@@ -1,0 +1,98 @@
+{
+  "schema": "ProbeManifest",
+  "version": 1,
+  "node": "PRE0",
+  "family": "preact",
+  "kind": "lock",
+  "products": [
+    "products/preact-version-lock.json",
+    "products/preact-capability-matrix.json",
+    "products/preact-activation.json",
+    "products/preact-host-table.json"
+  ],
+  "mandatoryCases": ["PRE0-AC1", "PRE0-AC2", "PRE0-AC3", "PRE0-AC4"],
+  "cases": [
+    {
+      "id": "PRE0-AC1",
+      "title": "pinned release",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "floating-pin",
+        "latest-pin",
+        "canary-pin",
+        "legacy-8-pin",
+        "diverged-pin",
+        "signals-not-optional",
+        "unratified-major",
+        "two-releases-per-package",
+        "signals-peer-mismatch"
+      ]
+    },
+    {
+      "id": "PRE0-AC2",
+      "title": "owned matrix",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "unowned-cell",
+        "duplicate-cell",
+        "missing-acceptance",
+        "wrong-producer-acceptance",
+        "fabricated-cell",
+        "build-cell",
+        "runtime-cell",
+        "exclusion-without-reason",
+        "derived-facet-authoritative",
+        "unsupported-facet-empty"
+      ]
+    },
+    {
+      "id": "PRE0-AC3",
+      "title": "distinct profiles",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "collapsed-profiles",
+        "compat-activates-react",
+        "alias-by-import-spelling",
+        "pragma-without-resolved-release",
+        "on-bypasses-admission",
+        "off-still-does-work",
+        "signals-without-package",
+        "signals-unadmitted-package"
+      ]
+    },
+    {
+      "id": "PRE0-AC4",
+      "title": "host and tag",
+      "disposition": "reject",
+      "twins": [
+        "clean products",
+        "ts-plugin-cell",
+        "reprovided-tsgo-cell",
+        "missing-tsgo-operations",
+        "host-matrix-drift",
+        "invented-tsgo-operation",
+        "limitation-marked-complete",
+        "parsed-type-string",
+        "open-canonical-tag",
+        "wrong-preact-tag",
+        "ownership-bypass"
+      ]
+    }
+  ],
+  "validator": {
+    "present": false,
+    "owner": "PRE1",
+    "acceptance": "PRE1-ACV",
+    "files": [
+      "tests/framework-preact/PRE0/contract.ts",
+      "tests/framework-preact/PRE0/preact-lock.spec.ts"
+    ],
+    "command": "node --test tests/framework-preact/PRE0/preact-lock.spec.ts",
+    "discovery": "REG0 scripts/run-framework-locks.mjs; no root test:scripts edit"
+  },
+  "runtimeCorrectness": false,
+  "notes": "Reviewed contract data and case inventory only. No executable validator, tests, schema enforcement, CI gate or production implementation. FWA1, REG0 and FCH1 consume data; PRE1 owns every planted-row failure proof."
+}
