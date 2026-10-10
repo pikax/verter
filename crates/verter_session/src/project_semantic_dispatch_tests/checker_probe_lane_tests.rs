@@ -417,7 +417,7 @@ fn flow_return_of(
 
 /// A host for `project` with its sibling files and ambient library
 /// registered; the probe module itself is not yet upserted.
-fn probe_host(project: ProbeProject<'_>) -> Arc<crate::VerterHost> {
+pub(super) fn probe_host(project: ProbeProject<'_>) -> Arc<crate::VerterHost> {
     use crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::make_audit_host;
     // A registered ambient library attaches to a configured project, so a
     // probe that reads one is checked in the tsconfig project it belongs to.

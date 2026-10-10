@@ -78,18 +78,16 @@ use verter_session_query::analysis::types::Hash16;
 use verter_session_query::facts::fact_cache::SignatureAdmission;
 use verter_session_query::facts::store_view::StoreView;
 use verter_session_query::facts::{
+    fact_cache::signature_entries,
     fact_cache::{FactVersionRef, ParseFactRef},
-    fact_read_set::{FactReadSet, FactReadSetFinalise, FACT_SIGNATURE_CAP},
+    fact_read_set::{seal_canonical_signature, FactReadSet, FactReadSetFinalise, FACT_PAGE_WIDTH},
 };
 
 /// Bracket one cold-compute closure with a push-style fact tracer.
 ///
 /// Installs a fresh [`verter_session_query::facts::fact_read_set::FactReadSetCell`] onto the
 /// TLS tracer stack, runs `f`, pops the tracer, and finalises the
-/// observation set. On [`FactReadSetFinalise::Overflow`] emits a
-/// [`verter_audit::structured_event::StructuredAuditEvent::FactSignatureOverflow`]
-/// and increments the host's per-host
-/// [`crate::VerterHost::signature_overflow_at_install`] counter.
+/// observation set into its complete (paged when wide) signature.
 ///
 /// Returns `(return_value, finalise_result, non_cacheable_read_observed)` so
 /// callers decide whether to admit the result to cache or treat it as
@@ -109,36 +107,20 @@ where
 {
     let (value, read_set) = source.with_fact_tracer(|| {
         #[cfg(any(test, feature = "test-support"))]
-        force_tracer_overflow_observations(source, None);
+        force_tracer_refusal(source, None);
         f()
     });
     (value, finalise_compute_scope(source, read_set))
 }
 
 /// Finalise the read set of one compute's tracer scope: re-check its basis,
-/// finalise it, and report an overflow.
+/// then finalise it.
 fn finalise_compute_scope<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>(
     source: &FactTracerBasisSource<'_, W>,
     mut read_set: verter_session_query::facts::fact_read_set::FactReadSet,
 ) -> FactReadSetFinalise {
     note_basis_recheck(source, &mut read_set);
-    let finalise = read_set.finalise();
-    // The overflow audit event + host counter are emitted HERE and ONLY here —
-    // at the ONE signature-CONSUMING boundary per compute. The cacheability
-    // scope below deliberately uses the non-emitting `would_overflow` peek: an
-    // inner overflow fans into every enclosing tracer, so an emitting nested
-    // peek would multiply a single overflowing compute's event and counter
-    // across each nesting level.
-    if matches!(finalise, FactReadSetFinalise::Overflow) {
-        crate::request_observers::push_structured_event(
-            verter_audit::structured_event::StructuredAuditEvent::FactSignatureOverflow {
-                candidate_size: (FACT_SIGNATURE_CAP as u32).saturating_add(1),
-                cap: FACT_SIGNATURE_CAP as u32,
-            },
-        );
-        source.record_signature_overflow();
-    }
-    finalise
+    read_set.finalise()
 }
 
 /// The fact tracer of one compute that runs in steps (a continuation
@@ -173,7 +155,7 @@ impl<'h, W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
         let scope = self.tracer.install();
         #[cfg(any(test, feature = "test-support"))]
         if !std::mem::replace(&mut self.forced, true) {
-            force_tracer_overflow_observations(&self.source, None);
+            force_tracer_refusal(&self.source, None);
         }
         scope
     }
@@ -204,15 +186,14 @@ impl<'h, W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
 /// that unrepresentable at the call site.
 enum BasisAuthority<'h, W> {
     Bound {
+        /// Read only for the host's test forcing knobs.
+        #[cfg(any(test, feature = "test-support"))]
         port: &'h dyn crate::resolver_core::fact_validation_port::FactValidation,
         clocks: &'h verter_session_query::facts::clocks::AggregateClockReader<W>,
     },
     Unbound {
-        overflow: &'h std::sync::atomic::AtomicU64,
         #[cfg(any(test, feature = "test-support"))]
         non_cacheable: &'h std::sync::atomic::AtomicBool,
-        #[cfg(any(test, feature = "test-support"))]
-        observations: &'h std::sync::atomic::AtomicUsize,
     },
 }
 
@@ -230,12 +211,9 @@ impl verter_session_query::facts::clocks::WorkspaceClocks for UnboundClocks {
     }
 }
 
-/// The owner of the state an unbound basis source reads: the process-side
-/// signature-overflow counter an unbound scope records into, and (under test
+/// The owner of the state an unbound basis source reads: (under test
 /// support) the engine forcing record it consults.
 pub trait UnboundBasisOwner {
-    /// The counter an unbound scope's signature overflow is recorded into.
-    fn signature_overflow_at_install(&self) -> &std::sync::atomic::AtomicU64;
     /// The engine forcing record an unbound scope consults.
     #[cfg(any(test, feature = "test-support"))]
     fn engine_test_knobs(&self) -> &crate::engine_test_knobs::TestKnobs;
@@ -265,15 +243,10 @@ impl<'h> FactTracerBasisSource<'h, UnboundClocks> {
     /// its producer or reader is compiled, and absent everywhere else, so no
     /// build configuration holds a store, counter or mirror with no reader.
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn unbound_observers(
-        overflow: &'h std::sync::atomic::AtomicU64,
-        forcing: &'h crate::engine_test_knobs::TestKnobs,
-    ) -> Self {
+    pub(crate) fn unbound_observers(forcing: &'h crate::engine_test_knobs::TestKnobs) -> Self {
         Self {
             authority: BasisAuthority::Unbound {
-                overflow,
                 non_cacheable: &forcing.force_fact_tracer_non_cacheable_read,
-                observations: &forcing.force_fact_tracer_overflow_observations,
             },
             seed: verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
         }
@@ -328,6 +301,7 @@ impl<'h, W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
     ) -> Self {
         Self {
             authority: BasisAuthority::Bound {
+                #[cfg(any(test, feature = "test-support"))]
                 port: ctx,
                 clocks: snapshot.clocks(),
             },
@@ -355,42 +329,26 @@ impl<'h, W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
     /// context's two arms share one source type.
     #[must_use]
     fn unbound_with_clocks(host: &'h impl UnboundBasisOwner) -> Self {
+        #[cfg(not(any(test, feature = "test-support")))]
+        let _ = host;
         Self {
             authority: BasisAuthority::Unbound {
-                overflow: host.signature_overflow_at_install(),
                 #[cfg(any(test, feature = "test-support"))]
                 non_cacheable: &host
                     .engine_test_knobs()
                     .force_fact_tracer_non_cacheable_read,
-                #[cfg(any(test, feature = "test-support"))]
-                observations: &host
-                    .engine_test_knobs()
-                    .force_fact_tracer_overflow_observations,
             },
             seed: verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
         }
     }
 
-    fn record_signature_overflow(&self) {
-        match &self.authority {
-            BasisAuthority::Bound { port, .. } => port.record_signature_overflow(),
-            BasisAuthority::Unbound { overflow, .. } => {
-                overflow.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            }
-        }
-    }
     #[cfg(any(test, feature = "test-support"))]
-    fn tracer_forcing(&self) -> (bool, usize) {
+    fn tracer_forcing(&self) -> bool {
         match &self.authority {
             BasisAuthority::Bound { port, .. } => port.tracer_forcing(),
-            BasisAuthority::Unbound {
-                non_cacheable,
-                observations,
-                ..
-            } => (
-                non_cacheable.load(std::sync::atomic::Ordering::Relaxed),
-                observations.load(std::sync::atomic::Ordering::Relaxed),
-            ),
+            BasisAuthority::Unbound { non_cacheable } => {
+                non_cacheable.load(std::sync::atomic::Ordering::Relaxed)
+            }
         }
     }
 
@@ -471,16 +429,11 @@ fn note_basis_recheck_on_cell<W: verter_session_query::facts::clocks::WorkspaceC
     cell.note_basis_recheck(&source.live_basis());
 }
 
-/// Test-only fact-injection hook read at every tracer scope entry
-/// ([`install_fact_tracer`] and [`with_cacheability_scope`]). When a knob is
-/// non-zero, fan up to one-over-cap synthetic observations across TWO fact
-/// domains into the freshly-installed tracer (and every enclosing one), so the
-/// scope deterministically reports overflow once the per-signature cap is
-/// exceeded. Splitting the observations keeps both per-domain buckets below
-/// their compaction threshold; a single wide `FileWholeHash` bucket would now
-/// compact to one terminal Content aggregate and would no longer exercise the
-/// refusal rail. This is the in-process equivalent of a genuinely wide
-/// multi-domain compute without a pathological workspace fixture.
+/// Test-only refusal hook read at every tracer scope entry
+/// ([`install_fact_tracer`] and [`with_cacheability_scope`]): when armed, the
+/// freshly-installed tracer (and every enclosing one) notes one typed
+/// non-cacheable read, so the scope deterministically refuses admission
+/// without a pathological workspace fixture.
 ///
 /// `scope` is the entering scope's ADDRESSABLE identity: `Some(_)` for a scope
 /// opened through [`named_cacheability_scope`] / [`named_fact_tracer`], `None`
@@ -488,16 +441,16 @@ fn note_basis_recheck_on_cell<W: verter_session_query::facts::clocks::WorkspaceC
 ///
 /// TWO knobs, deliberately:
 ///
-/// - the PER-HOST STICKY `force_fact_tracer_overflow_observations` overflows
-///   EVERY scope in the flow, named or not — the right tool when the boundary
-///   under test is the only one whose overflow can refuse the publication;
+/// - the PER-HOST STICKY `force_fact_tracer_non_cacheable_read` refuses EVERY
+///   scope in the flow, named or not — the right tool when the boundary under
+///   test is the only one whose refusal can decline the publication;
 /// - the THREAD-SCOPED TARGETED ONE-SHOT
-///   (`engine_test_knobs::arm_fact_tracer_overflow_once`) is claimed by the NAMED
-///   scope it was armed for, on the arming thread, and overflows that scope
-///   ALONE. It is the seam for a flow with TWO tracers where either overflow
-///   would independently refuse the same write: the sticky knob is
+///   (`engine_test_knobs::arm_fact_tracer_refusal_once`) is claimed by the NAMED
+///   scope it was armed for, on the arming thread, and refuses from that scope.
+///   It is the seam for a flow with TWO sibling tracers where either refusal
+///   would independently decline the same write: the sticky knob is
 ///   non-discriminating there (the test passes even if the boundary under test
-///   drops its overflow), while the one-shot isolates the NAMED scope and proves
+///   drops its refusal), while the one-shot isolates the NAMED scope and proves
 ///   that boundary's rail on its own.
 ///
 /// The one-shot is claimed by scope IDENTITY, never by scope ORDER. An
@@ -508,41 +461,25 @@ fn note_basis_recheck_on_cell<W: verter_session_query::facts::clocks::WorkspaceC
 /// scope claims only when it IS the armed target.
 ///
 /// Placed at the SHARED installer so EVERY traced admission boundary runs it
-/// rather than relying on a boundary-specific hook — a production site that
-/// reverts to a raw, overflow-discarding tracer still fans the observations and
-/// still fails the test. The production build compiles it out.
+/// rather than relying on a boundary-specific hook. The production build
+/// compiles it out.
 #[cfg(any(test, feature = "test-support"))]
-fn force_tracer_overflow_observations<
-    W: verter_session_query::facts::clocks::WorkspaceClocks + Clone,
->(
+fn force_tracer_refusal<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>(
     source: &FactTracerBasisSource<'_, W>,
     scope: Option<crate::engine_test_knobs::TracerScope>,
 ) {
-    let (non_cacheable, sticky) = source.tracer_forcing();
-    if non_cacheable {
+    let sticky = source.tracer_forcing();
+    let once = crate::engine_test_knobs::claim_fact_tracer_refusal_once(scope);
+    if sticky || once {
         crate::fact_tracing::note_non_cacheable_read_fan_out(
             verter_session_query::facts::reuse::NonCacheableReadReason::FencedServe,
         );
-    }
-    let once = crate::engine_test_knobs::claim_fact_tracer_overflow_once(scope);
-    for i in 0..sticky.max(once).min(FACT_SIGNATURE_CAP + 1) {
-        let fact = if i % 2 == 0 {
-            FactVersionRef::FileWholeHash {
-                canonical_id: format!("__force_tracer_overflow_{i}.ts"),
-                hash: [(i & 0xff) as u8; 16],
-            }
-        } else {
-            FactVersionRef::ProjectGeneration {
-                generation: u64::MAX - i as u64,
-            }
-        };
-        crate::resolver_core::resolver_context::observe_fan_out(fact);
     }
 }
 
 /// [`with_cacheability_scope`] for a scope that carries an ADDRESSABLE
 /// [`TracerScope`](crate::engine_test_knobs::TracerScope) identity, so a test can
-/// target it by NAME with the one-shot overflow knob.
+/// target it by NAME with the one-shot refusal knob.
 ///
 /// Reached only through the [`named_cacheability_scope`] macro, whose production
 /// arm expands to the plain, unnamed opener — the identity exists in test-support
@@ -561,13 +498,11 @@ where
     F: for<'t> FnOnce(&CacheabilityProbe<'t, W>) -> R,
 {
     let (value, mut read_set) = source.with_fact_tracer_cell(|cell| {
-        force_tracer_overflow_observations(source, Some(scope));
+        force_tracer_refusal(source, Some(scope));
         f(&CacheabilityProbe { cell, source })
     });
     note_basis_recheck(source, &mut read_set);
-    let non_cacheable = read_set.mutation_unstable()
-        || read_set.non_cacheable_read_observed()
-        || read_set.would_overflow();
+    let non_cacheable = read_set.mutation_unstable() || read_set.non_cacheable_read_observed();
     (value, non_cacheable)
 }
 
@@ -604,22 +539,11 @@ pub fn install_fact_tracer_named<
 where
     F: FnOnce() -> R,
 {
-    let (value, mut read_set) = source.with_fact_tracer(|| {
-        force_tracer_overflow_observations(source, Some(scope));
+    let (value, read_set) = source.with_fact_tracer(|| {
+        force_tracer_refusal(source, Some(scope));
         f()
     });
-    note_basis_recheck(source, &mut read_set);
-    let finalise = read_set.finalise();
-    if matches!(finalise, FactReadSetFinalise::Overflow) {
-        crate::request_observers::push_structured_event(
-            verter_audit::structured_event::StructuredAuditEvent::FactSignatureOverflow {
-                candidate_size: (FACT_SIGNATURE_CAP as u32).saturating_add(1),
-                cap: FACT_SIGNATURE_CAP as u32,
-            },
-        );
-        source.record_signature_overflow();
-    }
-    (value, finalise)
+    (value, finalise_compute_scope(source, read_set))
 }
 
 /// Open an [`install_fact_tracer_cacheability`] scope that a test can TARGET BY
@@ -635,7 +559,7 @@ where
 /// test can consume it, and the production build is byte-identical to the unnamed
 /// call it replaces.
 ///
-/// Naming a scope is what makes the one-shot overflow knob TARGETED instead of
+/// Naming a scope is what makes the one-shot refusal knob TARGETED instead of
 /// positional: the knob is claimed by identity, so a tracer scope added anywhere
 /// UPSTREAM cannot silently retarget it (an unnamed scope claims nothing).
 #[cfg(any(test, feature = "test-support"))]
@@ -724,30 +648,16 @@ impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone> Cacheabili
     ///    served-without-publication / transient basis while its fact stamps
     ///    read the LIVE view, so the read-side fact rail cannot reject the
     ///    entry.
-    /// 2. a fact-signature OVERFLOW — the compute observed more than
-    ///    [`FACT_SIGNATURE_CAP`] distinct facts.
+    /// 2. MUTATION INSTABILITY (below).
     ///
     /// Both are CACHE-ONLY: the value stays `Complete` and flows to the caller
     /// verbatim; only the shared-cache admission is refused (never
-    /// `ResultCompleteness::Partial`).
+    /// `ResultCompleteness::Partial`). The NUMBER of facts the compute read is
+    /// never a condition: a wide observation set is paged, never refused.
     ///
-    /// # Why an overflow refuses here
-    ///
-    /// NOT because the entry would be unrootable — at these boundaries it
-    /// WOULD be rootable: the entry's `ReadSetSignature.facts` is built from
-    /// ANOTHER source (the carrier's `dep_signature` via
-    /// `engine_fact_signature_for_materialize_memo`, or the keyed canonical's
-    /// observed hash), never from this tracer's finalised set, and that
-    /// curated signature is well under the cap. The refusal is a conservative
-    /// POLICY: an over-cap observation set means the compute read MORE than
-    /// the curated signature enumerates, so we can no longer prove the
-    /// signature COVERS everything the value depends on — a warm hit could
-    /// validate the curated facts while an unenumerated dependency has moved.
-    /// The rail therefore has a real cost (a legitimately fact-heavy compute
-    /// is recomputed cold forever); it is not free correctness bookkeeping.
     /// # Why MUTATION INSTABILITY refuses here too
     ///
-    /// A third condition folds in: a compaction domain this scope
+    /// The second condition: a compaction domain this scope
     /// compacts against advanced since its basis was installed. It is
     /// checked HERE, at the probe, and not only on scope exit, because
     /// this probe can authorise a write from inside the closure — an
@@ -759,14 +669,8 @@ impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone> Cacheabili
     /// carries the refusal, not its taxonomy.
     #[inline]
     pub fn non_cacheable(&self) -> bool {
-        // Overflow is peeked, never finalised: no `Arc<[FactVersionRef]>`
-        // allocation on the hot cold-member path, and no audit event — the
-        // event stays owned by the ONE signature-consuming `install_fact_tracer`
-        // boundary per compute (see its emission site).
         note_basis_recheck_on_cell(self.source, self.cell);
-        self.cell.mutation_unstable()
-            || self.cell.non_cacheable_read_observed()
-            || self.cell.would_overflow()
+        self.cell.mutation_unstable() || self.cell.non_cacheable_read_observed()
     }
 }
 
@@ -798,13 +702,11 @@ where
 {
     let (value, mut read_set) = source.with_fact_tracer_cell(|cell| {
         #[cfg(any(test, feature = "test-support"))]
-        force_tracer_overflow_observations(source, None);
+        force_tracer_refusal(source, None);
         f(&CacheabilityProbe { cell, source })
     });
     note_basis_recheck(source, &mut read_set);
-    let non_cacheable = read_set.mutation_unstable()
-        || read_set.non_cacheable_read_observed()
-        || read_set.would_overflow();
+    let non_cacheable = read_set.mutation_unstable() || read_set.non_cacheable_read_observed();
     (value, non_cacheable)
 }
 
@@ -814,10 +716,10 @@ where
 /// Use this entry at every admission boundary whose entry signature is built
 /// from ANOTHER source (the carrier's `dep_signature`, the keyed canonical's
 /// observed hash) rather than from this tracer's finalised set — those callers
-/// have no other place to see an overflow, and folding it into the verdict here
-/// makes it impossible to drop. A caller that DOES consume the finalised
-/// signature (building the entry's `ReadSetSignature` from it) uses
-/// [`install_fact_tracer`] and routes `Overflow` through
+/// have no other place to see a non-cacheable read, and folding it into the
+/// verdict here makes it impossible to drop. A caller that DOES consume the
+/// finalised signature (building the entry's `ReadSetSignature` from it) uses
+/// [`install_fact_tracer`] and routes the finalise outcome through
 /// [`SignatureAdmission::from_finalise`].
 ///
 /// Its readers are the unnamed arm of [`named_cacheability_scope`] (a build
@@ -1408,17 +1310,21 @@ pub fn fact_signature_from_fence(
 /// returns `Result<StructuralCarrierReadSet, NonAdmissionReason>` so
 /// refusal modes (`SelfRootConflict`, `RouteGenerationDependency`) reach
 /// the caller verbatim; `ref_cycle_read_set` uses the same typed result for
-/// torn roots, unresolved strict-world provenance, and completed-carrier
-/// overflow.
+/// torn roots and unresolved strict-world provenance.
 pub type StructuralCarrierReadSet = (Arc<[FactVersionRef]>, Arc<[Arc<str>]>);
 
 /// Finalize a structural cache carrier after every self-root, fence, prelude,
 /// and traced fact has been merged.
 ///
-/// Oversized self-root sets are replaced by one strict-world witness only
-/// after every root validates in the exact effective view. Any remaining
-/// over-cap completed carrier is refused here, at the terminal publication
-/// boundary rather than at the earlier tracer finalization boundary.
+/// A carrier whose top level is wider than one evidence page carries its
+/// self-roots as one strict-world witness, minted only after every root
+/// validates in the exact effective view, and loses every precise root fact,
+/// a paged one included. A carrier whose width is already held by evidence
+/// pages keeps its precise roots: strict root validation reads through the
+/// pages, and a precise root stays valid in any view that agrees on the
+/// root's content, where a witness is bound to the one view that minted it.
+/// Every carrier, however wide, is then sealed whole (paged when wide) —
+/// width is never a refusal.
 pub(crate) fn bound_completed_structural_carrier(
     view: &dyn StoreView,
     mut facts: Vec<FactVersionRef>,
@@ -1429,10 +1335,10 @@ pub(crate) fn bound_completed_structural_carrier(
     self_root_canonicals.sort();
     self_root_canonicals.dedup();
 
-    if facts.len() > FACT_SIGNATURE_CAP && !self_root_canonicals.is_empty() {
+    if facts.len() > FACT_PAGE_WIDTH && !self_root_canonicals.is_empty() {
         let mut roots: Vec<(Arc<str>, Hash16)> = Vec::with_capacity(self_root_canonicals.len());
         for canonical in &self_root_canonicals {
-            let Some(hash) = facts.iter().find_map(|fact| match fact {
+            let Some(hash) = signature_entries(&facts).find_map(|fact| match fact {
                 FactVersionRef::FileWholeHash { canonical_id, hash }
                     if canonical_id == canonical.as_ref() =>
                 {
@@ -1452,22 +1358,37 @@ pub(crate) fn bound_completed_structural_carrier(
             .mint_strict_self_root_world(&root_refs)
             .ok_or(NonAdmissionReason::UnresolvedProvenance)?;
 
-        facts.retain(|fact| match fact {
-            FactVersionRef::FileWholeHash { canonical_id, .. } => !self_root_canonicals
+        // The witness replaces every precise root fact, including one held
+        // on an evidence page; the remaining entries are sealed (and paged)
+        // again below.
+        let is_self_root = |fact: &FactVersionRef| match fact {
+            FactVersionRef::FileWholeHash { canonical_id, .. } => self_root_canonicals
                 .binary_search_by(|root| root.as_ref().cmp(canonical_id.as_str()))
                 .is_ok(),
-            _ => true,
-        });
+            _ => false,
+        };
+        facts = if facts.iter().any(is_paged_entry) {
+            signature_entries(&facts)
+                .filter(|fact| !is_self_root(fact))
+                .cloned()
+                .collect()
+        } else {
+            facts.retain(|fact| !is_self_root(fact));
+            facts
+        };
         facts.push(FactVersionRef::StrictSelfRootWorld(world));
-        facts.sort_unstable();
-        facts.dedup();
         self_root_canonicals.clear();
     }
 
-    if facts.len() > FACT_SIGNATURE_CAP {
-        return Err(NonAdmissionReason::SignatureOverflow);
-    }
-    Ok((Arc::from(facts), Arc::from(self_root_canonicals)))
+    Ok((
+        seal_canonical_signature(facts),
+        Arc::from(self_root_canonicals),
+    ))
+}
+
+/// Whether `fact` is an evidence page of a wide signature.
+fn is_paged_entry(fact: &FactVersionRef) -> bool {
+    matches!(fact, FactVersionRef::Receipt(receipt) if receipt.is_page())
 }
 
 /// A cache entry's dependency signature — the path-precise fact
@@ -1492,13 +1413,10 @@ pub(crate) fn bound_completed_structural_carrier(
 /// - `bubble(ctx)` fans `facts` into every active outer tracer on the
 ///   current TLS stack.
 /// - `canonical_ids()` returns the canonical IDs referenced by
-///   `facts`, deduplicated by string identity. The reverse index
-///   registers a (canonical → entry) mapping for each yielded ID.
-/// - `is_overflow()` returns true when the producer's tracer finalised
-///   with `FactReadSetFinalise::Overflow` — the materialised result
-///   is valid but the path-precise signature is too large to admit
-///   safely. Cache consumers route overflowed values through
-///   `ComputeAdmission::ReturnOnly` (return without admitting).
+///   `facts` — every evidence page and consumed receipt read through to
+///   the canonicals it reaches — deduplicated by string identity. The
+///   reverse index registers a (canonical → entry) mapping for each
+///   yielded ID.
 pub use verter_session_query::facts::fact_cache::ReadSetSignature;
 
 pub trait ReadSetSignatureExt {
@@ -1526,8 +1444,7 @@ impl ReadSetSignatureExt for ReadSetSignature {
     /// fact — including a `FileWholeHash` for a non-listed cross-file
     /// dependency — keeps the lazy
     /// [`verter_session_query::facts::store_view::StoreView::validates`] permissiveness.
-    /// An overflow carrier always fails; an empty carrier with no
-    /// self-roots validates vacuously.
+    /// An empty carrier with no self-roots validates vacuously.
     ///
     /// This is the strict warm-read validation entry point for a
     /// query-identity cache whose entry records its keyed (or
@@ -1541,9 +1458,6 @@ impl ReadSetSignatureExt for ReadSetSignature {
         ctx: &dyn crate::resolver_core::fact_validation_port::FactValidation,
         self_root_canonicals: &[Arc<str>],
     ) -> bool {
-        if self.overflowed {
-            return false;
-        }
         let self_root_refs: Vec<&str> = self_root_canonicals.iter().map(Arc::as_ref).collect();
         validate_fact_signature_with_self_roots(ctx, &self.facts, &self_root_refs)
     }
@@ -1566,15 +1480,14 @@ impl ReadSetSignatureExt for ReadSetSignature {
     /// validation passes regardless of the follower's view.
     ///
     /// Returns `true` iff at least one `FileWholeHash` fact in `facts`
-    /// has a canonical that appears in `self_root_canonicals`. An
-    /// overflow carrier never carries a self-root (`facts` is empty),
-    /// an empty `self_root_canonicals` slice can never match, and a
-    /// synthetic empty-fact carrier holds no `FileWholeHash` at all —
-    /// all three return `false`.
+    /// (evidence pages read through) has a canonical that appears in
+    /// `self_root_canonicals`. An empty `self_root_canonicals` slice can
+    /// never match, and a synthetic empty-fact carrier holds no
+    /// `FileWholeHash` at all — both return `false`.
     ///
     /// The in-flight joiner gate uses this to refuse cross-view reuse
     /// of ANY winner whose carrier could only ever validate vacuously —
-    /// a tracer-overflow carrier, an unrootable build carrying only
+    /// an unrootable build carrying only
     /// cross-file dependency facts, or a non-suppressed
     /// `QueryResult::Error(Miss)` from a declaration missing under the
     /// winner's overlay. For all of these `validate_with_self_roots` is
@@ -1585,8 +1498,7 @@ impl ReadSetSignatureExt for ReadSetSignature {
     #[inline]
     fn has_view_discriminating_self_root(&self, self_root_canonicals: &[Arc<str>]) -> bool {
         if self
-            .facts
-            .iter()
+            .entries()
             .any(|fact| matches!(fact, FactVersionRef::StrictSelfRootWorld(_)))
         {
             return true;
@@ -1594,7 +1506,7 @@ impl ReadSetSignatureExt for ReadSetSignature {
         if self_root_canonicals.is_empty() {
             return false;
         }
-        self.facts.iter().any(|fact| match fact {
+        self.entries().any(|fact| match fact {
             FactVersionRef::FileWholeHash { canonical_id, .. } => self_root_canonicals
                 .iter()
                 .any(|root| root.as_ref() == canonical_id.as_str()),
@@ -1619,7 +1531,7 @@ impl ReadSetSignatureExt for ReadSetSignature {
     /// `ReturnOnly` for `Partial(MissingDependency)`.
     #[inline]
     fn records_missing_dependency_fact(&self) -> bool {
-        self.facts.iter().any(|fact| {
+        self.entries().any(|fact| {
             matches!(
                 fact,
                 FactVersionRef::ResolveImports(inner) if inner.resolution_fact().is_some()
@@ -1643,7 +1555,7 @@ impl ReadSetSignatureExt for ReadSetSignature {
     /// `admit_decision` consults THIS, never the taint enum class.
     #[inline]
     fn records_negative_resolution_fact(&self) -> bool {
-        self.facts.iter().any(|fact| match fact {
+        self.entries().any(|fact| match fact {
             FactVersionRef::ResolveImports(
                 verter_session_query::facts::fact_cache::ResolveImportsFactRef::Semantic {
                     key:

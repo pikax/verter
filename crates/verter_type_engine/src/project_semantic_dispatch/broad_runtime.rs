@@ -769,9 +769,7 @@ fn runtime_query_error_partial_reason(error: &QueryError) -> Option<PartialReaso
         QueryError::Miss
         | QueryError::DeclPlaceholder { .. }
         | QueryError::CheckerRecovery { .. } => None,
-        QueryError::BudgetExceeded(_) | QueryError::SignatureOverflow => {
-            Some(PartialReasonSet::BUDGET_EXCEEDED)
-        }
+        QueryError::BudgetExceeded(_) => Some(PartialReasonSet::BUDGET_EXCEEDED),
         QueryError::Cancelled => Some(PartialReasonSet::CANCELLED),
         QueryError::UnstableState { .. } | QueryError::StaleSemanticOperand => {
             Some(PartialReasonSet::UNSTABLE_STATE)

@@ -1,15 +1,10 @@
 //! A one-time attachment consumed by the query facade. This carrier has no
 //! resource getters and cannot execute a query or expose the session store.
 
-use std::sync::Arc;
-// The overflow counter's only reader is the fact-validation proof surface, so
-// the import follows the field's own gate (see `EngineObservers::overflow`).
-#[cfg(any(test, feature = "test-support"))]
-use std::sync::atomic::AtomicU64;
-
 use crate::component_meta_caches::{
     DeclarationLookupDb, ImportedRegistryDb, OwnerCollectionDb, ResolvabilityDb, ShapeCacheDb,
 };
+use std::sync::Arc;
 
 pub struct EngineBinding<M> {
     pub(super) macro_mirrors: M,
@@ -85,11 +80,6 @@ impl EnginePolicy {
 
 /// Selected counters and fault witnesses; these own no query or source service.
 pub struct EngineObservers {
-    // The overflow counter is read by the unbound-observer fact-tracer
-    // basis, whose only consumer is the fact-validation proof surface
-    // (`test` / `test-support`), so it carries that same gate.
-    #[cfg(any(test, feature = "test-support"))]
-    pub(super) overflow: Arc<AtomicU64>,
     pub(super) provenance: Arc<crate::engine_provenance::EngineProvenance>,
     pub(super) relation: Arc<crate::project_semantic_dispatch::relation_knobs::RelationHostKnobs>,
     #[cfg(any(test, feature = "test-support"))]
@@ -101,7 +91,6 @@ pub struct EngineObservers {
 impl EngineObservers {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        #[cfg(any(test, feature = "test-support"))] overflow: Arc<AtomicU64>,
         provenance: Arc<crate::engine_provenance::EngineProvenance>,
         relation: Arc<crate::project_semantic_dispatch::relation_knobs::RelationHostKnobs>,
         #[cfg(any(test, feature = "test-support"))] flow: Arc<
@@ -112,8 +101,6 @@ impl EngineObservers {
         >,
     ) -> Self {
         Self {
-            #[cfg(any(test, feature = "test-support"))]
-            overflow,
             provenance,
             relation,
             #[cfg(any(test, feature = "test-support"))]
