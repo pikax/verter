@@ -760,6 +760,11 @@ impl Drop for RetentionCharge {
 pub struct ResolutionRetention(Arc<SemanticRetentionAccount>);
 
 impl ResolutionRetention {
+    /// Bind resolution publications to an aggregate retention account.
+    #[must_use]
+    pub fn new(account: Arc<SemanticRetentionAccount>) -> Self {
+        Self(account)
+    }
     /// The adapter over the process-local account.
     #[must_use]
     pub fn process_local() -> Self {
@@ -774,6 +779,15 @@ impl Default for ResolutionRetention {
 }
 
 impl crate::retention::resolution_charge::ResolutionRetentionAccount for ResolutionRetention {
+    fn reserve_retained_with_evidence(
+        &self,
+        bytes: usize,
+        facts: &[crate::facts::fact_cache::FactVersionRef],
+    ) -> Option<crate::retention::resolution_charge::ResolutionRetentionCharge> {
+        crate::facts::receipt::reserve_retained_with_evidence(&self.0, bytes, &[facts])
+            .admitted()
+            .map(crate::retention::resolution_charge::ResolutionRetentionCharge::new)
+    }
     fn reserve_retained(
         &self,
         bytes: usize,

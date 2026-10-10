@@ -464,6 +464,8 @@ struct WideArtifactNode {
     entries: dashmap::DashMap<u32, Arc<CacheEntry<String>>>,
     inflight: InflightTable<QueryFlightKey<u32>>,
     signature: ReadSetSignature,
+    stale_generation: bool,
+    strict_root: bool,
     account: Arc<verter_session_query::retention::SemanticRetentionAccount>,
 }
 
@@ -478,11 +480,44 @@ impl WideArtifactNode {
         Self {
             entries: dashmap::DashMap::new(),
             inflight: InflightTable::new(),
+            stale_generation: false,
+            strict_root: false,
             signature: ReadSetSignature::new(
                 verter_session_query::facts::fact_read_set::seal_canonical_signature(facts),
             ),
             account,
         }
+    }
+
+    fn with_valid_signature(mut self, host: &VerterHost) -> Self {
+        let facts = (0..2 * verter_session_query::facts::fact_read_set::FACT_PAGE_WIDTH + 3)
+            .map(|index| {
+                let canonical_id = format!("/wide/{index:05}.ts");
+                let _ = host
+                    .upsert(crate::types::UpsertRequest {
+                        canonical_id: Some(canonical_id.clone()),
+                        input_id: canonical_id.clone(),
+                        source: Arc::from("export const value = 1;"),
+                        file_language: verter_language::FileLanguage::script_ts(),
+                        aliases: Vec::new(),
+                    })
+                    .expect("wide dependency");
+                let source = host
+                    .scheduler
+                    .try_get_source(&canonical_id)
+                    .expect("source");
+                let hash = source
+                    .downcast_data::<crate::host_executor::HostSourceData>()
+                    .expect("host source")
+                    .parse
+                    .whole_hash;
+                FactVersionRef::FileWholeHash { canonical_id, hash }
+            })
+            .collect();
+        self.signature = ReadSetSignature::new(
+            verter_session_query::facts::fact_read_set::seal_canonical_signature(facts),
+        );
+        self
     }
 
     fn page_classes(&self) -> Vec<Option<verter_session_query::retention::ChargeClass>> {
@@ -515,8 +550,16 @@ impl ArtifactNode for WideArtifactNode {
         CacheAdmission::Cacheable {
             value: format!("v{key}"),
             signature: self.signature.clone(),
-            self_root_canonicals: Arc::from(Vec::<Arc<str>>::new()),
-            validated_at_generation: cx.generation(),
+            self_root_canonicals: if self.strict_root {
+                Arc::from(vec![Arc::from("/wide/00000.ts")])
+            } else {
+                Arc::from(Vec::<Arc<str>>::new())
+            },
+            validated_at_generation: if self.stale_generation {
+                cx.generation().wrapping_sub(1)
+            } else {
+                cx.generation()
+            },
         }
     }
 
@@ -545,8 +588,9 @@ fn cold_publish_claims_wide_signature_pages_and_is_refused_for_them() {
     let flags: &RequestFlags = ctx.request_flags();
 
     let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
-    let node = WideArtifactNode::new(Arc::clone(&account));
-    let _ = lookup(&node, 7u32, ctx, flags);
+    let node = WideArtifactNode::new(Arc::clone(&account)).with_valid_signature(&host);
+    assert_eq!(lookup(&node, 7u32, ctx, flags).as_deref(), Some("v7"));
+    assert_eq!(node.entries.len(), 1);
     let classes = node.page_classes();
     assert!(!classes.is_empty(), "premise: the signature is paged");
     assert!(classes
@@ -564,7 +608,7 @@ fn cold_publish_claims_wide_signature_pages_and_is_refused_for_them() {
         max_entry_bytes: 1,
         ..RetentionLimits::defaults()
     });
-    let node = WideArtifactNode::new(Arc::clone(&tight));
+    let node = WideArtifactNode::new(Arc::clone(&tight)).with_valid_signature(&host);
     assert_eq!(
         lookup(&node, 7u32, ctx, flags).as_deref(),
         Some("v7"),
@@ -576,4 +620,126 @@ fn cold_publish_claims_wide_signature_pages_and_is_refused_for_them() {
         .iter()
         .all(|class| *class == Some(ChargeClass::Pinned)));
     assert_eq!(tight.snapshot().retained_bytes, 0);
+}
+
+#[test]
+fn retention_refusal_preserves_artifact_post_compute_validation() {
+    use verter_session_query::retention::{RetentionLimits, SemanticRetentionAccount};
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
+    for max_entry_bytes in [usize::MAX, 1] {
+        for strict_root in [false, true] {
+            let mut node = WideArtifactNode::new(SemanticRetentionAccount::new(RetentionLimits {
+                max_entry_bytes,
+                ..RetentionLimits::defaults()
+            }));
+            node.strict_root = strict_root;
+            node.stale_generation = !strict_root;
+            assert_eq!(
+                lookup(&node, 7, ctx, ctx.request_flags()),
+                None,
+                "limit={max_entry_bytes}, strict_root={strict_root}"
+            );
+            assert!(node.entries.is_empty());
+        }
+    }
+}
+
+struct WideQueryNode {
+    artifact: WideArtifactNode,
+    store: ReverseIndexedCandidateStore<u32, String>,
+    stale: bool,
+    lower: bool,
+}
+
+impl QueryNode for WideQueryNode {
+    type Key = u32;
+    type Value = String;
+    type Discriminant = FactCandidateDiscriminant;
+    fn inflight(&self) -> &InflightTable<QueryFlightKey<u32>> {
+        &self.artifact.inflight
+    }
+    fn lookup_candidate(&self, _key: &u32, _cx: &ComputeCtx<'_>) -> Option<String> {
+        None
+    }
+    fn compute(&self, key: &u32, cx: &mut ComputeCtx<'_>) -> CacheAdmission<String> {
+        CacheAdmission::Cacheable {
+            value: format!("v{key}"),
+            signature: self.artifact.signature.clone(),
+            self_root_canonicals: Arc::from(Vec::<Arc<str>>::new()),
+            validated_at_generation: if self.stale {
+                cx.generation().wrapping_sub(1)
+            } else {
+                cx.generation()
+            },
+        }
+    }
+    fn discriminant(
+        &self,
+        _key: &u32,
+        _value: &String,
+        signature: &ReadSetSignature,
+        validated_at_generation: u64,
+    ) -> FactCandidateDiscriminant {
+        FactCandidateDiscriminant {
+            validated_at_generation,
+            facts: Arc::clone(&signature.facts),
+        }
+    }
+    fn publish_core(
+        &self,
+        key: u32,
+        candidate: Candidate<FactCandidateDiscriminant, String>,
+    ) -> PublishCoreOutcome<u32> {
+        self.store.publish_core(key, candidate)
+    }
+    fn evict_deferred(&self, victims: DeferredVictims<u32>) {
+        self.store.evict_deferred(victims);
+    }
+    fn lower_unadmitted(&self, value: &String) -> Option<String> {
+        self.lower.then(|| format!("lowered:{value}"))
+    }
+    fn retention_account(&self) -> Arc<verter_session_query::retention::SemanticRetentionAccount> {
+        Arc::clone(&self.artifact.account)
+    }
+}
+
+#[test]
+fn query_retention_refusal_preserves_delivery_validation_and_lowering() {
+    use verter_session_query::retention::{RetentionLimits, SemanticRetentionAccount};
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
+    for (limit, stale, lower) in [
+        (usize::MAX, false, false),
+        (1, false, false),
+        (usize::MAX, true, false),
+        (1, true, false),
+        (usize::MAX, true, true),
+        (1, true, true),
+    ] {
+        let artifact = WideArtifactNode::new(SemanticRetentionAccount::new(RetentionLimits {
+            max_entry_bytes: limit,
+            ..RetentionLimits::defaults()
+        }))
+        .with_valid_signature(&host);
+        let node = WideQueryNode {
+            artifact,
+            store: ReverseIndexedCandidateStore::with_counter(Arc::new(AtomicU64::new(0))),
+            stale,
+            lower,
+        };
+        let expected = if stale {
+            lower.then_some("lowered:v7")
+        } else {
+            Some("v7")
+        };
+        assert_eq!(
+            query::lookup(&node, 7, ctx, ctx.request_flags()).as_deref(),
+            expected
+        );
+        assert_eq!(
+            node.store.slot_len_for_test(&7),
+            usize::from(!stale && limit != 1)
+        );
+    }
 }
