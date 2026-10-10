@@ -81,6 +81,19 @@ row fails STIM1-ACV; writing this table does not claim those experiments ran.
 
 ## Route inventory and handoff
 
+The pinned tokenizer and frame controller linked in the vocabulary products own
+these version-specific boundaries. The following are future codec/relation
+verification obligations, not executed tests in this contract:
+
+| Input | Required outcome | Receiving obligation |
+| ----- | ---------------- | -------------------- |
+| `click->x#a click->x#b`, with U+0020 between descriptors | Two ordered action tokens with exact source spans | STIM1 descriptor codec verification |
+| The same pair separated by U+00A0 (NBSP) or U+000B (vertical tab), including leading/trailing ECMAScript whitespace | The same two ordered tokens; an HTML ASCII-only splitter fails this boundary | STIM1 descriptor codec verification |
+| `data-turbo-frame="_parent"` inside a frame with no ancestor frame | Reserved target; no missing-frame diagnostic or frame-id rename relation | STIM4T static frame relation verification |
+| The same target inside a nested frame | Relation to the nearest ancestor frame, conditional on its disabled state; no runtime navigation | STIM4T static frame relation verification |
+| A literal `turbo-frame id="_parent"` elsewhere, with and without a real ancestor frame | Literal ID has no precedence: resolve the ancestor or retain the no-ancestor disposition | STIM4T static frame relation verification |
+| An ordinary frame ID matching an authored frame | Preserve the ordinary authored ID relation | STIM4T static frame relation verification |
+
 No existing production route is displaced by this contract; there is no legacy
 deletion. HWC2 owns HTML, ERBH1 owns template facts, the shared CSS selector parser
 owns selectors, FWA1 owns activation, TypeInfo owns generated members, tsgo owns

@@ -23,7 +23,7 @@
         "id": "frame identity",
         "src": "URL fact; never fetched",
         "loading": ["eager", "lazy"],
-        "target": "frame id or _top/_self keyword",
+        "target": "frame id or _top/_self/_parent keyword; see frameKeywordRules",
         "disabled": "presence",
         "autoscroll": "presence",
         "refresh": ["morph"],
@@ -61,7 +61,10 @@
     "refresh"
   ],
   "streamRules": "replace/update may name method=morph; refresh may name method/scroll and request-id without a target. Other actions describe target(s) and template content statically, never perform mutations.",
-  "frameKeywords": ["_top", "_self"],
+  "frameKeywords": ["_top", "_self", "_parent"],
+  "frameKeywordRules": {
+    "_parent": "Resolves from the current frame's parent element to the nearest ancestor turbo-frame, never by document id. A literal frame id _parent does not take precedence. With no ancestor frame, navigation is not intercepted by the current frame; no missing-frame diagnostic or authored frame-id rename relation. With an ancestor, retain the ancestor relation and its disabled-state condition. Partial ancestry remains unknown."
+  },
   "dataAttributes": {
     "data-turbo": ["true", "false"],
     "data-turbo-track": ["reload", "dynamic"],

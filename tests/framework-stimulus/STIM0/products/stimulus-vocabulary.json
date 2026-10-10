@@ -3,6 +3,7 @@
   "kind": "StimulusVocabulary",
   "profile": "stimulus-3.2.2",
   "sources": {
+    "tokenizer": "https://raw.githubusercontent.com/hotwired/stimulus/v3.2.2/src/mutation-observers/token_list_observer.ts",
     "descriptors": "https://raw.githubusercontent.com/hotwired/stimulus/v3.2.2/src/core/action_descriptor.ts",
     "events": "https://raw.githubusercontent.com/hotwired/stimulus/v3.2.2/src/core/action.ts",
     "keys": "https://raw.githubusercontent.com/hotwired/stimulus/v3.2.2/src/core/schema.ts",
@@ -14,7 +15,7 @@
   },
   "descriptor": {
     "grammar": "[event[.keyFilter][@window|@document]->]identifier#method[:[!]option]*",
-    "listSeparator": "HTML ASCII whitespace; retain order and source spans",
+    "listSeparator": "ECMAScript whitespace and line terminators: trim, split on /\\s+/, discard empty tokens; retain order and source spans. Includes U+00A0 and U+000B, not only HTML ASCII whitespace.",
     "compoundKeys": "alt, ctrl, meta and shift joined with + to a key filter; pinned codec also admits the modifier+event form",
     "keyboardEvents": ["keydown", "keyup", "keypress"],
     "dottedNonKeyboardEvents": "Keep the dot suffix in the event name, not a keyboard filter.",

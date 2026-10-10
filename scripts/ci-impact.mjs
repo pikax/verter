@@ -834,6 +834,14 @@ export const CI_INERT_PATHS = Object.freeze([
   // Product, architecture and evidence inventories that only local verifiers
   // or the docs build read.
   "tests/documentation/**",
+  // Reviewed contract data; executable consumers must claim their own paths.
+  "tests/framework-stimulus/STIM0/cases.md",
+  "tests/framework-stimulus/STIM0/manifest.json",
+  "tests/framework-stimulus/STIM0/products/stimulus-activation-policy.json",
+  "tests/framework-stimulus/STIM0/products/stimulus-capability-matrix.json",
+  "tests/framework-stimulus/STIM0/products/stimulus-version-lock.json",
+  "tests/framework-stimulus/STIM0/products/stimulus-vocabulary.json",
+  "tests/framework-stimulus/STIM0/products/turbo-vocabulary.json",
   "tests/jetbrains-baseline/**",
   "tests/kernel/**",
   "tests/playground/**",

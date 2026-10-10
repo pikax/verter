@@ -58,7 +58,12 @@ names or declarations needing evaluation remain unknown or incomplete.
 
 Turbo contributes frame, stream and stream-source declarations; the eight stream
 actions; frame-id relations; `data-turbo*` attributes and `turbo-*` meta facts.
-`_top` and `_self` are frame keywords. Selectors go to the shared selector parser.
+`_top`, `_self` and `_parent` are frame keywords. In the pinned release, `_parent`
+resolves to the nearest ancestor frame, not a literal frame ID. Without an ancestor,
+the current frame does not intercept navigation; this is not a missing frame-id
+relation. Stimulus action lists use ECMAScript whitespace and line terminators,
+including NBSP and vertical tab, retaining ordered tokens and source spans.
+Selectors go to the shared selector parser.
 No navigation, fetch, stream execution, morphing or cache behavior is simulated.
 Attributes set by Turbo at runtime are vocabulary observations, not claims that
 Verter observes live runtime state.
