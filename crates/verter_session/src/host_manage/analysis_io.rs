@@ -455,9 +455,11 @@ impl VerterHost {
         }
         // raw_template_analysis lives on DerivedRawState (D48 split).
         let mut derived_ref = self.derived_raw_entry_or_default(canonical.to_string());
-        derived_ref
-            .value_mut()
-            .install_raw_template_analysis(template, admission);
+        derived_ref.value_mut().install_raw_template_analysis(
+            template,
+            admission,
+            self.project_type_store.retention_account(),
+        );
     }
 
     /// Serve the persisted profileless raw-template slot for `canonical`

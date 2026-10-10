@@ -457,7 +457,6 @@ impl CompileOutputNodeFactValidatedSession {
 
     /// A node whose published slots claim their evidence pages into
     /// `account`.
-    #[cfg(test)]
     pub(crate) fn with_retention_account(
         account: verter_session_query::retention::StoreAccount,
     ) -> Self {

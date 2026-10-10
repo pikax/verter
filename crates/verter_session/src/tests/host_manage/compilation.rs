@@ -1006,3 +1006,101 @@ fn effective_target_vue_only_when_no_script_candidates() {
         ".vue should be returned when it is the only candidate"
     );
 }
+
+#[test]
+fn compile_retention_refusal_suppresses_scheduler_and_template_companions() {
+    use verter_session_query::facts::{
+        fact_cache::{FactVersionRef, ReadSetSignature},
+        fact_read_set::seal_canonical_signature,
+        receipt::ResultReceipt,
+    };
+    use verter_session_query::retention::{ChargeClass, RetentionLimits, SemanticRetentionAccount};
+    for admitted in [true, false] {
+        let mut host = make_host();
+        let facts = (0..1025)
+            .map(|index| {
+                let canonical_id = format!("/wide/{index}.vue");
+                upsert_vue(&host, &canonical_id, "<template><div /></template>");
+                FactVersionRef::FileWholeHash {
+                    hash: current_whole_hash(&host, &canonical_id),
+                    canonical_id,
+                }
+            })
+            .collect();
+        let facts = seal_canonical_signature(facts);
+        let pages: Vec<_> = facts
+            .iter()
+            .filter_map(|fact| match fact {
+                FactVersionRef::Receipt(page) => Some(page.clone()),
+                _ => None,
+            })
+            .collect();
+        let page_bytes: usize = pages.iter().map(|page| page.retained_charge_bytes()).sum();
+        assert!(!pages.is_empty());
+        let account = SemanticRetentionAccount::new(RetentionLimits {
+            max_entry_bytes: if admitted { usize::MAX } else { page_bytes - 1 },
+            ..RetentionLimits::defaults()
+        });
+        host.project_type_store = Arc::new(
+            crate::project_type_store::ProjectTypeStore::with_retention_account(Arc::clone(
+                &account,
+            )),
+        );
+        let canonical = "/wide/Owner.vue";
+        upsert_vue(
+            &host,
+            canonical,
+            "<template><div class='complete' /></template>",
+        );
+        let profile = CompileProfile::default();
+        let profile_hash = crate::hash::compile_profile_hash(&profile);
+        let consumed = ResultReceipt::new(facts.to_vec());
+        drop(facts);
+        let facts = Arc::from(vec![FactVersionRef::Receipt(consumed)]);
+        let compile = || {
+            host.get_virtual_file(VirtualQuery {
+                raw_id: None,
+                canonical_id: Some(canonical.into()),
+                node_kind: Some(VirtualNodeKind::Main),
+                compile_profile: profile.clone(),
+            })
+            .expect("compile")
+        };
+        let output = crate::compile_fact_emission::with_extra_compile_observations(facts, compile);
+        assert!(!output.cache_hit);
+        let expected = if admitted {
+            ChargeClass::Retained
+        } else {
+            ChargeClass::Pinned
+        };
+        assert!(pages
+            .iter()
+            .all(|page| page.retained_charge_class() == Some(expected)));
+        assert_eq!(
+            host.compile_cache()
+                .get(canonical)
+                .and_then(|state| state
+                    .compile_slot_for_node(profile_hash)
+                    .map(|slot| ReadSetSignature::new(Arc::clone(&slot.fact_dep_signature.facts))))
+                .is_some(),
+            admitted
+        );
+        assert_eq!(
+            host.scheduler
+                .try_get_artifact(canonical, profile_hash)
+                .is_some(),
+            admitted
+        );
+        assert_eq!(persisted_raw_template(&host, canonical).is_some(), admitted);
+        if admitted {
+            let warm = compile();
+            assert!(warm.cache_hit);
+            assert_eq!(warm.code, output.code);
+        } else {
+            let recomputed = compile();
+            assert_eq!(recomputed.code, output.code);
+        }
+        drop((host, pages));
+        assert_eq!(account.snapshot().retained_bytes, 0);
+    }
+}
