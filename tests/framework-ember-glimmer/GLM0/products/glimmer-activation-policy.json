@@ -7,7 +7,7 @@
   "family": "ember-glimmer",
   "activationAuthority": {
     "sole": "FWA1",
-    "record": "FrameworkActivation { package, framework, state: active | inactive | unsupported-version | off, admittedRelease, mode, provenance }",
+    "record": "FrameworkActivation { package, framework, state: active | inactive | unsupported-version | off | unproven, admittedRelease, mode, provenance }",
     "home": "crates/verter_session/src/framework/project_capabilities.rs",
     "receivingAcceptance": ["FWA1-AC1", "FWA1-AC3", "FWA1-AC5"],
     "scope": "per workspace package, published per PM snapshot"

@@ -80,8 +80,44 @@
     "reason": "Documentation products the local DOC verifiers and the docs deploy read."
   },
   {
-    "glob": "tests/framework-ember-glimmer/**",
-    "reason": "Reviewed Ember/Glimmer contract data; no ci.yml lane reads it."
+    "glob": "tests/framework-angular/ANG0/manifest.json",
+    "reason": "Reviewed Angular contract data; no ci.yml lane reads these bytes yet. Executable specs and future consumed products require an explicit lane owner."
+  },
+  {
+    "glob": "tests/framework-angular/ANG0/cases.md",
+    "reason": "Reviewed Angular contract data; no ci.yml lane reads these bytes yet. Executable specs and future consumed products require an explicit lane owner."
+  },
+  {
+    "glob": "tests/framework-angular/ANG0/products/angular-version-lock.json",
+    "reason": "Reviewed Angular contract data; no ci.yml lane reads these bytes yet. Executable specs and future consumed products require an explicit lane owner."
+  },
+  {
+    "glob": "tests/framework-angular/ANG0/products/angular-capability-matrix.json",
+    "reason": "Reviewed Angular contract data; no ci.yml lane reads these bytes yet. Executable specs and future consumed products require an explicit lane owner."
+  },
+  {
+    "glob": "tests/framework-angular/ANG0/products/angular-activation-policy.json",
+    "reason": "Reviewed Angular contract data; no ci.yml lane reads these bytes yet. Executable specs and future consumed products require an explicit lane owner."
+  },
+  {
+    "glob": "tests/framework-ember-glimmer/GLM0/manifest.json",
+    "reason": "Reviewed Ember/Glimmer contract data; no ci.yml lane reads these bytes yet. Executable specs and future products stay outside these entries."
+  },
+  {
+    "glob": "tests/framework-ember-glimmer/GLM0/cases.md",
+    "reason": "Reviewed Ember/Glimmer contract data; no ci.yml lane reads these bytes yet. Executable specs and future products stay outside these entries."
+  },
+  {
+    "glob": "tests/framework-ember-glimmer/GLM0/products/glimmer-version-lock.json",
+    "reason": "Reviewed Ember/Glimmer contract data; no ci.yml lane reads these bytes yet. Executable specs and future products stay outside these entries."
+  },
+  {
+    "glob": "tests/framework-ember-glimmer/GLM0/products/glimmer-capability-matrix.json",
+    "reason": "Reviewed Ember/Glimmer contract data; no ci.yml lane reads these bytes yet. Executable specs and future products stay outside these entries."
+  },
+  {
+    "glob": "tests/framework-ember-glimmer/GLM0/products/glimmer-activation-policy.json",
+    "reason": "Reviewed Ember/Glimmer contract data; no ci.yml lane reads these bytes yet. Executable specs and future products stay outside these entries."
   },
   {
     "glob": "tests/framework-astro/AST0/cases.md",
@@ -114,6 +150,26 @@
   {
     "glob": "tests/framework-liquid/**",
     "reason": "Reviewed Liquid contract data; no ci.yml lane reads it."
+  },
+  {
+    "glob": "tests/framework-mdx/MDX0/cases.md",
+    "reason": "Reviewed MDX contract data; no ci.yml lane reads these bytes yet. Executable specs and future products stay outside these entries."
+  },
+  {
+    "glob": "tests/framework-mdx/MDX0/manifest.json",
+    "reason": "Reviewed MDX contract data; no ci.yml lane reads these bytes yet. Executable specs and future products stay outside these entries."
+  },
+  {
+    "glob": "tests/framework-mdx/MDX0/products/mdx-activation-policy.json",
+    "reason": "Reviewed MDX contract data; no ci.yml lane reads these bytes yet. Executable specs and future products stay outside these entries."
+  },
+  {
+    "glob": "tests/framework-mdx/MDX0/products/mdx-capability-matrix.json",
+    "reason": "Reviewed MDX contract data; no ci.yml lane reads these bytes yet. Executable specs and future products stay outside these entries."
+  },
+  {
+    "glob": "tests/framework-mdx/MDX0/products/mdx-version-lock.json",
+    "reason": "Reviewed MDX contract data; no ci.yml lane reads these bytes yet. Executable specs and future products stay outside these entries."
   },
   {
     "glob": "tests/jetbrains-baseline/**",
