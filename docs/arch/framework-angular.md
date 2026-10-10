@@ -37,7 +37,7 @@ CI-checked. ANG1M adds `products/angular-displaced-routes.json` (`ANG1M-AC6`).
 Admitted: `@angular/core`, `@angular/compiler-cli` and `@angular/compiler`
 **22.2.1** (published 2026-09-30, MIT), as the single release
 `angular@22.2.1` with the profile `angular-22.2.1-standalone`. The lock records
-each package's registry source and the integrity of the two release packages.
+each package's registry source and reviewed integrity for all three packages.
 
 A release is exact (identities `R04`–`R08`). Any installed version other than
 22.2.1 is `unsupported-version`, including 22.2.2 (published 2026-10-08) and
@@ -46,10 +46,13 @@ the 22.3.0 next builds; each needs a re-pin of the lock.
 **Angular 23 next/rc is excluded.** On 2026-10-09 the npm registry lists no
 23.x version of `@angular/core` or `@angular/compiler-cli`; the `next` dist-tag
 points at 22.3.0-next.1. There is no exact version to pin, and pinning the
-channel would be a floating tag. A later lock amendment that names an exact
-published 23.0.0 next or rc version admits it as a second profile. LNG1 names a
-23 channel too; lint packs run only where FWA1 admits a release from this lock,
-so that channel stays inactive until then.
+channel would be a floating tag. Future admission requires an explicit
+exact-release lock amendment and a separate release manifest naming the
+published 23.0.0 next or rc version, sources and reviewed integrity pins.
+Each manifest admits exactly one release; Angular 23 must not be appended to
+this manifest as a second release or profile. LNG1 names a 23 channel too;
+lint packs run only where FWA1 admits a release from a reviewed release
+manifest, so that channel stays inactive until then.
 
 Excluded modes:
 
@@ -74,9 +77,12 @@ compiler-cli test files and the angular.dev guide pages the lock lists (MIT).
 
 ## Activation
 
-FWA1's `FrameworkActivation` record is the only activation source. Angular is
-active for a workspace package only when FWA1 resolves `@angular/core` there
-from the installed version and that version is the admitted release.
+FWA1's `FrameworkActivation` record is the only activation source. Automatic
+detection reads the resolved installed `@angular/core` version for each
+workspace package from PM facts, never its declared range, and activates only
+when that version is the admitted release. Without a package manifest,
+explicit `on` naming an admitted release activates through the same FWA1
+record with `explicit` provenance; `auto` leaves that package inactive.
 `frameworks.angular = auto | on | off` follows framework-common: `off` disables
 the vertical, and `on` never admits an unadmitted release. FWA1's record is
 keyed by package, so the abort condition ("FWA1 cannot express a per-package

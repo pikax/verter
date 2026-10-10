@@ -72,6 +72,7 @@ Target: `products/angular-version-lock.json`.
 | `AC1-P14` | admitted release with channel `canary` | reject | `canary-or-nightly` |
 | `AC1-P15` | `angular-23-next` exclusion row deleted | reject | `missing-exclusion-reason` |
 | `AC1-P16` | the WDX1 row removed from `divergedPins` | reject | `diverged-pin-uninventoried` |
+| `AC1-P17` | `integrity` removed from `@angular/compiler` | reject | `missing-integrity` |
 
 ## ANG0-AC2 — owned matrix
 

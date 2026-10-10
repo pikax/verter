@@ -46,7 +46,8 @@
           "version": "22.2.1",
           "role": "exact peer of @angular/core and @angular/compiler-cli 22.2.1",
           "license": "MIT",
-          "source": "https://registry.npmjs.org/@angular/compiler/22.2.1"
+          "source": "https://registry.npmjs.org/@angular/compiler/22.2.1",
+          "integrity": "sha512-KRSz0c/T5eEiFa+F1l9OppAebJj9pT8kU3ArBMlxR3v/vzhpCfuQsFVQ4xEFC7dEm3zZIdv9ASKAP6ocNC4D/Q=="
         }
       ],
       "upstreamPeerFacts": [
@@ -100,7 +101,7 @@
       "channel": "next/rc",
       "disposition": "excluded",
       "reason": "unpublished: on 2026-10-09 the npm registry lists no 23.x version of @angular/core or @angular/compiler-cli (dist-tag next is 22.3.0-next.1). No exact version can be named, and pinning the channel would be a floating tag.",
-      "readmission": "A lock amendment that names an exact published 23.0.0 next or rc version, with its source and integrity, once the major is announced. FWA1 then reads the amended table. Until then an installed 23.x is unsupported-version."
+      "readmission": "An explicit exact-release lock amendment and a separate release manifest naming an exact published 23.0.0 next or rc version with sources and reviewed integrity pins, once the major is announced. Each manifest admits exactly one release; never append Angular 23 to this manifest as a second release or profile. FWA1 then reads the separately admitted release table. Until then an installed 23.x is unsupported-version."
     },
     {
       "id": "angular-22-other-builds",
@@ -220,6 +221,6 @@
   ],
   "lintProfileAlignment": {
     "owner": "LNG1",
-    "note": "LNG1 names the same @angular/core and @angular/compiler-cli 22.2.1 release and a 23 next/rc channel. Lint packs run only where FWA1 admits a release from this lock, so the 23 channel stays inactive until this lock admits an exact 23 version."
+    "note": "LNG1 names the same @angular/core and @angular/compiler-cli 22.2.1 release and a 23 next/rc channel. Lint packs run only where FWA1 admits a reviewed exact release, so the 23 channel stays inactive until an explicit exact-release lock amendment and a separate release manifest admit it. This manifest retains its single admitted release."
   }
 }
