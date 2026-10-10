@@ -128,6 +128,10 @@
     "reason": "Reviewed Astro contract data; no ci.yml lane reads these bytes yet. Executable specs and future products stay outside these entries."
   },
   {
+    "glob": "tests/framework-htmx/HTX0/**",
+    "reason": "Reviewed htmx contract data; no ci.yml lane reads these bytes yet. Executable validation and lane ownership are deferred to the htmx contract consumer."
+  },
+  {
     "glob": "tests/framework-liquid/**",
     "reason": "Reviewed Liquid contract data; no ci.yml lane reads it."
   },
@@ -150,6 +154,14 @@
   {
     "glob": "tests/framework-mdx/MDX0/products/mdx-version-lock.json",
     "reason": "Reviewed MDX contract data; no ci.yml lane reads these bytes yet. Executable specs and future products stay outside these entries."
+  },
+  {
+    "glob": "tests/framework-preact/PRE0/**/*.json",
+    "reason": "Reviewed Preact contract data; no ci.yml lane reads these bytes yet. PRE1-ACV removes this entry when its validator lands."
+  },
+  {
+    "glob": "tests/framework-preact/PRE0/*.md",
+    "reason": "Reviewed Preact contract inventory; no ci.yml lane reads these bytes yet. PRE1-ACV removes this entry when its validator lands."
   },
   {
     "glob": "tests/framework-stimulus/STIM0/cases.md",

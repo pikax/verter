@@ -1,0 +1,48 @@
+{
+  "id": "htmx-activation-policy.v1",
+  "schema": 1,
+  "family": "htmx",
+  "authority": "FWA1 FrameworkActivation, per PM package snapshot and file; REG0 htmx family row holds this data.",
+  "packageIdentity": "htmx.org",
+  "dependencyRoles": ["dependencies"],
+  "admittedMajors": [2, 4],
+  "releases": [
+    {
+      "major": 2,
+      "mode": "htmx-2",
+      "release": "2.0.11"
+    },
+    {
+      "major": 4,
+      "mode": "htmx-4",
+      "release": "4.0.0"
+    }
+  ],
+  "automatic": "auto/unset resolves the package dependency htmx.org through PM3 (including alias targets), reads its exact installed release, selects the profile by resolved major and checks the exact release lock. Declared ranges and transitive private dependencies are not evidence.",
+  "switch": {
+    "key": "frameworks.htmx",
+    "states": ["auto", "on", "off"],
+    "explicitOn": {
+      "state": "on",
+      "release": "<one exact admitted release>"
+    },
+    "profileRule": "The named release uniquely identifies htmx-2 or htmx-4; FWA1.mode carries that profile. No manifest or npm workspace is required.",
+    "precedence": "off and explicit on outrank auto; on never admits an unlisted release"
+  },
+  "outcomes": {
+    "active": "exact admitted release with manifest or explicit provenance",
+    "inactive": "no dependency evidence and no named explicit on; plain HWC HTML, zero overlay work",
+    "off": "whole vertical disabled, zero work",
+    "unsupported-version": "resolved/named release is outside the lock; no coercion or fallback profile"
+  },
+  "neverActivates": [
+    "script src URL or CDN host",
+    "hx- or data-hx- spelling",
+    "importmap pin",
+    "HTML file extension",
+    "declared dependency range alone",
+    "profile selected without a resolved major or a named explicit release"
+  ],
+  "coexistence": "HWC2 retains neutral facts; Alpine and htmx may attach their own facts without a second parser. Conflicting exact release claims require explicit selection, never nesting depth, order or recency.",
+  "abortEvidence": "FWA1 Surfaces Switch explicitly admits non-manifest on naming an admitted release; FrameworkActivation has admittedRelease and mode; FWA1-AC6 owns the non-manifest activation check. The missing-profile abort is not triggered. This is a planned contract, not shipped FWA1 implementation evidence."
+}
