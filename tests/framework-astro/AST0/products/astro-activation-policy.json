@@ -1,0 +1,67 @@
+{
+  "schema": "AstroActivationPolicy",
+  "version": 1,
+  "product": "AstroActivationPolicy",
+  "node": "AST0",
+  "kind": "lock",
+  "describesHead": {
+    "landingTitle": "docs(arch): record the parser decision, ownership, reuse and lineage (#812)",
+    "date": "2026-10-09"
+  },
+  "activationSource": {
+    "only": "FWA1 FrameworkActivation",
+    "record": "FrameworkActivation { package, framework, state: active | inactive | unsupported-version | off, admittedRelease, mode, provenance }",
+    "home": "crates/verter_session/src/framework/project_capabilities.rs",
+    "familyRow": "crates/verter_session/src/framework/families/astro.rs (REG0 module; the activation row is data there)",
+    "abortCheck": "FWA1 publishes one record per workspace package and file with the resolved installed version checked against this family's version lock, so a per-package, version-admitted astro activation is expressible; the AST0 abort condition does not apply."
+  },
+  "activationRow": {
+    "framework": "astro",
+    "dependencyNames": ["astro"],
+    "aliases": [],
+    "admittedReleases": ["astro-7.3.8"],
+    "releaseTable": "tests/framework-astro/AST0/products/astro-version-lock.json#/admittedReleases",
+    "modes": [],
+    "perFileNarrowing": "none: astro has no file pragma; activation is per owning package",
+    "explicitOnProfiles": ["astro-7.3.8"],
+    "nonNpmActivation": "none"
+  },
+  "switch": {
+    "key": "frameworks.astro",
+    "values": {
+      "auto": "active only when the owning package resolves the astro package to an admitted release",
+      "on": "active only at an admitted release; on names astro-7.3.8 or the record is unsupported-version; with no manifest entry, provenance is explicit",
+      "off": "the whole Astro vertical is off for every file of the package"
+    },
+    "readThrough": "CFG0 declarative configuration capture; user config is never evaluated"
+  },
+  "states": [
+    {"state": "active", "when": "resolved installed astro equals an admitted release, switch auto or on", "work": "the gated astro LanguageRow is reachable for the package's .astro files"},
+    {"state": "inactive", "when": "no resolved astro dependency and switch auto", "work": "zero"},
+    {"state": "unsupported-version", "when": "resolved astro is any version that is not exactly an admitted release (5.x, 6.x, another 7.x patch or minor, 7.4.0-beta.1), or on names an unadmitted release", "work": "zero, and the reason is reported through the FWA1 explain output"},
+    {"state": "off", "when": "frameworks.astro = off", "work": "zero"}
+  ],
+  "gate": {
+    "bit": "ProjectCapabilitySnapshot astro capability bit, set only from an active FWA1 record",
+    "gatedRow": "LanguageRow::gated(\"astro\", GatedCandidate { capability, ... }) in crates/verter_language/src/families/astro.rs (AST1)",
+    "wiredBy": "AST1M (AST1M-AC5); AST1 keeps the row inert in production and injects the capability in tests",
+    "fallback": "with the bit off a .astro file resolves to the gated fallback with zero parse work"
+  },
+  "zeroWorkWhenInactive": {
+    "rule": "When the record is not active for the owning package, the Astro vertical does no parse, fact, projection, lint or format work for that package.",
+    "receivers": [
+      {"surface": "parse", "acceptance": "AST1M-AC5"},
+      {"surface": "carrier LSP features", "acceptance": "AST1S-AC5"},
+      {"surface": "lint host", "acceptance": "AST8-AC1"},
+      {"surface": "lint packs", "acceptance": "LAS1-AC6"},
+      {"surface": "facts, projection and format", "acceptance": "AST9-AC1 (joins every admitted cell to a passing fixture, including the inactive-switch fixture that AST10-AC2 documents)"}
+    ]
+  },
+  "forbiddenActivation": [
+    {"id": "A-X01", "rule": "The .astro extension, a file path, a directory name (src/pages) or an astro.config.* file never activates Astro."},
+    {"id": "A-X02", "rule": "No second activation source beside FWA1: no LSP-local, lint-local (LK6), grammar-local (AST1G TextMate), descriptor-local or config-file probe."},
+    {"id": "A-X03", "rule": "A declared range is never read; activation reads the resolved installed version (VID0 R08)."},
+    {"id": "A-X04", "rule": "A floating, latest, canary, beta or legacy-major resolution never activates and is never coerced to the admitted release (VID0 R06, R07)."},
+    {"id": "A-X05", "rule": "VS Code TextMate colouring (AST1G) is client-side and lexical; it is never an activation and never product evidence."}
+  ]
+}
