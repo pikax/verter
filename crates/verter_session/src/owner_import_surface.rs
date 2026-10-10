@@ -207,17 +207,32 @@ impl OwnerImportSurfaceDb {
 
     /// Insert or replace the surface for `owner_canonical`. A replacement
     /// does not change the live-entry count.
-    pub(crate) fn insert_owned(&self, owner_canonical: Arc<str>, surface: Arc<OwnerImportSurface>) {
+    ///
+    /// The surface retains its signature's evidence pages, so admission
+    /// first claims them into a refusable reservation. A refused claim
+    /// inserts nothing and is returned for the caller to deliver the
+    /// surface uncached.
+    pub(crate) fn insert_owned(
+        &self,
+        owner_canonical: Arc<str>,
+        surface: Arc<OwnerImportSurface>,
+    ) -> Result<(), verter_session_query::retention::RetentionRefusal> {
+        verter_session_query::facts::receipt::claim_evidence_pages(
+            &verter_session_query::retention::SemanticRetentionAccount::process_local(),
+            &surface.read_set_signature.facts,
+        )?;
         let prev = self.entries.insert(owner_canonical, surface);
         if prev.is_none() {
             self.live_counter.fetch_add(1, Ordering::Relaxed);
         }
+        Ok(())
     }
 
     /// Test-support seed that intentionally bypasses real cold admission.
     #[cfg(any(test, feature = "test-support"))]
     pub fn insert(&self, owner_canonical: Arc<str>, surface: Arc<OwnerImportSurface>) {
-        self.insert_owned(owner_canonical, surface);
+        self.insert_owned(owner_canonical, surface)
+            .expect("a seeded surface's evidence pages fit the retention account");
     }
 
     /// Remove the currently stored owner surface only when it is the exact

@@ -31,8 +31,8 @@ fn read_session_src(rel: &str) -> String {
 #[test]
 fn compile_tier_signature_carries_member_presence() {
     // Arch guard: `CompileSlot.fact_dep_signature` MUST be the
-    // `ReadSetSignature` carrier (which wraps `Arc<[FactVersionRef]>`
-    // + the overflow flag). The legacy carrier was a
+    // `ReadSetSignature` carrier (which wraps `Arc<[FactVersionRef]>`).
+    // The legacy carrier was a
     // `Vec<FactVersionRef>` whose validation pumped through a
     // different path and dropped derived facts; this grep blocks the
     // regression.

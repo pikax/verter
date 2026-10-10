@@ -930,10 +930,6 @@ const variant: Variant = 'primary'
         cold_domain, warm_domain,
         "the served class domain must not depend on artifact-cache warmth",
     );
-    assert_eq!(
-        cold_signature.overflowed, warm_signature.overflowed,
-        "the overflow state must not depend on artifact-cache warmth",
-    );
     let cold_root = owner_whole_hash_facts(&cold_signature, LOCAL);
     assert!(
         !cold_root.is_empty(),

@@ -410,6 +410,20 @@ fn a_charge_releases_exactly_once_across_every_ending() {
     assert_eq!(account.snapshot().releases, 3);
 }
 
+/// A reservation splits only into the shares it was granted for: asking for
+/// more than the charge holds is a miscount, refused loudly rather than
+/// clamped into a smaller share that would under-charge its owner.
+#[test]
+#[should_panic(expected = "exceeds the 100 bytes this charge holds")]
+fn splitting_more_than_a_charge_holds_panics() {
+    let account = account(10_000, 10_000, 10_000);
+    let mut charge = account
+        .reserve(ChargeClass::Retained, 100)
+        .admitted()
+        .expect("fits");
+    let _share = charge.split_off(101);
+}
+
 /// Committing an in-flight charge to retained is gap-free: the bytes
 /// stay charged across the transition (so a concurrent reservation can
 /// never slip into an unaccounted window) while the ACTIVE sub-limit

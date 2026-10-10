@@ -1,0 +1,410 @@
+{
+  "id": "export-activation-case-table.v1",
+  "schema": 1,
+  "contractNode": "EAK0",
+  "describesHead": {
+    "landingTitle": "docs(arch): record the parser decision, ownership, reuse and lineage (#812)",
+    "date": "2026-10-09"
+  },
+  "companionInventory": "export-activation-inventory.v1.json",
+  "rule": "Each case states its input, the required RoleEvidence outcome and the forbidden outcome, and names the node whose test makes it executable. EAK0 ships no test; EAK1 builds and runs the corpus in its existing test lanes (EAK1-AC-R1). Every positive case has a same-spelling negative that differs only in the link that must fail (ER29). Work counts cover four families: evidence hop reads (module-resolution answers plus hop-module export-inventory reads), type-resolver calls, TypeScript-provider calls and package-code executions. Unless a case says otherwise, every case requires zero type-resolver, TypeScript-provider and package-code calls during evidence production (ER08, ER25). Unless stated otherwise the workspace installs vue at an admitted Vue 3 release and svelte at an admitted Svelte 5 release, both package-backed, and the role rows are the Vue and Svelte rows of ER02.",
+  "workFamilies": [
+    "evidence-hop-read",
+    "type-resolver-call",
+    "typescript-provider-call",
+    "package-code-execution"
+  ],
+  "cases": [
+    {
+      "id": "EC01",
+      "name": "exact Vue alias example",
+      "input": "widget.ts: import { defineComponent as dc } from 'vue'; const define = dc; export default define({ template: '<p>{{ msg }}</p>', data: () => ({ msg: 'hi' }) })",
+      "required": "One Proven evidence for the define(...) site: role (vue profile, component-definition), chain [LocalImport dc <- vue#defineComponent, ConstAlias define], terminal (vue, '.', defineComponent, Value), package vue at the admitted ReleaseId. The template option opens one embedded template region (ER24). Hop reads: 1 module-resolution answer for 'vue'.",
+      "forbidden": "A spelling test on 'defineComponent' or 'vue'; a type-resolver or TypeScript call; treating the define(...) call as plain TS",
+      "rules": ["ER02", "ER05", "ER09", "ER18", "ER24"],
+      "existingEvidence": [
+        "stp13_vue_import_alias_still_unwraps_by_binding",
+        "aliased_vue_import_classified_by_imported_name"
+      ],
+      "evidenceNote": "Both pin today's single-hop renamed-import recognition by spelling; neither follows the const alias. Pinned rendering of the charter's alias example; operator question eak0-vue-alias-example-text may add the verbatim text as an extra row.",
+      "executableOwner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC-R1"
+    },
+    {
+      "id": "EC02",
+      "name": "namespace member",
+      "input": "import * as V from 'vue'; export default V.defineComponent({ template: '<p/>' }); and the same with V['defineComponent']",
+      "required": "Proven for both sites; chain [LocalImport V <- vue namespace, NamespaceMember defineComponent]",
+      "forbidden": "A computed non-literal key accepted; a role inferred from the member spelling without the namespace link",
+      "rules": ["ER05", "ER18"],
+      "existingEvidence": [],
+      "executableOwner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC-R1"
+    },
+    {
+      "id": "EC03",
+      "name": "namespace destructuring",
+      "input": "import * as V from 'vue'; const { defineComponent: make } = V; export default make({})",
+      "required": "Proven; chain [LocalImport V, Destructure defineComponent as make]",
+      "forbidden": "Accepting the same destructuring with a default initializer (const { defineComponent: make = other } = V), which must be NotRole { Conditional }",
+      "rules": ["ER05", "ER13"],
+      "existingEvidence": [],
+      "executableOwner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC-R1"
+    },
+    {
+      "id": "EC04",
+      "name": "local named re-export barrel",
+      "input": "src/vue-api.ts: export { defineComponent as dc } from 'vue'; src/widget.ts: import { dc } from './vue-api'; export default dc({})",
+      "required": "Proven; chain [LocalImport dc <- ./vue-api, ReExport (src/vue-api.ts, 'vue', defineComponent)]; read set holds src/vue-api.ts's (SourceUnitId, ContentId) export inventory and both resolution answers. Hop reads: 2 resolution answers, 1 export-inventory read. All route, manifest and export facts are read from a coherent RoleResolutionSnapshot captured through their existing owners; missing captures produce Unproven. EAK1 supplies the capture/view boundary.",
+      "forbidden": "Reading src/vue-api.ts raw source instead of its export inventory; calling the type resolver to follow the barrel. Live filesystem, manifest, resolver or type-provider access during stage one; a planted live-read callback must fail the boundary test.",
+      "rules": ["ER05", "ER08", "ER19"],
+      "existingEvidence": [
+        "template_class_wrapper_routes_follow_import_then_export_and_local_alias_barrels",
+        "return_wrapper_routes_follow_renamed_imports_local_aliases_and_barrels"
+      ],
+      "evidenceNote": "Both pin barrel following for the post-snapshot wrapper route only.",
+      "executableOwner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC-R1"
+    },
+    {
+      "id": "EC05",
+      "name": "star re-export barrel",
+      "input": "src/vue-all.ts: export * from 'vue'; src/widget.ts: import { defineComponent } from './vue-all'; export default defineComponent({})",
+      "required": "Proven through ReExport via export *",
+      "forbidden": "Treating export * as an opaque unknown and dropping the role",
+      "rules": ["ER05", "ER08"],
+      "existingEvidence": ["resolve_exports_reads_workspace_only_barrels_and_vue_targets"],
+      "executableOwner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC-R1"
+    },
+    {
+      "id": "EC06",
+      "name": "explicit internal-package entry",
+      "input": "import { defineComponent } from '@vue/runtime-core'; export default defineComponent({}); and import { defineComponent } from '@vue/shared' where the role row lists vue and @vue/runtime-core only",
+      "required": "@vue/runtime-core: Proven (explicit row entry). @vue/shared: NotRole { NotCanonical }",
+      "forbidden": "A prefix or glob match on @vue/* or vue/*",
+      "rules": ["ER02", "ER09"],
+      "existingEvidence": [],
+      "executableOwner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC-R1"
+    },
+    {
+      "id": "EC07",
+      "name": "erasable TypeScript wrappers",
+      "input": "import { defineComponent } from 'vue'; const dc = (defineComponent as typeof defineComponent); const dc2 = defineComponent!; const dc3 = defineComponent satisfies Function",
+      "required": "Proven for calls through dc, dc2 and dc3; the wrappers are transparent",
+      "forbidden": "Treating an erasable wrapper as a call wrapper (NotRole { Wrapped })",
+      "rules": ["ER05"],
+      "existingEvidence": [],
+      "executableOwner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC-R1"
+    },
+    {
+      "id": "EC08",
+      "name": "userland defineComponent declaration",
+      "input": "function defineComponent(o) { return o } export default defineComponent({ template: '<p/>' })",
+      "required": "NotRole { LocalDeclaration }; no embedded template region; the file stays plain TS",
+      "forbidden": "Proven, or any region opened, because the callee is spelled defineComponent",
+      "rules": ["ER10", "ER11", "ER23"],
+      "existingEvidence": [
+        "template_class_facts_accept_exact_vue_wrappers_and_reject_local_fakes",
+        "return_wrapper_role_rejects_local_and_foreign_package_fakes"
+      ],
+      "evidenceNote": "Pins the same-spelling rejection for the post-snapshot wrapper route only.",
+      "executableOwner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC-R1"
+    },
+    {
+      "id": "EC09",
+      "name": "userland module export",
+      "input": "src/defineComponent.ts: export function defineComponent(o) { return o }; src/widget.ts: import { defineComponent } from './defineComponent'; export default defineComponent({})",
+      "required": "NotRole { NotCanonical }: the terminal is a workspace-owned module",
+      "forbidden": "Proven because the imported name matches the role row",
+      "rules": ["ER09"],
+      "existingEvidence": ["component_meta_binding_role_rejects_local_and_foreign_wrapper_fakes"],
+      "executableOwner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC-R1"
+    },
+    {
+      "id": "EC10",
+      "name": "specifier spelled vue mapped to a workspace file",
+      "input": "tsconfig paths { 'vue': ['./src/fake-vue.ts'] }; src/fake-vue.ts exports defineComponent; import { defineComponent } from 'vue'",
+      "required": "NotRole { NotCanonical }: the resolved module is workspace-owned, so the specifier bytes do not name a package",
+      "forbidden": "A package identity taken from the specifier bytes",
+      "rules": ["ER09"],
+      "existingEvidence": [],
+      "executableOwner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC-R1"
+    },
+    {
+      "id": "EC11",
+      "name": "reassigned and mutable aliases",
+      "input": "import { defineComponent } from 'vue'; let dc = defineComponent; dc = (o) => o; dc({}); and a second file with let dc2 = defineComponent; dc2({}) and no reassignment",
+      "required": "Both NotRole { Mutable }",
+      "forbidden": "Proven for the never-reassigned let, or a flow analysis deciding mutability",
+      "rules": ["ER11"],
+      "existingEvidence": [],
+      "executableOwner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC-R1"
+    },
+    {
+      "id": "EC12",
+      "name": "call wrappers",
+      "input": "import { defineComponent } from 'vue'; const a = wrap(defineComponent); const b = defineComponent.bind(null); a({}); b({})",
+      "required": "Both NotRole { Wrapped }",
+      "forbidden": "Proven through a call or bind",
+      "rules": ["ER12"],
+      "existingEvidence": ["return_wrapper_role_fails_closed_for_a_transparent_alias_wrapper"],
+      "evidenceNote": "Pins the fail-closed wrapper rule for the post-snapshot route only.",
+      "executableOwner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC-R1"
+    },
+    {
+      "id": "EC13",
+      "name": "object holder",
+      "input": "import { defineComponent } from 'vue'; const api = { dc: defineComponent }; api.dc({})",
+      "required": "NotRole { Wrapped }",
+      "forbidden": "Following an object-literal property as a link",
+      "rules": ["ER12"],
+      "existingEvidence": [],
+      "executableOwner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC-R1"
+    },
+    {
+      "id": "EC14",
+      "name": "conditional alias",
+      "input": "import { defineComponent } from 'vue'; const dc = flag ? defineComponent : other; const dc2 = defineComponent ?? other; dc({}); dc2({})",
+      "required": "Both NotRole { Conditional }",
+      "forbidden": "Proven through one branch",
+      "rules": ["ER13"],
+      "existingEvidence": [],
+      "executableOwner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC-R1"
+    },
+    {
+      "id": "EC15",
+      "name": "shadowed by an inner binding",
+      "input": "import { defineComponent } from 'vue'; function f(defineComponent) { return defineComponent({}) }; and { const defineComponent = (o) => o; defineComponent({}) }",
+      "required": "Both inner sites NotRole { Shadowed }; a call at module scope stays Proven",
+      "forbidden": "Resolving the inner site to the module import",
+      "rules": ["ER10"],
+      "existingEvidence": [],
+      "executableOwner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC-R1"
+    },
+    {
+      "id": "EC16",
+      "name": "unbound name and unsupported links",
+      "input": "defineComponent({}) with no binding and no project-profile contribution; const { defineComponent } = require('vue'); const m = await import('vue'); m.defineComponent({})",
+      "required": "Unbound site: NotRole { Unbound }. require and dynamic import: NotRole { Unsupported }",
+      "forbidden": "Accepting a free defineComponent as Vue's (today's EAK-D05 behaviour)",
+      "rules": ["ER06"],
+      "existingEvidence": [],
+      "evidenceNote": "The existing consumer is_vue_wrapper accepts the free name (EAK-F01). EAK1 proves rejection through the shared evidence API; EAK2-AC1 separately proves the existing consumer stops accepting it.",
+      "executableOwner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC-R1"
+    },
+    {
+      "id": "EC17",
+      "name": "unresolved package",
+      "input": "import { defineComponent } from 'vue' in a workspace where vue is not installed; then vue is installed at the admitted release",
+      "required": "Before: Unproven { needs: package vue }, ReturnOnly, nothing cached. After: a new evidence identity, Proven",
+      "forbidden": "A cached NotRole, a name-based guess, or the old Unproven served after the install",
+      "rules": ["ER14", "ER17"],
+      "existingEvidence": [],
+      "executableOwner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC-R1"
+    },
+    {
+      "id": "EC18",
+      "name": "ambiguous star barrel",
+      "input": "src/api.ts: export * from 'vue'; export * from './mine'; src/mine.ts: export function defineComponent(o) { return o }; import { defineComponent } from './api'",
+      "required": "Ambiguous { candidates: [vue#defineComponent, src/mine.ts#defineComponent] } in canonical encoding order; ReturnOnly; no region",
+      "forbidden": "Picking either candidate by declaration, discovery or completion order",
+      "rules": ["ER15", "ER17", "ER22"],
+      "existingEvidence": [],
+      "executableOwner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC-R1"
+    },
+    {
+      "id": "EC19",
+      "name": "one terminal through two paths",
+      "input": "src/api.ts: export * from 'vue'; export { defineComponent } from 'vue'; import { defineComponent } from './api'",
+      "required": "Proven, not Ambiguous; the recorded chain is the least by canonical encoding",
+      "forbidden": "Ambiguous for a shared terminal",
+      "rules": ["ER15", "ER22"],
+      "existingEvidence": [
+        "template_class_wrapper_artifact_binds_each_duplicate_terminal_route_exactly"
+      ],
+      "executableOwner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC-R1"
+    },
+    {
+      "id": "EC20",
+      "name": "barrel cycle",
+      "input": "src/a.ts: export * from './b'; src/b.ts: export * from './a'; import { defineComponent } from './a'",
+      "required": "NotRole { Cycle } after visiting each (module, export name) once",
+      "forbidden": "Non-termination, or BudgetExceeded for a detectable cycle",
+      "rules": ["ER16"],
+      "existingEvidence": ["stp14_alias_cycle_terminates_and_is_recorded_by_declaration_identity"],
+      "executableOwner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC-R1"
+    },
+    {
+      "id": "EC21",
+      "name": "type-only link",
+      "input": "import type { defineComponent } from 'vue'; const dc: typeof defineComponent = …; dc({}); and import { type defineComponent } from 'vue'; defineComponent({})",
+      "required": "NotRole { TypeOnlyLink } for the value-space role",
+      "forbidden": "Proven through a type-only import",
+      "rules": ["ER07"],
+      "existingEvidence": [],
+      "executableOwner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC-R1"
+    },
+    {
+      "id": "EC22",
+      "name": "incremental invalidation follows every provenance read",
+      "input": "EC04's workspace, warm. (a) Edit src/vue-api.ts to export { defineComponent as dc } from './mine'. (b) Revert the edit. (c) Edit an unrelated src/other.ts. (d) Change the installed vue release within the admitted line. (e) Change a consulted captured resolution/manifest fact without changing source bytes or SelectionInputs. (f) Recommit identical bytes under another host revision and complete work admitted before the change.",
+      "required": "(a) The widget evidence is invalidated and recomputes to NotRole { NotCanonical }. (b) The evidence identity equals the original warm identity, and equals a fresh host. (c) Zero evidence recomputed, zero hop reads. (d) A new evidence identity. (e) A changed evidence identity creates a new stage-one plan/generation through DR09; no old-generation projection is edited. (f) Equal content and consulted fact values preserve evidence identity across hosts and revisions, but the current publication stamp is renewed and stale work is refused.",
+      "forbidden": "Serving the warm Proven after (a); a changed identity after (b); any recompute after (c). Host-instance, scheduler or capture-generation tokens in evidence identity; accepting stale work on content-revert equality; reusing a stage-one plan after its evidence identity changes.",
+      "rules": ["ER19", "ER20", "ER21"],
+      "existingEvidence": [
+        "store_view_seeded_imported_barrel_backfills_wildcard_import_routes",
+        "resolver_store_view_tracks_reexport_import_routes"
+      ],
+      "evidenceNote": "Both pin read-set tracking of re-export routes in the shared resolver store view, which the evidence read set reuses.",
+      "executableOwner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC-R1"
+    },
+    {
+      "id": "EC23",
+      "name": "unsupported release keeps evidence and dormancy separate",
+      "input": "vue installed at a release outside the admitted line; EC01's file",
+      "required": "Evidence Proven for the canonical export; the profile is Dormant { UnsupportedVersion } from the activation record (DEM0 DR08), so no region opens",
+      "forbidden": "Evidence reporting NotRole for a release mismatch; a region opened for a dormant profile",
+      "rules": ["ER18", "ER23"],
+      "existingEvidence": [],
+      "executableOwner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC3"
+    },
+    {
+      "id": "EC24",
+      "name": "cancellation mid-chain",
+      "input": "EC04's request cancelled after the first hop read",
+      "required": "Cancelled, ReturnOnly; nothing published or cached; a retry answers what a fresh host answers",
+      "forbidden": "A cached partial chain, or a Proven or NotRole built from a partial read set",
+      "rules": ["ER17", "ER21"],
+      "existingEvidence": ["return_wrapper_role_degrades_typed_and_is_never_warmed"],
+      "executableOwner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC3"
+    },
+    {
+      "id": "EC25",
+      "name": "hop budget exhausted",
+      "input": "A barrel chain one hop longer than the request BudgetProfile allows, ending at vue#defineComponent",
+      "required": "BudgetExceeded, ReturnOnly, never cached; a request with an adequate budget proves the role",
+      "forbidden": "Caching BudgetExceeded as NotRole; serving it to a later request with a larger budget",
+      "rules": ["ER16", "ER17"],
+      "existingEvidence": [],
+      "executableOwner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC3"
+    },
+    {
+      "id": "EC26",
+      "name": "zero work without candidate bindings",
+      "input": "A plain TS file with no imports, and a file importing only './utils' functions that are never called at a role site",
+      "required": "Zero evidence hop reads and zero evidence records beyond the existing import inventory",
+      "forbidden": "Following './utils' speculatively, or reading any barrel before a role site demands it",
+      "rules": ["ER27"],
+      "existingEvidence": [
+        "template_class_requested_subject_does_not_read_unrelated_cold_wrapper_import",
+        "return_wrapper_demand_does_not_read_unrelated_cold_wrapper_import"
+      ],
+      "executableOwner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC4"
+    },
+    {
+      "id": "EC27",
+      "name": "barrel read once",
+      "input": "Fifty components, each importing dc from './vue-api' (EC04's barrel), checked in one batch",
+      "required": "src/vue-api.ts export inventory read exactly once per (SourceUnitId, ContentId); one resolution answer per distinct (importer directory, specifier) the resolver keys on",
+      "forbidden": "A barrel read per importing component, or a raw-source rescan",
+      "rules": ["ER08", "ER27"],
+      "existingEvidence": ["a_request_builds_an_owners_import_route_witness_once"],
+      "executableOwner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC4"
+    },
+    {
+      "id": "EC28",
+      "name": "profile intrinsic",
+      "input": "App.vue <script setup>: defineProps<{ a: string }>(); util.ts: defineProps({}); App2.vue <script setup>: import { defineProps } from 'vue'; defineProps({})",
+      "required": "App.vue: Proven ProfileIntrinsic under the release's scope law. util.ts: NotRole { OutsideRegion }. App2.vue: the import is not intrinsic evidence; the call is classified only by the intrinsic row's scope law for that release",
+      "forbidden": "An intrinsic proven in a plain TS file; an import from 'vue' treated as intrinsic evidence",
+      "rules": ["ER02", "ER04"],
+      "existingEvidence": [],
+      "executableOwner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC-R1"
+    },
+    {
+      "id": "EC29",
+      "name": "Svelte package export and look-alikes",
+      "input": "Comp.svelte: import { createEventDispatcher as ced } from 'svelte'; const d = ced(); Comp2.svelte: the same import from './fake-svelte'; Comp3.svelte: tsconfig paths { 'svelte': ['node_modules/other-pkg/index.js'] } with the same import",
+      "required": "Comp: Proven (svelte profile, legacy-dispatcher). Comp2: NotRole { NotCanonical }. Comp3: NotRole { NotCanonical }, because the resolved manifest names other-pkg",
+      "forbidden": "A package name derived from specifier bytes (today's EAK-D10 behaviour for Comp3)",
+      "rules": ["ER09", "ER18"],
+      "existingEvidence": [
+        "userland_snippet_lookalike_is_not_classified_snippet_typed",
+        "svelte_synth_is_identical_with_real_vs_fake_svelte_package",
+        "userland_snippet_lookalike_is_not_published_as_a_slot"
+      ],
+      "evidenceNote": "Existing tests pin the relative look-alike. EAK1 proves all three cases at the shared evidence API; EAK2-AC1 separately integrates that result into the existing Svelte script-fact route (EAK-F04).",
+      "executableOwner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC-R1"
+    },
+    {
+      "id": "EC30",
+      "name": "post-snapshot role stays out of projection",
+      "input": "import type { Ref as R } from 'vue'; type Box = R<number>; a prop typed Box in a component",
+      "required": "No P2 projection activation for the wrapper role; P3 evidence Proven through the exact-route authority; the Projection and PostSnapshot halves agree on the chain where both apply",
+      "forbidden": "A PostSnapshot role promoted to Projection; a type-resolver call during P2",
+      "rules": ["ER03", "ER25"],
+      "existingEvidence": [
+        "template_class_named_type_argument_prop_wrappers_peel_exact_vue_routes",
+        "return_wrapper_roles_cover_the_exact_vue_vocabulary_structurally"
+      ],
+      "executableOwner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC-R1"
+    }
+  ]
+}

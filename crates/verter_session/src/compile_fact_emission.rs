@@ -8,8 +8,9 @@
 //! through [`verter_session_query::facts::fact_cache::SignatureAdmission::from_finalise`]
 //! and stores the `Cacheable` arm's [`verter_session_query::facts::fact_cache::ReadSetSignature`]
 //! as the `fact_dep_signature` of the new [`crate::types::CompileSlot`].
-//! An overflowed tracer routes the freshly computed virtual file
-//! back to the caller without admitting a slot.
+//! A refused tracer (a non-cacheable read, mutation instability)
+//! routes the freshly computed virtual file back to the caller
+//! without admitting a slot.
 //!
 //! ## Why path-precision (R28)
 //!

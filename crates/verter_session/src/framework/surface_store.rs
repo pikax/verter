@@ -274,8 +274,21 @@ where
     /// publisher that recorded its version and paused could be overtaken by
     /// newer versions that evict it before its entry exists, then insert an
     /// entry no version list names — one no later eviction can reach.
+    ///
+    /// The entry retains its signature's evidence pages, so admission first
+    /// claims them into a refusable reservation; a refused claim memoizes
+    /// nothing and returns the complete entry uncached.
     pub fn insert(&self, key: FullKey<K>, entry: StoredSurfaceDto<B>) -> Arc<StoredSurfaceDto<B>> {
         let arc = Arc::new(entry);
+        if let Err(refusal) = verter_session_query::facts::receipt::claim_evidence_pages(
+            &verter_session_query::retention::SemanticRetentionAccount::process_local(),
+            &arc.read_set_signature.facts,
+        ) {
+            verter_type_engine::cache_runtime::admission::propagate_non_admission(
+                refusal.non_admission_reason(),
+            );
+            return arc;
+        }
         let mut owners = self.owners.lock();
         let evicted = Self::record_version(&mut owners, &key);
         self.park_at_admission_gate();

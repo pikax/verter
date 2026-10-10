@@ -27,10 +27,10 @@ they or the [authority inventory](authority-inventory.md) and the
 
 The reviewed contract data lives in `tests/kernel/DEM0/products/`:
 
-| File | Holds |
-| ---- | ----- |
-| `demand-inventory.v1.json` | Plan stages `P1`–`P5`, contract rules `DR01`–`DR30`, outcomes `DEM-O01`–`DEM-O10`, consumers `DEM-C01`–`DEM-C08`, displaced routes `DEM-D01`–`DEM-D06`, the UAK0, VID0, CAT0 and CFG0 routes it references, coverage of each deletion category, empty populations, findings and transferred obligations |
-| `demand-case-table.v1.json` | Cases `DC01`–`DC16`: input, required and forbidden outcome with exact work and audit counts, the rules each case exercises, existing evidence, and the node whose test makes it executable |
+| File                        | Holds                                                                                                                                                                                                                                                                                                   |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `demand-inventory.v1.json`  | Plan stages `P1`–`P5`, contract rules `DR01`–`DR30`, outcomes `DEM-O01`–`DEM-O10`, consumers `DEM-C01`–`DEM-C08`, displaced routes `DEM-D01`–`DEM-D06`, the UAK0, VID0, CAT0 and CFG0 routes it references, coverage of each deletion category, empty populations, findings and transferred obligations |
+| `demand-case-table.v1.json` | Cases `DC01`–`DC16`: input, required and forbidden outcome with exact work and audit counts, the rules each case exercises, existing evidence, and the node whose test makes it executable                                                                                                              |
 
 Every `successorPath` starts at DEM0 and follows successor edges in the
 controller-owned plan. UAK0, VID0, CAT0 and CFG0 rows keep their owners; DEM0
@@ -38,13 +38,13 @@ only references them.
 
 ## Plan stages
 
-| Stage | Name | Computed from | Fixed for | Implementation owner |
-| ----- | ---- | ------------- | --------- | -------------------- |
-| `P1` | `SelectionInputs` | captured inputs only (`DR01`–`DR05`) | one activation epoch | COX0 (`COX0-AC2`) |
-| `P2` | `SourceActivationPlan` | `P1` plus parse-domain facts of one source revision | one parse/transform generation | COX0 (`COX0-AC2`) |
-| `P3` | `SemanticClaimPlan` | `P2` plus the published project snapshot | one project snapshot | COX0 (`COX0-AC2`) |
-| `P4` | `CapabilityDemandPlan` | `P3` plus one request's operation, root and participation mask | one request | COX0 (`COX0-AC2`) |
-| `P5` | `DemandPlan` | the composition of `P1`–`P4` and its submission | one request | COX0 (`COX0-AC2`) |
+| Stage | Name                   | Computed from                                                                                  | Fixed for                      | Implementation owner |
+| ----- | ---------------------- | ---------------------------------------------------------------------------------------------- | ------------------------------ | -------------------- |
+| `P1`  | `SelectionInputs`      | captured inputs only (`DR01`–`DR05`)                                                           | one activation epoch           | COX0 (`COX0-AC2`)    |
+| `P2`  | `SourceActivationPlan` | `P1`, parse-domain facts of one source revision and captured projection role evidence (`DR07`) | one parse/transform generation | COX0 (`COX0-AC2`)    |
+| `P3`  | `SemanticClaimPlan`    | `P2` plus the published project snapshot                                                       | one project snapshot           | COX0 (`COX0-AC2`)    |
+| `P4`  | `CapabilityDemandPlan` | `P3` plus one request's operation, root and participation mask                                 | one request                    | COX0 (`COX0-AC2`)    |
+| `P5`  | `DemandPlan`           | the composition of `P1`–`P4` and its submission                                                | one request                    | COX0 (`COX0-AC2`)    |
 
 UAK0 `O03` already assigns "demand-selected activation and per-profile
 capability masks" to COX0, and the authority inventory binds `DemandPlan` to
@@ -97,18 +97,28 @@ consume the plan.
   selects the unit's `CarrierProfileId` from the catalog's `T01` claim and,
   per region, the candidate `FrameworkProfileId`s that the package's
   activation records and per-file narrowing allow.
-- **DR07.** Stage one may read only `SelectionInputs` and parse-domain facts
-  of the same revision: the carrier's region inventory, a
-  `@jsxImportSource` pragma, and EAK1's projection-time role evidence from
-  canonical package exports. It never calls TypeScript, the shared type
-  resolver, TypeInfo or any semantic oracle.
+- **DR07.** Stage one may read only `SelectionInputs`, parse-domain facts
+  of the same revision (the carrier's region inventory and a
+  `@jsxImportSource` pragma), and EAK1's captured projection-time role
+  evidence from canonical package exports. That evidence is not a local
+  parse fact: it reads the `RoleResolutionSnapshot` defined by EAK0 `ER08`
+  and `ER19`, containing owner-captured resolution answers, package facts
+  and content-addressed hop export inventories. EAK1 implements this view
+  over the existing authorities; COX0 consumes the resulting evidence.
+  All inputs are captured through their owners, extending `DR02`'s read
+  rule without adding a member to `SelectionInputs`. Missing inputs are
+  `Unproven`, never a live resolver or manifest read. Stage one never calls
+  TypeScript, the shared type resolver, TypeInfo or any semantic oracle.
 - **DR08.** Each region's stage-one outcome is exactly one of `Selected
-  { profile }`, `Dormant { reason }`, `Ambiguous { claims }` or `Unproven
-  { needs }`. `reason` is one of `Off`, `Inactive`, `UnsupportedVersion` or
+{ profile }`, `Dormant { reason }`, `Ambiguous { claims }` or `Unproven
+{ needs }`. `reason` is one of `Off`, `Inactive`, `UnsupportedVersion` or
   `NotClaimed`; the first three come from the activation record (FWA1).
 - **DR09.** The stage-one plan fixes the parse/transform generation. Its
   identity is `(SourceUnitId, SourceRevision, ContentId, CarrierProfileId,
-  ordered per-region outcomes, selection-input identity)`. Syntax artifacts
+ordered per-region outcomes, selection-input identity, ordered projection
+role-evidence identities)`. An empty evidence set has one canonical
+  encoding. Evidence identities use content facts, while source revision
+  and captured-owner generations fence publication. Syntax artifacts
   stay keyed by carrier profile (VID0 `R15`); a profile outcome enters an
   artifact key only for artifacts the profile computes.
 - **DR10.** A carrier that registers no profile claim (plain `ts`, `js`) has
@@ -120,8 +130,10 @@ consume the plan.
 - **DR11.** Stage two runs after the project snapshot that contains the
   stage-one generation is published. It mints one `AttachmentId` per
   `(SourceUnitId, RegionId, FrameworkProfileId)` for every `Selected` region
-  (VID0 `I06`), using post-snapshot facts: resolved imports, canonical role
-  provenance that needs resolution, and project membership (PM1).
+  (VID0 `I06`), using post-snapshot facts: resolved imports and canonical
+  role provenance that need semantic/type resolution, and project membership
+  (PM1). Captured module-route answers used by projection evidence (`DR07`)
+  do not call this stage or the type resolver.
 - **DR12.** Post-snapshot facts never mutate the current parse/transform
   generation. Stage two can confirm a stage-one selection or withdraw it for
   that snapshot (`Withdrawn { cause }`); it can never add a profile, change
@@ -129,7 +141,12 @@ consume the plan.
 - **DR13.** When a post-snapshot fact would change a stage-one input (for
   example a dependency edit that flips an activation record), the change
   reaches stage one only as a new `SelectionInputs` and a new activation
-  epoch (`DR21`). The old generation is never edited in place.
+  epoch (`DR21`). A change to a consulted role-resolution, manifest or
+  export-inventory fact instead revalidates EAK1's captured evidence; a
+  changed evidence identity creates a new `DR09` plan/generation even when
+  `SelectionInputs` is unchanged. An unchanged fact value may preserve
+  evidence identity but never bypasses current publication fences. The old
+  generation is never edited in place.
 - **DR14.** A semantic claim names its project profile when one applies
   (VID0 `I07`, PPR0T rows) and never re-mints the semantic profile it
   overlays.
@@ -154,15 +171,15 @@ consume the plan.
   profile (SKR-READS `BudgetProfile`). It never selects a different semantic
   answer.
 - **DR18.** Batch membership is the set of `(SourceUnitId, RegionId,
-  CapabilityId, fact demand)` entries. Batch order is the canonical encoding
+CapabilityId, fact demand)` entries. Batch order is the canonical encoding
   order of those entries (CAT0 `CR05`), never arrival, discovery or
   completion order.
 - **DR19.** Profile identity for refusal reuse is `(demand purpose,
-  BudgetProfile identity, ordered FrameworkProfileId set, normalized root
-  context, demand epoch, root source identity)`. The demand epoch is the
+BudgetProfile identity, ordered FrameworkProfileId set, normalized root
+context, demand epoch, root source identity)`. The demand epoch is the
   `DR21` epoch. The root source identity is VID0 `R12`: `(SourceUnitId,
-  SourceRevision, ContentId)`, or `(SourceUnitId, SourceRevision,
-  MapRevision)` when the root is a map. An eligible isolated-root refusal is
+SourceRevision, ContentId)`, or `(SourceUnitId, SourceRevision,
+MapRevision)` when the root is a map. An eligible isolated-root refusal is
   reused only under that exact identity. A refusal warmed under one demand
   epoch or one root source identity is not reusable under another (`DR25`,
   `DC05`). It stays a refusal and is never read as exact absence (TIF0
@@ -188,7 +205,7 @@ consume the plan.
   demand epoch only, as does any other participation change. A change that
   leaves every member identity unchanged mints neither (CFG0 `CR16`).
 - **DR22.** Ambiguity is decided per region, keyed by `(SourceUnitId,
-  RegionId)` (VID0 `R10`). Two active profiles claiming one region with no
+RegionId)` (VID0 `R10`). Two active profiles claiming one region with no
   per-file narrowing and no declared `T06` relation is `Ambiguous { claims }`
   (CAT0 `CR14`). Registration, load, discovery and completion order never
   decide. An ambiguous region serves no profile-specific result for that
@@ -234,18 +251,18 @@ consume the plan.
 
 ## Outcomes and owners
 
-| Outcome | Owner | Receiving acceptance |
-| ------- | ----- | -------------------- |
-| `DEM-O01` captured `SelectionInputs` and its identity (`DR01`–`DR05`) | COX0 | `COX0-AC2` |
-| `DEM-O02` pre-projection `SourceActivationPlan` (`DR06`–`DR10`) | COX0 | `COX0-AC2` |
-| `DEM-O03` post-snapshot `SemanticClaimPlan` (`DR11`–`DR14`) | COX0 | `COX0-AC2` |
-| `DEM-O04` `CapabilityDemandPlan` with exact fact demands (`DR15`, `DR16`) | COX0 | `COX0-AC2` |
-| `DEM-O05` `DemandPlan` purpose, batch order, refusal-reuse identity and submission (`DR17`–`DR20`) | COX0 | `COX0-AC2` |
-| `DEM-O06` ambiguity resolution and epoch transitions (`DR21`–`DR25`) | COX0 | `COX0-AC3` |
-| `DEM-O07` zero work, audit and cancellation (`DR26`–`DR30`) | COX0 | `COX0-AC4` |
-| `DEM-O08` `FrameworkActivation` records consumed by `P1` | FWA1 | `FWA1-AC1` |
-| `DEM-O09` canonical role evidence consumed by `P2` and `P3` | EAK1 | `EAK1-AC2` |
-| `DEM-O10` executable ownership validator and fixtures for this decision | UAO0 | `UAO0-AC-R1`, `UAO0-AC-R2` |
+| Outcome                                                                                            | Owner | Receiving acceptance       |
+| -------------------------------------------------------------------------------------------------- | ----- | -------------------------- |
+| `DEM-O01` captured `SelectionInputs` and its identity (`DR01`–`DR05`)                              | COX0  | `COX0-AC2`                 |
+| `DEM-O02` pre-projection `SourceActivationPlan` (`DR06`–`DR10`)                                    | COX0  | `COX0-AC2`                 |
+| `DEM-O03` post-snapshot `SemanticClaimPlan` (`DR11`–`DR14`)                                        | COX0  | `COX0-AC2`                 |
+| `DEM-O04` `CapabilityDemandPlan` with exact fact demands (`DR15`, `DR16`)                          | COX0  | `COX0-AC2`                 |
+| `DEM-O05` `DemandPlan` purpose, batch order, refusal-reuse identity and submission (`DR17`–`DR20`) | COX0  | `COX0-AC2`                 |
+| `DEM-O06` ambiguity resolution and epoch transitions (`DR21`–`DR25`)                               | COX0  | `COX0-AC3`                 |
+| `DEM-O07` zero work, audit and cancellation (`DR26`–`DR30`)                                        | COX0  | `COX0-AC4`                 |
+| `DEM-O08` `FrameworkActivation` records consumed by `P1`                                           | FWA1  | `FWA1-AC1`                 |
+| `DEM-O09` canonical role evidence consumed by `P2` and `P3`                                        | EAK1  | `EAK1-AC2`                 |
+| `DEM-O10` executable ownership validator and fixtures for this decision                            | UAO0  | `UAO0-AC-R1`, `UAO0-AC-R2` |
 
 ## Displaced routes recorded here
 
@@ -254,53 +271,53 @@ production-capable deletion owner. Five belong to the population the
 charter's reconciled contract removes after parity: legacy eager and
 one-framework-per-file selectors.
 
-| Route | Unit | Disposition | Deletion owner |
-| ----- | ---- | ----------- | -------------- |
+| Route     | Unit                                                                                                                                                                                                                           | Disposition                                                                                      | Deletion owner    |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------ | ----------------- |
 | `DEM-D01` | LSP diagnostics publication (`compute_verter_diagnostics_for_with_views`) runs every producer on each publish, including an eager `get_component_meta` for projection-limit diagnostics, whatever the request or participation | replace with a `DiagnosticsPublication` plan whose capabilities come from the participation mask | COX0 (`COX0-AC1`) |
-| `DEM-D02` | Admission-driven reclassification in `HostLanguageClassifier`: an unadmitted vertical's carrier routes like an unregistered extension, and its adapter modules become plain scripts | replace: the carrier keeps its `CarrierProfileId` and the profile is `Dormant` | COX0 (`COX0-AC1`) |
-| `DEM-D03` | The framework-surface executor plans and resolves every surface kind (`ALL_FRAMEWORK_SURFACE_KINDS`); the wire has no requested-kind demand | replace with requested facets through `P4` | TIF1 (`TIF1-AC1`) |
-| `DEM-D04` | Spelling-based role recognition in the component-meta resolver: `should_ignore_external_macro_type` compares `import_source == "vue"` | replace with canonical role evidence | EAK1 (`EAK1-AC1`) |
-| `DEM-D05` | Nuxt server/client component detection by suffix (`is_ssr_file`, `is_client_only_file`: `.server.vue`, `.client.vue`) | replace with Nuxt profile applicability from captured facts | NUX0 (`NUX0-AC1`) |
-| `DEM-D06` | `handle_did_open` and `handle_did_change` schedule full native semantic enrichment, and `handle_did_open` prewarms imported-carrier APIs, with no participation or demand gate | replace with an `Interactive` or `DiagnosticsPublication` plan | COX0 (`COX0-AC1`) |
+| `DEM-D02` | Admission-driven reclassification in `HostLanguageClassifier`: an unadmitted vertical's carrier routes like an unregistered extension, and its adapter modules become plain scripts                                            | replace: the carrier keeps its `CarrierProfileId` and the profile is `Dormant`                   | COX0 (`COX0-AC1`) |
+| `DEM-D03` | The framework-surface executor plans and resolves every surface kind (`ALL_FRAMEWORK_SURFACE_KINDS`); the wire has no requested-kind demand                                                                                    | replace with requested facets through `P4`                                                       | TIF1 (`TIF1-AC1`) |
+| `DEM-D04` | Spelling-based role recognition in the component-meta resolver: `should_ignore_external_macro_type` compares `import_source == "vue"`                                                                                          | replace with canonical role evidence produced by EAK1                                            | EAK2 (`EAK2-AC1`) |
+| `DEM-D05` | Nuxt server/client component detection by suffix (`is_ssr_file`, `is_client_only_file`: `.server.vue`, `.client.vue`)                                                                                                          | replace with Nuxt profile applicability from captured facts                                      | NUX0 (`NUX0-AC1`) |
+| `DEM-D06` | `handle_did_open` and `handle_did_change` schedule full native semantic enrichment, and `handle_did_open` prewarms imported-carrier APIs, with no participation or demand gate                                                 | replace with an `Interactive` or `DiagnosticsPublication` plan                                   | COX0 (`COX0-AC1`) |
 
 DEM0 references these routes owned elsewhere:
 
-| Route | Owner | Concern |
-| ----- | ----- | ------- |
-| UAK0 `D09` | COX0 | Process-flag admission and untagged `CapabilityId`; `DR04` names the successor |
-| UAK0 `D10`, `D11` | COX0 | Per-framework LSP branches and MCP `is_vue()` gates |
-| UAK0 `D06`, `D07`, `D08` | CPF1 | Hard-coded admitting registrations, the extension table that picks one framework per file, and the conflated `FileLanguage` |
-| UAK0 `D12`, `D14` | TIF1 | Component-information authorities this decision only demands from |
-| UAK0 `D18` | IDX0 | The per-request workspace component scan |
-| VID0 `V-D01`, `V-D05` | FWA1 | Implicit default major and string-prefix release admission |
-| VID0 `V-D02` | TIF1 | The open `framework_adapter_id` selector string |
-| CAT0 `CAT-D01`, `CAT-D02` | CPF1 | Admission-composed catalog and registry |
-| CAT0 `CAT-D06` | COX0 | `ActiveProviderIndex` as a per-file selection authority |
-| CFG0 `CF-D05` | NUX0 | `detect_ssr_project` and `detectNuxt` file-name probes |
+| Route                     | Owner | Concern                                                                                                                     |
+| ------------------------- | ----- | --------------------------------------------------------------------------------------------------------------------------- |
+| UAK0 `D09`                | COX0  | Process-flag admission and untagged `CapabilityId`; `DR04` names the successor                                              |
+| UAK0 `D10`, `D11`         | COX0  | Per-framework LSP branches and MCP `is_vue()` gates                                                                         |
+| UAK0 `D06`, `D07`, `D08`  | CPF1  | Hard-coded admitting registrations, the extension table that picks one framework per file, and the conflated `FileLanguage` |
+| UAK0 `D12`, `D14`         | TIF1  | Component-information authorities this decision only demands from                                                           |
+| UAK0 `D18`                | IDX0  | The per-request workspace component scan                                                                                    |
+| VID0 `V-D01`, `V-D05`     | FWA1  | Implicit default major and string-prefix release admission                                                                  |
+| VID0 `V-D02`              | TIF1  | The open `framework_adapter_id` selector string                                                                             |
+| CAT0 `CAT-D01`, `CAT-D02` | CPF1  | Admission-composed catalog and registry                                                                                     |
+| CAT0 `CAT-D06`            | COX0  | `ActiveProviderIndex` as a per-file selection authority                                                                     |
+| CFG0 `CF-D05`             | NUX0  | `detect_ssr_project` and `detectNuxt` file-name probes                                                                      |
 
 Deletion-category coverage:
 
-| Category | Recorded here | Referenced |
-| -------- | ------------- | ---------- |
-| central framework switch | `DEM-D04` | `D06`, `D07`, `D10`, `D11`, `CAT-D01`, `CAT-D02`, `CAT-D06`, `CF-D05` |
-| untagged coordinate/public identity | none: selection adds no public identity route | `D08`, `D09`, `V-D01`, `V-D02`, `V-D05` |
-| duplicate component information authority | none: `DEM-D01` and `DEM-D03` are eager demands on existing authorities | `D12`, `D14`, `D18` |
-| eager or one-framework-per-file selector (this decision's own population) | `DEM-D01`–`DEM-D03`, `DEM-D05`, `DEM-D06` | — |
+| Category                                                                  | Recorded here                                                           | Referenced                                                            |
+| ------------------------------------------------------------------------- | ----------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| central framework switch                                                  | `DEM-D04`                                                               | `D06`, `D07`, `D10`, `D11`, `CAT-D01`, `CAT-D02`, `CAT-D06`, `CF-D05` |
+| untagged coordinate/public identity                                       | none: selection adds no public identity route                           | `D08`, `D09`, `V-D01`, `V-D02`, `V-D05`                               |
+| duplicate component information authority                                 | none: `DEM-D01` and `DEM-D03` are eager demands on existing authorities | `D12`, `D14`, `D18`                                                   |
+| eager or one-framework-per-file selector (this decision's own population) | `DEM-D01`–`DEM-D03`, `DEM-D05`, `DEM-D06`                               | —                                                                     |
 
 The inventory also lists, under `referencedConsumers`, the consumers that
 UAK0, VID0, CAT0 and CFG0 already own (`C06`–`C09`, `V-C04`, `V-C06`,
 `CAT-C02`, `CF-C01`). DEM0 adds only consumers they do not list:
 
-| Consumer | Reads | Owner |
-| -------- | ----- | ----- |
-| `DEM-C01` session script-fact resolution and synth-path provider selection | `P2`, `P4` | COX0 (`COX0-AC2`) |
-| `DEM-C02` framework-surface executor and the `TypeInfoRequest` entry | `P3`, `P4` | TIF1 (`TIF1-AC2`) |
-| `DEM-C03` compiler requests over demanded fact families | `P4` | CMP1 (`CMP1-AC2`) |
-| `DEM-C04` workspace index contributions (`IndexContribution` purpose) | `P3`, `P5` | IDX0 (`IDX0-AC2`) |
-| `DEM-C05` Nuxt project-profile applicability on semantic claims | `P3` | NUX0 (`NUX0-AC1`) |
-| `DEM-C06` LSP workspace provider sync and carrier publication (`BatchCheck` purpose) | `P5` | COX0 (`COX0-AC2`) |
-| `DEM-C07` host audit runtime receiving the `DR28` records | `P2`, `P4` | COX0 (`COX0-AC4`) |
-| `DEM-C08` embedded-language region geometry under nested claims | `P3` | EMB0I (`EMB0I-AC1`) |
+| Consumer                                                                             | Reads      | Owner               |
+| ------------------------------------------------------------------------------------ | ---------- | ------------------- |
+| `DEM-C01` session script-fact resolution and synth-path provider selection           | `P2`, `P4` | COX0 (`COX0-AC2`)   |
+| `DEM-C02` framework-surface executor and the `TypeInfoRequest` entry                 | `P3`, `P4` | TIF1 (`TIF1-AC2`)   |
+| `DEM-C03` compiler requests over demanded fact families                              | `P4`       | CMP1 (`CMP1-AC2`)   |
+| `DEM-C04` workspace index contributions (`IndexContribution` purpose)                | `P3`, `P5` | IDX0 (`IDX0-AC2`)   |
+| `DEM-C05` Nuxt project-profile applicability on semantic claims                      | `P3`       | NUX0 (`NUX0-AC1`)   |
+| `DEM-C06` LSP workspace provider sync and carrier publication (`BatchCheck` purpose) | `P5`       | COX0 (`COX0-AC2`)   |
+| `DEM-C07` host audit runtime receiving the `DR28` records                            | `P2`, `P4` | COX0 (`COX0-AC4`)   |
+| `DEM-C08` embedded-language region geometry under nested claims                      | `P3`       | EMB0I (`EMB0I-AC1`) |
 
 ## Findings recorded for the receiving owners
 
@@ -390,6 +407,7 @@ coverage and bounded inspection discriminate it. The diff adds no test.
     (`parse_identity`, `registered_authorities`).
 
   New or extended tests belong to UAO0 and to the owners named per case.
+
 - **AC3 — incremental equivalence: not applicable.** No cache,
   cancellation, stale-publication or partial-result authority is touched,
   and no production byte changes. `DR21`–`DR25`, `DR29`, `DR30` and the

@@ -29,7 +29,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
-use verter_session_query::retention::{ChargeClass, RetentionAdmission, RetentionCharge};
+use verter_session_query::retention::{RetentionAdmission, RetentionCharge};
 
 use crate::fact_signature_helpers::ReadSetSignatureExt as _;
 use crate::project_semantic_dispatch::cost_receipt::{BudgetProfile, BudgetProfileSpec};
@@ -98,7 +98,11 @@ impl RefusalSummary {
         }
     }
 
-    /// The bytes the summary keeps alive.
+    /// The bytes the summary keeps alive of its own. A wide carrier's
+    /// evidence pages are not counted here: sealing the summary claims the
+    /// pages no earlier admission claimed into the same reservation, and a
+    /// page is charged once however many summaries and candidates share it
+    /// ([`verter_session_query::facts::receipt::reserve_retained_with_evidence`]).
     fn retained_bytes(&self) -> usize {
         let self_roots: usize = self
             .self_root_canonicals
@@ -196,8 +200,8 @@ impl SemanticGraphStore {
     }
 
     /// Seal `summary` as the refusal of the isolated root `key` under
-    /// `profile`, entered at `entered`. Refused — nothing kept — for an
-    /// overflowed fact rail, one the retention account declines to keep,
+    /// `profile`, entered at `entered`. Refused — nothing kept — for one
+    /// the retention account declines to keep,
     /// and, decided under the table's lock in the same step as the
     /// insertion, a cancelled evaluation, one the project moved under, or
     /// one the table was cleared under: a torn or superseded evaluation
@@ -212,13 +216,11 @@ impl SemanticGraphStore {
         entered: RefusalEntryState,
         mut summary: RefusalSummary,
     ) -> bool {
-        if summary.carrier.overflowed {
-            return false;
-        }
-        match self
-            .retention_account()
-            .reserve(ChargeClass::Retained, summary.retained_bytes())
-        {
+        match verter_session_query::facts::receipt::reserve_retained_with_evidence(
+            self.retention_account(),
+            summary.retained_bytes(),
+            &[&summary.carrier.facts],
+        ) {
             RetentionAdmission::Admitted(charge) => summary.retention = Some(charge),
             RetentionAdmission::Refused(refusal) => {
                 crate::cache_runtime::admission::propagate_non_admission(
@@ -288,6 +290,20 @@ impl SemanticGraphStore {
     #[cfg(any(test, feature = "test-support"))]
     pub fn refusal_summary_count_for_tests(&self) -> usize {
         self.refusal_summaries.table.lock().entries.len()
+    }
+
+    /// The validity rail of every sealed refusal the store keeps.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn refusal_carriers_for_tests(
+        &self,
+    ) -> Vec<verter_session_query::facts::fact_cache::ReadSetSignature> {
+        self.refusal_summaries
+            .table
+            .lock()
+            .entries
+            .values()
+            .map(|summary| summary.carrier.clone())
+            .collect()
     }
 
     /// Where an isolated root of `ctx`'s request enters the store now.
