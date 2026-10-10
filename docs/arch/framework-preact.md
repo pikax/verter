@@ -130,6 +130,7 @@ rejection proofs. No existing route is displaced, so the deletion set is empty.
 Runtime, cold/warm cache, cancellation and map tests are not applicable to a
 data-only change. The ratified CI ownership exception adds only
 `tests/framework-preact/PRE0/**/*.json` and `tests/framework-preact/PRE0/*.md`
-to `CI_INERT_PATHS` atomically with this inventory. PRE1-ACV removes these
+to `scripts/ci-inert-paths.json` (exported as `CI_INERT_PATHS`) atomically
+with this inventory. PRE1-ACV removes these
 entries and assigns the consumed inputs and executable specs to their existing
 consuming lane when its validator lands. REG0 retains runner discovery.
