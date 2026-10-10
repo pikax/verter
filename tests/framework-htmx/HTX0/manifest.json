@@ -1,0 +1,99 @@
+{
+  "schema": "ProbeManifest",
+  "version": 1,
+  "node": "HTX0",
+  "family": "htmx",
+  "kind": "lock",
+  "products": [
+    "products/htmx-version-lock.json",
+    "products/htmx-vocabulary.json",
+    "products/htmx-capability-matrix.json",
+    "products/htmx-activation-policy.json"
+  ],
+  "mandatoryCases": ["HTX0-AC1", "HTX0-AC2", "HTX0-AC3", "HTX0-AC4"],
+  "cases": [
+    {
+      "id": "HTX0-AC1",
+      "title": "pinned profiles",
+      "disposition": "reject",
+      "twins": [
+        "clean-products",
+        "floating-pin",
+        "dist-tag-pin",
+        "canary-nightly-pin",
+        "legacy-1-profile",
+        "diverged-pin",
+        "missing-source",
+        "shared-vocabulary-without-profile-source",
+        "shared-inheritance-or-events",
+        "two-releases-one-profile"
+      ]
+    },
+    {
+      "id": "HTX0-AC2",
+      "title": "owned matrix",
+      "disposition": "reject",
+      "twins": [
+        "clean-products",
+        "unowned-cell",
+        "missing-or-wrong-acceptance",
+        "cancelled-HTX3",
+        "cancelled-HTX5R",
+        "cancelled-HTX6",
+        "build-support",
+        "typed-endpoint-without-HRF",
+        "URL-as-endpoint",
+        "exclusion-without-reason",
+        "fabricated-four-hx-ext"
+      ]
+    },
+    {
+      "id": "HTX0-AC3",
+      "title": "facets absent and no runtime",
+      "disposition": "reject",
+      "twins": [
+        "clean-products",
+        "hx-vals-as-props",
+        "DOM-events-as-facet",
+        "slots-or-expose-facet",
+        "missing-facet-reason",
+        "request-class-fact",
+        "history-cache-fact",
+        "swap-settle-phase-fact",
+        "TS-plugin-cell",
+        "tsgo-reprovided-cell",
+        "registration-hover-completion",
+        "invented-wire-tag"
+      ]
+    },
+    {
+      "id": "HTX0-AC4",
+      "title": "activation",
+      "disposition": "reject",
+      "twins": [
+        "clean-products",
+        "CDN-URL-activation",
+        "hx-spelling-activation",
+        "importmap-activation",
+        "profile-without-resolved-major",
+        "on-without-named-release",
+        "on-unadmitted-release",
+        "off-still-produces-facts",
+        "inactive-changes-neutral-HTML"
+      ]
+    }
+  ],
+  "validator": {
+    "present": false,
+    "owner": "HTX1",
+    "acceptance": "HTX1-ACV",
+    "files": [
+      "tests/framework-htmx/HTX0/contract.ts",
+      "tests/framework-htmx/HTX0/htmx-lock.spec.ts"
+    ],
+    "command": "node --test tests/framework-htmx/HTX0/htmx-lock.spec.ts",
+    "discovery": "REG0 scripts/run-framework-locks.mjs (REG0-AC6); no root script edit"
+  },
+  "runtimeCorrectness": false,
+  "notes": "Reviewed contract bytes only. No executable validator, test, schema enforcement or CI gate; every future planted row is in cases.md. Required-planned is not a support claim."
+}
