@@ -128,5 +128,8 @@ PRE0-AC1 through PRE0-AC4 are satisfied here by reviewed products and
 `cases.md`, not executable acceptance claims. PRE1-ACV receives all lock
 rejection proofs. No existing route is displaced, so the deletion set is empty.
 Runtime, cold/warm cache, cancellation and map tests are not applicable to a
-data-only change. CI path classification belongs to the CI owner; future
-executable specs still require their discovery/CI owner.
+data-only change. The ratified CI ownership exception adds only
+`tests/framework-preact/PRE0/**/*.json` and `tests/framework-preact/PRE0/*.md`
+to `CI_INERT_PATHS` atomically with this inventory. PRE1-ACV removes these
+entries and assigns the consumed inputs and executable specs to their existing
+consuming lane when its validator lands. REG0 retains runner discovery.
