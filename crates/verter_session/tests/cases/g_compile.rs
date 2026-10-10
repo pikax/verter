@@ -1,7 +1,5 @@
 //! Consolidated integration-test group `compile`: each module below was
 //! a separate top-level tests/*.rs binary, merged to cut test-link count.
-#[path = "g_compile/admission_overflow_routes_to_return_only.rs"]
-mod admission_overflow_routes_to_return_only;
 #[path = "g_compile/compile_audit_css_analysis.rs"]
 mod compile_audit_css_analysis;
 #[path = "g_compile/compile_audit_filtered_and_parent.rs"]
@@ -34,12 +32,10 @@ mod compile_cache_mode_session_fact_validation;
 mod compile_cache_mode_session_only_prefetch;
 #[path = "g_compile/compile_cache_mode_stateless_bypass.rs"]
 mod compile_cache_mode_stateless_bypass;
-#[path = "g_compile/compile_cache_overflow_return_only.rs"]
-mod compile_cache_overflow_return_only;
+#[path = "g_compile/compile_cache_refusal_return_only.rs"]
+mod compile_cache_refusal_return_only;
 #[path = "g_compile/compile_empty_macro_type_deps_clears_semantic_axis.rs"]
 mod compile_empty_macro_type_deps_clears_semantic_axis;
-#[path = "g_compile/compile_force_overflow_is_host_scoped.rs"]
-mod compile_force_overflow_is_host_scoped;
 #[path = "g_compile/compile_slot_single_candidate.rs"]
 mod compile_slot_single_candidate;
 #[path = "g_compile/compile_tier_fact_validation.rs"]

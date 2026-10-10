@@ -211,16 +211,6 @@ impl<'a, 'c, P: Send + Sync, C: ResolverCapabilities> ComponentMetaResultPublish
                     "skipping component-meta cache promotion: cold compute consumed a non-cacheable read",
                 );
             }
-            FactReadSetFinalise::Overflow => {
-                let reason = verter_audit::NonAdmissionReason::SignatureOverflow;
-                verter_type_engine::cache_runtime::admission::propagate_non_admission(reason);
-                tracing::debug!(
-                    target: "verter::audit::record",
-                    file = %canonical,
-                    path = %path_label,
-                    "skipping component-meta cache promotion: fact-signature overflowed cap",
-                );
-            }
             FactReadSetFinalise::MutationUnstable => {
                 let reason = verter_audit::NonAdmissionReason::MutationUnstable;
                 verter_type_engine::cache_runtime::admission::propagate_non_admission(reason);

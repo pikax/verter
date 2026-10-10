@@ -841,6 +841,7 @@ export const CI_INERT_PATHS = Object.freeze([
   "tests/framework-angular/ANG0/products/angular-version-lock.json",
   "tests/framework-angular/ANG0/products/angular-capability-matrix.json",
   "tests/framework-angular/ANG0/products/angular-activation-policy.json",
+  "tests/framework-liquid/**",
   "tests/jetbrains-baseline/**",
   "tests/kernel/**",
   "tests/playground/**",

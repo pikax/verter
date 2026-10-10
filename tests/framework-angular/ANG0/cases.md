@@ -12,9 +12,12 @@ must include the recorded reason in its set of rejection reasons. Other
 independently applicable reasons are permitted: tag collisions can also cause
 allocation mismatches, and invalid pins can also diverge from their peers.
 The validator collects applicable reasons without a first-error precedence.
-A plant that does not apply
-(the target field or row is missing, or the planted value is already present)
-fails the case; it never counts as a pass.
+A plant that does not apply fails the case; it never counts as a pass.
+Modify/delete plants require their target row (and any named target field)
+to exist, and a modification must change its value. Add-field plants require
+the target row or named clone source to exist, with the field absent before
+planting and newly present with the stated value afterward. Add-row plants
+require a newly present row; clone plants also require their named source.
 
 Reasons describe structural contract violations, never differences in the
 prose of an operation label. AC2-P12 and AC3-P12 intentionally exercise the
@@ -28,6 +31,18 @@ It does not assert that a version was never published. Those expectations are
 derived from the reviewed lock when the validator lands and change only with
 an explicit release re-pin; tests mutate the input, not those expectations.
 No registry lookup or comparison of commit identities is part of a lock test.
+
+ANG1G's offline required-cell expectations likewise remain independent of
+the matrix being checked and of every planted input. They encode the ratified
+ANG5-AC5 completion operations at both inline and external locations
+(`ANG-C38` TS-region completion and `ANG-C41` carrier-only completion), and
+ANG5-AC6's required inline operations: syntax diagnostics (`ANG-C59`), document
+symbols (`ANG-C60`), folding/selection ranges (`ANG-C61`), carrier-only semantic
+tokens (`ANG-C62`), and gating/incremental/cancellation/parse reuse (`ANG-C63`).
+Match these requirements structurally by operation and location, not operation
+label wording. Deleting a cell or moving its operation/location into exclusions
+does not remove the requirement. Only a reviewed delivery-contract amendment
+changes these expectations; tests mutate the products, never the expectations.
 
 ## Clean products
 
@@ -87,7 +102,7 @@ Target: `products/angular-capability-matrix.json`.
 | `AC2-P21` | inline syntax-diagnostics cell `ANG-C59` removed | reject | `missing-required-cell` |
 | `AC2-P22` | `ANG-C60` producer becomes `ANG1S` and receiving acceptance becomes `ANG1S-AC2`, whose delivery scope is external only | reject | `acceptance-does-not-cover-location` |
 | `AC2-P23` | `ANG-C63` removed, leaving inline structure without gating/incremental/cancellation coverage | reject | `missing-required-cell` |
-| `AC2-P24` | inline structure moved from admitted cells into an exclusion | reject | `required-cell-excluded` |
+| `AC2-P24` | move `ANG-C59`, `ANG-C60`, `ANG-C61`, `ANG-C62` and `ANG-C63` from admitted cells into exclusions preserving their inline operations and locations | reject | `required-cell-excluded` |
 
 ## ANG0-AC3 — activation and host policy
 

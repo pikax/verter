@@ -275,8 +275,11 @@ pub struct BinderIdentityFactsEntry {
     pub facts: Arc<BinderIdentityFacts>,
     /// Path-precise fact carrier — the sole cache-validity oracle
     /// (validated via `validate_with_self_roots` with the keyed
-    /// canonical as the self-root set).
-    pub read_set_signature: ReadSetSignature,
+    /// canonical as the self-root set). `None` when the compute's read set
+    /// was refused as mutation-unstable: such an entry is returned, never
+    /// admitted, and carries no validity evidence at all — never an empty
+    /// signature that would validate vacuously.
+    pub read_set_signature: Option<ReadSetSignature>,
 }
 
 /// The family-A `BinderIdentityFacts` artifact store.
@@ -294,12 +297,23 @@ pub struct BinderIdentityFactsEntry {
 #[derive(Debug, Default)]
 pub struct BinderIdentityFactsStore {
     entries: DashMap<BinderIdentityFactsKey, Arc<BinderIdentityFactsEntry>>,
+    /// The account an admitted entry's evidence pages are claimed into.
+    retention_account: verter_session_query::retention::StoreAccount,
 }
 
 impl BinderIdentityFactsStore {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A store whose admissions claim their evidence pages into `account`.
+    #[cfg(test)]
+    fn with_retention_account(account: verter_session_query::retention::StoreAccount) -> Self {
+        Self {
+            retention_account: account,
+            ..Self::default()
+        }
     }
 
     /// Lookup by full key. `None` is a cold miss — the caller computes
@@ -315,8 +329,29 @@ impl BinderIdentityFactsStore {
     /// identical key is a deterministic recomputation, so the
     /// first-admitted entry is preserved (`Arc` identity for shared
     /// consumers).
-    pub fn insert(&self, key: BinderIdentityFactsKey, entry: Arc<BinderIdentityFactsEntry>) {
+    ///
+    /// The entry retains its signature's evidence pages, so admission first
+    /// claims them into a refusable reservation. Answers `false` when that
+    /// claim is refused: nothing is admitted and the caller keeps the entry
+    /// as an uncached value.
+    pub fn insert(
+        &self,
+        key: BinderIdentityFactsKey,
+        entry: Arc<BinderIdentityFactsEntry>,
+    ) -> bool {
+        if let Some(signature) = entry.read_set_signature.as_ref() {
+            if let Err(refusal) = verter_session_query::facts::receipt::claim_evidence_pages(
+                self.retention_account.get(),
+                &signature.facts,
+            ) {
+                verter_type_engine::cache_runtime::admission::propagate_non_admission(
+                    refusal.non_admission_reason(),
+                );
+                return false;
+            }
+        }
         self.entries.entry(key).or_insert(entry);
+        true
     }
 
     /// Number of cached entries. Used by tests + diagnostics.
@@ -699,7 +734,7 @@ fn scope_kind_sort_key(kind: &verter_type_engine::semantic_query::BinderScopeKin
 ///
 /// Returns `None` only when the canonical has no servable
 /// [`IndexedReady`] at all. A fenced (non-published) serve or a
-/// non-cacheable / overflowed read set still RETURNS the freshly
+/// non-cacheable / mutation-unstable read set still RETURNS the freshly
 /// computed artifact but admits NOTHING (`ReturnOnly` — the standard
 /// no-warm-for-unrootable rule).
 ///
@@ -726,10 +761,9 @@ pub(crate) fn produce_binder_identity_facts(
         parse_env_hash: indexed.parse_env_hash,
     };
     if let Some(entry) = store.get(&key) {
-        if entry
-            .read_set_signature
-            .validate_with_self_roots(ctx, std::slice::from_ref(&key.canonical))
-        {
+        if let Some(signature) = entry.read_set_signature.as_ref().filter(|signature| {
+            signature.validate_with_self_roots(ctx, std::slice::from_ref(&key.canonical))
+        }) {
             // A warm hit must BUBBLE the entry's read-set into any
             // active outer tracer: an enclosing traced computation
             // admits its own value with THESE binder facts observed, so
@@ -737,7 +771,7 @@ pub(crate) fn produce_binder_identity_facts(
             // `AppConfigNoOverrideProofDb::peek` pattern).
             verter_type_engine::fact_signature_helpers::bubble_fact_signature(
                 ctx,
-                &entry.read_set_signature.facts,
+                &signature.facts,
             );
             return Some(entry);
         }
@@ -871,7 +905,7 @@ pub(crate) fn produce_binder_identity_facts(
     let ((facts, all_pinned), finalise) = dispatch.traced_unbound(cold_body);
     let facts = Arc::new(facts);
     // A fenced serve, an unrecoverable observed-version fact registry,
-    // or a non-cacheable / overflowed read set never enters the shared
+    // or a non-cacheable / mutation-unstable read set never enters the shared
     // store — the fresh artifact is returned without admission.
     let admissible = serve.store_published && all_pinned;
     match finalise {
@@ -880,23 +914,33 @@ pub(crate) fn produce_binder_identity_facts(
         {
             let entry = Arc::new(BinderIdentityFactsEntry {
                 facts,
-                read_set_signature: ReadSetSignature::new(fact_dep_signature),
+                read_set_signature: Some(ReadSetSignature::new(fact_dep_signature)),
             });
+            // A refused evidence claim leaves the entry uncached; it is
+            // still the complete result.
             store.insert(key, Arc::clone(&entry));
             Some(entry)
         }
         verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(fact_dep_signature) => {
             Some(Arc::new(BinderIdentityFactsEntry {
                 facts,
-                read_set_signature: ReadSetSignature::new(fact_dep_signature),
+                read_set_signature: Some(ReadSetSignature::new(fact_dep_signature)),
             }))
         }
-        verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_)
-        | verter_session_query::facts::fact_read_set::FactReadSetFinalise::Overflow
-        | verter_session_query::facts::fact_read_set::FactReadSetFinalise::MutationUnstable => {
+        // Returned, never admitted: the entry's signature is never
+        // validated, so it carries whatever evidence the read set has.
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(
+            fact_dep_signature,
+        ) => Some(Arc::new(BinderIdentityFactsEntry {
+            facts,
+            read_set_signature: Some(ReadSetSignature::new(fact_dep_signature)),
+        })),
+        // Refused: no observation set survives, so the entry carries no
+        // signature rather than one claiming it depends on nothing.
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::MutationUnstable => {
             Some(Arc::new(BinderIdentityFactsEntry {
                 facts,
-                read_set_signature: ReadSetSignature::overflow(),
+                read_set_signature: None,
             }))
         }
     }
@@ -1084,5 +1128,92 @@ pub(crate) mod tests {
             ),
             "the bubbled outer read-set must invalidate when a pinned binder fact moves"
         );
+    }
+
+    /// An admitted entry owns its wide signature's pages as refusable
+    /// retained bytes; an account that refuses that footprint admits
+    /// nothing.
+    #[test]
+    fn a_wide_entry_claims_its_pages_and_is_refused_for_them() {
+        use super::{BinderIdentityFacts, BinderIdentityFactsEntry, BinderIdentityFactsKey};
+        use verter_session_query::facts::fact_cache::{FactVersionRef, ReadSetSignature};
+        use verter_session_query::retention::{
+            ChargeClass, RetentionLimits, SemanticRetentionAccount, StoreAccount,
+        };
+        let key = BinderIdentityFactsKey {
+            canonical: Arc::from("/w/a.ts"),
+            parse_stable_hash: [1; 16],
+            parse_env_hash: [2; 16],
+        };
+        let entry = || {
+            let facts = (0..2 * verter_session_query::facts::fact_read_set::FACT_PAGE_WIDTH + 3)
+                .map(|index| FactVersionRef::FileWholeHash {
+                    canonical_id: format!("/wide/{index:05}.ts"),
+                    hash: [1u8; 16],
+                })
+                .collect();
+            Arc::new(BinderIdentityFactsEntry {
+                facts: Arc::new(BinderIdentityFacts {
+                    canonical: Arc::from("/w/a.ts"),
+                    scopes: Arc::from([]),
+                    decl_slots: Arc::from([]),
+                    declaration_order: Arc::from([]),
+                    overload_groups: Arc::from([]),
+                    augmentation_contributions: Arc::from([]),
+                }),
+                read_set_signature: Some(ReadSetSignature::new(
+                    verter_session_query::facts::fact_read_set::seal_canonical_signature(facts),
+                )),
+            })
+        };
+        let pages_of = |entry: &BinderIdentityFactsEntry| -> Vec<_> {
+            entry
+                .read_set_signature
+                .as_ref()
+                .expect("the entry carries a signature")
+                .facts
+                .iter()
+                .filter_map(|fact| match fact {
+                    FactVersionRef::Receipt(page) if page.is_page() => Some(page.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
+        let store = super::BinderIdentityFactsStore::with_retention_account(StoreAccount::new(
+            Arc::clone(&account),
+        ));
+        assert!(store.insert(key.clone(), entry()));
+        let pages = pages_of(&store.get(&key).expect("the entry is admitted"));
+        assert!(!pages.is_empty(), "premise: the signature is paged");
+        assert!(pages
+            .iter()
+            .all(|page| page.retained_charge_class() == Some(ChargeClass::Retained)));
+        drop(pages);
+        store.clear();
+        assert_eq!(
+            account.snapshot().retained_bytes,
+            0,
+            "clearing the store drains its pages"
+        );
+
+        let tight = SemanticRetentionAccount::new(RetentionLimits {
+            max_entry_bytes: 1,
+            ..RetentionLimits::defaults()
+        });
+        let store = super::BinderIdentityFactsStore::with_retention_account(StoreAccount::new(
+            Arc::clone(&tight),
+        ));
+        let refused = entry();
+        assert!(
+            !store.insert(key, Arc::clone(&refused)),
+            "a refused claim admits nothing"
+        );
+        assert!(store.is_empty());
+        assert!(pages_of(&refused)
+            .iter()
+            .all(|page| page.retained_charge_class() == Some(ChargeClass::Pinned)));
+        assert_eq!(tight.snapshot().retained_bytes, 0);
     }
 }

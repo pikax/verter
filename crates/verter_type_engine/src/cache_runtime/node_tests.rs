@@ -113,39 +113,6 @@ fn signature_admission_from_ok_finalise_is_cacheable() {
     assert_eq!(sig.facts.len(), 1);
 }
 
-/// `SignatureAdmission::from_finalise` lifts an overflowed finalised
-/// tracer into the `NonCacheable` arm with the
-/// [`NonAdmissionReason::SignatureOverflow`] reason, and `cacheable()`
-/// returns `None`.
-///
-/// Discriminating: a regression that admitted an overflow as cacheable
-/// (or carried a different reason) would fail the match / reason
-/// assertion, and `cacheable()` returning `Some` for an overflow would
-/// fail the final assertion.
-#[test]
-fn signature_admission_from_overflow_finalise_is_non_cacheable() {
-    let admission = SignatureAdmission::from_finalise(FactReadSetFinalise::Overflow);
-
-    match &admission {
-        SignatureAdmission::NonCacheable(reason) => {
-            assert_eq!(
-                *reason,
-                NonAdmissionReason::SignatureOverflow,
-                "an overflowed tracer is non-cacheable with the overflow reason"
-            );
-        }
-        SignatureAdmission::Cacheable(_) => {
-            panic!("an overflowed finalise must NOT be cacheable")
-        }
-    }
-
-    // `cacheable()` returns None for the non-cacheable arm.
-    assert!(
-        admission.cacheable().is_none(),
-        "a non-cacheable admission must not expose a signature through cacheable()"
-    );
-}
-
 /// A complete observation set that consumed a non-cacheable read still
 /// carries its facts for enclosing tracers, but can never authorize a warm
 /// admission. The verdict is intrinsic to `FactReadSetFinalise` so no caller

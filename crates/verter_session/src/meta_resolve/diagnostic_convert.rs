@@ -39,11 +39,6 @@ use verter_type_engine::project_semantic_dispatch::walk::ShallowDiagnostic;
 #[must_use]
 pub(crate) fn shallow_to_expansion(diag: &ShallowDiagnostic) -> ExpansionDiagnostic {
     match diag {
-        ShallowDiagnostic::SignatureOverflow => ExpansionDiagnostic {
-            reason: ExpansionStopReason::BudgetExceeded,
-            context: "signature-overflow".to_string(),
-            property_name: None,
-        },
         ShallowDiagnostic::ProjectionWorkLimit { root } => ExpansionDiagnostic {
             reason: ExpansionStopReason::ProjectionWorkLimit,
             context: format!("projection-work-limit@{:?}", root),

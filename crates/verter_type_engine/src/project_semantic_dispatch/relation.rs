@@ -2533,29 +2533,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             output.cache_suppress = true;
             return output;
         }
-        // Test-only fact-injection hook (ported from the retired
-        // `relate_nodes` cold path): when the host's per-host
-        // `relation_knobs.force_overflow_observations` knob is non-zero, emit
-        // that many synthetic `FileWholeHash` observations onto the
-        // active tracer so finalise reports `Overflow` once the
-        // per-signature cap is exceeded — exercising the overflow
-        // non-admission path without a pathological multi-file fixture.
-        let force_n = self
-            .binding
-            .observers
-            .relation
-            .force_overflow_observations
-            .load(std::sync::atomic::Ordering::Relaxed);
-        if force_n > 0 {
-            for n in 0..force_n {
-                crate::resolver_core::resolver_context::observe_fan_out(
-                    verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-                        canonical_id: format!("__relation_force_overflow_{n}.ts"),
-                        hash: [(n & 0xff) as u8; 16],
-                    },
-                );
-            }
-        }
         let idx = self.relation_frame_open(key, InferenceOccurrence::ARGUMENT_COVARIANT);
         let mut bindings: Vec<InferBinding> = Vec::new();
         let verdict = self.reduce_relation(key, &mut bindings);

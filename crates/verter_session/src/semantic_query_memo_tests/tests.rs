@@ -5076,7 +5076,7 @@ fn joiner_outer_tracer_contains_winner_carrier_fact() {
             );
         }
         FactReadSetFinalise::NonCacheable(_) => panic!("joiner tracer unexpectedly non-cacheable"),
-        FactReadSetFinalise::Overflow | FactReadSetFinalise::MutationUnstable => {
+        FactReadSetFinalise::MutationUnstable => {
             panic!("joiner outer tracer refused")
         }
     }
@@ -5307,7 +5307,7 @@ fn joiner_of_cache_suppress_winner_inherits_carrier_and_suppression() {
             );
         }
         FactReadSetFinalise::NonCacheable(_) => panic!("joiner tracer unexpectedly non-cacheable"),
-        FactReadSetFinalise::Overflow | FactReadSetFinalise::MutationUnstable => {
+        FactReadSetFinalise::MutationUnstable => {
             panic!("joiner outer tracer refused")
         }
     }
@@ -9324,9 +9324,9 @@ mod prepared_identity_bijection {
 /// canonical with no matching `FileWholeHash` fact on the carrier refuses
 /// — the force's typed incomplete — never a silently SHRUNK root set that
 /// would validate at mint/force and let a `mint -> force -> mint` chain
-/// serve stale-complete after a dead-operand edit. An overflowed carrier
-/// keeps its (partial) evidence so the force maps the overflow flag to
-/// the typed `SignatureOverflow` refusal instead of the blander one.
+/// serve stale-complete after a dead-operand edit. A wide carrier's
+/// evidence pages are read through, so a root whose fact sits on any page
+/// reconstructs exactly as on a narrow carrier.
 #[test]
 fn operand_evidence_refuses_a_root_without_its_whole_hash_fact() {
     use verter_session_query::facts::fact_cache::FactVersionRef;
@@ -9373,14 +9373,32 @@ fn operand_evidence_refuses_a_root_without_its_whole_hash_fact() {
     )
     .is_none());
 
-    // An overflowed carrier keeps its (shrunk) evidence: the overflow
-    // flag — not this reconstruction — is the typed refusal the force
-    // reads.
-    let overflow = verter_session_query::facts::fact_cache::ReadSetSignature::overflow();
-    let evidence = semantic_operand_evidence(&overflow, &[Arc::clone(&root_producer)], &dep)
-        .expect("an overflowed carrier keeps its partial evidence");
-    assert!(evidence.self_roots().is_empty());
-    assert!(evidence.read_set().overflowed);
+    // A paged carrier: the producer root's fact sorts LAST, so it sits on
+    // the final page, behind more than one page of unrelated dependencies.
+    let mut wide: Vec<FactVersionRef> =
+        (0..2 * verter_session_query::facts::fact_read_set::FACT_PAGE_WIDTH + 1)
+            .map(|index| FactVersionRef::FileWholeHash {
+                canonical_id: format!("/w/dep-{index:05}.ts"),
+                hash: [3u8; 16],
+            })
+            .collect();
+    wide.push(FactVersionRef::FileWholeHash {
+        canonical_id: root_producer.as_ref().to_string(),
+        hash: [4u8; 16],
+    });
+    let paged = verter_session_query::facts::fact_cache::ReadSetSignature::new(
+        verter_session_query::facts::fact_read_set::seal_canonical_signature(wide),
+    );
+    assert!(
+        paged.facts.len() <= verter_session_query::facts::fact_read_set::FACT_PAGE_WIDTH,
+        "fixture invariant: the carrier is paged"
+    );
+    let evidence = semantic_operand_evidence(&paged, &[Arc::clone(&root_producer)], &dep)
+        .expect("a root backed on a page reconstructs");
+    assert_eq!(
+        evidence.self_roots(),
+        &[(Arc::clone(&root_producer), [4u8; 16])]
+    );
 }
 
 // ──────────────────────────────────────────────────────────────────
