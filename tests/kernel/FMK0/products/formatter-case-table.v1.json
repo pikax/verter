@@ -1,0 +1,423 @@
+{
+  "id": "formatter-case-table",
+  "schema": 1,
+  "contractNode": "FMK0",
+  "describesHead": {
+    "landingTitle": "docs(arch): define embedded codecs and exact authored map ownership (#838)",
+    "date": "2026-10-10"
+  },
+  "contractDocument": "docs/arch/kernel/formatter.md",
+  "kind": "Reviewed case data; no executable tests/validator/gates added",
+  "existingEvidence": {
+    "E01": {
+      "file": "crates/verter_language/tests/cases/parse_identity.rs",
+      "tests": [
+        "identical_inputs_share_parse_keys_and_parse_affecting_changes_do_not",
+        "script_profiles_encode_the_real_dialect_and_exact_source_bytes"
+      ],
+      "proves": "Current identical source/syntax inputs share keys; changed bytes/options/dialect do not.",
+      "limit": "No native formatter/profile/config cache exists; these do not prove FD02/FD18 service identity."
+    },
+    "E02": {
+      "file": "crates/verter_language/tests/cases/diagnostic_ordering.rs",
+      "tests": [
+        "every_normative_key_dimension_discriminates_independently",
+        "normative_sort_is_stable_across_input_permutations_when_keys_are_distinct"
+      ],
+      "proves": "Current typed diagnostic ordering discriminates its key dimensions and ignores discovery order.",
+      "limit": "No proof of future Doc/edit/map ordering."
+    },
+    "E03": {
+      "file": "crates/verter_protocol/tests/cases/typeinfo_proto_roundtrip.rs",
+      "tests": [
+        "type_info_graph_request_roundtrip_covers_every_payload_arm",
+        "semantic_type_graph_roundtrip_preserves_envelope_shape",
+        "supported_empty_and_unsupported_empty_decode_to_distinct_states"
+      ],
+      "proves": "Existing TypeInfo request/envelope payload survives serialization; supported empty and unsupported remain distinct.",
+      "limit": "No native FormatRequest/FormatResult or formatter parity is shipped."
+    },
+    "E04": {
+      "file": "crates/verter_lsp/src/documents/line_index.rs",
+      "tests": ["test_roundtrip_ascii", "test_utf16_supplementary", "test_utf8_encoding"],
+      "proves": "Current LineIndex ASCII round-trip and supplementary/UTF-8 positions at valid boundaries.",
+      "limit": "Not strict formatter UTF-16 surrogate-split rejection, formatted cursor conversion or all UTF-32/CRLF cases."
+    },
+    "E05": {
+      "file": "crates/verter_language/src/registered_source_authority.rs",
+      "tests": [
+        "valid_snapshot_round_trips_all_jointly_validated_fields",
+        "previous_generation_is_not_current_after_registration_advances",
+        "tampered_source_bytes_are_rehashed_and_rejected"
+      ],
+      "proves": "Current registered snapshots preserve jointly validated basis and reject obsolete/tampered content.",
+      "limit": "No formatter publication/admission path exists yet."
+    },
+    "E06": {
+      "file": "crates/verter_lsp/src/features/formatting.rs",
+      "tests": [
+        "test_no_edits_for_well_formatted",
+        "test_missing_trailing_newline",
+        "test_excessive_blank_lines",
+        "test_trailing_whitespace_removed"
+      ],
+      "proves": "Existing whitespace-only route and its limited behavior, not native formatting.",
+      "limit": "Superseded route-only tests retire with FMT3; they do not establish full formatting, edit non-overlap or idempotence."
+    }
+  },
+  "cases": [
+    {
+      "id": "FM-K01",
+      "name": "One outer and one embedded ownership path",
+      "input": "Vue/Svelte carrier with ordered script, style and template regions; catalog registration order reversed",
+      "required": "Unique outer selection and unique exact-language embedded contributions; identical output/provenance order; reject missing or duplicate claims",
+      "forbidden": "Framework-name branch, first-registered choice, duplicate embedded formatting or private renderer",
+      "rules": ["FD01", "FD12"],
+      "existingEvidence": [],
+      "implementationOwner": "UAP0",
+      "successorPath": ["FMK0", "UAP0"],
+      "receivingAcceptance": "UAP0-AC2",
+      "executionScope": "UAP0 subblock 3 architecture fixture; implementation remains with inventory owner"
+    },
+    {
+      "id": "FM-K02",
+      "name": "Truthful option outcomes",
+      "input": "Captured format section containing unknown name, wrong type, inapplicable known option and known unsupported value, with a supported absent default control",
+      "required": "Four truthful diagnostics as classified by the locked policy; admitted missing option alone gets its provenanced default",
+      "forbidden": "Silently ignore/coerce/drop explicit values or report successful empty edits",
+      "rules": ["FD03", "FD04", "FD05", "FD06"],
+      "existingEvidence": ["E03"],
+      "implementationOwner": "UAP0",
+      "successorPath": ["FMK0", "UAP0"],
+      "receivingAcceptance": "UAP0-AC2",
+      "executionScope": "UAP0 subblock 3 architecture fixture; implementation remains with inventory owner"
+    },
+    {
+      "id": "FM-K03",
+      "name": "Separate formatting and action map authority",
+      "input": "Same carrier receives one formatter edit and one lint/action fix against different source revisions",
+      "required": "Formatter map and action transaction remain distinct; stale action is refused by action owner, not blessed by formatter correspondence",
+      "forbidden": "Reuse formatter map as action validity or invoke lint fixer during formatting",
+      "rules": ["FD12", "FD14"],
+      "existingEvidence": [],
+      "implementationOwner": "UAP0",
+      "successorPath": ["FMK0", "UAP0"],
+      "receivingAcceptance": "UAP0-AC2",
+      "executionScope": "UAP0 subblock 3 architecture fixture; implementation remains with inventory owner"
+    },
+    {
+      "id": "FM-K04",
+      "name": "Inventory omission and owner conflict",
+      "input": "Reviewed inventory with one removed consumer, nonexistent owner, pathless owner or two deletion assignments",
+      "required": "Validator rejects each independently and accepts the original complete inventory",
+      "forbidden": "Accept plausible owner text without a real successor/receiving contract",
+      "rules": ["FD01"],
+      "existingEvidence": [],
+      "implementationOwner": "UAP0",
+      "successorPath": ["FMK0", "UAP0"],
+      "receivingAcceptance": "UAP0-AC-R1",
+      "executionScope": "UAP0 subblock 3 architecture fixture; implementation remains with inventory owner"
+    },
+    {
+      "id": "FM-K05",
+      "name": "Exact versus default versus unsupported",
+      "input": "Same hermetic input with three locked cells: exact Prettier bytes, pre-ratified native divergence, literal unsupported reason",
+      "required": "Exact byte comparison for exact cell; locked native bytes for default; typed refusal before printing for unsupported",
+      "forbidden": "Whitespace-normalized parity, post-hoc divergence, exact-to-default fallback",
+      "rules": ["FD05", "FD06", "FD07"],
+      "existingEvidence": [],
+      "implementationOwner": "FMT0",
+      "successorPath": ["FMK0", "FMT0"],
+      "receivingAcceptance": "FMT0-AC2",
+      "executionScope": "Future owning implementation proof; this file is reviewed data only"
+    },
+    {
+      "id": "FM-K06",
+      "name": "Config provenance and trusted capture",
+      "input": "Parent config, ignore rule and matching override plus a captured executable-config snapshot; prepared-input host missing one required capture",
+      "required": "FCFG0 normalizes once with ordered contributing provenance; missing capture stays NeedInputs; ignored file is explicit skipped/inapplicable",
+      "forbidden": "Runtime config execution, private option defaults in printer, forged Complete unchanged result",
+      "rules": ["FD02", "FD03", "FD04"],
+      "existingEvidence": [],
+      "implementationOwner": "FCFG0",
+      "successorPath": ["FMK0", "FMT0", "FCFG0"],
+      "receivingAcceptance": "FCFG0-AC2",
+      "executionScope": "Future owning implementation proof; this file is reviewed data only"
+    },
+    {
+      "id": "FM-K07",
+      "name": "Private domain and provenance discrimination",
+      "input": "Authored/formatted ranges over astral Unicode, CRLF and EOF; duplicate conflicting ID, unknown rendered ID, cross-revision ID",
+      "required": "Foundation rejects mixed/invalid domains and bindings; deterministic same-revision table reconstruction",
+      "forbidden": "Bare integer or generated-TSX conversion, two independently declared provenance tokens",
+      "rules": ["FD09"],
+      "existingEvidence": ["E05"],
+      "implementationOwner": "FMT1P",
+      "successorPath": ["FMK0", "FMT0", "FMT1P"],
+      "receivingAcceptance": "Table-driven identity tests reject duplicate/mismatched authored bindings, unknown IDs, and cross-revision reuse while preserving deterministic same-revision reconstruction.",
+      "executionScope": "Future owning implementation proof; this file is reviewed data only",
+      "receivingHeading": "Acceptance and evidence"
+    },
+    {
+      "id": "FM-K08",
+      "name": "Lossless authored coverage and recovery",
+      "input": "BOM, comments, raw script/style literals, custom block and malformed delimiter island in one carrier",
+      "required": "Every source/trivia region accounted for once in source order; exact island bytes or typed refusal; reuse existing parse",
+      "forbidden": "Lossy semantic-AST reconstruction, regex recovery, second parser, format-on-parse",
+      "rules": ["FD08", "FD11"],
+      "existingEvidence": [],
+      "implementationOwner": "FMT1A",
+      "successorPath": ["FMK0", "FMT0", "FMT1P", "FMT1A"],
+      "receivingAcceptance": "FMT1A-AC2",
+      "executionScope": "Future owning implementation proof; this file is reviewed data only"
+    },
+    {
+      "id": "FM-K09",
+      "name": "Doc rendering determinism and group laws",
+      "input": "Shared Doc with nested groups, hard/soft lines, Unicode text, tabs, conditional breaks and multiple suffixes",
+      "required": "Locked width/newline/suffix policy yields deterministic bytes and ordered source-backed segments",
+      "forbidden": "Semantic parse/resolve, unordered suffix flush, recovery text whitespace normalization",
+      "rules": ["FD09", "FD10"],
+      "existingEvidence": ["E02"],
+      "implementationOwner": "FMT1",
+      "successorPath": ["FMK0", "FMT0", "FMT1P", "FMT1"],
+      "receivingAcceptance": "FMT1-AC2",
+      "executionScope": "Future owning implementation proof; this file is reviewed data only"
+    },
+    {
+      "id": "FM-K10",
+      "name": "Exact edit application and minimality",
+      "input": "Source/result pair with two changed interior islands, stable middle, Unicode, CRLF, EOF and adjacent insertion",
+      "required": "Sorted non-overlapping scalar-boundary edits apply exactly; stable regions remain; no no-op edit",
+      "forbidden": "Whole-file replacement when smaller set proven or unbounded quadratic diff",
+      "rules": ["FD13"],
+      "existingEvidence": [],
+      "implementationOwner": "FMT1B",
+      "successorPath": ["FMK0", "FMT0", "FMT1P", "FMT1", "FMT1B"],
+      "receivingAcceptance": "FMT1B-AC1",
+      "executionScope": "Future owning implementation proof; this file is reviewed data only"
+    },
+    {
+      "id": "FM-K11",
+      "name": "Retained and changed position mapping",
+      "input": "Known retained token IDs plus inserted/deleted/replaced segments at scalar/CRLF/EOF boundaries",
+      "required": "Round-trip retained positions under locked bias; changed geometry explicit; ambiguity/absence typed",
+      "forbidden": "Proportional interpolation, duplicate unknown IDs, wrong output/source basis",
+      "rules": ["FD09", "FD14"],
+      "existingEvidence": [],
+      "implementationOwner": "FMT1C",
+      "successorPath": ["FMK0", "FMT0", "FMT1P", "FMT1", "FMT1C"],
+      "receivingAcceptance": "FMT1C-AC2",
+      "executionScope": "Future owning implementation proof; this file is reviewed data only"
+    },
+    {
+      "id": "FM-K12",
+      "name": "Embedded reversible map eligibility",
+      "input": "Cooked escape, indentation removal and interpolation hole with composed codec stages; one mismatched stage revision",
+      "required": "Exact endpoint joins and unique editable preimage; missing/non-reversible geometry refuses or retains under explicit cell policy",
+      "forbidden": "Private decoder/composer, hole crossing guessed span, clamp, raw fallback from cooked",
+      "rules": ["FD11", "FD12", "FD14"],
+      "existingEvidence": [],
+      "implementationOwner": "FMT3C",
+      "successorPath": ["FMK0", "FMT0", "FMT1P", "FMT1", "FMT1C", "FMT1D", "FMTH0", "FMT3C"],
+      "receivingAcceptance": "FMT3C-AC2",
+      "executionScope": "Future owning implementation proof; this file is reviewed data only"
+    },
+    {
+      "id": "FM-K13",
+      "name": "Outer and child boundary ownership",
+      "input": "Inline script/style plus raw recovery and an external src resource",
+      "required": "Outer owns delimiters/trivia; each child only its declared extent; external source unchanged or explicit unsupported",
+      "forbidden": "Child steals sibling trivia or edits external source as current carrier bytes",
+      "rules": ["FD08", "FD11", "FD12"],
+      "existingEvidence": [],
+      "implementationOwner": "FMT3C",
+      "successorPath": ["FMK0", "FMT0", "FMT1P", "FMT1", "FMT1C", "FMT1D", "FMTH0", "FMT3C"],
+      "receivingAcceptance": "FMT3C-AC2",
+      "executionScope": "Future owning implementation proof; this file is reviewed data only"
+    },
+    {
+      "id": "FM-K14",
+      "name": "Safe range and unaffected control",
+      "input": "Selection inside token, hole, raw text or malformed island, with stable siblings on both sides",
+      "required": "Smallest locked safe expansion or truthful refusal; outside bytes unchanged; expanded range agrees with full slice",
+      "forbidden": "Split island/delimiters, edit unrelated sibling or force full-file fallback",
+      "rules": ["FD15"],
+      "existingEvidence": [],
+      "implementationOwner": "FMT1D",
+      "successorPath": ["FMK0", "FMT0", "FMT1P", "FMT1", "FMT1C", "FMT1D"],
+      "receivingAcceptance": "FMT1D-AC1",
+      "executionScope": "Future owning implementation proof; this file is reviewed data only"
+    },
+    {
+      "id": "FM-K15",
+      "name": "Cursor affinity and correct output basis",
+      "input": "Cursors before/inside/after retained, inserted, replaced and deleted regions, astral scalar, CRLF and EOF",
+      "required": "Locked affinity yields deterministic formatted-domain position or explicit absence at non-unique preimage",
+      "forbidden": "Semantic nearest-token guess or authored/output source swap",
+      "rules": ["FD14", "FD16"],
+      "existingEvidence": [],
+      "implementationOwner": "FMT1E",
+      "successorPath": ["FMK0", "FMT0", "FMT1P", "FMT1", "FMT1C", "FMT1E"],
+      "receivingAcceptance": "FMT1E-AC2",
+      "executionScope": "Future owning implementation proof; this file is reviewed data only"
+    },
+    {
+      "id": "FM-K16",
+      "name": "Strict public UTF-16 conversion",
+      "input": "Valid supplementary scalar boundary control; cursor splits surrogate pair; range inverted/out of extent; result byte inside UTF-8 scalar",
+      "required": "FMT4F accepts exact controls, rejects invalid boundaries and uses input for requests/output for results",
+      "forbidden": "Clamp, byte-as-UTF16 shortcut, stale source or private coordinate serialization",
+      "rules": ["FD09", "FD15", "FD16"],
+      "existingEvidence": ["E04"],
+      "implementationOwner": "FMT4F",
+      "successorPath": [
+        "FMK0",
+        "FMT0",
+        "FMT1P",
+        "FMT1",
+        "FMT1C",
+        "FMT1D",
+        "FMTH0",
+        "FMT3C",
+        "FMT4P",
+        "FMT4F"
+      ],
+      "receivingAcceptance": "FMT4F-AC2",
+      "executionScope": "Future owning implementation proof; this file is reviewed data only"
+    },
+    {
+      "id": "FM-K17",
+      "name": "LSP negotiated encoding",
+      "input": "Same full-document output/edits through UTF-8, UTF-16 and UTF-32 document LineIndex",
+      "required": "Applying LSP TextEdits reconstructs direct output exactly; wrong revision/text fails",
+      "forbidden": "Default UTF-16 assumption, 0:0 fallback or guessed position",
+      "rules": ["FD13", "FD14"],
+      "existingEvidence": ["E04"],
+      "implementationOwner": "FMT4L",
+      "successorPath": [
+        "FMK0",
+        "FMT0",
+        "FMT1P",
+        "FMT1",
+        "FMT1C",
+        "FMT1D",
+        "FMTH0",
+        "FMT3C",
+        "FMT4P",
+        "FMT4L"
+      ],
+      "receivingAcceptance": "FMT4L-AC1",
+      "executionScope": "Future owning implementation proof; this file is reviewed data only"
+    },
+    {
+      "id": "FM-K18",
+      "name": "Surface capability truth and outcome parity",
+      "input": "Shared full-format corpus through Rust/LSP/NAPI/WASM/MCP, plus range/cursor requests per capability table; Complete unchanged and unsupported controls",
+      "required": "Shared cells agree; cursor only private/NAPI/WASM, range only Rust/NAPI/WASM/MCP; refusals never success",
+      "forbidden": "Private support advertises LSP range/cursor or MCP/Rust cursor",
+      "rules": ["FD03", "FD06", "FD15", "FD16"],
+      "existingEvidence": ["E03"],
+      "implementationOwner": "FMT4",
+      "successorPath": [
+        "FMK0",
+        "FMT0",
+        "FMT1P",
+        "FMT1",
+        "FMT1C",
+        "FMT1D",
+        "FMTH0",
+        "FMT3C",
+        "FMT4P",
+        "FMT4L",
+        "FMT3",
+        "FMT4"
+      ],
+      "receivingAcceptance": "FMT4-AC2",
+      "executionScope": "Future owning implementation proof; this file is reviewed data only"
+    },
+    {
+      "id": "FM-K19",
+      "name": "Idempotence, semantic stability and unaffected languages",
+      "input": "Valid and admitted recovery corpora with fixed profiles/options; add TypeScript/JSX/SCSS/Less contribution",
+      "required": "Native output is a fixed point, second pass zero edits; significant bytes/semantics preserved; unaffected language fixtures byte-identical",
+      "forbidden": "Normalize comparison or ratify new divergence after failed comparison",
+      "rules": ["FD06", "FD08", "FD17"],
+      "existingEvidence": [],
+      "implementationOwner": "FMT2",
+      "successorPath": ["FMK0", "FMT0", "FMT1P", "FMT1", "FMT1C", "FMT1D", "FMT2"],
+      "receivingAcceptance": "FMT2-AC3",
+      "executionScope": "Future owning implementation proof; this file is reviewed data only"
+    },
+    {
+      "id": "FM-K20",
+      "name": "Fresh versus incremental and edit/revert",
+      "input": "Same final basis reached fresh and through edit/revert, changing source, carrier, config provenance, catalog row or policy independently",
+      "required": "Equivalent complete output/edits/map answers; observed changes invalidate; unobserved provider changes do not; stable unaffected region lineage",
+      "forbidden": "Content-only cache hit or config changes forcing second syntax parse",
+      "rules": ["FD02", "FD18"],
+      "existingEvidence": ["E01", "E05"],
+      "implementationOwner": "FMT3C",
+      "successorPath": ["FMK0", "FMT0", "FMT1P", "FMT1", "FMT1C", "FMT1D", "FMTH0", "FMT3C"],
+      "receivingAcceptance": "FMT3C-AC3",
+      "executionScope": "Future owning implementation proof; this file is reviewed data only"
+    },
+    {
+      "id": "FM-K21",
+      "name": "Cancellation, stale completion and partial child",
+      "input": "Cancel before entry and during render; race a new source revision; required embedded child returns partial",
+      "required": "No stale/cancelled/partial publication or warm admission; retry same final basis equals fresh",
+      "forbidden": "Empty Complete result, old edit publication or partial outer success",
+      "rules": ["FD03", "FD06", "FD18"],
+      "existingEvidence": ["E05"],
+      "implementationOwner": "FMT3C",
+      "successorPath": ["FMK0", "FMT0", "FMT1P", "FMT1", "FMT1C", "FMT1D", "FMTH0", "FMT3C"],
+      "receivingAcceptance": "FMT3C-AC3",
+      "executionScope": "Future owning implementation proof; this file is reviewed data only"
+    },
+    {
+      "id": "FM-K22",
+      "name": "Bounded work, warm/churn and zero work",
+      "input": "Cold/exact-warm/changed-region/edit-revert/range-query requests, adversarial nesting and fixed churn manifest; disabled/unrequested/provider-transition controls",
+      "required": "FMT0-sized counts/growth and explicit stack/entry bounds; complete bytes emitted once; zero work for controls; closed sources retain no entries",
+      "forbidden": "Hidden parse/resolve/render/copy, unbounded group search, eager prewarm or ineligible cache entry",
+      "rules": ["FD03", "FD10", "FD18", "FD19"],
+      "existingEvidence": [],
+      "implementationOwner": "FMT3C",
+      "successorPath": ["FMK0", "FMT0", "FMT1P", "FMT1", "FMT1C", "FMT1D", "FMTH0", "FMT3C"],
+      "receivingAcceptance": "FMT3C-AC4",
+      "executionScope": "Future owning implementation proof; this file is reviewed data only"
+    },
+    {
+      "id": "FM-K23",
+      "name": "Atomic route switch and retained auto-close",
+      "input": "Existing LSP document formatting and > on-type fixtures before/after cutover",
+      "required": "Exactly one FMT4L→FMT4P→FMT3C document path; old whitespace body unreachable; continuously advertised document capability; auto-close unchanged; range absent",
+      "forbidden": "Dual route or on-type handler delegates to FormatterService",
+      "rules": ["FD01", "FD03"],
+      "existingEvidence": ["E06"],
+      "implementationOwner": "FMT3",
+      "successorPath": [
+        "FMK0",
+        "FMT0",
+        "FMT1P",
+        "FMT1",
+        "FMT1C",
+        "FMT1D",
+        "FMTH0",
+        "FMT3C",
+        "FMT4P",
+        "FMT4L",
+        "FMT3"
+      ],
+      "receivingAcceptance": "FMT3-AC3",
+      "executionScope": "Future owning implementation proof; this file is reviewed data only"
+    }
+  ],
+  "proofDisposition": {
+    "FMK0-AC1": "Reviewed inventory; UAP0-AC-R1 owns executable omission/conflict proof; FMT3 owns actual whitespace-route retirement.",
+    "FMK0-AC2": "E01–E05 cite existing identity, provenance, ordering and outcome coverage only; new native architecture fixtures are UAP0 subblock 3, not claimed shipped.",
+    "FMK0-AC3": "Not applicable to runtime verification of this docs-only diff: no incremental/cache/cancellation/publication authority changed. FMT3C-AC3 receives FD18.",
+    "FMK0-AC4": "Not applicable to runtime verification: no hot-path code changed. FMT0-AC3 locks work vocabulary; implementation owners prove counters/growth. No new benchmark or soak."
+  }
+}
