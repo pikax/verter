@@ -775,9 +775,11 @@ test("a framework vertical's listed contract data runs no lane, and listing it i
   }
   // The inert list is data: editing it runs the classifier's own tests (the
   // js lane), not every lane as an edit to the classifier does.
-  const inertEdit = select(["scripts/ci-inert-paths.json"]);
-  assert.equal(inertEdit.impact.full, false, JSON.stringify(inertEdit.impact.fullReasons));
-  assert.deepEqual(gatesOn(inertEdit.gates), ["js"]);
+  for (const file of ["scripts/ci-inert-paths.json", "scripts/ci-inert-paths.d/framework-mdx.json"]) {
+    const inertEdit = select([file]);
+    assert.equal(inertEdit.impact.full, false, JSON.stringify(inertEdit.impact.fullReasons));
+    assert.deepEqual(gatesOn(inertEdit.gates), ["js"], file);
+  }
 });
 
 test("the tracked tree passes the selection audit", () => {
@@ -807,6 +809,19 @@ test("unreadable selection data breaks no importer: every lane runs and the audi
     [stp1, "{ not json", /current-feature-inventory\.json/],
     // Every inert entry must say why no ci.yml job reads it.
     [inert, JSON.stringify([{ glob: "docs/**", reason: "" }]), /ci-inert-paths\.json/],
+    // A framework vertical's entries live in its own file, so verticals landing
+    // together never edit the same list.
+    [
+      inert,
+      JSON.stringify([{ glob: "tests/framework-newcomer/NEW0/cases.md", reason: "Prose." }]),
+      /belongs in scripts\/ci-inert-paths\.d\/framework-newcomer\.json/,
+    ],
+    [
+      join("scripts", "ci-inert-paths.d", "framework-mdx.json"),
+      JSON.stringify([{ glob: "tests/framework-astro/AST0/cases.md", reason: "Prose." }]),
+      /framework-mdx\.json.*belongs in scripts\/ci-inert-paths\.d\/framework-astro\.json/,
+    ],
+    [join("scripts", "ci-inert-paths.d", "framework-mdx.json"), "{ not json", /framework-mdx\.json/],
   ]) {
     const root = mkdtempSync(join(tmpdir(), "ci-impact-data-"));
     try {

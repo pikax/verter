@@ -1,0 +1,6 @@
+[
+  {
+    "glob": "tests/framework-liquid/**",
+    "reason": "Reviewed Liquid contract data; no ci.yml lane reads it."
+  }
+]
