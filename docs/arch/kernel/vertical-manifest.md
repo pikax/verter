@@ -103,16 +103,15 @@ FCH1 follows VIM1 and its charter path contains the harness TSV. No FCH1
 acceptance states the cutover. `FCH1-AC3` joins coverage onto
 `tests/framework-<f>/<P>0/products/*-capability-matrix.json` and can pass
 while the TSV stays hand-maintained, so it is not the receiving acceptance.
-`VIM-T05` records the proposed receiving amendment `FCH1-AC5`: after
-`VIM1-AC-R2`, FCH1 renders that TSV from the canonical matrix or deletes it,
-so hand-maintained disposition, maturity, owner and acceptance columns
-cannot remain a second authority. Its proof must reject hand edits to a
-rendered TSV or show the TSV deleted and all readers migrated. Existing
-Vue/Svelte goldens and dependency pins remain intact. The operator question
-`fch1-matrix-cutover-acceptance` requests ratification of this named acceptance
-in FCH1's controller-owned charter. Until ratification, the product records
-`receivingAcceptance: null` and the proposed acceptance separately; it claims
-no authorised transfer. VIM1 already precedes FCH1 in the controller plan.
+`VIM-T05` records receiving acceptance `FCH1-AC5`, authorised by ruling
+`fch1-matrix-cutover-acceptance` (2026-10-10): after `VIM1-AC-R2`, FCH1
+renders that TSV from the canonical matrix or deletes it, so hand-maintained
+disposition, maturity, owner and acceptance columns cannot remain a second
+authority. Its proof must reject hand edits to a rendered TSV or show the TSV
+deleted and all readers migrated. Existing Vue/Svelte goldens and dependency
+pins remain intact. `FCH1-AC3` stays the coverage join and does not authorise
+this cutover. VIM1 already precedes FCH1. Implementation remains FCH1's after
+VIM1.
 `G02` is deleted by NCK5 after that render's freshness guard holds (`VIM-D01`).
 
 ## Manifest layout
@@ -418,7 +417,7 @@ or full support declared over one) and `MN11` (merged Tailwind identity).
 | `VIM-D01` | duplicate capability authority; central framework switch; untagged identity | `CapabilityCell` / `CapabilityDisposition` (`G02`) in `crates/verter_compiler/src/compile_request/capability.rs`, a closed per-framework enum                | replace: the enum is deleted after VIM1's rendered-matrix freshness guard holds (`VIM1-AC-R2`). NCK5 is a successor of VIM1, rust-mixed, and its charter path `crates/verter_compiler` and domain `area:crates/verter_compiler` contain this file. CPF1 precedes VIM1, so CPF1 cannot be the deleter                                                                                                                           | NCK5 (`NCK5-AC1`), path `VIM0` → `VIM1` → `NCK5`                                                                                      |
 | `VIM-D02` | duplicate component information                                             | UAK0 `D12`–`D15`: component-meta resolver/cache/schema, public-API projection, off-store surface caches, legacy serde TypeInfo DTOs (authority-inventory.md) | keep that assignment. A manifest declares facets and roles; it computes no component information. TIF1 is not a successor of VIM0                                                                                                                                                                                                                                                                                              | TIF1 (`TIF1-AC1`), path `UAK0` → `UAK1` → `CAT0` → `TIF1`                                                                             |
 | `VIM-D03` | duplicate component information                                             | UAK0 `D18`: per-request component scan                                                                                                                       | keep that assignment. IDX0 is not a successor of VIM0                                                                                                                                                                                                                                                                                                                                                                          | IDX0 (`IDX0-AC1`), path `UAK0` → `UAK1` → `CAT0` → `DEM0` → `IDX0`                                                                    |
-| `VIM-D04` | duplicate capability authority                                              | hand-maintained `capability-matrix.tsv` (`G01`)                                                                                                              | stops being an authority (`VM26`, `MN07`). VIM1 renders the canonical matrix under `verticals/` (`VIM1-AC-R2`). Proposed `FCH1-AC5` requires rendering the harness TSV from that matrix or deleting it. The TSV is not a G03–G05 seed. FCH1's charter path and domain contain the TSV; VIM1's do not. VIM1 already precedes FCH1. Existing `FCH1-AC1`–`FCH1-AC4` do not state this cutover; `FCH1-AC3` remains a coverage join | proposed FCH1 (`FCH1-AC5`, pending ratification), path `VIM0` → `VIM1` → `FCH1`; `VIM-T05` is the amendment record, not an acceptance |
+| `VIM-D04` | duplicate capability authority                                              | hand-maintained `capability-matrix.tsv` (`G01`)                                                                                                              | stops being an authority (`VM26`, `MN07`). VIM1 renders the canonical matrix under `verticals/` (`VIM1-AC-R2`). `FCH1-AC5` requires rendering the harness TSV from that matrix or deleting it. The TSV is not a G03–G05 seed. FCH1's charter path and domain contain the TSV; VIM1's do not. VIM1 already precedes FCH1. `FCH1-AC3` remains a coverage join | FCH1 (`FCH1-AC5`, ruling `fch1-matrix-cutover-acceptance` 2026-10-10), path `VIM0` → `VIM1` → `FCH1`; `VIM-T05` binds that acceptance |
 
 `G06` (`V-D03`, REG0) and `G07` (`CAT-D04`, CPF1) stay with their owners.
 `VueOtherVersion` and `SvelteOtherVersion` are complement arms of `G02`.
@@ -461,9 +460,9 @@ rows, each with its own successor path and receiving acceptance.
   `capability-matrix.tsv` says `core@3.6.0-rc.3` and `svelte@5.56.8`; the
   oracle `package.json` files pin `vue` `3.6.0-rc.5` and `svelte` `5.56.10`.
   Two hand-maintained truths have drifted. `VM23` makes the oracle pin the
-  release and fails the divergence (`MN15`). FCH1 owns the TSV
-  (proposed `FCH1-AC5`, pending operator ratification); `FCH1-AC3` does not
-  state that cutover. VIM1 cannot write that path.
+  release and fails the divergence (`MN15`). FCH1 owns the TSV under
+  `FCH1-AC5` (ruling `fch1-matrix-cutover-acceptance`, 2026-10-10);
+  `FCH1-AC3` does not state that cutover. VIM1 cannot write that path.
 - **Versions are encoded as capability cells** (`VIM-F02`, NCK5).
   `VueOtherVersion` and `SvelteOtherVersion` (domain "anything other than …")
   write a version complement as a cell. Under `VM02` that is DEM0's
@@ -499,11 +498,11 @@ inspection are the right evidence. The diff adds no test, validator or check.
   after the freshness guard, because that node's charter path contains
   `crates/verter_compiler/src/compile_request/capability.rs`. `VIM-D02` and
   `VIM-D03` keep TIF1 and IDX0, the owners the authority inventory assigns,
-  on the UAK0 paths. `VIM-D04` proposes FCH1 (`FCH1-AC5`) on `VIM0` → `VIM1` →
+  on the UAK0 paths. `VIM-D04` binds FCH1 (`FCH1-AC5`) on `VIM0` → `VIM1` →
   `FCH1`: VIM1 renders under `verticals/`, and FCH1 owns the harness TSV.
-  `VIM-T05` records the proposed amendment, not an authorised acceptance.
-  AC1 remains incomplete until the operator ratifies `FCH1-AC5` in FCH1's
-  receiving charter; `FCH1-AC3` alone does not carry the cutover.
+  Ruling `fch1-matrix-cutover-acceptance` (2026-10-10) authorises `FCH1-AC5`.
+  `VIM-T05` binds that acceptance. `FCH1-AC3` remains the coverage join and
+  does not carry the cutover. Implementation stays with FCH1 after VIM1.
   UAK0, UAK1, VID0, CAT0, DEM0 and PAR0 rows are referenced, not re-owned.
   The executable validator for this inventory and the manifest negatives
   belongs to VIM1 (`VIM1-AC-R1`); UAM0 re-validates it (`UAM0-AC2`).

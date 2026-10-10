@@ -7,7 +7,7 @@
     "date": "2026-10-09"
   },
   "companionInventory": "configuration-inventory.v1.json",
-  "rule": "Each case states its input, required and forbidden outcomes, and executable owner. CFG0 ships no test. CFG1 owns the data-only envelope implementation after CFG0 and BR0; UAO0 retains the executable configuration fixtures under UAO0-AC-R2 and the ownership validator under UAO0-AC-R1. Cases list the CFG1 receiving acceptances they require, without moving static ecosystem capture or authorised dynamic execution into the loader. Controller reconciliation is tracked by configuration-inventory.v1.json receivingContracts.",
+  "rule": "Each case states its input, required and forbidden outcomes, and executable owner. CFG0 ships no test. CFG1 owns the data-only envelope implementation after CFG0 and BR0; UAO0 retains the executable configuration fixtures under UAO0-AC-R2 and the ownership validator under UAO0-AC-R1. Cases list the CFG1 receiving acceptances they require, without moving static ecosystem capture or authorised dynamic execution into the loader. Authorised receiving obligations are configuration-inventory.v1.json receivingContracts.",
   "cases": [
     {
       "id": "CC01",

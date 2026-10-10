@@ -31,10 +31,9 @@ The reviewed contract data lives in `tests/kernel/CFG0/products/`:
 | `configuration-inventory.v1.json`  | Contract rules `CR01`–`CR24`, outcomes `CF-O01`–`CF-O14`, consumers `CF-C01`–`CF-C19`, retained host inputs `CF-H01`–`CF-H04`, displaced routes `CF-D01`–`CF-D10`, the UAK0 routes it references, coverage of each deletion category, empty populations, the closed ownership gap `G01`, receiving contracts, findings and transferred obligations |
 | `configuration-case-table.v1.json` | Cases `CC01`–`CC17`: input, required and forbidden outcome, the rules each case exercises, existing evidence, and the node whose test makes it executable                                                                                                                                                                                          |
 
-Every `successorPath` starts at CFG0. Existing consumer paths retain their
-controller-owned edges; the ruled CFG1 path and its additional consumer
-prerequisites require controller reconciliation as recorded below. UAK0,
-UAK1 and VID0 rows keep their owners; CFG0 only references them.
+Every `successorPath` starts at CFG0. CFG1-owned rows run CFG0, BR0, CFG1.
+The eight ruled consumers insert that prefix ahead of their existing edges.
+UAK0, UAK1 and VID0 rows keep their owners; CFG0 only references them.
 
 ## Envelope v1
 
@@ -386,11 +385,11 @@ predecessors. Their existing acceptances consume these prerequisites:
 | COXD2    | `COXD2-AC2`                | `AC1`–`AC4` for scoped coexistence choices                                 |
 | UAO0     | `UAO0-AC-R1`, `UAO0-AC-R2` | `AC1`–`AC4` for ownership validation and executable cases                  |
 
-The controller mirror at repair dispatch contains no CFG1 node. The question
-`cfg1-receiving-contract` requests the receiving node, obligations and
-ordering required by the captured rulings. The inventory's
-`receivingContracts` records this pending controller reconciliation; these
-products do not create a plan node or claim that those edges already exist.
+Ruling `cfg1-receiving-contract` (2026-10-10) authorises CFG1 after CFG0 and
+BR0, the four acceptances above, and a CFG1 predecessor edge on CENV1C, FWA1,
+LNTCFG0, FCFG0, INT5, EDOC1, COXD2 and UAO0. The inventory's
+`receivingContracts` records that authorisation. These products do not
+implement the loader.
 
 ## Findings recorded for the receiving owners
 
@@ -435,9 +434,9 @@ coverage and bounded inspection discriminate it. The diff adds no test.
 - **AC1 — ownership contract.** The inventory binds every outcome, consumer
   and displaced route to one existing plan node, a successor path from CFG0
   and a receiving acceptance ID. The seven loader outcomes bind to
-  `CFG1-AC1`–`CFG1-AC4` above under the captured rulings. Acceptance remains
-  dependent on controller reconciliation of the receiving contracts and
-  ordering; documentation is not proof that a node or edge exists.
+  `CFG1-AC1`–`CFG1-AC4` above. Ruling `cfg1-receiving-contract` (2026-10-10)
+  authorises those obligations and the CFG0 → BR0 → CFG1 order. Documentation
+  records the contract; it does not implement the loader.
   The executable validator is UAO0's (`UAO0-AC-R1`), and so are the
   precedence, fail-closed, provenance and invalidation fixtures: `CC01`–`CC04`,
   `CC06`, `CC07`, `CC13` and `CC17` (`UAO0-AC-R2`). Every other case names its own
