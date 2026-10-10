@@ -1,0 +1,92 @@
+{
+  "schema": 1,
+  "contractNode": "PRE0",
+  "family": "preact",
+  "kind": "lock",
+  "id": "preact-host-table.v1",
+  "hosts": [
+    {
+      "id": "lsp-enhancement",
+      "transport": "Verter LSP through LSPX11",
+      "documentLanguageIds": ["typescriptreact", "javascriptreact", "typescript", "javascript"],
+      "fileKinds": [".tsx", ".jsx", ".ts", ".js"],
+      "profiles": ["preact-native", "preact-compat"],
+      "reprovidesTsgo": false,
+      "ownership": "owns(capability, position): tsgo position probe, COXD2 competitor ownership, user per-capability setting; Unknown retains Verter ownership",
+      "seamProducer": "LSPX11",
+      "seamAcceptance": "LSPX11-AC3"
+    }
+  ],
+  "operations": [
+    {
+      "id": "component-hover",
+      "cells": ["preact-native:component-hover", "preact-compat:component-hover"],
+      "host": "lsp-enhancement",
+      "tsgoOperations": ["getSymbolAtPosition", "getTypeAtPosition", "typeToString"],
+      "tsgoLimitations": ["getPropertiesOfType", "getSignaturesOfType"]
+    },
+    {
+      "id": "signal-hover",
+      "cells": ["preact-native:signal-hover", "preact-compat:signal-hover"],
+      "host": "lsp-enhancement",
+      "tsgoOperations": ["getSymbolAtPosition"],
+      "tsgoLimitations": []
+    },
+    {
+      "id": "context-provider-definition",
+      "cells": [
+        "preact-native:context-provider-definition",
+        "preact-compat:context-provider-definition"
+      ],
+      "host": "lsp-enhancement",
+      "tsgoOperations": ["getSymbolAtPosition"],
+      "tsgoLimitations": []
+    },
+    {
+      "id": "framework-diagnostics",
+      "cells": ["preact-native:framework-diagnostics", "preact-compat:framework-diagnostics"],
+      "host": "lsp-enhancement",
+      "tsgoOperations": [],
+      "tsgoLimitations": []
+    },
+    {
+      "id": "framework-code-actions",
+      "cells": ["preact-native:framework-code-actions", "preact-compat:framework-code-actions"],
+      "host": "lsp-enhancement",
+      "tsgoOperations": [],
+      "tsgoLimitations": []
+    }
+  ],
+  "limitations": {
+    "notification": "$/verter/tsgoLimitation",
+    "producer": "LSPX11",
+    "acceptance": "LSPX11-AC5",
+    "payload": ["operation", "feature", "file", "framework"],
+    "deduplicateBy": ["operation", "project"],
+    "rule": "If TypeInfo refuses a required fact and tsgo --api lacks the operation, publish Unavailable(tsgoLimitation: operation); never parse typeToString or certify Complete.",
+    "operations": [
+      {
+        "id": "getPropertiesOfType",
+        "fact": "props member enumeration"
+      },
+      {
+        "id": "getSignaturesOfType",
+        "fact": "callback signature and parameter enumeration"
+      }
+    ]
+  },
+  "excludedHosts": [
+    {
+      "id": "typescript-plugin",
+      "reason": "compatibility only; no Preact enhancement cells"
+    },
+    {
+      "id": "build",
+      "reason": "excluded; no preset modification"
+    },
+    {
+      "id": "runtime",
+      "reason": "excluded; no execution"
+    }
+  ]
+}
