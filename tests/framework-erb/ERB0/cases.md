@@ -28,6 +28,7 @@ Products: `erb-version-lock.json` (V), `erb-capability-matrix.json` (M),
 | P14 | V | `<%-` / `-%>` applicability omits `%-` | both `-` and `%-` recognise the trim delimiters |
 | P15 | V | implicit Erubi trimming drops leading whitespace without a following newline | leading whitespace at EOF must be preserved |
 | P16 | V | Action View `text/plain` escaping inverts `<%=` and `<%==` | both forms are raw under Action View's adapter |
+| P17 | V | `erb.erb-6.0.7` names `actionview-8.1.4` as `hostRelease` | fabricated host: this standalone profile has no Action View host; `hostRelease` must be null |
 
 ## ERB0-AC2 — owned matrix (`ERB0-matrix`)
 
@@ -90,6 +91,7 @@ Products: `erb-version-lock.json` (V), `erb-capability-matrix.json` (M),
 | OK4 | Every coexistence `operation` exists in the matrix. |
 | OK5 | With neither actionview nor erubi present, resolved `erb 6.0.7` selects `erb.erb-6.0.7` and retains release `erb-6.0.7`; `erb 6.0.8` is unsupported. |
 | OK6 | Resolved `actionview 8.1.4` with `erubi 1.13.1` selects `erb.erubi-1.13.1` and retains both exact releases; standalone `erubi 1.13.1` selects that engine profile with escaping unknown. |
+| OK7 | `erb.erb-6.0.7` has `hostRelease: null`; `erb.erubi-1.13.1` retains `hostRelease: actionview-8.1.4`. |
 
 ## Boundary controls for the deferred validator and scanner corpus
 

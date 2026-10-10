@@ -76,7 +76,7 @@
     {
       "id": "erb.erb-6.0.7",
       "engineRelease": "erb-6.0.7",
-      "hostRelease": "actionview-8.1.4",
+      "hostRelease": null,
       "hostRelation": "Action View 8.1 does not compile templates with this engine; the profile is selected only when the lockfile resolves erb and neither actionview nor erubi, or an explicit on names it",
       "selectedWhen": "the package's Gemfile.lock resolves erb 6.0.7 and resolves neither actionview nor erubi, or an explicit on names this profile",
       "tags": [

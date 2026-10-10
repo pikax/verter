@@ -176,7 +176,7 @@ moves unchanged to ERB1G (`ERB1G-ACV`).
 
 | Item | Met by | Planted rows |
 | ---- | ------ | ------------ |
-| `ERB0-AC1` pinned profiles | `erb-version-lock.json` | `P01`–`P16` |
+| `ERB0-AC1` pinned profiles | `erb-version-lock.json` | `P01`–`P17` |
 | `ERB0-AC2` owned matrix | `erb-capability-matrix.json` | `M01`–`M14` |
 | `ERB0-AC3` activation and associations | `erb-activation-policy.json` | `A01`–`A15` |
 | `ERB0-AC4` coexistence declared | `erb-coexistence.json` | `C01`–`C07` |
