@@ -1,0 +1,836 @@
+{
+  "schema": "GlimmerCapabilityMatrix",
+  "version": 1,
+  "product": "GlimmerCapabilityMatrix",
+  "node": "GLM0",
+  "kind": "lock",
+  "describesHead": {
+    "title": "docs(arch): define the compiler request, policy and stage identity (#819)",
+    "date": "2026-10-09"
+  },
+  "profiles": [
+    {
+      "id": "strict-gjs",
+      "carrier": ".gjs",
+      "mode": "strict",
+      "hostScript": "js",
+      "release": "ember-source-6.12"
+    },
+    {
+      "id": "strict-gts",
+      "carrier": ".gts",
+      "mode": "strict",
+      "hostScript": "ts",
+      "release": "ember-source-6.12"
+    },
+    {
+      "id": "colocated-hbs",
+      "carrier": ".hbs beside a Glimmer component class, or template-only",
+      "mode": "loose",
+      "hostScript": "the owning .ts/.js class",
+      "release": "ember-source-6.12"
+    }
+  ],
+  "hosts": [
+    {
+      "id": "tsgo",
+      "rule": "host-script and template-expression features through the Verter LSP TypeProvider tsgo routes, shared first then managed, over the GLM6 companion"
+    },
+    {
+      "id": "lsp-enhancement",
+      "rule": "carrier-only operations the TS projection cannot carry; never re-provides a tsgo/TS answer; answered only where LSPX11 owns(capability, position) resolves to Verter"
+    },
+    {
+      "id": "verter-substrate",
+      "rule": "facts contributed through shared kernel interfaces (TypeInfo, IDX, LNT/LRA, formatter); not an editor host"
+    },
+    {
+      "id": "tsserver-carrier-store",
+      "rule": "the existing carrier-generic carrier-store path of packages/typescript-plugin; compatibility only"
+    },
+    {
+      "id": "unsupported",
+      "rule": "a facet or operation that is structurally unavailable; reported UNSUPPORTED with a reason"
+    }
+  ],
+  "parserDecisions": [
+    {
+      "sublanguage": "glimmer-template",
+      "scope": ".hbs files and <template> content in .gjs/.gts",
+      "decision": "NewParser",
+      "home": "H05 crates/verter_glimmer_syntax",
+      "owner": "GLM1",
+      "acceptance": [
+        "GLM1-AC1",
+        "GLM1-AC2"
+      ],
+      "par0Row": "CL14",
+      "rationale": "mustaches, blocks, block params, named blocks, modifiers, sub-expressions and whitespace control occur inside element and attribute positions, so a fork of the HWC1 tokenizer would need Glimmer tokenization in every HTML state; one dedicated lossless frontend owns element content and mustaches together (PD06 forbids a shared HTML-family parser)"
+    },
+    {
+      "sublanguage": "gjs-gts-host-script",
+      "scope": ".gjs/.gts outside the <template> ranges",
+      "decision": "Reuse",
+      "home": "CL01 OXC",
+      "owner": "GLM1M",
+      "acceptance": [
+        "GLM1M-AC1"
+      ],
+      "rationale": "the host script is JavaScript/TypeScript and goes to OXC once the <template> ranges are attached"
+    },
+    {
+      "sublanguage": "template-tag-ranges",
+      "scope": "<template> range discovery in .gjs/.gts",
+      "decision": "NewParser",
+      "home": "H05 crates/verter_glimmer_syntax",
+      "owner": "GLM1M",
+      "acceptance": [
+        "GLM1M-AC1",
+        "GLM1M-AC2"
+      ],
+      "rationale": "the carrier parser is the only owner of carrier geometry; content-tag is an oracle only"
+    },
+    {
+      "sublanguage": "css",
+      "scope": "none",
+      "decision": "not-applicable",
+      "rationale": "core Glimmer has no style blocks; class and id bindings only (GLM7)"
+    }
+  ],
+  "oraclesOnly": [
+    "@glimmer/syntax",
+    "content-tag",
+    "@glint/ember-tsc",
+    "@glint/template",
+    "@glint/tsserver-plugin",
+    "ember-template-lint",
+    "eslint-plugin-ember"
+  ],
+  "displacedRoutes": [
+    {
+      "route": ".gjs/.gts unknown-extension fallback to FileLanguage::script_ts()",
+      "today": "OXC parses the whole file as TypeScript and fails at <template>",
+      "closedBy": {
+        "node": "GLM10",
+        "acceptance": "GLM10-AC4"
+      },
+      "replacedBy": "GLM1M attachment in active packages; inactive packages keep the script route (GLM1M-AC5)"
+    },
+    {
+      "route": "no Glimmer LanguageRow, CarrierGrammarConfig variant or FrameworkTag value",
+      "today": "Glimmer is unregistered",
+      "closedBy": {
+        "node": "GLM1",
+        "acceptance": "GLM1-AC6"
+      }
+    },
+    {
+      "route": "former BND build-output bridge",
+      "today": "no such route exists in this tree; the plan replaces the claim",
+      "closedBy": {
+        "node": "GLM6",
+        "acceptance": "GLM6-AC1"
+      },
+      "replacedBy": "the GLM6 TS-host projection"
+    }
+  ],
+  "baseline": [
+    "crates/verter_language/src/carrier_grammar.rs: CarrierGrammarConfig has Vue and Svelte variants only",
+    "crates/verter_language/src/language.rs: FileLanguage::script_ts() is the catch-all for unknown extensions, so .gjs/.gts route as TypeScript scripts",
+    "crates/verter_language/src/language.rs: FileLanguage::FrameworkTemplate exists for owned external templates",
+    "crates/verter_protocol/proto/verter/v1/typeinfo.proto: FrameworkTag has NONE 0, VUE 1, SVELTE 2, REACT 3, SOLID 4, OPEN_CANONICAL 5 and no Ember/Glimmer value",
+    "crates/verter_session/src/framework/registry.rs: tag_disposition returns None for NONE and OPEN_CANONICAL"
+  ],
+  "productEvidenceRule": "a cell is satisfied only by its receiving acceptance's own proof; an installed parser, Glint, an oracle package or syntax highlighting (GLM1G) is never product evidence",
+  "rows": [
+    {
+      "op": "carrier-parse",
+      "host": "verter-substrate",
+      "sublanguage": "glimmer-template",
+      "cells": {
+        "strict-gjs": {
+          "producer": "GLM1",
+          "acceptance": "GLM1-AC1"
+        },
+        "strict-gts": {
+          "producer": "GLM1",
+          "acceptance": "GLM1-AC1"
+        },
+        "colocated-hbs": {
+          "producer": "GLM1",
+          "acceptance": "GLM1-AC1"
+        }
+      }
+    },
+    {
+      "op": "carrier-recovery",
+      "host": "verter-substrate",
+      "sublanguage": "glimmer-template",
+      "cells": {
+        "strict-gjs": {
+          "producer": "GLM1",
+          "acceptance": "GLM1-AC2"
+        },
+        "strict-gts": {
+          "producer": "GLM1",
+          "acceptance": "GLM1-AC2"
+        },
+        "colocated-hbs": {
+          "producer": "GLM1",
+          "acceptance": "GLM1-AC2"
+        }
+      }
+    },
+    {
+      "op": "region-attachment-and-maps",
+      "host": "verter-substrate",
+      "cells": {
+        "strict-gjs": {
+          "producer": "GLM1M",
+          "acceptance": "GLM1M-AC1"
+        },
+        "strict-gts": {
+          "producer": "GLM1M",
+          "acceptance": "GLM1M-AC1"
+        },
+        "colocated-hbs": {
+          "producer": "GLM1M",
+          "acceptance": "GLM1M-AC4"
+        }
+      }
+    },
+    {
+      "op": "syntax-diagnostics",
+      "host": "lsp-enhancement",
+      "cells": {
+        "strict-gjs": {
+          "producer": "GLM1S",
+          "acceptance": "GLM1S-AC1"
+        },
+        "strict-gts": {
+          "producer": "GLM1S",
+          "acceptance": "GLM1S-AC1"
+        },
+        "colocated-hbs": {
+          "producer": "GLM1S",
+          "acceptance": "GLM1S-AC1"
+        }
+      }
+    },
+    {
+      "op": "document-symbols",
+      "host": "lsp-enhancement",
+      "cells": {
+        "strict-gjs": {
+          "producer": "GLM1S",
+          "acceptance": "GLM1S-AC2"
+        },
+        "strict-gts": {
+          "producer": "GLM1S",
+          "acceptance": "GLM1S-AC2"
+        },
+        "colocated-hbs": {
+          "producer": "GLM1S",
+          "acceptance": "GLM1S-AC2"
+        }
+      }
+    },
+    {
+      "op": "folding-and-selection-ranges",
+      "host": "lsp-enhancement",
+      "cells": {
+        "strict-gjs": {
+          "producer": "GLM1S",
+          "acceptance": "GLM1S-AC3"
+        },
+        "strict-gts": {
+          "producer": "GLM1S",
+          "acceptance": "GLM1S-AC3"
+        },
+        "colocated-hbs": {
+          "producer": "GLM1S",
+          "acceptance": "GLM1S-AC3"
+        }
+      }
+    },
+    {
+      "op": "carrier-semantic-tokens",
+      "host": "lsp-enhancement",
+      "note": "carrier syntax only; TS/JS regions get no Verter token",
+      "cells": {
+        "strict-gjs": {
+          "producer": "GLM1S",
+          "acceptance": "GLM1S-AC4"
+        },
+        "strict-gts": {
+          "producer": "GLM1S",
+          "acceptance": "GLM1S-AC4"
+        },
+        "colocated-hbs": {
+          "producer": "GLM1S",
+          "acceptance": "GLM1S-AC4"
+        }
+      }
+    },
+    {
+      "op": "ts-diagnostics",
+      "host": "tsgo",
+      "tsgoOperations": [
+        "diagnostics"
+      ],
+      "route": "TsgoCompositeProvider: TsgoSharedProvider first, then TsgoOwnedBackend, over the GLM6 companion; map-back through ProviderPositionMapper with generated-only spans suppressed",
+      "cells": {
+        "strict-gjs": {
+          "producer": "GLM6",
+          "acceptance": "GLM6-AC1"
+        },
+        "strict-gts": {
+          "producer": "GLM6",
+          "acceptance": "GLM6-AC1"
+        },
+        "colocated-hbs": {
+          "producer": "GLM6",
+          "acceptance": "GLM6-AC1"
+        }
+      }
+    },
+    {
+      "op": "ts-hover",
+      "host": "tsgo",
+      "tsgoOperations": [
+        "hover"
+      ],
+      "route": "TsgoCompositeProvider: TsgoSharedProvider first, then TsgoOwnedBackend, over the GLM6 companion; map-back through ProviderPositionMapper with generated-only spans suppressed",
+      "cells": {
+        "strict-gjs": {
+          "producer": "GLM5",
+          "acceptance": "GLM5-AC1"
+        },
+        "strict-gts": {
+          "producer": "GLM5",
+          "acceptance": "GLM5-AC1"
+        },
+        "colocated-hbs": {
+          "producer": "GLM5",
+          "acceptance": "GLM5-AC1"
+        }
+      }
+    },
+    {
+      "op": "ts-completion",
+      "host": "tsgo",
+      "tsgoOperations": [
+        "completion"
+      ],
+      "route": "TsgoCompositeProvider: TsgoSharedProvider first, then TsgoOwnedBackend, over the GLM6 companion; map-back through ProviderPositionMapper with generated-only spans suppressed",
+      "cells": {
+        "strict-gjs": {
+          "producer": "GLM5",
+          "acceptance": "GLM5-AC1"
+        },
+        "strict-gts": {
+          "producer": "GLM5",
+          "acceptance": "GLM5-AC1"
+        },
+        "colocated-hbs": {
+          "producer": "GLM5",
+          "acceptance": "GLM5-AC1"
+        }
+      }
+    },
+    {
+      "op": "ts-definition",
+      "host": "tsgo",
+      "tsgoOperations": [
+        "definition"
+      ],
+      "route": "TsgoCompositeProvider: TsgoSharedProvider first, then TsgoOwnedBackend, over the GLM6 companion; map-back through ProviderPositionMapper with generated-only spans suppressed",
+      "cells": {
+        "strict-gjs": {
+          "producer": "GLM5",
+          "acceptance": "GLM5-AC1"
+        },
+        "strict-gts": {
+          "producer": "GLM5",
+          "acceptance": "GLM5-AC1"
+        },
+        "colocated-hbs": {
+          "producer": "GLM5",
+          "acceptance": "GLM5-AC1"
+        }
+      }
+    },
+    {
+      "op": "ts-references",
+      "host": "tsgo",
+      "tsgoOperations": [
+        "references"
+      ],
+      "route": "TsgoCompositeProvider: TsgoSharedProvider first, then TsgoOwnedBackend, over the GLM6 companion; map-back through ProviderPositionMapper with generated-only spans suppressed",
+      "cells": {
+        "strict-gjs": {
+          "producer": "GLM5",
+          "acceptance": "GLM5-AC2"
+        },
+        "strict-gts": {
+          "producer": "GLM5",
+          "acceptance": "GLM5-AC2"
+        },
+        "colocated-hbs": {
+          "producer": "GLM5",
+          "acceptance": "GLM5-AC2"
+        }
+      }
+    },
+    {
+      "op": "ts-rename",
+      "host": "tsgo",
+      "tsgoOperations": [
+        "rename"
+      ],
+      "route": "TsgoCompositeProvider: TsgoSharedProvider first, then TsgoOwnedBackend, over the GLM6 companion; map-back through ProviderPositionMapper with generated-only spans suppressed",
+      "note": "tsgo computes the locations; a generated-only location refuses the whole rename",
+      "cells": {
+        "strict-gjs": {
+          "producer": "GLM5R",
+          "acceptance": "GLM5R-AC3"
+        },
+        "strict-gts": {
+          "producer": "GLM5R",
+          "acceptance": "GLM5R-AC3"
+        },
+        "colocated-hbs": {
+          "producer": "GLM5R",
+          "acceptance": "GLM5R-AC3"
+        }
+      }
+    },
+    {
+      "op": "ts-import-surface",
+      "host": "tsgo",
+      "tsgoOperations": [
+        "definition",
+        "hover",
+        "diagnostics"
+      ],
+      "route": "TsgoCompositeProvider: TsgoSharedProvider first, then TsgoOwnedBackend, over the GLM6 companion; map-back through ProviderPositionMapper with generated-only spans suppressed",
+      "note": "import Card from './card.gts' types Card as its Component<Signature>",
+      "cells": {
+        "strict-gjs": {
+          "producer": "GLM6",
+          "acceptance": "GLM6-AC3"
+        },
+        "strict-gts": {
+          "producer": "GLM6",
+          "acceptance": "GLM6-AC3"
+        },
+        "colocated-hbs": {
+          "exclusion": "not-applicable",
+          "reason": "a co-located .hbs is not an importable module; its class is imported through its .ts/.js owner"
+        }
+      }
+    },
+    {
+      "op": "companion-sync-and-binding",
+      "host": "tsgo",
+      "tsgoOperations": [
+        "source files"
+      ],
+      "route": "tsgo/carrier_sync.rs + ProjectBinding",
+      "cells": {
+        "strict-gjs": {
+          "producer": "GLM6",
+          "acceptance": "GLM6-AC4"
+        },
+        "strict-gts": {
+          "producer": "GLM6",
+          "acceptance": "GLM6-AC4"
+        },
+        "colocated-hbs": {
+          "producer": "GLM6",
+          "acceptance": "GLM6-AC4"
+        }
+      }
+    },
+    {
+      "op": "element-and-attribute-completion",
+      "host": "lsp-enhancement",
+      "cells": {
+        "strict-gjs": {
+          "producer": "GLM5",
+          "acceptance": "GLM5-AC3"
+        },
+        "strict-gts": {
+          "producer": "GLM5",
+          "acceptance": "GLM5-AC3"
+        },
+        "colocated-hbs": {
+          "producer": "GLM5",
+          "acceptance": "GLM5-AC3"
+        }
+      }
+    },
+    {
+      "op": "named-block-completion",
+      "host": "lsp-enhancement",
+      "note": "from GLM3 Signature['Blocks']",
+      "cells": {
+        "strict-gjs": {
+          "producer": "GLM5",
+          "acceptance": "GLM5-AC3"
+        },
+        "strict-gts": {
+          "producer": "GLM5",
+          "acceptance": "GLM5-AC3"
+        },
+        "colocated-hbs": {
+          "producer": "GLM5",
+          "acceptance": "GLM5-AC3"
+        }
+      }
+    },
+    {
+      "op": "block-and-modifier-name-completion",
+      "host": "lsp-enhancement",
+      "note": "only where the projection cannot carry it",
+      "cells": {
+        "strict-gjs": {
+          "producer": "GLM5",
+          "acceptance": "GLM5-AC3"
+        },
+        "strict-gts": {
+          "producer": "GLM5",
+          "acceptance": "GLM5-AC3"
+        },
+        "colocated-hbs": {
+          "producer": "GLM5",
+          "acceptance": "GLM5-AC3"
+        }
+      }
+    },
+    {
+      "op": "auto-close",
+      "host": "lsp-enhancement",
+      "route": "features/carriers/glimmer.rs through the REG0 auto_close_tag.rs dispatch",
+      "cells": {
+        "strict-gjs": {
+          "producer": "GLM5",
+          "acceptance": "GLM5-AC3"
+        },
+        "strict-gts": {
+          "producer": "GLM5",
+          "acceptance": "GLM5-AC3"
+        },
+        "colocated-hbs": {
+          "producer": "GLM5",
+          "acceptance": "GLM5-AC3"
+        }
+      }
+    },
+    {
+      "op": "component-tag-definition",
+      "host": "tsgo",
+      "tsgoOperations": [
+        "definition",
+        "references"
+      ],
+      "route": "TsgoCompositeProvider: TsgoSharedProvider first, then TsgoOwnedBackend, over the GLM6 companion; map-back through ProviderPositionMapper with generated-only spans suppressed",
+      "cells": {
+        "strict-gjs": {
+          "producer": "GLM5",
+          "acceptance": "GLM5-AC1"
+        },
+        "strict-gts": {
+          "producer": "GLM5",
+          "acceptance": "GLM5-AC1"
+        },
+        "colocated-hbs": {
+          "exclusion": "other-host",
+          "reason": "loose-mode resolver names have no TS correlate; answered by the loose-resolver-name-navigation row"
+        }
+      }
+    },
+    {
+      "op": "loose-resolver-name-navigation",
+      "host": "lsp-enhancement",
+      "note": "conditional facts from GLM2; never definite",
+      "cells": {
+        "strict-gjs": {
+          "exclusion": "not-applicable",
+          "reason": "strict mode resolves lexically; tsgo answers through the projected import"
+        },
+        "strict-gts": {
+          "exclusion": "not-applicable",
+          "reason": "strict mode resolves lexically; tsgo answers through the projected import"
+        },
+        "colocated-hbs": {
+          "producer": "GLM5",
+          "acceptance": "GLM5-AC4"
+        }
+      }
+    },
+    {
+      "op": "carrier-rename",
+      "host": "lsp-enhancement",
+      "note": "named blocks, block params and definite loose component names as LSO8 edit plans",
+      "cells": {
+        "strict-gjs": {
+          "producer": "GLM5R",
+          "acceptance": "GLM5R-AC1"
+        },
+        "strict-gts": {
+          "producer": "GLM5R",
+          "acceptance": "GLM5R-AC1"
+        },
+        "colocated-hbs": {
+          "producer": "GLM5R",
+          "acceptance": "GLM5R-AC1"
+        }
+      }
+    },
+    {
+      "op": "semantic-binding-facts",
+      "host": "verter-substrate",
+      "cells": {
+        "strict-gjs": {
+          "producer": "GLM2",
+          "acceptance": "GLM2-AC1"
+        },
+        "strict-gts": {
+          "producer": "GLM2",
+          "acceptance": "GLM2-AC1"
+        },
+        "colocated-hbs": {
+          "producer": "GLM2",
+          "acceptance": "GLM2-AC3"
+        }
+      }
+    },
+    {
+      "op": "component-facet-props",
+      "host": "verter-substrate",
+      "facet": "props",
+      "provenance": "native",
+      "source": "Signature['Args']",
+      "cells": {
+        "strict-gjs": {
+          "producer": "GLM3",
+          "acceptance": "GLM3-AC1"
+        },
+        "strict-gts": {
+          "producer": "GLM3",
+          "acceptance": "GLM3-AC1"
+        },
+        "colocated-hbs": {
+          "producer": "GLM3",
+          "acceptance": "GLM3-AC1"
+        }
+      }
+    },
+    {
+      "op": "component-facet-slots",
+      "host": "verter-substrate",
+      "facet": "slots",
+      "provenance": "native",
+      "source": "Signature['Blocks']",
+      "cells": {
+        "strict-gjs": {
+          "producer": "GLM3",
+          "acceptance": "GLM3-AC1"
+        },
+        "strict-gts": {
+          "producer": "GLM3",
+          "acceptance": "GLM3-AC1"
+        },
+        "colocated-hbs": {
+          "producer": "GLM3",
+          "acceptance": "GLM3-AC1"
+        }
+      }
+    },
+    {
+      "op": "component-facet-events",
+      "host": "verter-substrate",
+      "facet": "events",
+      "provenance": "derived(callback-arg)",
+      "source": "function-typed Signature['Args'] members",
+      "cells": {
+        "strict-gjs": {
+          "producer": "GLM3",
+          "acceptance": "GLM3-AC3"
+        },
+        "strict-gts": {
+          "producer": "GLM3",
+          "acceptance": "GLM3-AC3"
+        },
+        "colocated-hbs": {
+          "producer": "GLM3",
+          "acceptance": "GLM3-AC3"
+        }
+      }
+    },
+    {
+      "op": "component-facet-expose",
+      "host": "unsupported",
+      "facet": "expose",
+      "cells": {
+        "strict-gjs": {
+          "producer": "GLM3",
+          "acceptance": "GLM3-AC4",
+          "outcome": "UNSUPPORTED",
+          "reason": "Glimmer components have no imperative-handle surface; reported UNSUPPORTED, never empty"
+        },
+        "strict-gts": {
+          "producer": "GLM3",
+          "acceptance": "GLM3-AC4",
+          "outcome": "UNSUPPORTED",
+          "reason": "Glimmer components have no imperative-handle surface; reported UNSUPPORTED, never empty"
+        },
+        "colocated-hbs": {
+          "producer": "GLM3",
+          "acceptance": "GLM3-AC4",
+          "outcome": "UNSUPPORTED",
+          "reason": "Glimmer components have no imperative-handle surface; reported UNSUPPORTED, never empty"
+        }
+      }
+    },
+    {
+      "op": "element-root-fact",
+      "host": "verter-substrate",
+      "source": "Signature['Element']",
+      "note": "the ...attributes splattributes target consumed by GLM7",
+      "cells": {
+        "strict-gjs": {
+          "producer": "GLM7",
+          "acceptance": "GLM7-AC1"
+        },
+        "strict-gts": {
+          "producer": "GLM7",
+          "acceptance": "GLM7-AC1"
+        },
+        "colocated-hbs": {
+          "producer": "GLM7",
+          "acceptance": "GLM7-AC1"
+        }
+      }
+    },
+    {
+      "op": "framework-semantics-facts",
+      "host": "verter-substrate",
+      "cells": {
+        "strict-gjs": {
+          "producer": "GLM4",
+          "acceptance": "GLM4-AC1"
+        },
+        "strict-gts": {
+          "producer": "GLM4",
+          "acceptance": "GLM4-AC1"
+        },
+        "colocated-hbs": {
+          "producer": "GLM4",
+          "acceptance": "GLM4-AC1"
+        }
+      }
+    },
+    {
+      "op": "style-and-accessibility-facts",
+      "host": "verter-substrate",
+      "cells": {
+        "strict-gjs": {
+          "producer": "GLM7",
+          "acceptance": "GLM7-AC3"
+        },
+        "strict-gts": {
+          "producer": "GLM7",
+          "acceptance": "GLM7-AC3"
+        },
+        "colocated-hbs": {
+          "producer": "GLM7",
+          "acceptance": "GLM7-AC3"
+        }
+      }
+    },
+    {
+      "op": "lint-host",
+      "host": "verter-substrate",
+      "note": "rule populations live in lint.ember (LEM1-LEM10)",
+      "cells": {
+        "strict-gjs": {
+          "producer": "GLM8",
+          "acceptance": "GLM8-AC2"
+        },
+        "strict-gts": {
+          "producer": "GLM8",
+          "acceptance": "GLM8-AC2"
+        },
+        "colocated-hbs": {
+          "producer": "GLM8",
+          "acceptance": "GLM8-AC2"
+        }
+      }
+    },
+    {
+      "op": "format",
+      "host": "verter-substrate",
+      "cells": {
+        "strict-gjs": {
+          "producer": "GLM8F",
+          "acceptance": "GLM8F-AC1"
+        },
+        "strict-gts": {
+          "producer": "GLM8F",
+          "acceptance": "GLM8F-AC1"
+        },
+        "colocated-hbs": {
+          "producer": "GLM8F",
+          "acceptance": "GLM8F-AC1"
+        }
+      }
+    },
+    {
+      "op": "tsserver-plugin-compatibility",
+      "host": "tsserver-carrier-store",
+      "note": "the existing carrier-generic carrier-store path only; never the host of a feature",
+      "cells": {
+        "strict-gjs": {
+          "producer": "GLM6",
+          "acceptance": "GLM6-AC7"
+        },
+        "strict-gts": {
+          "producer": "GLM6",
+          "acceptance": "GLM6-AC7"
+        },
+        "colocated-hbs": {
+          "producer": "GLM6",
+          "acceptance": "GLM6-AC7"
+        }
+      }
+    }
+  ],
+  "exclusions": [
+    {
+      "op": "build-output-consumption",
+      "reason": "Embroider/ember-cli build output and its source maps are not consumed; no BND bridge (ruling 4). GLM6 is the TS-host projection."
+    },
+    {
+      "op": "debug-test-preview-maps",
+      "reason": "no DBG/TST/WPF map is promised over Ember build output (ruling 4)."
+    },
+    {
+      "op": "runtime-execution",
+      "reason": "no rendering, hydration, dev server or execution of Ember code or config (framework-common)."
+    },
+    {
+      "op": "glint-language-server-host",
+      "reason": "Glint's own language server is never the host; Glint is a GLM9 oracle only (decision 4)."
+    },
+    {
+      "op": "tsserver-host",
+      "reason": "tsserver is never the host of a Glimmer feature; it gets only the carrier-store path (decision 4)."
+    },
+    {
+      "op": "classic-mode-profiles",
+      "reason": "classic components, classic classes, {{action}}/{{mut}}, implicit-this fallback and pre-Octane resolution are reported unsupported with a reason, never a profile (decision 1)."
+    }
+  ]
+}
