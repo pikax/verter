@@ -128,5 +128,5 @@ PRE0-AC1 through PRE0-AC4 are satisfied here by reviewed products and
 `cases.md`, not executable acceptance claims. PRE1-ACV receives all lock
 rejection proofs. No existing route is displaced, so the deletion set is empty.
 Runtime, cold/warm cache, cancellation and map tests are not applicable to a
-data-only change. The narrow CI-inert classification covers only this JSON and
-prose; future executable specs still require their discovery/CI owner.
+data-only change. CI path classification belongs to the CI owner; future
+executable specs still require their discovery/CI owner.
