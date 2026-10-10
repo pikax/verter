@@ -1,0 +1,53 @@
+{
+  "schema": "StencilHostTable",
+  "version": 1,
+  "family": "stencil",
+  "hosts": [
+    {
+      "id": "lsp-enhancement",
+      "server": "crates/verter_lsp",
+      "seam": "LSPX11",
+      "profile": "stencil-tsx",
+      "matrixCells": [
+        "literal-rename",
+        "attribute-rename",
+        "tag-hover",
+        "tag-definition",
+        "watch-definition",
+        "listen-definition",
+        "framework-diagnostics",
+        "cem-projection"
+      ],
+      "selection": "owns(capability, position): tsgo position probe, COXD2, user capability setting; Unknown means Verter owns",
+      "response": "Only Stencil additions; ordinary TS results stay with tsgo"
+    }
+  ],
+  "tsgo": {
+    "owner": "crates/verter_tsgo_api",
+    "available": [
+      "getTypeAtPosition",
+      "getSymbolAtPosition",
+      "typeToString",
+      "diagnostics",
+      "sourceFiles"
+    ],
+    "typeToString": "Display only; never parse to recover semantic facts"
+  },
+  "limitations": [
+    {
+      "id": "eventEmitterTypeArgument",
+      "operation": "typeArguments",
+      "trigger": "TypeInfo refuses the EventEmitter<T> payload and tsgo --api cannot supply its type argument",
+      "outcome": "Unavailable(tsgoLimitation: typeArguments)",
+      "notification": "$/verter/tsgoLimitation",
+      "deduplication": "once per operation and project through LSPX11",
+      "producer": "STN3",
+      "acceptance": "STN3-AC4",
+      "deliveryProducer": "STN5",
+      "deliveryAcceptance": "STN5-AC4"
+    }
+  ],
+  "facetQuality": "Authoritative facet provenance does not certify an unresolved member type: preserve Approximate, conditional, unknown, Unavailable, refusal, cancellation and partial status",
+  "consumerPolicy": "Client merge capability must be verified by LSPX11; this contract does not certify multi-server result merging",
+  "excludedHosts": ["typescript-plugin", "stencil-build", "stencil-runtime"]
+}
