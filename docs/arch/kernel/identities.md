@@ -34,7 +34,7 @@ their owners; VID0 only refines or references them.
 | `I01` | `SourceUnitId` | stable lineage: `SourceId` plus logical role | imported (B4R0 repair, seam `S08`) | `verter_identity` |
 | `I02` | `SourceRevision`, `ContentId`, `MapRevision` | exact version, bytes, map construction | imported | `verter_identity` |
 | `I03` | `CarrierProfileId` | syntax carrier: bytes, geometry, parse, recovery | new | VID0T (`VID0T-AC1`) |
-| `I04` | `ReleaseId` | one exact semantic release, one per manifest | new | VID0T (`VID0T-AC2`) |
+| `I04` | `ReleaseId` | one exact semantic release; one per profile manifest, none on a carrier manifest | new | VID0T (`VID0T-AC2`) |
 | `I05` | `FrameworkProfileId` | meaning of one exact release over its carriers | new | VID0T (`VID0T-AC1`) |
 | `I06` | `AttachmentId`, `RegionId` | one semantic claim on one addressed region of a unit | new | VID0T (`VID0T-AC1`) |
 | `I07` | `ProjectProfileId` | project-profile overlay | new | VID0T (`VID0T-AC1`) |
@@ -82,8 +82,10 @@ never contains. The short form:
 
 ### Exact release
 
-- **R04.** One manifest declares exactly one release. Two releases, or a
-  versions array, in one manifest is a structural failure.
+- **R04.** One semantic-profile or project-profile manifest declares exactly
+  one release. A carrier manifest declares none: a carrier identity contains
+  no `ReleaseId` (`I03`) and stays equal when the release changes (`R02`).
+  Two releases, or a versions array, in one manifest is a structural failure.
 - **R05.** Separate majors are separate manifests and separate semantic
   profiles. They never share a profile, a cache key or a vocabulary table.
 - **R06.** There is no implicit default major. A release that does not resolve
