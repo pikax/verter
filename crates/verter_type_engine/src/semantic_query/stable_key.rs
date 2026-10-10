@@ -1947,7 +1947,6 @@ fn encode_query_error(enc: &mut Recipe, err: &QueryError) {
         QueryError::BudgetExceeded(_) => 3,
         QueryError::Cancelled => 4,
         QueryError::UnstableState { .. } => 5,
-        QueryError::SignatureOverflow => 6,
         QueryError::ForeignSemanticOperand => 7,
         QueryError::StaleSemanticOperand => 8,
         QueryError::IncompleteSemanticOperand { .. } => 9,

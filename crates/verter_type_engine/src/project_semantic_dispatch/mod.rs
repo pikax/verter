@@ -2743,10 +2743,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// **Build-output threading.** On `FactReadSetFinalise::Ok`, the
     /// self-version-rooted carrier is stored on
     /// `QueryBuildOutput.graph_carrier` so `warm_publish_one` records
-    /// it verbatim onto the `MemoEntry`. On
-    /// `FactReadSetFinalise::Overflow`, the build output is marked
-    /// `cache_suppress = true` so the memo refuses to publish the
-    /// entry — the caller cold-recomputes on the next request.
+    /// it verbatim onto the `MemoEntry`. On a refusing outcome, the build
+    /// output is marked `cache_suppress = true` so the memo refuses to
+    /// publish the entry — the caller cold-recomputes on the next request.
     //
     // arch-guard:single-acquire-query-call — the helper holds the only
     // production `graph.acquire_query(` call site. The
@@ -2762,8 +2761,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// cheap probe and returns `(key, CarrierNormalizationPrelude::none())` with
     /// NO tracer allocation. The carrier case installs a tracer around
     /// [`Self::normalize_carrier_subject_key`], finalises it, and records the
-    /// traced facts plus whether the prelude overflowed / observed a fenced
-    /// serve (either ⇒ `cache_suppress`).
+    /// traced facts plus whether the prelude was mutation-unstable / observed
+    /// a fenced serve (either ⇒ `cache_suppress`).
     ///
     /// Re-entrancy is sound: nested dispatch inside the normalization installs
     /// its OWN tracer (a TLS stack), and tracer fan-out records into every
@@ -2833,11 +2832,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 cache_suppress: true,
                 partial_reasons,
             },
-            // An overflowed OR mutation-unstable prelude yields no fact
-            // list the rewrite can be soundly rooted on, so both suppress
-            // caching (the value still flows; the memo refuses).
-            verter_session_query::facts::fact_read_set::FactReadSetFinalise::Overflow
-            | verter_session_query::facts::fact_read_set::FactReadSetFinalise::MutationUnstable => {
+            // A mutation-unstable prelude yields no fact list the rewrite
+            // can be soundly rooted on, so it suppresses caching (the value
+            // still flows; the memo refuses).
+            verter_session_query::facts::fact_read_set::FactReadSetFinalise::MutationUnstable => {
                 CarrierNormalizationPrelude {
                     facts: None,
                     cache_suppress: true,
@@ -2974,7 +2972,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         build_local: BuildLocalTaint,
         finalise: verter_session_query::facts::fact_read_set::FactReadSetFinalise,
         carrier_prelude: &CarrierNormalizationPrelude,
-        evidence_target_key: Option<&SemanticQueryKey>,
         key: &SemanticQueryKey,
     ) -> (
         crate::project_semantic_dispatch::walk::QueryBuildOutput<SemanticQueryValue>,
@@ -3019,24 +3016,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         provenance
             .memo_entry_fact_tracer_installs
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        // `true` only for the exact build an active force targets —
-        // never a nested build reached underneath it, and never an
-        // unrelated caller's build (see `evidence_target_key` above and
-        // `finalise_traced_build_output`'s parameter doc).
-        let operand_force_active = evidence_target_key.is_some_and(|target| {
-            self.active_operand_evidence
-                .borrow()
-                .iter()
-                .any(|(entry, _)| entry == target)
-        });
-        finalise_rooted_build_output(
-            self.ctx,
-            output,
-            finalise,
-            provenance,
-            carrier_prelude,
-            operand_force_active,
-        )
+        finalise_rooted_build_output(self.ctx, output, finalise, carrier_prelude)
     }
 
     /// Attribute one query read by its key's kind and whether a cold build
@@ -3523,7 +3503,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // entry's read-set or a memoized resolved key could be admitted whose
         // rewrite depended on UNTRACKED state (cache poisoning). The non-carrier
         // common case allocates NO tracer. The captured facts merge into the
-        // build admission's signature; an overflowed / fenced-serve prelude
+        // build admission's signature; a mutation-unstable / fenced-serve prelude
         // suppresses caching (the value still flows, the memo refuses).
         let (key, carrier_prelude) = self.trace_carrier_subject_normalization_if_needed(key);
 
@@ -3894,7 +3874,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 build_local,
                 finalise,
                 &carrier_prelude_for_build,
-                evidence_target_key.as_ref(),
                 &key_for_close,
             );
             rooting_for_closure.set(rooted);
@@ -4077,16 +4056,9 @@ pub fn finalised_build_certifies_refusal_for_tests<
     ctx: &dyn crate::resolver_core::ResolverContext<C>,
     output: crate::project_semantic_dispatch::walk::QueryBuildOutput<T>,
     finalise: verter_session_query::facts::fact_read_set::FactReadSetFinalise,
-    provenance: &crate::engine_provenance::EngineProvenance,
 ) -> bool {
-    let (output, rooting) = finalise_rooted_build_output(
-        ctx,
-        output,
-        finalise,
-        provenance,
-        &CarrierNormalizationPrelude::none(),
-        false,
-    );
+    let (output, rooting) =
+        finalise_rooted_build_output(ctx, output, finalise, &CarrierNormalizationPrelude::none());
     TracedFacts::of_output(&output, rooting).is_some()
 }
 
@@ -4177,44 +4149,23 @@ pub fn finalise_traced_build_output<T, C: crate::resolver_core::ResolverCapabili
     ctx: &dyn crate::resolver_core::ResolverContext<C>,
     output: crate::project_semantic_dispatch::walk::QueryBuildOutput<T>,
     finalise: verter_session_query::facts::fact_read_set::FactReadSetFinalise,
-    provenance: &crate::engine_provenance::EngineProvenance,
     carrier_prelude: &CarrierNormalizationPrelude,
-    operand_force_active: bool,
 ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput<T> {
-    finalise_rooted_build_output(
-        ctx,
-        output,
-        finalise,
-        provenance,
-        carrier_prelude,
-        operand_force_active,
-    )
-    .0
+    finalise_rooted_build_output(ctx, output, finalise, carrier_prelude).0
 }
 
 /// [`finalise_traced_build_output`], with the strict self-roots its
 /// carrier completed under when — and only when — the tracer finalised
 /// cleanly and the build self-rooted soundly: the evidence a sealed
-/// refusal is delivered on. `None` for a fenced-serve tracer, an overflow,
-/// a moved domain, or a torn or conflicting self-root, whose carrier (if
-/// any) is broadcast to joiners but proves nothing about the build.
+/// refusal is delivered on. `None` for a fenced-serve tracer, a moved
+/// domain, or a torn or conflicting self-root, whose carrier (if any) is
+/// broadcast to joiners but proves nothing about the build.
 #[inline(never)]
 fn finalise_rooted_build_output<T, C: crate::resolver_core::ResolverCapabilities>(
     ctx: &dyn crate::resolver_core::ResolverContext<C>,
     output: crate::project_semantic_dispatch::walk::QueryBuildOutput<T>,
     finalise: verter_session_query::facts::fact_read_set::FactReadSetFinalise,
-    provenance: &crate::engine_provenance::EngineProvenance,
     carrier_prelude: &CarrierNormalizationPrelude,
-    // Gates the `ShallowDiagnostic::SignatureOverflow` walker diagnostic
-    // below: `true` ONLY when this exact cold build is the direct build for
-    // an actively-forcing operand's own key (never a transitively nested
-    // build, never an unrelated consumer). This finalizer runs for EVERY
-    // `SemanticQueryKey` in the system; the diagnostic must stay invisible
-    // to every other caller — including component-meta's public
-    // `MacroExpansionDiagnostics` conversion — or a plain, unrelated
-    // overflow starts reporting a NEW `BudgetExceeded` reason it never did
-    // before, which the charter forbids.
-    operand_force_active: bool,
 ) -> (
     crate::project_semantic_dispatch::walk::QueryBuildOutput<T>,
     Option<CompletedSelfRoots>,
@@ -4233,8 +4184,8 @@ fn finalise_rooted_build_output<T, C: crate::resolver_core::ResolverCapabilities
             crate::semantic_query::ResultCompleteness::partial(carrier_prelude.partial_reasons()),
         );
     }
-    // The carrier-normalization prelude can independently suppress caching (an
-    // overflowed / fenced-serve carrier rewrite) regardless of the build's own
+    // The carrier-normalization prelude can independently suppress caching (a
+    // mutation-unstable / fenced-serve carrier rewrite) regardless of the build's own
     // finalise arm.
     output.cache_suppress |= carrier_prelude.cache_suppress();
     let finalise_is_non_cacheable = matches!(
@@ -4301,8 +4252,7 @@ fn finalise_rooted_build_output<T, C: crate::resolver_core::ResolverCapabilities
                         verter_session_query::facts::fact_cache::ReadSetSignature::new(facts);
                     // §18.2 fact-rooted admission: a sound self-version-rooted
                     // carrier is the FIRST gate (a torn / unrootable self-root
-                    // already routed to the `None` arm below, and an overflowed
-                    // tracer to the `Overflow` arm). `admit_decision` applies
+                    // already routed to the `Err` arm below). `admit_decision` applies
                     // the SECOND, taint-narrowed gate: a `Clean` result over a
                     // sound carrier is `Warm`. `taint` is currently always
                     // `Clean`; non-`Clean` taint is produced by the §18.4
@@ -4326,7 +4276,7 @@ fn finalise_rooted_build_output<T, C: crate::resolver_core::ResolverCapabilities
                         }
                     }
                 }
-                Err(reason) => {
+                Err(_unrootable) => {
                     // Non-cacheable: refuse memo admission (the value
                     // still flows back to the caller). The build's
                     // traced cross-file dep facts are nonetheless
@@ -4347,42 +4297,18 @@ fn finalise_rooted_build_output<T, C: crate::resolver_core::ResolverCapabilities
                     // carrier too so joiners observe the same
                     // project-generation gate.
                     output.cache_suppress = true;
-                    if reason == crate::cache_runtime::NonAdmissionReason::SignatureOverflow {
-                        if operand_force_active {
-                            output.walker_diagnostics.push(
-                                crate::project_semantic_dispatch::walk::ShallowDiagnostic::SignatureOverflow,
-                            );
-                        }
-                        provenance
-                            .memo_entry_overflow_refusals
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    } else {
-                        output.graph_carrier = Some(Box::new(
-                            verter_session_query::facts::fact_cache::ReadSetSignature::new(
-                                Arc::from(merged_facts.into_boxed_slice()),
+                    output.graph_carrier = Some(Box::new(
+                        verter_session_query::facts::fact_cache::ReadSetSignature::new(
+                            verter_session_query::facts::fact_read_set::seal_canonical_signature(
+                                merged_facts,
                             ),
-                        ));
-                    }
+                        ),
+                    ));
                 }
             }
         }
-        verter_session_query::facts::fact_read_set::FactReadSetFinalise::Overflow => {
-            if operand_force_active {
-                output.walker_diagnostics.push(
-                    crate::project_semantic_dispatch::walk::ShallowDiagnostic::SignatureOverflow,
-                );
-            }
-            provenance
-                .memo_entry_overflow_refusals
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            // A tracer overflow yields no bounded fact list, so no
-            // carrier can be broadcast — the joiner inherits the
-            // non-cacheability through the `cache_suppress` flag the
-            // cooperative-admission path propagates to joiners.
-            output.cache_suppress = true;
-        }
-        // Same suppression, and deliberately NOT counted as an overflow:
-        // the refusal is about a domain that moved, not about size.
+        // A domain moved under the build: no fact list it observed can root
+        // the entry.
         verter_session_query::facts::fact_read_set::FactReadSetFinalise::MutationUnstable => {
             output.cache_suppress = true;
         }

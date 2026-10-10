@@ -1,7 +1,7 @@
 //! Engine-owned test forcing state.
 //!
 //! The fence / partial / non-cacheable-serve toggles, the semantic-operand
-//! seams, the fact-tracer overflow injectors and the macro-hot-mirror
+//! seams, the fact-tracer refusal injectors and the macro-hot-mirror
 //! rendezvous that the semantic engine's own code reads. In-process cache-poison
 //! and no-warm-admission tests arm them to reproduce a mid-flight-supersession
 //! fenced serve, a budget-truncated partial or a non-cacheable read
@@ -97,21 +97,11 @@ pub struct TestKnobs {
     /// reader is the gated injection at the direct-serve probe in
     /// `resolve_bare_ref_head`.
     pub force_carrier_direct_serve_fence_for_tests: std::sync::atomic::AtomicBool,
-    /// Number of synthetic `FileWholeHash` observations every
-    /// `fact_signature_helpers::install_fact_tracer` scope fans into its
-    /// freshly-installed tracer. A value above `FACT_SIGNATURE_CAP` (1024)
-    /// deterministically drives EVERY traced admission boundary's tracer to
-    /// finalise `FactReadSetFinalise::Overflow` — an observation set no
-    /// signature can root, so a warm read could never revalidate the entry.
-    /// The in-process equivalent of a compute that genuinely observes thousands
-    /// of facts, without a pathological workspace fixture. Per-host (no
-    /// process-global concurrency hazard). Test-support-gated: the only reader
-    /// is the gated injection at the shared tracer installer.
-    pub force_fact_tracer_overflow_observations: std::sync::atomic::AtomicUsize,
     /// Mark every freshly-installed tracer as having consumed one typed
-    /// non-cacheable read. Unlike the overflow injector, this knob is
-    /// independent of fact cardinality and therefore remains a valid
-    /// anti-poisoning fixture when observed domains compact.
+    /// non-cacheable read, so EVERY traced admission boundary refuses
+    /// without a pathological workspace fixture. Per-host (no process-global
+    /// concurrency hazard). Test-support-gated: the only reader is the gated
+    /// injection at the shared tracer installer.
     pub force_fact_tracer_non_cacheable_read: std::sync::atomic::AtomicBool,
     /// A rendezvous every `macro_type_arg_hot_ref` demand waits on AFTER its
     /// lock-free warm-miss check and BEFORE it takes the per-slot build lock.
@@ -153,7 +143,7 @@ impl TestKnobs {
 }
 
 /// The closed set of ADDRESSABLE tracer scopes — the scopes a test may name as
-/// the target of the one-shot overflow knob below.
+/// the target of the one-shot refusal knob below.
 ///
 /// A tracer scope is addressable only when its production open-site passes a
 /// variant of this enum through the `named_cacheability_scope!` /
@@ -179,9 +169,9 @@ pub enum TracerScope {
     ComponentMetaOutput,
     /// The framework script-fact entry-point's IMPORT-ROUTE resolution scope —
     /// the cacheability tracer that brackets `resolve_snapshot_imports`, whose
-    /// verdict (fenced serve OR fact-signature overflow) is the ONLY thing that
-    /// can refuse the resolved-fact publication built from the sibling scope
-    /// below.
+    /// verdict (a non-cacheable read or mutation instability) is the ONLY thing
+    /// that can refuse the resolved-fact publication built from the sibling
+    /// scope below.
     ScriptFactsImportRoute,
     /// The framework script-fact entry-point's `provider.validate` scope — the
     /// signature-CONSUMING tracer whose finalised observation set becomes the
@@ -191,91 +181,90 @@ pub enum TracerScope {
 
 thread_local! {
     /// THREAD-SCOPED one-shot sibling of
-    /// [`TestKnobs::force_fact_tracer_overflow_observations`]: the NAMED
-    /// tracer scope armed here — and ONLY that scope — consumes the count when it
-    /// is next entered ON THIS THREAD, and fans that many synthetic observations
-    /// into ITSELF alone; every other scope in the same flow sees zero.
+    /// [`TestKnobs::force_fact_tracer_non_cacheable_read`]: the NAMED tracer
+    /// scope armed here — and ONLY that scope — claims it when it is next
+    /// entered ON THIS THREAD and notes one non-cacheable read from itself;
+    /// every sibling scope in the same flow claims nothing.
     ///
-    /// The always-on knob overflows EVERY tracer in a flow, which makes it
-    /// non-discriminating wherever a flow installs two tracers and EITHER overflow
-    /// would independently refuse the same publication — the framework script-fact
-    /// entry-point is exactly that shape (an import-resolution cacheability tracer,
-    /// then a sibling `provider.validate` tracer whose finalised set feeds
-    /// `SignatureAdmission`). Arming the one-shot for the import scope overflows
-    /// ONLY it, leaving the validation tracer cacheable, so the test proves THAT
-    /// boundary's rail on its own.
+    /// The always-on knob refuses EVERY tracer in a flow, which makes it
+    /// non-discriminating wherever a flow installs two sibling tracers and
+    /// EITHER refusal would independently decline the same publication — the
+    /// framework script-fact entry-point is exactly that shape (an
+    /// import-resolution cacheability tracer, then a sibling
+    /// `provider.validate` tracer whose finalised set feeds
+    /// `SignatureAdmission`). Arming the one-shot for the import scope refuses
+    /// from ONLY it, leaving the validation tracer cacheable, so the test
+    /// proves THAT boundary's rail on its own.
     ///
-    /// TARGETED, not positional. The count is claimed by scope IDENTITY
-    /// ([`TracerScope`]), never by scope ORDER: an unrelated scope that happens to
-    /// open first — including one newly added UPSTREAM by an unrelated change —
-    /// carries no name, does not match the armed target, and leaves the one-shot
-    /// armed for its intended claimant. An order-keyed one-shot would be silently
-    /// retargeted by exactly that change while the test using it stayed green.
+    /// TARGETED, not positional. The one-shot is claimed by scope IDENTITY
+    /// ([`TracerScope`]), never by scope ORDER: an unrelated scope that happens
+    /// to open first — including one newly added UPSTREAM by an unrelated
+    /// change — carries no name, does not match the armed target, and leaves
+    /// the one-shot armed for its intended claimant.
     ///
     /// THREAD-scoped, not per-host, because tracer scopes are per-thread (the
-    /// tracer stack is TLS). A per-host cell would be swapped by whichever thread
-    /// happened to enter the named scope first, so a concurrent test — or any test
-    /// running on a shared host while another thread traces — could consume someone
-    /// else's one-shot. Arming and claiming on the same thread makes the seam
-    /// deterministic under concurrency. The production build compiles it out.
-    static FACT_TRACER_OVERFLOW_ONCE: std::cell::Cell<Option<(TracerScope, usize)>> =
+    /// tracer stack is TLS). Arming and claiming on the same thread makes the
+    /// seam deterministic under concurrency. The production build compiles it
+    /// out.
+    static FACT_TRACER_REFUSAL_ONCE: std::cell::Cell<Option<TracerScope>> =
         const { std::cell::Cell::new(None) };
 
     /// The scope that actually CLAIMED the one-shot, recorded at the moment it
-    /// fanned its synthetic observations.
+    /// noted its refusal.
     ///
-    /// This is the attribution rail: a test asserts the overflow landed on the
+    /// This is the attribution rail: a test asserts the refusal landed on the
     /// scope UNDER TEST, not merely that the one-shot was consumed *somewhere*.
-    /// Cleared by [`arm_fact_tracer_overflow_once`], so a reading test always sees
-    /// the claim made after its own arming.
-    static FACT_TRACER_OVERFLOW_CLAIMED_BY: std::cell::Cell<Option<TracerScope>> =
+    /// Cleared by [`arm_fact_tracer_refusal_once`], so a reading test always
+    /// sees the claim made after its own arming.
+    static FACT_TRACER_REFUSAL_CLAIMED_BY: std::cell::Cell<Option<TracerScope>> =
         const { std::cell::Cell::new(None) };
 }
 
-/// Arm the thread-scoped one-shot overflow count FOR A NAMED SCOPE.
+/// Arm the thread-scoped one-shot refusal FOR A NAMED SCOPE.
 ///
-/// The count is claimed by the next entry of `scope` on this thread — not by the
-/// next tracer scope to open, whatever it happens to be. Arming also clears the
-/// claim record, so [`fact_tracer_overflow_claimed_by`] reports the claim made
-/// after this call.
-pub fn arm_fact_tracer_overflow_once(scope: TracerScope, count: usize) {
-    FACT_TRACER_OVERFLOW_ONCE.with(|cell| cell.set(Some((scope, count))));
-    FACT_TRACER_OVERFLOW_CLAIMED_BY.with(|cell| cell.set(None));
+/// The one-shot is claimed by the next entry of `scope` on this thread — not by
+/// the next tracer scope to open, whatever it happens to be. Arming also clears
+/// the claim record, so [`fact_tracer_refusal_claimed_by`] reports the claim
+/// made after this call.
+pub fn arm_fact_tracer_refusal_once(scope: TracerScope) {
+    FACT_TRACER_REFUSAL_ONCE.with(|cell| cell.set(Some(scope)));
+    FACT_TRACER_REFUSAL_CLAIMED_BY.with(|cell| cell.set(None));
 }
 
-/// Claim the thread-scoped one-shot count on behalf of `scope`, returning the
-/// count only when `scope` IS the armed target (and disarming it).
+/// Claim the thread-scoped one-shot on behalf of `scope`: `true` only when
+/// `scope` IS the armed target (and disarming it).
 ///
 /// An UNNAMED scope passes `None` and can never claim. A NAMED scope that is not
 /// the armed target leaves the one-shot armed for its intended claimant. The
-/// claiming scope is recorded for [`fact_tracer_overflow_claimed_by`].
-pub(crate) fn claim_fact_tracer_overflow_once(scope: Option<TracerScope>) -> usize {
+/// claiming scope is recorded for [`fact_tracer_refusal_claimed_by`].
+pub(crate) fn claim_fact_tracer_refusal_once(scope: Option<TracerScope>) -> bool {
     let Some(scope) = scope else {
-        return 0;
+        return false;
     };
-    FACT_TRACER_OVERFLOW_ONCE.with(|cell| match cell.get() {
-        Some((armed, count)) if armed == scope => {
+    FACT_TRACER_REFUSAL_ONCE.with(|cell| match cell.get() {
+        Some(armed) if armed == scope => {
             cell.set(None);
-            FACT_TRACER_OVERFLOW_CLAIMED_BY.with(|claimed| claimed.set(Some(scope)));
-            count
+            FACT_TRACER_REFUSAL_CLAIMED_BY.with(|claimed| claimed.set(Some(scope)));
+            true
         }
-        _ => 0,
+        _ => false,
     })
 }
 
 /// Read the still-armed one-shot target WITHOUT claiming it — the anti-vacuity
 /// check a test uses to prove the target scope actually ran (a still-armed
-/// target means nothing overflowed), and to prove an unrelated upstream scope
+/// target means nothing claimed it), and to prove an unrelated upstream scope
 /// did NOT steal it.
-pub fn peek_fact_tracer_overflow_once() -> Option<(TracerScope, usize)> {
-    FACT_TRACER_OVERFLOW_ONCE.with(|cell| cell.get())
+pub fn peek_fact_tracer_refusal_once() -> Option<TracerScope> {
+    FACT_TRACER_REFUSAL_ONCE.with(|cell| cell.get())
 }
 
-/// The scope that claimed the one-shot since the last [`arm_fact_tracer_overflow_once`],
-/// or `None` when no scope claimed it. The ATTRIBUTION oracle: a test asserts the
-/// forced overflow landed on the scope under test, never merely that it landed.
-pub fn fact_tracer_overflow_claimed_by() -> Option<TracerScope> {
-    FACT_TRACER_OVERFLOW_CLAIMED_BY.with(|cell| cell.get())
+/// The scope that claimed the one-shot since the last
+/// [`arm_fact_tracer_refusal_once`], or `None` when no scope claimed it. The
+/// ATTRIBUTION oracle: a test asserts the forced refusal landed on the scope
+/// under test, never merely that it landed.
+pub fn fact_tracer_refusal_claimed_by() -> Option<TracerScope> {
+    FACT_TRACER_REFUSAL_CLAIMED_BY.with(|cell| cell.get())
 }
 
 /// Test-only callback slot; manual `Debug` because `dyn Fn` has none.

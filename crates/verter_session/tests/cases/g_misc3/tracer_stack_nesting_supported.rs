@@ -58,8 +58,8 @@ fn tracer_stack_nesting_outer_and_inner_both_non_empty() {
             FactReadSetFinalise::NonCacheable(_) => {
                 panic!("inner scope unexpectedly non-cacheable")
             }
-            FactReadSetFinalise::Overflow | FactReadSetFinalise::MutationUnstable => {
-                panic!("inner scope overflowed unexpectedly")
+            FactReadSetFinalise::MutationUnstable => {
+                panic!("inner scope was mutation-unstable")
             }
         }
         inner_finalise
@@ -79,8 +79,8 @@ fn tracer_stack_nesting_outer_and_inner_both_non_empty() {
             );
         }
         FactReadSetFinalise::NonCacheable(_) => panic!("outer scope unexpectedly non-cacheable"),
-        FactReadSetFinalise::Overflow | FactReadSetFinalise::MutationUnstable => {
-            panic!("outer scope overflowed unexpectedly")
+        FactReadSetFinalise::MutationUnstable => {
+            panic!("outer scope was mutation-unstable")
         }
     }
 

@@ -763,9 +763,9 @@ impl VerterHost {
                 // serve) classifies `RequestOnly` and stays reusable
                 // inside the request while a transient one (a broken
                 // decl-body lease) does not. The cacheability scope
-                // supplies the UNATTRIBUTED half — a fact-signature
-                // overflow or a mutation-instability verdict names no
-                // reason, and the conservative class is the only sound
+                // supplies the UNATTRIBUTED half — a mutation-instability
+                // verdict names no reason, and the conservative class is
+                // the only sound
                 // answer for it.
                 let refusals = verter_type_engine::fact_tracing::RefusalObservationScope::enter();
                 let (bundle, non_cacheable) =
@@ -1181,8 +1181,7 @@ impl VerterHost {
         // resolution world it captured with nothing to re-derive.
         //
         // FAIL CLOSED on an unrootable witness. `None` means a refused
-        // resolution, an unreadable parse surface, or a union that
-        // overflows `FACT_SIGNATURE_CAP` — the bundle's import-route
+        // resolution or an unreadable parse surface — the bundle's import-route
         // dependency cannot be expressed as facts, so nothing can
         // invalidate it. Admitting it rooted on `FileWholeHash` ALONE
         // would serve pre-appearance dependency edges forever: the
@@ -3423,7 +3422,7 @@ impl VerterHost {
         // A per-binding route walk returning the empty-facts strict-admission
         // signal is served but never published. This also covers a fenced serve
         // adopted cross-thread inside the route DB, where the owner tracer cannot
-        // see the original serve. Direct traced non-cacheability and overflow are
+        // see the original serve. Direct traced non-cacheability is
         // enforced independently by `OwnerImportSurfaceDb` after this closure.
         if unrooted_route_walk {
             self.provenance

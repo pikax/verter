@@ -134,8 +134,6 @@ pub fn probe_walk_typeof_resolved<C: crate::resolver_core::ResolverCapabilities>
 /// human-readable messages without re-walking the graph.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ShallowDiagnostic {
-    /// The force/read dependency carrier exceeded its bounded signature.
-    SignatureOverflow,
     /// The connected root demand exhausted its projection/evaluation work
     /// envelope while identities were still changing. This is operational
     /// partiality, not a semantic cycle or an unresolved-reference carrier.
@@ -350,8 +348,8 @@ pub struct QueryBuildOutput<T = SemanticNodeId> {
     /// (`semantic_graph_read_set_signature` → `None`) still carries a
     /// NON-ADMITTED carrier holding its traced cross-file dep facts so
     /// the cooperative-admission winner can broadcast them to joiners.
-    /// Only a tracer-overflow build (no bounded fact list) leaves this
-    /// `None`. Whatever carrier is present, `warm_publish_one` / the
+    /// Only a mutation-unstable build (no fact list it can root) leaves
+    /// this `None`. Whatever carrier is present, `warm_publish_one` / the
     /// in-flight joiner state / prefix-backfill publish or broadcast it
     /// verbatim — they NEVER reconstruct facts from the legacy fence.
     ///

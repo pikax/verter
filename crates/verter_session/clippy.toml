@@ -31,3 +31,8 @@ disallowed-macros = [
   { path = "std::debug_assert_eq", reason = "use verter_debug_assert::verter_debug_assert_eq! — precompute any side-effecting value first, the raw macro's arguments never evaluate in a shipped build" },
   { path = "std::debug_assert_ne", reason = "use verter_debug_assert::verter_debug_assert_ne! — precompute any side-effecting value first, the raw macro's arguments never evaluate in a shipped build" },
 ]
+
+# `FactVersionRef` keys: a `ResultReceipt`'s identity never reads the
+# retention account its evidence page charges (see the workspace-root
+# clippy.toml for the full rationale).
+ignore-interior-mutability = ["bytes::Bytes", "verter_session_query::facts::receipt::ResultReceipt"]
