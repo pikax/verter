@@ -55,6 +55,11 @@ key filters, default events and the five value types. Tagged implementation
 sources govern version-specific behavior; the official reference supplies
 examples. Dotted non-keyboard events remain event names. Custom schemas, loader
 names or declarations needing evaluation remain unknown or incomplete.
+Static values admit constructor, literal-default and type/default-object forms.
+The pinned [value declaration helpers](https://raw.githubusercontent.com/hotwired/stimulus/v3.2.2/src/core/value_properties.ts)
+infer literal kinds and preserve their defaults, including `0`, `false`, strings,
+arrays and plain objects. These forms produce the same TypeInfo member names;
+computed defaults remain unknown. The case table hands their comparison to STIM3.
 Action parameters come from the element carrying the action descriptor, as the
 pinned [parameter getter](https://raw.githubusercontent.com/hotwired/stimulus/v3.2.2/src/core/action.ts)
 and [event preparation](https://raw.githubusercontent.com/hotwired/stimulus/v3.2.2/src/core/binding.ts)
@@ -63,6 +68,9 @@ action reads the button's. The case table hands this pair to STIM1.
 
 Turbo contributes frame, stream and stream-source declarations; the eight stream
 actions; frame-id relations; `data-turbo*` attributes and `turbo-*` meta facts.
+The pinned [visit action getter](https://raw.githubusercontent.com/hotwired/turbo/v8.0.23/src/util.js)
+accepts authored `advance`, `replace` and `restore`; the vocabulary records all
+three as static facts. Their clean controls go to STIM1 and STIM4T.
 `_top`, `_self` and `_parent` are frame keywords. The pinned
 [frame controller](https://raw.githubusercontent.com/hotwired/turbo/v8.0.23/src/core/frames/frame_controller.js)
 looks up a literal `turbo-frame id="_self"` before falling back to the current

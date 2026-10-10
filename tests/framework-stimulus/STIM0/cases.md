@@ -81,7 +81,17 @@ row fails STIM1-ACV; writing this table does not claim those experiments ran.
 
 ## Route inventory and handoff
 
-The pinned action parameter getter, binding event preparation, tokenizer, frame controller and document frame redirector linked in the vocabulary products own
+Literal value declarations and visit actions have these additional clean controls:
+
+| Input                                                                                                   | Required outcome                                                                                                                                                                 | Receiving obligation                                            |
+| ------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| `static values = { count: 0 }` versus `{ count: Number }` and `{ count: { type: Number, default: 0 } }` | All three give number with default 0 and `countValue`/`hasCountValue`; literal and configuration defaults are custom defaults, whereas the constructor uses the built-in default | STIM3 typed member projection verification                      |
+| `static values = { enabled: false, label: 'hello', items: [], options: {} }`                            | Boolean, string, array and object types retain their literal defaults and generated members without evaluation                                                                   | STIM3 typed member projection verification                      |
+| `static values = { count: computeCount() }`                                                             | Computed type/default stays unknown; no call execution or invented number default                                                                                                | STIM3 typed member projection verification                      |
+| `<turbo-frame id="messages" data-turbo-action="restore">` versus `advance` and `replace` on that frame  | All three are valid pinned visit actions; preserve the action as a static fact without navigating or simulating history                                                          | STIM1 vocabulary verification; STIM4T static Turbo verification |
+| The same frame with `data-turbo-action="rewind"`                                                        | Invalid visit-action token; the pinned getter returns no action, so do not normalize it to `restore`                                                                             | STIM1 vocabulary verification; STIM4T static Turbo verification |
+
+The pinned action parameter getter, binding event preparation, tokenizer, value declaration helpers, visit action getter, frame controller and document frame redirector linked in the vocabulary products own
 these version-specific boundaries. The following are future codec/relation
 verification obligations, not executed tests in this contract:
 

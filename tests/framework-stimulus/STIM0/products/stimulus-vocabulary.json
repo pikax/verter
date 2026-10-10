@@ -154,12 +154,18 @@
   ],
   "declarations": [
     "static targets",
-    "static values (constructor or type/default object)",
+    "static values (constructor, literal default or type/default object; see valueDeclarationForms)",
     "static classes",
     "static outlets",
     "application.register with symbol-proven binding",
     "loader convention backed by resolved registration facts"
   ],
+  "valueDeclarationForms": {
+    "constructor": "Symbol-proven Array, Boolean, Number, Object or String; type and built-in default come from valueTypes. Example: count: Number gives number with default 0.",
+    "literalDefault": "Boolean, number, string, array or plain object literal; infer its valueTypes kind and retain the literal as its custom default. Examples: count: 0, enabled: false, label: 'hello', items: [], options: {}. An object with type/default fields follows the pinned configuration-object rules first.",
+    "typeDefaultObject": "Configuration object with type, default or both. Example: count: { type: Number, default: 0 }; a supplied default must match the declared type. Type-only uses the built-in default; default-only infers the kind from the default.",
+    "staticBoundary": "Use shared symbol and literal facts only. Computed expressions, calls, spreads or unresolved constructor/configuration bindings retain unknown type/default parts; never execute them. All admitted forms contribute the same generated value member names through TypeInfo."
+  },
   "generatedMembers": {
     "targets": ["nameTarget", "nameTargets", "hasNameTarget"],
     "values": ["nameValue", "hasNameValue"],
