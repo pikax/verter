@@ -2248,7 +2248,7 @@ impl VerterHost {
                     {
                         let session_node =
                             crate::compile_output_node::CompileOutputNodeFactValidatedSession::with_retention_account(
-                                verter_session_query::retention::StoreAccount::new(Arc::clone(self.project_type_store.retention_account())),
+                                self.project_type_store.retention_store_account(),
                             );
                         session_node.publish(
                             &mut cc,
