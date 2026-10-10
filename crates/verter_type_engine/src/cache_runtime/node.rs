@@ -34,9 +34,11 @@ use super::singleflight::{
 use crate::fact_signature_helpers::ReadSetSignatureExt as _;
 use crate::resolver_core::fact_validation_port::FactValidation;
 use crate::resolver_core::resolver_context::RequestFlags;
+use verter_audit::NonAdmissionReason;
 use verter_session_query::facts::fact_cache::SignatureAdmission;
 use verter_session_query::facts::fact_read_set::FactReadSetFinalise;
 use verter_session_query::facts::store_view::StoreViewCompatToken;
+use verter_session_query::retention::SemanticRetentionAccount;
 
 /// Per-compute context threaded into a node's `compute` / `validate`.
 ///
@@ -159,6 +161,30 @@ pub trait ArtifactNode {
     /// Removal-side counterpart of [`Self::post_publish`], fired when the
     /// substrate removes a published entry. Default: no-op.
     fn removal_cleanup(&self, _key: &Self::Key, _entry: &Arc<CacheEntry<Self::Value>>) {}
+    /// The account a published entry's evidence pages are claimed into.
+    /// Default: the process account.
+    fn retention_account(&self) -> Arc<SemanticRetentionAccount> {
+        SemanticRetentionAccount::process_local()
+    }
+}
+
+/// Claim the evidence pages a cold winner's cacheable `signature` reaches
+/// before the entry is published: the entry retains them, so they join a
+/// refusable reservation on `account`. A refused claim answers the
+/// non-admission reason the winner returns its value under, uncached; the
+/// signature's facts are bubbled into the outer tracer first, since the
+/// winner-side projection that would bubble them runs only on a publish.
+fn claim_published_pages(
+    account: &Arc<SemanticRetentionAccount>,
+    signature: &verter_session_query::facts::fact_cache::ReadSetSignature,
+    resolver: &dyn FactValidation,
+) -> Result<(), NonAdmissionReason> {
+    verter_session_query::facts::receipt::claim_evidence_pages(account, &signature.facts).map_err(
+        |refusal| {
+            signature.bubble(resolver);
+            refusal.non_admission_reason()
+        },
+    )
 }
 
 /// Cooperative warm-or-cold lookup over an [`ArtifactNode`].
@@ -222,12 +248,15 @@ pub fn lookup<N: ArtifactNode>(
                     signature,
                     self_root_canonicals,
                     validated_at_generation,
-                } => ComputeAdmission::Cacheable(CacheEntry {
-                    value,
-                    signature,
-                    self_root_canonicals,
-                    validated_at_generation,
-                }),
+                } => match claim_published_pages(&node.retention_account(), &signature, resolver) {
+                    Ok(()) => ComputeAdmission::Cacheable(CacheEntry {
+                        value,
+                        signature,
+                        self_root_canonicals,
+                        validated_at_generation,
+                    }),
+                    Err(reason) => ComputeAdmission::ReturnOnly { value, reason },
+                },
                 CacheAdmission::ReturnOnly { value, reason } => {
                     ComputeAdmission::ReturnOnly { value, reason }
                 }
@@ -370,6 +399,12 @@ pub trait QueryNode {
     fn lower_unadmitted(&self, _value: &Self::Value) -> Option<Self::Value> {
         None
     }
+
+    /// The account a published entry's evidence pages are claimed into.
+    /// Default: the process account.
+    fn retention_account(&self) -> Arc<SemanticRetentionAccount> {
+        SemanticRetentionAccount::process_local()
+    }
 }
 
 /// Query-identity cooperative lookup + publish entry points.
@@ -440,6 +475,11 @@ pub mod query {
                         self_root_canonicals,
                         validated_at_generation,
                     } => {
+                        if let Err(reason) =
+                            claim_published_pages(&node.retention_account(), &signature, resolver)
+                        {
+                            return ComputeAdmission::ReturnOnly { value, reason };
+                        }
                         // Build the discriminant from the EXACT generation
                         // the candidate is stamped with, NOT from
                         // `cx.generation()` (the lookup-entry snapshot). A

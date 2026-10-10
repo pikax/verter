@@ -6305,8 +6305,10 @@ fn a_generic_self_referencing_thenable_follows_its_recorded_instantiation() {
 ///
 /// The lib conditional: tsc 7.0.2 answers `Awaited<GrowThen<string>>` with
 /// `any` under TS2589 in about a second — its tail run reaches the
-/// checker's 1000-step limit — and so does the relation here, through the
-/// same count.
+/// checker's 1000-step limit — and so does the relation here, at its own
+/// tail budget (a lower one than production's stands in for it on the same
+/// path: each step of a growing thenable is dearer than the last, so the
+/// production budget's run is the ledger's to cost, not this test's).
 ///
 /// The runtime relation has NO such rule in the checker: a 5000-deep chain
 /// of distinct thenables awaits to its value, and neither `await` of a
@@ -6324,7 +6326,10 @@ fn a_growing_thenable_hits_the_checker_limit_in_the_lib_conditional_only() {
         CheckerDiagnostic, CheckerDiagnosticCode, CheckerDiagnosticOperation,
     };
     let host = host_with(&[(RECURSIVE_THENABLE, RECURSIVE_THENABLE_SRC)]);
-    let (data, raised) = reduced_annotation(&host, "libGrowThen");
+    let (data, raised) = {
+        let _tail = super::connected_demand::TailBudgetForTests::install(200);
+        reduced_annotation(&host, "libGrowThen")
+    };
     assert_eq!(
         data,
         SemanticNodeData::Opaque(QueryError::CheckerRecovery {

@@ -181,34 +181,6 @@ pub(crate) struct RenderOnlyMain {
     pub(crate) diagnostics: Vec<HostDiagnostic>,
 }
 
-/// RAII arm/clear of per-host `compile_force_overflow_observations`.
-/// Drop clears so a panic cannot leak the forced state. Per-host: does
-/// not poison a concurrent compile on another host.
-#[doc(hidden)]
-#[cfg(any(test, feature = "test-support"))]
-pub struct CompileForceOverflowGuard<'h> {
-    host: &'h VerterHost,
-}
-
-#[cfg(any(test, feature = "test-support"))]
-impl<'h> CompileForceOverflowGuard<'h> {
-    /// Set `host`'s forced observation count to `n` and return the guard.
-    pub(crate) fn arm(host: &'h VerterHost, n: usize) -> Self {
-        host.compile_force_overflow_observations
-            .store(n, std::sync::atomic::Ordering::Relaxed);
-        Self { host }
-    }
-}
-
-#[cfg(any(test, feature = "test-support"))]
-impl Drop for CompileForceOverflowGuard<'_> {
-    fn drop(&mut self) {
-        self.host
-            .compile_force_overflow_observations
-            .store(0, std::sync::atomic::Ordering::Relaxed);
-    }
-}
-
 /// Zero the compile-tier prefetch counter so a following cold compute
 /// is observed in isolation.
 #[doc(hidden)]
@@ -1163,8 +1135,8 @@ impl VerterHost {
     /// the producer actually recorded the cross-file fact set the
     /// consumer's read-side fact-validation oracle depends on. The
     /// returned `ReadSetSignature` exposes `.facts` (the path-precise
-    /// fact rail) and `.is_overflow()` / `.is_cacheable()` directly;
-    /// callers that want the raw fact slice read `.facts`.
+    /// fact rail, paged when wide) and `.entries()` (every entry with its
+    /// pages read through).
     pub fn compile_slot_fact_dep_signature(
         &self,
         canonical_id: &str,
@@ -1975,8 +1947,9 @@ impl VerterHost {
         // have NO fact rail, so they compile directly without the tracer
         // and never finalise a signature.
         let (compile_result, compile_admission) = if actual_mode == CompileCacheMode::Session {
-            let (result, fact_read_set) =
-                self.with_fact_tracer(verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched, || {
+            let (result, fact_read_set) = self.with_fact_tracer(
+                verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+                || {
                     // Replay the prefetch's BY-VALUE fenced-serve consumption
                     // into THIS tracer scope: the compile's payload derives from
                     // the prefetch-populated state, so a fenced serve consumed
@@ -1985,8 +1958,8 @@ impl VerterHost {
                     // (`non_cacheable_read_observed`), consulted below.
                     if prefetch_observation.fenced_serve_observed {
                         verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
-                        verter_session_query::facts::reuse::NonCacheableReadReason::FencedServe,
-                    );
+                            verter_session_query::facts::reuse::NonCacheableReadReason::FencedServe,
+                        );
                     }
                     crate::compile_fact_emission::observe_compile_tier_dependencies(
                         self,
@@ -1995,30 +1968,12 @@ impl VerterHost {
                         &compile_input.macro_type_deps,
                         &compile_input.external_requests,
                     );
-                    // Test-only fact injection: when armed, emit `N`
-                    // synthetic `FileWholeHash` observations into the active
-                    // tracer. `N > FACT_SIGNATURE_CAP` (1024) drives the
-                    // tracer to `Overflow` deterministically, exercising the
-                    // refuse-publish-on-overflow path without a pathological
-                    // workspace fixture.
-                    let force_n = self
-                        .compile_force_overflow_observations
-                        .load(std::sync::atomic::Ordering::Relaxed);
-                    if force_n > 0 {
-                        for n in 0..force_n {
-                            verter_type_engine::resolver_core::resolver_context::observe_fan_out(
-                                verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-                                    canonical_id: format!("__compile_force_overflow_{n}.ts"),
-                                    hash: [(n & 0xff) as u8; 16],
-                                },
-                            );
-                        }
-                    }
                     self.compile_entry(&compile_input, profile, native_host_binding)
-                });
+                },
+            );
             // `Cacheable(sig)` → publish the compile-output slot through
             // the typed session node under the path-precise signature.
-            // `NonCacheable` (fenced serve, overflow) → the session node
+            // `NonCacheable` (fenced serve, mutation instability) → the session node
             // removes any prior slot and the freshly computed value is
             // returned without admitting. The caller-visible result is
             // computed independently of admission.
