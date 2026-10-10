@@ -148,17 +148,11 @@ function readStp1Inventory(root) {
     }
     return { paths: [...new Set(paths)].sort(), error: null };
   } catch (error) {
-    return { paths: [], error: `${STP1_INVENTORY}: ${error.message}` };
+    return { paths: [], error: { file: STP1_INVENTORY, message: error.message } };
   }
 }
 
 const STP1 = readStp1Inventory(REPO_ROOT);
-
-/**
- * Problems deriving the selection from repository data. Each one means a
- * filter may be missing paths, so the gates run every lane and the audit fails.
- */
-const SELECTION_CONFIG_ERRORS = Object.freeze(STP1.error ? [STP1.error] : []);
 
 /**
  * The non-crate inputs of each lane: the path half of selection.
@@ -798,83 +792,62 @@ export const ESCAPE_HATCHES = Object.freeze([
  * inert here when no ci.yml job reads it. A file a lane reads is owned by that
  * lane's filter even under an inert tree (`docs/audit-footprint/**`,
  * `tests/vscode-product/VSC0/products/…`): inert only means a change to it
- * does not force the fallback.
+ * does not force the fallback. So, unlike a filter, an inert entry cannot
+ * narrow what a lane selects, and the list lives in data
+ * (`scripts/ci-inert-paths.json`, every entry with the reason no ci.yml job
+ * reads it) rather than in this module: classifying a new tree costs the
+ * classifier's own tests, not the every-lane run an edit here triggers.
+ * Entries name what has been reviewed, not whole families of future trees: a
+ * framework vertical lists its contract data, so an executable spec or a new
+ * product added beside it later still fails the audit until it is classified.
  *
  * Every tracked path a ci.yml job reads by NAME rather than content is out of
  * reach of any path list: `tracked_paths_are_portable` checks the names of
  * every tracked file whenever the rust lane runs, so a non-portable name added
  * under an inert tree is caught by the next change that runs it.
  */
-export const CI_INERT_PATHS = Object.freeze([
-  // Prose.
-  "docs/**",
-  ".github/BENCHMARK.md",
-  ".github/INTEGRATION_TEST.md",
-  "AGENTS.md",
-  "CONTRIBUTING.md",
-  "LICENSE",
-  "readme.md",
-  // Read for its existence only: verter_session tests locate the repository
-  // root by it.
-  "CLAUDE.md",
-  // Agent skills, editor settings and the pre-commit hook.
-  ".claude/**",
-  ".husky/**",
-  ".lintstagedrc.cjs",
-  ".vscode/**",
-  // Workflows that run on their own triggers and whose files no ci.yml job
-  // reads.
-  ".github/workflows/benchmark.yml",
-  ".github/workflows/corpus-gate.yml",
-  ".github/workflows/dx-extended.yml",
-  ".github/workflows/editor-packages.yml",
-  ".github/workflows/integration-test.yml",
-  ".github/workflows/lsp-benchmark.yml",
-  ".github/workflows/meta-benchmark.yml",
-  // Product, architecture and evidence inventories that only local verifiers
-  // or the docs build read.
-  "tests/documentation/**",
-  // Reviewed contract data; executable consumers must claim their own paths.
-  "tests/framework-stimulus/STIM0/cases.md",
-  "tests/framework-stimulus/STIM0/manifest.json",
-  "tests/framework-stimulus/STIM0/products/stimulus-activation-policy.json",
-  "tests/framework-stimulus/STIM0/products/stimulus-capability-matrix.json",
-  "tests/framework-stimulus/STIM0/products/stimulus-version-lock.json",
-  "tests/framework-stimulus/STIM0/products/stimulus-vocabulary.json",
-  "tests/framework-stimulus/STIM0/products/turbo-vocabulary.json",
-  // Reviewed Astro contract data; no ci.yml lane reads these bytes yet.
-  // Keep executable specs and future products outside these inert entries.
-  "tests/framework-astro/AST0/cases.md",
-  "tests/framework-astro/AST0/corpus/**/*.astro",
-  "tests/framework-astro/AST0/manifest.json",
-  "tests/framework-astro/AST0/products/astro-activation-policy.json",
-  "tests/framework-astro/AST0/products/astro-capability-matrix.json",
-  "tests/framework-astro/AST0/products/astro-version-lock.json",
-  "tests/framework-astro/evidence/AST0/cases.md",
-  "tests/framework-liquid/**",
-  "tests/jetbrains-baseline/**",
-  "tests/kernel/**",
-  "tests/playground/**",
-  "tests/product-experience/**",
-  "tests/skills/**",
-  "tests/test-layout/**",
-  "tests/vscode-product/**",
-  "tests/vscode-web/**",
-  "tests/web-product/**",
-  "tests/workspace-responsiveness/**",
-  // Example applications (examples/reference is the arch lane's), manual
-  // tools and MCP client configurations.
-  "examples/*",
-  "examples/src/**",
-  "tools/debug/**",
-  "tools/tsgo-api-gate/**",
-  "mcp/README.md",
-  "mcp/verter-http.mcp.json",
-  // A tracked test report js-build-test overwrites before reading it.
-  "test-results/**",
-]);
+const INERT_PATHS_FILE = "scripts/ci-inert-paths.json";
 
-const COMPILED_CI_INERT_PATHS = CI_INERT_PATHS.map(compileGlob);
+/** Never throws, for the same reason as the STP1 inventory read. */
+function readInertPaths(root) {
+  try {
+    const entries = JSON.parse(readFileSync(resolve(root, INERT_PATHS_FILE), "utf8"));
+    if (!Array.isArray(entries) || entries.length === 0) {
+      throw new Error("expected a non-empty array of { glob, reason } entries");
+    }
+    for (const entry of entries) {
+      if (typeof entry?.reason !== "string" || entry.reason.trim() === "") {
+        throw new Error(`${JSON.stringify(entry?.glob)} must say why no ci.yml job reads it`);
+      }
+    }
+    const globs = entries.map((entry) => entry.glob);
+    return { globs, compiled: globs.map(compileGlob), error: null };
+  } catch (error) {
+    return {
+      globs: [],
+      compiled: [],
+      error: { file: INERT_PATHS_FILE, message: error.message },
+    };
+  }
+}
+
+const INERT = readInertPaths(REPO_ROOT);
+
+export const CI_INERT_PATHS = Object.freeze(INERT.globs);
+
+const COMPILED_CI_INERT_PATHS = INERT.compiled;
+
+/**
+ * Problems deriving the selection from repository data. Each one means a
+ * filter may be missing paths or an inert path may force the fallback, so the
+ * gates run every lane and the audit fails, naming the file.
+ */
+const SELECTION_CONFIG_ERRORS = Object.freeze(
+  [STP1.error, INERT.error].filter(Boolean).map(({ file, message }) => ({
+    file,
+    message: `${file}: ${message}`,
+  })),
+);
 
 export function isCiInert(relPath) {
   return COMPILED_CI_INERT_PATHS.some((re) => re.test(relPath));
@@ -1003,9 +976,11 @@ export function composeLaneGates(filterHits, impact, gates = LANE_GATES) {
 /**
  * The selection's own configuration checked against the tree. `unowned`:
  * tracked files no crate, hatch, path filter or inert glob owns — every change
- * to one would run every lane. `dead`: globs that match no tracked file — a
- * lane that silently stopped selecting the file it was written for (a moved
- * script, a renamed test). `config`: repository data a filter is derived from
+ * to one would run every lane. `dead`: filter globs that match no tracked file
+ * — a lane that silently stopped selecting the file it was written for (a
+ * moved script, a renamed test). Inert globs are not checked: one may name a
+ * family of trees before its first member lands, and an unused one cannot
+ * narrow any lane. `config`: repository data the selection is derived from
  * could not be read (`SELECTION_CONFIG_ERRORS`).
  *
  * @param {string[]} trackedFiles `git ls-files`, forward-slash paths
@@ -1031,13 +1006,14 @@ export function auditSelection(trackedFiles, workspaceMetadata) {
     const { include, exclude = [] } = Array.isArray(spec) ? { include: spec } : spec;
     for (const glob of [...include, ...exclude]) if (!anyMatch(glob)) dead.push(`${name}: ${glob}`);
   }
-  for (const glob of CI_INERT_PATHS) if (!anyMatch(glob)) dead.push(`CI_INERT_PATHS: ${glob}`);
-  return { unowned, dead, config: [...SELECTION_CONFIG_ERRORS] };
+  return { unowned, dead, config: SELECTION_CONFIG_ERRORS.map((error) => error.message) };
 }
 
 function reportConfigErrors(consequence) {
   for (const error of SELECTION_CONFIG_ERRORS) {
-    process.stdout.write(`::error title=ci-impact selection config::${error} — ${consequence}\n`);
+    process.stdout.write(
+      `::error title=ci-impact selection config::${error.message} — ${consequence}\n`,
+    );
   }
 }
 
@@ -1227,10 +1203,10 @@ export function main(argv = process.argv.slice(2), env = process.env, cwd = proc
       everything: true,
       fullReasons: [
         ...impact.fullReasons,
-        ...SELECTION_CONFIG_ERRORS.map((reason) => ({
-          file: STP1_INVENTORY,
+        ...SELECTION_CONFIG_ERRORS.map(({ file, message }) => ({
+          file,
           id: "selection-config",
-          reason,
+          reason: message,
         })),
       ],
       lanes: Object.fromEntries(Object.keys(LANE_ROOTS).map((lane) => [lane, true])),

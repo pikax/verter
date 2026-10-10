@@ -3724,6 +3724,7 @@ impl DerivedRawState {
         &mut self,
         template: Arc<verter_session_query::analysis::template::TemplateAnalysisSnapshot>,
         admission: RawTemplateSlotAdmission,
+        account: &Arc<verter_session_query::retention::SemanticRetentionAccount>,
     ) {
         let Some(source_version) = admission.admitted_version() else {
             return;
@@ -3736,6 +3737,14 @@ impl DerivedRawState {
             .as_ref()
             .is_none_or(|entry| entry.source_version <= source_version);
         if supersedes {
+            if verter_session_query::facts::receipt::claim_evidence_pages(
+                account,
+                &template_class_signature.facts,
+            )
+            .is_err()
+            {
+                return;
+            }
             self.raw_template_analysis = Some(RawTemplateAnalysisEntry {
                 template,
                 source_version,
