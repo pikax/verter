@@ -127,16 +127,14 @@ impl Drop for OperandEvidenceGuard<'_> {
 }
 
 /// The forced candidate's evidence unioned with the evidence of the input
-/// operands the force consumed, deduplicated and bounded by the same
-/// signature cap the seal applies. Overflow is the typed
-/// [`QueryError::SignatureOverflow`] refusal, never a silently truncated
-/// root set.
+/// operands the force consumed: every fact of every side, sealed whole
+/// (paged when wide), never a truncated set.
 fn union_operand_evidence(
     inputs: &[SemanticOperandEvidence],
     produced: SemanticOperandEvidence,
-) -> Result<SemanticOperandEvidence, QueryError> {
+) -> SemanticOperandEvidence {
     if inputs.is_empty() {
-        return Ok(produced);
+        return produced;
     }
     let mut facts: Vec<verter_session_query::facts::fact_cache::FactVersionRef> =
         produced.read_set().facts.iter().cloned().collect();
@@ -144,17 +142,7 @@ fn union_operand_evidence(
         produced.self_roots().to_vec();
     let mut deps: Vec<DepSignature> = produced.dep_signatures().to_vec();
     for input in inputs {
-        if input.read_set().overflowed {
-            return Err(QueryError::SignatureOverflow);
-        }
-        for fact in input.read_set().facts.iter() {
-            if !facts.contains(fact) {
-                facts.push(fact.clone());
-                if facts.len() > verter_session_query::facts::fact_read_set::FACT_SIGNATURE_CAP {
-                    return Err(QueryError::SignatureOverflow);
-                }
-            }
-        }
+        facts.extend(input.read_set().facts.iter().cloned());
         for root in input.self_roots().iter() {
             if !roots.contains(root) {
                 roots.push(root.clone());
@@ -166,12 +154,14 @@ fn union_operand_evidence(
             }
         }
     }
-    Ok(SemanticOperandEvidence::seal(
-        ReadSetSignature::new(Arc::from(facts.into_boxed_slice())),
+    SemanticOperandEvidence::seal(
+        ReadSetSignature::new(
+            verter_session_query::facts::fact_read_set::seal_canonical_signature(facts),
+        ),
         Arc::from(roots.into_boxed_slice()),
         Arc::from(deps.into_boxed_slice()),
         &SemanticOperandAuthority::mint_for_forcing_boundary(),
-    ))
+    )
 }
 
 impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
@@ -188,9 +178,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return Err(SemanticOperandMintError::ForeignNode);
         }
         let evidence = forced.evidence().clone();
-        if evidence.read_set().overflowed {
-            return Err(SemanticOperandMintError::SignatureOverflow);
-        }
         Ok(SemanticOperand::node(
             forced.store_identity(),
             forced.generation(),
@@ -468,18 +455,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 return Err(SemanticOperandMintError::ForeignNode);
             }
             nodes.push(node);
-            if evidence.read_set().overflowed {
-                return Err(SemanticOperandMintError::SignatureOverflow);
-            }
-            for fact in evidence.read_set().facts.iter() {
-                if !facts.contains(fact) {
-                    facts.push(fact.clone());
-                    if facts.len() > verter_session_query::facts::fact_read_set::FACT_SIGNATURE_CAP
-                    {
-                        return Err(SemanticOperandMintError::SignatureOverflow);
-                    }
-                }
-            }
+            facts.extend(evidence.read_set().facts.iter().cloned());
             for root in evidence.self_roots().iter() {
                 if !roots.contains(root) {
                     roots.push(root.clone());
@@ -494,7 +470,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         Ok((
             Arc::from(nodes.into_boxed_slice()),
             SemanticOperandEvidence::seal(
-                ReadSetSignature::new(Arc::from(facts.into_boxed_slice())),
+                ReadSetSignature::new(
+                    verter_session_query::facts::fact_read_set::seal_canonical_signature(facts),
+                ),
                 Arc::from(roots.into_boxed_slice()),
                 Arc::from(deps.into_boxed_slice()),
                 &SemanticOperandAuthority::mint_for_forcing_boundary(),
@@ -624,10 +602,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 
     fn merge_operand_evidence(&self, evidence: &SemanticOperandEvidence) -> Result<(), QueryError> {
-        if evidence.read_set().overflowed {
-            self.fold_into_top_build_local_taint(false, true);
-            return Err(QueryError::SignatureOverflow);
-        }
         let self_root_canonicals: Vec<Arc<str>> = evidence
             .self_roots()
             .iter()
@@ -667,13 +641,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             if let Err(error) = self.merge_operand_evidence(evidence) {
                 // `merge_operand_evidence` already folded `cache_suppress`
-                // (never warm-admit this entry). A torn/overflowed injected
+                // (never warm-admit this entry). A torn injected
                 // evidence set must ALSO taint `result_is_partial` — a stale
                 // node discovered here (revalidated at cold-build time, not
                 // just at the force's preflight check) must never let the
                 // build finish as a complete `Value`; without this, an edit
                 // landing between preflight and cold execution would let a
-                // stale/overflowed operand escape as a fully-formed result.
+                // stale operand escape as a fully-formed result.
                 let reasons = if matches!(error, QueryError::StaleSemanticOperand) {
                     crate::semantic_query::PartialReasonSet::SUPERSEDED_GENERATION
                 } else {
@@ -1274,18 +1248,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         );
         let (read, evidence) = self.execute_read_with_operand_evidence(key);
         crate::meta_resolve::emit_dispatch_dep_signature_facts(self, &read.dep_signature);
-        if evidence
-            .as_ref()
-            .is_some_and(|evidence| evidence.read_set().overflowed)
-            || read.walker_diagnostics.iter().any(|diagnostic| {
-                matches!(
-                    diagnostic,
-                    crate::project_semantic_dispatch::walk::ShallowDiagnostic::SignatureOverflow
-                )
-            })
-        {
-            return QueryResult::Error(QueryError::SignatureOverflow);
-        }
         if read.result_is_partial {
             return match read.value {
                 QueryResult::Error(error) => QueryResult::Error(error),
@@ -1314,10 +1276,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // set — and a `mint -> force -> mint` chain would silently
                 // drop the original producer's roots. Unioning here makes
                 // the force's OWN observable output path-independent.
-                let evidence = match union_operand_evidence(&projection_evidence, evidence) {
-                    Ok(evidence) => evidence,
-                    Err(error) => return QueryResult::Error(error),
-                };
+                let evidence = union_operand_evidence(&projection_evidence, evidence);
                 QueryResult::Value(ForcedSemanticOperand::minted(
                     self.graph().operand_store_identity(),
                     self.snapshot.current_project_generation(),

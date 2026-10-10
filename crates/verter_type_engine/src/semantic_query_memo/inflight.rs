@@ -86,7 +86,7 @@ pub(super) struct InflightState {
     /// The winner build's `cache_suppress` flag. Set by the winner
     /// alongside `completed`; a joiner that observes `aborted == false`
     /// returns this verbatim in its `CacheRead.cache_suppress`. A
-    /// `cache_suppress` winner is non-cacheable (tracer overflow,
+    /// `cache_suppress` winner is non-cacheable (a non-cacheable read,
     /// pathological input, or an unrootable / `None` signature); the
     /// joiner MUST inherit the same non-cacheability so a joiner inside
     /// an outer cold query cannot publish an outer entry that — through

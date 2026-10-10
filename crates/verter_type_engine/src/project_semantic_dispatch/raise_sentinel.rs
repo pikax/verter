@@ -38,7 +38,6 @@ pub(in crate::project_semantic_dispatch) fn query_error_is_unmaterialized_sentin
         QueryError::Miss
         | QueryError::UnsupportedIntrinsic { .. }
         | QueryError::BudgetExceeded(_)
-        | QueryError::SignatureOverflow
         | QueryError::StaleSemanticOperand
         | QueryError::IncompleteSemanticOperand { .. }
         | QueryError::Cancelled
@@ -95,7 +94,6 @@ pub(in crate::project_semantic_dispatch) fn query_error_is_object_surface_sentin
         QueryError::Miss
         | QueryError::UnsupportedIntrinsic { .. }
         | QueryError::BudgetExceeded(_)
-        | QueryError::SignatureOverflow
         | QueryError::ForeignSemanticOperand
         | QueryError::StaleSemanticOperand
         | QueryError::IncompleteSemanticOperand { .. }
@@ -133,7 +131,6 @@ pub(in crate::project_semantic_dispatch) fn query_error_is_semantic_miss_sentine
         QueryError::Miss => true,
         QueryError::UnsupportedIntrinsic { .. }
         | QueryError::BudgetExceeded(_)
-        | QueryError::SignatureOverflow
         | QueryError::ForeignSemanticOperand
         | QueryError::StaleSemanticOperand
         | QueryError::IncompleteSemanticOperand { .. }
@@ -419,7 +416,6 @@ mod tests {
             QueryError::OpenSurface,
             QueryError::UnrepresentableSurface,
             QueryError::UnrepresentableSurfaceMember,
-            QueryError::SignatureOverflow,
             QueryError::ForeignSemanticOperand,
             QueryError::StaleSemanticOperand,
             QueryError::IncompleteSemanticOperand {
@@ -465,7 +461,6 @@ mod tests {
                 QueryError::Miss
                     | QueryError::UnsupportedIntrinsic { .. }
                     | QueryError::BudgetExceeded(_)
-                    | QueryError::SignatureOverflow
                     | QueryError::StaleSemanticOperand
                     | QueryError::IncompleteSemanticOperand { .. }
                     | QueryError::Cancelled
