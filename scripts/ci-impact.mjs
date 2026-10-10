@@ -834,6 +834,15 @@ export const CI_INERT_PATHS = Object.freeze([
   // Product, architecture and evidence inventories that only local verifiers
   // or the docs build read.
   "tests/documentation/**",
+  // Reviewed Astro contract data; no ci.yml lane reads these bytes yet.
+  // Keep executable specs and future products outside these inert entries.
+  "tests/framework-astro/AST0/cases.md",
+  "tests/framework-astro/AST0/corpus/**/*.astro",
+  "tests/framework-astro/AST0/manifest.json",
+  "tests/framework-astro/AST0/products/astro-activation-policy.json",
+  "tests/framework-astro/AST0/products/astro-capability-matrix.json",
+  "tests/framework-astro/AST0/products/astro-version-lock.json",
+  "tests/framework-astro/evidence/AST0/cases.md",
   "tests/framework-liquid/**",
   "tests/framework-stencil/**",
   "tests/jetbrains-baseline/**",
