@@ -20,6 +20,10 @@ pub trait LiveFactValidation: FactValidation {
 
 pub trait FactValidation {
     fn current_external_supersession_fingerprint(&self) -> u64;
+    /// The external-input fingerprint of this request's captured base,
+    /// only when that base was proven current. Frozen session overlays
+    /// are normalized out; additive completions do not move this fence.
+    fn publication_input_fingerprint(&self) -> Option<u64>;
     /// The cancellation and project-generation handles the host captured
     /// when it admitted this request. Every read through them is live.
     fn request_flags(&self) -> &super::resolver_context::RequestFlags;

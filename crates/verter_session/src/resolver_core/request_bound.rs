@@ -1331,6 +1331,10 @@ impl<L: RequestBoundLifecycle>
 }
 
 impl<L: RequestBoundLifecycle> FactValidation for RequestBoundAdapter<L> {
+    fn publication_input_fingerprint(&self) -> Option<u64> {
+        self.0.request_view().publication_input_fingerprint()
+    }
+
     fn current_external_supersession_fingerprint(&self) -> u64 {
         verter_type_engine::count_resolver_context_call!(
             "FactValidation::current_external_supersession_fingerprint"

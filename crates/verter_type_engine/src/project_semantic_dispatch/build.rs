@@ -2954,7 +2954,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     self.project_generation_signature(),
                 )
                     .into();
-                output.set_partial(composed_partial);
+                output.fold_partial(composed_partial);
                 if observed.is_none() || effective_root_missing {
                     output.cache_suppress = true;
                 }
@@ -2971,7 +2971,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let result = composed.value;
         let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput =
             (result, self.project_generation_signature()).into();
-        output.set_partial(composed_is_partial);
+        output.fold_partial(composed_is_partial);
         if observed.is_none() {
             // Could not self-root on the decl's live content version —
             // refuse warm admission; the value still flows to the caller.
@@ -4759,7 +4759,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // materialize warm gates refuse it. Benign non-cacheability of
             // the nested read does NOT taint this (it is `cache_suppress`
             // on the inner memo only).
-            output.set_partial(utility_is_partial);
+            output.fold_partial(utility_is_partial);
             return InstantiateStart::Done(Box::new(
                 output.with_observed_self_roots(observed_self_roots),
             ));
@@ -4973,7 +4973,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 empty_signature(),
             )
                 .into();
-            output.set_partial(unresolved_owner_debt);
+            output.fold_partial(unresolved_owner_debt);
             output.cache_suppress = unresolved_owner_debt;
             return InstantiateStart::Done(Box::new(output));
         }
@@ -11050,7 +11050,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     self.project_generation_signature(),
                 ))
                 .with_observed_self_roots(observed_self_roots);
-                out.set_partial(any_partial || norm.result_is_partial);
+                out.fold_partial(any_partial || norm.result_is_partial);
                 Some(out)
             }
             _ => None,
@@ -11738,7 +11738,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             fence,
         ))
         .with_observed_self_roots(observed_self_roots);
-        keyof_output.set_partial(keyof_is_partial);
+        keyof_output.fold_partial(keyof_is_partial);
         keyof_output
     }
 
@@ -12327,7 +12327,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 fence.clone(),
             ))
             .with_observed_self_roots(self.observed_self_roots_from_nodes([source, resolved]));
-            out.set_partial(partial);
+            out.fold_partial(partial);
             out
         };
         match data.as_ref() {

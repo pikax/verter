@@ -377,24 +377,26 @@ pub(super) fn classify_runtime(
     counters: &mut VueMacroCodegenCounters,
 ) -> Result<RuntimeClassification, ProjectionFailure> {
     counters.runtime_classifier_calls += 1;
-    let result = dispatch.execute(dispatch.broad_runtime_key_for(subject));
-    if macro_projection_faulted(MacroProjectionLane::RuntimeMemberValue) {
-        return Err(partial_failure());
-    }
+    let result = dispatch.execute_fact(dispatch.broad_runtime_key_for(subject));
     let classification = match result {
-        QueryResult::Value(output) => match output.value {
-            SemanticQueryValue::BroadRuntime(classification) => classification,
-            _ => {
-                return Err(ProjectionFailure::Unsupported(
-                    UnsupportedReason::SemanticConstruct,
-                ))
-            }
-        },
-        QueryResult::Recursive(_) => {
-            return Err(ProjectionFailure::Partial(MacroPartialReason::Recursion))
+        Ok(verter_type_engine::semantic_query::FactResult::Complete(
+            SemanticQueryValue::BroadRuntime(classification),
+        )) => classification,
+        Ok(verter_type_engine::semantic_query::FactResult::Complete(_)) => {
+            return Err(ProjectionFailure::Unsupported(
+                UnsupportedReason::SemanticConstruct,
+            ));
         }
-        QueryResult::Error(_) => {
-            return Err(resolution_failure(MacroProjectionLane::RuntimeMemberValue))
+        Ok(
+            verter_type_engine::semantic_query::FactResult::Approximate { causes, .. }
+            | verter_type_engine::semantic_query::FactResult::Unavailable { causes },
+        ) => {
+            return Err(failure_from_causes(causes.get()));
+        }
+        Err(_) => {
+            return Err(ProjectionFailure::Partial(
+                MacroPartialReason::IncompleteTraversal,
+            ))
         }
     };
 
@@ -734,7 +736,12 @@ pub(super) fn resolution_failure(lane: MacroProjectionLane) -> ProjectionFailure
 pub(super) fn partial_failure() -> ProjectionFailure {
     let reasons =
         verter_type_engine::request_context::current_cold_compute_completeness().reasons();
+    failure_from_causes(reasons)
+}
+
+fn failure_from_causes(reasons: PartialReasonSet) -> ProjectionFailure {
     let reason = if reasons.contains(PartialReasonSet::BUDGET_EXCEEDED)
+        || reasons.contains(PartialReasonSet::OPERATION_BUDGET)
         || reasons.contains(PartialReasonSet::PROJECTION_WORK_LIMIT)
         || reasons.contains(PartialReasonSet::CONNECTED_MEMORY_LIMIT)
         || reasons.contains(PartialReasonSet::DEFERRED_EVALUATION_LIMIT)
@@ -763,6 +770,51 @@ fn member_ordinal(index: usize) -> u32 {
 mod lane_containment_tests {
     use super::{macro_projection_residual, MacroProjectionLane};
     use verter_type_engine::semantic_query::{PartialReasonSet, ResultCompleteness};
+
+    #[test]
+    fn exact_runtime_member_is_independent_of_an_earlier_failed_fact() {
+        use crate::{HostConfig, UpsertRequest, VerterHost};
+        use std::sync::Arc;
+        use verter_macro_dto::RuntimeConstructor;
+        use verter_type_engine::request_context::{
+            fold_result_completeness, ColdComputeCompletenessScope,
+        };
+
+        let host = VerterHost::new_standalone(HostConfig::default());
+        let canonical = "/src/Independent.vue";
+        let _ = host
+            .upsert(UpsertRequest {
+                canonical_id: Some(canonical.into()),
+                input_id: canonical.into(),
+                source: Arc::from(
+                    "<script setup lang=\"ts\">defineProps<{ good: string }>()</script>",
+                ),
+                file_language: crate::FileLanguage::vue(),
+                aliases: Vec::new(),
+            })
+            .unwrap();
+        crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
+            let dispatch = super::ProjectSemanticDispatch::new(ctx);
+            let indexed = ctx.ensure_indexed_ready_serve(canonical).unwrap().indexed;
+            let mac = &indexed.script_analysis.as_ref().unwrap().macros[0];
+            let owner = super::build_owner_decl_identity(ctx, canonical, mac.owner);
+            let subject = dispatch.broad_runtime_subject_for_macro(&owner, 0).unwrap();
+            let _scope = ColdComputeCompletenessScope::enter();
+            fold_result_completeness(ResultCompleteness::partial(
+                PartialReasonSet::BUDGET_EXCEEDED,
+            ));
+            let classification = super::classify_runtime(
+                &dispatch,
+                subject.member(Arc::from("good")),
+                &mut super::VueMacroCodegenCounters::default(),
+            )
+            .expect("an exact sibling's classification owns its guarantee");
+            assert_eq!(
+                classification.constructors.as_slice(),
+                &[RuntimeConstructor::String]
+            );
+        });
+    }
 
     fn residual(reason: PartialReasonSet, lane: MacroProjectionLane) -> PartialReasonSet {
         macro_projection_residual(ResultCompleteness::Partial(reason), lane)

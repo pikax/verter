@@ -480,17 +480,6 @@ impl<T> QueryBuildOutput<T> {
         self.completeness = self.completeness.merge(other);
     }
 
-    /// Set partiality from a flag, keeping the classes already recorded
-    /// when it stays partial (a recomputed verdict).
-    #[inline]
-    pub fn set_partial(&mut self, partial: bool) {
-        self.completeness = if partial {
-            crate::semantic_query::ResultCompleteness::Partial(self.completeness.reasons())
-        } else {
-            crate::semantic_query::ResultCompleteness::Complete
-        };
-    }
-
     /// Fold a nested partiality flag in (never clears).
     #[inline]
     pub fn fold_partial(&mut self, partial: bool) {
@@ -506,12 +495,6 @@ impl<T> QueryBuildOutput<T> {
         if !reasons.is_empty() {
             self.mark_partial_with(reasons);
         }
-    }
-
-    /// Replace the observed completeness outright (a recomputed verdict).
-    #[inline]
-    pub fn set_completeness(&mut self, completeness: crate::semantic_query::ResultCompleteness) {
-        self.completeness = completeness;
     }
 
     pub fn map_result<U>(

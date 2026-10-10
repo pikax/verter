@@ -57,6 +57,23 @@ Direct owner imports take the `OwnerImportSurfaceDb` path via `resolve_owner_dir
 
 ## Native Vs Compat (CRITICAL)
 
+Runtime constructor consumers read `ProjectSemanticDispatch::execute_fact`.
+The broad-runtime producer carries its own member classification guarantee:
+an exact sibling remains exact when an ancestor's value failed, while a
+classifier that could not finish exposes an unavailable fact. Unknown runtime
+kinds can themselves be exact (for example an authored `unknown` type).
+The consumer branches on the typed fact and preserves its failure causes;
+unrelated enclosing completeness does not authorize or veto the member.
+
+Final-component storage is engine-owned and generic; the session facade owns
+native payload policy. Its read validates the request generation and dependency
+signature. Its publish consumes engine-produced tracer evidence, checks exact
+owner coverage, and checks its generation and external-input publication fence.
+Fresh cold dependencies can be absent from the request-entry snapshot; this
+does not turn cold publication into a warm lookup. All retained dependencies
+remain in the signature after the narrow owner-route filter and validate on read.
+Neither the facade nor another consumer has a production raw DB/map accessor.
+
 The official/native component-meta payload is the semantic authority. `@verter/component-meta/compat` is a projection layer for `vue-component-meta` interoperability, not a second semantic pipeline.
 
 Guards: `no_napi_direct_verter_compiler_emitters`
