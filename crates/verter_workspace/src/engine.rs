@@ -4431,6 +4431,10 @@ impl Engine {
             );
             let query = transaction.lock().query().cloned();
             let mut transaction = transaction.into_inner();
+            #[cfg(test)]
+            if let Some(witness) = resolution_test_hooks::extra_resolution_witness() {
+                transaction.adopt_witness(&witness);
+            }
             // The decision's COMPLETE direct edge set, taken before
             // finalisation consumes the transaction. Direct only: the
             // primitive facts this attempt observed plus the child
@@ -4520,6 +4524,7 @@ impl Engine {
                         cache_key.clone(),
                         entry.clone(),
                         bytes,
+                        &entry.signature.facts,
                         overlay.authority(),
                     );
                     published = seq.is_some();
@@ -4546,11 +4551,11 @@ impl Engine {
                     let reservation = if importer_retired {
                         Err(None)
                     } else {
-                        self.retention.reserve(bytes).map_err(
-                            |crate::overlay_residency::RetentionRefused| {
+                        self.retention
+                            .reserve_with_evidence(bytes, &entry.signature.facts)
+                            .map_err(|crate::overlay_residency::RetentionRefused| {
                                 Some(verter_audit::NonAdmissionReason::RetentionPressure)
-                            },
-                        )
+                            })
                     };
                     match reservation {
                         Ok(charge) => {

@@ -1,0 +1,233 @@
+{
+  "schema": "AngularCapabilityMatrix",
+  "version": 1,
+  "product": "AngularCapabilityMatrix",
+  "node": "ANG0",
+  "kind": "lock",
+  "family": "angular",
+  "ownershipRule": "Every admitted cell names exactly one producer node and one receiving acceptance ID of that producer covering its operation and locations. ANG9-AC1 independently qualifies all cells; it never substitutes for delivery acceptance. Every other row is a truthful exclusion with a reason.",
+  "evidenceRule": "A cell is supported only by its receiving acceptance passing on the pinned release. An architecture proof (ANGP), an installed compiler and syntax highlighting (ANG1G) are never product evidence.",
+  "qualification": {
+    "coverage": "ANG9-AC1 joins every admitted cell to a passing fixture on the pinned release",
+    "promotion": "ANG10-AC1 promotes Angular only when every cell has an ANG9 pass or is one of the exclusions below",
+    "validator": "ANG1G-ACV: tests/framework-angular/ANG0/angular-lock.spec.ts, run by scripts/run-framework-locks.mjs (REG0-AC6)"
+  },
+  "profiles": [
+    {
+      "id": "angular-22.2.1-standalone",
+      "release": "angular@22.2.1",
+      "compilationScope": "standalone component imports",
+      "templateLocations": ["inline", "external"]
+    }
+  ],
+  "hosts": [
+    {
+      "id": "tsgo-composite",
+      "kind": "lsp-tsgo",
+      "router": "TsgoCompositeProvider (crates/verter_lsp/src/tsgo/composite.rs)",
+      "order": ["tsgo-shared (TsgoSharedProvider)", "tsgo-managed (TsgoOwnedBackend over crates/verter_tsgo_api)"],
+      "projection": "ANG6 companion through carrier_sync (crates/verter_lsp/src/tsgo/carrier_sync.rs), mapped back by ProviderPositionMapper"
+    },
+    {
+      "id": "lsp-enhancement",
+      "kind": "verter-lsp carrier-only",
+      "rule": "answers only what tsgo cannot; never re-provides a tsgo result; steps down where LSPX11 owns(capability, position) is false"
+    },
+    {
+      "id": "kernel",
+      "kind": "shared kernel facts",
+      "rule": "language, session, TypeInfo and index contributions with no editor route of their own"
+    },
+    {
+      "id": "lint-host",
+      "kind": "LNT2 carrier registration",
+      "rule": "rule populations stay in lint.angular (LNG1-LNG9, LNG12)"
+    },
+    {
+      "id": "formatter",
+      "kind": "formatter authority view",
+      "rule": "delegates HTML to FMTH0, expressions to FMT2TX and styles to FMTC0"
+    },
+    {
+      "id": "typescript-plugin-generic",
+      "kind": "tsserver compatibility",
+      "rule": "existing carrier-generic carrier-store path only; no Angular-specific row"
+    }
+  ],
+  "parserDecisions": [
+    {
+      "sublanguage": "template markup (elements, attributes, bindings, blocks, ICU, template elements)",
+      "par0Row": "CL12",
+      "decision": "ForkAndSpecialize",
+      "base": "CL10 neutral HTML tokenizer lineage (H08 crates/verter_html_syntax, HWC1)",
+      "home": "H02 crates/verter_angular_syntax",
+      "owner": "ANG1",
+      "grammarSlot": "ANG1-AC1",
+      "recoverySlot": "ANG1-AC2",
+      "neutralHtmlBranches": "none: the fork lives in H02 and the neutral parser gains no Angular mode, table or branch (PD06, PN03)",
+      "sameGrammarFor": ["inline", "external"]
+    },
+    {
+      "sublanguage": "binding and interpolation expressions, event statements, pipes and *dir microsyntax",
+      "par0Row": "CL12",
+      "decision": "NewParser",
+      "grammar": "dedicated Angular expression grammar in H02, not an OXC specialisation",
+      "home": "H02 crates/verter_angular_syntax",
+      "owner": "ANG1",
+      "grammarSlot": "ANG1-AC1",
+      "recoverySlot": "ANG1-AC2",
+      "reason": "The Angular expression language is not an ECMAScript subset OXC can parse: `|` is the pipe operator with `:` arguments and every bitwise operator is unsupported; declarations, arrow functions, `new` and the comma operator are rejected; event bindings are `;`-separated statements; *dir microsyntax (`let x of xs; index as i`) and the `$any`/`$safeNavigationMigration` forms are Angular-only (adev/src/content/guide/templates/expression-syntax.md at v22.2.1). Type answers come from tsgo over the ANG6 companion, so no TS semantics live in this grammar."
+    },
+    {
+      "sublanguage": "component TypeScript host (decorators, inline template and style literals)",
+      "par0Row": "CL01",
+      "decision": "Reuse",
+      "owner": "OXC through the choke point",
+      "note": "Inline template and style literals are attached by ANG1M through the EMB0 escape-aware literal codec."
+    },
+    {
+      "sublanguage": "component styles (inline styles, styleUrl, styleUrls)",
+      "par0Row": "CL04",
+      "decision": "Reuse",
+      "owner": "verter_css_syntax",
+      "note": "SCSS and Less only as the CL05/CL06 dialects where they are admitted."
+    },
+    {
+      "sublanguage": "an .html file not associated with a component",
+      "par0Row": "CL10",
+      "decision": "Reuse",
+      "owner": "neutral HTML (H08)",
+      "note": "Stays neutral; see the activation policy."
+    }
+  ],
+  "facets": [
+    {
+      "facet": "props",
+      "sources": ["input()", "input.required()", "@Input (aliases and transform input types)", "the input half of model()"],
+      "provenance": "native",
+      "producer": "ANG3",
+      "receivingAcceptance": "ANG3-AC1"
+    },
+    {
+      "facet": "events",
+      "sources": ["output()", "@Output", "outputFromObservable"],
+      "provenance": "native",
+      "producer": "ANG3",
+      "receivingAcceptance": "ANG3-AC1"
+    },
+    {
+      "facet": "events",
+      "sources": ["the model() change event xChange"],
+      "provenance": "derived(model-change)",
+      "producer": "ANG3",
+      "receivingAcceptance": "ANG3-AC3"
+    },
+    {
+      "facet": "slots",
+      "sources": ["<ng-content select>"],
+      "provenance": "derived(content-projection)",
+      "producer": "ANG3",
+      "receivingAcceptance": "ANG3-AC3"
+    },
+    {
+      "facet": "expose",
+      "sources": ["exportAs", "public members reachable through template refs"],
+      "provenance": "derived(export-as)",
+      "producer": "ANG3",
+      "receivingAcceptance": "ANG3-AC3"
+    },
+    {
+      "facet": "options",
+      "provenance": "unsupported",
+      "producer": "ANG3",
+      "receivingAcceptance": "ANG3-AC5"
+    },
+    {
+      "facet": "model",
+      "provenance": "unsupported",
+      "producer": "ANG3",
+      "receivingAcceptance": "ANG3-AC5",
+      "note": "model() maps to props plus the derived change event; the MODEL surface kind is UNSUPPORTED."
+    }
+  ],
+  "cells": [
+    {"id": "ANG-C01", "operation": "template parse, lossless round trip", "locations": ["inline", "external"], "host": "kernel", "producer": "ANG1", "receivingAcceptance": "ANG1-AC1"},
+    {"id": "ANG-C02", "operation": "template parse recovery with authored offsets", "locations": ["inline", "external"], "host": "kernel", "producer": "ANG1", "receivingAcceptance": "ANG1-AC2"},
+    {"id": "ANG-C03", "operation": "custom *dir microsyntax parse; built-in structural sugar rejected as unsupported-profile", "locations": ["inline", "external"], "host": "kernel", "producer": "ANG1", "receivingAcceptance": "ANG1-AC3"},
+    {"id": "ANG-C04", "operation": "wire tag FRAMEWORK_TAG_ANGULAR registered with the adapter descriptor", "locations": [], "host": "kernel", "producer": "ANG1", "receivingAcceptance": "ANG1-AC5"},
+    {"id": "ANG-C05", "operation": "FWA1-only activation with zero work when inactive", "locations": ["inline", "external"], "host": "kernel", "producer": "ANG1M", "receivingAcceptance": "ANG1M-AC5"},
+    {"id": "ANG-C06", "operation": "template and style attachment with exact maps", "locations": ["inline", "external"], "host": "kernel", "producer": "ANG1M", "receivingAcceptance": "ANG1M-AC1"},
+    {"id": "ANG-C07", "operation": "region identity across nested and malformed edits", "locations": ["inline", "external"], "host": "kernel", "producer": "ANG1M", "receivingAcceptance": "ANG1M-AC2"},
+    {"id": "ANG-C08", "operation": "shared templateUrl gives one attachment context per component; ambiguous owner is NeedSelection", "locations": ["external"], "host": "kernel", "producer": "ANG1M", "receivingAcceptance": "ANG1M-AC3"},
+    {"id": "ANG-C09", "operation": "dynamic or interpolated template literal refused as unsupported", "locations": ["inline"], "host": "kernel", "producer": "ANG1M", "receivingAcceptance": "ANG1M-AC4"},
+    {"id": "ANG-C10", "operation": "displaced-route inventory recorded with owning acceptances", "locations": [], "host": "kernel", "producer": "ANG1M", "receivingAcceptance": "ANG1M-AC6"},
+    {"id": "ANG-C11", "operation": "native syntax diagnostics", "locations": ["external"], "host": "lsp-enhancement", "producer": "ANG1S", "receivingAcceptance": "ANG1S-AC1"},
+    {"id": "ANG-C12", "operation": "document symbols", "locations": ["external"], "host": "lsp-enhancement", "producer": "ANG1S", "receivingAcceptance": "ANG1S-AC2"},
+    {"id": "ANG-C13", "operation": "folding and selection ranges", "locations": ["external"], "host": "lsp-enhancement", "producer": "ANG1S", "receivingAcceptance": "ANG1S-AC3"},
+    {"id": "ANG-C14", "operation": "carrier-only semantic tokens", "locations": ["external"], "host": "lsp-enhancement", "producer": "ANG1S", "receivingAcceptance": "ANG1S-AC4"},
+    {"id": "ANG-C15", "operation": "carrier structure gating, fresh-equals-incremental and one parse per content hash", "locations": ["external"], "host": "lsp-enhancement", "producer": "ANG1S", "receivingAcceptance": "ANG1S-AC5"},
+    {"id": "ANG-C16", "operation": "selector binding within the standalone imports scope", "locations": ["inline", "external"], "host": "kernel", "producer": "ANG2", "receivingAcceptance": "ANG2-AC1"},
+    {"id": "ANG-C17", "operation": "one template file shared by two components keeps distinct binding contexts", "locations": ["external"], "host": "kernel", "producer": "ANG2", "receivingAcceptance": "ANG2-AC2"},
+    {"id": "ANG-C18", "operation": "template reference and @let targets", "locations": ["inline", "external"], "host": "kernel", "producer": "ANG2", "receivingAcceptance": "ANG2-AC3"},
+    {"id": "ANG-C19", "operation": "atomic incremental index contribution on imports edits", "locations": ["inline", "external"], "host": "kernel", "producer": "ANG2", "receivingAcceptance": "ANG2-AC4"},
+    {"id": "ANG-C20", "operation": "NgModule-declared component gets a typed unsupported-profile scope", "locations": ["inline", "external"], "host": "kernel", "producer": "ANG2", "receivingAcceptance": "ANG2-AC5"},
+    {"id": "ANG-C21", "operation": "component info: signal and decorator inputs and outputs", "locations": ["inline", "external"], "host": "kernel", "producer": "ANG3", "receivingAcceptance": "ANG3-AC1"},
+    {"id": "ANG-C22", "operation": "unresolved input types are Unavailable, never guessed", "locations": ["inline", "external"], "host": "kernel", "producer": "ANG3", "receivingAcceptance": "ANG3-AC2"},
+    {"id": "ANG-C23", "operation": "derived facets carry provenance", "locations": ["inline", "external"], "host": "kernel", "producer": "ANG3", "receivingAcceptance": "ANG3-AC3"},
+    {"id": "ANG-C24", "operation": "template context guards", "locations": ["inline", "external"], "host": "kernel", "producer": "ANG3", "receivingAcceptance": "ANG3-AC4"},
+    {"id": "ANG-C25", "operation": "registry completeness; OPTIONS and MODEL UNSUPPORTED", "locations": [], "host": "kernel", "producer": "ANG3", "receivingAcceptance": "ANG3-AC5"},
+    {"id": "ANG-C26", "operation": "control-flow facts (@for track identity, @defer triggers)", "locations": ["inline", "external"], "host": "kernel", "producer": "ANG4", "receivingAcceptance": "ANG4-AC1"},
+    {"id": "ANG-C27", "operation": "computed providers and routes stay unknown", "locations": ["inline", "external"], "host": "kernel", "producer": "ANG4", "receivingAcceptance": "ANG4-AC2"},
+    {"id": "ANG-C28", "operation": "static signal graph and effect injection-context facts", "locations": ["inline", "external"], "host": "kernel", "producer": "ANG4", "receivingAcceptance": "ANG4-AC3"},
+    {"id": "ANG-C29", "operation": "hydration annotations and realm classification as source facts", "locations": ["inline", "external"], "host": "kernel", "producer": "ANG4", "receivingAcceptance": "ANG4-AC4"},
+    {"id": "ANG-C30", "operation": "TS-region hover and type errors", "locations": ["inline"], "host": "tsgo-composite", "tsgoOperations": ["textDocument/hover", "diagnostics"], "producer": "ANG6", "receivingAcceptance": "ANG6-AC1"},
+    {"id": "ANG-C31", "operation": "answers in generated companion scaffolding suppressed", "locations": ["inline", "external"], "host": "tsgo-composite", "tsgoOperations": ["textDocument/hover", "textDocument/definition", "textDocument/references", "diagnostics"], "producer": "ANG6", "receivingAcceptance": "ANG6-AC2"},
+    {"id": "ANG-C32", "operation": "TS-region binding diagnostics", "locations": ["external"], "host": "tsgo-composite", "tsgoOperations": ["diagnostics", "textDocument/hover"], "producer": "ANG6", "receivingAcceptance": "ANG6-AC3"},
+    {"id": "ANG-C33", "operation": "external-template document-selector row and companion naming generated fresh", "locations": ["external"], "host": "tsgo-composite", "producer": "ANG6", "receivingAcceptance": "ANG6-AC4"},
+    {"id": "ANG-C34", "operation": "companion re-sync: fresh equals incremental, cancelled sync keeps the previous companion", "locations": ["inline", "external"], "host": "tsgo-composite", "producer": "ANG6", "receivingAcceptance": "ANG6-AC5"},
+    {"id": "ANG-C35", "operation": "tsserver compatibility through the generic carrier store", "locations": ["inline", "external"], "host": "typescript-plugin-generic", "angularSpecific": false, "producer": "ANG6", "receivingAcceptance": "ANG6-AC6"},
+    {"id": "ANG-C36", "operation": "TS-region hover, definition and references answered exactly once", "locations": ["inline", "external"], "host": "tsgo-composite", "tsgoOperations": ["textDocument/hover", "textDocument/definition", "textDocument/references"], "producer": "ANG5", "receivingAcceptance": "ANG5-AC1"},
+    {"id": "ANG-C37", "operation": "binding definition to input() and output() declarations", "locations": ["inline", "external"], "host": "tsgo-composite", "tsgoOperations": ["textDocument/definition"], "producer": "ANG5", "receivingAcceptance": "ANG5-AC3"},
+    {"id": "ANG-C38", "operation": "TS-region completion", "locations": ["inline", "external"], "host": "tsgo-composite", "tsgoOperations": ["textDocument/completion"], "producer": "ANG5", "receivingAcceptance": "ANG5-AC5"},
+    {"id": "ANG-C39", "operation": "selector references within importing standalone scopes", "locations": ["inline", "external"], "host": "lsp-enhancement", "tsgoLimitation": "tsgo has no Angular selector-scope model", "producer": "ANG5", "receivingAcceptance": "ANG5-AC2"},
+    {"id": "ANG-C40", "operation": "navigation on broken source: complete before the break, incomplete after", "locations": ["inline", "external"], "host": "lsp-enhancement", "producer": "ANG5", "receivingAcceptance": "ANG5-AC4"},
+    {"id": "ANG-C41", "operation": "carrier-only completion (elements, attributes, ng-content slots)", "locations": ["inline", "external"], "host": "lsp-enhancement", "tsgoLimitation": "tsgo has no template element, attribute or content-projection model", "producer": "ANG5", "receivingAcceptance": "ANG5-AC5"},
+    {"id": "ANG-C42", "operation": "TS-symbol rename leaves unrelated text untouched", "locations": ["inline", "external"], "host": "tsgo-composite", "tsgoOperations": ["textDocument/rename", "textDocument/prepareRename"], "producer": "ANG5R", "receivingAcceptance": "ANG5R-AC2"},
+    {"id": "ANG-C43", "operation": "rename touching generated scaffolding is refused whole", "locations": ["inline", "external"], "host": "tsgo-composite", "tsgoOperations": ["textDocument/rename"], "producer": "ANG5R", "receivingAcceptance": "ANG5R-AC3"},
+    {"id": "ANG-C44", "operation": "selector rename plan", "locations": ["inline", "external"], "host": "lsp-enhancement", "tsgoLimitation": "tsgo has no Angular selector model", "producer": "ANG5R", "receivingAcceptance": "ANG5R-AC1"},
+    {"id": "ANG-C45", "operation": "input and output alias rename plan", "locations": ["inline", "external"], "host": "lsp-enhancement", "tsgoLimitation": "a public alias string is not a TS symbol", "producer": "ANG5R", "receivingAcceptance": "ANG5R-AC4"},
+    {"id": "ANG-C46", "operation": "rename steps down where another provider owns the position", "locations": ["inline", "external"], "host": "lsp-enhancement", "producer": "ANG5R", "receivingAcceptance": "ANG5R-AC5"},
+    {"id": "ANG-C47", "operation": "encapsulated style links and ::ng-deep escape", "locations": ["inline", "external"], "host": "kernel", "producer": "ANG7", "receivingAcceptance": "ANG7-AC1"},
+    {"id": "ANG-C48", "operation": "dynamic class bindings are conditional or unknown", "locations": ["inline", "external"], "host": "kernel", "producer": "ANG7", "receivingAcceptance": "ANG7-AC2"},
+    {"id": "ANG-C49", "operation": "host root facts", "locations": ["inline", "external"], "host": "kernel", "producer": "ANG7", "receivingAcceptance": "ANG7-AC3"},
+    {"id": "ANG-C50", "operation": "projection outlet facts", "locations": ["inline", "external"], "host": "kernel", "producer": "ANG7", "receivingAcceptance": "ANG7-AC4"},
+    {"id": "ANG-C51", "operation": "lint host does zero work when FWA1 resolves Angular off", "locations": ["inline", "external"], "host": "lint-host", "producer": "ANG8", "receivingAcceptance": "ANG8-AC1"},
+    {"id": "ANG-C52", "operation": "suppression comment spans", "locations": ["inline", "external"], "host": "lint-host", "producer": "ANG8", "receivingAcceptance": "ANG8-AC2"},
+    {"id": "ANG-C53", "operation": "safe fixes only; no automatic structural-sugar migration", "locations": ["inline", "external"], "host": "lint-host", "producer": "ANG8", "receivingAcceptance": "ANG8-AC3"},
+    {"id": "ANG-C54", "operation": "lint host registers no rule population", "locations": [], "host": "lint-host", "producer": "ANG8", "receivingAcceptance": "ANG8-AC4"},
+    {"id": "ANG-C55", "operation": "format: idempotent and meaning-preserving", "locations": ["inline", "external"], "host": "formatter", "producer": "ANG8F", "receivingAcceptance": "ANG8F-AC1"},
+    {"id": "ANG-C56", "operation": "format: recovery islands byte-identical", "locations": ["inline", "external"], "host": "formatter", "producer": "ANG8F", "receivingAcceptance": "ANG8F-AC2"},
+    {"id": "ANG-C57", "operation": "format: delegation to FMT2TX and FMTC0, no second printer", "locations": ["inline", "external"], "host": "formatter", "producer": "ANG8F", "receivingAcceptance": "ANG8F-AC3"},
+    {"id": "ANG-C58", "operation": "format: inline template formatted inside its literal through the ANG1M escape-aware maps", "locations": ["inline"], "host": "formatter", "producer": "ANG8F", "receivingAcceptance": "ANG8F-AC4"},
+    {"id": "ANG-C59", "operation": "inline native syntax diagnostics through the native syntax rail at exact literal ranges", "locations": ["inline"], "host": "lsp-enhancement", "producer": "ANG5", "receivingAcceptance": "ANG5-AC6"},
+    {"id": "ANG-C60", "operation": "inline document symbols through exact literal maps, preserving the surrounding TS outline", "locations": ["inline"], "host": "lsp-enhancement", "producer": "ANG5", "receivingAcceptance": "ANG5-AC6"},
+    {"id": "ANG-C61", "operation": "inline folding and selection ranges through exact literal maps", "locations": ["inline"], "host": "lsp-enhancement", "producer": "ANG5", "receivingAcceptance": "ANG5-AC6"},
+    {"id": "ANG-C62", "operation": "inline carrier-only semantic tokens; no tokens inside TS expression regions", "locations": ["inline"], "host": "lsp-enhancement", "producer": "ANG5", "receivingAcceptance": "ANG5-AC6"},
+    {"id": "ANG-C63", "operation": "inline structure: inactive zero work, edit/revert equals fresh, cancellation publishes nothing and shared parse reuse", "locations": ["inline"], "host": "lsp-enhancement", "producer": "ANG5", "receivingAcceptance": "ANG5-AC6"}
+  ],
+  "exclusions": [
+    {"id": "ANG-X01", "row": "consuming ng build / ngc emit output or its source maps", "reason": "ruling 4: no BND consumption; ANG6 is the TS-host projection"},
+    {"id": "ANG-X02", "row": "a DBG, TST or WPF source-map promise for Angular output", "reason": "ruling 4: no map is promised over a build Verter does not own"},
+    {"id": "ANG-X03", "row": "rendering, hydrating, serving or executing Angular code, config or dev servers", "reason": "framework-common: no runtime in verticals; realm and hydration facts are static source classifications (ANG4)"},
+    {"id": "ANG-X04", "row": "NgModule declarations scope as a supported profile", "reason": "ruling 2: legacy mode; typed unsupported-profile result", "refusalProof": ["ANG2-AC5", "ANG5-AC2"]},
+    {"id": "ANG-X05", "row": "*ngIf, *ngFor and *ngSwitch as a supported profile", "reason": "superseded by built-in control flow; the official migration is `ng generate @angular/core:control-flow`", "refusalProof": ["ANG1-AC3"]},
+    {"id": "ANG-X06", "row": "@angular/language-service as an authority or editor route", "reason": "decision 5: oracle only (ANG9)"},
+    {"id": "ANG-X07", "row": "the Angular 23 next/rc profile", "reason": "no 23.x version is published to name exactly (angular-version-lock.json#excludedReleases)"},
+    {"id": "ANG-X08", "row": "a Verter-computed TS-region answer (hover, completion, definition, references, rename, diagnostics)", "reason": "TS regions are answered by tsgo over the ANG6 companion; a duplicate fails ANG5-AC1"},
+    {"id": "ANG-X09", "row": "an Angular-specific @verter/typescript-plugin row", "reason": "decision 5: generic carrier-store compatibility only (ANG6-AC6)"},
+    {"id": "ANG-X10", "row": "activation from a generic .html file, LK6, angular.json or a name match", "reason": "FWA1 is the only activation source (angular-activation-policy.json)"},
+    {"id": "ANG-X11", "row": "OPTIONS and MODEL surface kinds", "reason": "class-B facet table: not used; model() maps to props plus a derived event", "refusalProof": ["ANG3-AC5"]},
+    {"id": "ANG-X12", "row": "Prettier's Angular printer as a formatting oracle", "reason": "not an official Angular source"},
+    {"id": "ANG-X13", "row": "ANG1G TextMate colouring as support evidence for any cell", "reason": "client-side lexical colouring; never product evidence (ANG1G-AC6)"}
+  ]
+}

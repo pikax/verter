@@ -1,0 +1,82 @@
+{
+  "schema": "AngularActivationPolicy",
+  "version": 1,
+  "product": "AngularActivationPolicy",
+  "node": "ANG0",
+  "kind": "lock",
+  "family": "angular",
+  "activationSource": {
+    "owner": "FWA1",
+    "record": "FrameworkActivation { package, framework, state, admittedRelease, mode, provenance }",
+    "home": "crates/verter_session/src/framework/project_capabilities.rs",
+    "familyRow": "crates/verter_session/src/framework/families/angular.rs (activation-rule slot written by FWA1)",
+    "granularity": "per workspace package, then per file",
+    "detection": {
+      "package": "@angular/core",
+      "reads": "the resolved installed version from the PM3 package snapshot",
+      "neverReads": ["the declared dependency range", "the presence of angular.json", "@angular/language-service", "a file extension", "an @Component name match"]
+    },
+    "admission": {
+      "releaseTable": "tests/framework-angular/ANG0/products/angular-version-lock.json#admittedReleases",
+      "admitted": ["angular@22.2.1"],
+      "otherwise": "unsupported-version, with its reason; never coerced"
+    },
+    "switch": {
+      "setting": "frameworks.angular",
+      "values": ["auto", "on", "off"],
+      "off": "the whole Angular vertical does zero work for the package",
+      "on": "never admits a release this lock does not admit",
+      "explicitOnWithoutManifest": "on that names an admitted release activates with provenance explicit; auto leaves the package inactive"
+    },
+    "capabilityBit": "FWA1's admitted record sets the Angular ProjectCapabilitySnapshot bit; that bit gates the Angular LanguageRow::gated row and the external-template document-selector row",
+    "abortCheck": "FWA1's record is keyed by package, so a per-package @angular/core activation is expressible; the ANG0 abort clause does not apply"
+  },
+  "inactiveMeansZeroWork": {
+    "states": ["inactive", "unsupported-version", "off"],
+    "noWorkOf": ["parse", "attachment", "fact", "projection", "navigation", "lint-host", "format"],
+    "proofs": [
+      {"work": "parse and attachment", "acceptance": "ANG1M-AC5"},
+      {"work": "external carrier LSP structure features", "acceptance": "ANG1S-AC5"},
+      {"work": "inline carrier LSP structure features", "acceptance": "ANG5-AC6"},
+      {"work": "lint host", "acceptance": "ANG8-AC1"}
+    ]
+  },
+  "notActivationSources": [
+    {
+      "source": "LK6 lint switch",
+      "role": "selects which lint.angular packs run where FWA1 already resolves Angular active; it never turns the vertical on or off"
+    },
+    {
+      "source": "ANG1G TextMate injection grammars",
+      "role": "client-side lexical colouring only; never activation and never product evidence"
+    },
+    {
+      "source": "@angular/language-service",
+      "role": "test-only oracle"
+    },
+    {
+      "source": "angular.json, project.json or any workspace config file",
+      "role": "not read for activation"
+    }
+  ],
+  "htmlNeutrality": {
+    "rule": "A generic .html file stays neutral HTML until it is exactly associated with a component through a resolved templateUrl in a package where FWA1 resolves Angular active.",
+    "association": "ANGP findings consumed at ANG1M (ANG1M-AC3, ANG1M-AC6); an ambiguous owner returns NeedSelection",
+    "neutralParser": "CL10 neutral HTML (H08 verter_html_syntax) carries no Angular branch"
+  },
+  "hostPolicy": {
+    "tsRegionAuthority": "tsgo through the Verter LSP TypeProvider routes",
+    "router": "TsgoCompositeProvider (crates/verter_lsp/src/tsgo/composite.rs)",
+    "order": [
+      {"rank": 1, "route": "tsgo-shared", "provider": "TsgoSharedProvider (crates/verter_lsp/src/tsgo/shared.rs)"},
+      {"rank": 2, "route": "tsgo-managed", "provider": "TsgoOwnedBackend over crates/verter_tsgo_api"}
+    ],
+    "projection": "ANG6 companion, project-bound through ProjectBinding/BoundProject and mapped back through ProviderPositionMapper; generated-only spans suppressed",
+    "verterLsp": "carrier-only enhancements; never computes a TS-region answer itself",
+    "externalTemplates": "a Verter LSP document-selector row gated by the FWA1 capability bit (ANG6, ANG6-AC4)",
+    "inlineTemplates": "LSPX11 Angular contributor seam (LSPX11-AC8), implemented by ANG5 using ANG1S CarrierStructureFeatures and ANG1M exact escape-aware authored maps; ordinary TS regions remain with tsgo (ANG5-AC5, ANG5-AC6)",
+    "typescriptPlugin": "@verter/typescript-plugin serves the companion only through its existing carrier-generic carrier-store path; no Angular-specific row (ANG6-AC6)",
+    "angularLanguageService": "oracle only",
+    "stepDown": "a Verter carrier-only answer is given only where LSPX11 owns(capability, position) resolves to Verter (ANG5R-AC5)"
+  }
+}

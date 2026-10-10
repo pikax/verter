@@ -1,0 +1,42 @@
+{
+  "schema": "FrameworkLockManifest",
+  "version": 1,
+  "node": "ANG0",
+  "kind": "lock",
+  "family": "angular",
+  "products": [
+    {"name": "AngularVersionLock", "path": "tests/framework-angular/ANG0/products/angular-version-lock.json"},
+    {"name": "AngularCapabilityMatrix", "path": "tests/framework-angular/ANG0/products/angular-capability-matrix.json"},
+    {"name": "AngularActivationPolicy", "path": "tests/framework-angular/ANG0/products/angular-activation-policy.json"}
+  ],
+  "reservedProducts": [
+    {"name": "AngularDisplacedRoutes", "path": "tests/framework-angular/ANG0/products/angular-displaced-routes.json", "writer": "ANG1M", "acceptance": "ANG1M-AC6"}
+  ],
+  "cases": "tests/framework-angular/ANG0/cases.md",
+  "acceptance": [
+    {"id": "ANG0-AC1", "name": "pinned release", "product": "AngularVersionLock", "cases": "ANG0-AC1"},
+    {"id": "ANG0-AC2", "name": "owned matrix", "product": "AngularCapabilityMatrix", "cases": "ANG0-AC2"},
+    {"id": "ANG0-AC3", "name": "activation and host policy", "product": "AngularActivationPolicy", "cases": "ANG0-AC3"},
+    {"id": "ANG0-AC4", "name": "proof is not support", "product": "AngularCapabilityMatrix", "cases": "ANG0-AC4"},
+    {"id": "ANG0-AC5", "name": "wire tag ratified", "product": "AngularVersionLock", "cases": "ANG0-AC5"}
+  ],
+  "validator": {
+    "status": "not-landed",
+    "owner": "ANG1G",
+    "acceptance": "ANG1G-ACV",
+    "files": ["tests/framework-angular/ANG0/contract.ts", "tests/framework-angular/ANG0/angular-lock.spec.ts"],
+    "test": "node --test tests/framework-angular/ANG0/angular-lock.spec.ts",
+    "runner": "scripts/run-framework-locks.mjs (REG0-AC6)"
+  },
+  "consumers": [
+    {"node": "FWA1", "reads": "angular-version-lock.json#admittedReleases as the Angular release table"},
+    {"node": "REG0", "reads": "the parser home, wire tag and template file associations"},
+    {"node": "FCH1", "reads": "the products as data"},
+    {"node": "ANG9", "reads": "the capability matrix cells for coverage"},
+    {"node": "ANG10", "reads": "the capability matrix cells and exclusions for promotion"}
+  ],
+  "docs": "docs/arch/framework-angular.md",
+  "productionLoc": 0,
+  "runtimeCorrectness": false,
+  "notes": "Contract bytes only. ANG0 lands reviewed data and the planted-row case table; it adds no validator, CI gate, test or package script. The lock is not CI-checked until ANG1G lands its spec."
+}

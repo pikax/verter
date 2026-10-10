@@ -730,7 +730,7 @@ test("the CLI reads an arbitrarily large changed-file list from a file, not the 
   }
 });
 
-test("the audit names a path nothing owns and a glob that matches nothing", () => {
+test("the audit names a path nothing owns and a filter glob that matches nothing", () => {
   const tracked = [
     "crates/verter_wasm/src/lib.rs",
     "docs/guide.md",
@@ -738,14 +738,46 @@ test("the audit names a path nothing owns and a glob that matches nothing", () =
     "brand-new-dir/thing.txt",
     ...Object.values(PATH_FILTERS)
       .flatMap((spec) => (Array.isArray(spec) ? spec : [...spec.include, ...(spec.exclude ?? [])]))
-      .concat(CI_INERT_PATHS)
       // One concrete file per glob keeps every glob live but the one dropped.
       .map((glob) => glob.replaceAll("**", "x").replaceAll("*", "x"))
       .filter((file) => file !== "scripts/gate-internals.mjs"),
   ];
-  const { unowned, dead } = auditSelection(tracked, laneMetadata);
+  const { unowned, dead, config } = auditSelection(tracked, laneMetadata);
   assert.deepEqual(unowned, ["brand-new-dir/thing.txt"]);
+  // No tracked file matches any inert glob here, yet none is reported: an
+  // inert glob cannot narrow any lane, so only filter globs are checked.
   assert.deepEqual(dead, ["wasm: scripts/gate-internals.mjs"]);
+  assert.deepEqual(config, []);
+});
+
+test("a framework vertical's listed contract data runs no lane, and listing it is no hatch", () => {
+  // The shape of a framework vertical's pull request: its architecture page
+  // and the reviewed contract data it lists as inert.
+  const vertical = select([
+    "docs/arch/framework-astro.md",
+    "tests/framework-astro/AST0/cases.md",
+    "tests/framework-astro/AST0/corpus/islands/Counter.astro",
+    "tests/framework-astro/AST0/products/astro-capability-matrix.json",
+    "tests/framework-liquid/LIQ0/products/liquid-vocabulary.json",
+  ]);
+  assert.equal(vertical.impact.full, false, JSON.stringify(vertical.impact.fullReasons));
+  assert.deepEqual(gatesOn(vertical.gates), []);
+  // An entry names what was reviewed, never a family of future files: an
+  // executable spec or a new product beside the listed data still needs a
+  // decision, so it forces the fallback (and fails the audit).
+  for (const file of [
+    "tests/framework-astro/AST0/conformance.spec.mjs",
+    "tests/framework-astro/AST0/products/astro-new-product.json",
+    "tests/framework-newcomer/NEW0/manifest.json",
+  ]) {
+    assert.equal(isCiInert(file), false, file);
+    assert.equal(select([file]).impact.everything, true, file);
+  }
+  // The inert list is data: editing it runs the classifier's own tests (the
+  // js lane), not every lane as an edit to the classifier does.
+  const inertEdit = select(["scripts/ci-inert-paths.json"]);
+  assert.equal(inertEdit.impact.full, false, JSON.stringify(inertEdit.impact.fullReasons));
+  assert.deepEqual(gatesOn(inertEdit.gates), ["js"]);
 });
 
 test("the tracked tree passes the selection audit", () => {
@@ -759,59 +791,66 @@ test("the tracked tree passes the selection audit", () => {
   assert.match(run.stdout, /tracked files all owned; every filter glob matches/);
 });
 
-test("an unreadable STP1 inventory breaks no importer: every lane runs and the audit names it", async () => {
-  // The sfc-projection filter derives fixtures from the inventory. A change
-  // that breaks or moves it must not crash every tool importing this module,
-  // and must not narrow selection either.
-  const root = mkdtempSync(join(tmpdir(), "ci-impact-inventory-"));
-  try {
-    cpSync(SCRIPT_DIR, join(root, "scripts"), { recursive: true });
-    const inventory = join(
-      root,
-      "tests",
-      "sfc-projection",
-      "STP1",
-      "products",
-      "current-feature-inventory.json",
-    );
-    mkdirSync(dirname(inventory), { recursive: true });
-    writeFileSync(inventory, "{ not json");
+test("unreadable selection data breaks no importer: every lane runs and the audit names it", async () => {
+  // The sfc-projection filter derives fixtures from the STP1 inventory, and
+  // the inert list is data. A change that breaks or moves either must not
+  // crash every tool importing this module, and must not narrow selection.
+  const stp1 = join(
+    "tests",
+    "sfc-projection",
+    "STP1",
+    "products",
+    "current-feature-inventory.json",
+  );
+  const inert = join("scripts", "ci-inert-paths.json");
+  for (const [broken, contents, named] of [
+    [stp1, "{ not json", /current-feature-inventory\.json/],
+    // Every inert entry must say why no ci.yml job reads it.
+    [inert, JSON.stringify([{ glob: "docs/**", reason: "" }]), /ci-inert-paths\.json/],
+  ]) {
+    const root = mkdtempSync(join(tmpdir(), "ci-impact-data-"));
+    try {
+      cpSync(SCRIPT_DIR, join(root, "scripts"), { recursive: true });
+      mkdirSync(dirname(join(root, stp1)), { recursive: true });
+      cpSync(join(REPO_ROOT, stp1), join(root, stp1));
+      writeFileSync(join(root, broken), contents);
 
-    const moved = await import(pathToFileURL(join(root, "scripts", "ci-impact.mjs")).href);
-    const audit = moved.auditSelection(["docs/guide.md"], laneMetadata);
-    assert.equal(audit.config.length, 1);
-    assert.match(audit.config[0], /current-feature-inventory\.json/);
+      const moved = await import(pathToFileURL(join(root, "scripts", "ci-impact.mjs")).href);
+      const audit = moved.auditSelection(["docs/guide.md"], laneMetadata);
+      assert.equal(audit.config.length, 1, broken);
+      assert.match(audit.config[0], named);
 
-    writeFileSync(join(root, "changed.json"), JSON.stringify(["docs/guide.md"]));
-    writeFileSync(join(root, "metadata.json"), JSON.stringify(laneMetadata));
-    const githubOutput = join(root, "github-output");
-    writeFileSync(githubOutput, "");
-    const run = spawnSync(
-      process.execPath,
-      [
-        join(root, "scripts", "ci-impact.mjs"),
-        "--changed-files",
-        join(root, "changed.json"),
-        "--metadata",
-        join(root, "metadata.json"),
-        "--github-output",
-        githubOutput,
-      ],
-      { encoding: "utf8", cwd: root },
-    );
-    assert.equal(run.status, 0, `${run.stdout}${run.stderr}`);
-    assert.match(
-      run.stdout,
-      /::error title=ci-impact selection config::.*current-feature-inventory\.json/,
-    );
-    const gates = readFileSync(githubOutput, "utf8")
-      .split(/\r?\n/u)
-      .filter((line) => line.startsWith("gate_"));
-    assert.ok(
-      gates.length === Object.keys(LANE_GATES).length && gates.every((l) => l.endsWith("=true")),
-      gates.join(" "),
-    );
-  } finally {
-    rmSync(root, { recursive: true, force: true });
+      writeFileSync(join(root, "changed.json"), JSON.stringify(["docs/guide.md"]));
+      writeFileSync(join(root, "metadata.json"), JSON.stringify(laneMetadata));
+      const githubOutput = join(root, "github-output");
+      writeFileSync(githubOutput, "");
+      const run = spawnSync(
+        process.execPath,
+        [
+          join(root, "scripts", "ci-impact.mjs"),
+          "--changed-files",
+          join(root, "changed.json"),
+          "--metadata",
+          join(root, "metadata.json"),
+          "--github-output",
+          githubOutput,
+        ],
+        { encoding: "utf8", cwd: root },
+      );
+      assert.equal(run.status, 0, `${run.stdout}${run.stderr}`);
+      assert.match(
+        run.stdout,
+        new RegExp(`::error title=ci-impact selection config::.*${named.source}`),
+      );
+      const gates = readFileSync(githubOutput, "utf8")
+        .split(/\r?\n/u)
+        .filter((line) => line.startsWith("gate_"));
+      assert.ok(
+        gates.length === Object.keys(LANE_GATES).length && gates.every((l) => l.endsWith("=true")),
+        `${broken}: ${gates.join(" ")}`,
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   }
 });
