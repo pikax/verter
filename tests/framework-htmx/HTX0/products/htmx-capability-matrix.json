@@ -1,0 +1,652 @@
+{
+  "id": "htmx-capability-matrix.v1",
+  "schema": 1,
+  "profiles": ["htmx-2", "htmx-4"],
+  "cells": [
+    {
+      "id": "HTM01",
+      "profile": "htmx-2",
+      "operation": "attribute/value decoding and authored regions",
+      "host": "static-facts",
+      "selectors": ["html"],
+      "disposition": "required-planned",
+      "producer": "HTX1",
+      "acceptance": "HTX1-AC1",
+      "reason": "Trigger JavaScript and selector regions use EMB0; no carrier or parser.",
+      "tsgoOperations": [],
+      "tsgoLimitation": null,
+      "qualification": "HTX9-AC1"
+    },
+    {
+      "id": "HTM02",
+      "profile": "htmx-4",
+      "operation": "attribute/value decoding and authored regions",
+      "host": "static-facts",
+      "selectors": ["html"],
+      "disposition": "required-planned",
+      "producer": "HTX1",
+      "acceptance": "HTX1-AC1",
+      "reason": "Trigger JavaScript and selector regions use EMB0; no carrier or parser.",
+      "tsgoOperations": [],
+      "tsgoLimitation": null,
+      "qualification": "HTX9-AC1"
+    },
+    {
+      "id": "HTM03",
+      "profile": "htmx-2",
+      "operation": "profile-specific attribute claims",
+      "host": "static-facts",
+      "selectors": ["html"],
+      "disposition": "required-planned",
+      "producer": "HTX1",
+      "acceptance": "HTX1-AC2",
+      "reason": "Independent vocabulary; :inherited is 4.x only.",
+      "tsgoOperations": [],
+      "tsgoLimitation": null,
+      "qualification": "HTX9-AC1"
+    },
+    {
+      "id": "HTM04",
+      "profile": "htmx-4",
+      "operation": "profile-specific attribute claims",
+      "host": "static-facts",
+      "selectors": ["html"],
+      "disposition": "required-planned",
+      "producer": "HTX1",
+      "acceptance": "HTX1-AC2",
+      "reason": "Independent vocabulary; :inherited is 4.x only.",
+      "tsgoOperations": [],
+      "tsgoLimitation": null,
+      "qualification": "HTX9-AC1"
+    },
+    {
+      "id": "HTM05",
+      "profile": "htmx-2",
+      "operation": "literal request identity",
+      "host": "static-facts",
+      "selectors": ["html"],
+      "disposition": "required-planned",
+      "producer": "HTX2",
+      "acceptance": "HTX2-AC1",
+      "reason": "URL is never an endpoint by spelling.",
+      "tsgoOperations": [],
+      "tsgoLimitation": null,
+      "qualification": "HTX9-AC1"
+    },
+    {
+      "id": "HTM06",
+      "profile": "htmx-4",
+      "operation": "literal request identity",
+      "host": "static-facts",
+      "selectors": ["html"],
+      "disposition": "required-planned",
+      "producer": "HTX2",
+      "acceptance": "HTX2-AC1",
+      "reason": "URL is never an endpoint by spelling.",
+      "tsgoOperations": [],
+      "tsgoLimitation": null,
+      "qualification": "HTX9-AC1"
+    },
+    {
+      "id": "HTM07",
+      "profile": "htmx-2",
+      "operation": "selector bindings with population/partial witness",
+      "host": "static-facts",
+      "selectors": ["html"],
+      "disposition": "required-planned",
+      "producer": "HTX2",
+      "acceptance": "HTX2-AC2",
+      "reason": "CSS3 matches neutral HWC2 facts; holes stay Incomplete (HTX2-AC3).",
+      "tsgoOperations": [],
+      "tsgoLimitation": null,
+      "qualification": "HTX9-AC1"
+    },
+    {
+      "id": "HTM08",
+      "profile": "htmx-4",
+      "operation": "selector bindings with population/partial witness",
+      "host": "static-facts",
+      "selectors": ["html"],
+      "disposition": "required-planned",
+      "producer": "HTX2",
+      "acceptance": "HTX2-AC2",
+      "reason": "CSS3 matches neutral HWC2 facts; holes stay Incomplete (HTX2-AC3).",
+      "tsgoOperations": [],
+      "tsgoLimitation": null,
+      "qualification": "HTX9-AC1"
+    },
+    {
+      "id": "HTM09",
+      "profile": "htmx-2",
+      "operation": "effective inheritance provenance",
+      "host": "static-facts",
+      "selectors": ["html"],
+      "disposition": "required-planned",
+      "producer": "HTX4",
+      "acceptance": "HTX4-AC1",
+      "reason": "2.x implicit and 4.x explicit inheritance remain distinct.",
+      "tsgoOperations": [],
+      "tsgoLimitation": null,
+      "qualification": "HTX9-AC1"
+    },
+    {
+      "id": "HTM10",
+      "profile": "htmx-4",
+      "operation": "effective inheritance provenance",
+      "host": "static-facts",
+      "selectors": ["html"],
+      "disposition": "required-planned",
+      "producer": "HTX4",
+      "acceptance": "HTX4-AC1",
+      "reason": "2.x implicit and 4.x explicit inheritance remain distinct.",
+      "tsgoOperations": [],
+      "tsgoLimitation": null,
+      "qualification": "HTX9-AC1"
+    },
+    {
+      "id": "HTM11",
+      "profile": "htmx-2",
+      "operation": "default trigger, target and swap",
+      "host": "static-facts",
+      "selectors": ["html"],
+      "disposition": "required-planned",
+      "producer": "HTX4",
+      "acceptance": "HTX4-AC2",
+      "reason": "Authored default assumptions, no live evaluation.",
+      "tsgoOperations": [],
+      "tsgoLimitation": null,
+      "qualification": "HTX9-AC1"
+    },
+    {
+      "id": "HTM12",
+      "profile": "htmx-4",
+      "operation": "default trigger, target and swap",
+      "host": "static-facts",
+      "selectors": ["html"],
+      "disposition": "required-planned",
+      "producer": "HTX4",
+      "acceptance": "HTX4-AC2",
+      "reason": "Authored default assumptions, no live evaluation.",
+      "tsgoOperations": [],
+      "tsgoLimitation": null,
+      "qualification": "HTX9-AC1"
+    },
+    {
+      "id": "HTM13",
+      "profile": "htmx-2",
+      "operation": "response-overridable target/swap",
+      "host": "static-facts",
+      "selectors": ["html"],
+      "disposition": "required-planned",
+      "producer": "HTX4",
+      "acceptance": "HTX4-AC3",
+      "reason": "Only static HRF1 no-retarget evidence can make a target definite.",
+      "tsgoOperations": [],
+      "tsgoLimitation": null,
+      "qualification": "HTX9-AC1"
+    },
+    {
+      "id": "HTM14",
+      "profile": "htmx-4",
+      "operation": "response-overridable target/swap",
+      "host": "static-facts",
+      "selectors": ["html"],
+      "disposition": "required-planned",
+      "producer": "HTX4",
+      "acceptance": "HTX4-AC3",
+      "reason": "Only static HRF1 no-retarget evidence can make a target definite.",
+      "tsgoOperations": [],
+      "tsgoLimitation": null,
+      "qualification": "HTX9-AC1"
+    },
+    {
+      "id": "HTM15",
+      "profile": "htmx-2",
+      "operation": "DOM event vocabulary facts",
+      "host": "static-facts",
+      "selectors": ["html"],
+      "disposition": "required-planned",
+      "producer": "HTX4",
+      "acceptance": "HTX4-AC4",
+      "reason": "Pinned DOM events and trigger grammar; no component facets.",
+      "tsgoOperations": [],
+      "tsgoLimitation": null,
+      "qualification": "HTX9-AC1"
+    },
+    {
+      "id": "HTM16",
+      "profile": "htmx-4",
+      "operation": "DOM event vocabulary facts",
+      "host": "static-facts",
+      "selectors": ["html"],
+      "disposition": "required-planned",
+      "producer": "HTX4",
+      "acceptance": "HTX4-AC4",
+      "reason": "Pinned DOM events and trigger grammar; no component facets.",
+      "tsgoOperations": [],
+      "tsgoLimitation": null,
+      "qualification": "HTX9-AC1"
+    },
+    {
+      "id": "HTM17",
+      "profile": "htmx-2",
+      "operation": "selector and inherited-source definition",
+      "host": "lsp-enhancement",
+      "selectors": ["html"],
+      "disposition": "required-planned",
+      "producer": "HTX5",
+      "acceptance": "HTX5-AC1",
+      "reason": "HWCI0 HTML host; same-spelled id in another document excluded.",
+      "tsgoOperations": [],
+      "tsgoLimitation": null,
+      "qualification": "HTX9-AC1"
+    },
+    {
+      "id": "HTM18",
+      "profile": "htmx-4",
+      "operation": "selector and inherited-source definition",
+      "host": "lsp-enhancement",
+      "selectors": ["html"],
+      "disposition": "required-planned",
+      "producer": "HTX5",
+      "acceptance": "HTX5-AC1",
+      "reason": "HWCI0 HTML host; same-spelled id in another document excluded.",
+      "tsgoOperations": [],
+      "tsgoLimitation": null,
+      "qualification": "HTX9-AC1"
+    },
+    {
+      "id": "HTM19",
+      "profile": "htmx-2",
+      "operation": "references and rename occurrence roles",
+      "host": "lsp-enhancement",
+      "selectors": ["html"],
+      "disposition": "required-planned",
+      "producer": "HTX5",
+      "acceptance": "HTX5-AC2",
+      "reason": "LSO4 occurrence roles feed HWCI0/LSO8 rename; HTX5 creates no edit plan.",
+      "tsgoOperations": [],
+      "tsgoLimitation": null,
+      "qualification": "HTX9-AC1"
+    },
+    {
+      "id": "HTM20",
+      "profile": "htmx-4",
+      "operation": "references and rename occurrence roles",
+      "host": "lsp-enhancement",
+      "selectors": ["html"],
+      "disposition": "required-planned",
+      "producer": "HTX5",
+      "acceptance": "HTX5-AC2",
+      "reason": "LSO4 occurrence roles feed HWCI0/LSO8 rename; HTX5 creates no edit plan.",
+      "tsgoOperations": [],
+      "tsgoLimitation": null,
+      "qualification": "HTX9-AC1"
+    },
+    {
+      "id": "HTM21",
+      "profile": "htmx-2",
+      "operation": "htmx hover and completion",
+      "host": "lsp-enhancement",
+      "selectors": ["html"],
+      "disposition": "required-planned",
+      "producer": "HTX5",
+      "acceptance": "HTX5-AC4",
+      "reason": "Pinned trigger/swap explanation, attribute vocabulary and selector candidates; built-in HTML features stay with their owner.",
+      "tsgoOperations": [],
+      "tsgoLimitation": null,
+      "qualification": "HTX9-AC1"
+    },
+    {
+      "id": "HTM22",
+      "profile": "htmx-4",
+      "operation": "htmx hover and completion",
+      "host": "lsp-enhancement",
+      "selectors": ["html"],
+      "disposition": "required-planned",
+      "producer": "HTX5",
+      "acceptance": "HTX5-AC4",
+      "reason": "Pinned trigger/swap explanation, attribute vocabulary and selector candidates; built-in HTML features stay with their owner.",
+      "tsgoOperations": [],
+      "tsgoLimitation": null,
+      "qualification": "HTX9-AC1"
+    },
+    {
+      "id": "HTM23",
+      "profile": "htmx-2",
+      "operation": "extension-use definition and references",
+      "host": "lsp-enhancement",
+      "selectors": ["html"],
+      "disposition": "required-planned",
+      "producer": "HTX5",
+      "acceptance": "HTX5-AC4",
+      "reason": "Literal hx-ext use resolves to authored defineExtension; additive references beside tsgo only.",
+      "tsgoOperations": [],
+      "tsgoLimitation": null,
+      "qualification": "HTX9-AC1"
+    },
+    {
+      "id": "HTM24",
+      "profile": "htmx-2",
+      "operation": "extension registration references to HTML uses",
+      "host": "lsp-enhancement",
+      "selectors": ["javascript", "typescript"],
+      "disposition": "required-planned",
+      "producer": "HTX5",
+      "acceptance": "HTX5-AC4",
+      "reason": "Return only HTML hx-ext occurrences beside tsgo references; no JS/TS hover or completion.",
+      "tsgoOperations": [],
+      "tsgoLimitation": null,
+      "qualification": "HTX9-AC1"
+    },
+    {
+      "id": "HTM25",
+      "profile": "htmx-2",
+      "operation": "keyboard activation facts",
+      "host": "static-facts",
+      "selectors": ["html"],
+      "disposition": "required-planned",
+      "producer": "HTX7",
+      "acceptance": "HTX7-AC1",
+      "reason": "Static trigger and focusability; no runtime listener observation.",
+      "tsgoOperations": [],
+      "tsgoLimitation": null,
+      "qualification": "HTX9-AC1"
+    },
+    {
+      "id": "HTM26",
+      "profile": "htmx-4",
+      "operation": "keyboard activation facts",
+      "host": "static-facts",
+      "selectors": ["html"],
+      "disposition": "required-planned",
+      "producer": "HTX7",
+      "acceptance": "HTX7-AC1",
+      "reason": "Static trigger and focusability; no runtime listener observation.",
+      "tsgoOperations": [],
+      "tsgoLimitation": null,
+      "qualification": "HTX9-AC1"
+    },
+    {
+      "id": "HTM27",
+      "profile": "htmx-2",
+      "operation": "live/silent target region facts",
+      "host": "static-facts",
+      "selectors": ["html"],
+      "disposition": "required-planned",
+      "producer": "HTX7",
+      "acceptance": "HTX7-AC2",
+      "reason": "Authored aria-live; holes stay Incomplete.",
+      "tsgoOperations": [],
+      "tsgoLimitation": null,
+      "qualification": "HTX9-AC1"
+    },
+    {
+      "id": "HTM28",
+      "profile": "htmx-4",
+      "operation": "live/silent target region facts",
+      "host": "static-facts",
+      "selectors": ["html"],
+      "disposition": "required-planned",
+      "producer": "HTX7",
+      "acceptance": "HTX7-AC2",
+      "reason": "Authored aria-live; holes stay Incomplete.",
+      "tsgoOperations": [],
+      "tsgoLimitation": null,
+      "qualification": "HTX9-AC1"
+    },
+    {
+      "id": "HTM29",
+      "profile": "htmx-2",
+      "operation": "profile-scoped lint diagnostics",
+      "host": "lsp-enhancement",
+      "selectors": ["html"],
+      "disposition": "required-planned",
+      "producer": "HTX8",
+      "acceptance": "HTX8-AC1",
+      "reason": "LNT2/LRA owns rule execution; inactive or mismatched profile runs zero rules.",
+      "tsgoOperations": [],
+      "tsgoLimitation": null,
+      "qualification": "HTX9-AC1"
+    },
+    {
+      "id": "HTM30",
+      "profile": "htmx-4",
+      "operation": "profile-scoped lint diagnostics",
+      "host": "lsp-enhancement",
+      "selectors": ["html"],
+      "disposition": "required-planned",
+      "producer": "HTX8",
+      "acceptance": "HTX8-AC1",
+      "reason": "LNT2/LRA owns rule execution; inactive or mismatched profile runs zero rules.",
+      "tsgoOperations": [],
+      "tsgoLimitation": null,
+      "qualification": "HTX9-AC1"
+    },
+    {
+      "id": "HTM31",
+      "profile": "htmx-2",
+      "operation": "lint fixes",
+      "host": "lsp-enhancement",
+      "selectors": ["html"],
+      "disposition": "required-planned",
+      "producer": "HTX8",
+      "acceptance": "HTX8-AC3",
+      "reason": "LSO8 transactions only; never edit template holes.",
+      "tsgoOperations": [],
+      "tsgoLimitation": null,
+      "qualification": "HTX9-AC1"
+    },
+    {
+      "id": "HTM32",
+      "profile": "htmx-4",
+      "operation": "lint fixes",
+      "host": "lsp-enhancement",
+      "selectors": ["html"],
+      "disposition": "required-planned",
+      "producer": "HTX8",
+      "acceptance": "HTX8-AC3",
+      "reason": "LSO8 transactions only; never edit template holes.",
+      "tsgoOperations": [],
+      "tsgoLimitation": null,
+      "qualification": "HTX9-AC1"
+    },
+    {
+      "id": "HTM33",
+      "profile": "htmx-2",
+      "operation": "neutral HTML formatting with opaque values",
+      "host": "lsp-enhancement",
+      "selectors": ["html"],
+      "disposition": "required-planned",
+      "producer": "HTX8F",
+      "acceptance": "HTX8F-AC1",
+      "reason": "FMTH0 formats HTML; hx-trigger/hx-on/JSON value bytes stay opaque.",
+      "tsgoOperations": [],
+      "tsgoLimitation": null,
+      "qualification": "HTX9-AC1"
+    },
+    {
+      "id": "HTM34",
+      "profile": "htmx-4",
+      "operation": "neutral HTML formatting with opaque values",
+      "host": "lsp-enhancement",
+      "selectors": ["html"],
+      "disposition": "required-planned",
+      "producer": "HTX8F",
+      "acceptance": "HTX8F-AC1",
+      "reason": "FMTH0 formats HTML; hx-trigger/hx-on/JSON value bytes stay opaque.",
+      "tsgoOperations": [],
+      "tsgoLimitation": null,
+      "qualification": "HTX9-AC1"
+    },
+    {
+      "id": "HTM35",
+      "profile": "htmx-2",
+      "operation": "typed request/response fragment linkage",
+      "host": "static-facts",
+      "selectors": ["html"],
+      "disposition": "required-planned",
+      "producer": "HRF2",
+      "acceptance": "HRF2-AC1",
+      "reason": "HRF1 carries OAPI3 operation identities and fragments; HTX2 URL spelling never proves a typed endpoint.",
+      "tsgoOperations": [],
+      "tsgoLimitation": null,
+      "qualification": "HTX9-AC1"
+    },
+    {
+      "id": "HTM36",
+      "profile": "htmx-4",
+      "operation": "typed request/response fragment linkage",
+      "host": "static-facts",
+      "selectors": ["html"],
+      "disposition": "required-planned",
+      "producer": "HRF2",
+      "acceptance": "HRF2-AC1",
+      "reason": "HRF1 carries OAPI3 operation identities and fragments; HTX2 URL spelling never proves a typed endpoint.",
+      "tsgoOperations": [],
+      "tsgoLimitation": null,
+      "qualification": "HTX9-AC1"
+    }
+  ],
+  "exclusions": [
+    {
+      "id": "HTE1",
+      "operation": "build",
+      "profiles": ["htmx-2", "htmx-4"],
+      "disposition": "excluded",
+      "reason": "served as authored; no Verter transform and no map chain"
+    },
+    {
+      "id": "HTE2",
+      "operation": "runtime",
+      "profiles": ["htmx-2", "htmx-4"],
+      "disposition": "excluded",
+      "reason": "No requests, runtime class, history-cache, swap or settle phase observations."
+    },
+    {
+      "id": "HTE3",
+      "operation": "typescript-plugin",
+      "profiles": ["htmx-2", "htmx-4"],
+      "disposition": "excluded",
+      "reason": "No htmx work in packages/typescript-plugin."
+    },
+    {
+      "id": "HTE4",
+      "operation": "tsgo/TS re-provision",
+      "profiles": ["htmx-2", "htmx-4"],
+      "disposition": "excluded",
+      "reason": "TypeScript symbols, types and standard JS/TS features remain tsgo-owned."
+    },
+    {
+      "id": "HTE5",
+      "operation": "standard HTML features",
+      "profiles": ["htmx-2", "htmx-4"],
+      "disposition": "excluded",
+      "reason": "Tags, standard attributes and emmet remain editor/HWCI0-owned."
+    },
+    {
+      "id": "HTE6",
+      "operation": "JS/TS registration hover or completion",
+      "profiles": ["htmx-2", "htmx-4"],
+      "disposition": "excluded",
+      "reason": "The additive row returns only framework locations, never hover/completion."
+    },
+    {
+      "id": "HTE7",
+      "operation": "style/root/slot/fallthrough records",
+      "profiles": ["htmx-2", "htmx-4"],
+      "disposition": "excluded",
+      "reason": "HTX7-AC4 supplies NoStyleRecords to CSS7 and no component root/slot/fallthrough records to AX5."
+    },
+    {
+      "id": "HTE8",
+      "operation": "defineExtension/hx-ext navigation",
+      "profiles": ["htmx-4"],
+      "disposition": "excluded",
+      "reason": "4.0.0 uses registerExtension and extension-owned attributes. No defineExtension or hx-ext exists in its pinned core. Adding navigation for that distinct contract awaits htmx-four-extension-registration ratification.",
+      "source": {
+        "package": "htmx.org",
+        "release": "4.0.0",
+        "artifact": "https://registry.npmjs.org/htmx.org/-/htmx.org-4.0.0.tgz",
+        "integrity": "sha512-T/171FUY93Kdfp8t+DnHdk45QvKRiBhVhhrwSzrXgUi4pHKvhp77dUA/qg8FAjsFWPIHNbmUuIdCrcVHuiZWng==",
+        "path": "dist/htmx.js"
+      }
+    }
+  ],
+  "delivery": {
+    "host": "Verter LSP",
+    "htmlOwner": "HWCI0",
+    "enhancementSeam": "LSPX11",
+    "stepDown": "Owns checks tsgo probe, COXD2 and per-capability settings; inactive/stepped-down does zero work. Unknown means Verter owns. Never re-provide another tool result.",
+    "tsgo": "No cell needs a tsgo type query. JS/TS registration identity is authored literal/name binding; framework-only locations are additive beside tsgo. Unsupported computed identity is unknown, never parse typeToString."
+  },
+  "facets": [
+    {
+      "name": "props",
+      "disposition": "does-not-exist",
+      "reason": "htmx has no component contract; hx-vals are request data, never props."
+    },
+    {
+      "name": "events",
+      "disposition": "does-not-exist",
+      "reason": "htmx events are DOM events; HTX4 facts, no component event facet."
+    },
+    {
+      "name": "slots",
+      "disposition": "does-not-exist",
+      "reason": "htmx has no component contract; hx-vals are request data, never props."
+    },
+    {
+      "name": "expose",
+      "disposition": "does-not-exist",
+      "reason": "htmx has no component contract; hx-vals are request data, never props."
+    }
+  ],
+  "wireTag": null,
+  "carrier": null,
+  "stages": {
+    "kept": ["HTX0", "HTX1", "HTX2", "HTX4", "HTX5", "HTX7", "HTX8", "HTX8F", "HTX9", "HTX10"],
+    "cancelled": [
+      {
+        "node": "HTX3",
+        "reason": "No types to project."
+      },
+      {
+        "node": "HTX5R",
+        "reason": "Occurrences fold into HTX5; HWCI0/LSO8 owns rename."
+      },
+      {
+        "node": "HTX6",
+        "reason": "No build."
+      }
+    ]
+  },
+  "qualification": [
+    {
+      "producer": "HTX9",
+      "acceptance": "HTX9-AC1",
+      "operation": "per-profile matrix coverage"
+    },
+    {
+      "producer": "HTX9",
+      "acceptance": "HTX9-AC2",
+      "operation": "pinned grammar agreement"
+    },
+    {
+      "producer": "HTX9",
+      "acceptance": "HTX9-AC3",
+      "operation": "incremental/fresh, edit/revert and cancellation"
+    },
+    {
+      "producer": "HTX9",
+      "acceptance": "HTX9-AC4",
+      "operation": "browser/native/HTML editor exposure; advisory work/performance evidence"
+    },
+    {
+      "producer": "HTX10",
+      "acceptance": "HTX10-AC1",
+      "operation": "product terminal support claim only after qualification"
+    }
+  ],
+  "supportClaim": false
+}
