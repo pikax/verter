@@ -128,6 +128,10 @@
     "reason": "Reviewed Astro contract data; no ci.yml lane reads these bytes yet. Executable specs and future products stay outside these entries."
   },
   {
+    "glob": "tests/framework-htmx/HTX0/**",
+    "reason": "Reviewed htmx contract data; no ci.yml lane reads these bytes yet. Executable validation and lane ownership are deferred to the htmx contract consumer."
+  },
+  {
     "glob": "tests/framework-liquid/**",
     "reason": "Reviewed Liquid contract data; no ci.yml lane reads it."
   },
