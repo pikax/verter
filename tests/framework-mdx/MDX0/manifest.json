@@ -1,0 +1,27 @@
+{
+  "schema": "FrameworkLockManifest",
+  "version": 1,
+  "node": "MDX0",
+  "kind": "lock",
+  "framework": "mdx",
+  "products": ["MdxVersionLock", "MdxCapabilityMatrix", "MdxActivationPolicy"],
+  "productFiles": {
+    "MdxVersionLock": "tests/framework-mdx/MDX0/products/mdx-version-lock.json",
+    "MdxCapabilityMatrix": "tests/framework-mdx/MDX0/products/mdx-capability-matrix.json",
+    "MdxActivationPolicy": "tests/framework-mdx/MDX0/products/mdx-activation-policy.json"
+  },
+  "cases": "tests/framework-mdx/MDX0/cases.md",
+  "docs": "docs/arch/framework-mdx.md",
+  "mandatoryCases": ["MDX0-AC1", "MDX0-AC2", "MDX0-AC3", "MDX0-AC4", "MDX0-AC5"],
+  "validator": {
+    "status": "not-landed-here",
+    "owner": "MDX1G",
+    "receivingAcceptance": "MDX1G-ACV",
+    "contract": "tests/framework-mdx/MDX0/contract.ts",
+    "test": "node --test tests/framework-mdx/MDX0/mdx-lock.spec.ts",
+    "discovery": "scripts/run-framework-locks.mjs (REG0-AC6)"
+  },
+  "productionLoc": 0,
+  "deletionPopulation": [],
+  "notes": "Contract bytes only. This node lands reviewed data and the planted-row case table; it lands no executable validator, test, CI lane or package script. Every planted row in cases.md becomes a failing case of the MDX1G validator against these products. The React profile is referenced by RCT0's lock path and profile name; the React pin-equality assertion is MDX1M-AC6."
+}
