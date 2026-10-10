@@ -14,6 +14,12 @@ owner is the typed immutable catalog and demand-selected kernel services;
 the shared implementation home is **`verter_language::embedded`**, owned by
 EMB0I. This page specifies that future interface, not shipped support.
 
+Issue #227's runtime codec criteria remain unimplemented: this contract does
+not satisfy reusable decoding, typed cooked-value partiality or exact authored
+map composition. Those criteria require EMB0I's implementation and executable
+proof, followed by the receiving consumers' integration proof. A documentation
+check cannot establish their completion.
+
 ## Reviewed products and ownership
 
 The contract data in `tests/kernel/EMB0/products/` consists of:
