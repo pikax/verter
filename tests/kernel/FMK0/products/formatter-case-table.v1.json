@@ -154,9 +154,8 @@
       "existingEvidence": ["E05"],
       "implementationOwner": "FMT1P",
       "successorPath": ["FMK0", "FMT0", "FMT1P"],
-      "receivingAcceptance": "Table-driven identity tests reject duplicate/mismatched authored bindings, unknown IDs, and cross-revision reuse while preserving deterministic same-revision reconstruction.",
-      "executionScope": "Future owning implementation proof; this file is reviewed data only",
-      "receivingHeading": "Acceptance and evidence"
+      "receivingAcceptance": "FMT1P-AC4",
+      "executionScope": "Future owning implementation proof; this file is reviewed data only"
     },
     {
       "id": "FM-K08",

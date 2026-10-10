@@ -41,8 +41,7 @@
       "rules": "FD09",
       "implementationOwner": "FMT1P",
       "successorPath": ["FMK0", "FMT0", "FMT1P"],
-      "receivingAcceptance": "Checked ranges reject inverted/out-of-bounds construction and preserve exact UTF-8 byte identities at Unicode/CRLF/EOF boundaries.",
-      "receivingHeading": "Acceptance and evidence"
+      "receivingAcceptance": "FMT1P-AC2"
     },
     {
       "id": "FM-O05",

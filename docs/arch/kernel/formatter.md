@@ -25,10 +25,22 @@ The reviewed data under `tests/kernel/FMK0/products/` is:
 | `formatter-case-table.v1.json` | Architecture, compatibility, recovery, composition, edits, maps, range, cursor, identity and bounded-work cases; existing evidence and future executable owners |
 
 Each owned outcome and consumer has one owner, a successor path from FMK0, and
-one receiving acceptance. An unnumbered receiving clause is named by its exact
-heading and text, never a fabricated acceptance ID. Inherited boundaries/routes
-reference the original inventory and its original rooted path: they are not
-reassigned to a formatter descendant. The conformance checkpoint is read-only.
+one receiving acceptance ID. Operator ruling
+`formatter-foundation-acceptance-binding` (2026-10-10) numbers FMT1P's five
+existing Acceptance and evidence clauses in order and leaves each clause's text
+unchanged. It adds no FMT1P predecessor or dependency edge; FMT1P stays after
+FMK0 through FMT0.
+
+- **FMT1P-AC1** — coordinate-domain separation. Compile-time/type tests prove authored and formatted domains cannot be interchanged or implicitly converted.
+- **FMT1P-AC2** — checked ranges. Checked ranges reject inverted/out-of-bounds construction and preserve exact UTF-8 byte identities at Unicode/CRLF/EOF boundaries.
+- **FMT1P-AC3** — shared provenance types. Compile-time foundation tests prove synthetic producer and consumer roles must share the same `FormatProvenanceId`/`Provenanced<T>`/`FormatProvenanceTable<R>` definitions and cannot substitute a bare integer or separately declared token. FMT1 and FMT1A own the later evidence that their real implementations consume this contract.
+- **FMT1P-AC4** — provenance identity validation. Table-driven identity tests reject duplicate/mismatched authored bindings, unknown IDs, and cross-revision reuse while preserving deterministic same-revision reconstruction.
+- **FMT1P-AC5** — dependency isolation. Dependency inspection proves the empty foundation cannot parse, render, format, or serialize a request.
+
+`FM-O04` receives `FMT1P-AC2`. `FM-K07` receives `FMT1P-AC4`. Inherited
+boundaries/routes reference the original inventory and its original rooted path:
+they are not reassigned to a formatter descendant. The conformance checkpoint
+is read-only.
 UAP0 subblock 3 owns architecture fixtures; `UAP0-AC-R1` owns executable inventory
 validation and rejects missing members, unknown/pathless owners and conflicting
 assignments. FMT0 owns the exact option/cell/corpus catalogs and gate wiring.
