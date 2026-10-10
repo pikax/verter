@@ -1,6 +1,6 @@
 //! R3/R26/R28 arch guard for the Family A inner caches. The
-//! path-precise fact-dependency rail (`Arc<[FactVersionRef]>` + the
-//! overflow flag) is now carried by the `ReadSetSignature` carrier,
+//! path-precise fact-dependency rail (`Arc<[FactVersionRef]>`) is now
+//! carried by the `ReadSetSignature` carrier,
 //! and the four single-entry caches store their value + carrier in the
 //! generic `cache_runtime::CacheEntry<V>` rather than a bespoke
 //! per-cache `*Entry` struct.

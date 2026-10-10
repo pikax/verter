@@ -134,12 +134,6 @@ fn a_scope_spanning_a_domain_advance_finalises_as_mutation_unstable() {
          this finalisation, so the terminal aggregate would claim the domain held as of a \
          generation these observations do not come from. Got {finalise:?}"
     );
-    assert!(
-        !matches!(finalise, FactReadSetFinalise::Overflow),
-        "and it must NEVER be reported as overflow: instability is a STABILITY failure, and \
-         degrading it into a cardinality one refuses the attempt under exactly the size rail \
-         this substrate exists to remove"
-    );
 }
 
 /// The control: the SAME basis, the SAME scope, NO mutation. Without it

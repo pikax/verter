@@ -3,7 +3,7 @@
 
 use verter_session_query::facts::{
     fact_cache::FactVersionRef,
-    fact_read_set::{FactReadSetFinalise, FACT_SIGNATURE_CAP},
+    fact_read_set::{FactReadSetFinalise, FACT_PAGE_WIDTH},
 };
 
 #[allow(unused_imports)]
@@ -65,8 +65,8 @@ mod file_source_env_observation_tests {
             FactReadSetFinalise::NonCacheable(_) => {
                 panic!("the observed source-env fact is cacheable")
             }
-            FactReadSetFinalise::Overflow | FactReadSetFinalise::MutationUnstable => {
-                panic!("one fact overflows nothing and no domain moves in this fixture")
+            FactReadSetFinalise::MutationUnstable => {
+                panic!("no domain moves in this fixture")
             }
         };
         assert_eq!(
@@ -98,77 +98,71 @@ mod file_source_env_observation_tests {
     }
 }
 
-/// The tracer-CACHEABILITY entry ([`install_fact_tracer_cacheability`]) must fold
-/// BOTH independent non-admission conditions into its single verdict bit: a
-/// non-cacheable read AND a `FactReadSetFinalise::Overflow`.
-///
-/// An admission boundary whose entry signature is built from another source (the
-/// carrier's `dep_signature`, the keyed canonical's observed hash) never inspects
-/// the tracer's finalised set, so an `Overflow` seen only there would be dropped on
-/// the floor and a rootless entry would warm the shared cache.
+/// The tracer-CACHEABILITY entry ([`install_fact_tracer_cacheability`]) refuses
+/// for a non-cacheable read and never for the NUMBER of facts a compute read: a
+/// wide observation set is paged into a complete signature, so width cannot be
+/// a refusal reason at any admission boundary.
 mod tracer_cacheability_tests {
     use super::*;
     use crate::{HostConfig, VerterHost};
 
-    /// One synthetic observation above the per-signature cap.
-    const OVER_CAP: usize = FACT_SIGNATURE_CAP + 1;
-
-    /// DISCRIMINATING: a compute that consumed NO non-cacheable read but whose
-    /// observation set OVERFLOWED is NON-CACHEABLE. The raw
-    /// [`install_fact_tracer`] bit is `false` for it (it reports only the
-    /// non-cacheable-read rail) — which is exactly the hole: a boundary reading
-    /// that bit alone admits a rootless entry. The cacheability entry must report
-    /// `true`.
-    #[test]
-    fn cacheability_verdict_folds_overflow_with_no_non_cacheable_read() {
-        let host = VerterHost::new_standalone(HostConfig::default());
-        host.test_force
-            .engine
-            .force_fact_tracer_overflow_observations
-            .store(OVER_CAP, std::sync::atomic::Ordering::Relaxed);
-
-        // The raw 3-tuple entry: overflow lands in `finalise`, and the
-        // non-cacheable-read bit stays FALSE (no fenced serve / lease miss ran).
-        let (value, finalise) = install_fact_tracer(
-            &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
-            || 7u32,
-        );
-        let non_cacheable_read_observed = matches!(&finalise, FactReadSetFinalise::NonCacheable(_));
-        assert_eq!(value, 7, "the traced value flows to the caller verbatim");
-        assert!(
-            matches!(finalise, FactReadSetFinalise::Overflow),
-            "fixture invariant: the forced observations must overflow the signature cap",
-        );
-        assert!(
-            !non_cacheable_read_observed,
-            "fixture invariant: no non-cacheable READ was consumed — so a boundary that \
-             consults ONLY this bit would ADMIT the rootless entry (the hole under test)",
-        );
-
-        // The cacheability entry folds the overflow in — one verdict, two conditions.
-        let (value, non_cacheable) = install_fact_tracer_cacheability(
-            &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
-            || 7u32,
-        );
-        assert_eq!(value, 7, "the traced value flows to the caller verbatim");
-        assert!(
-            non_cacheable,
-            "OVERFLOW MUST REFUSE: an observation set above FACT_SIGNATURE_CAP can be rooted \
-             by NO signature, so a warm read could never revalidate the entry — the \
-             cacheability verdict must fold `FactReadSetFinalise::Overflow` in as a second, \
-             INDEPENDENT non-admission condition alongside the non-cacheable-read rail",
-        );
-
-        host.test_force
-            .engine
-            .force_fact_tracer_overflow_observations
-            .store(0, std::sync::atomic::Ordering::Relaxed);
+    /// Fan `count` distinct whole-hash observations into every active tracer.
+    fn observe_wide(count: usize) {
+        for index in 0..count {
+            verter_type_engine::resolver_core::resolver_context::observe_fan_out(
+                FactVersionRef::FileWholeHash {
+                    canonical_id: format!("/wide/{index:05}.ts"),
+                    hash: [(index & 0xff) as u8; 16],
+                },
+            );
+        }
     }
 
-    /// Anti-vacuity: with the knob UNARMED an ordinary compute is CACHEABLE, so the
-    /// verdict above is not a constant `true`.
+    /// DISCRIMINATING: a compute that read more facts than one evidence page —
+    /// and consumed no non-cacheable read — is CACHEABLE, and its signature
+    /// keeps every fact it read.
     #[test]
-    fn cacheability_verdict_is_false_for_an_ordinary_compute() {
+    fn a_wide_compute_stays_cacheable_and_keeps_every_fact() {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        let width = FACT_PAGE_WIDTH + 1;
+
+        let (value, finalise) = install_fact_tracer(
+            &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
+            || {
+                observe_wide(width);
+                7u32
+            },
+        );
+        assert_eq!(value, 7, "the traced value flows to the caller verbatim");
+        let FactReadSetFinalise::Ok(facts) = finalise else {
+            panic!("a wide compute finalises into its complete signature, got {finalise:?}");
+        };
+        let signature = verter_session_query::facts::fact_cache::ReadSetSignature::new(facts);
+        assert_eq!(
+            signature.entry_count(),
+            width,
+            "every observed fact survives"
+        );
+
+        let (value, non_cacheable) = install_fact_tracer_cacheability(
+            &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
+            || {
+                observe_wide(width);
+                7u32
+            },
+        );
+        assert_eq!(value, 7, "the traced value flows to the caller verbatim");
+        assert!(
+            !non_cacheable,
+            "width is never a refusal: the cacheability verdict of a wide compute that \
+             consumed no non-cacheable read is CACHEABLE",
+        );
+    }
+
+    /// Anti-vacuity: the verdict is not a constant. An ordinary compute is
+    /// CACHEABLE, and the same compute under the armed refusal knob is NOT.
+    #[test]
+    fn cacheability_verdict_refuses_only_a_non_cacheable_read() {
         let host = VerterHost::new_standalone(HostConfig::default());
         let (value, non_cacheable) = install_fact_tracer_cacheability(
             &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
@@ -177,89 +171,23 @@ mod tracer_cacheability_tests {
         assert_eq!(value, 7);
         assert!(
             !non_cacheable,
-            "an ordinary compute (no non-cacheable read, no overflow) stays CACHEABLE — the \
-             verdict must not be an unconditional refusal",
+            "an ordinary compute stays CACHEABLE — the verdict must not be an \
+             unconditional refusal",
         );
-    }
 
-    /// AUDIT SEMANTICS: ONE overflowing compute emits ONE overflow audit event and
-    /// bumps [`crate::VerterHost::signature_overflow_at_install`] exactly ONCE — no
-    /// matter how many cacheability scopes nest inside it.
-    ///
-    /// Cacheability scopes now wrap whole producer computes, and they NEST (a
-    /// component-meta cold compute's signature-consuming tracer encloses the
-    /// shape-cache producers' scopes). An observation fans into EVERY active tracer,
-    /// so an inner overflow overflows every enclosing cell too. If the cacheability
-    /// path emitted on overflow, ONE overflowing compute would emit the event and
-    /// bump the counter once PER NESTING LEVEL — silently multiplying the audit
-    /// substrate's overflow counter and footprint. The overflow-only peek
-    /// (`FactReadSet::would_overflow`) exists precisely so the emission stays owned
-    /// by the ONE signature-CONSUMING boundary.
-    ///
-    /// DISCRIMINATING: the compute below runs TWO cacheability scopes nested inside
-    /// one `install_fact_tracer`, all overflowing. Exactly one bump is correct.
-    /// Routing the cacheability path back through the emitting `install_fact_tracer`
-    /// yields 3.
-    #[test]
-    fn one_overflowing_compute_bumps_the_overflow_counter_exactly_once() {
-        use std::sync::atomic::Ordering;
-
-        let host = VerterHost::new_standalone(HostConfig::default());
         host.test_force
             .engine
-            .force_fact_tracer_overflow_observations
-            .store(OVER_CAP, Ordering::Relaxed);
-
-        // The signature-CONSUMING boundary (it finalises and roots its entry on the
-        // finalised set) with TWO nested cacheability scopes inside it — the shape
-        // the producer rewiring creates.
-        let (_v, finalise) = install_fact_tracer(
+            .force_fact_tracer_non_cacheable_read
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let (value, non_cacheable) = install_fact_tracer_cacheability(
             &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
-            || {
-                let (inner, inner_non_cacheable) = install_fact_tracer_cacheability(
-                    &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(
-                        &host,
-                    ),
-                    || {
-                        let (deepest, deepest_non_cacheable) = install_fact_tracer_cacheability(
-                            &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
-                            || 1u32,
-                        );
-                        assert!(
-                    deepest_non_cacheable,
-                    "fixture invariant: the innermost cacheability scope must OVERFLOW (else \
-                     the counter assertion is vacuous)",
-                );
-                        deepest
-                    },
-                );
-                assert!(
-                    inner_non_cacheable,
-                    "fixture invariant: the enclosing cacheability scope must ALSO overflow (the \
-                 inner scope's observations fan outward into it)",
-                );
-                inner
-            },
+            || 7u32,
         );
-        assert!(
-            matches!(finalise, FactReadSetFinalise::Overflow),
-            "fixture invariant: the outermost signature-consuming tracer must overflow too",
-        );
-
         host.test_force
             .engine
-            .force_fact_tracer_overflow_observations
-            .store(0, Ordering::Relaxed);
-
-        assert_eq!(
-            host.signature_overflow_at_install.load(Ordering::Relaxed),
-            1,
-            "AUDIT REGRESSION: one overflowing compute bumped the signature-overflow counter \
-             more than once. An observation fans into every active tracer, so an inner overflow \
-             overflows each enclosing scope; only the ONE signature-CONSUMING boundary may emit \
-             the audit event and bump the counter. A cacheability scope must PEEK overflow \
-             (`FactReadSet::would_overflow`) — never finalise-and-emit — or nesting silently \
-             multiplies the audit substrate's overflow counter and footprint",
-        );
+            .force_fact_tracer_non_cacheable_read
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(value, 7, "a refused value still flows to the caller");
+        assert!(non_cacheable, "a non-cacheable read refuses admission");
     }
 }

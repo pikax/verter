@@ -842,6 +842,7 @@ export const CI_INERT_PATHS = Object.freeze([
   "tests/framework-stimulus/STIM0/products/stimulus-version-lock.json",
   "tests/framework-stimulus/STIM0/products/stimulus-vocabulary.json",
   "tests/framework-stimulus/STIM0/products/turbo-vocabulary.json",
+  "tests/framework-liquid/**",
   "tests/jetbrains-baseline/**",
   "tests/kernel/**",
   "tests/playground/**",

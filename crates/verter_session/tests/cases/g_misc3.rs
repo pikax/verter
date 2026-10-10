@@ -41,10 +41,8 @@ mod path_precise_invalidation_baseline;
 mod repo_first_pass_diagnosis_corpus;
 #[path = "g_misc3/shallow_walk_no_over_materialise.rs"]
 mod shallow_walk_no_over_materialise;
-#[path = "g_misc3/signature_overflow_pre_canary.rs"]
-mod signature_overflow_pre_canary;
-#[path = "g_misc3/signature_size_bound.rs"]
-mod signature_size_bound;
+#[path = "g_misc3/signature_width_pages.rs"]
+mod signature_width_pages;
 #[path = "g_misc3/slot_binding_graph_fact_tracer_emission.rs"]
 mod slot_binding_graph_fact_tracer_emission;
 #[path = "g_misc3/slot_binding_graph_matrix_member_presence.rs"]
