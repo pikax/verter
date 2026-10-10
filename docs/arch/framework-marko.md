@@ -270,7 +270,8 @@ route's disposition and owning acceptances; the two must agree row for row.
   `style {}`, `--` text blocks and the Class API reject inputs — and MRK1 owns
   the corpus files.
 - **F-MRK0-04 (CI path selection).** `tests/framework-marko/**` is listed as
-  CI-inert in `scripts/ci-impact.mjs`, because nothing in `ci.yml` reads it
+  CI-inert in `scripts/ci-inert-paths.json`, which `scripts/ci-impact.mjs`
+  reads, because nothing in `ci.yml` reads the contract data
   until MRK1G lands the lock spec. MRK1G moves it to the lane that runs the
   spec.
 - **F-MRK0-05 (MRK5).** Cells `C28`–`C30` name the ratified amended
