@@ -41,8 +41,8 @@ summary; the raw harness runs stay out of the tree.
 - **Call counts.** `count_resolver_context_call!` names each port method at
   its implementation. The counters exist only under the default-off
   `semantic-observe` feature: OPTIONAL in
-  [the observation policy](../arch/semantic-observe.md), with an inventory
-  row in [`crates/verter_type_engine/observe-inventory/`](../../crates/verter_type_engine/observe-inventory/).
+  [the observation policy](https://github.com/pikax/verter/blob/main/docs/arch/semantic-observe.md), with an inventory
+  row in [`crates/verter_type_engine/observe-inventory/`](https://github.com/pikax/verter/tree/main/crates/verter_type_engine/observe-inventory/).
   `cargo run -p verter_bench --profile no-debug-assertions --features
   semantic-observe --example resolver_dispatch_profile -- <scenario-dir>...`
   profiles every given benchmark scenario directory
