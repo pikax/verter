@@ -31,6 +31,25 @@ EMB0 → EAK1 → UAO0. The validator must reject missing inventory members,
 unknown/pathless owners and conflicting assignments. No validator is shipped
 by this decision.
 
+The operator ruling `embedded-receiving-codec-acceptance` (2026-10-10)
+ratifies `<owner>-AC-EMB` for the 25 implementation consumers other than
+INT-TT. These receiving clauses cover shared-codec adoption, exact authored
+UTF-8 maps or explicit typed partiality, profile-owned semantics, and private
+decoder/composer rejection or retirement after byte/map equivalence. They
+also receive applicable incremental/fresh equivalence, stable unaffected
+regions and stale/cancelled/partial non-warming proof. The ruling is the
+amendment authority even where the controller's charter mirror still shows
+the earlier unnumbered shared-codec amendment. Activation/version criteria
+are separate and do not prove codec acceptance.
+
+INT-TT retains `INT-TT-AC5` for sole-codec adoption, `INT-TT-AC1` for exact
+hole maps, `INT-TT-AC3` for placeholder round-trips and `INT-TT-AC4` for
+incremental region isolation/recovery. The case table binds these separately.
+Each integration row scopes its corpus to the consumer's existing boundary;
+an untouched group needs an owner-specific absent-policy/route rationale.
+Primitive admission, fuzz and work-count proof remains with EMB0I. These
+amendments add no implementation, predecessor or CI lane to this decision.
+
 Every implementation consumer uses EMB0I's primitives. INT-TT composes the
 tagged-template adapter and hole-placeholder registry over them; LIT1 uses
 that adapter and adds Lit's dialect/profile rows. Neither creates a private
@@ -90,7 +109,7 @@ Raw input retains its exact authored spelling. Cooked input uses the host
 literal's value, whose positions need not equal authored positions. The codec
 does not execute JavaScript, a template, a preprocessor or a runtime plugin.
 
-A JavaScript cooked value is potentially UTF-16 code units, not necessarily
+A JavaScript cooked value may contain UTF-16 code units that do not represent
 Unicode scalar text. Before any embedded parser call, offset minting or map
 publication, validate the complete cooked value. A paired surrogate becomes
 one scalar encoded as four UTF-8 bytes. A lone high or low surrogate produces
@@ -163,16 +182,16 @@ retain multiple exact origins without acquiring edit authority. A syntax map
 does not certify runtime provenance, and a runtime map does not certify safe
 edits. No universal projection mask grants all operations together.
 
-| Amended consumer                   | Exactness requirement                                                                                          | Receiving owner/acceptance             |
-| ---------------------------------- | -------------------------------------------------------------------------------------------------------------- | -------------------------------------- |
-| Pug                                | Expansion/mixin origins remain ordered; repeated output has no guessed unique edit origin                      | DIAL2, `DIAL2-AC2`                     |
-| Stylesheet dialects/custom PostCSS | Transform output missing trustworthy maps disables authored automatic edits; retain syntax versus build stages | DIAL7, `DIAL7-AC2`; STP38, `STP38-AC1` |
-| Lit                                | Escape/CRLF/hole expression maps compose through INT-TT; Lit owns activation/dialect policy                    | INT-TT, `INT-TT-AC1`; LIT1, `LIT1-AC2` |
-| MDX                                | ESM/expression/JSX nested regions retain exact ranges and attachment identities                                | MDX1M, `MDX1M-AC1`–`MDX1M-AC2`         |
-| Angular external resources         | Inline escapes and external source/base identity; shared resource has distinct component contexts              | ANG1M, `ANG1M-AC1`–`ANG1M-AC3`         |
-| Glimmer/GJS/GTS                    | Template-tag/co-located regions preserve exact authored lineage                                                | GLM1M, `GLM1M-AC1`                     |
-| Marko                              | Embedded script/style/expression regions preserve authored identity                                            | MRK1M, `MRK1M-AC1`                     |
-| Astro                              | Frontmatter/expression/script/style geometry stays exact; per-region invalidation                              | AST1M, `AST1M-AC1`–`AST1M-AC4`         |
+| Amended consumer                   | Exactness requirement                                                                                          | Receiving owner/acceptance                   |
+| ---------------------------------- | -------------------------------------------------------------------------------------------------------------- | -------------------------------------------- |
+| Pug                                | Expansion/mixin origins remain ordered; repeated output has no guessed unique edit origin                      | DIAL2, `DIAL2-AC-EMB`                        |
+| Stylesheet dialects/custom PostCSS | Transform output missing trustworthy maps disables authored automatic edits; retain syntax versus build stages | DIAL7, `DIAL7-AC-EMB`; STP38, `STP38-AC-EMB` |
+| Lit                                | Escape/CRLF/hole expression maps compose through INT-TT; Lit owns activation/dialect policy                    | INT-TT, `INT-TT-AC1`; LIT1, `LIT1-AC-EMB`    |
+| MDX                                | ESM/expression/JSX nested regions retain exact ranges and attachment identities                                | MDX1M, `MDX1M-AC-EMB`                        |
+| Angular external resources         | Inline escapes and external source/base identity; shared resource has distinct component contexts              | ANG1M, `ANG1M-AC-EMB`                        |
+| Glimmer/GJS/GTS                    | Template-tag/co-located regions preserve exact authored lineage                                                | GLM1M, `GLM1M-AC-EMB`                        |
+| Marko                              | Embedded script/style/expression regions preserve authored identity                                            | MRK1M, `MRK1M-AC-EMB`                        |
+| Astro                              | Frontmatter/expression/script/style geometry stays exact; per-region invalidation                              | AST1M, `AST1M-AC-EMB`                        |
 
 Profiles share primitives only when their authored semantics are expressible
 by neutral policies. If that would require a language branch in the neutral
@@ -205,7 +224,7 @@ embedded-only populations are empty now. The route ledger enumerates the
 consumer-local rejection owner for every future private geometry route; that
 owner adopts shared primitives and removes any superseded decoder only after
 byte/map equivalence. EAK1 specifically owns any superseded Vue bespoke literal
-path under `EAK1-AC1`/`EAK1-AC2`. EMB0I implements primitives but switches no
+path under `EAK1-AC-EMB`. EMB0I implements primitives but switches no
 consumer. No compatibility bridge or dual authority is authorized.
 
 `CodeTransform` mapping products, `ContentMapper`, the canonical boundary

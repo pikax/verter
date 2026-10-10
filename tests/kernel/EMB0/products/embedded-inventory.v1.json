@@ -60,7 +60,7 @@
       "kind": "implementation",
       "implementationOwner": "ALP1",
       "successorPath": ["EMB0", "EMB0I", "ALP1"],
-      "receivingAcceptance": "ALP1-AC2",
+      "receivingAcceptance": "ALP1-AC-EMB",
       "adoption": "Use shared primitives; language activation/grammar/hole meaning remains owner-local. No private literal decoder or map composer."
     },
     {
@@ -69,7 +69,7 @@
       "kind": "implementation",
       "implementationOwner": "ANG1",
       "successorPath": ["EMB0", "EMB0I", "ANG1"],
-      "receivingAcceptance": "ANG1-AC2",
+      "receivingAcceptance": "ANG1-AC-EMB",
       "adoption": "Use shared primitives; language activation/grammar/hole meaning remains owner-local. No private literal decoder or map composer."
     },
     {
@@ -78,7 +78,7 @@
       "kind": "implementation",
       "implementationOwner": "ANG1M",
       "successorPath": ["EMB0", "EMB0I", "ANG1M"],
-      "receivingAcceptance": "ANG1M-AC1",
+      "receivingAcceptance": "ANG1M-AC-EMB",
       "adoption": "Use shared primitives; language activation/grammar/hole meaning remains owner-local. No private literal decoder or map composer."
     },
     {
@@ -87,7 +87,7 @@
       "kind": "implementation",
       "implementationOwner": "AST1",
       "successorPath": ["EMB0", "EMB0I", "AST1"],
-      "receivingAcceptance": "AST1-AC2",
+      "receivingAcceptance": "AST1-AC-EMB",
       "adoption": "Use shared primitives; language activation/grammar/hole meaning remains owner-local. No private literal decoder or map composer."
     },
     {
@@ -96,7 +96,7 @@
       "kind": "implementation",
       "implementationOwner": "AST1M",
       "successorPath": ["EMB0", "EMB0I", "AST1M"],
-      "receivingAcceptance": "AST1M-AC1",
+      "receivingAcceptance": "AST1M-AC-EMB",
       "adoption": "Use shared primitives; language activation/grammar/hole meaning remains owner-local. No private literal decoder or map composer."
     },
     {
@@ -105,7 +105,7 @@
       "kind": "implementation",
       "implementationOwner": "DATA5",
       "successorPath": ["EMB0", "EMB0I", "DATA5"],
-      "receivingAcceptance": "DATA5-AC2",
+      "receivingAcceptance": "DATA5-AC-EMB",
       "adoption": "Use shared primitives; language activation/grammar/hole meaning remains owner-local. No private literal decoder or map composer."
     },
     {
@@ -114,7 +114,7 @@
       "kind": "implementation",
       "implementationOwner": "DDB1",
       "successorPath": ["EMB0", "EMB0I", "DDB1"],
-      "receivingAcceptance": "DDB1-AC2",
+      "receivingAcceptance": "DDB1-AC-EMB",
       "adoption": "Use shared primitives; language activation/grammar/hole meaning remains owner-local. No private literal decoder or map composer."
     },
     {
@@ -123,7 +123,7 @@
       "kind": "implementation",
       "implementationOwner": "DIAL2",
       "successorPath": ["EMB0", "EMB0I", "DIAL2"],
-      "receivingAcceptance": "DIAL2-AC2",
+      "receivingAcceptance": "DIAL2-AC-EMB",
       "adoption": "Use shared primitives; language activation/grammar/hole meaning remains owner-local. No private literal decoder or map composer."
     },
     {
@@ -132,7 +132,7 @@
       "kind": "implementation",
       "implementationOwner": "DIAL7",
       "successorPath": ["EMB0", "EMB0I", "DIAL7"],
-      "receivingAcceptance": "DIAL7-AC2",
+      "receivingAcceptance": "DIAL7-AC-EMB",
       "adoption": "Use shared primitives; language activation/grammar/hole meaning remains owner-local. No private literal decoder or map composer."
     },
     {
@@ -141,7 +141,7 @@
       "kind": "implementation",
       "implementationOwner": "EAK1",
       "successorPath": ["EMB0", "EMB0I", "EAK1"],
-      "receivingAcceptance": "EAK1-AC2",
+      "receivingAcceptance": "EAK1-AC-EMB",
       "adoption": "Use shared primitives; language activation/grammar/hole meaning remains owner-local. No private literal decoder or map composer."
     },
     {
@@ -150,7 +150,7 @@
       "kind": "implementation",
       "implementationOwner": "GLM1",
       "successorPath": ["EMB0", "EMB0I", "GLM1"],
-      "receivingAcceptance": "GLM1-AC2",
+      "receivingAcceptance": "GLM1-AC-EMB",
       "adoption": "Use shared primitives; language activation/grammar/hole meaning remains owner-local. No private literal decoder or map composer."
     },
     {
@@ -159,7 +159,7 @@
       "kind": "implementation",
       "implementationOwner": "GLM1M",
       "successorPath": ["EMB0", "EMB0I", "GLM1M"],
-      "receivingAcceptance": "GLM1M-AC1",
+      "receivingAcceptance": "GLM1M-AC-EMB",
       "adoption": "Use shared primitives; language activation/grammar/hole meaning remains owner-local. No private literal decoder or map composer."
     },
     {
@@ -168,7 +168,7 @@
       "kind": "implementation",
       "implementationOwner": "HTX1",
       "successorPath": ["EMB0", "EMB0I", "HTX1"],
-      "receivingAcceptance": "HTX1-AC2",
+      "receivingAcceptance": "HTX1-AC-EMB",
       "adoption": "Use shared primitives; language activation/grammar/hole meaning remains owner-local. No private literal decoder or map composer."
     },
     {
@@ -177,7 +177,7 @@
       "kind": "implementation",
       "implementationOwner": "LIT1",
       "successorPath": ["EMB0", "EMB0I", "LIT1"],
-      "receivingAcceptance": "LIT1-AC2",
+      "receivingAcceptance": "LIT1-AC-EMB",
       "adoption": "Use shared primitives; language activation/grammar/hole meaning remains owner-local. No private literal decoder or map composer."
     },
     {
@@ -186,7 +186,7 @@
       "kind": "implementation",
       "implementationOwner": "LSO1",
       "successorPath": ["EMB0", "EMB0I", "LSO1"],
-      "receivingAcceptance": "LSO1-AC2",
+      "receivingAcceptance": "LSO1-AC-EMB",
       "adoption": "Use shared primitives; language activation/grammar/hole meaning remains owner-local. No private literal decoder or map composer."
     },
     {
@@ -195,7 +195,7 @@
       "kind": "implementation",
       "implementationOwner": "MDX1M",
       "successorPath": ["EMB0", "EMB0I", "MDX1M"],
-      "receivingAcceptance": "MDX1M-AC1",
+      "receivingAcceptance": "MDX1M-AC-EMB",
       "adoption": "Use shared primitives; language activation/grammar/hole meaning remains owner-local. No private literal decoder or map composer."
     },
     {
@@ -204,7 +204,7 @@
       "kind": "implementation",
       "implementationOwner": "MRK1",
       "successorPath": ["EMB0", "EMB0I", "MRK1"],
-      "receivingAcceptance": "MRK1-AC2",
+      "receivingAcceptance": "MRK1-AC-EMB",
       "adoption": "Use shared primitives; language activation/grammar/hole meaning remains owner-local. No private literal decoder or map composer."
     },
     {
@@ -213,7 +213,7 @@
       "kind": "implementation",
       "implementationOwner": "MRK1M",
       "successorPath": ["EMB0", "EMB0I", "MRK1M"],
-      "receivingAcceptance": "MRK1M-AC1",
+      "receivingAcceptance": "MRK1M-AC-EMB",
       "adoption": "Use shared primitives; language activation/grammar/hole meaning remains owner-local. No private literal decoder or map composer."
     },
     {
@@ -222,7 +222,7 @@
       "kind": "implementation",
       "implementationOwner": "PRE1",
       "successorPath": ["EMB0", "EMB0I", "PRE1"],
-      "receivingAcceptance": "PRE1-AC2",
+      "receivingAcceptance": "PRE1-AC-EMB",
       "adoption": "Use shared primitives; language activation/grammar/hole meaning remains owner-local. No private literal decoder or map composer."
     },
     {
@@ -231,7 +231,7 @@
       "kind": "implementation",
       "implementationOwner": "QWK1",
       "successorPath": ["EMB0", "EMB0I", "QWK1"],
-      "receivingAcceptance": "QWK1-AC2",
+      "receivingAcceptance": "QWK1-AC-EMB",
       "adoption": "Use shared primitives; language activation/grammar/hole meaning remains owner-local. No private literal decoder or map composer."
     },
     {
@@ -240,7 +240,7 @@
       "kind": "implementation",
       "implementationOwner": "RCT1",
       "successorPath": ["EMB0", "EMB0I", "RCT1"],
-      "receivingAcceptance": "RCT1-AC2",
+      "receivingAcceptance": "RCT1-AC-EMB",
       "adoption": "Use shared primitives; language activation/grammar/hole meaning remains owner-local. No private literal decoder or map composer."
     },
     {
@@ -249,7 +249,7 @@
       "kind": "implementation",
       "implementationOwner": "RGX1",
       "successorPath": ["EMB0", "EMB0I", "RGX1"],
-      "receivingAcceptance": "RGX1-AC3",
+      "receivingAcceptance": "RGX1-AC-EMB",
       "adoption": "Use shared primitives; language activation/grammar/hole meaning remains owner-local. No private literal decoder or map composer."
     },
     {
@@ -258,7 +258,7 @@
       "kind": "implementation",
       "implementationOwner": "SLD1",
       "successorPath": ["EMB0", "EMB0I", "SLD1"],
-      "receivingAcceptance": "SLD1-AC2",
+      "receivingAcceptance": "SLD1-AC-EMB",
       "adoption": "Use shared primitives; language activation/grammar/hole meaning remains owner-local. No private literal decoder or map composer."
     },
     {
@@ -267,7 +267,7 @@
       "kind": "implementation",
       "implementationOwner": "STN1",
       "successorPath": ["EMB0", "EMB0I", "STN1"],
-      "receivingAcceptance": "STN1-AC2",
+      "receivingAcceptance": "STN1-AC-EMB",
       "adoption": "Use shared primitives; language activation/grammar/hole meaning remains owner-local. No private literal decoder or map composer."
     },
     {
@@ -276,7 +276,7 @@
       "kind": "implementation",
       "implementationOwner": "STP38",
       "successorPath": ["EMB0", "EMB0I", "STP38"],
-      "receivingAcceptance": "STP38-AC1",
+      "receivingAcceptance": "STP38-AC-EMB",
       "adoption": "Use shared primitives; language activation/grammar/hole meaning remains owner-local. No private literal decoder or map composer."
     },
     {
@@ -285,7 +285,7 @@
       "kind": "implementation",
       "implementationOwner": "INT-TT",
       "successorPath": ["EMB0", "EMB0I", "INT-TT"],
-      "receivingAcceptance": "INT-TT-AC1",
+      "receivingAcceptance": "INT-TT-AC5",
       "adoption": "Use shared primitives; language activation/grammar/hole meaning remains owner-local. No private literal decoder or map composer."
     },
     {
@@ -487,5 +487,6 @@
       "standalone EmbeddedSourceId"
     ],
     "rule": "Existing API owners and deletion ledgers remain authoritative; this inventory does not claim their future implementations are shipped."
-  }
+  },
+  "receivingAcceptanceBasis": "Operator ruling embedded-receiving-codec-acceptance, 2026-10-10: ratified <owner>-AC-EMB for the 25 implementation consumers; INT-TT retains AC5 for sole-codec adoption and AC1/AC3/AC4 for maps, placeholders and incremental behavior. These receiving amendments preserve each consumer scope; executable proof follows EMB0."
 }

@@ -278,211 +278,331 @@
   "integrationBindings": [
     {
       "consumer": "EMB-C01",
-      "caseGroups": ["profile", "composition", "regions", "external", "holes", "incremental"],
+      "caseGroups": ["profile", "composition", "regions", "holes", "incremental"],
       "implementationOwner": "ALP1",
       "successorPath": ["EMB0", "EMB0I", "ALP1"],
-      "receivingAcceptance": "ALP1-AC2",
-      "criterion": "Alpine attribute directive value codecs"
+      "receivingAcceptance": "ALP1-AC-EMB",
+      "criterion": "Adopt EMB0I EmbeddedTextCodec and AuthoredMapChain (Lit via INT-TT); exact authored UTF-8 maps or explicit unmappable/typed partial results; profile-owned activation, grammar and holes; no private decoder/composer, retirement only after byte/map equivalence; applicable corpus proves incremental equals fresh, stable unaffected regions and no stale/cancelled/partial warming, with owner-specific rationales for untouched groups.",
+      "corpusScope": "Alpine attribute directive value codecs: exercise the listed groups within this owner’s existing syntax/attachment scope; primitive Unicode, raw/cooked and work-count proofs remain with EMB0I. An untouched group requires a rationale identifying the absent policy or route, not a passing activation test.",
+      "untouchedCaseGroups": [
+        {
+          "group": "external",
+          "rationale": "Alpine attribute-value codecs have inline authored ranges; they do not own Angular external template/style loading or cross-component resource contexts."
+        }
+      ]
     },
     {
       "consumer": "EMB-C02",
-      "caseGroups": ["profile", "composition", "regions", "external", "holes", "incremental"],
+      "caseGroups": ["profile", "composition", "regions", "holes", "incremental"],
       "implementationOwner": "ANG1",
       "successorPath": ["EMB0", "EMB0I", "ANG1"],
-      "receivingAcceptance": "ANG1-AC2",
-      "criterion": "Angular syntax geometry without activation"
+      "receivingAcceptance": "ANG1-AC-EMB",
+      "criterion": "Adopt EMB0I EmbeddedTextCodec and AuthoredMapChain (Lit via INT-TT); exact authored UTF-8 maps or explicit unmappable/typed partial results; profile-owned activation, grammar and holes; no private decoder/composer, retirement only after byte/map equivalence; applicable corpus proves incremental equals fresh, stable unaffected regions and no stale/cancelled/partial warming, with owner-specific rationales for untouched groups.",
+      "corpusScope": "Angular syntax geometry without activation: exercise the listed groups within this owner’s existing syntax/attachment scope; primitive Unicode, raw/cooked and work-count proofs remain with EMB0I. An untouched group requires a rationale identifying the absent policy or route, not a passing activation test.",
+      "untouchedCaseGroups": [
+        {
+          "group": "external",
+          "rationale": "ANG1 owns syntax geometry without activation; external resource attachments and component contexts belong to ANG1M."
+        }
+      ]
     },
     {
       "consumer": "EMB-C03",
       "caseGroups": ["profile", "composition", "regions", "external", "holes", "incremental"],
       "implementationOwner": "ANG1M",
       "successorPath": ["EMB0", "EMB0I", "ANG1M"],
-      "receivingAcceptance": "ANG1M-AC1",
-      "criterion": "Angular inline/external template/style attachments and resource bases"
+      "receivingAcceptance": "ANG1M-AC-EMB",
+      "criterion": "Adopt EMB0I EmbeddedTextCodec and AuthoredMapChain (Lit via INT-TT); exact authored UTF-8 maps or explicit unmappable/typed partial results; profile-owned activation, grammar and holes; no private decoder/composer, retirement only after byte/map equivalence; applicable corpus proves incremental equals fresh, stable unaffected regions and no stale/cancelled/partial warming, with owner-specific rationales for untouched groups.",
+      "corpusScope": "Angular inline/external template/style attachments and resource bases: exercise the listed groups within this owner’s existing syntax/attachment scope; primitive Unicode, raw/cooked and work-count proofs remain with EMB0I. An untouched group requires a rationale identifying the absent policy or route, not a passing activation test."
     },
     {
       "consumer": "EMB-C04",
-      "caseGroups": ["profile", "composition", "regions", "external", "holes", "incremental"],
+      "caseGroups": ["profile", "composition", "regions", "holes", "incremental"],
       "implementationOwner": "AST1",
       "successorPath": ["EMB0", "EMB0I", "AST1"],
-      "receivingAcceptance": "AST1-AC2",
-      "criterion": "Astro grammar recovery geometry"
+      "receivingAcceptance": "AST1-AC-EMB",
+      "criterion": "Adopt EMB0I EmbeddedTextCodec and AuthoredMapChain (Lit via INT-TT); exact authored UTF-8 maps or explicit unmappable/typed partial results; profile-owned activation, grammar and holes; no private decoder/composer, retirement only after byte/map equivalence; applicable corpus proves incremental equals fresh, stable unaffected regions and no stale/cancelled/partial warming, with owner-specific rationales for untouched groups.",
+      "corpusScope": "Astro grammar recovery geometry: exercise the listed groups within this owner’s existing syntax/attachment scope; primitive Unicode, raw/cooked and work-count proofs remain with EMB0I. An untouched group requires a rationale identifying the absent policy or route, not a passing activation test.",
+      "untouchedCaseGroups": [
+        {
+          "group": "external",
+          "rationale": "AST1 owns grammar/recovery geometry; frontmatter/script/style attachments belong to AST1M, not this syntax-only consumer."
+        }
+      ]
     },
     {
       "consumer": "EMB-C05",
       "caseGroups": ["profile", "composition", "regions", "external", "holes", "incremental"],
       "implementationOwner": "AST1M",
       "successorPath": ["EMB0", "EMB0I", "AST1M"],
-      "receivingAcceptance": "AST1M-AC1",
-      "criterion": "Astro frontmatter/expression/script/style attachments"
+      "receivingAcceptance": "AST1M-AC-EMB",
+      "criterion": "Adopt EMB0I EmbeddedTextCodec and AuthoredMapChain (Lit via INT-TT); exact authored UTF-8 maps or explicit unmappable/typed partial results; profile-owned activation, grammar and holes; no private decoder/composer, retirement only after byte/map equivalence; applicable corpus proves incremental equals fresh, stable unaffected regions and no stale/cancelled/partial warming, with owner-specific rationales for untouched groups.",
+      "corpusScope": "Astro frontmatter/expression/script/style attachments: exercise the listed groups within this owner’s existing syntax/attachment scope; primitive Unicode, raw/cooked and work-count proofs remain with EMB0I. An untouched group requires a rationale identifying the absent policy or route, not a passing activation test."
     },
     {
       "consumer": "EMB-C06",
-      "caseGroups": ["profile", "composition", "regions", "external", "holes", "incremental"],
+      "caseGroups": ["profile", "composition", "regions", "holes", "incremental"],
       "implementationOwner": "DATA5",
       "successorPath": ["EMB0", "EMB0I", "DATA5"],
-      "receivingAcceptance": "DATA5-AC2",
-      "criterion": "Markdown fence embedded-region isolation"
+      "receivingAcceptance": "DATA5-AC-EMB",
+      "criterion": "Adopt EMB0I EmbeddedTextCodec and AuthoredMapChain (Lit via INT-TT); exact authored UTF-8 maps or explicit unmappable/typed partial results; profile-owned activation, grammar and holes; no private decoder/composer, retirement only after byte/map equivalence; applicable corpus proves incremental equals fresh, stable unaffected regions and no stale/cancelled/partial warming, with owner-specific rationales for untouched groups.",
+      "corpusScope": "Markdown fence embedded-region isolation: exercise the listed groups within this owner’s existing syntax/attachment scope; primitive Unicode, raw/cooked and work-count proofs remain with EMB0I. An untouched group requires a rationale identifying the absent policy or route, not a passing activation test.",
+      "untouchedCaseGroups": [
+        {
+          "group": "external",
+          "rationale": "Markdown fence isolation maps fenced bytes in their authored document; it does not load Angular external template/style resources."
+        }
+      ]
     },
     {
       "consumer": "EMB-C07",
-      "caseGroups": ["profile", "composition", "regions", "external", "holes", "incremental"],
+      "caseGroups": ["profile", "composition", "regions", "holes", "incremental"],
       "implementationOwner": "DDB1",
       "successorPath": ["EMB0", "EMB0I", "DDB1"],
-      "receivingAcceptance": "DDB1-AC2",
-      "criterion": "DynamoDB expressions in authored literals"
+      "receivingAcceptance": "DDB1-AC-EMB",
+      "criterion": "Adopt EMB0I EmbeddedTextCodec and AuthoredMapChain (Lit via INT-TT); exact authored UTF-8 maps or explicit unmappable/typed partial results; profile-owned activation, grammar and holes; no private decoder/composer, retirement only after byte/map equivalence; applicable corpus proves incremental equals fresh, stable unaffected regions and no stale/cancelled/partial warming, with owner-specific rationales for untouched groups.",
+      "corpusScope": "DynamoDB expressions in authored literals: exercise the listed groups within this owner’s existing syntax/attachment scope; primitive Unicode, raw/cooked and work-count proofs remain with EMB0I. An untouched group requires a rationale identifying the absent policy or route, not a passing activation test.",
+      "untouchedCaseGroups": [
+        {
+          "group": "external",
+          "rationale": "DynamoDB expression literals map back to their host literal; cross-component external template/style attachment is not an expression-literal route."
+        }
+      ]
     },
     {
       "consumer": "EMB-C08",
       "caseGroups": ["profile", "composition", "regions", "external", "holes", "incremental"],
       "implementationOwner": "DIAL2",
       "successorPath": ["EMB0", "EMB0I", "DIAL2"],
-      "receivingAcceptance": "DIAL2-AC2",
-      "criterion": "Pug expansion and repeated mixin origins"
+      "receivingAcceptance": "DIAL2-AC-EMB",
+      "criterion": "Adopt EMB0I EmbeddedTextCodec and AuthoredMapChain (Lit via INT-TT); exact authored UTF-8 maps or explicit unmappable/typed partial results; profile-owned activation, grammar and holes; no private decoder/composer, retirement only after byte/map equivalence; applicable corpus proves incremental equals fresh, stable unaffected regions and no stale/cancelled/partial warming, with owner-specific rationales for untouched groups.",
+      "corpusScope": "Pug expansion and repeated mixin origins: exercise the listed groups within this owner’s existing syntax/attachment scope; primitive Unicode, raw/cooked and work-count proofs remain with EMB0I. An untouched group requires a rationale identifying the absent policy or route, not a passing activation test."
     },
     {
       "consumer": "EMB-C09",
       "caseGroups": ["profile", "composition", "regions", "external", "holes", "incremental"],
       "implementationOwner": "DIAL7",
       "successorPath": ["EMB0", "EMB0I", "DIAL7"],
-      "receivingAcceptance": "DIAL7-AC2",
-      "criterion": "Stylesheet/PostCSS transform maps and unmappable edits"
+      "receivingAcceptance": "DIAL7-AC-EMB",
+      "criterion": "Adopt EMB0I EmbeddedTextCodec and AuthoredMapChain (Lit via INT-TT); exact authored UTF-8 maps or explicit unmappable/typed partial results; profile-owned activation, grammar and holes; no private decoder/composer, retirement only after byte/map equivalence; applicable corpus proves incremental equals fresh, stable unaffected regions and no stale/cancelled/partial warming, with owner-specific rationales for untouched groups.",
+      "corpusScope": "Stylesheet/PostCSS transform maps and unmappable edits: exercise the listed groups within this owner’s existing syntax/attachment scope; primitive Unicode, raw/cooked and work-count proofs remain with EMB0I. An untouched group requires a rationale identifying the absent policy or route, not a passing activation test."
     },
     {
       "consumer": "EMB-C10",
-      "caseGroups": ["profile", "composition", "regions", "external", "holes", "incremental"],
+      "caseGroups": ["profile", "composition", "regions", "holes", "incremental"],
       "implementationOwner": "EAK1",
       "successorPath": ["EMB0", "EMB0I", "EAK1"],
-      "receivingAcceptance": "EAK1-AC2",
-      "criterion": "Vue proven defineComponent template literal extraction"
+      "receivingAcceptance": "EAK1-AC-EMB",
+      "criterion": "Adopt EMB0I EmbeddedTextCodec and AuthoredMapChain (Lit via INT-TT); exact authored UTF-8 maps or explicit unmappable/typed partial results; profile-owned activation, grammar and holes; no private decoder/composer, retirement only after byte/map equivalence; applicable corpus proves incremental equals fresh, stable unaffected regions and no stale/cancelled/partial warming, with owner-specific rationales for untouched groups.",
+      "corpusScope": "Vue proven defineComponent template literal extraction: exercise the listed groups within this owner’s existing syntax/attachment scope; primitive Unicode, raw/cooked and work-count proofs remain with EMB0I. An untouched group requires a rationale identifying the absent policy or route, not a passing activation test.",
+      "untouchedCaseGroups": [
+        {
+          "group": "external",
+          "rationale": "Vue defineComponent literal extraction maps inline object literals; Angular external resource attachment is not this extraction boundary."
+        }
+      ]
     },
     {
       "consumer": "EMB-C11",
-      "caseGroups": ["profile", "composition", "regions", "external", "holes", "incremental"],
+      "caseGroups": ["profile", "composition", "regions", "holes", "incremental"],
       "implementationOwner": "GLM1",
       "successorPath": ["EMB0", "EMB0I", "GLM1"],
-      "receivingAcceptance": "GLM1-AC2",
-      "criterion": "Glimmer/Handlebars syntax geometry"
+      "receivingAcceptance": "GLM1-AC-EMB",
+      "criterion": "Adopt EMB0I EmbeddedTextCodec and AuthoredMapChain (Lit via INT-TT); exact authored UTF-8 maps or explicit unmappable/typed partial results; profile-owned activation, grammar and holes; no private decoder/composer, retirement only after byte/map equivalence; applicable corpus proves incremental equals fresh, stable unaffected regions and no stale/cancelled/partial warming, with owner-specific rationales for untouched groups.",
+      "corpusScope": "Glimmer/Handlebars syntax geometry: exercise the listed groups within this owner’s existing syntax/attachment scope; primitive Unicode, raw/cooked and work-count proofs remain with EMB0I. An untouched group requires a rationale identifying the absent policy or route, not a passing activation test.",
+      "untouchedCaseGroups": [
+        {
+          "group": "external",
+          "rationale": "GLM1 owns Glimmer/Handlebars syntax geometry; co-located and tagged template attachments belong to GLM1M."
+        }
+      ]
     },
     {
       "consumer": "EMB-C12",
       "caseGroups": ["profile", "composition", "regions", "external", "holes", "incremental"],
       "implementationOwner": "GLM1M",
       "successorPath": ["EMB0", "EMB0I", "GLM1M"],
-      "receivingAcceptance": "GLM1M-AC1",
-      "criterion": "GJS/GTS tag and colocated template attachments"
+      "receivingAcceptance": "GLM1M-AC-EMB",
+      "criterion": "Adopt EMB0I EmbeddedTextCodec and AuthoredMapChain (Lit via INT-TT); exact authored UTF-8 maps or explicit unmappable/typed partial results; profile-owned activation, grammar and holes; no private decoder/composer, retirement only after byte/map equivalence; applicable corpus proves incremental equals fresh, stable unaffected regions and no stale/cancelled/partial warming, with owner-specific rationales for untouched groups.",
+      "corpusScope": "GJS/GTS tag and colocated template attachments: exercise the listed groups within this owner’s existing syntax/attachment scope; primitive Unicode, raw/cooked and work-count proofs remain with EMB0I. An untouched group requires a rationale identifying the absent policy or route, not a passing activation test."
     },
     {
       "consumer": "EMB-C13",
-      "caseGroups": ["profile", "composition", "regions", "external", "holes", "incremental"],
+      "caseGroups": ["profile", "composition", "regions", "holes", "incremental"],
       "implementationOwner": "HTX1",
       "successorPath": ["EMB0", "EMB0I", "HTX1"],
-      "receivingAcceptance": "HTX1-AC2",
-      "criterion": "htmx attribute value codecs"
+      "receivingAcceptance": "HTX1-AC-EMB",
+      "criterion": "Adopt EMB0I EmbeddedTextCodec and AuthoredMapChain (Lit via INT-TT); exact authored UTF-8 maps or explicit unmappable/typed partial results; profile-owned activation, grammar and holes; no private decoder/composer, retirement only after byte/map equivalence; applicable corpus proves incremental equals fresh, stable unaffected regions and no stale/cancelled/partial warming, with owner-specific rationales for untouched groups.",
+      "corpusScope": "htmx attribute value codecs: exercise the listed groups within this owner’s existing syntax/attachment scope; primitive Unicode, raw/cooked and work-count proofs remain with EMB0I. An untouched group requires a rationale identifying the absent policy or route, not a passing activation test.",
+      "untouchedCaseGroups": [
+        {
+          "group": "external",
+          "rationale": "htmx attribute codecs map inline attribute bytes; external component template/style resource loading is outside that boundary."
+        }
+      ]
     },
     {
       "consumer": "EMB-C14",
-      "caseGroups": ["profile", "composition", "regions", "external", "holes", "incremental"],
+      "caseGroups": ["profile", "composition", "regions", "holes", "incremental"],
       "implementationOwner": "LIT1",
       "successorPath": ["EMB0", "EMB0I", "LIT1"],
-      "receivingAcceptance": "LIT1-AC2",
-      "criterion": "Lit dialect profiles consume INT-TT adapter, no Lit-local codec"
+      "receivingAcceptance": "LIT1-AC-EMB",
+      "criterion": "Adopt EMB0I EmbeddedTextCodec and AuthoredMapChain (Lit via INT-TT); exact authored UTF-8 maps or explicit unmappable/typed partial results; profile-owned activation, grammar and holes; no private decoder/composer, retirement only after byte/map equivalence; applicable corpus proves incremental equals fresh, stable unaffected regions and no stale/cancelled/partial warming, with owner-specific rationales for untouched groups.",
+      "corpusScope": "Lit dialect profiles consume INT-TT adapter, no Lit-local codec: exercise the listed groups within this owner’s existing syntax/attachment scope; primitive Unicode, raw/cooked and work-count proofs remain with EMB0I. An untouched group requires a rationale identifying the absent policy or route, not a passing activation test.",
+      "untouchedCaseGroups": [
+        {
+          "group": "external",
+          "rationale": "Lit registers dialect/profile policy over INT-TT inline tagged templates; it does not own external template/style resource loading."
+        }
+      ]
     },
     {
       "consumer": "EMB-C15",
       "caseGroups": ["profile", "composition", "regions", "external", "holes", "incremental"],
       "implementationOwner": "LSO1",
       "successorPath": ["EMB0", "EMB0I", "LSO1"],
-      "receivingAcceptance": "LSO1-AC2",
-      "criterion": "Carrier recovery preserves region geometry"
+      "receivingAcceptance": "LSO1-AC-EMB",
+      "criterion": "Adopt EMB0I EmbeddedTextCodec and AuthoredMapChain (Lit via INT-TT); exact authored UTF-8 maps or explicit unmappable/typed partial results; profile-owned activation, grammar and holes; no private decoder/composer, retirement only after byte/map equivalence; applicable corpus proves incremental equals fresh, stable unaffected regions and no stale/cancelled/partial warming, with owner-specific rationales for untouched groups.",
+      "corpusScope": "Carrier recovery preserves region geometry: exercise the listed groups within this owner’s existing syntax/attachment scope; primitive Unicode, raw/cooked and work-count proofs remain with EMB0I. An untouched group requires a rationale identifying the absent policy or route, not a passing activation test."
     },
     {
       "consumer": "EMB-C16",
       "caseGroups": ["profile", "composition", "regions", "external", "holes", "incremental"],
       "implementationOwner": "MDX1M",
       "successorPath": ["EMB0", "EMB0I", "MDX1M"],
-      "receivingAcceptance": "MDX1M-AC1",
-      "criterion": "MDX ESM/expression/JSX attachments"
+      "receivingAcceptance": "MDX1M-AC-EMB",
+      "criterion": "Adopt EMB0I EmbeddedTextCodec and AuthoredMapChain (Lit via INT-TT); exact authored UTF-8 maps or explicit unmappable/typed partial results; profile-owned activation, grammar and holes; no private decoder/composer, retirement only after byte/map equivalence; applicable corpus proves incremental equals fresh, stable unaffected regions and no stale/cancelled/partial warming, with owner-specific rationales for untouched groups.",
+      "corpusScope": "MDX ESM/expression/JSX attachments: exercise the listed groups within this owner’s existing syntax/attachment scope; primitive Unicode, raw/cooked and work-count proofs remain with EMB0I. An untouched group requires a rationale identifying the absent policy or route, not a passing activation test."
     },
     {
       "consumer": "EMB-C17",
-      "caseGroups": ["profile", "composition", "regions", "external", "holes", "incremental"],
+      "caseGroups": ["profile", "composition", "regions", "holes", "incremental"],
       "implementationOwner": "MRK1",
       "successorPath": ["EMB0", "EMB0I", "MRK1"],
-      "receivingAcceptance": "MRK1-AC2",
-      "criterion": "Marko grammar recovery geometry"
+      "receivingAcceptance": "MRK1-AC-EMB",
+      "criterion": "Adopt EMB0I EmbeddedTextCodec and AuthoredMapChain (Lit via INT-TT); exact authored UTF-8 maps or explicit unmappable/typed partial results; profile-owned activation, grammar and holes; no private decoder/composer, retirement only after byte/map equivalence; applicable corpus proves incremental equals fresh, stable unaffected regions and no stale/cancelled/partial warming, with owner-specific rationales for untouched groups.",
+      "corpusScope": "Marko grammar recovery geometry: exercise the listed groups within this owner’s existing syntax/attachment scope; primitive Unicode, raw/cooked and work-count proofs remain with EMB0I. An untouched group requires a rationale identifying the absent policy or route, not a passing activation test.",
+      "untouchedCaseGroups": [
+        {
+          "group": "external",
+          "rationale": "MRK1 owns Marko grammar/recovery geometry; script/style/expression attachments belong to MRK1M."
+        }
+      ]
     },
     {
       "consumer": "EMB-C18",
       "caseGroups": ["profile", "composition", "regions", "external", "holes", "incremental"],
       "implementationOwner": "MRK1M",
       "successorPath": ["EMB0", "EMB0I", "MRK1M"],
-      "receivingAcceptance": "MRK1M-AC1",
-      "criterion": "Marko script/style/expression attachments"
+      "receivingAcceptance": "MRK1M-AC-EMB",
+      "criterion": "Adopt EMB0I EmbeddedTextCodec and AuthoredMapChain (Lit via INT-TT); exact authored UTF-8 maps or explicit unmappable/typed partial results; profile-owned activation, grammar and holes; no private decoder/composer, retirement only after byte/map equivalence; applicable corpus proves incremental equals fresh, stable unaffected regions and no stale/cancelled/partial warming, with owner-specific rationales for untouched groups.",
+      "corpusScope": "Marko script/style/expression attachments: exercise the listed groups within this owner’s existing syntax/attachment scope; primitive Unicode, raw/cooked and work-count proofs remain with EMB0I. An untouched group requires a rationale identifying the absent policy or route, not a passing activation test."
     },
     {
       "consumer": "EMB-C19",
       "caseGroups": ["profile", "composition", "regions", "external", "holes", "incremental"],
       "implementationOwner": "PRE1",
       "successorPath": ["EMB0", "EMB0I", "PRE1"],
-      "receivingAcceptance": "PRE1-AC2",
-      "criterion": "Preact carrier attachments"
+      "receivingAcceptance": "PRE1-AC-EMB",
+      "criterion": "Adopt EMB0I EmbeddedTextCodec and AuthoredMapChain (Lit via INT-TT); exact authored UTF-8 maps or explicit unmappable/typed partial results; profile-owned activation, grammar and holes; no private decoder/composer, retirement only after byte/map equivalence; applicable corpus proves incremental equals fresh, stable unaffected regions and no stale/cancelled/partial warming, with owner-specific rationales for untouched groups.",
+      "corpusScope": "Preact carrier attachments: exercise the listed groups within this owner’s existing syntax/attachment scope; primitive Unicode, raw/cooked and work-count proofs remain with EMB0I. An untouched group requires a rationale identifying the absent policy or route, not a passing activation test."
     },
     {
       "consumer": "EMB-C20",
       "caseGroups": ["profile", "composition", "regions", "external", "holes", "incremental"],
       "implementationOwner": "QWK1",
       "successorPath": ["EMB0", "EMB0I", "QWK1"],
-      "receivingAcceptance": "QWK1-AC2",
-      "criterion": "Qwik 2 carrier attachments"
+      "receivingAcceptance": "QWK1-AC-EMB",
+      "criterion": "Adopt EMB0I EmbeddedTextCodec and AuthoredMapChain (Lit via INT-TT); exact authored UTF-8 maps or explicit unmappable/typed partial results; profile-owned activation, grammar and holes; no private decoder/composer, retirement only after byte/map equivalence; applicable corpus proves incremental equals fresh, stable unaffected regions and no stale/cancelled/partial warming, with owner-specific rationales for untouched groups.",
+      "corpusScope": "Qwik 2 carrier attachments: exercise the listed groups within this owner’s existing syntax/attachment scope; primitive Unicode, raw/cooked and work-count proofs remain with EMB0I. An untouched group requires a rationale identifying the absent policy or route, not a passing activation test."
     },
     {
       "consumer": "EMB-C21",
       "caseGroups": ["profile", "composition", "regions", "external", "holes", "incremental"],
       "implementationOwner": "RCT1",
       "successorPath": ["EMB0", "EMB0I", "RCT1"],
-      "receivingAcceptance": "RCT1-AC2",
-      "criterion": "React carrier attachments"
+      "receivingAcceptance": "RCT1-AC-EMB",
+      "criterion": "Adopt EMB0I EmbeddedTextCodec and AuthoredMapChain (Lit via INT-TT); exact authored UTF-8 maps or explicit unmappable/typed partial results; profile-owned activation, grammar and holes; no private decoder/composer, retirement only after byte/map equivalence; applicable corpus proves incremental equals fresh, stable unaffected regions and no stale/cancelled/partial warming, with owner-specific rationales for untouched groups.",
+      "corpusScope": "React carrier attachments: exercise the listed groups within this owner’s existing syntax/attachment scope; primitive Unicode, raw/cooked and work-count proofs remain with EMB0I. An untouched group requires a rationale identifying the absent policy or route, not a passing activation test."
     },
     {
       "consumer": "EMB-C22",
-      "caseGroups": ["profile", "composition", "regions", "external", "holes", "incremental"],
+      "caseGroups": ["profile", "composition", "regions", "holes", "incremental"],
       "implementationOwner": "RGX1",
       "successorPath": ["EMB0", "EMB0I", "RGX1"],
-      "receivingAcceptance": "RGX1-AC2",
-      "criterion": "Regex host-literal and pattern map levels"
+      "receivingAcceptance": "RGX1-AC-EMB",
+      "criterion": "Adopt EMB0I EmbeddedTextCodec and AuthoredMapChain (Lit via INT-TT); exact authored UTF-8 maps or explicit unmappable/typed partial results; profile-owned activation, grammar and holes; no private decoder/composer, retirement only after byte/map equivalence; applicable corpus proves incremental equals fresh, stable unaffected regions and no stale/cancelled/partial warming, with owner-specific rationales for untouched groups.",
+      "corpusScope": "Regex host-literal and pattern map levels: exercise the listed groups within this owner’s existing syntax/attachment scope; primitive Unicode, raw/cooked and work-count proofs remain with EMB0I. An untouched group requires a rationale identifying the absent policy or route, not a passing activation test.",
+      "untouchedCaseGroups": [
+        {
+          "group": "external",
+          "rationale": "Regex host-literal/pattern maps retain their host source; external component template/style loading is not this map level."
+        }
+      ]
     },
     {
       "consumer": "EMB-C23",
       "caseGroups": ["profile", "composition", "regions", "external", "holes", "incremental"],
       "implementationOwner": "SLD1",
       "successorPath": ["EMB0", "EMB0I", "SLD1"],
-      "receivingAcceptance": "SLD1-AC2",
-      "criterion": "Solid carrier attachments"
+      "receivingAcceptance": "SLD1-AC-EMB",
+      "criterion": "Adopt EMB0I EmbeddedTextCodec and AuthoredMapChain (Lit via INT-TT); exact authored UTF-8 maps or explicit unmappable/typed partial results; profile-owned activation, grammar and holes; no private decoder/composer, retirement only after byte/map equivalence; applicable corpus proves incremental equals fresh, stable unaffected regions and no stale/cancelled/partial warming, with owner-specific rationales for untouched groups.",
+      "corpusScope": "Solid carrier attachments: exercise the listed groups within this owner’s existing syntax/attachment scope; primitive Unicode, raw/cooked and work-count proofs remain with EMB0I. An untouched group requires a rationale identifying the absent policy or route, not a passing activation test."
     },
     {
       "consumer": "EMB-C24",
       "caseGroups": ["profile", "composition", "regions", "external", "holes", "incremental"],
       "implementationOwner": "STN1",
       "successorPath": ["EMB0", "EMB0I", "STN1"],
-      "receivingAcceptance": "STN1-AC2",
-      "criterion": "Stencil carrier attachments"
+      "receivingAcceptance": "STN1-AC-EMB",
+      "criterion": "Adopt EMB0I EmbeddedTextCodec and AuthoredMapChain (Lit via INT-TT); exact authored UTF-8 maps or explicit unmappable/typed partial results; profile-owned activation, grammar and holes; no private decoder/composer, retirement only after byte/map equivalence; applicable corpus proves incremental equals fresh, stable unaffected regions and no stale/cancelled/partial warming, with owner-specific rationales for untouched groups.",
+      "corpusScope": "Stencil carrier attachments: exercise the listed groups within this owner’s existing syntax/attachment scope; primitive Unicode, raw/cooked and work-count proofs remain with EMB0I. An untouched group requires a rationale identifying the absent policy or route, not a passing activation test."
     },
     {
       "consumer": "EMB-C25",
       "caseGroups": ["profile", "composition", "regions", "external", "holes", "incremental"],
       "implementationOwner": "STP38",
       "successorPath": ["EMB0", "EMB0I", "STP38"],
-      "receivingAcceptance": "STP38-AC1",
-      "criterion": "External blocks and preprocessor source-identity maps"
+      "receivingAcceptance": "STP38-AC-EMB",
+      "criterion": "Adopt EMB0I EmbeddedTextCodec and AuthoredMapChain (Lit via INT-TT); exact authored UTF-8 maps or explicit unmappable/typed partial results; profile-owned activation, grammar and holes; no private decoder/composer, retirement only after byte/map equivalence; applicable corpus proves incremental equals fresh, stable unaffected regions and no stale/cancelled/partial warming, with owner-specific rationales for untouched groups.",
+      "corpusScope": "External blocks and preprocessor source-identity maps: exercise the listed groups within this owner’s existing syntax/attachment scope; primitive Unicode, raw/cooked and work-count proofs remain with EMB0I. An untouched group requires a rationale identifying the absent policy or route, not a passing activation test."
     },
     {
       "consumer": "EMB-C26",
-      "caseGroups": ["holes", "ordering", "incremental"],
+      "caseGroups": ["profile"],
+      "implementationOwner": "INT-TT",
+      "successorPath": ["EMB0", "EMB0I", "INT-TT"],
+      "receivingAcceptance": "INT-TT-AC5",
+      "criterion": "Sole shared tagged-template codec over EMB0I; Lit and CSS-in-JS adopt it. This is adoption/tree-inspection evidence, not map or incremental proof.",
+      "corpusScope": "INT-TT owns activated inline tagged templates and placeholders, not external-resource loading (EMB-K17). Its map, placeholder and incremental groups have separate receiving criteria; primitive admission/fuzz/work groups stay with EMB0I."
+    },
+    {
+      "consumer": "EMB-C26",
+      "caseGroups": ["composition", "holes", "ordering"],
       "implementationOwner": "INT-TT",
       "successorPath": ["EMB0", "EMB0I", "INT-TT"],
       "receivingAcceptance": "INT-TT-AC1",
-      "criterion": "Shared tagged-template adapter, tag-profile registry and hole placeholders over EMB0I"
+      "criterion": "Exact authored expression maps across escapes, CRLF and nested templates; nearest-token maps fail.",
+      "corpusScope": "INT-TT owns activated inline tagged templates and placeholders, not external-resource loading (EMB-K17). Its map, placeholder and incremental groups have separate receiving criteria; primitive admission/fuzz/work groups stay with EMB0I."
+    },
+    {
+      "consumer": "EMB-C26",
+      "caseGroups": ["holes"],
+      "implementationOwner": "INT-TT",
+      "successorPath": ["EMB0", "EMB0I", "INT-TT"],
+      "receivingAcceptance": "INT-TT-AC3",
+      "criterion": "CSS/HTML hole placeholders round-trip through the shared parsers to exact authored bytes.",
+      "corpusScope": "INT-TT owns activated inline tagged templates and placeholders, not external-resource loading (EMB-K17). Its map, placeholder and incremental groups have separate receiving criteria; primitive admission/fuzz/work groups stay with EMB0I."
+    },
+    {
+      "consumer": "EMB-C26",
+      "caseGroups": ["regions", "incremental"],
+      "implementationOwner": "INT-TT",
+      "successorPath": ["EMB0", "EMB0I", "INT-TT"],
+      "receivingAcceptance": "INT-TT-AC4",
+      "criterion": "A local edit re-parses only its template; unterminated recovery preserves later offsets.",
+      "corpusScope": "INT-TT owns activated inline tagged templates and placeholders, not external-resource loading (EMB-K17). Its map, placeholder and incremental groups have separate receiving criteria; primitive admission/fuzz/work groups stay with EMB0I."
     }
-  ]
+  ],
+  "receivingAcceptanceBasis": "Operator ruling embedded-receiving-codec-acceptance, 2026-10-10: ratified <owner>-AC-EMB for the 25 implementation consumers; INT-TT retains AC5 for sole-codec adoption and AC1/AC3/AC4 for maps, placeholders and incremental behavior. These receiving amendments preserve each consumer scope; executable proof follows EMB0."
 }

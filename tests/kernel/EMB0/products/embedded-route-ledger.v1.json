@@ -356,8 +356,8 @@
       "currentPopulation": "absent embedded geometry at described head; reject on adoption, delete any introduced/superseded implementation after byte/map equivalence",
       "deletionOwner": "ALP1",
       "successorPath": ["EMB0", "EMB0I", "ALP1"],
-      "receivingAcceptance": "ALP1-AC2",
-      "receivingCriterion": "Consumer charter shared-codec amendment: adopt EMB0I (Lit via INT-TT), no private decoder/composer; exact authored maps and byte/map equivalence before retirement."
+      "receivingAcceptance": "ALP1-AC-EMB",
+      "receivingCriterion": "Adopt EMB0I EmbeddedTextCodec and AuthoredMapChain (Lit via INT-TT); exact authored UTF-8 maps or explicit unmappable/typed partial results; profile-owned activation, grammar and holes; no private decoder/composer, retirement only after byte/map equivalence; applicable corpus proves incremental equals fresh, stable unaffected regions and no stale/cancelled/partial warming, with owner-specific rationales for untouched groups."
     },
     {
       "id": "EMB-D02",
@@ -365,8 +365,8 @@
       "currentPopulation": "absent embedded geometry at described head; reject on adoption, delete any introduced/superseded implementation after byte/map equivalence",
       "deletionOwner": "ANG1",
       "successorPath": ["EMB0", "EMB0I", "ANG1"],
-      "receivingAcceptance": "ANG1-AC2",
-      "receivingCriterion": "Consumer charter shared-codec amendment: adopt EMB0I (Lit via INT-TT), no private decoder/composer; exact authored maps and byte/map equivalence before retirement."
+      "receivingAcceptance": "ANG1-AC-EMB",
+      "receivingCriterion": "Adopt EMB0I EmbeddedTextCodec and AuthoredMapChain (Lit via INT-TT); exact authored UTF-8 maps or explicit unmappable/typed partial results; profile-owned activation, grammar and holes; no private decoder/composer, retirement only after byte/map equivalence; applicable corpus proves incremental equals fresh, stable unaffected regions and no stale/cancelled/partial warming, with owner-specific rationales for untouched groups."
     },
     {
       "id": "EMB-D03",
@@ -374,8 +374,8 @@
       "currentPopulation": "absent embedded geometry at described head; reject on adoption, delete any introduced/superseded implementation after byte/map equivalence",
       "deletionOwner": "ANG1M",
       "successorPath": ["EMB0", "EMB0I", "ANG1M"],
-      "receivingAcceptance": "ANG1M-AC1",
-      "receivingCriterion": "Consumer charter shared-codec amendment: adopt EMB0I (Lit via INT-TT), no private decoder/composer; exact authored maps and byte/map equivalence before retirement."
+      "receivingAcceptance": "ANG1M-AC-EMB",
+      "receivingCriterion": "Adopt EMB0I EmbeddedTextCodec and AuthoredMapChain (Lit via INT-TT); exact authored UTF-8 maps or explicit unmappable/typed partial results; profile-owned activation, grammar and holes; no private decoder/composer, retirement only after byte/map equivalence; applicable corpus proves incremental equals fresh, stable unaffected regions and no stale/cancelled/partial warming, with owner-specific rationales for untouched groups."
     },
     {
       "id": "EMB-D04",
@@ -383,8 +383,8 @@
       "currentPopulation": "absent embedded geometry at described head; reject on adoption, delete any introduced/superseded implementation after byte/map equivalence",
       "deletionOwner": "AST1",
       "successorPath": ["EMB0", "EMB0I", "AST1"],
-      "receivingAcceptance": "AST1-AC2",
-      "receivingCriterion": "Consumer charter shared-codec amendment: adopt EMB0I (Lit via INT-TT), no private decoder/composer; exact authored maps and byte/map equivalence before retirement."
+      "receivingAcceptance": "AST1-AC-EMB",
+      "receivingCriterion": "Adopt EMB0I EmbeddedTextCodec and AuthoredMapChain (Lit via INT-TT); exact authored UTF-8 maps or explicit unmappable/typed partial results; profile-owned activation, grammar and holes; no private decoder/composer, retirement only after byte/map equivalence; applicable corpus proves incremental equals fresh, stable unaffected regions and no stale/cancelled/partial warming, with owner-specific rationales for untouched groups."
     },
     {
       "id": "EMB-D05",
@@ -392,8 +392,8 @@
       "currentPopulation": "absent embedded geometry at described head; reject on adoption, delete any introduced/superseded implementation after byte/map equivalence",
       "deletionOwner": "AST1M",
       "successorPath": ["EMB0", "EMB0I", "AST1M"],
-      "receivingAcceptance": "AST1M-AC1",
-      "receivingCriterion": "Consumer charter shared-codec amendment: adopt EMB0I (Lit via INT-TT), no private decoder/composer; exact authored maps and byte/map equivalence before retirement."
+      "receivingAcceptance": "AST1M-AC-EMB",
+      "receivingCriterion": "Adopt EMB0I EmbeddedTextCodec and AuthoredMapChain (Lit via INT-TT); exact authored UTF-8 maps or explicit unmappable/typed partial results; profile-owned activation, grammar and holes; no private decoder/composer, retirement only after byte/map equivalence; applicable corpus proves incremental equals fresh, stable unaffected regions and no stale/cancelled/partial warming, with owner-specific rationales for untouched groups."
     },
     {
       "id": "EMB-D06",
@@ -401,8 +401,8 @@
       "currentPopulation": "absent embedded geometry at described head; reject on adoption, delete any introduced/superseded implementation after byte/map equivalence",
       "deletionOwner": "DATA5",
       "successorPath": ["EMB0", "EMB0I", "DATA5"],
-      "receivingAcceptance": "DATA5-AC5",
-      "receivingCriterion": "Consumer charter shared-codec amendment: adopt EMB0I (Lit via INT-TT), no private decoder/composer; exact authored maps and byte/map equivalence before retirement."
+      "receivingAcceptance": "DATA5-AC-EMB",
+      "receivingCriterion": "Adopt EMB0I EmbeddedTextCodec and AuthoredMapChain (Lit via INT-TT); exact authored UTF-8 maps or explicit unmappable/typed partial results; profile-owned activation, grammar and holes; no private decoder/composer, retirement only after byte/map equivalence; applicable corpus proves incremental equals fresh, stable unaffected regions and no stale/cancelled/partial warming, with owner-specific rationales for untouched groups."
     },
     {
       "id": "EMB-D07",
@@ -410,8 +410,8 @@
       "currentPopulation": "absent embedded geometry at described head; reject on adoption, delete any introduced/superseded implementation after byte/map equivalence",
       "deletionOwner": "DDB1",
       "successorPath": ["EMB0", "EMB0I", "DDB1"],
-      "receivingAcceptance": "DDB1-AC2",
-      "receivingCriterion": "Consumer charter shared-codec amendment: adopt EMB0I (Lit via INT-TT), no private decoder/composer; exact authored maps and byte/map equivalence before retirement."
+      "receivingAcceptance": "DDB1-AC-EMB",
+      "receivingCriterion": "Adopt EMB0I EmbeddedTextCodec and AuthoredMapChain (Lit via INT-TT); exact authored UTF-8 maps or explicit unmappable/typed partial results; profile-owned activation, grammar and holes; no private decoder/composer, retirement only after byte/map equivalence; applicable corpus proves incremental equals fresh, stable unaffected regions and no stale/cancelled/partial warming, with owner-specific rationales for untouched groups."
     },
     {
       "id": "EMB-D08",
@@ -419,8 +419,8 @@
       "currentPopulation": "absent embedded geometry at described head; reject on adoption, delete any introduced/superseded implementation after byte/map equivalence",
       "deletionOwner": "DIAL2",
       "successorPath": ["EMB0", "EMB0I", "DIAL2"],
-      "receivingAcceptance": "DIAL2-AC5",
-      "receivingCriterion": "Consumer charter shared-codec amendment: adopt EMB0I (Lit via INT-TT), no private decoder/composer; exact authored maps and byte/map equivalence before retirement."
+      "receivingAcceptance": "DIAL2-AC-EMB",
+      "receivingCriterion": "Adopt EMB0I EmbeddedTextCodec and AuthoredMapChain (Lit via INT-TT); exact authored UTF-8 maps or explicit unmappable/typed partial results; profile-owned activation, grammar and holes; no private decoder/composer, retirement only after byte/map equivalence; applicable corpus proves incremental equals fresh, stable unaffected regions and no stale/cancelled/partial warming, with owner-specific rationales for untouched groups."
     },
     {
       "id": "EMB-D09",
@@ -428,8 +428,8 @@
       "currentPopulation": "absent embedded geometry at described head; reject on adoption, delete any introduced/superseded implementation after byte/map equivalence",
       "deletionOwner": "DIAL7",
       "successorPath": ["EMB0", "EMB0I", "DIAL7"],
-      "receivingAcceptance": "DIAL7-AC5",
-      "receivingCriterion": "Consumer charter shared-codec amendment: adopt EMB0I (Lit via INT-TT), no private decoder/composer; exact authored maps and byte/map equivalence before retirement."
+      "receivingAcceptance": "DIAL7-AC-EMB",
+      "receivingCriterion": "Adopt EMB0I EmbeddedTextCodec and AuthoredMapChain (Lit via INT-TT); exact authored UTF-8 maps or explicit unmappable/typed partial results; profile-owned activation, grammar and holes; no private decoder/composer, retirement only after byte/map equivalence; applicable corpus proves incremental equals fresh, stable unaffected regions and no stale/cancelled/partial warming, with owner-specific rationales for untouched groups."
     },
     {
       "id": "EMB-D10",
@@ -437,8 +437,8 @@
       "currentPopulation": "absent embedded geometry at described head; reject on adoption, delete any introduced/superseded implementation after byte/map equivalence",
       "deletionOwner": "EAK1",
       "successorPath": ["EMB0", "EMB0I", "EAK1"],
-      "receivingAcceptance": "EAK1-AC1",
-      "receivingCriterion": "Consumer charter shared-codec amendment: adopt EMB0I (Lit via INT-TT), no private decoder/composer; exact authored maps and byte/map equivalence before retirement."
+      "receivingAcceptance": "EAK1-AC-EMB",
+      "receivingCriterion": "Adopt EMB0I EmbeddedTextCodec and AuthoredMapChain (Lit via INT-TT); exact authored UTF-8 maps or explicit unmappable/typed partial results; profile-owned activation, grammar and holes; no private decoder/composer, retirement only after byte/map equivalence; applicable corpus proves incremental equals fresh, stable unaffected regions and no stale/cancelled/partial warming, with owner-specific rationales for untouched groups."
     },
     {
       "id": "EMB-D11",
@@ -446,8 +446,8 @@
       "currentPopulation": "absent embedded geometry at described head; reject on adoption, delete any introduced/superseded implementation after byte/map equivalence",
       "deletionOwner": "GLM1",
       "successorPath": ["EMB0", "EMB0I", "GLM1"],
-      "receivingAcceptance": "GLM1-AC2",
-      "receivingCriterion": "Consumer charter shared-codec amendment: adopt EMB0I (Lit via INT-TT), no private decoder/composer; exact authored maps and byte/map equivalence before retirement."
+      "receivingAcceptance": "GLM1-AC-EMB",
+      "receivingCriterion": "Adopt EMB0I EmbeddedTextCodec and AuthoredMapChain (Lit via INT-TT); exact authored UTF-8 maps or explicit unmappable/typed partial results; profile-owned activation, grammar and holes; no private decoder/composer, retirement only after byte/map equivalence; applicable corpus proves incremental equals fresh, stable unaffected regions and no stale/cancelled/partial warming, with owner-specific rationales for untouched groups."
     },
     {
       "id": "EMB-D12",
@@ -455,8 +455,8 @@
       "currentPopulation": "absent embedded geometry at described head; reject on adoption, delete any introduced/superseded implementation after byte/map equivalence",
       "deletionOwner": "GLM1M",
       "successorPath": ["EMB0", "EMB0I", "GLM1M"],
-      "receivingAcceptance": "GLM1M-AC1",
-      "receivingCriterion": "Consumer charter shared-codec amendment: adopt EMB0I (Lit via INT-TT), no private decoder/composer; exact authored maps and byte/map equivalence before retirement."
+      "receivingAcceptance": "GLM1M-AC-EMB",
+      "receivingCriterion": "Adopt EMB0I EmbeddedTextCodec and AuthoredMapChain (Lit via INT-TT); exact authored UTF-8 maps or explicit unmappable/typed partial results; profile-owned activation, grammar and holes; no private decoder/composer, retirement only after byte/map equivalence; applicable corpus proves incremental equals fresh, stable unaffected regions and no stale/cancelled/partial warming, with owner-specific rationales for untouched groups."
     },
     {
       "id": "EMB-D13",
@@ -464,8 +464,8 @@
       "currentPopulation": "absent embedded geometry at described head; reject on adoption, delete any introduced/superseded implementation after byte/map equivalence",
       "deletionOwner": "HTX1",
       "successorPath": ["EMB0", "EMB0I", "HTX1"],
-      "receivingAcceptance": "HTX1-AC2",
-      "receivingCriterion": "Consumer charter shared-codec amendment: adopt EMB0I (Lit via INT-TT), no private decoder/composer; exact authored maps and byte/map equivalence before retirement."
+      "receivingAcceptance": "HTX1-AC-EMB",
+      "receivingCriterion": "Adopt EMB0I EmbeddedTextCodec and AuthoredMapChain (Lit via INT-TT); exact authored UTF-8 maps or explicit unmappable/typed partial results; profile-owned activation, grammar and holes; no private decoder/composer, retirement only after byte/map equivalence; applicable corpus proves incremental equals fresh, stable unaffected regions and no stale/cancelled/partial warming, with owner-specific rationales for untouched groups."
     },
     {
       "id": "EMB-D14",
@@ -473,8 +473,8 @@
       "currentPopulation": "absent embedded geometry at described head; reject on adoption, delete any introduced/superseded implementation after byte/map equivalence",
       "deletionOwner": "LIT1",
       "successorPath": ["EMB0", "EMB0I", "LIT1"],
-      "receivingAcceptance": "LIT1-AC2",
-      "receivingCriterion": "Consumer charter shared-codec amendment: adopt EMB0I (Lit via INT-TT), no private decoder/composer; exact authored maps and byte/map equivalence before retirement."
+      "receivingAcceptance": "LIT1-AC-EMB",
+      "receivingCriterion": "Adopt EMB0I EmbeddedTextCodec and AuthoredMapChain (Lit via INT-TT); exact authored UTF-8 maps or explicit unmappable/typed partial results; profile-owned activation, grammar and holes; no private decoder/composer, retirement only after byte/map equivalence; applicable corpus proves incremental equals fresh, stable unaffected regions and no stale/cancelled/partial warming, with owner-specific rationales for untouched groups."
     },
     {
       "id": "EMB-D15",
@@ -482,8 +482,8 @@
       "currentPopulation": "absent embedded geometry at described head; reject on adoption, delete any introduced/superseded implementation after byte/map equivalence",
       "deletionOwner": "LSO1",
       "successorPath": ["EMB0", "EMB0I", "LSO1"],
-      "receivingAcceptance": "LSO1-AC-SOLE",
-      "receivingCriterion": "Consumer charter shared-codec amendment: adopt EMB0I (Lit via INT-TT), no private decoder/composer; exact authored maps and byte/map equivalence before retirement."
+      "receivingAcceptance": "LSO1-AC-EMB",
+      "receivingCriterion": "Adopt EMB0I EmbeddedTextCodec and AuthoredMapChain (Lit via INT-TT); exact authored UTF-8 maps or explicit unmappable/typed partial results; profile-owned activation, grammar and holes; no private decoder/composer, retirement only after byte/map equivalence; applicable corpus proves incremental equals fresh, stable unaffected regions and no stale/cancelled/partial warming, with owner-specific rationales for untouched groups."
     },
     {
       "id": "EMB-D16",
@@ -491,8 +491,8 @@
       "currentPopulation": "absent embedded geometry at described head; reject on adoption, delete any introduced/superseded implementation after byte/map equivalence",
       "deletionOwner": "MDX1M",
       "successorPath": ["EMB0", "EMB0I", "MDX1M"],
-      "receivingAcceptance": "MDX1M-AC1",
-      "receivingCriterion": "Consumer charter shared-codec amendment: adopt EMB0I (Lit via INT-TT), no private decoder/composer; exact authored maps and byte/map equivalence before retirement."
+      "receivingAcceptance": "MDX1M-AC-EMB",
+      "receivingCriterion": "Adopt EMB0I EmbeddedTextCodec and AuthoredMapChain (Lit via INT-TT); exact authored UTF-8 maps or explicit unmappable/typed partial results; profile-owned activation, grammar and holes; no private decoder/composer, retirement only after byte/map equivalence; applicable corpus proves incremental equals fresh, stable unaffected regions and no stale/cancelled/partial warming, with owner-specific rationales for untouched groups."
     },
     {
       "id": "EMB-D17",
@@ -500,8 +500,8 @@
       "currentPopulation": "absent embedded geometry at described head; reject on adoption, delete any introduced/superseded implementation after byte/map equivalence",
       "deletionOwner": "MRK1",
       "successorPath": ["EMB0", "EMB0I", "MRK1"],
-      "receivingAcceptance": "MRK1-AC2",
-      "receivingCriterion": "Consumer charter shared-codec amendment: adopt EMB0I (Lit via INT-TT), no private decoder/composer; exact authored maps and byte/map equivalence before retirement."
+      "receivingAcceptance": "MRK1-AC-EMB",
+      "receivingCriterion": "Adopt EMB0I EmbeddedTextCodec and AuthoredMapChain (Lit via INT-TT); exact authored UTF-8 maps or explicit unmappable/typed partial results; profile-owned activation, grammar and holes; no private decoder/composer, retirement only after byte/map equivalence; applicable corpus proves incremental equals fresh, stable unaffected regions and no stale/cancelled/partial warming, with owner-specific rationales for untouched groups."
     },
     {
       "id": "EMB-D18",
@@ -509,8 +509,8 @@
       "currentPopulation": "absent embedded geometry at described head; reject on adoption, delete any introduced/superseded implementation after byte/map equivalence",
       "deletionOwner": "MRK1M",
       "successorPath": ["EMB0", "EMB0I", "MRK1M"],
-      "receivingAcceptance": "MRK1M-AC1",
-      "receivingCriterion": "Consumer charter shared-codec amendment: adopt EMB0I (Lit via INT-TT), no private decoder/composer; exact authored maps and byte/map equivalence before retirement."
+      "receivingAcceptance": "MRK1M-AC-EMB",
+      "receivingCriterion": "Adopt EMB0I EmbeddedTextCodec and AuthoredMapChain (Lit via INT-TT); exact authored UTF-8 maps or explicit unmappable/typed partial results; profile-owned activation, grammar and holes; no private decoder/composer, retirement only after byte/map equivalence; applicable corpus proves incremental equals fresh, stable unaffected regions and no stale/cancelled/partial warming, with owner-specific rationales for untouched groups."
     },
     {
       "id": "EMB-D19",
@@ -518,8 +518,8 @@
       "currentPopulation": "absent embedded geometry at described head; reject on adoption, delete any introduced/superseded implementation after byte/map equivalence",
       "deletionOwner": "PRE1",
       "successorPath": ["EMB0", "EMB0I", "PRE1"],
-      "receivingAcceptance": "PRE1-AC2",
-      "receivingCriterion": "Consumer charter shared-codec amendment: adopt EMB0I (Lit via INT-TT), no private decoder/composer; exact authored maps and byte/map equivalence before retirement."
+      "receivingAcceptance": "PRE1-AC-EMB",
+      "receivingCriterion": "Adopt EMB0I EmbeddedTextCodec and AuthoredMapChain (Lit via INT-TT); exact authored UTF-8 maps or explicit unmappable/typed partial results; profile-owned activation, grammar and holes; no private decoder/composer, retirement only after byte/map equivalence; applicable corpus proves incremental equals fresh, stable unaffected regions and no stale/cancelled/partial warming, with owner-specific rationales for untouched groups."
     },
     {
       "id": "EMB-D20",
@@ -527,8 +527,8 @@
       "currentPopulation": "absent embedded geometry at described head; reject on adoption, delete any introduced/superseded implementation after byte/map equivalence",
       "deletionOwner": "QWK1",
       "successorPath": ["EMB0", "EMB0I", "QWK1"],
-      "receivingAcceptance": "QWK1-AC2",
-      "receivingCriterion": "Consumer charter shared-codec amendment: adopt EMB0I (Lit via INT-TT), no private decoder/composer; exact authored maps and byte/map equivalence before retirement."
+      "receivingAcceptance": "QWK1-AC-EMB",
+      "receivingCriterion": "Adopt EMB0I EmbeddedTextCodec and AuthoredMapChain (Lit via INT-TT); exact authored UTF-8 maps or explicit unmappable/typed partial results; profile-owned activation, grammar and holes; no private decoder/composer, retirement only after byte/map equivalence; applicable corpus proves incremental equals fresh, stable unaffected regions and no stale/cancelled/partial warming, with owner-specific rationales for untouched groups."
     },
     {
       "id": "EMB-D21",
@@ -536,8 +536,8 @@
       "currentPopulation": "absent embedded geometry at described head; reject on adoption, delete any introduced/superseded implementation after byte/map equivalence",
       "deletionOwner": "RCT1",
       "successorPath": ["EMB0", "EMB0I", "RCT1"],
-      "receivingAcceptance": "RCT1-AC2",
-      "receivingCriterion": "Consumer charter shared-codec amendment: adopt EMB0I (Lit via INT-TT), no private decoder/composer; exact authored maps and byte/map equivalence before retirement."
+      "receivingAcceptance": "RCT1-AC-EMB",
+      "receivingCriterion": "Adopt EMB0I EmbeddedTextCodec and AuthoredMapChain (Lit via INT-TT); exact authored UTF-8 maps or explicit unmappable/typed partial results; profile-owned activation, grammar and holes; no private decoder/composer, retirement only after byte/map equivalence; applicable corpus proves incremental equals fresh, stable unaffected regions and no stale/cancelled/partial warming, with owner-specific rationales for untouched groups."
     },
     {
       "id": "EMB-D22",
@@ -545,8 +545,8 @@
       "currentPopulation": "absent embedded geometry at described head; reject on adoption, delete any introduced/superseded implementation after byte/map equivalence",
       "deletionOwner": "RGX1",
       "successorPath": ["EMB0", "EMB0I", "RGX1"],
-      "receivingAcceptance": "RGX1-AC2",
-      "receivingCriterion": "Consumer charter shared-codec amendment: adopt EMB0I (Lit via INT-TT), no private decoder/composer; exact authored maps and byte/map equivalence before retirement."
+      "receivingAcceptance": "RGX1-AC-EMB",
+      "receivingCriterion": "Adopt EMB0I EmbeddedTextCodec and AuthoredMapChain (Lit via INT-TT); exact authored UTF-8 maps or explicit unmappable/typed partial results; profile-owned activation, grammar and holes; no private decoder/composer, retirement only after byte/map equivalence; applicable corpus proves incremental equals fresh, stable unaffected regions and no stale/cancelled/partial warming, with owner-specific rationales for untouched groups."
     },
     {
       "id": "EMB-D23",
@@ -554,8 +554,8 @@
       "currentPopulation": "absent embedded geometry at described head; reject on adoption, delete any introduced/superseded implementation after byte/map equivalence",
       "deletionOwner": "SLD1",
       "successorPath": ["EMB0", "EMB0I", "SLD1"],
-      "receivingAcceptance": "SLD1-AC2",
-      "receivingCriterion": "Consumer charter shared-codec amendment: adopt EMB0I (Lit via INT-TT), no private decoder/composer; exact authored maps and byte/map equivalence before retirement."
+      "receivingAcceptance": "SLD1-AC-EMB",
+      "receivingCriterion": "Adopt EMB0I EmbeddedTextCodec and AuthoredMapChain (Lit via INT-TT); exact authored UTF-8 maps or explicit unmappable/typed partial results; profile-owned activation, grammar and holes; no private decoder/composer, retirement only after byte/map equivalence; applicable corpus proves incremental equals fresh, stable unaffected regions and no stale/cancelled/partial warming, with owner-specific rationales for untouched groups."
     },
     {
       "id": "EMB-D24",
@@ -563,8 +563,8 @@
       "currentPopulation": "absent embedded geometry at described head; reject on adoption, delete any introduced/superseded implementation after byte/map equivalence",
       "deletionOwner": "STN1",
       "successorPath": ["EMB0", "EMB0I", "STN1"],
-      "receivingAcceptance": "STN1-AC2",
-      "receivingCriterion": "Consumer charter shared-codec amendment: adopt EMB0I (Lit via INT-TT), no private decoder/composer; exact authored maps and byte/map equivalence before retirement."
+      "receivingAcceptance": "STN1-AC-EMB",
+      "receivingCriterion": "Adopt EMB0I EmbeddedTextCodec and AuthoredMapChain (Lit via INT-TT); exact authored UTF-8 maps or explicit unmappable/typed partial results; profile-owned activation, grammar and holes; no private decoder/composer, retirement only after byte/map equivalence; applicable corpus proves incremental equals fresh, stable unaffected regions and no stale/cancelled/partial warming, with owner-specific rationales for untouched groups."
     },
     {
       "id": "EMB-D25",
@@ -572,8 +572,8 @@
       "currentPopulation": "absent embedded geometry at described head; reject on adoption, delete any introduced/superseded implementation after byte/map equivalence",
       "deletionOwner": "STP38",
       "successorPath": ["EMB0", "EMB0I", "STP38"],
-      "receivingAcceptance": "STP38-AC1",
-      "receivingCriterion": "Consumer charter shared-codec amendment: adopt EMB0I (Lit via INT-TT), no private decoder/composer; exact authored maps and byte/map equivalence before retirement."
+      "receivingAcceptance": "STP38-AC-EMB",
+      "receivingCriterion": "Adopt EMB0I EmbeddedTextCodec and AuthoredMapChain (Lit via INT-TT); exact authored UTF-8 maps or explicit unmappable/typed partial results; profile-owned activation, grammar and holes; no private decoder/composer, retirement only after byte/map equivalence; applicable corpus proves incremental equals fresh, stable unaffected regions and no stale/cancelled/partial warming, with owner-specific rationales for untouched groups."
     },
     {
       "id": "EMB-D26",
@@ -582,7 +582,7 @@
       "deletionOwner": "INT-TT",
       "successorPath": ["EMB0", "EMB0I", "INT-TT"],
       "receivingAcceptance": "INT-TT-AC5",
-      "receivingCriterion": "Consumer charter shared-codec amendment: adopt EMB0I (Lit via INT-TT), no private decoder/composer; exact authored maps and byte/map equivalence before retirement."
+      "receivingCriterion": "INT-TT-AC5: one shared tagged-template codec over EMB0I, adopted by Lit and CSS-in-JS; no second codec. Retire superseded decoders only after byte/map equivalence."
     }
   ],
   "categoryCoverage": {
@@ -626,5 +626,6 @@
       "reason": "Svelte runtime constant folding, not authored embedded-region geometry."
     }
   ],
-  "cutover": "No production deletion in EMB0 or EMB0I. Exactly one consumer-local owner retires/rejects each private geometry route after equivalence; inherited deletion owners are unchanged."
+  "cutover": "No production deletion in EMB0 or EMB0I. Exactly one consumer-local owner retires/rejects each private geometry route after equivalence; inherited deletion owners are unchanged.",
+  "receivingAcceptanceBasis": "Operator ruling embedded-receiving-codec-acceptance, 2026-10-10: ratified <owner>-AC-EMB for the 25 implementation consumers; INT-TT retains AC5 for sole-codec adoption and AC1/AC3/AC4 for maps, placeholders and incremental behavior. These receiving amendments preserve each consumer scope; executable proof follows EMB0."
 }
