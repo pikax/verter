@@ -1,0 +1,12 @@
+---
+const href = "/docs";
+const title = "Docs";
+const attrs = { "data-kind": "link", rel: "noopener" };
+const size = 2;
+---
+
+<a href={href} title={title}>dynamic</a>
+<a {href} {title}>shorthand</a>
+<a {...attrs} href="/static">spread</a>
+<div class=`size-${size}` data-static='single' hidden>template literal and boolean</div>
+<input value={size} disabled={size > 1} />
