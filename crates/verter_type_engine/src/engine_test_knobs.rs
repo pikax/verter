@@ -80,6 +80,13 @@ pub struct TestKnobs {
     /// Per-host (no process-global concurrency hazard). Test-support-gated: the
     /// only reader is the gated injection in `execute_via_cold_build_helper`.
     pub force_result_partial_for_tests: std::sync::atomic::AtomicBool,
+    /// Per-host test-injection knob for the shared cold-build closure: a
+    /// non-empty set taints EVERY cold build's frame partial under exactly
+    /// these classes before the inner build runs — the in-process
+    /// equivalent of a build whose read observed them (a cancellation, a
+    /// superseded generation, a torn view). Empty (the default) is inert.
+    pub force_result_partial_reasons_for_tests:
+        parking_lot::Mutex<crate::semantic_query::PartialReasonSet>,
     /// Per-host test-injection knob for the carrier-subject DIRECT serve on
     /// the EVALUATOR carrier path. When `true`, the head resolver's
     /// `ensure_indexed_ready_serve` `resolves_to_file` probe

@@ -825,9 +825,16 @@ impl<'s> ProducerLease<'s> {
             satisfied_projection,
             flow_completion,
         } = output;
+        let result = prepared::enforce_projection_value_shape(prepared.key(), result);
+        // An aborted build (cancellation, a superseded or torn view) is no
+        // fact: no reader of this flight receives its value.
+        let result = crate::project_semantic_dispatch::projection_fact::withhold_aborted_projection(
+            prepared.key(),
+            completeness,
+            result,
+        );
         let result_is_partial = completeness.is_partial();
         let partial_reasons = completeness.reasons();
-        let result = prepared::enforce_projection_value_shape(prepared.key(), result);
         // §3.4 default: a non-path build (`Instantiate`, `KeyOf`, `TypeOf`,
         // …) records no path-walk hops, so its satisfied projection defaults
         // to the single terminal point the slot's mode denotes at the key's
