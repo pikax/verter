@@ -1,0 +1,178 @@
+{
+  "schema": "AstroCapabilityMatrix",
+  "version": 1,
+  "product": "AstroCapabilityMatrix",
+  "node": "AST0",
+  "kind": "lock",
+  "describesHead": {
+    "landingTitle": "docs(arch): record the parser decision, ownership, reuse and lineage (#812)",
+    "date": "2026-10-09"
+  },
+  "cellRule": "Every operation x host x profile cell is owned (exactly one producer node and one receiving acceptance ID) or a truthful exclusion with a reason. claimBasis is none for every cell at ratification (WDX0): a cell becomes a support claim only through runtime-observation evidence from AST9 (AST9-AC1) and promotion at AST10 (AST10-AC1). No cell cites ASTP, an installed parser, an installed oracle or syntax highlighting (AST1G) as product evidence.",
+  "profiles": [
+    {"id": "astro-7.3.8", "disposition": "admitted", "release": "tests/framework-astro/AST0/products/astro-version-lock.json#/admittedReleases/0"},
+    {"id": "astro-7.4.0-beta.1", "disposition": "excluded", "reason": "prerelease-minor-of-the-admitted-major", "cells": "none"}
+  ],
+  "hosts": {
+    "order": "ruling 1 (tsgo ruling): a TS-region operation is answered by tsgo first; the Verter LSP answers carrier-only operations only; the tsserver plugin receives carrier-generic compatibility only",
+    "rows": [
+      {
+        "id": "tsgo",
+        "kind": "TS-region host",
+        "route": "Verter LSP TypeProvider tsgo routes: TsgoCompositeProvider (crates/verter_lsp/src/tsgo/composite.rs), shared-tsgo attach first, then managed tsgo",
+        "projection": "AST6 IDE companion, synced through crates/verter_lsp/src/tsgo/carrier_sync.rs and bound through ProjectBinding/BoundProject",
+        "mapBack": "ProviderPositionMapper (crates/verter_lsp/src/documents/provider_projection.rs) over the AST1M maps; generated-only spans suppressed",
+        "transport": "existing routes only; no new client transport"
+      },
+      {
+        "id": "verter-lsp",
+        "kind": "lsp-enhancement",
+        "route": "Verter LSP carrier features (crates/verter_lsp/src/features/carriers/astro.rs, created empty by REG0) over the AST1 CST and the shared kernel services",
+        "rule": "answers only carrier-only operations; it never answers a TS-region operation and never re-provides a tsgo result; it steps down where LSPX11 owns(capability, position) does not resolve to Verter"
+      },
+      {
+        "id": "typescript-plugin",
+        "kind": "tsserver compatibility",
+        "route": "packages/typescript-plugin over the existing carrier-generic carrier-store publication",
+        "rule": "no Astro-specific cell, code or behaviour; one carrier-generic compatibility cell only"
+      },
+      {
+        "id": "verter-session",
+        "kind": "fact producer",
+        "route": "shared kernel fact and TypeInfo contributions (no editor transport); types read through TypeInfo and tsgo only",
+        "rule": "a fact neither TypeInfo nor tsgo can give is Unavailable(tsgoLimitation: <op>)"
+      }
+    ]
+  },
+  "parserDecision": {
+    "parRow": "CL11",
+    "home": "H01 crates/verter_astro_syntax (created by REG0, filled by AST1)",
+    "carrier": {
+      "sublanguage": "Astro carrier: frontmatter fence, HTML-shaped markup, components, fragments, expression and attribute islands, directives, script and style element boundaries, comments",
+      "decision": "NewParser",
+      "kind": "DK4",
+      "rationale": [
+        "The carrier's distinguishing structure is not WHATWG tokenization: { } expression islands appear in text and attribute positions and nest markup inside JavaScript ({items.map((i) => <li>{i}</li>)}), so the tokenizer must hand exact extents to OXC and re-enter markup inside them; attribute shorthand {attr}, spread {...props} and backtick attribute values are carrier syntax; the --- frontmatter fence precedes the template.",
+        "The candidate fork source H08 crates/verter_html_syntax does not exist at the described head and is not an ancestor of AST1 in the plan; AST1 rescopes if the decision would fork the tokenizer inside HWC1.",
+        "PAR0 PD06 forbids a shared HTML-family parser, recovery mode or cache key, so a fork could not share HWC1's recovery anyway; Astro owns its recovery corpus (AST1-AC2)."
+      ],
+      "lineage": {
+        "sourceOwner": "none (new parser; no in-repository source is copied)",
+        "upstreamSpecification": "Astro syntax reference for astro 7.3.8 (docs.astro.build: Astro syntax, Components, Template expressions reference, Directives reference)",
+        "adaptedUpstreamMaterial": "none",
+        "oracle": "@astrojs/compiler-rs 0.5.1, test-only grammar oracle; @astrojs/astro2tsx 0.1.2 is the separate test-only projection oracle. Exact pins and upstream dependency ranges are recorded separately in the version lock.",
+        "corpus": {
+          "name": "AST0 Astro grammar corpus",
+          "path": "tests/framework-astro/AST0/corpus",
+          "admittedRelease": "astro-7.3.8",
+          "digest": "sha256-540135b4613882d982c0b91808d05e65080660eee4194d535e8fe2f028a2951e",
+          "digestRule": "sha256 over the sorted lines '<path relative to the corpus>:<hex sha256 of the LF-normalized file bytes>', each line LF-terminated; the validator (AST1G-ACV) recomputes it, and a mismatch means the corpus changed without amending this lock",
+          "files": "tests/framework-astro/AST0/manifest.json#/corpus",
+          "receivers": ["AST1-AC1 (lossless round trip over every valid file)", "AST1-AC2 (recovery over every recovery file)"]
+        }
+      }
+    },
+    "delegations": [
+      {"sublanguage": "frontmatter (TypeScript)", "decision": "Reuse", "kind": "DK1", "owner": "CL01 OXC through verter_parser::oxc_parse", "regionKind": "ScriptRegionKind::Frontmatter (exists in crates/verter_language/src/parse_artifact.rs)", "attachedBy": "AST1M-AC1"},
+      {"sublanguage": "template expressions and attribute expressions (TSX)", "decision": "Reuse", "kind": "DK1", "owner": "CL01 OXC through verter_parser::oxc_parse", "attachedBy": "AST1M-AC1"},
+      {"sublanguage": "processed <script> (TypeScript module)", "decision": "Reuse", "kind": "DK1", "owner": "CL01 OXC", "attachedBy": "AST1M-AC3"},
+      {"sublanguage": "<script is:inline> (classic JavaScript, unprocessed)", "decision": "Reuse", "kind": "DK1", "owner": "CL01 OXC", "attachedBy": "AST1M-AC3"},
+      {"sublanguage": "<style> (CSS, SCSS, Less)", "decision": "Reuse", "kind": "DK1", "owner": "CL04 verter_css_syntax with its owner-declared dialects", "attachedBy": "AST1M-AC1"},
+      {"sublanguage": "set:html / set:text values and is:raw content", "decision": "none", "kind": "opaque", "owner": "carrier (never parsed as markup)", "attachedBy": "AST1M-AC3"}
+    ],
+    "forbidden": [
+      "@astrojs/compiler, @astrojs/compiler-rs or @astrojs/astro2tsx as parser, transform or projection authority",
+      "a second TS/JS parser or a regex scanner for the frontmatter fence or expression ends (AST1 abort)",
+      "a compiler-backend row for Astro: the carrier is tooling-only; a compile demand reports UNSUPPORTED (PAR0 PN04, CPF0 PC04/PC06)"
+    ]
+  },
+  "facets": {
+    "ruling": "ruling 3; mapped onto FrameworkSurfaceKind in FrameworkAdapterDescriptor.supported_surfaces",
+    "rows": [
+      {"kind": "PROPS", "disposition": "supported", "provenance": "native", "source": "the component's Props type (interface or type alias), types from the checker", "producer": "AST3", "receivingAcceptance": "AST3-AC1"},
+      {"kind": "SLOTS", "disposition": "supported", "provenance": "derived(template)", "source": "<slot> and <slot name> in the template plus Astro.slots reads", "producer": "AST3", "receivingAcceptance": "AST3-AC3"},
+      {"kind": "EMITS", "disposition": "unsupported", "reason": "structural: Astro components have no event surface", "producer": "AST3", "receivingAcceptance": "AST3-AC4"},
+      {"kind": "EXPOSE", "disposition": "unsupported", "reason": "structural: Astro components expose no imperative handle", "producer": "AST3", "receivingAcceptance": "AST3-AC4"},
+      {"kind": "OPTIONS", "disposition": "unsupported", "reason": "not used by class B", "producer": "AST3", "receivingAcceptance": "AST3-AC4"},
+      {"kind": "MODEL", "disposition": "unsupported", "reason": "not used by class B", "producer": "AST3", "receivingAcceptance": "AST3-AC4"}
+    ],
+    "rule": "An unmapped facet is UNSUPPORTED, never empty. Until AST3 lands, AST1 registers the descriptor with empty supported_surfaces and every kind UNSUPPORTED (AST1-AC5)."
+  },
+  "cells": [
+    {"id": "C01", "operation": "type and semantic diagnostics", "regions": ["frontmatter", "expression", "processed-script"], "host": "tsgo", "profile": "astro-7.3.8", "disposition": "owned", "producer": "AST6", "receivingAcceptance": "AST6-AC1", "tsgoOperations": ["semantic diagnostics over the companion"], "claimBasis": "none"},
+    {"id": "C02", "operation": "hover", "regions": ["frontmatter", "expression", "processed-script"], "host": "tsgo", "profile": "astro-7.3.8", "disposition": "owned", "producer": "AST5", "receivingAcceptance": "AST5-AC1", "tsgoOperations": ["hover"], "claimBasis": "none"},
+    {"id": "C03", "operation": "go to definition", "regions": ["frontmatter", "expression", "processed-script"], "host": "tsgo", "profile": "astro-7.3.8", "disposition": "owned", "producer": "AST5", "receivingAcceptance": "AST5-AC1", "tsgoOperations": ["definition"], "claimBasis": "none"},
+    {"id": "C04", "operation": "find references", "regions": ["frontmatter", "expression", "processed-script"], "host": "tsgo", "profile": "astro-7.3.8", "disposition": "owned", "producer": "AST5", "receivingAcceptance": "AST5-AC1", "tsgoOperations": ["references"], "claimBasis": "none"},
+    {"id": "C05", "operation": "component-tag references (<Card>: import, open and close tags, spread uses)", "regions": ["component-tag"], "host": "tsgo", "profile": "astro-7.3.8", "disposition": "owned", "producer": "AST5", "receivingAcceptance": "AST5-AC2", "tsgoOperations": ["references over the projected invocation"], "claimBasis": "none"},
+    {"id": "C06", "operation": "cross-framework island navigation (<Counter client:load /> to .vue/.svelte/.tsx)", "regions": ["component-tag"], "host": "tsgo", "profile": "astro-7.3.8", "disposition": "owned", "producer": "AST5", "receivingAcceptance": "AST5-AC5", "tsgoOperations": ["definition"], "claimBasis": "none"},
+    {"id": "C55", "operation": "component-tag definition to a .astro component (<Card>, <UI.Card>)", "regions": ["component-tag"], "host": "tsgo", "profile": "astro-7.3.8", "disposition": "excluded", "reason": "unowned-acceptance: AST5's outcome names definition on component tags but its acceptance items prove only island targets (AST5-AC5); claimable after an AST5 acceptance amendment", "claimBasis": "none"},
+    {"id": "C07", "operation": "TS-region rename", "regions": ["frontmatter", "expression", "processed-script"], "host": "tsgo", "profile": "astro-7.3.8", "disposition": "owned", "producer": "AST5R", "receivingAcceptance": "AST5R-AC2", "tsgoOperations": ["rename locations"], "notes": "a location in a projection-only range is a typed refusal (AST5R-AC3); a multi-claimant carrier fails closed per the project-bound external-TS contract", "claimBasis": "none"},
+    {"id": "C08", "operation": "generated-only span suppression for every tsgo answer", "regions": ["projection-only"], "host": "tsgo", "profile": "astro-7.3.8", "disposition": "owned", "producer": "AST6", "receivingAcceptance": "AST6-AC2", "tsgoOperations": ["all of the above"], "claimBasis": "none"},
+    {"id": "C09", "operation": ".astro import surface for .ts/.tsx/.astro importers", "regions": ["import-surface"], "host": "tsgo", "profile": "astro-7.3.8", "disposition": "owned", "producer": "AST6", "receivingAcceptance": "AST6-AC3", "tsgoOperations": ["semantic diagnostics in the importer"], "claimBasis": "none"},
+    {"id": "C10", "operation": "TS-region completion", "regions": ["frontmatter", "expression", "processed-script"], "host": "tsgo", "profile": "astro-7.3.8", "disposition": "excluded", "reason": "unowned-acceptance: AST5's outcome names the completion remap but no AST5 acceptance item receives TS-region completion; the cell is claimable only after an AST5 acceptance amendment names it", "claimBasis": "none"},
+    {"id": "C11", "operation": "TS-region signature help, inlay hints, document highlights, code actions and semantic tokens", "regions": ["frontmatter", "expression", "processed-script"], "host": "tsgo", "profile": "astro-7.3.8", "disposition": "excluded", "reason": "not claimed by this train: no producer acceptance item; Verter emits no TS-region semantic token (AST1S-AC4)", "claimBasis": "none"},
+    {"id": "C12", "operation": "every TS-region operation", "regions": ["frontmatter", "expression", "processed-script", "inline-script"], "host": "verter-lsp", "profile": "astro-7.3.8", "disposition": "excluded", "reason": "forbidden-duplicate: a Verter-computed answer to a TS-region operation is a duplicate of tsgo (AST5-AC1 rejects a planted one)", "claimBasis": "none"},
+    {"id": "C13", "operation": "<script is:inline> language features", "regions": ["inline-script"], "host": "tsgo", "profile": "astro-7.3.8", "disposition": "excluded", "reason": "not claimed: AST6 projects frontmatter, expressions and processed scripts; an is:inline script is classic and unprocessed (AST1M-AC3) and no acceptance item receives its features", "claimBasis": "none"},
+    {"id": "C14", "operation": "syntax diagnostics (recovery islands)", "regions": ["carrier"], "host": "verter-lsp", "profile": "astro-7.3.8", "disposition": "owned", "producer": "AST1S", "receivingAcceptance": "AST1S-AC1", "claimBasis": "none"},
+    {"id": "C15", "operation": "document symbols", "regions": ["carrier"], "host": "verter-lsp", "profile": "astro-7.3.8", "disposition": "owned", "producer": "AST1S", "receivingAcceptance": "AST1S-AC2", "claimBasis": "none"},
+    {"id": "C16", "operation": "folding and selection ranges", "regions": ["carrier"], "host": "verter-lsp", "profile": "astro-7.3.8", "disposition": "owned", "producer": "AST1S", "receivingAcceptance": "AST1S-AC3", "claimBasis": "none"},
+    {"id": "C17", "operation": "carrier semantic tokens (fence, directive names, component tags, expression delimiters)", "regions": ["carrier"], "host": "verter-lsp", "profile": "astro-7.3.8", "disposition": "owned", "producer": "AST1S", "receivingAcceptance": "AST1S-AC4", "claimBasis": "none"},
+    {"id": "C18", "operation": "template HTML element completion", "regions": ["template"], "host": "verter-lsp", "profile": "astro-7.3.8", "disposition": "owned", "producer": "AST5", "receivingAcceptance": "AST5-AC3", "claimBasis": "none"},
+    {"id": "C56", "operation": "template HTML attribute-name and attribute-value completion", "regions": ["template"], "host": "verter-lsp", "profile": "astro-7.3.8", "disposition": "excluded", "reason": "unowned-acceptance: AST5's outcome names attribute completion but AST5-AC3 receives only slot-name and HTML element completion; claimable after an AST5 acceptance amendment proving completion in a template attribute position and its absence in frontmatter", "claimBasis": "none"},
+    {"id": "C19", "operation": "slot-name completion in slot=\"...\"", "regions": ["template"], "host": "verter-lsp", "profile": "astro-7.3.8", "disposition": "owned", "producer": "AST5", "receivingAcceptance": "AST5-AC3", "claimBasis": "none"},
+    {"id": "C20", "operation": "partial carrier results after a recovery island", "regions": ["carrier"], "host": "verter-lsp", "profile": "astro-7.3.8", "disposition": "owned", "producer": "AST5", "receivingAcceptance": "AST5-AC4", "claimBasis": "none"},
+    {"id": "C21", "operation": "directive-name completion (client:*, server:*, set:*, is:*, class:list, define:vars, transition:*)", "regions": ["template"], "host": "verter-lsp", "profile": "astro-7.3.8", "disposition": "excluded", "reason": "conditional and unowned-acceptance: admitted only where the AST6 projection cannot type the directive, and no AST5 acceptance item receives it yet", "claimBasis": "none"},
+    {"id": "C22", "operation": "tag auto-close", "regions": ["template"], "host": "verter-lsp", "profile": "astro-7.3.8", "disposition": "excluded", "reason": "unowned-acceptance: AST5 lists auto-close among its surfaces but no acceptance item receives it", "claimBasis": "none"},
+    {"id": "C23", "operation": "linked editing of tag pairs", "regions": ["template"], "host": "verter-lsp", "profile": "astro-7.3.8", "disposition": "excluded", "reason": "not claimed by this train: no producer acceptance item", "claimBasis": "none"},
+    {"id": "C24", "operation": "slot rename across canonical consumers", "regions": ["template"], "host": "verter-lsp", "profile": "astro-7.3.8", "disposition": "owned", "producer": "AST5R", "receivingAcceptance": "AST5R-AC1", "claimBasis": "none"},
+    {"id": "C25", "operation": "unsafe-rename refusal (client:* directive, HTML attribute)", "regions": ["template"], "host": "verter-lsp", "profile": "astro-7.3.8", "disposition": "owned", "producer": "AST5R", "receivingAcceptance": "AST5R-AC4", "claimBasis": "none"},
+    {"id": "C26", "operation": "rename step-down where another provider owns the position", "regions": ["template"], "host": "verter-lsp", "profile": "astro-7.3.8", "disposition": "owned", "producer": "AST5R", "receivingAcceptance": "AST5R-AC5", "claimBasis": "none"},
+    {"id": "C27", "operation": "document formatting", "regions": ["carrier"], "host": "verter-lsp", "profile": "astro-7.3.8", "disposition": "owned", "producer": "AST8F", "receivingAcceptance": "AST8F-AC1", "notes": "frontmatter delegates to the TS formatter and <style> to the CSS formatter (AST8F-AC3)", "claimBasis": "none"},
+    {"id": "C28", "operation": "lint host: suppression and safe fixes", "regions": ["carrier"], "host": "verter-lsp", "profile": "astro-7.3.8", "disposition": "owned", "producer": "AST8", "receivingAcceptance": "AST8-AC2", "claimBasis": "none"},
+    {"id": "C29", "operation": "lint: directive and module correctness rules", "regions": ["carrier"], "host": "verter-lsp", "profile": "astro-7.3.8", "disposition": "owned", "producer": "LAS1", "receivingAcceptance": "LAS1-AC1", "claimBasis": "none"},
+    {"id": "C30", "operation": "lint: astro check diagnostics parity", "regions": ["carrier"], "host": "verter-lsp", "profile": "astro-7.3.8", "disposition": "owned", "producer": "LAS2", "receivingAcceptance": "LAS2-AC1", "claimBasis": "none"},
+    {"id": "C31", "operation": "lint: security and style hygiene", "regions": ["carrier"], "host": "verter-lsp", "profile": "astro-7.3.8", "disposition": "owned", "producer": "LAS3", "receivingAcceptance": "LAS3-AC1", "claimBasis": "none"},
+    {"id": "C32", "operation": "lint: accessibility admission", "regions": ["template"], "host": "verter-lsp", "profile": "astro-7.3.8", "disposition": "owned", "producer": "LAS4", "receivingAcceptance": "LAS4-AC1", "claimBasis": "none"},
+    {"id": "C33", "operation": "lint: island and route contracts", "regions": ["carrier"], "host": "verter-lsp", "profile": "astro-7.3.8", "disposition": "owned", "producer": "LAS5", "receivingAcceptance": "LAS5-AC1", "claimBasis": "none"},
+    {"id": "C34", "operation": "assists and generators (astro.generate-static-paths)", "regions": ["frontmatter"], "host": "verter-lsp", "profile": "astro-7.3.8", "disposition": "owned", "producer": "LAS6", "receivingAcceptance": "LAS6-AC1", "claimBasis": "none"},
+    {"id": "C35", "operation": "carrier-generic companion delivery to tsserver", "regions": ["frontmatter", "expression", "processed-script"], "host": "typescript-plugin", "profile": "astro-7.3.8", "disposition": "owned", "producer": "AST6", "receivingAcceptance": "AST6-AC6", "notes": "compatibility only through the existing carrier-store path; no Astro-specific plugin code", "claimBasis": "none"},
+    {"id": "C36", "operation": "any Astro-specific tsserver behaviour", "regions": ["*"], "host": "typescript-plugin", "profile": "astro-7.3.8", "disposition": "excluded", "reason": "forbidden: the tsserver plugin receives carrier-generic compatibility only", "claimBasis": "none"},
+    {"id": "C37", "operation": "props facet", "regions": ["frontmatter"], "host": "verter-session", "profile": "astro-7.3.8", "disposition": "owned", "producer": "AST3", "receivingAcceptance": "AST3-AC1", "tsgoOperations": ["type at position", "symbol at position"], "tsgoLimitation": "a shape TypeInfo and tsgo cannot give is Unavailable(tsgoLimitation: <op>); typeToString is never parsed", "claimBasis": "none"},
+    {"id": "C38", "operation": "slots facet", "regions": ["template"], "host": "verter-session", "profile": "astro-7.3.8", "disposition": "owned", "producer": "AST3", "receivingAcceptance": "AST3-AC3", "claimBasis": "none"},
+    {"id": "C39", "operation": "events and expose facets (structurally UNSUPPORTED)", "regions": ["*"], "host": "verter-session", "profile": "astro-7.3.8", "disposition": "owned", "producer": "AST3", "receivingAcceptance": "AST3-AC4", "claimBasis": "none"},
+    {"id": "C40", "operation": "component binding and region scope", "regions": ["frontmatter", "template"], "host": "verter-session", "profile": "astro-7.3.8", "disposition": "owned", "producer": "AST2", "receivingAcceptance": "AST2-AC1", "claimBasis": "none"},
+    {"id": "C41", "operation": "cross-framework island binding", "regions": ["component-tag"], "host": "verter-session", "profile": "astro-7.3.8", "disposition": "owned", "producer": "AST2", "receivingAcceptance": "AST2-AC3", "claimBasis": "none"},
+    {"id": "C42", "operation": "island facts (client:* strategy, target framework, crossing props)", "regions": ["component-tag"], "host": "verter-session", "profile": "astro-7.3.8", "disposition": "owned", "producer": "AST4", "receivingAcceptance": "AST4-AC1", "claimBasis": "none"},
+    {"id": "C43", "operation": "realm facts (server frontmatter, client processed script)", "regions": ["frontmatter", "processed-script"], "host": "verter-session", "profile": "astro-7.3.8", "disposition": "owned", "producer": "AST4", "receivingAcceptance": "AST4-AC3", "claimBasis": "none"},
+    {"id": "C44", "operation": "route facts (getStaticPaths params)", "regions": ["frontmatter"], "host": "verter-session", "profile": "astro-7.3.8", "disposition": "owned", "producer": "AST4", "receivingAcceptance": "AST4-AC4", "claimBasis": "none"},
+    {"id": "C45", "operation": "template style facts", "regions": ["template", "style"], "host": "verter-session", "profile": "astro-7.3.8", "disposition": "owned", "producer": "AST7", "receivingAcceptance": "AST7-AC1", "claimBasis": "none"},
+    {"id": "C46", "operation": "accessibility facts", "regions": ["template"], "host": "verter-session", "profile": "astro-7.3.8", "disposition": "owned", "producer": "AST7", "receivingAcceptance": "AST7-AC3", "claimBasis": "none"},
+    {"id": "C47", "operation": "forwarding contribution ({...Astro.props} spreads)", "regions": ["template"], "host": "verter-session", "profile": "astro-7.3.8", "disposition": "owned", "producer": "FWD1-ASTRO", "receivingAcceptance": "FWD1-ASTRO-AC1", "claimBasis": "none"},
+    {"id": "C48", "operation": "transport boundary contribution (island props)", "regions": ["component-tag"], "host": "verter-session", "profile": "astro-7.3.8", "disposition": "owned", "producer": "TRN1-ASTRO", "receivingAcceptance": "TRN1-ASTRO-AC1", "claimBasis": "none"},
+    {"id": "C49", "operation": "render-tree contribution", "regions": ["template"], "host": "verter-session", "profile": "astro-7.3.8", "disposition": "owned", "producer": "RND1-ASTRO", "receivingAcceptance": "RND1-ASTRO-AC1", "claimBasis": "none"},
+    {"id": "C50", "operation": "composed page contribution (layouts)", "regions": ["template"], "host": "verter-session", "profile": "astro-7.3.8", "disposition": "owned", "producer": "CPD1-ASTRO", "receivingAcceptance": "CPD1-ASTRO-AC1", "claimBasis": "none"},
+    {"id": "C51", "operation": "compile to a runtime render function", "regions": ["*"], "host": "verter-session", "profile": "astro-7.3.8", "disposition": "excluded", "reason": "tooling-only carrier: no compiler backend; a compile demand reports UNSUPPORTED (PAR0 PN04, CPF0 PC06)", "claimBasis": "none"},
+    {"id": "C52", "operation": "consume official astro build or astro dev output and its maps", "regions": ["*"], "host": "verter-session", "profile": "astro-7.3.8", "disposition": "excluded", "reason": "build exclusion (ruling 4): no BND consumption; AST6 is the TS-host projection", "claimBasis": "none"},
+    {"id": "C53", "operation": "DBG, TST or WPF source maps", "regions": ["*"], "host": "verter-session", "profile": "astro-7.3.8", "disposition": "excluded", "reason": "build exclusion (ruling 4): no map is promised", "claimBasis": "none"},
+    {"id": "C54", "operation": "execute, render, hydrate or instrument Astro code, config, integrations or dev server", "regions": ["*"], "host": "verter-session", "profile": "astro-7.3.8", "disposition": "excluded", "reason": "no-runtime rule (framework-common)", "claimBasis": "none"}
+  ],
+  "exposure": {
+    "rule": "Exposure through Verter's browser (WASM) and native hosts and the VS Code client is qualification, not a producer cell; it is measured once the owned cells pass.",
+    "rows": [
+      {"host": "browser (verter_wasm)", "producer": "AST9", "receivingAcceptance": "AST9-AC4"},
+      {"host": "native (verter_napi)", "producer": "AST9", "receivingAcceptance": "AST9-AC4"},
+      {"host": "VS Code client contribution (generated client manifest row)", "producer": "AST6", "receivingAcceptance": "AST6-AC4"}
+    ]
+  },
+  "qualification": {
+    "coverage": {"producer": "AST9", "receivingAcceptance": "AST9-AC1", "rule": "every owned cell joins at least one passing fixture; an uncovered or failing cell names its producer"},
+    "promotion": {"producer": "AST10", "receivingAcceptance": "AST10-AC1", "rule": "promotion only when every owned cell has an AST9 pass and every excluded cell is this ratified exclusion"},
+    "displacedRoutes": {"producer": "AST1M", "receivingAcceptance": "AST1M-AC6", "file": "tests/framework-astro/AST0/products/astro-displaced-routes.json", "closedBy": "AST10-AC4"}
+  },
+  "notEvidence": [
+    "ASTP (an architecture proof)",
+    "an installed parser or an installed oracle package",
+    "syntax highlighting (AST1G TextMate grammar)",
+    "pinning or installing an upstream package"
+  ]
+}
