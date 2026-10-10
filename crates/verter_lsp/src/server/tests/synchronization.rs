@@ -1281,7 +1281,7 @@ const fyy = { baz: 1 }
         &member_position,
         initial_ctx,
         initial_offset,
-        |_tsx_path: String, _offset: u32| {
+        |_query: crate::type_provider::traits::ProviderQuery, _offset: u32| {
             let n = calls_in.fetch_add(1, Ordering::SeqCst);
             let poison = poison.clone();
             async move {
@@ -1314,6 +1314,111 @@ const fyy = { baz: 1 }
         "the identity fence must refuse the SECOND query outright, not launder a \
          cross-revision answer"
     );
+}
+
+/// A typed coordinate conflict means the surface the query was minted from is
+/// not the one the engine held: the recovery re-binds a fresh query to the
+/// surface recorded now — without a resync, which would only repeat work the
+/// conflict proves already happened — and the retry intends exactly that
+/// recaptured surface.
+#[tokio::test]
+async fn a_coordinate_conflict_rebinds_to_the_current_surface_without_resync() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+
+    let (app_uri, member_position, _expected_decl_range) =
+        seed_member_definition_fixture(server, &provider, "/workspace/src/App.vue");
+    let initial_ctx = synced_type_provider_context_surface_only(server, &app_uri);
+    let initial_id = initial_ctx.snapshot.delivered_surface_id();
+    let initial_offset = merge::carrier_position_to_tsx_offset_validated(
+        &member_position,
+        &initial_ctx.carrier_line_index,
+        &initial_ctx.mapper,
+        &initial_ctx.tsx_line_index,
+    )
+    .expect("member usage maps into the generated TSX");
+    let answer = crate::type_provider::protocol::TypeLocation {
+        path: initial_ctx.tsx_path.clone(),
+        start: 7,
+        end: 10,
+    };
+
+    let intents = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let intents_in = intents.clone();
+    let resyncs = Arc::new(AtomicUsize::new(0));
+    let resyncs_in = resyncs.clone();
+    let outcome = super::super::provider_recovery::provider_query_with_bounded_recovery(
+        "definition",
+        &member_position,
+        initial_ctx,
+        initial_offset,
+        |query: crate::type_provider::traits::ProviderQuery, _offset: u32| {
+            let mut intents = intents_in.lock().unwrap();
+            intents.push(query.intended().map(|intended| intended.id()));
+            let first = intents.len() == 1;
+            let answer = answer.clone();
+            async move {
+                if first {
+                    Err(crate::type_provider::protocol::TypeProviderError {
+                        query_conflict: true,
+                        ..crate::type_provider::protocol::TypeProviderError::new(
+                            "the engine holds other bytes than the query intends",
+                        )
+                    })
+                } else {
+                    Ok(vec![answer])
+                }
+            }
+        },
+        || async {
+            resyncs_in.fetch_add(1, Ordering::SeqCst);
+        },
+        || {
+            // The surface the engine holds is recorded under a fresh
+            // generation over the same source.
+            let canonical_id = server
+                .documents
+                .get_canonical_id(&app_uri)
+                .expect("canonical id");
+            let ide = server.documents.get_ide(&app_uri).expect("IDE output");
+            let tsx_path = server
+                .active_ide_path_for_uri(&app_uri)
+                .expect("live IDE path");
+            let seed_revision = server.documents.snapshot_identity(&app_uri);
+            server.record_carrier_ide_snapshot_with_pin(
+                seed_revision.as_ref().map(|revision| (&app_uri, revision)),
+                &canonical_id,
+                &tsx_path,
+                &ide.code,
+                None,
+            );
+            server.type_provider_context(&app_uri)
+        },
+    )
+    .await;
+
+    assert!(outcome.value.is_some(), "the re-bound query answers");
+    assert_eq!(
+        resyncs.load(Ordering::SeqCst),
+        0,
+        "a conflict needs no resync"
+    );
+    let intents = intents.lock().unwrap();
+    assert_eq!(intents.len(), 2);
+    assert_eq!(
+        intents[0],
+        Some(initial_id),
+        "the first query intends its capture"
+    );
+    assert_eq!(
+        intents[1],
+        Some(outcome.ctx.snapshot.delivered_surface_id()),
+        "the retry intends exactly the recaptured surface"
+    );
+    assert_ne!(intents[1], intents[0]);
 }
 
 /// The fence keys on SOURCE identity, not surface generation: a resync that
@@ -1361,7 +1466,7 @@ async fn provider_retry_proceeds_when_carrier_source_is_unchanged_across_regener
         &member_position,
         initial_ctx,
         initial_offset,
-        |_tsx_path: String, _offset: u32| {
+        |_query: crate::type_provider::traits::ProviderQuery, _offset: u32| {
             let n = calls_in.fetch_add(1, Ordering::SeqCst);
             let answer = answer.clone();
             async move {
@@ -6148,6 +6253,7 @@ async fn real_tsserver_slot_member_access_stays_typed_after_opening_child_and_pa
         // verter_lsp-internal backend: the Rust merge layer maps responses.
         false,
         None,
+        None,
     )
     .await
     {
@@ -6248,7 +6354,13 @@ async fn real_tsserver_slot_member_access_stays_typed_after_opening_child_and_pa
                 );
                 let probe_saw_name = match tsx_offset {
                     Some(tsx_offset) => match provider
-                        .get_completions(&ctx.tsx_path, tsx_offset, Some("."))
+                        .get_completions(
+                            &crate::type_provider::traits::ProviderQuery::at_engine_surface(
+                                &ctx.tsx_path,
+                            ),
+                            tsx_offset,
+                            Some("."),
+                        )
                         .await
                     {
                         Ok(direct_result) => {
@@ -6308,7 +6420,11 @@ async fn real_tsserver_slot_member_access_stays_typed_after_opening_child_and_pa
         })
         .map(|(ctx, tsx_offset, tsx_path)| async move {
             direct_provider
-                .get_completions(&ctx.tsx_path, tsx_offset, Some("."))
+                .get_completions(
+                    &crate::type_provider::traits::ProviderQuery::at_engine_surface(&ctx.tsx_path),
+                    tsx_offset,
+                    Some("."),
+                )
                 .await
                 .map(|result| {
                     (
@@ -6344,7 +6460,11 @@ async fn real_tsserver_slot_member_access_stays_typed_after_opening_child_and_pa
     };
     let (_literal_labels, _literal_error) = if let Some((tsx_path, tsx_offset)) = literal_debug {
         match provider
-            .get_completions(&tsx_path, tsx_offset, Some("."))
+            .get_completions(
+                &crate::type_provider::traits::ProviderQuery::at_engine_surface(&tsx_path),
+                tsx_offset,
+                Some("."),
+            )
             .await
         {
             Ok(result) => (

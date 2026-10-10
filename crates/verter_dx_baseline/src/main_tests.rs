@@ -8,6 +8,7 @@ use verter_type_runtime::protocol::{
     ProviderDiagnosticContext, RenameLocation, SemanticToken, SignatureHelp, TypeCodeAction,
     TypeDocumentHighlight,
 };
+use verter_type_runtime::provider_query::ProviderQuery;
 use verter_type_runtime::ProviderFuture;
 
 /// A hermetic in-process provider that records file operations and returns
@@ -101,7 +102,7 @@ impl TypeProvider for MockProvider {
     }
     fn get_completions(
         &self,
-        _p: &str,
+        _p: &ProviderQuery,
         _o: u32,
         _t: Option<&str>,
     ) -> ProviderFuture<'_, CompletionResult> {
@@ -110,7 +111,7 @@ impl TypeProvider for MockProvider {
             is_incomplete: false
         })
     }
-    fn get_hover(&self, _p: &str, o: u32) -> ProviderFuture<'_, Option<HoverInfo>> {
+    fn get_hover(&self, _p: &ProviderQuery, o: u32) -> ProviderFuture<'_, Option<HoverInfo>> {
         self.hover_offsets.lock().unwrap().push(o);
         let h = self.hover.clone();
         ready!(h)
@@ -118,41 +119,58 @@ impl TypeProvider for MockProvider {
     fn get_diagnostics(&self, _p: &str) -> ProviderFuture<'_, Vec<TypeDiagnostic>> {
         ready!(vec![])
     }
-    fn get_definition(&self, _p: &str, _o: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
+    fn get_definition(&self, _p: &ProviderQuery, _o: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
         ready!(vec![])
     }
-    fn get_type_definition(&self, _p: &str, _o: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
+    fn get_type_definition(
+        &self,
+        _p: &ProviderQuery,
+        _o: u32,
+    ) -> ProviderFuture<'_, Vec<TypeLocation>> {
         ready!(vec![])
     }
-    fn get_references(&self, _p: &str, _o: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
+    fn get_references(&self, _p: &ProviderQuery, _o: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
         ready!(vec![])
     }
-    fn get_rename_locations(&self, _p: &str, _o: u32) -> ProviderFuture<'_, Vec<RenameLocation>> {
+    fn get_rename_locations(
+        &self,
+        _p: &ProviderQuery,
+        _o: u32,
+    ) -> ProviderFuture<'_, Vec<RenameLocation>> {
         ready!(vec![])
     }
-    fn get_signature_help(&self, _p: &str, _o: u32) -> ProviderFuture<'_, Option<SignatureHelp>> {
+    fn get_signature_help(
+        &self,
+        _p: &ProviderQuery,
+        _o: u32,
+    ) -> ProviderFuture<'_, Option<SignatureHelp>> {
         ready!(None)
     }
     fn get_code_actions(
         &self,
-        _p: &str,
+        _p: &ProviderQuery,
         _s: u32,
         _e: u32,
         _diagnostics: &[ProviderDiagnosticContext],
     ) -> ProviderFuture<'_, Vec<TypeCodeAction>> {
         ready!(vec![])
     }
-    fn get_semantic_tokens(&self, _p: &str) -> ProviderFuture<'_, Vec<SemanticToken>> {
+    fn get_semantic_tokens(&self, _p: &ProviderQuery) -> ProviderFuture<'_, Vec<SemanticToken>> {
         ready!(vec![])
     }
     fn get_document_highlights(
         &self,
-        _p: &str,
+        _p: &ProviderQuery,
         _o: u32,
     ) -> ProviderFuture<'_, Vec<TypeDocumentHighlight>> {
         ready!(vec![])
     }
-    fn get_inlay_hints(&self, _p: &str, _s: u32, _e: u32) -> ProviderFuture<'_, Vec<InlayHint>> {
+    fn get_inlay_hints(
+        &self,
+        _p: &ProviderQuery,
+        _s: u32,
+        _e: u32,
+    ) -> ProviderFuture<'_, Vec<InlayHint>> {
         ready!(vec![])
     }
 }
@@ -1067,7 +1085,10 @@ async fn known_good_script_setup_hover_resolves_through_tsgo_on_emitted_tsx() {
         .await
         .expect("open emitted tsx in tsgo");
     let hover = provider
-        .get_hover(&tsx_path, offset)
+        .get_hover(
+            &verter_type_runtime::provider_query::ProviderQuery::at_engine_surface(&tsx_path),
+            offset,
+        )
         .await
         .expect("tsgo hover");
     let _ = provider.shutdown().await;

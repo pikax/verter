@@ -25,6 +25,7 @@
 //! just the feature function, is what gets asserted). They assert EXACT edit
 //! ranges, not counts.
 
+use crate::type_provider::traits::ProviderQuery;
 use std::sync::Arc;
 
 use tower_lsp_server::ls_types::{
@@ -3008,14 +3009,18 @@ impl crate::TypeProvider for RenameErrorProvider {
 
     fn get_rename_locations(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         offset: u32,
     ) -> crate::type_provider::traits::ProviderFuture<
         '_,
         Vec<crate::type_provider::protocol::RenameLocation>,
     > {
+        let path = query.path();
         // Record the query through the inner mock, then fail.
-        let recorded = self.inner.get_rename_locations(path, offset);
+        let recorded = self.inner.get_rename_locations(
+            &crate::type_provider::traits::ProviderQuery::at_engine_surface(path),
+            offset,
+        );
         Box::pin(async move {
             let _ = recorded.await;
             Err(crate::type_provider::protocol::TypeProviderError::new(
@@ -3054,25 +3059,34 @@ impl crate::TypeProvider for RenameErrorProvider {
 
     fn get_completions(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         offset: u32,
         trigger_character: Option<&str>,
     ) -> crate::type_provider::traits::ProviderFuture<
         '_,
         crate::type_provider::protocol::CompletionResult,
     > {
-        self.inner.get_completions(path, offset, trigger_character)
+        let path = query.path();
+        self.inner.get_completions(
+            &crate::type_provider::traits::ProviderQuery::at_engine_surface(path),
+            offset,
+            trigger_character,
+        )
     }
 
     fn get_hover(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         offset: u32,
     ) -> crate::type_provider::traits::ProviderFuture<
         '_,
         Option<crate::type_provider::protocol::HoverInfo>,
     > {
-        self.inner.get_hover(path, offset)
+        let path = query.path();
+        self.inner.get_hover(
+            &crate::type_provider::traits::ProviderQuery::at_engine_surface(path),
+            offset,
+        )
     }
 
     fn get_diagnostics(
@@ -3087,51 +3101,67 @@ impl crate::TypeProvider for RenameErrorProvider {
 
     fn get_definition(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         offset: u32,
     ) -> crate::type_provider::traits::ProviderFuture<
         '_,
         Vec<crate::type_provider::protocol::TypeLocation>,
     > {
-        self.inner.get_definition(path, offset)
+        let path = query.path();
+        self.inner.get_definition(
+            &crate::type_provider::traits::ProviderQuery::at_engine_surface(path),
+            offset,
+        )
     }
 
     fn get_type_definition(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         offset: u32,
     ) -> crate::type_provider::traits::ProviderFuture<
         '_,
         Vec<crate::type_provider::protocol::TypeLocation>,
     > {
-        self.inner.get_type_definition(path, offset)
+        let path = query.path();
+        self.inner.get_type_definition(
+            &crate::type_provider::traits::ProviderQuery::at_engine_surface(path),
+            offset,
+        )
     }
 
     fn get_references(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         offset: u32,
     ) -> crate::type_provider::traits::ProviderFuture<
         '_,
         Vec<crate::type_provider::protocol::TypeLocation>,
     > {
-        self.inner.get_references(path, offset)
+        let path = query.path();
+        self.inner.get_references(
+            &crate::type_provider::traits::ProviderQuery::at_engine_surface(path),
+            offset,
+        )
     }
 
     fn get_signature_help(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         offset: u32,
     ) -> crate::type_provider::traits::ProviderFuture<
         '_,
         Option<crate::type_provider::protocol::SignatureHelp>,
     > {
-        self.inner.get_signature_help(path, offset)
+        let path = query.path();
+        self.inner.get_signature_help(
+            &crate::type_provider::traits::ProviderQuery::at_engine_surface(path),
+            offset,
+        )
     }
 
     fn get_code_actions(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         start_offset: u32,
         end_offset: u32,
         diagnostics: &[crate::type_provider::protocol::ProviderDiagnosticContext],
@@ -3139,40 +3169,57 @@ impl crate::TypeProvider for RenameErrorProvider {
         '_,
         Vec<crate::type_provider::protocol::TypeCodeAction>,
     > {
-        self.inner
-            .get_code_actions(path, start_offset, end_offset, diagnostics)
+        let path = query.path();
+        self.inner.get_code_actions(
+            &crate::type_provider::traits::ProviderQuery::at_engine_surface(path),
+            start_offset,
+            end_offset,
+            diagnostics,
+        )
     }
 
     fn get_semantic_tokens(
         &self,
-        path: &str,
+        query: &ProviderQuery,
     ) -> crate::type_provider::traits::ProviderFuture<
         '_,
         Vec<crate::type_provider::protocol::SemanticToken>,
     > {
-        self.inner.get_semantic_tokens(path)
+        let path = query.path();
+        self.inner.get_semantic_tokens(
+            &crate::type_provider::traits::ProviderQuery::at_engine_surface(path),
+        )
     }
 
     fn get_document_highlights(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         offset: u32,
     ) -> crate::type_provider::traits::ProviderFuture<
         '_,
         Vec<crate::type_provider::protocol::TypeDocumentHighlight>,
     > {
-        self.inner.get_document_highlights(path, offset)
+        let path = query.path();
+        self.inner.get_document_highlights(
+            &crate::type_provider::traits::ProviderQuery::at_engine_surface(path),
+            offset,
+        )
     }
 
     fn get_inlay_hints(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         start_offset: u32,
         end_offset: u32,
     ) -> crate::type_provider::traits::ProviderFuture<
         '_,
         Vec<crate::type_provider::protocol::InlayHint>,
     > {
-        self.inner.get_inlay_hints(path, start_offset, end_offset)
+        let path = query.path();
+        self.inner.get_inlay_hints(
+            &crate::type_provider::traits::ProviderQuery::at_engine_surface(path),
+            start_offset,
+            end_offset,
+        )
     }
 }

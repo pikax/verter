@@ -1515,6 +1515,53 @@ pub struct ProviderLifecycleRoot {
 /// Every raw spelling tracked under one filesystem identity, with its state.
 type IdentitySpellings = Arc<[(Arc<str>, CapturedPathState)]>;
 
+/// A captured root names, for every path it holds a current surface of, the
+/// exact provider bytes a returned location in that path is mapped through: a
+/// provider query carrying it refuses to decode a foreign location through any
+/// other bytes.
+impl verter_type_runtime::provider_query::IntendedTargets for ProviderLifecycleRoot {
+    fn intended(&self, path: &str) -> Option<Arc<str>> {
+        match self.state_for(path)? {
+            CapturedPathState::Current(snapshot) => Some(Arc::clone(&snapshot.provider_content)),
+            CapturedPathState::KnownNonMappable => None,
+        }
+    }
+}
+
+/// A captured view names, for every path it holds a mappable surface of, the
+/// exact provider bytes a returned location in that path is mapped through.
+impl verter_type_runtime::provider_query::IntendedTargets for ProviderQuerySnapshot {
+    fn intended(&self, path: &str) -> Option<Arc<str>> {
+        self.snapshot_for(path)
+            .map(|snapshot| Arc::clone(&snapshot.provider_content))
+    }
+}
+
+impl ProviderSurfaceSnapshot {
+    /// The delivered-surface identity a provider query intending this surface
+    /// carries.
+    #[must_use]
+    pub fn delivered_surface_id(&self) -> verter_type_runtime::provider_query::DeliveredSurfaceId {
+        verter_type_runtime::provider_query::DeliveredSurfaceId {
+            generation: self.stamp.generation,
+            content_epoch: self.stamp.content_epoch,
+            incarnation: self.stamp.incarnation,
+        }
+    }
+
+    /// A provider query whose request position was computed against this
+    /// surface: the adapter binds it only to these exact bytes, so every
+    /// offset it answers is one this surface's map can carry back.
+    #[must_use]
+    pub fn provider_query(&self) -> verter_type_runtime::provider_query::ProviderQuery {
+        verter_type_runtime::provider_query::ProviderQuery::intending(
+            &*self.stamp.provider_path,
+            self.delivered_surface_id(),
+            Arc::clone(&self.provider_content),
+        )
+    }
+}
+
 impl ProviderLifecycleRoot {
     /// This root viewed with `CarrierApi` snapshots as the mappable role.
     #[must_use]

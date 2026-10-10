@@ -151,7 +151,10 @@ async fn hover_probe_under(tsconfig: &str, source: &str, rhs: &str) -> Option<St
     let (provider, path, _dir) = spawn_with(tsconfig, &[("fixture.ts", &synth.source)]).await?;
     let hover = tokio::time::timeout(
         Duration::from_secs(15),
-        provider.get_hover(&path, synth.probe_name_offset as u32),
+        provider.get_hover(
+            &verter_type_runtime::provider_query::ProviderQuery::at_engine_surface(&path),
+            synth.probe_name_offset as u32,
+        ),
     )
     .await
     .expect("hover did not time out")
@@ -175,7 +178,10 @@ async fn spike_hover_expands_and_is_confluent_with_authored() {
 
     let hover = tokio::time::timeout(
         Duration::from_secs(15),
-        provider.get_hover(&path, synth.probe_name_offset as u32),
+        provider.get_hover(
+            &verter_type_runtime::provider_query::ProviderQuery::at_engine_surface(&path),
+            synth.probe_name_offset as u32,
+        ),
     )
     .await
     .expect("hover did not time out")
@@ -249,7 +255,10 @@ async fn spike_definition_primitive_binds_to_intended_decl() {
         + 2;
     let defs = tokio::time::timeout(
         Duration::from_secs(15),
-        provider.get_definition(&path, rhs_ref_offset as u32),
+        provider.get_definition(
+            &verter_type_runtime::provider_query::ProviderQuery::at_engine_surface(&path),
+            rhs_ref_offset as u32,
+        ),
     )
     .await
     .expect("definition did not time out")
@@ -410,7 +419,10 @@ async fn spike_nuia_delivery_via_value_probe() {
         let (provider, path, _dir) = spawn_with(tsconfig, &[("fixture.ts", SOURCE)]).await?;
         let hover = tokio::time::timeout(
             Duration::from_secs(15),
-            provider.get_hover(&path, off as u32),
+            provider.get_hover(
+                &verter_type_runtime::provider_query::ProviderQuery::at_engine_surface(&path),
+                off as u32,
+            ),
         )
         .await
         .expect("hover did not time out")

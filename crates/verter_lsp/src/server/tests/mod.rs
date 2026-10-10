@@ -1,4 +1,5 @@
 use super::*;
+use crate::type_provider::traits::ProviderQuery;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -112,7 +113,7 @@ impl TypeProvider for SlowConfigurePathsProvider {
 
     fn get_completions(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _offset: u32,
         _trigger_character: Option<&str>,
     ) -> ProviderFuture<'_, CompletionResult> {
@@ -124,7 +125,11 @@ impl TypeProvider for SlowConfigurePathsProvider {
         })
     }
 
-    fn get_hover(&self, _path: &str, _offset: u32) -> ProviderFuture<'_, Option<HoverInfo>> {
+    fn get_hover(
+        &self,
+        _query: &ProviderQuery,
+        _offset: u32,
+    ) -> ProviderFuture<'_, Option<HoverInfo>> {
         Box::pin(async { Ok(None) })
     }
 
@@ -132,25 +137,33 @@ impl TypeProvider for SlowConfigurePathsProvider {
         Box::pin(async { Ok(Vec::new()) })
     }
 
-    fn get_definition(&self, _path: &str, _offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
-        Box::pin(async { Ok(Vec::new()) })
-    }
-
-    fn get_type_definition(
+    fn get_definition(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _offset: u32,
     ) -> ProviderFuture<'_, Vec<TypeLocation>> {
         Box::pin(async { Ok(Vec::new()) })
     }
 
-    fn get_references(&self, _path: &str, _offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
+    fn get_type_definition(
+        &self,
+        _query: &ProviderQuery,
+        _offset: u32,
+    ) -> ProviderFuture<'_, Vec<TypeLocation>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn get_references(
+        &self,
+        _query: &ProviderQuery,
+        _offset: u32,
+    ) -> ProviderFuture<'_, Vec<TypeLocation>> {
         Box::pin(async { Ok(Vec::new()) })
     }
 
     fn get_rename_locations(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _offset: u32,
     ) -> ProviderFuture<'_, Vec<RenameLocation>> {
         Box::pin(async { Ok(Vec::new()) })
@@ -158,7 +171,7 @@ impl TypeProvider for SlowConfigurePathsProvider {
 
     fn get_signature_help(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _offset: u32,
     ) -> ProviderFuture<'_, Option<SignatureHelp>> {
         Box::pin(async { Ok(None) })
@@ -166,7 +179,7 @@ impl TypeProvider for SlowConfigurePathsProvider {
 
     fn get_code_actions(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _start_offset: u32,
         _end_offset: u32,
         _diagnostics: &[ProviderDiagnosticContext],
@@ -174,13 +187,16 @@ impl TypeProvider for SlowConfigurePathsProvider {
         Box::pin(async { Ok(Vec::new()) })
     }
 
-    fn get_semantic_tokens(&self, _path: &str) -> ProviderFuture<'_, Vec<SemanticToken>> {
+    fn get_semantic_tokens(
+        &self,
+        _query: &ProviderQuery,
+    ) -> ProviderFuture<'_, Vec<SemanticToken>> {
         Box::pin(async { Ok(Vec::new()) })
     }
 
     fn get_document_highlights(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _offset: u32,
     ) -> ProviderFuture<'_, Vec<TypeDocumentHighlight>> {
         Box::pin(async { Ok(Vec::new()) })
@@ -188,7 +204,7 @@ impl TypeProvider for SlowConfigurePathsProvider {
 
     fn get_inlay_hints(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _start_offset: u32,
         _end_offset: u32,
     ) -> ProviderFuture<'_, Vec<InlayHint>> {
@@ -236,7 +252,7 @@ impl TypeProvider for TriggerSensitiveCompletionProvider {
 
     fn get_completions(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _offset: u32,
         trigger_character: Option<&str>,
     ) -> ProviderFuture<'_, CompletionResult> {
@@ -289,7 +305,11 @@ impl TypeProvider for TriggerSensitiveCompletionProvider {
         })
     }
 
-    fn get_hover(&self, _path: &str, _offset: u32) -> ProviderFuture<'_, Option<HoverInfo>> {
+    fn get_hover(
+        &self,
+        _query: &ProviderQuery,
+        _offset: u32,
+    ) -> ProviderFuture<'_, Option<HoverInfo>> {
         Box::pin(async { Ok(None) })
     }
 
@@ -297,25 +317,33 @@ impl TypeProvider for TriggerSensitiveCompletionProvider {
         Box::pin(async { Ok(Vec::new()) })
     }
 
-    fn get_definition(&self, _path: &str, _offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
-        Box::pin(async { Ok(Vec::new()) })
-    }
-
-    fn get_type_definition(
+    fn get_definition(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _offset: u32,
     ) -> ProviderFuture<'_, Vec<TypeLocation>> {
         Box::pin(async { Ok(Vec::new()) })
     }
 
-    fn get_references(&self, _path: &str, _offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
+    fn get_type_definition(
+        &self,
+        _query: &ProviderQuery,
+        _offset: u32,
+    ) -> ProviderFuture<'_, Vec<TypeLocation>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn get_references(
+        &self,
+        _query: &ProviderQuery,
+        _offset: u32,
+    ) -> ProviderFuture<'_, Vec<TypeLocation>> {
         Box::pin(async { Ok(Vec::new()) })
     }
 
     fn get_rename_locations(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _offset: u32,
     ) -> ProviderFuture<'_, Vec<RenameLocation>> {
         Box::pin(async { Ok(Vec::new()) })
@@ -323,7 +351,7 @@ impl TypeProvider for TriggerSensitiveCompletionProvider {
 
     fn get_signature_help(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _offset: u32,
     ) -> ProviderFuture<'_, Option<SignatureHelp>> {
         Box::pin(async { Ok(None) })
@@ -331,7 +359,7 @@ impl TypeProvider for TriggerSensitiveCompletionProvider {
 
     fn get_code_actions(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _start_offset: u32,
         _end_offset: u32,
         _diagnostics: &[ProviderDiagnosticContext],
@@ -339,13 +367,16 @@ impl TypeProvider for TriggerSensitiveCompletionProvider {
         Box::pin(async { Ok(Vec::new()) })
     }
 
-    fn get_semantic_tokens(&self, _path: &str) -> ProviderFuture<'_, Vec<SemanticToken>> {
+    fn get_semantic_tokens(
+        &self,
+        _query: &ProviderQuery,
+    ) -> ProviderFuture<'_, Vec<SemanticToken>> {
         Box::pin(async { Ok(Vec::new()) })
     }
 
     fn get_document_highlights(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _offset: u32,
     ) -> ProviderFuture<'_, Vec<TypeDocumentHighlight>> {
         Box::pin(async { Ok(Vec::new()) })
@@ -353,7 +384,7 @@ impl TypeProvider for TriggerSensitiveCompletionProvider {
 
     fn get_inlay_hints(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _start_offset: u32,
         _end_offset: u32,
     ) -> ProviderFuture<'_, Vec<InlayHint>> {
@@ -418,7 +449,7 @@ impl TypeProvider for DotTriggerRequiredCompletionProvider {
 
     fn get_completions(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _offset: u32,
         trigger_character: Option<&str>,
     ) -> ProviderFuture<'_, CompletionResult> {
@@ -488,7 +519,11 @@ impl TypeProvider for DotTriggerRequiredCompletionProvider {
         })
     }
 
-    fn get_hover(&self, _path: &str, _offset: u32) -> ProviderFuture<'_, Option<HoverInfo>> {
+    fn get_hover(
+        &self,
+        _query: &ProviderQuery,
+        _offset: u32,
+    ) -> ProviderFuture<'_, Option<HoverInfo>> {
         Box::pin(async { Ok(None) })
     }
 
@@ -496,25 +531,33 @@ impl TypeProvider for DotTriggerRequiredCompletionProvider {
         Box::pin(async { Ok(Vec::new()) })
     }
 
-    fn get_definition(&self, _path: &str, _offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
-        Box::pin(async { Ok(Vec::new()) })
-    }
-
-    fn get_type_definition(
+    fn get_definition(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _offset: u32,
     ) -> ProviderFuture<'_, Vec<TypeLocation>> {
         Box::pin(async { Ok(Vec::new()) })
     }
 
-    fn get_references(&self, _path: &str, _offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
+    fn get_type_definition(
+        &self,
+        _query: &ProviderQuery,
+        _offset: u32,
+    ) -> ProviderFuture<'_, Vec<TypeLocation>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn get_references(
+        &self,
+        _query: &ProviderQuery,
+        _offset: u32,
+    ) -> ProviderFuture<'_, Vec<TypeLocation>> {
         Box::pin(async { Ok(Vec::new()) })
     }
 
     fn get_rename_locations(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _offset: u32,
     ) -> ProviderFuture<'_, Vec<RenameLocation>> {
         Box::pin(async { Ok(Vec::new()) })
@@ -522,7 +565,7 @@ impl TypeProvider for DotTriggerRequiredCompletionProvider {
 
     fn get_signature_help(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _offset: u32,
     ) -> ProviderFuture<'_, Option<SignatureHelp>> {
         Box::pin(async { Ok(None) })
@@ -530,7 +573,7 @@ impl TypeProvider for DotTriggerRequiredCompletionProvider {
 
     fn get_code_actions(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _start_offset: u32,
         _end_offset: u32,
         _diagnostics: &[ProviderDiagnosticContext],
@@ -538,13 +581,16 @@ impl TypeProvider for DotTriggerRequiredCompletionProvider {
         Box::pin(async { Ok(Vec::new()) })
     }
 
-    fn get_semantic_tokens(&self, _path: &str) -> ProviderFuture<'_, Vec<SemanticToken>> {
+    fn get_semantic_tokens(
+        &self,
+        _query: &ProviderQuery,
+    ) -> ProviderFuture<'_, Vec<SemanticToken>> {
         Box::pin(async { Ok(Vec::new()) })
     }
 
     fn get_document_highlights(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _offset: u32,
     ) -> ProviderFuture<'_, Vec<TypeDocumentHighlight>> {
         Box::pin(async { Ok(Vec::new()) })
@@ -552,7 +598,7 @@ impl TypeProvider for DotTriggerRequiredCompletionProvider {
 
     fn get_inlay_hints(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _start_offset: u32,
         _end_offset: u32,
     ) -> ProviderFuture<'_, Vec<InlayHint>> {
@@ -738,7 +784,7 @@ impl TypeProvider for GatedDeclOverlayProvider {
 
     fn get_completions(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _offset: u32,
         _trigger_character: Option<&str>,
     ) -> ProviderFuture<'_, CompletionResult> {
@@ -750,7 +796,11 @@ impl TypeProvider for GatedDeclOverlayProvider {
         })
     }
 
-    fn get_hover(&self, _path: &str, _offset: u32) -> ProviderFuture<'_, Option<HoverInfo>> {
+    fn get_hover(
+        &self,
+        _query: &ProviderQuery,
+        _offset: u32,
+    ) -> ProviderFuture<'_, Option<HoverInfo>> {
         Box::pin(async { Ok(None) })
     }
 
@@ -758,25 +808,33 @@ impl TypeProvider for GatedDeclOverlayProvider {
         Box::pin(async { Ok(Vec::new()) })
     }
 
-    fn get_definition(&self, _path: &str, _offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
-        Box::pin(async { Ok(Vec::new()) })
-    }
-
-    fn get_type_definition(
+    fn get_definition(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _offset: u32,
     ) -> ProviderFuture<'_, Vec<TypeLocation>> {
         Box::pin(async { Ok(Vec::new()) })
     }
 
-    fn get_references(&self, _path: &str, _offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
+    fn get_type_definition(
+        &self,
+        _query: &ProviderQuery,
+        _offset: u32,
+    ) -> ProviderFuture<'_, Vec<TypeLocation>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn get_references(
+        &self,
+        _query: &ProviderQuery,
+        _offset: u32,
+    ) -> ProviderFuture<'_, Vec<TypeLocation>> {
         Box::pin(async { Ok(Vec::new()) })
     }
 
     fn get_rename_locations(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _offset: u32,
     ) -> ProviderFuture<'_, Vec<RenameLocation>> {
         Box::pin(async { Ok(Vec::new()) })
@@ -784,7 +842,7 @@ impl TypeProvider for GatedDeclOverlayProvider {
 
     fn get_signature_help(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _offset: u32,
     ) -> ProviderFuture<'_, Option<SignatureHelp>> {
         Box::pin(async { Ok(None) })
@@ -792,7 +850,7 @@ impl TypeProvider for GatedDeclOverlayProvider {
 
     fn get_code_actions(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _start_offset: u32,
         _end_offset: u32,
         _diagnostics: &[ProviderDiagnosticContext],
@@ -800,13 +858,16 @@ impl TypeProvider for GatedDeclOverlayProvider {
         Box::pin(async { Ok(Vec::new()) })
     }
 
-    fn get_semantic_tokens(&self, _path: &str) -> ProviderFuture<'_, Vec<SemanticToken>> {
+    fn get_semantic_tokens(
+        &self,
+        _query: &ProviderQuery,
+    ) -> ProviderFuture<'_, Vec<SemanticToken>> {
         Box::pin(async { Ok(Vec::new()) })
     }
 
     fn get_document_highlights(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _offset: u32,
     ) -> ProviderFuture<'_, Vec<TypeDocumentHighlight>> {
         Box::pin(async { Ok(Vec::new()) })
@@ -814,7 +875,7 @@ impl TypeProvider for GatedDeclOverlayProvider {
 
     fn get_inlay_hints(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _start_offset: u32,
         _end_offset: u32,
     ) -> ProviderFuture<'_, Vec<InlayHint>> {
@@ -913,10 +974,11 @@ impl TypeProvider for LostContentCompletionProvider {
 
     fn get_completions(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         _offset: u32,
         _trigger_character: Option<&str>,
     ) -> ProviderFuture<'_, CompletionResult> {
+        let path = query.path();
         let path = path.to_string();
         Box::pin(async move {
             self.calls.lock().unwrap().push(MockCall::GetCompletions {
@@ -981,7 +1043,11 @@ impl TypeProvider for LostContentCompletionProvider {
         })
     }
 
-    fn get_hover(&self, _path: &str, _offset: u32) -> ProviderFuture<'_, Option<HoverInfo>> {
+    fn get_hover(
+        &self,
+        _query: &ProviderQuery,
+        _offset: u32,
+    ) -> ProviderFuture<'_, Option<HoverInfo>> {
         Box::pin(async { Ok(None) })
     }
 
@@ -989,25 +1055,33 @@ impl TypeProvider for LostContentCompletionProvider {
         Box::pin(async { Ok(Vec::new()) })
     }
 
-    fn get_definition(&self, _path: &str, _offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
-        Box::pin(async { Ok(Vec::new()) })
-    }
-
-    fn get_type_definition(
+    fn get_definition(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _offset: u32,
     ) -> ProviderFuture<'_, Vec<TypeLocation>> {
         Box::pin(async { Ok(Vec::new()) })
     }
 
-    fn get_references(&self, _path: &str, _offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
+    fn get_type_definition(
+        &self,
+        _query: &ProviderQuery,
+        _offset: u32,
+    ) -> ProviderFuture<'_, Vec<TypeLocation>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn get_references(
+        &self,
+        _query: &ProviderQuery,
+        _offset: u32,
+    ) -> ProviderFuture<'_, Vec<TypeLocation>> {
         Box::pin(async { Ok(Vec::new()) })
     }
 
     fn get_rename_locations(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _offset: u32,
     ) -> ProviderFuture<'_, Vec<RenameLocation>> {
         Box::pin(async { Ok(Vec::new()) })
@@ -1015,7 +1089,7 @@ impl TypeProvider for LostContentCompletionProvider {
 
     fn get_signature_help(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _offset: u32,
     ) -> ProviderFuture<'_, Option<SignatureHelp>> {
         Box::pin(async { Ok(None) })
@@ -1023,7 +1097,7 @@ impl TypeProvider for LostContentCompletionProvider {
 
     fn get_code_actions(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _start_offset: u32,
         _end_offset: u32,
         _diagnostics: &[ProviderDiagnosticContext],
@@ -1031,13 +1105,16 @@ impl TypeProvider for LostContentCompletionProvider {
         Box::pin(async { Ok(Vec::new()) })
     }
 
-    fn get_semantic_tokens(&self, _path: &str) -> ProviderFuture<'_, Vec<SemanticToken>> {
+    fn get_semantic_tokens(
+        &self,
+        _query: &ProviderQuery,
+    ) -> ProviderFuture<'_, Vec<SemanticToken>> {
         Box::pin(async { Ok(Vec::new()) })
     }
 
     fn get_document_highlights(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _offset: u32,
     ) -> ProviderFuture<'_, Vec<TypeDocumentHighlight>> {
         Box::pin(async { Ok(Vec::new()) })
@@ -1045,7 +1122,7 @@ impl TypeProvider for LostContentCompletionProvider {
 
     fn get_inlay_hints(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _start_offset: u32,
         _end_offset: u32,
     ) -> ProviderFuture<'_, Vec<InlayHint>> {

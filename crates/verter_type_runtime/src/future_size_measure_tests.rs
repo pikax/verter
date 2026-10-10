@@ -6,6 +6,7 @@
 //!
 //! Not a gate. Numbers are printed and copied into docs/contributing/gate-performance.md* findings.
 
+use crate::provider_query::ProviderQuery;
 use std::mem::{size_of, size_of_val};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -65,7 +66,7 @@ impl TypeProvider for MeasureMock {
 
     fn get_completions(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _offset: u32,
         _trigger: Option<&str>,
     ) -> ProviderFuture<'_, CompletionResult> {
@@ -77,7 +78,11 @@ impl TypeProvider for MeasureMock {
         })
     }
 
-    fn get_hover(&self, _path: &str, _offset: u32) -> ProviderFuture<'_, Option<HoverInfo>> {
+    fn get_hover(
+        &self,
+        _query: &ProviderQuery,
+        _offset: u32,
+    ) -> ProviderFuture<'_, Option<HoverInfo>> {
         Box::pin(async move { Ok(None) })
     }
 
@@ -86,25 +91,33 @@ impl TypeProvider for MeasureMock {
         Box::pin(async move { Ok(Vec::new()) })
     }
 
-    fn get_definition(&self, _path: &str, _offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
-        Box::pin(async move { Ok(Vec::new()) })
-    }
-
-    fn get_type_definition(
+    fn get_definition(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _offset: u32,
     ) -> ProviderFuture<'_, Vec<TypeLocation>> {
         Box::pin(async move { Ok(Vec::new()) })
     }
 
-    fn get_references(&self, _path: &str, _offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
+    fn get_type_definition(
+        &self,
+        _query: &ProviderQuery,
+        _offset: u32,
+    ) -> ProviderFuture<'_, Vec<TypeLocation>> {
+        Box::pin(async move { Ok(Vec::new()) })
+    }
+
+    fn get_references(
+        &self,
+        _query: &ProviderQuery,
+        _offset: u32,
+    ) -> ProviderFuture<'_, Vec<TypeLocation>> {
         Box::pin(async move { Ok(Vec::new()) })
     }
 
     fn get_rename_locations(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _offset: u32,
     ) -> ProviderFuture<'_, Vec<RenameLocation>> {
         Box::pin(async move { Ok(Vec::new()) })
@@ -112,7 +125,7 @@ impl TypeProvider for MeasureMock {
 
     fn get_signature_help(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _offset: u32,
     ) -> ProviderFuture<'_, Option<SignatureHelp>> {
         Box::pin(async move { Ok(None) })
@@ -120,7 +133,7 @@ impl TypeProvider for MeasureMock {
 
     fn get_code_actions(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _start: u32,
         _end: u32,
         _diagnostics: &[ProviderDiagnosticContext],
@@ -128,13 +141,16 @@ impl TypeProvider for MeasureMock {
         Box::pin(async move { Ok(Vec::new()) })
     }
 
-    fn get_semantic_tokens(&self, _path: &str) -> ProviderFuture<'_, Vec<SemanticToken>> {
+    fn get_semantic_tokens(
+        &self,
+        _query: &ProviderQuery,
+    ) -> ProviderFuture<'_, Vec<SemanticToken>> {
         Box::pin(async move { Ok(Vec::new()) })
     }
 
     fn get_document_highlights(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _offset: u32,
     ) -> ProviderFuture<'_, Vec<TypeDocumentHighlight>> {
         Box::pin(async move { Ok(Vec::new()) })
@@ -142,7 +158,7 @@ impl TypeProvider for MeasureMock {
 
     fn get_inlay_hints(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _start: u32,
         _end: u32,
     ) -> ProviderFuture<'_, Vec<InlayHint>> {
@@ -196,7 +212,10 @@ async fn measure_type_runtime_future_sizes() {
     // Trait-boundary outer sizes (production TypeProvider always boxes).
     let tp: Arc<dyn TypeProvider> = Arc::new(MeasureMock);
     {
-        let fut = tp.get_definition("synthetic.tsx", 0);
+        let fut = tp.get_definition(
+            &crate::provider_query::ProviderQuery::at_engine_surface("synthetic.tsx"),
+            0,
+        );
         report(
             "TypeProvider::get_definition (ProviderFuture)",
             size_of_val(&fut),
@@ -204,7 +223,10 @@ async fn measure_type_runtime_future_sizes() {
         drop(fut);
     }
     {
-        let fut = tp.get_hover("synthetic.tsx", 0);
+        let fut = tp.get_hover(
+            &crate::provider_query::ProviderQuery::at_engine_surface("synthetic.tsx"),
+            0,
+        );
         report(
             "TypeProvider::get_hover (ProviderFuture)",
             size_of_val(&fut),
@@ -212,7 +234,11 @@ async fn measure_type_runtime_future_sizes() {
         drop(fut);
     }
     {
-        let fut = tp.get_completions("synthetic.tsx", 0, None);
+        let fut = tp.get_completions(
+            &crate::provider_query::ProviderQuery::at_engine_surface("synthetic.tsx"),
+            0,
+            None,
+        );
         report(
             "TypeProvider::get_completions (ProviderFuture)",
             size_of_val(&fut),
