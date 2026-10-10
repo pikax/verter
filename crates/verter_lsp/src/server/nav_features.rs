@@ -164,7 +164,10 @@ async fn enrich_v_bind_completion_details(
         ) else {
             continue;
         };
-        if let Ok(Some(info)) = tp.get_hover(&ctx.tsx_path, tsx_offset).await {
+        if let Ok(Some(info)) = tp
+            .get_hover(&ctx.snapshot.provider_query(), tsx_offset)
+            .await
+        {
             // Post-await validation (fail closed): stop enriching against a
             // superseded surface; already-set details came from a live one.
             if !server.provider_context_still_valid(uri, &ctx) {
@@ -223,7 +226,10 @@ async fn handle_hover_attempt(
     if let Some(tp) = &server.type_provider {
         if let Some(vf_ctx) = server.virtual_file_context(uri) {
             if let Some(offset) = vf_ctx.line_index.position_to_offset(position) {
-                if let Ok(Some(info)) = tp.get_hover(&vf_ctx.tsx_path, offset).await {
+                if let Ok(Some(info)) = tp
+                    .get_hover(&vf_ctx.snapshot.provider_query(), offset)
+                    .await
+                {
                     // Post-await validation (fail closed): a hover produced
                     // against a superseded surface must be dropped.
                     if !server.virtual_request_surface_still_valid(uri, &vf_ctx) {
@@ -371,7 +377,10 @@ async fn handle_hover_attempt(
                     &ctx.mapper,
                     &ctx.tsx_line_index,
                 ) {
-                    if let Ok(Some(info)) = tp.get_hover(&ctx.tsx_path, tsx_offset).await {
+                    if let Ok(Some(info)) = tp
+                        .get_hover(&ctx.snapshot.provider_query(), tsx_offset)
+                        .await
+                    {
                         // Post-await validation (fail closed): drop a provider
                         // result produced against a superseded surface.
                         if server.provider_context_still_valid(uri, &ctx) {
@@ -443,19 +452,18 @@ async fn handle_hover_attempt(
                 // spin. A persistently failing provider is a provider
                 // sync/health concern, not something hover may paper over with
                 // invented content.
-                let outcome =
-                    super::provider_recovery::provider_query_with_bounded_recovery(
-                        "hover",
-                        position,
-                        captured_ctx,
-                        tsx_offset,
-                        |tsx_path: String, offset: u32| async move {
-                            tp.get_hover(&tsx_path, offset).await
-                        },
-                        || server.ensure_current_file_synced(uri),
-                        || server.type_provider_context(uri),
-                    )
-                    .await;
+                let outcome = super::provider_recovery::provider_query_with_bounded_recovery(
+                    "hover",
+                    position,
+                    captured_ctx,
+                    tsx_offset,
+                    |query: crate::type_provider::traits::ProviderQuery, offset: u32| async move {
+                        tp.get_hover(&query, offset).await
+                    },
+                    || server.ensure_current_file_synced(uri),
+                    || server.type_provider_context(uri),
+                )
+                .await;
                 tracing::info!(
                     "hover type provider result: {}",
                     match &outcome.value {
@@ -527,8 +535,9 @@ async fn handle_hover_attempt(
                                     "hover: redirecting merged class/style from vue offset {} to {} (tsx offset {})",
                                     carrier_offset, redirect_offset, redirect_tsx
                                 );
-                                    if let Ok(redirect_hover) =
-                                        tp.get_hover(&ctx.tsx_path, redirect_tsx).await
+                                    if let Ok(redirect_hover) = tp
+                                        .get_hover(&ctx.snapshot.provider_query(), redirect_tsx)
+                                        .await
                                     {
                                         // Post-await validation (fail closed): drop the
                                         // provider hover on a superseded surface.
@@ -705,7 +714,7 @@ async fn handle_completion_attempt(
             let tsx_path = vf_ctx.tsx_path.clone();
             if let Some(offset) = vf_ctx.line_index.position_to_offset(position) {
                 if let Ok(result) = tp
-                    .get_completions(&tsx_path, offset, trigger_character)
+                    .get_completions(&vf_ctx.snapshot.provider_query(), offset, trigger_character)
                     .await
                 {
                     // Post-await validation (fail closed): completions produced
@@ -1353,8 +1362,8 @@ async fn handle_completion_attempt(
                     position,
                     ctx,
                     tsx_offset,
-                    |path: String, offset: u32| async move {
-                        tp.get_completions(&path, offset, tp_trigger).await
+                    |query: crate::type_provider::traits::ProviderQuery, offset: u32| async move {
+                        tp.get_completions(&query, offset, tp_trigger).await
                     },
                     || async {
                         match server.type_provider_kind {
@@ -1407,9 +1416,10 @@ async fn handle_completion_attempt(
                                 &ctx.mapper,
                                 &ctx.tsx_line_index,
                             ) {
-                                Some(offset) => {
-                                    tp.get_completions(&ctx.tsx_path, offset, None).await.ok()
-                                }
+                                Some(offset) => tp
+                                    .get_completions(&ctx.snapshot.provider_query(), offset, None)
+                                    .await
+                                    .ok(),
                                 None => None,
                             };
                             if let Some(mut retry_result) = retry_result {
@@ -1579,8 +1589,9 @@ pub(super) async fn handle_completion_resolve(
                                 tower_lsp_server::jsonrpc::ErrorCode::ContentModified,
                             ));
                         };
-                        if let Ok(Some(resolve_result)) =
-                            tp.resolve_completion(provider_path, resolve_data).await
+                        if let Ok(Some(resolve_result)) = tp
+                            .resolve_completion(&snapshot.provider_query(), resolve_data)
+                            .await
                         {
                             if !server.provider_request_surface_still_valid(&carrier_uri, &snapshot)
                             {
