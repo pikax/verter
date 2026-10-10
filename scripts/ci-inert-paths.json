@@ -132,6 +132,26 @@
     "reason": "Reviewed Liquid contract data; no ci.yml lane reads it."
   },
   {
+    "glob": "tests/framework-mdx/MDX0/cases.md",
+    "reason": "Reviewed MDX contract data; no ci.yml lane reads these bytes yet. Executable specs and future products stay outside these entries."
+  },
+  {
+    "glob": "tests/framework-mdx/MDX0/manifest.json",
+    "reason": "Reviewed MDX contract data; no ci.yml lane reads these bytes yet. Executable specs and future products stay outside these entries."
+  },
+  {
+    "glob": "tests/framework-mdx/MDX0/products/mdx-activation-policy.json",
+    "reason": "Reviewed MDX contract data; no ci.yml lane reads these bytes yet. Executable specs and future products stay outside these entries."
+  },
+  {
+    "glob": "tests/framework-mdx/MDX0/products/mdx-capability-matrix.json",
+    "reason": "Reviewed MDX contract data; no ci.yml lane reads these bytes yet. Executable specs and future products stay outside these entries."
+  },
+  {
+    "glob": "tests/framework-mdx/MDX0/products/mdx-version-lock.json",
+    "reason": "Reviewed MDX contract data; no ci.yml lane reads these bytes yet. Executable specs and future products stay outside these entries."
+  },
+  {
     "glob": "tests/jetbrains-baseline/**",
     "reason": "Baseline products; the one the DX harness reads is owned by the dx filter."
   },
