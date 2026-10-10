@@ -796,9 +796,10 @@ export const ESCAPE_HATCHES = Object.freeze([
  * narrow what a lane selects, and the list lives in data
  * (`scripts/ci-inert-paths.json`, every entry with the reason no ci.yml job
  * reads it) rather than in this module: classifying a new tree costs the
- * classifier's own tests, not the every-lane run an edit here triggers. An
- * inert glob may name a family of trees before its first member lands (every
- * framework vertical's contract data under `tests/framework-<name>/`).
+ * classifier's own tests, not the every-lane run an edit here triggers.
+ * Entries name what has been reviewed, not whole families of future trees: a
+ * framework vertical lists its contract data, so an executable spec or a new
+ * product added beside it later still fails the audit until it is classified.
  *
  * Every tracked path a ci.yml job reads by NAME rather than content is out of
  * reach of any path list: `tracked_paths_are_portable` checks the names of

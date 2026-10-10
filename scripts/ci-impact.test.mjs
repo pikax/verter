@@ -744,22 +744,35 @@ test("the audit names a path nothing owns and a filter glob that matches nothing
   ];
   const { unowned, dead, config } = auditSelection(tracked, laneMetadata);
   assert.deepEqual(unowned, ["brand-new-dir/thing.txt"]);
-  // No tracked file matches any inert glob here: an inert glob may name a
-  // family of trees before its first member lands, so only filters are dead.
+  // No tracked file matches any inert glob here, yet none is reported: an
+  // inert glob cannot narrow any lane, so only filter globs are checked.
   assert.deepEqual(dead, ["wasm: scripts/gate-internals.mjs"]);
   assert.deepEqual(config, []);
 });
 
-test("a framework vertical's contract data runs no lane, and classifying a tree is no hatch", () => {
+test("a framework vertical's listed contract data runs no lane, and listing it is no hatch", () => {
   // The shape of a framework vertical's pull request: its architecture page
-  // and the reviewed contract data under tests/framework-<name>/.
+  // and the reviewed contract data it lists as inert.
   const vertical = select([
-    "docs/arch/framework-stimulus.md",
-    "tests/framework-stimulus/STIM0/cases.md",
-    "tests/framework-stimulus/STIM0/products/stimulus-vocabulary.json",
+    "docs/arch/framework-astro.md",
+    "tests/framework-astro/AST0/cases.md",
+    "tests/framework-astro/AST0/corpus/islands/Counter.astro",
+    "tests/framework-astro/AST0/products/astro-capability-matrix.json",
+    "tests/framework-liquid/LIQ0/products/liquid-vocabulary.json",
   ]);
   assert.equal(vertical.impact.full, false, JSON.stringify(vertical.impact.fullReasons));
   assert.deepEqual(gatesOn(vertical.gates), []);
+  // An entry names what was reviewed, never a family of future files: an
+  // executable spec or a new product beside the listed data still needs a
+  // decision, so it forces the fallback (and fails the audit).
+  for (const file of [
+    "tests/framework-astro/AST0/conformance.spec.mjs",
+    "tests/framework-astro/AST0/products/astro-new-product.json",
+    "tests/framework-newcomer/NEW0/manifest.json",
+  ]) {
+    assert.equal(isCiInert(file), false, file);
+    assert.equal(select([file]).impact.everything, true, file);
+  }
   // The inert list is data: editing it runs the classifier's own tests (the
   // js lane), not every lane as an edit to the classifier does.
   const inertEdit = select(["scripts/ci-inert-paths.json"]);
