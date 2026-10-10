@@ -32,7 +32,9 @@ The reviewed contract data lives in `tests/kernel/CFG0/products/`:
 | `configuration-case-table.v1.json` | Cases `CC01`–`CC17`: input, required and forbidden outcome, the rules each case exercises, existing evidence, and the node whose test makes it executable                                                                                                                                                                                          |
 
 Every `successorPath` starts at CFG0. CFG1-owned rows run CFG0, BR0, CFG1.
-The eight ruled consumers insert that prefix ahead of their existing edges.
+The seven receiving consumers insert that prefix ahead of their existing edges.
+UAO0 is a separate CFG1 validation binding. `UAO0-AC-R1` and `UAO0-AC-R2`
+retain `CFG1-AC1`–`CFG1-AC4` as prerequisites.
 UAK0, UAK1 and VID0 rows keep their owners; CFG0 only references them.
 
 ## Envelope v1
@@ -371,7 +373,7 @@ retains authorised dynamic evaluation into a new snapshot (`CR20`). CENV2
 retains secret handles (`CR24`). UAO0 owns executable inventory validation
 and case-table proofs, and never implements a substitute loader.
 
-The receiving consumers must follow CFG1 as well as their existing
+The seven receiving consumers must follow CFG1 as well as their existing
 predecessors. Their existing acceptances consume these prerequisites:
 
 | Receiver | Receiving acceptance       | CFG1 prerequisites                                                         |
@@ -383,7 +385,10 @@ predecessors. Their existing acceptances consume these prerequisites:
 | INT5     | `INT5-AC5`                 | `AC1`, `AC2`, `AC3` for decoded embedded bindings                          |
 | EDOC1    | `EDOC1-AC1`                | `AC1`, `AC2`, `AC3` for embedded-document bindings                         |
 | COXD2    | `COXD2-AC2`                | `AC1`–`AC4` for scoped coexistence choices                                 |
-| UAO0     | `UAO0-AC-R1`, `UAO0-AC-R2` | `AC1`–`AC4` for ownership validation and executable cases                  |
+
+UAO0 is a separate CFG1 validation binding. `UAO0-AC-R1` and `UAO0-AC-R2`
+retain `CFG1-AC1`–`CFG1-AC4` as prerequisites and never implement a substitute
+loader.
 
 Ruling `cfg1-receiving-contract` (2026-10-10) authorises CFG1 after CFG0 and
 BR0, the four acceptances above, and a CFG1 predecessor edge on CENV1C, FWA1,

@@ -371,7 +371,7 @@
       "unit": "Hand-maintained capability matrix",
       "paths": ["packages/framework-conformance-harness/evidence/capability-matrix.tsv"],
       "shape": "34 rows keyed by cell_id; display framework column; untagged compatibility_domain (core@3.6.0-rc.3, svelte@5.56.8, 'anything other than ...'); target_disposition; target_maturity; owner and acceptance_id naming retired program blocks",
-      "disposition": "displaced as an authority (VIM-D04). Not a seed: FCH1 carries VIM-T05, which makes the TSV a rendered consumer or deletes it after VIM1 renders the matrix. FCH1-AC3 does not state that cutover"
+      "disposition": "displaced as an authority (VIM-D04). Not a seed: FCH1-AC5, authorised by ruling fch1-matrix-cutover-acceptance (2026-10-10) and recorded in VIM-T05, makes the TSV a rendered consumer or deletes it after VIM1-AC-R2. FCH1-AC3 does not state that cutover"
     },
     {
       "id": "G02",

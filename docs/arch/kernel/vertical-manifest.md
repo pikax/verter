@@ -99,8 +99,8 @@ There is no vertical manifest. The facts it will hold live in nine places:
 cites by path and digest; `G08` and `G09` are vocabularies a manifest
 references by id. `G06` and `G07` keep their recorded owners. `G01` stops
 being an authority (`VIM-D04`): VIM1 renders the matrix under `verticals/`.
-FCH1 follows VIM1 and its charter path contains the harness TSV. No FCH1
-acceptance states the cutover. `FCH1-AC3` joins coverage onto
+FCH1 follows VIM1 and its charter path contains the harness TSV. `FCH1-AC3`
+does not state the cutover. It joins coverage onto
 `tests/framework-<f>/<P>0/products/*-capability-matrix.json` and can pass
 while the TSV stays hand-maintained, so it is not the receiving acceptance.
 `VIM-T05` records receiving acceptance `FCH1-AC5`, authorised by ruling
