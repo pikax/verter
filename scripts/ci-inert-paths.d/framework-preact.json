@@ -1,0 +1,10 @@
+[
+  {
+    "glob": "tests/framework-preact/PRE0/**/*.json",
+    "reason": "Reviewed Preact contract data; no ci.yml lane reads these bytes yet. PRE1-ACV removes this entry when its validator lands."
+  },
+  {
+    "glob": "tests/framework-preact/PRE0/*.md",
+    "reason": "Reviewed Preact contract inventory; no ci.yml lane reads these bytes yet. PRE1-ACV removes this entry when its validator lands."
+  }
+]

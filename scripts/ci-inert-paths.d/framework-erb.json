@@ -1,0 +1,6 @@
+[
+  {
+    "glob": "tests/framework-erb/ERB0/**",
+    "reason": "Reviewed ERB contract data and deferred case specifications; no ci.yml job consumes them until the grammar validator lands."
+  }
+]
