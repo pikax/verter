@@ -40,6 +40,22 @@ Exact-source controls for HTX1-ACV (static authored syntax only):
 | 2.0.11 nearer non-nullish keys retain their values over ancestor keys in all four object-merge rules. Authored JSON controls for `hx-vals`, `hx-headers` and `hx-request` retain false, 0 and empty string; a nearer `n=2` retains 2 over ancestor `n=1`. | two-object-merge-non-nullish-precedence | A truthiness-based fill or unconditional ancestor overwrite incorrectly replaces supported non-nullish nearer values. JavaScript-derived `hx-vars` values remain unknown under the same source rule. |
 | 4.0.0 `hx-swap="innerHTML ignoreTitle:true"` admits the `ignoreTitle` HCON modifier from `#parseSwapSpec`; `#swap` consumes it. Controls with `ignoreTitle:false` or no modifier retain the same strategy and other authored modifiers. | four-ignore-title-modifier-missing | Omitting `ignoreTitle` from the pinned modifier inventory rejects supported authored swap syntax. This checks grammar membership, never document-title mutation or a live swap. |
 
+Recursive selector controls use 2.0.11 and are repeated independently for
+`hx-include`, `hx-indicator` and `hx-disabled-elt`: substitute each spelling
+for `ATTR` below. Ordinary `input` elements with ids `a`, `b` and `c` are
+present in the same document; no element named `inherit` is present. The source
+is the integrity-pinned `findAttributeTargets` and its three consumers.
+HTX2 receives selector bindings; HTX4 receives each authored contribution's
+provenance. These controls describe authored target populations, not requests,
+indicator classes or disabled-state changes.
+
+| Clean control | Planted twin | Expected failure reason |
+| --- | --- | --- |
+| `<main ATTR="#a"><button ATTR="inherit, #b"></button></main>` retains both the nearer `#b` and ancestor `#a` contributions. Whitespace around the comma-delimited whole `inherit` token also admits the append. | two-selector-inherit-nearest-only | Nearest-only resolution loses `#a`; treating `inherit` solely as an ordinary CSS selector omits the supported recursive append. |
+| The same parent with `<button ATTR="#b">` retains only `#b`. | two-selector-without-inherit-appends | Without the whole `inherit` token, the nearer authored value replaces the ancestor's targets; implicit closest-value lookup alone does not accumulate them. |
+| `<main ATTR="find input"><input id="a"><button ATTR="inherit, #b"></button></main>` retains `#b` plus `#a`: the recursive call evaluates `find input` from `main`. As an unaffected control, a button without its own `ATTR` evaluates the inherited `find input` from that button, which has no input descendant. | two-selector-inherit-relative-origin | Reusing the button as the recursive evaluation element loses the ancestor-relative `#a` contribution; switching every implicit lookup to the ancestor also changes the unaffected no-local-value control. |
+| `<section ATTR="#c"><main ATTR="inherit, #a"><button ATTR="inherit, #b"></button></main></section>` retains `#b`, `#a` and `#c`, with their separate authored provenance. | two-selector-inherit-recursion-stops | A single parent append loses `#c`; each recursive ancestor value can itself request another append. |
+
 These controls compare authored claims and regions, never handler execution,
 history restoration, response observation or live swaps. The sources are the
 integrity-pinned `dist/htmx.js` functions named in the vocabulary entries.

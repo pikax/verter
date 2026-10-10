@@ -37,7 +37,11 @@
         "four-status-invalid-suffix",
         "two-object-merge-nullish-precedence",
         "two-object-merge-non-nullish-precedence",
-        "four-ignore-title-modifier-missing"
+        "four-ignore-title-modifier-missing",
+        "two-selector-inherit-nearest-only",
+        "two-selector-without-inherit-appends",
+        "two-selector-inherit-relative-origin",
+        "two-selector-inherit-recursion-stops"
       ]
     },
     {

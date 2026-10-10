@@ -67,6 +67,18 @@ non-null value. `unset` terminates the merge with null. JavaScript values remain
 unknown and are never evaluated. The 4.0.0 swap grammar includes
 the HCON `ignoreTitle` modifier; recording it does not model title changes.
 
+In 2.0.11, `hx-include`, `hx-indicator` and `hx-disabled-elt` share
+`findAttributeTargets`. After closest-value lookup, a comma-delimited whole
+`inherit` token recursively appends the next authored ancestor's targets to
+the nearer targets. Without that token, a nearer value replaces ancestor
+targets. Relative selectors in each recursive call use that ancestor as their
+evaluation element; ordinary implicit lookup still evaluates from the initial
+element. HTX2 records the selector bindings and HTX4 retains each contribution's
+provenance. The [official include example](https://htmx.org/attributes/hx-include/)
+illustrates additive syntax; the pinned source determines the exact rule.
+`cases.md` hands additive, replacement, ancestor-relative and multi-ancestor
+controls to HTX1-ACV. None requires executing htmx.
+
 The handler grammars also differ: 2.0.11 recognizes event-suffixed colon and
 dash forms but ignores bare `hx-on`. 4.0.0 admits bare `hx-on="click -> code"`
 and event suffixes using the configured meta character (colon by default);

@@ -71,8 +71,9 @@
             "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
             "path": "dist/htmx.js"
           },
-          "inheritance": "implicit; nearest effective authored ancestor, subject to hx-disinherit/hx-inherit",
-          "value": "authored value decoded by the pinned reference; never evaluated"
+          "inheritance": "implicit closest-value lookup via getClosestAttributeValue, subject to hx-disinherit/hx-inherit; findAttributeTargets resolves the nearer selector targets first, then a whole inherit token at the start/end or surrounded by commas (allowing whitespace) recursively appends targets from the next ancestor carrying this attribute; each recursive call uses that ancestor as its evaluation element for relative selectors; without inherit, the nearer value replaces ancestor targets; the exact value 'this' resolves the closest element carrying the attribute via findThisElement; only static authored targets and provenance are recorded, never runtime effects",
+          "value": "selector list with optional whole-token inherit for recursive ancestor-target append; authored selectors decoded by the pinned reference; never executed",
+          "inheritanceSource": "findAttributeTargets, getClosestAttributeValue, querySelectorAllExt and findThisElement"
         },
         {
           "name": "hx-disinherit",
@@ -167,8 +168,9 @@
             "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
             "path": "dist/htmx.js"
           },
-          "inheritance": "implicit; nearest effective authored ancestor, subject to hx-disinherit/hx-inherit",
-          "value": "authored value decoded by the pinned reference; never evaluated"
+          "inheritance": "implicit closest-value lookup via getClosestAttributeValue, subject to hx-disinherit/hx-inherit; findAttributeTargets resolves the nearer selector targets first, then a whole inherit token at the start/end or surrounded by commas (allowing whitespace) recursively appends targets from the next ancestor carrying this attribute; each recursive call uses that ancestor as its evaluation element for relative selectors; without inherit, the nearer value replaces ancestor targets; the exact value 'this' resolves the closest element carrying the attribute via findThisElement; only static authored targets and provenance are recorded, never runtime effects",
+          "value": "selector list with optional whole-token inherit for recursive ancestor-target append; authored selectors decoded by the pinned reference; never executed",
+          "inheritanceSource": "findAttributeTargets, getClosestAttributeValue, querySelectorAllExt and findThisElement"
         },
         {
           "name": "hx-indicator",
@@ -179,8 +181,9 @@
             "integrity": "sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==",
             "path": "dist/htmx.js"
           },
-          "inheritance": "implicit; nearest effective authored ancestor, subject to hx-disinherit/hx-inherit",
-          "value": "authored value decoded by the pinned reference; never evaluated"
+          "inheritance": "implicit closest-value lookup via getClosestAttributeValue, subject to hx-disinherit/hx-inherit; findAttributeTargets resolves the nearer selector targets first, then a whole inherit token at the start/end or surrounded by commas (allowing whitespace) recursively appends targets from the next ancestor carrying this attribute; each recursive call uses that ancestor as its evaluation element for relative selectors; without inherit, the nearer value replaces ancestor targets; the exact value 'this' resolves the closest element carrying the attribute via findThisElement; only static authored targets and provenance are recorded, never runtime effects",
+          "value": "selector list with optional whole-token inherit for recursive ancestor-target append; authored selectors decoded by the pinned reference; never executed",
+          "inheritanceSource": "findAttributeTargets, getClosestAttributeValue, querySelectorAllExt and findThisElement"
         },
         {
           "name": "hx-inherit",
