@@ -1374,3 +1374,84 @@ fn legacy_manifest_membership_survives_the_first_journal_publish() {
         assert!(sources.contains(&expected), "{expected} kept: {sources:?}");
     }
 }
+
+// ── publication stamps: the authority a query settles out-of-band bytes on ──
+
+/// Publish `content` as the IDE companion of `A.vue` through `store`.
+fn publish_ide(store: &CarrierPublishStore, user_tree: &tempfile::TempDir, content: &str) {
+    let batch = PublishBatch::from_snapshot(
+        user_tree.path().to_string_lossy().to_string(),
+        snapshot(
+            "d:/ws/tsconfig.json",
+            vec![file(
+                "d:/ws/src/A.vue.tsx",
+                "d:/ws/src/A.vue",
+                SnapshotRole::CarrierIde,
+                ScriptKind::Tsx,
+                content,
+                None,
+                1,
+            )],
+        ),
+        None,
+        OwnedSetScope::SourceDelta,
+    );
+    store.publish_batch(&batch).expect("publish");
+}
+
+fn attested(publications: &CarrierStorePublications, path: &str, bytes: &str) -> u64 {
+    use verter_type_runtime::provider_query::{Attestation, SurfacePublications};
+    match publications.attest(path, bytes) {
+        Attestation::Attested(published) => published.epoch,
+        other => panic!("{path} not attested: {other:?}"),
+    }
+}
+
+/// A row's stamp moves on every publication that changes its bytes — by any
+/// writer of the store — and never returns to an earlier value, so an answer
+/// dispatched before a change that later changes back is still detected. An
+/// identical republication keeps it: the plugin serves the same bytes.
+#[test]
+fn publication_stamps_are_publisher_authoritative_and_never_reused() {
+    use verter_type_runtime::provider_query::{Attestation, SurfacePublications};
+    let (this_process, user_tree) = fresh_store();
+    // Another LSP process over the same workspace store.
+    let other_process =
+        CarrierPublishStore::open(HOST_VERSION, &user_tree.path().to_string_lossy());
+    let publications = CarrierStorePublications::open(this_process.workspace_dir());
+
+    assert_eq!(
+        publications.attest("d:/ws/src/A.vue.tsx", "A"),
+        Attestation::Unpublished
+    );
+    publish_ide(&this_process, &user_tree, "A");
+    let dispatched_at = publications
+        .position()
+        .expect("a published store has a position");
+    let first = attested(&publications, "d:/ws/src/A.vue.tsx", "A");
+    assert!(first <= dispatched_at.epoch);
+    // The plugin serves an IDE companion under its source identity too.
+    assert_eq!(attested(&publications, "d:/ws/src/A.vue", "A"), first);
+
+    publish_ide(&this_process, &user_tree, "A");
+    assert_eq!(
+        attested(&publications, "d:/ws/src/A.vue.tsx", "A"),
+        first,
+        "an identical republication keeps the stamp"
+    );
+
+    // The other writer publishes B; this process records nothing.
+    publish_ide(&other_process, &user_tree, "B");
+    assert_eq!(
+        publications.attest("d:/ws/src/A.vue.tsx", "A"),
+        Attestation::Contradicted
+    );
+    // …and A again.
+    publish_ide(&other_process, &user_tree, "A");
+    let back = attested(&publications, "d:/ws/src/A.vue.tsx", "A");
+    assert!(
+        back > dispatched_at.epoch,
+        "A→B→A ends at a publication after the dispatch position ({back} vs {})",
+        dispatched_at.epoch
+    );
+}

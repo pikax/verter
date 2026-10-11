@@ -1,0 +1,1499 @@
+{
+  "id": "formatter-inventory",
+  "schema": 1,
+  "contractNode": "FMK0",
+  "describesHead": {
+    "landingTitle": "docs(arch): define embedded codecs and exact authored map ownership (#838)",
+    "date": "2026-10-10"
+  },
+  "currentOwner": "framework-shaped host/session registries and untagged public boundaries",
+  "finalOwner": "typed immutable universal catalog and demand-selected kernel services",
+  "companionCaseTable": "tests/kernel/FMK0/products/formatter-case-table.v1.json",
+  "contractDocument": "docs/arch/kernel/formatter.md",
+  "outcomes": [
+    {
+      "id": "FM-O01",
+      "outcome": "Compatibility/options/corpora catalog, exact current-route lock and gate wiring",
+      "rules": "FD04–FD07",
+      "implementationOwner": "FMT0",
+      "successorPath": ["FMK0", "FMT0"],
+      "receivingAcceptance": "FMT0-AC2"
+    },
+    {
+      "id": "FM-O02",
+      "outcome": "Bounded-work vocabulary, fixtures/action manifest and performance evidence-run registration",
+      "rules": "FD19",
+      "implementationOwner": "FMT0",
+      "successorPath": ["FMK0", "FMT0"],
+      "receivingAcceptance": "FMT0-AC3"
+    },
+    {
+      "id": "FM-O03",
+      "outcome": "Opaque format-section and captured Prettier config/ignore/override translation with provenance",
+      "rules": "FD04",
+      "implementationOwner": "FCFG0",
+      "successorPath": ["FMK0", "FMT0", "FCFG0"],
+      "receivingAcceptance": "FCFG0-AC1"
+    },
+    {
+      "id": "FM-O04",
+      "outcome": "Private coordinate/provenance foundation and module reservations",
+      "rules": "FD09",
+      "implementationOwner": "FMT1P",
+      "successorPath": ["FMK0", "FMT0", "FMT1P"],
+      "receivingAcceptance": "FMT1P-AC2"
+    },
+    {
+      "id": "FM-O05",
+      "outcome": "Doc algebra and deterministic renderer",
+      "rules": "FD10",
+      "implementationOwner": "FMT1",
+      "successorPath": ["FMK0", "FMT0", "FMT1P", "FMT1"],
+      "receivingAcceptance": "FMT1-AC1"
+    },
+    {
+      "id": "FM-O06",
+      "outcome": "Carrier authored-view/block inventory and recovery islands",
+      "rules": "FD08–FD11",
+      "implementationOwner": "FMT1A",
+      "successorPath": ["FMK0", "FMT0", "FMT1P", "FMT1A"],
+      "receivingAcceptance": "FMT1A-AC1"
+    },
+    {
+      "id": "FM-O07",
+      "outcome": "Exact bounded minimal edit derivation",
+      "rules": "FD13",
+      "implementationOwner": "FMT1B",
+      "successorPath": ["FMK0", "FMT0", "FMT1P", "FMT1", "FMT1B"],
+      "receivingAcceptance": "FMT1B-AC1"
+    },
+    {
+      "id": "FM-O08",
+      "outcome": "Authored-to-formatted map authority",
+      "rules": "FD14",
+      "implementationOwner": "FMT1C",
+      "successorPath": ["FMK0", "FMT0", "FMT1P", "FMT1", "FMT1C"],
+      "receivingAcceptance": "FMT1C-AC1"
+    },
+    {
+      "id": "FM-O09",
+      "outcome": "Safe authored range expansion and containment",
+      "rules": "FD15",
+      "implementationOwner": "FMT1D",
+      "successorPath": ["FMK0", "FMT0", "FMT1P", "FMT1", "FMT1C", "FMT1D"],
+      "receivingAcceptance": "FMT1D-AC1"
+    },
+    {
+      "id": "FM-O10",
+      "outcome": "Cursor projection and affinity",
+      "rules": "FD16",
+      "implementationOwner": "FMT1E",
+      "successorPath": ["FMK0", "FMT0", "FMT1P", "FMT1", "FMT1C", "FMT1E"],
+      "receivingAcceptance": "FMT1E-AC1"
+    },
+    {
+      "id": "FM-O11",
+      "outcome": "JavaScript printer contribution",
+      "rules": "FD12",
+      "implementationOwner": "FMT2",
+      "successorPath": ["FMK0", "FMT0", "FMT1P", "FMT1", "FMT1C", "FMT1D", "FMT2"],
+      "receivingAcceptance": "FMT2-AC1"
+    },
+    {
+      "id": "FM-O12",
+      "outcome": "TypeScript printer extension",
+      "rules": "FD12",
+      "implementationOwner": "FMT2T",
+      "successorPath": ["FMK0", "FMT0", "FMT1P", "FMT1", "FMT1C", "FMT1D", "FMT2", "FMT2T"],
+      "receivingAcceptance": "FMT2T-AC1"
+    },
+    {
+      "id": "FM-O13",
+      "outcome": "JSX printer extension",
+      "rules": "FD12",
+      "implementationOwner": "FMT2X",
+      "successorPath": ["FMK0", "FMT0", "FMT1P", "FMT1", "FMT1C", "FMT1D", "FMT2", "FMT2X"],
+      "receivingAcceptance": "FMT2X-AC1"
+    },
+    {
+      "id": "FM-O14",
+      "outcome": "TSX composition of existing TypeScript and JSX rules",
+      "rules": "FD12",
+      "implementationOwner": "FMT2TX",
+      "successorPath": [
+        "FMK0",
+        "FMT0",
+        "FMT1P",
+        "FMT1",
+        "FMT1C",
+        "FMT1D",
+        "FMT2",
+        "FMT2T",
+        "FMT2TX"
+      ],
+      "receivingAcceptance": "FMT2TX-AC1"
+    },
+    {
+      "id": "FM-O15",
+      "outcome": "CSS printer contribution",
+      "rules": "FD12",
+      "implementationOwner": "FMTC0",
+      "successorPath": ["FMK0", "FMT0", "FMT1P", "FMT1", "FMT1C", "FMT1D", "FMTC0"],
+      "receivingAcceptance": "FMTC0-AC1"
+    },
+    {
+      "id": "FM-O16",
+      "outcome": "SCSS printer extension",
+      "rules": "FD12",
+      "implementationOwner": "FMTCS0",
+      "successorPath": ["FMK0", "FMT0", "FMT1P", "FMT1", "FMT1C", "FMT1D", "FMTC0", "FMTCS0"],
+      "receivingAcceptance": "FMTCS0-AC1"
+    },
+    {
+      "id": "FM-O17",
+      "outcome": "Less printer extension",
+      "rules": "FD12",
+      "implementationOwner": "FMTCL0",
+      "successorPath": ["FMK0", "FMT0", "FMT1P", "FMT1", "FMT1C", "FMT1D", "FMTC0", "FMTCL0"],
+      "receivingAcceptance": "FMTCL0-AC1"
+    },
+    {
+      "id": "FM-O18",
+      "outcome": "Neutral HTML view/printer contribution",
+      "rules": "FD12",
+      "implementationOwner": "FMTH0",
+      "successorPath": ["FMK0", "FMT0", "FMT1P", "FMT1", "FMT1C", "FMT1D", "FMTH0"],
+      "receivingAcceptance": "FMTH0-AC1"
+    },
+    {
+      "id": "FM-O19",
+      "outcome": "Vue carrier view/printer contribution",
+      "rules": "FD12",
+      "implementationOwner": "FMTV0",
+      "successorPath": [
+        "FMK0",
+        "FMT0",
+        "FMT1P",
+        "FMT1",
+        "FMT1C",
+        "FMT1D",
+        "FMT2",
+        "FMT2T",
+        "FMT2TX",
+        "FMTV0"
+      ],
+      "receivingAcceptance": "FMTV0-AC1"
+    },
+    {
+      "id": "FM-O20",
+      "outcome": "Svelte carrier view/printer contribution",
+      "rules": "FD12",
+      "implementationOwner": "FMTS0",
+      "successorPath": [
+        "FMK0",
+        "FMT0",
+        "FMT1P",
+        "FMT1",
+        "FMT1C",
+        "FMT1D",
+        "FMT2",
+        "FMT2T",
+        "FMT2TX",
+        "FMTS0"
+      ],
+      "receivingAcceptance": "FMTS0-AC1"
+    },
+    {
+      "id": "FM-O21",
+      "outcome": "Pug view/printer preserving significant indentation and expressions",
+      "rules": "FD11–FD12",
+      "implementationOwner": "DIAL4",
+      "successorPath": ["FMK0", "DIAL4"],
+      "receivingAcceptance": "DIAL4-AC2"
+    },
+    {
+      "id": "FM-O22",
+      "outcome": "Unique formatter service, composition, demand and cache authority",
+      "rules": "FD01–FD03, FD12, FD18",
+      "implementationOwner": "FMT3C",
+      "successorPath": ["FMK0", "FMT0", "FMT1P", "FMT1", "FMT1C", "FMT1D", "FMTH0", "FMT3C"],
+      "receivingAcceptance": "FMT3C-AC1"
+    },
+    {
+      "id": "FM-O23",
+      "outcome": "Private-to-Rust protocol geometry, outcome and dormant service adapter",
+      "rules": "FD13–FD16",
+      "implementationOwner": "FMT4P",
+      "successorPath": [
+        "FMK0",
+        "FMT0",
+        "FMT1P",
+        "FMT1",
+        "FMT1C",
+        "FMT1D",
+        "FMTH0",
+        "FMT3C",
+        "FMT4P"
+      ],
+      "receivingAcceptance": "FMT4P-AC1"
+    },
+    {
+      "id": "FM-O24",
+      "outcome": "Dormant LSP negotiated-encoding adapter",
+      "rules": "FD13–FD16",
+      "implementationOwner": "FMT4L",
+      "successorPath": [
+        "FMK0",
+        "FMT0",
+        "FMT1P",
+        "FMT1",
+        "FMT1C",
+        "FMT1D",
+        "FMTH0",
+        "FMT3C",
+        "FMT4P",
+        "FMT4L"
+      ],
+      "receivingAcceptance": "FMT4L-AC1"
+    },
+    {
+      "id": "FM-O25",
+      "outcome": "Sole strict UTF-16 range/cursor conversion and private cursor caller/consumer",
+      "rules": "FD15–FD16",
+      "implementationOwner": "FMT4F",
+      "successorPath": [
+        "FMK0",
+        "FMT0",
+        "FMT1P",
+        "FMT1",
+        "FMT1C",
+        "FMT1D",
+        "FMTH0",
+        "FMT3C",
+        "FMT4P",
+        "FMT4F"
+      ],
+      "receivingAcceptance": "FMT4F-AC1"
+    },
+    {
+      "id": "FM-O26",
+      "outcome": "NAPI public adapter",
+      "rules": "FD03, FD15–FD16",
+      "implementationOwner": "FMT4N",
+      "successorPath": [
+        "FMK0",
+        "FMT0",
+        "FMT1P",
+        "FMT1",
+        "FMT1C",
+        "FMT1D",
+        "FMTH0",
+        "FMT3C",
+        "FMT4P",
+        "FMT4F",
+        "FMT4N"
+      ],
+      "receivingAcceptance": "FMT4N-AC1"
+    },
+    {
+      "id": "FM-O27",
+      "outcome": "WASM public adapter",
+      "rules": "FD03, FD15–FD16",
+      "implementationOwner": "FMT4W",
+      "successorPath": [
+        "FMK0",
+        "FMT0",
+        "FMT1P",
+        "FMT1",
+        "FMT1C",
+        "FMT1D",
+        "FMTH0",
+        "FMT3C",
+        "FMT4P",
+        "FMT4F",
+        "FMT4W"
+      ],
+      "receivingAcceptance": "FMT4W-AC1"
+    },
+    {
+      "id": "FM-O28",
+      "outcome": "MCP public adapter without cursor cell",
+      "rules": "FD03, FD15",
+      "implementationOwner": "FMT4M",
+      "successorPath": [
+        "FMK0",
+        "FMT0",
+        "FMT1P",
+        "FMT1",
+        "FMT1C",
+        "FMT1D",
+        "FMTH0",
+        "FMT3C",
+        "FMT4P",
+        "FMT4M"
+      ],
+      "receivingAcceptance": "FMT4M-AC1"
+    },
+    {
+      "id": "FM-O29",
+      "outcome": "Atomic LSP document-route switch and whitespace-only retirement",
+      "rules": "FD01",
+      "implementationOwner": "FMT3",
+      "successorPath": [
+        "FMK0",
+        "FMT0",
+        "FMT1P",
+        "FMT1",
+        "FMT1C",
+        "FMT1D",
+        "FMTH0",
+        "FMT3C",
+        "FMT4P",
+        "FMT4L",
+        "FMT3"
+      ],
+      "receivingAcceptance": "FMT3-AC3"
+    },
+    {
+      "id": "FM-O30",
+      "outcome": "Cross-surface conformance and promotion, without implementation/deletion",
+      "rules": "FD17",
+      "implementationOwner": "FMT4",
+      "successorPath": [
+        "FMK0",
+        "FMT0",
+        "FMT1P",
+        "FMT1",
+        "FMT1C",
+        "FMT1D",
+        "FMTH0",
+        "FMT3C",
+        "FMT4P",
+        "FMT4L",
+        "FMT3",
+        "FMT4"
+      ],
+      "receivingAcceptance": "FMT4-AC1"
+    },
+    {
+      "id": "FM-O31",
+      "outcome": "Executable ownership validator",
+      "rules": "All inventory rows",
+      "implementationOwner": "UAP0",
+      "successorPath": ["FMK0", "UAP0"],
+      "receivingAcceptance": "UAP0-AC-R1"
+    },
+    {
+      "id": "FM-O32",
+      "outcome": "Architecture fixtures: unique outer/embedded ownership, truthful options, separate action maps",
+      "rules": "FD01, FD04–FD07, FD14",
+      "implementationOwner": "UAP0",
+      "successorPath": ["FMK0", "UAP0"],
+      "receivingAcceptance": "UAP0-AC2"
+    }
+  ],
+  "consumers": [
+    {
+      "id": "FM-C01",
+      "consumer": "Formatter implementation lock consumes the vocabulary and classification schema",
+      "kind": "contract",
+      "implementationOwner": "FMT0",
+      "successorPath": ["FMK0", "FMT0"],
+      "receivingAcceptance": "FMT0-AC2"
+    },
+    {
+      "id": "FM-C02",
+      "consumer": "Config translator consumes captured CFG0 inputs and the locked options",
+      "kind": "implementation",
+      "implementationOwner": "FCFG0",
+      "successorPath": ["FMK0", "FMT0", "FCFG0"],
+      "receivingAcceptance": "FCFG0-AC2"
+    },
+    {
+      "id": "FM-C03",
+      "consumer": "Pug contributes to the existing authority, without a second renderer/map",
+      "kind": "implementation",
+      "implementationOwner": "DIAL4",
+      "successorPath": ["FMK0", "DIAL4"],
+      "receivingAcceptance": "DIAL4-AC1"
+    },
+    {
+      "id": "FM-C04",
+      "consumer": "Public contract decision consumes per-surface formatter truth, no blanket private parity",
+      "kind": "contract",
+      "implementationOwner": "PUB0",
+      "successorPath": ["FMK0", "PUB0"],
+      "receivingAcceptance": "PUB0-AC1"
+    },
+    {
+      "id": "FM-C05",
+      "consumer": "Manifest compiler renders deterministic formatter capability/contribution rows",
+      "kind": "implementation",
+      "implementationOwner": "VIM1",
+      "successorPath": ["FMK0", "VIM1"],
+      "receivingAcceptance": "VIM1-AC2"
+    },
+    {
+      "id": "FM-C06",
+      "consumer": "Public family lock reconciles formatter architecture and owns validator/fixtures",
+      "kind": "validation",
+      "implementationOwner": "UAP0",
+      "successorPath": ["FMK0", "UAP0"],
+      "receivingAcceptance": "UAP0-AC-R1"
+    },
+    {
+      "id": "FM-C07",
+      "consumer": "Authored view consumes accepted parser source/recovery artifacts",
+      "kind": "implementation",
+      "implementationOwner": "FMT1A",
+      "successorPath": ["FMK0", "FMT0", "FMT1P", "FMT1A"],
+      "receivingAcceptance": "FMT1A-AC3"
+    },
+    {
+      "id": "FM-C08",
+      "consumer": "Renderer consumes shared Doc and provenance carriers, no source parse",
+      "kind": "implementation",
+      "implementationOwner": "FMT1",
+      "successorPath": ["FMK0", "FMT0", "FMT1P", "FMT1"],
+      "receivingAcceptance": "FMT1-AC2"
+    },
+    {
+      "id": "FM-C09",
+      "consumer": "Edit derivation consumes authored/rendered bytes from the same request",
+      "kind": "implementation",
+      "implementationOwner": "FMT1B",
+      "successorPath": ["FMK0", "FMT0", "FMT1P", "FMT1", "FMT1B"],
+      "receivingAcceptance": "FMT1B-AC1"
+    },
+    {
+      "id": "FM-C10",
+      "consumer": "Map construction joins authored/rendered IDs, no separate token authority",
+      "kind": "implementation",
+      "implementationOwner": "FMT1C",
+      "successorPath": ["FMK0", "FMT0", "FMT1P", "FMT1", "FMT1C"],
+      "receivingAcceptance": "FMT1C-AC1"
+    },
+    {
+      "id": "FM-C11",
+      "consumer": "Range expansion consumes view/map, no local geometry fork",
+      "kind": "implementation",
+      "implementationOwner": "FMT1D",
+      "successorPath": ["FMK0", "FMT0", "FMT1P", "FMT1", "FMT1C", "FMT1D"],
+      "receivingAcceptance": "FMT1D-AC4"
+    },
+    {
+      "id": "FM-C12",
+      "consumer": "Cursor queries consume shared map/edit indexes",
+      "kind": "implementation",
+      "implementationOwner": "FMT1E",
+      "successorPath": ["FMK0", "FMT0", "FMT1P", "FMT1", "FMT1C", "FMT1E"],
+      "receivingAcceptance": "FMT1E-AC4"
+    },
+    {
+      "id": "FM-C13",
+      "consumer": "Service aggregates carrier/embedded contributions and owns cache admission",
+      "kind": "implementation",
+      "implementationOwner": "FMT3C",
+      "successorPath": ["FMK0", "FMT0", "FMT1P", "FMT1", "FMT1C", "FMT1D", "FMTH0", "FMT3C"],
+      "receivingAcceptance": "FMT3C-AC2"
+    },
+    {
+      "id": "FM-C14",
+      "consumer": "Rust foundation consumes service result once and validates checked Span basis",
+      "kind": "implementation",
+      "implementationOwner": "FMT4P",
+      "successorPath": [
+        "FMK0",
+        "FMT0",
+        "FMT1P",
+        "FMT1",
+        "FMT1C",
+        "FMT1D",
+        "FMTH0",
+        "FMT3C",
+        "FMT4P"
+      ],
+      "receivingAcceptance": "FMT4P-AC6"
+    },
+    {
+      "id": "FM-C15",
+      "consumer": "LSP adapter consumes foundation once and uses authored LineIndex",
+      "kind": "implementation",
+      "implementationOwner": "FMT4L",
+      "successorPath": [
+        "FMK0",
+        "FMT0",
+        "FMT1P",
+        "FMT1",
+        "FMT1C",
+        "FMT1D",
+        "FMTH0",
+        "FMT3C",
+        "FMT4P",
+        "FMT4L"
+      ],
+      "receivingAcceptance": "FMT4L-AC4"
+    },
+    {
+      "id": "FM-C16",
+      "consumer": "UTF-16 adapter consumes private authored/formatted snapshots",
+      "kind": "implementation",
+      "implementationOwner": "FMT4F",
+      "successorPath": [
+        "FMK0",
+        "FMT0",
+        "FMT1P",
+        "FMT1",
+        "FMT1C",
+        "FMT1D",
+        "FMTH0",
+        "FMT3C",
+        "FMT4P",
+        "FMT4F"
+      ],
+      "receivingAcceptance": "FMT4F-AC2"
+    },
+    {
+      "id": "FM-C17",
+      "consumer": "NAPI consumes the shared UTF-16 adapter",
+      "kind": "implementation",
+      "implementationOwner": "FMT4N",
+      "successorPath": [
+        "FMK0",
+        "FMT0",
+        "FMT1P",
+        "FMT1",
+        "FMT1C",
+        "FMT1D",
+        "FMTH0",
+        "FMT3C",
+        "FMT4P",
+        "FMT4F",
+        "FMT4N"
+      ],
+      "receivingAcceptance": "FMT4N-AC3"
+    },
+    {
+      "id": "FM-C18",
+      "consumer": "WASM consumes the shared UTF-16 adapter",
+      "kind": "implementation",
+      "implementationOwner": "FMT4W",
+      "successorPath": [
+        "FMK0",
+        "FMT0",
+        "FMT1P",
+        "FMT1",
+        "FMT1C",
+        "FMT1D",
+        "FMTH0",
+        "FMT3C",
+        "FMT4P",
+        "FMT4F",
+        "FMT4W"
+      ],
+      "receivingAcceptance": "FMT4W-AC3"
+    },
+    {
+      "id": "FM-C19",
+      "consumer": "MCP consumes Rust Span/result authority",
+      "kind": "implementation",
+      "implementationOwner": "FMT4M",
+      "successorPath": [
+        "FMK0",
+        "FMT0",
+        "FMT1P",
+        "FMT1",
+        "FMT1C",
+        "FMT1D",
+        "FMTH0",
+        "FMT3C",
+        "FMT4P",
+        "FMT4M"
+      ],
+      "receivingAcceptance": "FMT4M-AC3"
+    },
+    {
+      "id": "FM-C20",
+      "consumer": "Live LSP document handler consumes FMT4L after one cutover",
+      "kind": "implementation",
+      "implementationOwner": "FMT3",
+      "successorPath": [
+        "FMK0",
+        "FMT0",
+        "FMT1P",
+        "FMT1",
+        "FMT1C",
+        "FMT1D",
+        "FMTH0",
+        "FMT3C",
+        "FMT4P",
+        "FMT4L",
+        "FMT3"
+      ],
+      "receivingAcceptance": "FMT3-AC1"
+    },
+    {
+      "id": "FM-C21",
+      "consumer": "Promotion consumes real cross-surface results and supported cells",
+      "kind": "proof",
+      "implementationOwner": "FMT4",
+      "successorPath": [
+        "FMK0",
+        "FMT0",
+        "FMT1P",
+        "FMT1",
+        "FMT1C",
+        "FMT1D",
+        "FMTH0",
+        "FMT3C",
+        "FMT4P",
+        "FMT4L",
+        "FMT3",
+        "FMT4"
+      ],
+      "receivingAcceptance": "FMT4-AC3"
+    },
+    {
+      "id": "FM-C22",
+      "consumer": "JavaScript printer contribution consumes source-backed views, shared Doc/provenance and normalized config",
+      "kind": "implementation",
+      "implementationOwner": "FMT2",
+      "successorPath": ["FMK0", "FMT0", "FMT1P", "FMT1", "FMT1C", "FMT1D", "FMT2"],
+      "receivingAcceptance": "FMT2-AC1"
+    },
+    {
+      "id": "FM-C23",
+      "consumer": "TypeScript printer extension consumes source-backed views, shared Doc/provenance and normalized config",
+      "kind": "implementation",
+      "implementationOwner": "FMT2T",
+      "successorPath": ["FMK0", "FMT0", "FMT1P", "FMT1", "FMT1C", "FMT1D", "FMT2", "FMT2T"],
+      "receivingAcceptance": "FMT2T-AC1"
+    },
+    {
+      "id": "FM-C24",
+      "consumer": "JSX printer extension consumes source-backed views, shared Doc/provenance and normalized config",
+      "kind": "implementation",
+      "implementationOwner": "FMT2X",
+      "successorPath": ["FMK0", "FMT0", "FMT1P", "FMT1", "FMT1C", "FMT1D", "FMT2", "FMT2X"],
+      "receivingAcceptance": "FMT2X-AC1"
+    },
+    {
+      "id": "FM-C25",
+      "consumer": "TSX composition of existing TypeScript and JSX rules consumes source-backed views, shared Doc/provenance and normalized config",
+      "kind": "implementation",
+      "implementationOwner": "FMT2TX",
+      "successorPath": [
+        "FMK0",
+        "FMT0",
+        "FMT1P",
+        "FMT1",
+        "FMT1C",
+        "FMT1D",
+        "FMT2",
+        "FMT2T",
+        "FMT2TX"
+      ],
+      "receivingAcceptance": "FMT2TX-AC1"
+    },
+    {
+      "id": "FM-C26",
+      "consumer": "CSS printer contribution consumes source-backed views, shared Doc/provenance and normalized config",
+      "kind": "implementation",
+      "implementationOwner": "FMTC0",
+      "successorPath": ["FMK0", "FMT0", "FMT1P", "FMT1", "FMT1C", "FMT1D", "FMTC0"],
+      "receivingAcceptance": "FMTC0-AC1"
+    },
+    {
+      "id": "FM-C27",
+      "consumer": "SCSS printer extension consumes source-backed views, shared Doc/provenance and normalized config",
+      "kind": "implementation",
+      "implementationOwner": "FMTCS0",
+      "successorPath": ["FMK0", "FMT0", "FMT1P", "FMT1", "FMT1C", "FMT1D", "FMTC0", "FMTCS0"],
+      "receivingAcceptance": "FMTCS0-AC1"
+    },
+    {
+      "id": "FM-C28",
+      "consumer": "Less printer extension consumes source-backed views, shared Doc/provenance and normalized config",
+      "kind": "implementation",
+      "implementationOwner": "FMTCL0",
+      "successorPath": ["FMK0", "FMT0", "FMT1P", "FMT1", "FMT1C", "FMT1D", "FMTC0", "FMTCL0"],
+      "receivingAcceptance": "FMTCL0-AC1"
+    },
+    {
+      "id": "FM-C29",
+      "consumer": "Neutral HTML view/printer contribution consumes source-backed views, shared Doc/provenance and normalized config",
+      "kind": "implementation",
+      "implementationOwner": "FMTH0",
+      "successorPath": ["FMK0", "FMT0", "FMT1P", "FMT1", "FMT1C", "FMT1D", "FMTH0"],
+      "receivingAcceptance": "FMTH0-AC1"
+    },
+    {
+      "id": "FM-C30",
+      "consumer": "Vue carrier view/printer contribution consumes source-backed views, shared Doc/provenance and normalized config",
+      "kind": "implementation",
+      "implementationOwner": "FMTV0",
+      "successorPath": [
+        "FMK0",
+        "FMT0",
+        "FMT1P",
+        "FMT1",
+        "FMT1C",
+        "FMT1D",
+        "FMT2",
+        "FMT2T",
+        "FMT2TX",
+        "FMTV0"
+      ],
+      "receivingAcceptance": "FMTV0-AC1"
+    },
+    {
+      "id": "FM-C31",
+      "consumer": "Svelte carrier view/printer contribution consumes source-backed views, shared Doc/provenance and normalized config",
+      "kind": "implementation",
+      "implementationOwner": "FMTS0",
+      "successorPath": [
+        "FMK0",
+        "FMT0",
+        "FMT1P",
+        "FMT1",
+        "FMT1C",
+        "FMT1D",
+        "FMT2",
+        "FMT2T",
+        "FMT2TX",
+        "FMTS0"
+      ],
+      "receivingAcceptance": "FMTS0-AC1"
+    }
+  ],
+  "checkpoint": {
+    "consumer": "TC-EXPANSION-KERNEL-1",
+    "successorPath": ["FMK0", "TC-EXPANSION-KERNEL-1"],
+    "receivingClause": "Audits every task of the train before its terminal against the frozen charters, acceptance verdicts, review findings and landing records.",
+    "mutation": "read-only; no implementation/deletion ownership"
+  },
+  "inheritedBoundaries": [
+    {
+      "boundary": "CarrierProfileId, FrameworkProfileId, ProjectProfileId",
+      "referenceFile": "tests/kernel/VID0/products/identity-inventory.v1.json",
+      "referenceRows": "I03-I06",
+      "scope": "Inherited owner; referenced, not reassigned by FMK0",
+      "implementationOwner": "VID0T",
+      "successorPath": ["VID0", "VID0T"],
+      "receivingAcceptance": "VID0T-AC1"
+    },
+    {
+      "boundary": "CatalogSnapshot construction",
+      "referenceFile": "tests/kernel/CAT0/products/catalog-inventory.v1.json",
+      "referenceRows": "T01-T05; embedded codec policy remains EMB0-owned",
+      "scope": "Inherited owner; referenced, not reassigned by FMK0",
+      "implementationOwner": "CPF1",
+      "successorPath": ["CAT0", "CPF1"],
+      "receivingAcceptance": "CPF1-AC2"
+    },
+    {
+      "boundary": "DemandPlan submission",
+      "referenceFile": "tests/kernel/DEM0/products/demand-inventory.v1.json",
+      "referenceRows": "DEM-O05",
+      "scope": "Inherited owner; referenced, not reassigned by FMK0",
+      "implementationOwner": "COX0",
+      "successorPath": ["DEM0", "COX0"],
+      "receivingAcceptance": "COX0-AC2"
+    },
+    {
+      "boundary": "TypeInfoRequest view",
+      "referenceFile": "tests/kernel/TIF0/products/typeinfo-inventory.v1.json",
+      "referenceRows": "TypeInfo request/view",
+      "scope": "Inherited owner; referenced, not reassigned by FMK0",
+      "implementationOwner": "TIF1",
+      "successorPath": ["TIF0", "TIF1"],
+      "receivingAcceptance": "TIF1-AC2"
+    },
+    {
+      "boundary": "EmbeddedByteOffset/Range",
+      "referenceFile": "tests/kernel/ENC0/products/coordinate-inventory.v1.json",
+      "referenceRows": "CD4",
+      "scope": "Inherited owner; referenced, not reassigned by FMK0",
+      "implementationOwner": "ENC0T",
+      "successorPath": ["ENC0", "ENC0T"],
+      "receivingAcceptance": "ENC0T-AC1"
+    },
+    {
+      "boundary": "EmbeddedTextCodec profile-declared codec policy",
+      "referenceFile": "tests/kernel/EMB0/products/embedded-inventory.v1.json",
+      "referenceRows": "EMB-O02",
+      "scope": "Shared codec/reversible-map primitives remain EMB0I-owned; formatter contributes no private decoder/composer",
+      "implementationOwner": "EMB0I",
+      "successorPath": ["EMB0", "EMB0I"],
+      "receivingAcceptance": "EMB0I-AC1"
+    },
+    {
+      "boundary": "AuthoredMapChain exact reversible composition",
+      "referenceFile": "tests/kernel/EMB0/products/embedded-inventory.v1.json",
+      "referenceRows": "EMB-O04",
+      "scope": "Shared codec/reversible-map primitives remain EMB0I-owned; formatter contributes no private decoder/composer",
+      "implementationOwner": "EMB0I",
+      "successorPath": ["EMB0", "EMB0I"],
+      "receivingAcceptance": "EMB0I-AC3"
+    }
+  ],
+  "currentRoutes": [
+    {
+      "id": "FM-R01",
+      "path": "crates/verter_lsp/src/features/formatting.rs",
+      "symbol": "format_document",
+      "state": "live whitespace-only document formatter",
+      "disposition": "replace-and-delete",
+      "deletionOwner": "FMT3",
+      "productionCapable": true,
+      "successorPath": [
+        "FMK0",
+        "FMT0",
+        "FMT1P",
+        "FMT1",
+        "FMT1C",
+        "FMT1D",
+        "FMTH0",
+        "FMT3C",
+        "FMT4P",
+        "FMT4L",
+        "FMT3"
+      ],
+      "receivingAcceptance": "FMT3-AC3",
+      "deletionPopulation": "Body and only route-exclusive helpers/tests; never shared LineIndex, carrier block projection or auto-close helpers"
+    },
+    {
+      "id": "FM-R02",
+      "path": "crates/verter_lsp/src/server/mod.rs",
+      "symbol": "LanguageServer::formatting",
+      "state": "standard document-formatting dispatch",
+      "disposition": "retain-dispatch",
+      "integrationOwner": "FMT3",
+      "successorPath": [
+        "FMK0",
+        "FMT0",
+        "FMT1P",
+        "FMT1",
+        "FMT1C",
+        "FMT1D",
+        "FMTH0",
+        "FMT3C",
+        "FMT4P",
+        "FMT4L",
+        "FMT3"
+      ],
+      "receivingAcceptance": "FMT3-AC1"
+    },
+    {
+      "id": "FM-R03",
+      "path": "crates/verter_lsp/src/server/aux_features.rs",
+      "symbol": "handle_formatting",
+      "state": "calls FM-R01 with current document source, projected blocks and LineIndex",
+      "disposition": "switch-to-FMT4L",
+      "integrationOwner": "FMT3",
+      "successorPath": [
+        "FMK0",
+        "FMT0",
+        "FMT1P",
+        "FMT1",
+        "FMT1C",
+        "FMT1D",
+        "FMTH0",
+        "FMT3C",
+        "FMT4P",
+        "FMT4L",
+        "FMT3"
+      ],
+      "receivingAcceptance": "FMT3-AC1"
+    },
+    {
+      "id": "FM-R04",
+      "path": "crates/verter_lsp/src/capabilities.rs",
+      "symbol": "document_formatting_provider",
+      "state": "advertised true",
+      "disposition": "retain-continuously",
+      "integrationOwner": "FMT3",
+      "successorPath": [
+        "FMK0",
+        "FMT0",
+        "FMT1P",
+        "FMT1",
+        "FMT1C",
+        "FMT1D",
+        "FMTH0",
+        "FMT3C",
+        "FMT4P",
+        "FMT4L",
+        "FMT3"
+      ],
+      "receivingAcceptance": "FMT3-AC1"
+    },
+    {
+      "id": "FM-R05",
+      "path": "crates/verter_lsp/src/server/mod.rs",
+      "symbol": "LanguageServer::on_type_formatting",
+      "state": "markup auto-close dispatch, not full formatting",
+      "disposition": "retain-outside-formatter",
+      "unchangedProofOwner": "FMT3",
+      "successorPath": [
+        "FMK0",
+        "FMT0",
+        "FMT1P",
+        "FMT1",
+        "FMT1C",
+        "FMT1D",
+        "FMTH0",
+        "FMT3C",
+        "FMT4P",
+        "FMT4L",
+        "FMT3"
+      ],
+      "receivingAcceptance": "FMT3-AC5"
+    },
+    {
+      "id": "FM-R06",
+      "path": "crates/verter_lsp/src/server/aux_features.rs",
+      "symbol": "handle_on_type_formatting",
+      "state": "markup auto-close handler",
+      "disposition": "retain-outside-formatter",
+      "unchangedProofOwner": "FMT3",
+      "successorPath": [
+        "FMK0",
+        "FMT0",
+        "FMT1P",
+        "FMT1",
+        "FMT1C",
+        "FMT1D",
+        "FMTH0",
+        "FMT3C",
+        "FMT4P",
+        "FMT4L",
+        "FMT3"
+      ],
+      "receivingAcceptance": "FMT3-AC5"
+    },
+    {
+      "id": "FM-R07",
+      "path": "crates/verter_lsp/src/capabilities.rs",
+      "symbol": "document_on_type_formatting_provider",
+      "state": "advertised > trigger",
+      "disposition": "retain-outside-formatter",
+      "unchangedProofOwner": "FMT3",
+      "successorPath": [
+        "FMK0",
+        "FMT0",
+        "FMT1P",
+        "FMT1",
+        "FMT1C",
+        "FMT1D",
+        "FMTH0",
+        "FMT3C",
+        "FMT4P",
+        "FMT4L",
+        "FMT3"
+      ],
+      "receivingAcceptance": "FMT3-AC5"
+    }
+  ],
+  "inheritedRoutes": [
+    {
+      "inventory": "tests/kernel/UAK0/products/deletion-retag-ledger.v1.json",
+      "routeId": "D01",
+      "category": "central-framework-switch",
+      "paths": [
+        "crates/verter_language/src/carrier_grammar.rs",
+        "crates/verter_compiler/src/framework_common/registered_carrier_projection.rs",
+        "crates/verter_session/src/carrier_publication_store/mod.rs"
+      ],
+      "symbols": [
+        "CarrierGrammarConfig::{Vue, Svelte}",
+        "carrier_identity",
+        "grammar_fingerprint",
+        "parse_options_for_accepted",
+        "parse_key_for_accepted"
+      ],
+      "deletionOwner": "CPF1",
+      "productionCapable": true,
+      "successorPath": ["UAK0", "UAK1", "CAT0", "CPF1"],
+      "receivingAcceptance": "CPF1-AC1",
+      "relationship": "Inherited reference only; original owner/path unchanged, not a formatter deletion"
+    },
+    {
+      "inventory": "tests/kernel/UAK0/products/deletion-retag-ledger.v1.json",
+      "routeId": "D02",
+      "category": "central-framework-switch",
+      "paths": [
+        "crates/verter_compiler/src/framework_common/registered_carrier_projection.rs",
+        "crates/verter_compiler/src/framework_common/vue_host_integration.rs",
+        "crates/verter_compiler/src/standalone.rs"
+      ],
+      "symbols": [
+        "InstalledCarrierFrontend",
+        "InstalledParseAdmission",
+        "InstalledSemanticAuthority",
+        "InstalledProjectionBackend",
+        "InstalledHostIntegration",
+        "InstalledRuntimeBackend",
+        "KnownRegisteredCompiler",
+        "built_in_frontend_catalog",
+        "built_in_semantic_catalog",
+        "built_in_projection_catalog",
+        "built_in_host_integration_catalog",
+        "built_in_runtime_catalog"
+      ],
+      "deletionOwner": "CPF1",
+      "productionCapable": true,
+      "successorPath": ["UAK0", "UAK1", "CAT0", "CPF1"],
+      "receivingAcceptance": "CPF1-AC1",
+      "relationship": "Inherited reference only; original owner/path unchanged, not a formatter deletion"
+    },
+    {
+      "inventory": "tests/kernel/UAK0/products/deletion-retag-ledger.v1.json",
+      "routeId": "D03",
+      "category": "central-framework-switch",
+      "paths": [
+        "crates/verter_compiler/src/compile_request/mod.rs",
+        "crates/verter_compiler/src/standalone.rs",
+        "crates/verter_compiler/src/assembly/fragment.rs",
+        "crates/verter_session/src/host_resolve/compile_request_build.rs",
+        "crates/verter_session/src/host_resolve/native_host_binding.rs"
+      ],
+      "symbols": [
+        "FrameworkOption",
+        "FrameworkCompileRequest",
+        "DirectExecutionInputs",
+        "PreparedCarrier",
+        "FrameworkDomain",
+        "BoundRenderedMain",
+        "BoundCompiledProducts",
+        "BoundNativeHostRequest"
+      ],
+      "deletionOwner": "CPF1",
+      "productionCapable": true,
+      "successorPath": ["UAK0", "UAK1", "CAT0", "CPF1"],
+      "receivingAcceptance": "CPF1-AC1",
+      "relationship": "Inherited reference only; original owner/path unchanged, not a formatter deletion"
+    },
+    {
+      "inventory": "tests/kernel/UAK0/products/deletion-retag-ledger.v1.json",
+      "routeId": "D04",
+      "category": "central-framework-switch",
+      "paths": [
+        "crates/verter_language/src/parse_identity.rs",
+        "crates/verter_language/src/parse_artifact.rs",
+        "crates/verter_language/src/parse_artifact/carrier_inventory.rs"
+      ],
+      "symbols": [
+        "FrameworkSyntaxProfile::{Vue, Svelte, Script, Requested}",
+        "syntax_profile_id_for",
+        "default_parse_identity_for",
+        "parse_identity_for",
+        "ParseOptions.{delimiters, custom_elements, svelte_loose}",
+        "DirectiveFamily::{Vue, Svelte}",
+        "parse_artifact JS module-kind is_vue branch"
+      ],
+      "deletionOwner": "CPF1",
+      "productionCapable": true,
+      "successorPath": ["UAK0", "UAK1", "CAT0", "CPF1"],
+      "receivingAcceptance": "CPF1-AC1",
+      "relationship": "Inherited reference only; original owner/path unchanged, not a formatter deletion"
+    },
+    {
+      "inventory": "tests/kernel/UAK0/products/deletion-retag-ledger.v1.json",
+      "routeId": "D05",
+      "category": "central-framework-switch",
+      "paths": [
+        "crates/verter_language/src/language.rs",
+        "crates/verter_language/src/ids.rs",
+        "crates/verter_compiler/src/framework_common/registered_carrier_projection.rs",
+        "crates/verter_compiler/src/script/process.rs",
+        "crates/verter_compiler/src/svelte/runtime/client_surface_imports.rs",
+        "crates/verter_session/src/carrier_publication_store/mod.rs",
+        "crates/verter_session/src/framework/synth.rs",
+        "crates/verter_session/src/framework/self_file.rs",
+        "crates/verter_session/src/host_compile_audit.rs",
+        "crates/verter_session/src/host_manage/analysis_io.rs",
+        "crates/verter_session/src/typeinfo/framework_surface/vue_exec/mod.rs",
+        "crates/verter_validation_probe/src/corpus/mod.rs",
+        "crates/verter_semantic_source/src/rune_ambient.rs",
+        "crates/verter_tsc/src/checker.rs"
+      ],
+      "symbols": [
+        "FileLanguage::is_vue",
+        "FileLanguage::is_svelte",
+        "FrameworkAdapterId::is_vue",
+        "FrameworkAdapterId::is_svelte",
+        "FileLanguage::vue()/svelte() and FrameworkAdapterId::vue()/svelte() call sites used for dispatch"
+      ],
+      "deletionOwner": "CPF1",
+      "productionCapable": true,
+      "successorPath": ["UAK0", "UAK1", "CAT0", "CPF1"],
+      "receivingAcceptance": "CPF1-AC1",
+      "relationship": "Inherited reference only; original owner/path unchanged, not a formatter deletion"
+    },
+    {
+      "inventory": "tests/kernel/UAK0/products/deletion-retag-ledger.v1.json",
+      "routeId": "D06",
+      "category": "central-framework-switch",
+      "paths": [
+        "crates/verter_session/src/framework/registry.rs",
+        "crates/verter_session/src/framework/descriptor.rs"
+      ],
+      "symbols": [
+        "FrameworkAdapterRegistry::built_in",
+        "FrameworkAdapterRegistry::built_in_admitting",
+        "vue_registration",
+        "svelte_registration",
+        "built_in_descriptors",
+        "vue_descriptor",
+        "svelte_descriptor",
+        "FrameworkCapabilityCatalog::built_in",
+        "FrameworkAdapterRegistry::scratch_synthesizing_adapter_id"
+      ],
+      "deletionOwner": "CPF1",
+      "productionCapable": true,
+      "successorPath": ["UAK0", "UAK1", "CAT0", "CPF1"],
+      "receivingAcceptance": "CPF1-AC1",
+      "relationship": "Inherited reference only; original owner/path unchanged, not a formatter deletion"
+    },
+    {
+      "inventory": "tests/kernel/UAK0/products/deletion-retag-ledger.v1.json",
+      "routeId": "D07",
+      "category": "central-framework-switch",
+      "paths": ["crates/verter_language/src/registry.rs"],
+      "symbols": [
+        "LanguageRegistry::built_in",
+        "LanguageRegistry::global",
+        "SVELTE_RUNE_MODULE_LANGUAGE_ID"
+      ],
+      "deletionOwner": "CPF1",
+      "productionCapable": true,
+      "successorPath": ["UAK0", "UAK1", "CAT0", "CPF1"],
+      "receivingAcceptance": "CPF1-AC1",
+      "relationship": "Inherited reference only; original owner/path unchanged, not a formatter deletion"
+    },
+    {
+      "inventory": "tests/kernel/UAK0/products/deletion-retag-ledger.v1.json",
+      "routeId": "D08",
+      "category": "untagged-coordinate-or-public-identity",
+      "paths": ["crates/verter_language/src/language.rs", "crates/verter_language/src/ids.rs"],
+      "symbols": [
+        "FileLanguage::Framework { adapter_id, language_id }",
+        "FileLanguage::FrameworkTemplate { adapter_id, owner_hint }",
+        "ScriptFlavor::AdapterModule { adapter_id, language_id }",
+        "FrameworkAdapterId(Arc<str>)",
+        "LanguageId(Arc<str>)"
+      ],
+      "deletionOwner": "CPF1",
+      "productionCapable": true,
+      "successorPath": ["UAK0", "UAK1", "CAT0", "CPF1"],
+      "receivingAcceptance": "CPF1-AC1",
+      "relationship": "Inherited reference only; original owner/path unchanged, not a formatter deletion"
+    },
+    {
+      "inventory": "tests/kernel/UAK0/products/deletion-retag-ledger.v1.json",
+      "routeId": "D09",
+      "category": "untagged-coordinate-or-public-identity",
+      "paths": [
+        "crates/verter_language/src/ids.rs",
+        "crates/verter_language/src/registry.rs",
+        "crates/verter_lsp/src/main.rs",
+        "crates/verter_session/src/framework/options.rs",
+        "crates/verter_napi/src/lib.rs",
+        "crates/verter_wasm/src/lib.rs",
+        "packages/vue-vscode/package.json",
+        "packages/vue-vscode/src/extension.ts"
+      ],
+      "symbols": [
+        "CapabilityId(Arc<str>)",
+        "GatedCandidate",
+        "framework_options_from_cli (--frameworks=)",
+        "FrameworkOptions::admitting_names",
+        "verter.enable client setting (declared, never read)",
+        "initializationOptions.frameworks (sent, never read)"
+      ],
+      "deletionOwner": "COX0",
+      "productionCapable": true,
+      "successorPath": ["UAK0", "UAK1", "CAT0", "DEM0", "COX0"],
+      "receivingAcceptance": "COX0-AC1",
+      "relationship": "Inherited reference only; original owner/path unchanged, not a formatter deletion"
+    },
+    {
+      "inventory": "tests/kernel/UAK0/products/deletion-retag-ledger.v1.json",
+      "routeId": "D10",
+      "category": "central-framework-switch",
+      "paths": [
+        "crates/verter_lsp/src/server/nav_features.rs",
+        "crates/verter_lsp/src/server/rename_plan.rs",
+        "crates/verter_lsp/src/features/cursor_context.rs",
+        "crates/verter_lsp/src/server_utils.rs",
+        "crates/verter_lsp/src/svelte_assets.rs",
+        "crates/verter_lsp/src/background_init.rs",
+        "crates/verter_lsp/src/type_provider/project_sync/virtual_types.rs",
+        "crates/verter_lsp/src/features/auto_close_tag.rs",
+        "packages/vue-vscode/src/VueApiDecorationProvider.ts",
+        "packages/vue-vscode/src/extension.ts",
+        "packages/typescript-plugin/src/index.ts"
+      ],
+      "symbols": [
+        "handle_hover_attempt is_svelte branch",
+        "markup_occurrence_inventory / rename_plan resolve is_svelte branches",
+        "CursorContext::from_uri is_svelte branch",
+        "compute_verter_diagnostics_for_with_views Vue-only rule drop",
+        "svelte_package_diagnostic / owner_provider_path_config",
+        "prepare_managed_tsgo_svelte_carrier dispatch",
+        "CarrierKind::{Vue, Svelte} / carrier_kind_for_language",
+        "VueApiDecorationProvider languageId === 'vue'",
+        "extension.ts '**/*.{vue,svelte}' probe and 'vue' configuration section",
+        "typescript-plugin Svelte JSX runtime branches"
+      ],
+      "deletionOwner": "COX0",
+      "productionCapable": true,
+      "successorPath": ["UAK0", "UAK1", "CAT0", "DEM0", "COX0"],
+      "receivingAcceptance": "COX0-AC1",
+      "relationship": "Inherited reference only; original owner/path unchanged, not a formatter deletion"
+    },
+    {
+      "inventory": "tests/kernel/UAK0/products/deletion-retag-ledger.v1.json",
+      "routeId": "D11",
+      "category": "central-framework-switch",
+      "paths": ["crates/verter_mcp/src/server.rs"],
+      "symbols": ["verter_mcp server tool handlers branching on kind.is_vue()"],
+      "deletionOwner": "COX0",
+      "productionCapable": true,
+      "successorPath": ["UAK0", "UAK1", "CAT0", "DEM0", "COX0"],
+      "receivingAcceptance": "COX0-AC1",
+      "relationship": "Inherited reference only; original owner/path unchanged, not a formatter deletion"
+    },
+    {
+      "inventory": "tests/kernel/UAK0/products/deletion-retag-ledger.v1.json",
+      "routeId": "D12",
+      "category": "duplicate-component-information-authority",
+      "paths": [
+        "crates/verter_session/src/meta.rs",
+        "crates/verter_session/src/meta/output_api.rs",
+        "crates/verter_session/src/host_manage/component_meta_entry.rs",
+        "crates/verter_session/src/host_manage/component_meta_entry_resolution.rs",
+        "crates/verter_session/src/resolver_core/component_meta",
+        "crates/verter_session/src/component_meta_result_db.rs",
+        "crates/verter_session/src/component_meta_cached_result.rs",
+        "crates/verter_session/src/component_meta_result_admission.rs",
+        "crates/verter_session/src/component_meta_host.rs",
+        "crates/verter_session/src/component_meta_payload.rs",
+        "crates/verter_session/src/component_meta_resolution_policy",
+        "crates/verter_session/src/meta_resolve",
+        "crates/verter_protocol/src/component_meta.rs",
+        "crates/verter_protocol/src/types.rs"
+      ],
+      "symbols": [
+        "MetaSession::get_component_meta and its batch/resolution/payload/surface/type-expansion variants",
+        "VerterHost::get_component_meta_via_view",
+        "VerterHost::get_component_meta_with_resolution",
+        "resolve_component_meta_parts",
+        "component_meta_resolved_macros",
+        "component_meta_type_registry",
+        "ComponentMetaResultDb / ComponentMetaResultKey",
+        "CachedComponentMetaResult",
+        "ComponentMetaHost / ComponentMetaSession",
+        "component_meta_payload::{ComponentMetaSurface, TypeHandle, assemble_volar_payload, assemble_surface_from_analysis, resolve_type_expansion}",
+        "component_meta_resolution_policy",
+        "COMPONENT_META_SCHEMA_VERSION / component_meta_payload / encode_component_meta_payload",
+        "FfiComponentMeta / FfiComponentMetaOutputLane"
+      ],
+      "deletionOwner": "TIF1",
+      "productionCapable": true,
+      "successorPath": ["UAK0", "UAK1", "CAT0", "TIF1"],
+      "receivingAcceptance": "TIF1-AC1",
+      "relationship": "Inherited reference only; original owner/path unchanged, not a formatter deletion"
+    },
+    {
+      "inventory": "tests/kernel/UAK0/products/deletion-retag-ledger.v1.json",
+      "routeId": "D13",
+      "category": "duplicate-component-information-authority",
+      "paths": [
+        "crates/verter_session/src/host_resolve/virtual_file_pipeline.rs",
+        "crates/verter_session/src/framework/public_contract.rs",
+        "crates/verter_session/src/framework/api_projector.rs",
+        "crates/verter_session/src/framework/api_projectors",
+        "crates/verter_protocol/src/types.rs"
+      ],
+      "symbols": [
+        "VerterHost::get_public_api / get_public_api_batch / get_public_api_with_mode / get_public_api_projection",
+        "ComponentPublicContract / PublicProp",
+        "ComponentApiProjector and its Vue/Svelte impls",
+        "FfiComponentPublicContract / FfiPublicProp / FfiPublicEvent / FfiPublicSlot / FfiPublicApiResult / PublicApiProjectionSubject"
+      ],
+      "deletionOwner": "TIF1",
+      "productionCapable": true,
+      "successorPath": ["UAK0", "UAK1", "CAT0", "TIF1"],
+      "receivingAcceptance": "TIF1-AC1",
+      "relationship": "Inherited reference only; original owner/path unchanged, not a formatter deletion"
+    },
+    {
+      "inventory": "tests/kernel/UAK0/products/deletion-retag-ledger.v1.json",
+      "routeId": "D14",
+      "category": "duplicate-component-information-authority",
+      "paths": [
+        "crates/verter_session/src/framework/surface_store.rs",
+        "crates/verter_session/src/typeinfo/framework_surface/mod.rs"
+      ],
+      "symbols": [
+        "FrameworkSurfaceStore / ErasedFrameworkSurfaceStore / StoredSurfaceDto",
+        "VueSurfaceKey / SvelteSurfaceKey"
+      ],
+      "deletionOwner": "TIF1",
+      "productionCapable": true,
+      "successorPath": ["UAK0", "UAK1", "CAT0", "TIF1"],
+      "receivingAcceptance": "TIF1-AC1",
+      "relationship": "Inherited reference only; original owner/path unchanged, not a formatter deletion"
+    },
+    {
+      "inventory": "tests/kernel/UAK0/products/deletion-retag-ledger.v1.json",
+      "routeId": "D15",
+      "category": "duplicate-component-information-authority",
+      "paths": [
+        "crates/verter_protocol/src/typeinfo.rs",
+        "crates/verter_ffi/src/convert/typeinfo.rs"
+      ],
+      "symbols": ["FfiEvaluateTypeExpressionRequest", "FfiImportSpec", "FfiSymbolEntry"],
+      "deletionOwner": "TIF1",
+      "productionCapable": true,
+      "successorPath": ["UAK0", "UAK1", "CAT0", "TIF1"],
+      "receivingAcceptance": "TIF1-AC1",
+      "relationship": "Inherited reference only; original owner/path unchanged, not a formatter deletion"
+    },
+    {
+      "inventory": "tests/kernel/UAK0/products/deletion-retag-ledger.v1.json",
+      "routeId": "D16",
+      "category": "untagged-coordinate-or-public-identity",
+      "paths": [
+        "crates/verter_napi/src/lib.rs",
+        "crates/verter_wasm/src/lib.rs",
+        "crates/verter_napi/src/compile_request_response.rs",
+        "crates/verter_mcp/src/server.rs",
+        "crates/verter_protocol/proto/verter/v1/typeinfo.proto",
+        "crates/verter_ffi/src/convert/offset.rs"
+      ],
+      "symbols": [
+        "NAPI get_code_actions(offset: u32) (UTF-16 by doc comment only)",
+        "WASM getCodeActions(offset: u32)",
+        "NapiTextEdit { spanStart, spanEnd }",
+        "NapiDocumentSymbol positions",
+        "NapiSourceRange { start, end }",
+        "NapiPreprocessorDiagnostic { line, column }",
+        "compile_request_response hard-coded OffsetEncoding::Utf16",
+        "MCP QuickFixParams.offset (byte offset)",
+        "proto GraphSpanRef { start, end }",
+        "proto GraphDiagnostic span offsets"
+      ],
+      "deletionOwner": "ENCF0",
+      "productionCapable": true,
+      "successorPath": ["UAK0", "UAK1", "ENC0", "ENCF0"],
+      "receivingAcceptance": "ENCF0-AC1",
+      "relationship": "Inherited reference only; original owner/path unchanged, not a formatter deletion"
+    },
+    {
+      "inventory": "tests/kernel/UAK0/products/deletion-retag-ledger.v1.json",
+      "routeId": "D17",
+      "category": "untagged-coordinate-or-public-identity",
+      "paths": [
+        "crates/verter_lsp/src/type_provider/project_sync/virtual_types.rs",
+        "crates/verter_lsp/src/type_provider/merge/position.rs",
+        "packages/vue-vscode/src/utils.ts"
+      ],
+      "symbols": [
+        "virtual_types.rs provider UTF16 literals",
+        "merge/position.rs mapped-run columns always UTF-16",
+        "utf16OffsetToPosition in the VS Code client"
+      ],
+      "deletionOwner": "ENCL0",
+      "productionCapable": true,
+      "successorPath": ["UAK0", "UAK1", "ENC0", "ENCL0"],
+      "receivingAcceptance": "ENCL0-AC1",
+      "relationship": "Inherited reference only; original owner/path unchanged, not a formatter deletion"
+    },
+    {
+      "inventory": "tests/kernel/UAK0/products/deletion-retag-ledger.v1.json",
+      "routeId": "D18",
+      "category": "duplicate-component-information-authority",
+      "paths": ["crates/verter_lsp/src/server_utils.rs"],
+      "symbols": ["build_workspace_components"],
+      "deletionOwner": "IDX0",
+      "productionCapable": true,
+      "successorPath": ["UAK0", "UAK1", "CAT0", "DEM0", "IDX0"],
+      "receivingAcceptance": "IDX0-AC1",
+      "relationship": "Inherited reference only; original owner/path unchanged, not a formatter deletion"
+    },
+    {
+      "inventory": "tests/kernel/UAK0/products/deletion-retag-ledger.v1.json",
+      "routeId": "D19",
+      "category": "untagged-coordinate-or-public-identity",
+      "paths": ["crates/verter_lsp/src/config.rs"],
+      "symbols": [
+        "ProjectRegistry::from_workspace_roots / from_canonical_roots",
+        "ProjectConfig / RegistryBuildResult"
+      ],
+      "deletionOwner": "PM1",
+      "productionCapable": true,
+      "successorPath": ["UAK0", "UAK1", "VID0", "CFG0", "PM0", "PM1"],
+      "receivingAcceptance": "PM1-AC1",
+      "relationship": "Inherited reference only; original owner/path unchanged, not a formatter deletion"
+    }
+  ],
+  "emptyPopulations": [
+    {
+      "unit": "Native FormatterService, FormatterConfig, Doc renderer/view/edit/map authorities",
+      "evidence": "No document formatter implementation in crates/verter_language, verter_session, verter_protocol or verter_identity; Rust Display/fmt is presentation only.",
+      "receivers": ["FCFG0", "FMT1P", "FMT1", "FMT1A", "FMT1B", "FMT1C", "FMT1D", "FMT1E", "FMT3C"]
+    },
+    {
+      "unit": "Rust protocol, NAPI, WASM and MCP native document-formatting routes",
+      "evidence": "No FormatRequest/FormatResult document API or document-formatting entry point in these sources.",
+      "receivers": ["FMT4P", "FMT4F", "FMT4N", "FMT4W", "FMT4M"]
+    },
+    {
+      "unit": "LSP range formatting and cursor result",
+      "evidence": "No range formatting provider/handler; standard document formatting returns TextEdit[], not a cursor.",
+      "disposition": "Unavailable; no existing owner is authorized to add these public cells."
+    },
+    {
+      "unit": "Production external formatter/config delegation",
+      "evidence": "format_document ignores options and calls no Prettier/dprint/oxfmt. CFG0 records no existing Prettier/EditorConfig/Biome reader.",
+      "disposition": "No delegation deletion to invent; native design structurally forbids delegation."
+    },
+    {
+      "unit": "Private printer/view prototypes",
+      "evidence": "No native formatter prototypes in the current surfaces. FMT0 requires exact route inventory amendment if one is discovered later.",
+      "disposition": "Empty deletion population; no conditional absorption."
+    }
+  ],
+  "completenessAudit": {
+    "surfaces": [
+      "crates/verter_language/src",
+      "crates/verter_session/src",
+      "crates/verter_protocol/src",
+      "crates/verter_identity/src",
+      "crates/verter_lsp/src",
+      "crates/verter_napi/src",
+      "crates/verter_wasm/src",
+      "crates/verter_mcp/src"
+    ],
+    "directSuccessors": ["DIAL4", "FCFG0", "FMT0", "PUB0", "TC-EXPANSION-KERNEL-1", "UAP0", "VIM1"],
+    "excluded": [
+      "Compiler emitted JS/CSS and source maps",
+      "TypeInfo text/Display presentation",
+      "JSON pretty serialization",
+      "Repository oxfmt tooling",
+      "Client-owned formatter pipelines",
+      "Unrequested vertical expansions beyond this formatter contract"
+    ],
+    "method": "Source census and caller inspection; compare each direct successor and each reconciled subblock to an outcome/consumer or read-only checkpoint. All three inherited deletion categories reference original owners.",
+    "validator": {
+      "implementationOwner": "UAP0",
+      "successorPath": ["FMK0", "UAP0"],
+      "receivingAcceptance": "UAP0-AC-R1"
+    },
+    "caseExecution": "UAP0 subblock 3, with positive contract UAP0-AC2; future production mechanisms prove their own receiving acceptances.",
+    "productionChanges": 0
+  }
+}

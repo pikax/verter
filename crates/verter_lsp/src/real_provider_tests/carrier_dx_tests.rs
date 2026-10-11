@@ -130,7 +130,10 @@ async fn assert_carrier_dx_contract_tsserver(session: &RealProviderTestSession) 
     for _ in 0..16 {
         comp_defs = session
             .provider()
-            .get_definition(&consumer, comp_specifier_off)
+            .get_definition(
+                &crate::type_provider::traits::ProviderQuery::at_engine_surface(&consumer),
+                comp_specifier_off,
+            )
             .await
             .unwrap_or_default();
         if !comp_defs.is_empty() {
@@ -168,7 +171,10 @@ async fn assert_carrier_dx_contract_tsserver(session: &RealProviderTestSession) 
     );
     let widget_defs = session
         .provider()
-        .get_definition(&consumer, widget_specifier_off)
+        .get_definition(
+            &crate::type_provider::traits::ProviderQuery::at_engine_surface(&consumer),
+            widget_specifier_off,
+        )
         .await
         .unwrap_or_default();
     assert!(
@@ -234,7 +240,10 @@ async fn assert_carrier_dx_contract_tsserver(session: &RealProviderTestSession) 
         for offset in widget_use_offsets {
             if let Some(hover) = session
                 .provider()
-                .get_hover(&consumer, offset)
+                .get_hover(
+                    &crate::type_provider::traits::ProviderQuery::at_engine_surface(&consumer),
+                    offset,
+                )
                 .await
                 .ok()
                 .flatten()
@@ -246,7 +255,10 @@ async fn assert_carrier_dx_contract_tsserver(session: &RealProviderTestSession) 
             widget_type_defs.extend(
                 session
                     .provider()
-                    .get_type_definition(&consumer, offset)
+                    .get_type_definition(
+                        &crate::type_provider::traits::ProviderQuery::at_engine_surface(&consumer),
+                        offset,
+                    )
                     .await
                     .unwrap_or_default(),
             );
@@ -286,7 +298,10 @@ async fn assert_carrier_dx_contract_tsserver(session: &RealProviderTestSession) 
     let comp_binding_off = offset_of(&csrc, "import Comp from", "import ".len());
     let comp_refs = session
         .provider()
-        .get_references(&consumer, comp_binding_off)
+        .get_references(
+            &crate::type_provider::traits::ProviderQuery::at_engine_surface(&consumer),
+            comp_binding_off,
+        )
         .await
         .unwrap_or_default();
     let ref_paths: Vec<&String> = comp_refs.iter().map(|r| &r.path).collect();
@@ -319,7 +334,10 @@ async fn assert_carrier_dx_contract_tsserver(session: &RealProviderTestSession) 
     let widget_binding_off = offset_of(&csrc, "import Widget from", "import ".len());
     let widget_rename = session
         .provider()
-        .get_rename_locations(&consumer, widget_binding_off)
+        .get_rename_locations(
+            &crate::type_provider::traits::ProviderQuery::at_engine_surface(&consumer),
+            widget_binding_off,
+        )
         .await
         .unwrap_or_default();
     assert!(
@@ -350,7 +368,11 @@ async fn assert_carrier_dx_contract_tsserver(session: &RealProviderTestSession) 
     );
     let completions = session
         .provider()
-        .get_completions(&consumer, top_off, None)
+        .get_completions(
+            &crate::type_provider::traits::ProviderQuery::at_engine_surface(&consumer),
+            top_off,
+            None,
+        )
         .await;
     if let Ok(list) = completions {
         let labels: Vec<&str> = list.items.iter().map(|i| i.label.as_str()).collect();
@@ -369,7 +391,10 @@ async fn assert_carrier_dx_contract_tsserver(session: &RealProviderTestSession) 
     let comment_off = offset_of(&csrc, "// A PLAIN `.ts` file", 3);
     let comment_defs = session
         .provider()
-        .get_definition(&consumer, comment_off)
+        .get_definition(
+            &crate::type_provider::traits::ProviderQuery::at_engine_surface(&consumer),
+            comment_off,
+        )
         .await
         .unwrap_or_default();
     assert!(

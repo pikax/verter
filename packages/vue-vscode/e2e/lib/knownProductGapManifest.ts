@@ -9,7 +9,7 @@
  * is omitted deliberately because it is a regression sentinel, not accepted debt.
  */
 
-import type { ProductGapCanaryManifest } from "../../src/runSummaryOracle";
+import type { ProductGapCanary, ProductGapCanaryManifest } from "../../src/runSummaryOracle";
 
 export type ProductGapManifest = Readonly<Record<string, string>>;
 export type { ProductGapCanaryManifest };
@@ -362,7 +362,30 @@ const PLAIN_TS_CONSUMER = "ISSUE-shared-tsgo-plain-ts-consumer";
 // The two shapes the unresolved `./ExposePublic.vue` import takes in the consumer.
 const UNRESOLVED_COMPONENT_IMPORT = /ts:2307:Cannot find module '\.\/ExposePublic\.vue'/;
 
+// A provider answer that locates a declaration inside a library the engine reads
+// itself (here `lib.dom.d.ts`) has no delivered bytes to decode against, so the
+// provider leg is a typed conflict and the native result — which knows no DOM
+// declaration — is served. The canary expects exactly that empty answer; a
+// definition that reaches the library again flips it.
+const UNDELIVERED_LIBRARY_DEFINITION = (issue: string): ProductGapCanary => ({
+  issue,
+  failure:
+    /DOM event definition failed: Error: definition src\/(?:ts\/DomEventHandler|js\/JSDocEventHandler)\.(?:vue|svelte)#clientX not ready within/,
+});
+const UNDELIVERED_LIBRARY_DEFINITION_CANARIES: ProductGapCanaryManifest = {
+  "shared.js-jsdoc.dom-event.member-definition": UNDELIVERED_LIBRARY_DEFINITION(
+    "ISSUE-js-dom-event-jsdoc",
+  ),
+  "shared.ts.dom-event.member-definition": UNDELIVERED_LIBRARY_DEFINITION(
+    "ISSUE-ts-dom-event-definition",
+  ),
+};
+
 const KNOWN_PRODUCT_GAP_CANARIES_BY_ROUTE: Readonly<Record<string, ProductGapCanaryManifest>> = {
+  "svelte-parity@tsgo": UNDELIVERED_LIBRARY_DEFINITION_CANARIES,
+  "svelte-parity@tsserver": UNDELIVERED_LIBRARY_DEFINITION_CANARIES,
+  "vue-parity@tsgo": UNDELIVERED_LIBRARY_DEFINITION_CANARIES,
+  "vue-parity@tsserver": UNDELIVERED_LIBRARY_DEFINITION_CANARIES,
   "vue-parity@shared-tsgo": {
     // On the editor-shared tsgo route a plain `.ts` file is served by the editor's own
     // TypeScript, where Verter's TypeScript plugin does not exist, and generated

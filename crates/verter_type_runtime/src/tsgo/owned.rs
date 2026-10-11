@@ -51,6 +51,7 @@ use crate::protocol::{
     InlayHint, ProviderDiagnosticContext, RenameLocation, SemanticToken, SignatureHelp,
     TypeCodeAction, TypeDiagnostic, TypeDiagnosticSeverity, TypeDocumentHighlight, TypeLocation,
 };
+use crate::traits::ProviderQuery;
 use crate::traits::{ProviderFuture, TypeProvider};
 use crate::tsgo::ipc::TsgoTypeProvider;
 
@@ -745,96 +746,108 @@ impl TypeProvider for TsgoOwnedProvider {
 
     fn get_completions(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         offset: u32,
         trigger_character: Option<&str>,
     ) -> ProviderFuture<'_, CompletionResult> {
-        self.lsp.get_completions(path, offset, trigger_character)
+        self.lsp.get_completions(query, offset, trigger_character)
     }
 
     fn get_completion_details<'a>(
         &'a self,
-        path: &'a str,
+        query: &'a ProviderQuery,
         offset: u32,
         items: &'a [Completion],
     ) -> ProviderFuture<'a, Vec<Completion>> {
-        self.lsp.get_completion_details(path, offset, items)
+        self.lsp.get_completion_details(query, offset, items)
     }
 
     fn resolve_completion(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         data: CompletionResolveData,
     ) -> ProviderFuture<'_, Option<CompletionResolveResult>> {
-        self.lsp.resolve_completion(path, data)
+        self.lsp.resolve_completion(query, data)
     }
 
-    fn get_hover(&self, path: &str, offset: u32) -> ProviderFuture<'_, Option<HoverInfo>> {
-        self.lsp.get_hover(path, offset)
+    fn get_hover(
+        &self,
+        query: &ProviderQuery,
+        offset: u32,
+    ) -> ProviderFuture<'_, Option<HoverInfo>> {
+        self.lsp.get_hover(query, offset)
     }
 
-    fn get_definition(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
-        self.lsp.get_definition(path, offset)
+    fn get_definition(
+        &self,
+        query: &ProviderQuery,
+        offset: u32,
+    ) -> ProviderFuture<'_, Vec<TypeLocation>> {
+        self.lsp.get_definition(query, offset)
     }
 
     fn get_type_definition(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         offset: u32,
     ) -> ProviderFuture<'_, Vec<TypeLocation>> {
-        self.lsp.get_type_definition(path, offset)
+        self.lsp.get_type_definition(query, offset)
     }
 
-    fn get_references(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
-        self.lsp.get_references(path, offset)
+    fn get_references(
+        &self,
+        query: &ProviderQuery,
+        offset: u32,
+    ) -> ProviderFuture<'_, Vec<TypeLocation>> {
+        self.lsp.get_references(query, offset)
     }
 
     fn get_rename_locations(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         offset: u32,
     ) -> ProviderFuture<'_, Vec<RenameLocation>> {
-        self.lsp.get_rename_locations(path, offset)
+        self.lsp.get_rename_locations(query, offset)
     }
 
     fn get_signature_help(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         offset: u32,
     ) -> ProviderFuture<'_, Option<SignatureHelp>> {
-        self.lsp.get_signature_help(path, offset)
+        self.lsp.get_signature_help(query, offset)
     }
 
     fn get_code_actions(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         start_offset: u32,
         end_offset: u32,
         diagnostics: &[ProviderDiagnosticContext],
     ) -> ProviderFuture<'_, Vec<TypeCodeAction>> {
         self.lsp
-            .get_code_actions(path, start_offset, end_offset, diagnostics)
+            .get_code_actions(query, start_offset, end_offset, diagnostics)
     }
 
-    fn get_semantic_tokens(&self, path: &str) -> ProviderFuture<'_, Vec<SemanticToken>> {
-        self.lsp.get_semantic_tokens(path)
+    fn get_semantic_tokens(&self, query: &ProviderQuery) -> ProviderFuture<'_, Vec<SemanticToken>> {
+        self.lsp.get_semantic_tokens(query)
     }
 
     fn get_document_highlights(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         offset: u32,
     ) -> ProviderFuture<'_, Vec<TypeDocumentHighlight>> {
-        self.lsp.get_document_highlights(path, offset)
+        self.lsp.get_document_highlights(query, offset)
     }
 
     fn get_inlay_hints(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         start_offset: u32,
         end_offset: u32,
     ) -> ProviderFuture<'_, Vec<InlayHint>> {
-        self.lsp.get_inlay_hints(path, start_offset, end_offset)
+        self.lsp.get_inlay_hints(query, start_offset, end_offset)
     }
 
     // ── Config / workspace / lifecycle: delegate to --lsp. ──

@@ -140,6 +140,13 @@ Tests are evidence, not a quota. At preflight, map each changed contract to the 
 - Incremental, cancellation, stale-publication, counter, allocation, soak, and performance evidence applies only when the change touches the corresponding authority or hot path. Otherwise record it as not applicable with a terse boundary-based rationale.
 - New features and bug fixes still require adequate regression evidence. Refactors must keep applicable existing coverage green; they do not earn new tests merely by changing structure.
 
+### LSP request barriers
+
+LSP mock foreign-target checks settle after both `ProviderDispatch` and
+`ProviderDecode` barrier waits. Capture the held target bytes before the
+response and compare them immediately before return; checking inside the
+barriered answer misses changes made by the decode barrier.
+
 ### A declared check must be bound to a lane
 
 A committed test that no command runs is not coverage — it reads as coverage,

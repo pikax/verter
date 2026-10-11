@@ -3166,6 +3166,419 @@ async fn references_drop_provider_locations_when_surface_regenerates_mid_request
     );
 }
 
+/// A REFERENCES answer locating into a FOREIGN carrier decodes only through
+/// the surface the request maps it through: when the engine holds other bytes
+/// for the foreign carrier than the surface the LSP recorded (a delivery that
+/// ran ahead of its record), the query refuses the location instead of letting
+/// the LSP map the engine's offsets through the captured surface.
+#[tokio::test(flavor = "multi_thread")]
+async fn references_into_a_foreign_carrier_decode_only_through_the_mapped_surface() {
+    let (service, provider, parent_uri, position, child_ide_path, _child_canonical) =
+        make_foreign_mapping_fixture().await;
+    let server = service.inner();
+    let parent_ctx = synced_type_provider_context(server, &parent_uri).await;
+    let tsx_offset = merge::carrier_position_to_tsx_offset_validated(
+        &position,
+        &parent_ctx.carrier_line_index,
+        &parent_ctx.mapper,
+        &parent_ctx.tsx_line_index,
+    )
+    .expect("parent position maps to tsx");
+    let recorded = server
+        .documents
+        .provider_surfaces()
+        .current_snapshot(&child_ide_path)
+        .expect("child surface current");
+    let child_target = recorded
+        .provider_content
+        .find("msg")
+        .expect("token present in child IDE content") as u32;
+    provider.set_references(
+        &parent_ctx.tsx_path,
+        tsx_offset,
+        vec![crate::type_provider::protocol::TypeLocation {
+            path: child_ide_path.clone(),
+            start: child_target,
+            end: child_target + 3,
+        }],
+    );
+    let references = || async {
+        server
+            .references(ReferenceParams {
+                text_document_position: TextDocumentPositionParams {
+                    text_document: TextDocumentIdentifier {
+                        uri: parent_uri.clone(),
+                    },
+                    position,
+                },
+                context: ReferenceContext {
+                    include_declaration: true,
+                },
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+            })
+            .await
+            .expect("references request should succeed")
+    };
+    let maps_child = |response: &Option<Vec<Location>>| {
+        response
+            .iter()
+            .flatten()
+            .any(|l| l.uri.as_str().ends_with("/Child.vue"))
+    };
+
+    provider.hold_engine_target(&child_ide_path, &recorded.provider_content);
+    let held = references().await;
+    assert!(
+        maps_child(&held),
+        "the engine holding the recorded surface maps the foreign location: {held:?}"
+    );
+
+    let ahead = format!(
+        "{}\n// delivered ahead of its record",
+        recorded.provider_content
+    );
+    provider.hold_engine_target(&child_ide_path, &ahead);
+    let raced = references().await;
+    assert!(
+        !maps_child(&raced),
+        "offsets the engine produced against other bytes must never map through the \
+         recorded foreign surface: {raced:?}"
+    );
+}
+
+/// A foreign carrier's bytes moving at the engine after a references query
+/// was dispatched refuse its answer at settlement, even though the engine held
+/// exactly the recorded surface when the query reached it.
+#[tokio::test(flavor = "multi_thread")]
+async fn references_into_a_foreign_carrier_moved_after_dispatch_never_map() {
+    let (service, provider, parent_uri, position, child_ide_path, _child_canonical) =
+        make_foreign_mapping_fixture().await;
+    let server = service.inner();
+    let parent_ctx = synced_type_provider_context(server, &parent_uri).await;
+    let tsx_offset = merge::carrier_position_to_tsx_offset_validated(
+        &position,
+        &parent_ctx.carrier_line_index,
+        &parent_ctx.mapper,
+        &parent_ctx.tsx_line_index,
+    )
+    .expect("parent position maps to tsx");
+    let recorded = server
+        .documents
+        .provider_surfaces()
+        .current_snapshot(&child_ide_path)
+        .expect("child surface current");
+    let child_target = recorded
+        .provider_content
+        .find("msg")
+        .expect("token present in child IDE content") as u32;
+    provider.set_references(
+        &parent_ctx.tsx_path,
+        tsx_offset,
+        vec![crate::type_provider::protocol::TypeLocation {
+            path: child_ide_path.clone(),
+            start: child_target,
+            end: child_target + 3,
+        }],
+    );
+    provider.hold_engine_target(&child_ide_path, &recorded.provider_content);
+    let barriers = server.request_barriers();
+    provider.set_request_barriers(Arc::clone(&barriers));
+    let moved = format!(
+        "{}
+// delivered under the answer",
+        recorded.provider_content
+    );
+    barriers.arm(
+        crate::server::test_support::RequestBarrier::ProviderDispatch,
+        Arc::new({
+            let provider = Arc::clone(&provider);
+            let child_ide_path = child_ide_path.clone();
+            move |_| {
+                provider.hold_engine_target(&child_ide_path, &moved);
+                Box::pin(async {})
+            }
+        }),
+    );
+    let response = server
+        .references(ReferenceParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier {
+                    uri: parent_uri.clone(),
+                },
+                position,
+            },
+            context: ReferenceContext {
+                include_declaration: true,
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        })
+        .await
+        .expect("references request should succeed");
+    assert!(
+        !response
+            .iter()
+            .flatten()
+            .any(|l| l.uri.as_str().ends_with("/Child.vue")),
+        "a location decoded against bytes that moved under the answer must never map          through the recorded foreign surface: {response:?}"
+    );
+}
+
+/// A TYPE-DEFINITION answer locating into a foreign carrier maps only while
+/// the engine holds exactly the surface the request maps it through: bytes
+/// delivered ahead of their record, or moved after dispatch, refuse it.
+#[tokio::test(flavor = "multi_thread")]
+async fn type_definition_into_a_foreign_carrier_maps_only_through_the_held_surface() {
+    let (service, provider, parent_uri, position, child_ide_path, _child_canonical) =
+        make_foreign_mapping_fixture().await;
+    let server = service.inner();
+    let parent_ctx = synced_type_provider_context(server, &parent_uri).await;
+    let tsx_offset = merge::carrier_position_to_tsx_offset_validated(
+        &position,
+        &parent_ctx.carrier_line_index,
+        &parent_ctx.mapper,
+        &parent_ctx.tsx_line_index,
+    )
+    .expect("parent position maps to tsx");
+    let recorded = server
+        .documents
+        .provider_surfaces()
+        .current_snapshot(&child_ide_path)
+        .expect("child surface current");
+    let child_target = recorded
+        .provider_content
+        .find("msg")
+        .expect("token present in child IDE content") as u32;
+    provider.set_type_definitions(
+        &parent_ctx.tsx_path,
+        tsx_offset,
+        vec![crate::type_provider::protocol::TypeLocation {
+            path: child_ide_path.clone(),
+            start: child_target,
+            end: child_target + 3,
+        }],
+    );
+    let maps_child = || async {
+        let response = server
+            .goto_type_definition(foreign_definition_params(&parent_uri, position))
+            .await
+            .expect("type-definition request should succeed");
+        let locations = match response {
+            Some(GotoDefinitionResponse::Array(locs)) => locs,
+            Some(GotoDefinitionResponse::Scalar(loc)) => vec![loc],
+            Some(GotoDefinitionResponse::Link(links)) => links
+                .into_iter()
+                .map(|link| Location {
+                    uri: link.target_uri,
+                    range: link.target_selection_range,
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+        locations
+            .iter()
+            .any(|l| l.uri.as_str().ends_with("/Child.vue"))
+    };
+
+    provider.hold_engine_target(&child_ide_path, &recorded.provider_content);
+    assert!(
+        maps_child().await,
+        "the engine holding the recorded surface maps the foreign type definition"
+    );
+
+    let ahead = format!(
+        "{}\n// delivered ahead of its record",
+        recorded.provider_content
+    );
+    provider.hold_engine_target(&child_ide_path, &ahead);
+    assert!(
+        !maps_child().await,
+        "offsets the engine produced against other bytes must never map through the \
+         recorded foreign surface"
+    );
+
+    provider.hold_engine_target(&child_ide_path, &recorded.provider_content);
+    let barriers = server.request_barriers();
+    provider.set_request_barriers(Arc::clone(&barriers));
+    barriers.arm(
+        crate::server::test_support::RequestBarrier::ProviderDispatch,
+        Arc::new({
+            let provider = Arc::clone(&provider);
+            let child_ide_path = child_ide_path.clone();
+            move |_| {
+                provider.hold_engine_target(&child_ide_path, &ahead);
+                Box::pin(async {})
+            }
+        }),
+    );
+    assert!(
+        !maps_child().await,
+        "a location decoded against bytes that moved under the answer must never map \
+         through the recorded foreign surface"
+    );
+}
+
+/// Rename locations into a foreign target settle like every other navigation
+/// answer: target bytes that move between dispatch and decode refuse the whole
+/// rename, so no edit is computed against bytes the engine no longer holds.
+#[tokio::test]
+async fn rename_locations_refuse_a_target_moved_between_dispatch_and_decode() {
+    use crate::type_provider::traits::ProviderQuery;
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let origin = "/ws/src/App.vue.tsx";
+    let target = "/ws/src/Child.vue.tsx";
+    provider.set_rename_locations(
+        origin,
+        3,
+        vec![
+            RenameLocation {
+                path: origin.to_string(),
+                start: 3,
+                end: 6,
+            },
+            RenameLocation {
+                path: target.to_string(),
+                start: 10,
+                end: 13,
+            },
+        ],
+    );
+    provider.hold_engine_target(target, "const msg = 1;");
+    let query = ProviderQuery::at_engine_surface(origin);
+    let settled = provider
+        .get_rename_locations(&query, 3)
+        .await
+        .expect("a target held through the answer settles");
+    assert_eq!(settled.len(), 2);
+
+    let barriers = Arc::new(crate::server::test_support::RequestBarriers::default());
+    provider.set_request_barriers(Arc::clone(&barriers));
+    barriers.arm(
+        crate::server::test_support::RequestBarrier::ProviderDispatch,
+        Arc::new({
+            let provider = Arc::clone(&provider);
+            move |_| {
+                provider.hold_engine_target(target, "// moved\nconst msg = 1;");
+                Box::pin(async {})
+            }
+        }),
+    );
+    let error = provider
+        .get_rename_locations(&query, 3)
+        .await
+        .expect_err("a target moved under the answer refuses the whole rename");
+    assert!(error.query_conflict, "typed conflict, got {error}");
+}
+
+#[tokio::test]
+async fn foreign_target_answers_refuse_engine_bytes_changed_before_return() {
+    use crate::type_provider::protocol::{TypeCodeEdit, TypeLocation};
+    use crate::type_provider::traits::ProviderQuery;
+
+    #[derive(Clone, Copy, Debug)]
+    enum Route {
+        Definition,
+        TypeDefinition,
+        References,
+        Rename,
+        CodeActions,
+    }
+
+    for route in [
+        Route::Definition,
+        Route::TypeDefinition,
+        Route::References,
+        Route::Rename,
+        Route::CodeActions,
+    ] {
+        let provider = Arc::new(MockTypeProvider::new());
+        let origin = "/ws/src/App.vue.tsx";
+        let target = "/ws/src/Child.vue.tsx";
+        let location = TypeLocation {
+            path: target.to_string(),
+            start: 6,
+            end: 9,
+        };
+        provider.set_definitions(origin, 3, vec![location.clone()]);
+        provider.set_type_definitions(origin, 3, vec![location.clone()]);
+        provider.set_references(origin, 3, vec![location]);
+        provider.set_rename_locations(
+            origin,
+            3,
+            vec![RenameLocation {
+                path: target.to_string(),
+                start: 6,
+                end: 9,
+            }],
+        );
+        provider.set_code_actions(
+            origin,
+            3,
+            6,
+            vec![TypeCodeAction {
+                title: "Rename binding".to_string(),
+                kind: Some("quickfix".to_string()),
+                edits: vec![TypeCodeEdit {
+                    path: target.to_string(),
+                    start: 6,
+                    end: 9,
+                    new_text: "message".to_string(),
+                }],
+            }],
+        );
+        provider.hold_engine_target(target, "const msg = 1;");
+        let query = ProviderQuery::at_engine_surface(origin);
+        let answer = || async {
+            match route {
+                Route::Definition => provider.get_definition(&query, 3).await.map(|r| r.len()),
+                Route::TypeDefinition => provider
+                    .get_type_definition(&query, 3)
+                    .await
+                    .map(|r| r.len()),
+                Route::References => provider.get_references(&query, 3).await.map(|r| r.len()),
+                Route::Rename => provider
+                    .get_rename_locations(&query, 3)
+                    .await
+                    .map(|r| r.len()),
+                Route::CodeActions => provider
+                    .get_code_actions(&query, 3, 6, &[])
+                    .await
+                    .map(|r| r.len()),
+            }
+        };
+        assert_eq!(
+            answer().await.expect("an unmoved target settles"),
+            1,
+            "{route:?}"
+        );
+
+        let barriers = Arc::new(crate::server::test_support::RequestBarriers::default());
+        provider.set_request_barriers(Arc::clone(&barriers));
+        barriers.arm(
+            crate::server::test_support::RequestBarrier::ProviderDecode,
+            Arc::new({
+                let provider = Arc::downgrade(&provider);
+                move |_| {
+                    provider
+                        .upgrade()
+                        .expect("the querying provider is alive")
+                        .hold_engine_target(target, "// moved\nconst msg = 1;");
+                    Box::pin(async {})
+                }
+            }),
+        );
+        let error = answer()
+            .await
+            .expect_err("a target moved before return refuses the answer");
+        assert!(
+            error.query_conflict,
+            "{route:?}: typed conflict, got {error}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn contract_builtin_directive_definition_is_fail_closed_empty() {
     // There is nothing authored to jump to for a built-in directive: the

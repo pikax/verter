@@ -1,0 +1,30 @@
+[
+  {
+    "glob": "tests/framework-stimulus/STIM0/cases.md",
+    "reason": "Reviewed Stimulus and Turbo contract data; no ci.yml lane reads these bytes yet. Executable specs and future consumed products require an explicit lane owner."
+  },
+  {
+    "glob": "tests/framework-stimulus/STIM0/manifest.json",
+    "reason": "Reviewed Stimulus and Turbo contract data; no ci.yml lane reads these bytes yet. Executable specs and future consumed products require an explicit lane owner."
+  },
+  {
+    "glob": "tests/framework-stimulus/STIM0/products/stimulus-activation-policy.json",
+    "reason": "Reviewed Stimulus and Turbo contract data; no ci.yml lane reads these bytes yet. Executable specs and future consumed products require an explicit lane owner."
+  },
+  {
+    "glob": "tests/framework-stimulus/STIM0/products/stimulus-capability-matrix.json",
+    "reason": "Reviewed Stimulus and Turbo contract data; no ci.yml lane reads these bytes yet. Executable specs and future consumed products require an explicit lane owner."
+  },
+  {
+    "glob": "tests/framework-stimulus/STIM0/products/stimulus-version-lock.json",
+    "reason": "Reviewed Stimulus and Turbo contract data; no ci.yml lane reads these bytes yet. Executable specs and future consumed products require an explicit lane owner."
+  },
+  {
+    "glob": "tests/framework-stimulus/STIM0/products/stimulus-vocabulary.json",
+    "reason": "Reviewed Stimulus and Turbo contract data; no ci.yml lane reads these bytes yet. Executable specs and future consumed products require an explicit lane owner."
+  },
+  {
+    "glob": "tests/framework-stimulus/STIM0/products/turbo-vocabulary.json",
+    "reason": "Reviewed Stimulus and Turbo contract data; no ci.yml lane reads these bytes yet. Executable specs and future consumed products require an explicit lane owner."
+  }
+]
