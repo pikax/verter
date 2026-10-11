@@ -654,6 +654,24 @@ impl Subscription<'_> {
             drop(state);
             return Joined::Read(cancelled_cache_read());
         }
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some((_, completion)) = store
+            .exhausted_join_abort
+            .lock()
+            .as_ref()
+            .filter(|(key, _)| key == prepared.key())
+        {
+            state.aborted = true;
+            attempt.retries = MAX_INFLIGHT_RETRIES;
+            if matches!(
+                completion,
+                super::test_support::ExhaustedJoinAbortForTests::OtherSentinel
+            ) {
+                state.completed = Some(QueryResult::Error(QueryError::Other(Arc::from(
+                    "aborted subscriber flight",
+                ))));
+            }
+        }
         if state.aborted && attempt.retries < MAX_INFLIGHT_RETRIES {
             // A concurrent canonical invalidation swept the (family, slot)
             // this flight served. Retire the exact aborted flight before
@@ -667,12 +685,24 @@ impl Subscription<'_> {
             store.retire_inflight(prepared, &inflight, attempt.independent);
             return Joined::Retry;
         }
-        let result = state.completed.clone().unwrap_or_else(|| {
-            if state.aborted {
-                return QueryResult::Error(QueryError::ExecutionAborted(
+        if state.aborted {
+            // Invalidation can preserve an earlier completion. Exhaustion
+            // ends retries, never the abort's veto over that completion.
+            drop(state);
+            store.retire_inflight(prepared, &inflight, attempt.independent);
+            return Joined::Read(CacheRead {
+                value: QueryResult::Error(QueryError::ExecutionAborted(
                     crate::semantic_query::ExecutionAbort::Superseded,
-                ));
-            }
+                )),
+                dep_signature: empty_signature(),
+                walker_diagnostics: Arc::from([]),
+                cache_suppress: true,
+                result_is_partial: true,
+                partial_reasons: PartialReasonSet::SUPERSEDED_GENERATION,
+                receipt: crate::semantic_query::ReadReceipt::Unpriced,
+            });
+        }
+        let result = state.completed.clone().unwrap_or_else(|| {
             QueryResult::Error(QueryError::Other(Arc::from(
                 "joiner woke without completion after retry budget exhausted",
             )))
