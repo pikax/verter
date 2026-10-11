@@ -71,8 +71,9 @@ pub(crate) enum ResponseClass {
     Navigation,
     /// Edits a client applies. Every open document an edit was computed
     /// against is captured like a navigation target and validated at
-    /// settlement; the delivered edit names each captured version
-    /// ([`ForegroundRequest::bind_edits`]).
+    /// settlement; a newly created path is recorded before that settlement
+    /// ([`ForegroundRequest::record_absent_creates`]) and the delivered edit
+    /// names each captured version ([`ForegroundRequest::bind_edits`]).
     Edit,
 }
 
@@ -450,6 +451,24 @@ impl ForegroundRequest {
         Some(Some(identity))
     }
 
+    /// Record every `ResourceOp::Create` in `response` whose path is not open
+    /// and not readable. [`Self::settle`] checks those paths are still absent,
+    /// so this runs after the edit is computed and before settlement. A path
+    /// that already exists is left unrecorded; [`Self::bind_edits`] refuses it.
+    pub(crate) fn record_absent_creates<T: EditBearing>(
+        &self,
+        documents: &DocumentRegistry,
+        response: &T,
+    ) {
+        response.visit_edits(&mut |edit| {
+            for uri in created_uris(edit) {
+                if self.created_path_is_absent(documents, uri) {
+                    self.note_absent_create(uri);
+                }
+            }
+        });
+    }
+
     /// Bind every edit in `response` to the revisions this request captured,
     /// in the client's negotiated shape. An edit reaching a target open in the
     /// client whose revision the request never captured could address bytes
@@ -462,27 +481,30 @@ impl ForegroundRequest {
         response: &mut T,
     ) -> Result<(), EditRefusal> {
         response.bind_each_edit(&mut |edit| {
-            if let Some(tower_lsp_server::ls_types::DocumentChanges::Operations(operations)) =
-                &edit.document_changes
-            {
-                for operation in operations {
-                    if let tower_lsp_server::ls_types::DocumentChangeOperation::Op(
-                        tower_lsp_server::ls_types::ResourceOp::Create(create),
-                    ) = operation
-                    {
-                        let path = uri_to_canonical_id(&create.uri);
-                        if documents.open_uri_for_fs_path(&path).is_some()
-                            || documents.host().workspace_read().read_file(&path).is_some()
-                        {
-                            return Err(EditRefusal::UnboundTarget(create.uri.clone()));
-                        }
-                        self.absent_targets.lock().push(path);
-                    }
+            for uri in created_uris(edit) {
+                if !self.created_path_is_absent(documents, uri) {
+                    return Err(EditRefusal::UnboundTarget(uri.clone()));
                 }
+                self.note_absent_create(uri);
             }
             let mut revision_of = |target: &Uri| self.edit_target_revision(documents, target);
             bind_workspace_edit(edit, self.edit_support, &mut revision_of)
         })
+    }
+
+    fn created_path_is_absent(&self, documents: &DocumentRegistry, uri: &Uri) -> bool {
+        let path = uri_to_canonical_id(uri);
+        documents.open_uri_for_fs_path(&path).is_none()
+            && documents.host().workspace_read().read_file(&path).is_none()
+    }
+
+    fn note_absent_create(&self, uri: &Uri) {
+        let path = uri_to_canonical_id(uri);
+        let mut absent = self.absent_targets.lock();
+        if absent.iter().any(|known| same_document_path(known, &path)) {
+            return;
+        }
+        absent.push(path);
     }
 
     fn edit_target_revision(
@@ -634,6 +656,27 @@ pub(crate) trait EditBearing {
         &mut self,
         bind: &mut dyn FnMut(&mut WorkspaceEdit) -> Result<(), EditRefusal>,
     ) -> Result<(), EditRefusal>;
+
+    /// Visit every `WorkspaceEdit` the answer delivers, without binding it.
+    fn visit_edits(&self, visit: &mut dyn FnMut(&WorkspaceEdit));
+}
+
+/// `ResourceOp::Create` targets in `edit`, in delivery order.
+fn created_uris(edit: &WorkspaceEdit) -> Vec<&Uri> {
+    let Some(tower_lsp_server::ls_types::DocumentChanges::Operations(operations)) =
+        &edit.document_changes
+    else {
+        return Vec::new();
+    };
+    operations
+        .iter()
+        .filter_map(|operation| match operation {
+            tower_lsp_server::ls_types::DocumentChangeOperation::Op(
+                tower_lsp_server::ls_types::ResourceOp::Create(create),
+            ) => Some(&create.uri),
+            _ => None,
+        })
+        .collect()
 }
 
 impl EditBearing for WorkspaceEdit {
@@ -642,6 +685,10 @@ impl EditBearing for WorkspaceEdit {
         bind: &mut dyn FnMut(&mut WorkspaceEdit) -> Result<(), EditRefusal>,
     ) -> Result<(), EditRefusal> {
         bind(self)
+    }
+
+    fn visit_edits(&self, visit: &mut dyn FnMut(&WorkspaceEdit)) {
+        visit(self);
     }
 }
 
@@ -661,6 +708,17 @@ impl EditBearing for Vec<CodeActionOrCommand> {
             CodeActionOrCommand::CodeAction(_) | CodeActionOrCommand::Command(_) => true,
         });
         Ok(())
+    }
+
+    fn visit_edits(&self, visit: &mut dyn FnMut(&WorkspaceEdit)) {
+        for action in self {
+            if let CodeActionOrCommand::CodeAction(CodeAction {
+                edit: Some(edit), ..
+            }) = action
+            {
+                visit(edit);
+            }
+        }
     }
 }
 
@@ -832,8 +890,9 @@ mod tests {
 
     /// An absent create is delivered with a null version. A create whose path
     /// is already on disk or already open is withdrawn, `ignore_if_exists`
-    /// included. A path that appears after mapping settles `ContentModified`
-    /// while project authority is unchanged.
+    /// included. Recording the create, then the path appearing, settles
+    /// `ContentModified` while project authority is unchanged — the order
+    /// `answer_repaired_edit_foreground` uses (record, settle, then bind).
     #[test]
     fn a_created_path_is_delivered_only_while_it_stays_absent() {
         let (temp, documents) = workspace();
@@ -911,26 +970,58 @@ mod tests {
             Some(4),
             "the open source keeps the version captured at admission"
         );
+
+        // Settlement sees the create only after it is recorded, and recording
+        // happens before bind on the server. This request has not bound.
+        let settlement = ForegroundRequest::admit(
+            &documents,
+            ForegroundRoute::CodeAction,
+            &source,
+            WorkspaceEditSupport::VersionedDocumentChanges,
+        );
+        let pending = vec![
+            action_creating("extract absent", &source, &absent),
+            action_creating("extract existing", &source, &existing),
+            action_creating("extract open", &source, &open),
+        ];
         assert!(
-            matches!(request.settle(&documents, Some(())), Settled::Answer(_)),
+            settlement.absent_targets.lock().is_empty(),
+            "precondition: settlement has not recorded a create"
+        );
+        assert!(
+            matches!(settlement.settle(&documents, Some(())), Settled::Answer(_)),
+            "an unrecorded create is not a settlement target"
+        );
+        settlement.record_absent_creates(&documents, &pending);
+        {
+            let recorded = settlement.absent_targets.lock();
+            assert_eq!(recorded.len(), 1, "only the absent create is recorded");
+            assert!(
+                super::same_document_path(&recorded[0], &absent_id),
+                "recorded {}, expected {absent_id}",
+                recorded[0]
+            );
+        }
+        assert!(
+            matches!(settlement.settle(&documents, Some(())), Settled::Answer(_)),
             "an absent create still settles while the path is absent"
         );
         assert!(
-            request.authority.is_current(&documents.host()),
+            settlement.authority.is_current(&documents.host()),
             "precondition: authority is unchanged before the path appears"
         );
 
         documents.appear_open_for_test(&absent, "<template><div/></template>\n");
         assert!(
-            request.authority.is_current(&documents.host()),
+            settlement.authority.is_current(&documents.host()),
             "the appearance must not replace project authority"
         );
         assert!(
             matches!(
-                request.settle(&documents, Some(())),
+                settlement.settle(&documents, Some(())),
                 Settled::ContentModified
             ),
-            "a created path that appears before settlement is content-modified"
+            "a created path that appears after it is recorded and before settlement is content-modified"
         );
     }
 }
