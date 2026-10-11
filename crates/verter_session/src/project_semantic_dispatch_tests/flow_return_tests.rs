@@ -427,6 +427,235 @@ fn flow_execution_abort_is_delivered_to_singleflight_follower() {
     ));
 }
 
+/// A follower that has exhausted invalidation retries cannot consume a retained
+/// completion, even when that completion still validates for its view.
+#[test]
+fn flow_exhausted_follower_abort_suppresses_retained_completions() {
+    assert_exhausted_follower_abort(
+        verter_type_engine::semantic_query_memo::test_support::ExhaustedJoinAbortForTests::RetainCompletion,
+    );
+}
+
+#[test]
+fn flow_exhausted_follower_abort_preserves_other_sentinel_disposition() {
+    assert_exhausted_follower_abort(
+        verter_type_engine::semantic_query_memo::test_support::ExhaustedJoinAbortForTests::OtherSentinel,
+    );
+}
+
+fn assert_exhausted_follower_abort(
+    completion: verter_type_engine::semantic_query_memo::test_support::ExhaustedJoinAbortForTests,
+) {
+    use verter_type_engine::semantic_query::{
+        ExecutionAbort, FactResult, PartialReasonSet, ReturnProjectionDemand,
+    };
+    enum Follower {
+        Raw,
+        Audited,
+        Enclosing,
+    }
+
+    struct ProduceHookGuard<'s>(&'s verter_type_engine::semantic_query_memo::SemanticGraphStore);
+    impl Drop for ProduceHookGuard<'_> {
+        fn drop(&mut self) {
+            self.0.set_produce_hook_for_tests(None);
+        }
+    }
+
+    for delivery in [Follower::Raw, Follower::Audited, Follower::Enclosing] {
+        let host = make_host_with_config(HostConfig {
+            audit_enabled: true,
+            ..HostConfig::default()
+        });
+        let inner = return_identity("subInner", FunctionPartIdentity::DeclarationBody, 0);
+        let outer = return_identity(
+            "subOuterCallsInner",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        with_dispatch(&host, |dispatch| {
+            let inner_key =
+                SemanticQueryKey::FlowReturn(Box::new(dispatch.flow_return_key_for(&inner)));
+            let enclosing_key =
+                SemanticQueryKey::ResolveDecl(verter_type_engine::semantic_query::ResolveDeclKey {
+                    scope: verter_type_engine::semantic_query::ScopeId {
+                        canonical_id: Arc::from(CANONICAL),
+                        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                        local_scope: None,
+                        binder_scope_id:
+                            verter_type_engine::semantic_query::BinderScopeId::file_scope(
+                                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                            ),
+                    },
+                    name: Arc::from("Enclosing"),
+                });
+            let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let release_rx = std::sync::Mutex::new(release_rx);
+            let hold_once = std::sync::atomic::AtomicBool::new(true);
+            let held_key = inner_key.clone();
+            dispatch
+                .graph()
+                .set_produce_hook_for_tests(Some(Arc::new(move |key, _| {
+                    if key == &held_key
+                        && hold_once.swap(false, std::sync::atomic::Ordering::SeqCst)
+                    {
+                        let _ = ready_tx.send(());
+                        let _ = release_rx
+                            .lock()
+                            .unwrap()
+                            .recv_timeout(std::time::Duration::from_secs(10));
+                    }
+                })));
+            let hook = ProduceHookGuard(dispatch.graph());
+            let fault = dispatch
+                .graph()
+                .test_exhausted_join_abort(inner_key.clone(), completion);
+            std::thread::scope(|threads| {
+                let producer = threads.spawn(|| {
+                    with_dispatch(&host, |dispatch| {
+                        dispatch.execute_via_cold_build_helper(inner_key.clone())
+                    })
+                });
+                let ready = ready_rx.recv_timeout(std::time::Duration::from_secs(10));
+                if ready.is_err() {
+                    let _ = release_tx.send(());
+                    let _ = producer.join();
+                    panic!("the raw producer must reach the held flight: {ready:?}");
+                }
+                let follower = threads.spawn(|| {
+                    if matches!(delivery, Follower::Audited) {
+                        let public = host.get_flow_return_type_with_audit(
+                            &inner,
+                            ReturnProjectionDemand::whole_return(),
+                        );
+                        assert!(
+                            matches!(
+                                public.as_result(),
+                                Err(crate::host_flow_return_audit::FlowReturnError::Aborted(
+                                    ExecutionAbort::Superseded
+                                ))
+                            ),
+                            "an audited follower must preserve the abort: {:?}",
+                            public.as_result()
+                        );
+                        assert!(
+                            public.audit().flow_return_inference_payload().is_some(),
+                            "the failed public call still delivers its audit payload"
+                        );
+                    } else {
+                        with_dispatch(&host, |dispatch| {
+                            let _validity = verter_type_engine::request_context::ExecutionValidityScope::enter();
+                            let raw = if matches!(delivery, Follower::Enclosing) {
+                                let node = dispatch.graph().intern_node(SemanticNodeData::Primitive(
+                                    verter_type_engine::semantic_query::PrimitiveKind::String,
+                                ));
+                                dispatch.graph().execute_cooperative_value(
+                                    host.as_ref(), enclosing_key.clone(), || node, || {
+                                        let _ = dispatch.execute_via_cold_build_helper(inner_key.clone());
+                                        // The enclosing computation has its own complete value.
+                                        // The consumed child's validity must still veto admission.
+                                        let output: verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput<SemanticQueryValue> = (
+                                            QueryResult::Value(SemanticQueryValue::TypeNode(node)),
+                                            verter_type_engine::semantic_query_memo::test_support::empty_signature_for_tests(),
+                                        ).into();
+                                        output
+                                    },
+                                )
+                            } else {
+                                dispatch.execute_via_cold_build_helper(inner_key.clone())
+                            };
+                            assert!(
+                                matches!(
+                                    raw.value,
+                                    QueryResult::Error(QueryError::ExecutionAborted(
+                                        ExecutionAbort::Superseded
+                                    ))
+                                ),
+                                "an exhausted follower must deliver a typed abort: {:?}",
+                                raw.value
+                            );
+                            assert!(raw.cache_suppress && raw.result_is_partial);
+                            assert!(raw
+                                .partial_reasons
+                                .contains(PartialReasonSet::SUPERSEDED_GENERATION));
+                            if matches!(delivery, Follower::Raw) {
+                                assert!(
+                                    raw.receipt.priced().is_none(),
+                                    "aborted delivery must not charge the retained completion"
+                                );
+                            }
+                        });
+                    }
+                });
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                while dispatch
+                    .graph()
+                    .task_registry_for_tests()
+                    .wait_count_for_tests()
+                    == 0
+                    && std::time::Instant::now() < deadline
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                let joined = dispatch
+                    .graph()
+                    .task_registry_for_tests()
+                    .wait_count_for_tests()
+                    > 0;
+                // Release before asserting or joining, including a failed rendezvous.
+                let _ = release_tx.send(());
+                let produced = producer.join().expect("the producer completes");
+                follower.join().expect("the follower completes");
+                assert!(joined, "the follower must join the held inner flight");
+                assert!(
+                    matches!(
+                        &produced.value,
+                        QueryResult::Value(SemanticQueryValue::FlowReturn(value)) if matches!(value.fact(), FactResult::Complete(_))
+                    ),
+                    "the unaffected producer still delivers its complete value"
+                );
+            });
+            assert_eq!(
+                dispatch
+                    .graph()
+                    .slot_candidate_count_for_tests(&enclosing_key),
+                0,
+                "no enclosing result may admit around the exhausted follower"
+            );
+            drop((fault, hook));
+            if matches!(delivery, Follower::Enclosing) {
+                let node = dispatch.graph().intern_node(SemanticNodeData::Primitive(
+                    verter_type_engine::semantic_query::PrimitiveKind::String,
+                ));
+                let clean = dispatch.graph().execute_cooperative(
+                    host.as_ref(), enclosing_key.clone(), || node,
+                    || (QueryResult::Value(node), verter_type_engine::semantic_query_memo::test_support::empty_signature_for_tests()),
+                );
+                assert!(matches!(clean.value, QueryResult::Value(value) if value == node));
+                assert_eq!(
+                    dispatch
+                        .graph()
+                        .slot_candidate_count_for_tests(&enclosing_key),
+                    1,
+                    "a clean enclosing computation remains admissible"
+                );
+            }
+        });
+        for identity in [&inner, &outer] {
+            let recovered = host
+                .get_flow_return_type_with_audit(identity, ReturnProjectionDemand::whole_return());
+            assert!(
+                matches!(
+                    recovered.as_result().unwrap().fact(),
+                    FactResult::Complete(_)
+                ),
+                "a clean request must recover after exhausted follower delivery"
+            );
+        }
+    }
+}
+
 #[test]
 fn flow_execution_abort_reaches_raw_direct_and_public_consumers() {
     use super::flow_return::flow_admission_fault_injection as inject;

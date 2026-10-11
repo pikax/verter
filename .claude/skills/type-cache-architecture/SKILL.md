@@ -1018,6 +1018,14 @@ before any early return, admission decision or memo insertion. Typed
 
 ### Completed results and their receipts
 
+An aborted singleflight never delivers its retained completion to a subscriber.
+`Subscription::wait` retires and retries within its retry allowance; exhaustion
+returns a typed `ExecutionAborted(Superseded)` read with suppression, partiality,
+and no cost receipt. That disposition takes precedence over a retained value or
+an `Other` sentinel, and dispatch propagates it into enclosing evaluations and
+the audited FlowReturn API. A fresh clean claim can still compute or reuse a
+validated result.
+
 Completion and retention are separate verdicts. A flow evaluation that
 completes as its own component's root lands in the dispatch transaction's
 demand-keyed result table (`FlowResultTable` in `dispatch_txn.rs`), classified
