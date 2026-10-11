@@ -182,7 +182,9 @@ pub use membership::{
     static_membership_with_typescript_defaults, FallbackMembership, ProjectMembership,
     SupportedExtensions,
 };
-pub use memory::{MemoryOptions, MemorySnapshot, MemoryWorkspace};
+pub use memory::{
+    MemoryOptions, MemorySnapshot, MemoryWorkspace, SnapshotChanges, SnapshotMemberChange,
+};
 pub use overlay::OverlayStore;
 pub use overlay_residency::OverlayAuthority;
 pub use package_index::PackageIndex;

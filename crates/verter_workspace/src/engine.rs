@@ -5741,6 +5741,10 @@ impl Engine {
         self.snapshot.read().revision()
     }
 
+    pub(crate) fn snapshot_changes_since(&self, since: Option<u64>) -> crate::SnapshotChanges {
+        self.snapshot.read().changes_since(since)
+    }
+
     pub(crate) fn snapshot_canonicals(&self) -> Vec<String> {
         self.snapshot.read().ids().map(str::to_owned).collect()
     }
