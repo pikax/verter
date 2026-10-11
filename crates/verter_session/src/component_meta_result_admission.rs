@@ -163,7 +163,10 @@ impl<'a, 'c, P: Send + Sync + Clone, C: ResolverCapabilities>
     ) -> (R, Option<AdmittedComponentMetaResult<P>>)
     where
         Compute: FnOnce() -> R,
-        Decide: FnOnce(&R) -> ComponentMetaPublishDecision<P>,
+        Decide: FnOnce(
+            &R,
+            &verter_type_engine::project_semantic_dispatch::memo::ComponentMetaEvidence,
+        ) -> ComponentMetaPublishDecision<P>,
         P: verter_session_query::retention::RetainedFootprint,
     {
         let (value, finalise) = self
@@ -171,7 +174,7 @@ impl<'a, 'c, P: Send + Sync + Clone, C: ResolverCapabilities>
             .traced_component_meta_compute(_canonical, compute);
         let mut admitted = None;
         match finalise {
-            ComponentMetaTrace::Observed(evidence) => match decide(&value) {
+            ComponentMetaTrace::Observed(evidence) => match decide(&value, &evidence) {
                 ComponentMetaPublishDecision::Publish {
                     key,
                     owner_whole_hash,
@@ -262,7 +265,10 @@ impl<'a, 'c, P: Send + Sync + Clone, C: ResolverCapabilities>
     ) -> R
     where
         Compute: FnOnce() -> R,
-        Decide: FnOnce(&R) -> ComponentMetaPublishDecision<P>,
+        Decide: FnOnce(
+            &R,
+            &verter_type_engine::project_semantic_dispatch::memo::ComponentMetaEvidence,
+        ) -> ComponentMetaPublishDecision<P>,
         P: verter_session_query::retention::RetainedFootprint,
     {
         self.compute_and_admit_with_entry(canonical, path_label, compute, decide)

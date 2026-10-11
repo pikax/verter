@@ -977,13 +977,13 @@ impl VerterHost {
                     Some((extract.analysis, extract.completeness)),
                 )
             },
-            |computed| {
+            |computed, evidence| {
                 let (Some(resolved), Some((meta, extract_completeness))) = computed else {
                     return crate::component_meta_result_db::ComponentMetaPublishDecision::no_value(
                     );
                 };
                 let final_completeness = resolved.completeness.merge(*extract_completeness);
-                let admission = dispatch.component_meta_admission_proof(&refusal_query);
+                let admission = dispatch.component_meta_admission_proof(&refusal_query, evidence);
                 self.component_meta_publish_decision_with_view(
                     canonical,
                     view,

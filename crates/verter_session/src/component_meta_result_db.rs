@@ -164,7 +164,7 @@ mod tests {
                 );
                 41u32
             },
-            |_value| {
+            |_value, _evidence| {
                 ComponentMetaPublishDecision::publish(
                     key.clone(),
                     owner_hash,
@@ -193,7 +193,7 @@ mod tests {
                 );
                 42u32
             },
-            |_value| {
+            |_value, _evidence| {
                 ComponentMetaPublishDecision::publish(
                     refused_key.clone(),
                     refused_hash,
@@ -217,7 +217,7 @@ mod tests {
                 );
                 43u32
             },
-            |_| {
+            |_, _evidence| {
                 // The edit occurs after tracer finalization, before storage.
                 let _ = host
                     .upsert(crate::UpsertRequest {
@@ -277,7 +277,7 @@ mod tests {
                 );
                 44u32
             },
-            |_| {
+            |_, _evidence| {
                 let _ = host
                     .upsert(crate::UpsertRequest {
                         canonical_id: Some("/w/dep.ts".into()),
@@ -645,7 +645,7 @@ mod tests {
                 );
                 7u32
             },
-            |_| {
+            |_, _evidence| {
                 ComponentMetaPublishDecision::retain_refusal(
                     key.clone(),
                     owner_hash,
@@ -690,7 +690,7 @@ mod tests {
                 );
                 9u32
             },
-            |_| {
+            |_, _evidence| {
                 ComponentMetaPublishDecision::publish(
                     key.clone(),
                     owner_hash,
@@ -745,7 +745,7 @@ mod tests {
                 );
                 8u32
             },
-            |_| {
+            |_, _evidence| {
                 ComponentMetaPublishDecision::retain_refusal(
                     certified_key.clone(),
                     owner_hash,
@@ -803,7 +803,7 @@ mod tests {
                 );
                 5u32
             },
-            |_| {
+            |_, _evidence| {
                 ComponentMetaPublishDecision::retain_refusal(
                     isolated_key.clone(),
                     owner_hash,
@@ -883,7 +883,7 @@ mod tests {
                 );
                 1u32
             },
-            |_| {
+            |_, _evidence| {
                 ComponentMetaPublishDecision::return_only(
                     verter_audit::NonAdmissionReason::PartialResult,
                 )
@@ -901,7 +901,7 @@ mod tests {
                 );
                 2u32
             },
-            |_| {
+            |_, _evidence| {
                 ComponentMetaPublishDecision::publish(
                     missing_key.clone(),
                     owner_hash,
@@ -936,7 +936,7 @@ mod tests {
                 );
                 3u32
             },
-            |_| {
+            |_, _evidence| {
                 ComponentMetaPublishDecision::publish(
                     sibling.clone(),
                     owner_hash,
@@ -1044,7 +1044,7 @@ mod tests {
                 );
                 7u32
             },
-            |_| {
+            |_, _evidence| {
                 ComponentMetaPublishDecision::retain_refusal(
                     key.clone(),
                     owner_hash,
@@ -1488,5 +1488,537 @@ mod tests {
         );
         crate::host_manage::component_meta_entry::COLD_BODY_PRE_RESOLVE_HOOK
             .with(|slot| *slot.borrow_mut() = None);
+    }
+
+    fn indexed_vue(canonical: &str) -> (crate::VerterHost, Hash16) {
+        let host = crate::VerterHost::new_standalone(crate::types::HostConfig::default());
+        let _ = host
+            .upsert(crate::UpsertRequest {
+                canonical_id: Some(canonical.into()),
+                input_id: canonical.into(),
+                source: Arc::from(
+                    "<script setup lang=\"ts\">defineProps<{ x: string }>()</script>",
+                ),
+                file_language: crate::FileLanguage::vue(),
+                aliases: Vec::new(),
+            })
+            .unwrap();
+        let owner_hash = host.ensure_indexed_ready(canonical).unwrap().whole_hash;
+        (host, owner_hash)
+    }
+
+    fn observe_owner(canonical: &str, owner_hash: Hash16) {
+        verter_type_engine::resolver_core::resolver_context::observe_fan_out(
+            verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+                canonical_id: canonical.to_string(),
+                hash: owner_hash,
+            },
+        );
+    }
+
+    #[test]
+    fn outstanding_traces_replay_their_own_request_spend() {
+        use verter_type_engine::project_semantic_dispatch::memo::ComponentMetaTrace;
+        use verter_type_engine::request_context::{
+            current_request_budget, RequestContext, RequestContextGuard,
+        };
+        use verter_type_engine::semantic_query::{PartialReasonSet, ResultCompleteness};
+
+        let canonical = "/w/two-traces.vue";
+        let (host, owner_hash) = indexed_vue(canonical);
+        let db: ComponentMetaResultDb<u32> = ComponentMetaResultDb::new();
+        let dispatch =
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+        let read = crate::component_meta_result_admission::ComponentMetaResultRead::new(
+            &dispatch,
+            &db,
+            host.provenance().as_ref(),
+        );
+        let generation = dispatch.current_project_generation();
+        let budget_partial = ResultCompleteness::partial(PartialReasonSet::BUDGET_EXCEEDED);
+        let status = final_component_refusal_status(budget_partial.reasons()).unwrap();
+        let key_a = mk_result_key(canonical, [1u8; 16]);
+        let key_b = mk_result_key(canonical, [2u8; 16]);
+        let install = |id: u64| {
+            RequestContextGuard::install(RequestContext::with_kind_timing_and_projection_budget(
+                id,
+                Arc::from(canonical),
+                verter_audit::RequestKind::ComponentMeta,
+                false,
+                false,
+                None,
+                20,
+            ))
+        };
+
+        let _request = install(1);
+        let query_a = dispatch.component_meta_refusal_query(canonical);
+        let (_, trace_a) = dispatch.traced_component_meta_compute(canonical, || {
+            current_request_budget()
+                .expect("request")
+                .check_projection_op_count();
+            observe_owner(canonical, owner_hash);
+            1u32
+        });
+        let query_b = dispatch.component_meta_refusal_query(canonical);
+        let (_, trace_b) = dispatch.traced_component_meta_compute(canonical, || {
+            let budget = current_request_budget().expect("request");
+            for _ in 0..5 {
+                budget.check_projection_op_count();
+            }
+            observe_owner(canonical, owner_hash);
+            5u32
+        });
+        let ComponentMetaTrace::Observed(evidence_a) = trace_a else {
+            panic!("trace A must be observed");
+        };
+        let ComponentMetaTrace::Observed(evidence_b) = trace_b else {
+            panic!("trace B must be observed");
+        };
+        let admit = |key, evidence, query, recovery: u32| {
+            dispatch.admit_component_meta_refusal(
+                &db,
+                key,
+                owner_hash,
+                evidence,
+                refusal_identity_for(ComponentMetaRefusalClass::OperationProfile, query),
+                status,
+                budget_partial,
+                Arc::new(recovery),
+                generation,
+            )
+        };
+        assert!(admit(key_b.clone(), evidence_b, &query_b, 5).is_some());
+        assert!(admit(key_a.clone(), evidence_a, &query_a, 1).is_some());
+        drop(_request);
+
+        let _replay_a = install(2);
+        assert!(read.replay_refusal(&key_a, owner_hash, &query_a).is_some());
+        assert_eq!(
+            current_request_budget()
+                .expect("replay A")
+                .projection_ops_executed_count(),
+            1,
+            "admitting A after B still replays A's one operation"
+        );
+        drop(_replay_a);
+
+        let _replay_b = install(3);
+        current_request_budget()
+            .expect("entry for B")
+            .check_projection_op_count();
+        assert!(read.replay_refusal(&key_b, owner_hash, &query_b).is_some());
+        assert_eq!(
+            current_request_budget()
+                .expect("replay B")
+                .projection_ops_executed_count(),
+            6,
+            "B replays the five operations it spent on top of its entry"
+        );
+    }
+
+    #[test]
+    fn a_sibling_spend_is_not_an_isolated_root() {
+        use std::sync::Barrier;
+        use std::thread;
+        use verter_type_engine::request_context::{
+            current_request_budget, RequestContext, RequestContextGuard,
+        };
+        use verter_type_engine::semantic_query::{PartialReasonSet, ResultCompleteness};
+
+        let canonical = "/w/sibling-spend.vue";
+        let (host, owner_hash) = indexed_vue(canonical);
+        let db: ComponentMetaResultDb<u32> = ComponentMetaResultDb::new();
+        let dispatch =
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+        let publish =
+            crate::component_meta_result_admission::ComponentMetaResultPublish::new(&dispatch, &db);
+        let read = crate::component_meta_result_admission::ComponentMetaResultRead::new(
+            &dispatch,
+            &db,
+            host.provenance().as_ref(),
+        );
+        let generation = dispatch.current_project_generation();
+        let depth = ResultCompleteness::partial(PartialReasonSet::CONNECTED_QUERY_DEPTH_LIMIT);
+        let status = final_component_refusal_status(depth.reasons()).unwrap();
+        let contended_key = mk_result_key(canonical, [3u8; 16]);
+        let control_key = mk_result_key(canonical, [4u8; 16]);
+        let install = |id: u64| {
+            RequestContextGuard::install(RequestContext::with_kind_timing_and_projection_budget(
+                id,
+                Arc::from(canonical),
+                verter_audit::RequestKind::ComponentMeta,
+                false,
+                false,
+                None,
+                8,
+            ))
+        };
+
+        let _contended = install(1);
+        let query = dispatch.component_meta_refusal_query(canonical);
+        assert!(query.entered_isolated);
+        let start = Arc::new(Barrier::new(2));
+        let spent = Arc::new(Barrier::new(2));
+        let sibling_budget = current_request_budget().expect("request");
+        let start_s = Arc::clone(&start);
+        let spent_s = Arc::clone(&spent);
+        let sibling = thread::spawn(move || {
+            start_s.wait();
+            sibling_budget.check_projection_op_count();
+            spent_s.wait();
+        });
+        let runs = Arc::new(AtomicU64::new(0));
+        let runs_c = Arc::clone(&runs);
+        publish.compute_and_admit(
+            canonical,
+            "contended",
+            || {
+                start.wait();
+                spent.wait();
+                sibling.join().expect("sibling");
+                runs_c.fetch_add(1, Ordering::SeqCst);
+                observe_owner(canonical, owner_hash);
+                1u32
+            },
+            |_, evidence| {
+                let proof = dispatch.component_meta_admission_proof(&query, evidence);
+                assert!(
+                    !proof.entered_isolated,
+                    "a sibling spend is not this compute's own"
+                );
+                assert_eq!(
+                    classify_final_component_retention(depth, proof),
+                    FinalComponentRetention::NotAdmitted
+                );
+                ComponentMetaPublishDecision::no_value()
+            },
+        );
+        assert!(read
+            .replay_refusal(&contended_key, owner_hash, &query)
+            .is_none());
+        drop(_contended);
+
+        let _again = install(2);
+        let again = Arc::clone(&runs);
+        publish.compute_and_admit(
+            canonical,
+            "recompute",
+            || {
+                again.fetch_add(1, Ordering::SeqCst);
+                observe_owner(canonical, owner_hash);
+                2u32
+            },
+            |_, _evidence| ComponentMetaPublishDecision::no_value(),
+        );
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            2,
+            "the refused trace recomputes"
+        );
+        drop(_again);
+
+        let _control = install(3);
+        let control_query = dispatch.component_meta_refusal_query(canonical);
+        let control_runs = Arc::new(AtomicU64::new(0));
+        let control_flag = Arc::clone(&control_runs);
+        publish.compute_and_admit(
+            canonical,
+            "control",
+            || {
+                control_flag.fetch_add(1, Ordering::SeqCst);
+                observe_owner(canonical, owner_hash);
+                3u32
+            },
+            |_, evidence| {
+                let proof = dispatch.component_meta_admission_proof(&control_query, evidence);
+                assert!(proof.entered_isolated);
+                let class = match classify_final_component_retention(depth, proof) {
+                    FinalComponentRetention::Retain(class) => class,
+                    other => panic!("uncontended depth refusal must be retained, got {other:?}"),
+                };
+                ComponentMetaPublishDecision::retain_refusal(
+                    control_key.clone(),
+                    owner_hash,
+                    refusal_identity_for(class, &control_query),
+                    status,
+                    depth,
+                    Arc::new(3u32),
+                    generation,
+                )
+            },
+        );
+        drop(_control);
+        let _replay = install(4);
+        let replayed = read
+            .replay_refusal(&control_key, owner_hash, &control_query)
+            .expect("the uncontended refusal replays");
+        assert_eq!(*replayed.recovery, 3);
+        assert_eq!(control_runs.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_producer_certificate_retains_and_an_uncertified_recursion_does_not() {
+        use verter_type_engine::project_semantic_dispatch::connected_demand::{
+            note_component_meta_divergence_for_test, note_component_meta_schedule_cut_for_test,
+        };
+        use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+        use verter_type_engine::semantic_query::{PartialReasonSet, ResultCompleteness};
+
+        let canonical = "/w/certificate.vue";
+        let (host, owner_hash) = indexed_vue(canonical);
+        let db: ComponentMetaResultDb<u32> = ComponentMetaResultDb::new();
+        let dispatch =
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+        let publish =
+            crate::component_meta_result_admission::ComponentMetaResultPublish::new(&dispatch, &db);
+        let read = crate::component_meta_result_admission::ComponentMetaResultRead::new(
+            &dispatch,
+            &db,
+            host.provenance().as_ref(),
+        );
+        let generation = dispatch.current_project_generation();
+        let recursion = ResultCompleteness::partial(PartialReasonSet::SAME_PATH_RECURSION);
+        let status = final_component_refusal_status(recursion.reasons()).unwrap();
+        let certified_key = mk_result_key(canonical, [5u8; 16]);
+        let plain_key = mk_result_key(canonical, [6u8; 16]);
+        let cut_key = mk_result_key(canonical, [7u8; 16]);
+        let install = |id: u64| {
+            RequestContextGuard::install(RequestContext::with_kind_timing_and_projection_budget(
+                id,
+                Arc::from(canonical),
+                verter_audit::RequestKind::ComponentMeta,
+                false,
+                false,
+                None,
+                8,
+            ))
+        };
+        let runs = Arc::new(AtomicU64::new(0));
+
+        let _certified = install(1);
+        let query = dispatch.component_meta_refusal_query(canonical);
+        let runs_c = Arc::clone(&runs);
+        publish.compute_and_admit(
+            canonical,
+            "certified",
+            || {
+                runs_c.fetch_add(1, Ordering::SeqCst);
+                note_component_meta_divergence_for_test();
+                observe_owner(canonical, owner_hash);
+                11u32
+            },
+            |_, evidence| {
+                let proof = dispatch.component_meta_admission_proof(&query, evidence);
+                assert!(proof.divergence_certificate);
+                assert!(!proof.schedule_cut);
+                let class = match classify_final_component_retention(recursion, proof) {
+                    FinalComponentRetention::Retain(class) => class,
+                    other => panic!("certificate must retain, got {other:?}"),
+                };
+                assert_eq!(class, ComponentMetaRefusalClass::CertifiedDivergence);
+                ComponentMetaPublishDecision::retain_refusal(
+                    certified_key.clone(),
+                    owner_hash,
+                    refusal_identity_for(class, &query),
+                    status,
+                    recursion,
+                    Arc::new(11u32),
+                    generation,
+                )
+            },
+        );
+        drop(_certified);
+        let _replay = install(2);
+        let replayed = read
+            .replay_refusal(&certified_key, owner_hash, &query)
+            .expect("certified refusal replays");
+        assert_eq!(*replayed.recovery, 11);
+        assert_eq!(replayed.status, status);
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            1,
+            "replay does not run the producer"
+        );
+        drop(_replay);
+
+        let _plain = install(3);
+        let plain_query = dispatch.component_meta_refusal_query(canonical);
+        let plain_runs = Arc::new(AtomicU64::new(0));
+        let plain_flag = Arc::clone(&plain_runs);
+        publish.compute_and_admit(
+            canonical,
+            "uncertified",
+            || {
+                plain_flag.fetch_add(1, Ordering::SeqCst);
+                observe_owner(canonical, owner_hash);
+                12u32
+            },
+            |_, evidence| {
+                let proof = dispatch.component_meta_admission_proof(&plain_query, evidence);
+                assert!(!proof.divergence_certificate);
+                assert_eq!(
+                    classify_final_component_retention(recursion, proof),
+                    FinalComponentRetention::NotAdmitted
+                );
+                ComponentMetaPublishDecision::no_value()
+            },
+        );
+        assert!(read
+            .replay_refusal(&plain_key, owner_hash, &plain_query)
+            .is_none());
+        let plain_again = Arc::clone(&plain_runs);
+        publish.compute_and_admit(
+            canonical,
+            "uncertified-again",
+            || {
+                plain_again.fetch_add(1, Ordering::SeqCst);
+                observe_owner(canonical, owner_hash);
+                13u32
+            },
+            |_, _evidence| ComponentMetaPublishDecision::no_value(),
+        );
+        assert_eq!(plain_runs.load(Ordering::SeqCst), 2);
+        drop(_plain);
+
+        let _cut = install(4);
+        let cut_query = dispatch.component_meta_refusal_query(canonical);
+        publish.compute_and_admit(
+            canonical,
+            "schedule-cut",
+            || {
+                note_component_meta_divergence_for_test();
+                note_component_meta_schedule_cut_for_test();
+                observe_owner(canonical, owner_hash);
+                14u32
+            },
+            |_, evidence| {
+                let proof = dispatch.component_meta_admission_proof(&cut_query, evidence);
+                assert!(proof.divergence_certificate);
+                assert!(proof.schedule_cut);
+                assert_eq!(
+                    classify_final_component_retention(recursion, proof),
+                    FinalComponentRetention::NotAdmitted
+                );
+                ComponentMetaPublishDecision::no_value()
+            },
+        );
+        assert!(read
+            .replay_refusal(&cut_key, owner_hash, &cut_query)
+            .is_none());
+    }
+
+    #[test]
+    fn connected_charges_follow_the_compute_across_roots() {
+        use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+        use verter_type_engine::semantic_query::{PartialReasonSet, ResultCompleteness};
+
+        let canonical = "/w/span-roots.vue";
+        let (host, owner_hash) = indexed_vue(canonical);
+        let db: ComponentMetaResultDb<u32> = ComponentMetaResultDb::new();
+        let dispatch =
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+        let publish =
+            crate::component_meta_result_admission::ComponentMetaResultPublish::new(&dispatch, &db);
+        let read = crate::component_meta_result_admission::ComponentMetaResultRead::new(
+            &dispatch,
+            &db,
+            host.provenance().as_ref(),
+        );
+        let generation = dispatch.current_project_generation();
+        let tripped = ResultCompleteness::partial(PartialReasonSet::PROJECTION_WORK_LIMIT);
+        let status = final_component_refusal_status(tripped.reasons()).unwrap();
+        let small_key = mk_result_key(canonical, [8u8; 16]);
+        let wide_key = mk_result_key(canonical, [9u8; 16]);
+        let install = |id: u64| {
+            RequestContextGuard::install(RequestContext::with_kind_timing_and_projection_budget(
+                id,
+                Arc::from(canonical),
+                verter_audit::RequestKind::ComponentMeta,
+                false,
+                false,
+                None,
+                20,
+            ))
+        };
+
+        let _request = install(1);
+        let small_query = dispatch.component_meta_refusal_query(canonical);
+        let ledger = dispatch.connected_demand();
+        ledger.with_root_for_test(false, |root| {
+            root.charge(50, 0, PartialReasonSet::empty());
+        });
+        publish.compute_and_admit(
+            canonical,
+            "small-after-large",
+            || {
+                ledger.with_root_for_test(false, |root| {
+                    root.charge(1, 0, PartialReasonSet::empty());
+                });
+                observe_owner(canonical, owner_hash);
+                1u32
+            },
+            |_, _evidence| {
+                ComponentMetaPublishDecision::retain_refusal(
+                    small_key.clone(),
+                    owner_hash,
+                    refusal_identity_for(ComponentMetaRefusalClass::OperationProfile, &small_query),
+                    status,
+                    tripped,
+                    Arc::new(1u32),
+                    generation,
+                )
+            },
+        );
+        ledger.with_root_for_test(false, |root| {
+            assert!(read
+                .replay_refusal(&small_key, owner_hash, &small_query)
+                .is_some());
+            let (work, _, _) = root.charges();
+            assert_eq!(
+                work, 1,
+                "a compute after a larger root records its own work"
+            );
+        });
+
+        let wide_query = dispatch.component_meta_refusal_query(canonical);
+        publish.compute_and_admit(
+            canonical,
+            "two-roots",
+            || {
+                ledger.with_root_for_test(false, |root| {
+                    root.charge(10, 0, PartialReasonSet::PROJECTION_WORK_LIMIT);
+                });
+                ledger.with_root_for_test(false, |root| {
+                    root.charge(2, 4, PartialReasonSet::empty());
+                });
+                observe_owner(canonical, owner_hash);
+                2u32
+            },
+            |_, _evidence| {
+                ComponentMetaPublishDecision::retain_refusal(
+                    wide_key.clone(),
+                    owner_hash,
+                    refusal_identity_for(ComponentMetaRefusalClass::OperationProfile, &wide_query),
+                    status,
+                    tripped,
+                    Arc::new(2u32),
+                    generation,
+                )
+            },
+        );
+        drop(_request);
+        let _replay = install(2);
+        ledger.with_root_for_test(false, |root| {
+            let replayed = read
+                .replay_refusal(&wide_key, owner_hash, &wide_query)
+                .expect("the span refusal replays");
+            assert_eq!(*replayed.recovery, 2);
+            let (work, bytes, trip) = root.charges();
+            assert_eq!(work, 12);
+            assert_eq!(bytes, 4);
+            assert!(trip.contains(PartialReasonSet::PROJECTION_WORK_LIMIT));
+            assert!(root.try_charge().is_err());
+        });
     }
 }

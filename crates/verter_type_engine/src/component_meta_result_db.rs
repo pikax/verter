@@ -864,10 +864,17 @@ impl<P> ComponentMetaResultDb<P> {
             Ok(value) => value,
             Err(shared) => (*shared).clone(),
         };
+        // One retained paid identity is the same 64 bytes the refusal
+        // summary reserves (`refusal_summary::IDENTITY_BYTES`).
+        const REQUEST_IDENTITY_BYTES: usize = 64;
+        let request_bytes = effects.request.as_ref().map_or(0, |spent| {
+            spent.identities().saturating_mul(REQUEST_IDENTITY_BYTES)
+        });
         let bytes =
             verter_session_query::retention::RetainedFootprint::retained_footprint_bytes(&recovery)
                 + read_set_signature.facts.len() * footprint::FACT_BYTES
-                + verter_session_query::retention::ENTRY_OVERHEAD_BYTES;
+                + verter_session_query::retention::ENTRY_OVERHEAD_BYTES
+                + request_bytes;
         let charge = match verter_session_query::facts::receipt::reserve_retained_with_evidence(
             self.retention_account(),
             bytes,
@@ -1375,5 +1382,63 @@ mod refusal_ledger_tests {
         assert_eq!(account.snapshot().retained_bytes, charged);
         drop(recovery);
         assert_eq!(account.snapshot().retained_bytes, 0);
+    }
+
+    #[test]
+    fn retained_request_identities_grow_the_reservation() {
+        use crate::project_semantic_dispatch::cost_receipt::CostIdentity;
+        use crate::request_budget::RequestSpent;
+
+        let account = SemanticRetentionAccount::new(RetentionLimits {
+            aggregate_ceiling_bytes: 10_000_000,
+            active_ceiling_bytes: 10_000_000,
+            max_entry_bytes: 512,
+            pin_threshold_bytes: 10_000_000,
+        });
+        let db: ComponentMetaResultDb<u32> =
+            ComponentMetaResultDb::with_account_for_test(Arc::clone(&account));
+        let status = final_component_refusal_status(PartialReasonSet::OPERATION_BUDGET).unwrap();
+        let completeness = ResultCompleteness::partial(PartialReasonSet::OPERATION_BUDGET);
+        let signature = verter_session_query::facts::fact_cache::ReadSetSignature::empty();
+        let seal = |root: &str, effects: ComponentMetaRefusalEffects| {
+            db.seal_refusal(
+                key("/w/charged.vue"),
+                [1u8; 16],
+                refusal_identity_for(
+                    ComponentMetaRefusalClass::OperationProfile,
+                    &query(root, 4, 0, 0),
+                ),
+                status,
+                completeness,
+                Arc::new(7u32),
+                signature.clone(),
+                0,
+                effects,
+            )
+        };
+        let identities = |n: usize| ComponentMetaRefusalEffects {
+            request: Some(RequestSpent::from_identities_for_test(
+                (0..n)
+                    .map(|index| CostIdentity::new(format!("paid-{index}").into_bytes()))
+                    .collect(),
+                Vec::new(),
+            )),
+            ..ComponentMetaRefusalEffects::default()
+        };
+
+        assert!(seal("none", ComponentMetaRefusalEffects::default()).is_some());
+        let empty_prefix = account.snapshot().retained_bytes;
+        assert!(seal("one", identities(1)).is_some());
+        assert_eq!(
+            account.snapshot().retained_bytes - empty_prefix,
+            empty_prefix + 64,
+            "one retained paid identity adds the summary's 64-byte charge"
+        );
+        let charged = account.snapshot().retained_bytes;
+        assert!(
+            seal("wide", identities(200)).is_none(),
+            "a paid prefix past the entry ceiling is not admitted"
+        );
+        assert_eq!(account.snapshot().retained_bytes, charged);
     }
 }

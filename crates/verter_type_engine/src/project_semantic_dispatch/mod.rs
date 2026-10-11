@@ -3942,6 +3942,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 Acquired::Recursive(recursion) => {
                     if recursion == crate::semantic_query_memo::Recursion::WaitCycle {
                         self.connected_demand.note_schedule_cut();
+                    } else {
+                        self.connected_demand.note_divergence_certificate();
                     }
                     SemanticGraphStore::recursion_read(
                         recursion,

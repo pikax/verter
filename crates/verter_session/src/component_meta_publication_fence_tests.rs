@@ -66,7 +66,7 @@ fn captured_component_publication_fence_refuses_stale_and_unproven_bases() {
                 );
                 45u32
             },
-            |_| {
+            |_, _evidence| {
                 ComponentMetaPublishDecision::publish(
                     key.clone(),
                     owner_hash,

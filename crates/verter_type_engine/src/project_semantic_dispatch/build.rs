@@ -5087,6 +5087,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // the state it was in then, and each step is a function of
                 // that state: it repeats forever, a certified divergence.
                 if build.tail_arguments.contains(&next) {
+                    self.connected_demand.note_divergence_certificate();
                     result = checker_policy::divergence_recovery(
                         self.graph(),
                         checker_policy::CertifiedDivergence::exact_recurrence(
@@ -15530,6 +15531,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// application under the same context, so a certified divergence — a
     /// complete answer, kept.
     fn lib_awaited_recurs(&self) -> SemanticNodeId {
+        self.connected_demand.note_divergence_certificate();
         crate::semantic_query::checker_policy::divergence_recovery(
             self.graph(),
             crate::semantic_query::checker_policy::CertifiedDivergence::exact_recurrence(

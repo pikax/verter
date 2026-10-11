@@ -10,7 +10,6 @@ use crate::fact_signature_helpers::ReadSetSignatureExt as _;
 use crate::resolver_core::fact_validation_port::{FactValidation, LiveFactValidation};
 use crate::resolver_core::resolver_context::{RequestFlags, RequestSnapshot};
 use dashmap::DashMap;
-use std::cell::RefCell;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
@@ -19,40 +18,41 @@ use verter_session_query::declarations::metadata::ResolvedTypeDeclaration;
 use verter_session_query::facts::fact_cache::FactVersionRef;
 use verter_session_query::facts::fact_cache::ReadSetSignature;
 
-/// Accounting of the traced component-meta compute on this thread. The
-/// admission that follows the compute reads it; the next compute replaces it.
-struct ComponentMetaComputeAccounting {
-    effects: crate::component_meta_result_db::ComponentMetaRefusalEffects,
-    /// The compute's request spend is its own: the paid prefix held, or
-    /// there was no request to interleave with.
-    spent_alone: bool,
-}
-
-thread_local! {
-    static COMPONENT_META_ACCOUNTING: RefCell<ComponentMetaComputeAccounting> = RefCell::new(
-        ComponentMetaComputeAccounting {
-            effects: crate::component_meta_result_db::ComponentMetaRefusalEffects::default(),
-            spent_alone: false,
-        },
-    );
-}
-
-fn component_meta_accounting() -> ComponentMetaComputeAccounting {
-    COMPONENT_META_ACCOUNTING.with(|slot| {
-        let slot = slot.borrow();
-        ComponentMetaComputeAccounting {
-            effects: slot.effects.clone(),
-            spent_alone: slot.spent_alone,
-        }
-    })
-}
-
 /// Finalized evidence of one traced component computation. Only the engine
 /// can mint it; admission consumes it under its publication fence.
+///
+/// The refusal charges, the isolation flag and the divergence certificate
+/// are this compute's. A later compute does not replace them.
 pub struct ComponentMetaEvidence {
     facts: Arc<[FactVersionRef]>,
     generation: u64,
     external_fingerprint: u64,
+    effects: crate::component_meta_result_db::ComponentMetaRefusalEffects,
+    /// The compute's request spend is its own: the paid prefix and the
+    /// operation counter moved only by what this thread recorded, or there
+    /// was no request to interleave with.
+    spent_alone: bool,
+    /// A producer proved an exact same-path recurrence during this compute.
+    /// A same-path reason bit is not this flag.
+    divergence_certificate: bool,
+    /// A schedule cut was noted during this compute.
+    schedule_cut: bool,
+}
+
+impl ComponentMetaEvidence {
+    /// Admission proof for this compute. The certificate, the schedule cut
+    /// and the isolation flag are the ones recorded on this evidence.
+    #[must_use]
+    pub fn admission_proof(
+        &self,
+        query: &crate::component_meta_result_db::ComponentMetaRefusalQuery,
+    ) -> crate::component_meta_result_db::FinalComponentAdmissionProof {
+        crate::component_meta_result_db::FinalComponentAdmissionProof {
+            divergence_certificate: self.divergence_certificate,
+            schedule_cut: self.schedule_cut,
+            entered_isolated: query.entered_isolated && self.spent_alone && !self.schedule_cut,
+        }
+    }
 }
 
 /// Tracer finalization for a component result. A refused trace cannot mint
@@ -1389,23 +1389,20 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispat
         }
     }
 
-    /// Admission proof for the compute that just ran on this thread.
+    /// Admission proof for the compute `evidence` finalised.
     ///
-    /// The divergence certificate stays unset: a same-path recursion bit
-    /// is not, by itself, a certificate. A schedule cut and a spend that
-    /// was not this compute's alone both refuse isolated-root retention.
+    /// A same-path recursion bit is not, by itself, a certificate. A
+    /// schedule cut and a spend that was not this compute's alone both
+    /// refuse isolated-root retention. The current demand root is not
+    /// consulted: two outstanding computes keep their own proofs.
     #[must_use]
     pub fn component_meta_admission_proof(
         &self,
         query: &crate::component_meta_result_db::ComponentMetaRefusalQuery,
+        evidence: &ComponentMetaEvidence,
     ) -> crate::component_meta_result_db::FinalComponentAdmissionProof {
-        let schedule_cut = self.connected_demand().was_schedule_cut();
-        let spent_alone = component_meta_accounting().spent_alone;
-        crate::component_meta_result_db::FinalComponentAdmissionProof {
-            divergence_certificate: false,
-            schedule_cut,
-            entered_isolated: query.entered_isolated && spent_alone && !schedule_cut,
-        }
+        let _ = self.current_project_generation();
+        evidence.admission_proof(query)
     }
 
     /// Apply a sealed refusal's charges to this demand. Misses, changing
@@ -1525,7 +1522,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispat
             recovery,
             ReadSetSignature::new(facts),
             generation,
-            component_meta_accounting().effects,
+            evidence.effects,
         )
     }
 
@@ -1540,8 +1537,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispat
         let external_fingerprint = self.ctx.publication_input_fingerprint();
         let request = crate::request_context::current_request_budget();
         let entry_snapshot = request.as_ref().map(|budget| budget.capture_entry());
-        let (work_at_entry, bytes_at_entry) = self.connected_demand().charged();
-        let trip_at_entry = self.connected_demand().active_trip().unwrap_or_default();
+        let spend = crate::request_budget::ThreadSpendGuard::enter();
+        let span = super::connected_demand::ComponentMetaSpanGuard::enter();
         let (value, finalise) = self.traced_compute(|| {
             if let Some(hash) = self.ctx.authoritative_current_content_hash(owner_canonical) {
                 crate::resolver_core::resolver_context::observe_fan_out(
@@ -1553,24 +1550,23 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispat
             }
             compute()
         });
-        let request_spent = match (request.as_ref(), entry_snapshot.as_ref()) {
-            (Some(budget), Some(snapshot)) => budget.observed_spend_since(snapshot),
-            _ => None,
+        let (operations, paid) = spend.finish();
+        let span = span.finish();
+        let (request_spent, spent_alone) = match (request.as_ref(), entry_snapshot.as_ref()) {
+            (Some(budget), Some(snapshot)) => {
+                let (spent, alone) = budget.owned_spend(snapshot, operations, &paid);
+                (Some(spent), alone)
+            }
+            _ => (None, true),
         };
-        let spent_alone = request_spent.is_some() || entry_snapshot.is_none();
-        let (work_now, bytes_now) = self.connected_demand().charged();
-        let trip_now = self.connected_demand().active_trip().unwrap_or_default();
-        COMPONENT_META_ACCOUNTING.with(|slot| {
-            *slot.borrow_mut() = ComponentMetaComputeAccounting {
-                effects: crate::component_meta_result_db::ComponentMetaRefusalEffects {
-                    request: request_spent,
-                    work: work_now.saturating_sub(work_at_entry),
-                    bytes: bytes_now.saturating_sub(bytes_at_entry),
-                    trip: trip_now.without(trip_at_entry),
-                },
-                spent_alone,
-            };
-        });
+        let effects = crate::component_meta_result_db::ComponentMetaRefusalEffects {
+            request: request_spent,
+            work: span.work,
+            bytes: span.bytes,
+            trip: span.trip,
+        };
+        let divergence_certificate = span.certificates > 0;
+        let schedule_cut = span.schedule_cuts > 0;
         let trace = match finalise {
             verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(facts)
                 if external_fingerprint.is_some_and(|captured| {
@@ -1582,6 +1578,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispat
                     generation,
                     external_fingerprint: external_fingerprint
                         .expect("checked captured fingerprint"),
+                    effects,
+                    spent_alone,
+                    divergence_certificate,
+                    schedule_cut,
                 })
             }
             verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(_) => {
