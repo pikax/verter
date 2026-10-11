@@ -991,6 +991,27 @@ mod tests {
             !ran_resolution.load(Ordering::SeqCst),
             "the resolution demand must not resolve again"
         );
+        let (_analysis, resolution) = host
+            .get_component_meta_with_resolution(canonical)
+            .expect("the resolution consumer replays the retained refusal");
+        assert!(
+            !resolution.fact_status().is_complete(),
+            "a replayed resolution is the refusal, not a successful hit: {:?}",
+            resolution.fact_status()
+        );
+        assert!(
+            resolution.synthesis_should_suppress,
+            "a refusal replay must not present the recovery as cacheable"
+        );
+        assert_eq!(
+            host.project_type_store().component_meta_results().len(),
+            0,
+            "the refusal is not a successful candidate"
+        );
+        assert!(
+            !ran_resolution.load(Ordering::SeqCst),
+            "reading the resolution must not enter the cold body"
+        );
         crate::host_manage::component_meta_entry::COLD_BODY_PRE_RESOLVE_HOOK
             .with(|slot| *slot.borrow_mut() = None);
 

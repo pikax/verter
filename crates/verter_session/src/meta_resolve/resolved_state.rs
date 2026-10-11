@@ -121,6 +121,13 @@ pub struct ResolvedComponentMetaState {
 }
 
 impl ResolvedComponentMetaState {
+    /// Fact status of this resolution. A retained refusal is not complete.
+    #[must_use]
+    pub fn fact_status(&self) -> verter_type_engine::semantic_query::FactStatus {
+        crate::component_meta_result_db::final_component_refusal_status(self.completeness.reasons())
+            .unwrap_or(verter_type_engine::semantic_query::FactStatus::Complete)
+    }
+
     /// Merge facts observed by the extraction/fallthrough phase into this
     /// call-owned state. Existing resolve facts retain their order; new facts
     /// append in producer order with deterministic equality-based dedup.

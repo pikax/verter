@@ -197,13 +197,18 @@ impl VerterHost {
         if let Some(retained) =
             self.replay_component_meta_refusal_with_view(canonical.as_str(), &view, &fixed)
         {
+            let status_completeness = retained.completeness;
             let cached = retained.recovery;
             if let Some(snapshot) = reload_component_meta_template_snapshot(
                 self,
                 &cached.canonical_id,
                 cached.whole_hash,
             ) {
-                let resolution = cached.resolution_template.rehydrate(snapshot, request_id);
+                let mut resolution = cached.resolution_template.rehydrate(snapshot, request_id);
+                // The retained refusal's status rides on the resolution.
+                // Rehydrate must not present the recovery as a complete hit.
+                resolution.completeness = status_completeness;
+                resolution.synthesis_should_suppress = status_completeness.is_partial();
                 return Ok(Some((cached.analysis.clone(), resolution)));
             }
         }

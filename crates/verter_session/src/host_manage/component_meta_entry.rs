@@ -54,9 +54,15 @@ thread_local! {
 /// Run (and consume) the test-only pre-resolve hook. No-op when disarmed.
 #[cfg(test)]
 pub(crate) fn run_cold_body_pre_resolve_hook() {
+    COLD_BODY_ENTRIES.with(|count| count.set(count.get().saturating_add(1)));
     if let Some(hook) = COLD_BODY_PRE_RESOLVE_HOOK.with(|slot| slot.borrow_mut().take()) {
         hook();
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static COLD_BODY_ENTRIES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
