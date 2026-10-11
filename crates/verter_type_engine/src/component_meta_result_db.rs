@@ -33,16 +33,28 @@
 //! - **`options_fingerprint` is a stable `Hash16`** produced from a
 //!   manually-stable serialization of output-affecting fields only —
 //!   never request ids, trace flags, or caller metadata.
-//! - Cancelled, budget-exceeded, or partial results are **not** promoted
-//!   into the cache. They must surface as `QueryError` variants to the
-//!   caller.
+//! - Successful candidates are complete facts only. A certified divergence,
+//!   an operation-profile refusal, or an isolated-root ledger refusal is
+//!   retained in the refusal ledger with its original status and recovery,
+//!   never as a successful candidate. Any other approximation, a missing
+//!   input, and an execution abort are not retained.
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
+use rustc_hash::FxHashMap;
 use verter_session_query::analysis::types::Hash16;
+use verter_session_query::facts::fact_cache::ReadSetSignature;
+use verter_session_query::retention::RetentionCharge;
 
 use crate::bounded_query_retention::BoundedCandidateMap;
+use crate::semantic_query::{FactStatus, PartialReason, PartialReasonSet, ResultCompleteness};
+
+/// How many final-component refusals the ledger keeps. The oldest is dropped
+/// first. Successful candidates use the candidate budget and are not counted
+/// here.
+const REFUSAL_LEDGER_CAP: usize = 256;
 
 /// Stable fingerprint over output-affecting options. Constructed by the
 /// caller from an explicitly versioned serialization; the type alias
@@ -153,6 +165,199 @@ impl<P> Clone for ComponentMetaResultEntry<P> {
     }
 }
 
+/// Which eligible refusal a final component demand retained.
+///
+/// These stay refusals. A retained recovery is never a successful candidate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ComponentMetaRefusalClass {
+    /// The producer's deterministic divergence certificate.
+    CertifiedDivergence,
+    /// The demand stopped under this operation profile.
+    OperationProfile,
+    /// An isolated root stopped under this profile, allowance and context.
+    IsolatedRoot,
+}
+
+/// The request axes a refusal was sealed under, already normalized for its
+/// class. Certified divergence ignores profile and entry allowance. An
+/// operation-profile refusal ignores entry allowance. An isolated-root
+/// refusal uses every axis.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ComponentMetaRefusalIdentity {
+    pub class: ComponentMetaRefusalClass,
+    pub profile: u64,
+    pub root: Arc<str>,
+    pub entry_allowance: u64,
+    pub context: u64,
+}
+
+/// The axes of the demand asking to reuse a refusal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComponentMetaRefusalQuery {
+    pub root: Arc<str>,
+    pub profile: u64,
+    pub entry_allowance: u64,
+    pub context: u64,
+}
+
+impl ComponentMetaRefusalQuery {
+    /// The ledger identities this demand may reuse, in class order.
+    #[must_use]
+    pub fn reusable_identities(&self) -> [ComponentMetaRefusalIdentity; 3] {
+        [
+            refusal_identity_for(ComponentMetaRefusalClass::CertifiedDivergence, self),
+            refusal_identity_for(ComponentMetaRefusalClass::OperationProfile, self),
+            refusal_identity_for(ComponentMetaRefusalClass::IsolatedRoot, self),
+        ]
+    }
+}
+
+/// Normalize `class` onto `query`. A higher profile, a different root, a
+/// different context, or (for an isolated root) a different entry allowance
+/// produces a different identity.
+#[must_use]
+pub fn refusal_identity_for(
+    class: ComponentMetaRefusalClass,
+    query: &ComponentMetaRefusalQuery,
+) -> ComponentMetaRefusalIdentity {
+    match class {
+        ComponentMetaRefusalClass::CertifiedDivergence => ComponentMetaRefusalIdentity {
+            class,
+            profile: 0,
+            root: Arc::clone(&query.root),
+            entry_allowance: 0,
+            context: query.context,
+        },
+        ComponentMetaRefusalClass::OperationProfile => ComponentMetaRefusalIdentity {
+            class,
+            profile: query.profile,
+            root: Arc::clone(&query.root),
+            entry_allowance: 0,
+            context: query.context,
+        },
+        ComponentMetaRefusalClass::IsolatedRoot => ComponentMetaRefusalIdentity {
+            class,
+            profile: query.profile,
+            root: Arc::clone(&query.root),
+            entry_allowance: query.entry_allowance,
+            context: query.context,
+        },
+    }
+}
+
+/// Whether a finished final-component compute may be published or retained.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FinalComponentRetention {
+    /// The demanded facts are complete.
+    Complete,
+    /// Retain this refusal class. Not a successful value.
+    Retain(ComponentMetaRefusalClass),
+    /// Approximate, missing-input, abort, or any other non-eligible outcome.
+    NotAdmitted,
+}
+
+/// Classify `completeness` for the final component store.
+///
+/// `entered_isolated` is true when this demand entered with an empty paid
+/// set. A depth refusal under an enclosing paid set is not an isolated-root
+/// ledger entry and is not retained.
+#[must_use]
+pub fn classify_final_component_retention(
+    completeness: ResultCompleteness,
+    entered_isolated: bool,
+) -> FinalComponentRetention {
+    if !completeness.is_partial() {
+        return FinalComponentRetention::Complete;
+    }
+    let mut operation = false;
+    let mut divergence = false;
+    let mut depth = false;
+    let mut other = false;
+    for reason in completeness.reasons().iter() {
+        match reason {
+            PartialReason::BudgetExceeded
+            | PartialReason::OperationBudget
+            | PartialReason::ProjectionWorkLimit
+            | PartialReason::ConnectedMemoryLimit
+            | PartialReason::DeferredEvaluationLimit
+            | PartialReason::StructuralFactDemandLimit => operation = true,
+            PartialReason::SamePathRecursion => divergence = true,
+            PartialReason::ConnectedQueryDepthLimit => depth = true,
+            PartialReason::Cancelled
+            | PartialReason::SupersededGeneration
+            | PartialReason::UnstableState
+            | PartialReason::WalkerFatal
+            | PartialReason::Propagated
+            | PartialReason::SemanticQueryFault
+            | PartialReason::MissingSemanticNodeData
+            | PartialReason::MissingDependency
+            | PartialReason::FlowReturnUninferred
+            | PartialReason::FlowReturnUnverified
+            | PartialReason::FlowReturnNoSurface
+            | PartialReason::UndecidedConditional => other = true,
+        }
+    }
+    if other || (!operation && !divergence && !depth) {
+        return FinalComponentRetention::NotAdmitted;
+    }
+    if divergence && !operation && !depth {
+        return FinalComponentRetention::Retain(ComponentMetaRefusalClass::CertifiedDivergence);
+    }
+    if depth && entered_isolated && !divergence {
+        return FinalComponentRetention::Retain(ComponentMetaRefusalClass::IsolatedRoot);
+    }
+    if operation && !divergence && !depth {
+        return FinalComponentRetention::Retain(ComponentMetaRefusalClass::OperationProfile);
+    }
+    FinalComponentRetention::NotAdmitted
+}
+
+/// The refusal status of a partial reason set. `None` when the set is empty.
+#[must_use]
+pub fn final_component_refusal_status(reasons: PartialReasonSet) -> Option<FactStatus> {
+    crate::semantic_query::surface_resolution::NonEmptyReasons::new(reasons)
+        .map(FactStatus::Unavailable)
+}
+
+type RefusalSlot = (ComponentMetaResultKey, Hash16, ComponentMetaRefusalIdentity);
+
+struct SealedComponentMetaRefusal<P> {
+    status: FactStatus,
+    completeness: ResultCompleteness,
+    recovery: Arc<P>,
+    read_set_signature: ReadSetSignature,
+    validated_at_generation: u64,
+    /// Drop releases the retention charge. The field is never read.
+    #[allow(dead_code)]
+    retention: Option<RetentionCharge>,
+}
+
+struct ComponentMetaRefusalLedger<P> {
+    entries: FxHashMap<RefusalSlot, SealedComponentMetaRefusal<P>>,
+    order: VecDeque<RefusalSlot>,
+}
+
+impl<P> Default for ComponentMetaRefusalLedger<P> {
+    fn default() -> Self {
+        Self {
+            entries: FxHashMap::default(),
+            order: VecDeque::new(),
+        }
+    }
+}
+
+/// A retained final-component refusal. Its recovery is the original refused
+/// outcome, not a successful cache candidate.
+#[derive(Clone)]
+pub struct ComponentMetaRetainedRefusal<P> {
+    pub identity: ComponentMetaRefusalIdentity,
+    pub status: FactStatus,
+    pub completeness: ResultCompleteness,
+    pub recovery: Arc<P>,
+    pub read_set_signature: ReadSetSignature,
+    pub validated_at_generation: u64,
+}
+
 /// Host-owned final result cache. Generic over the payload type so native
 /// and compat projections can share the same backing without double-caching
 /// semantic meaning.
@@ -188,6 +393,9 @@ pub struct ComponentMetaResultDb<P> {
     /// admits against the same ceiling rather than retaining entries that
     /// consume no aggregate headroom.
     retention_account: verter_session_query::retention::StoreAccount,
+    /// Eligible refusals. Absent from [`Self::len`] so a refusal is never
+    /// counted as a successful candidate.
+    refusals: Mutex<ComponentMetaRefusalLedger<P>>,
 }
 
 impl<P> ComponentMetaResultDb<P> {
@@ -312,6 +520,7 @@ impl<P> ComponentMetaResultDb<P> {
             stale_sweeps,
             schema_version,
             retention_account,
+            refusals: Mutex::new(ComponentMetaRefusalLedger::default()),
         }
     }
 
@@ -474,6 +683,136 @@ impl<P> ComponentMetaResultDb<P> {
         self.publish_core(key, owner_whole_hash, entry);
     }
 
+    fn lock_refusals(&self) -> std::sync::MutexGuard<'_, ComponentMetaRefusalLedger<P>> {
+        self.refusals
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    /// Seal an eligible refusal. A complete status is not a refusal. The
+    /// success candidate list is left unchanged, including when retention
+    /// refuses the bytes.
+    pub(crate) fn seal_refusal(
+        &self,
+        key: ComponentMetaResultKey,
+        owner_whole_hash: Hash16,
+        identity: ComponentMetaRefusalIdentity,
+        status: FactStatus,
+        completeness: ResultCompleteness,
+        recovery: Arc<P>,
+        read_set_signature: ReadSetSignature,
+        validated_at_generation: u64,
+    ) -> Option<ComponentMetaRetainedRefusal<P>>
+    where
+        P: verter_session_query::retention::RetainedFootprint,
+    {
+        if status.is_complete() {
+            return None;
+        }
+        let identity = refusal_identity_for(
+            identity.class,
+            &ComponentMetaRefusalQuery {
+                root: Arc::clone(&identity.root),
+                profile: identity.profile,
+                entry_allowance: identity.entry_allowance,
+                context: identity.context,
+            },
+        );
+        let bytes = verter_session_query::retention::RetainedFootprint::retained_footprint_bytes(
+            recovery.as_ref(),
+        ) + read_set_signature.facts.len() * footprint::FACT_BYTES
+            + verter_session_query::retention::ENTRY_OVERHEAD_BYTES;
+        let charge = match verter_session_query::facts::receipt::reserve_retained_with_evidence(
+            self.retention_account(),
+            bytes,
+            &[&read_set_signature.facts],
+        ) {
+            verter_session_query::retention::RetentionAdmission::Admitted(charge) => charge,
+            verter_session_query::retention::RetentionAdmission::Refused(refusal) => {
+                crate::cache_runtime::admission::propagate_non_admission(
+                    refusal.non_admission_reason(),
+                );
+                return None;
+            }
+        };
+        let retained = ComponentMetaRetainedRefusal {
+            identity: identity.clone(),
+            status,
+            completeness,
+            recovery: Arc::clone(&recovery),
+            read_set_signature: read_set_signature.clone(),
+            validated_at_generation,
+        };
+        let slot = (key, owner_whole_hash, identity);
+        let mut ledger = self.lock_refusals();
+        if ledger.entries.contains_key(&slot) {
+            ledger.order.retain(|existing| existing != &slot);
+        } else {
+            while ledger.entries.len() >= REFUSAL_LEDGER_CAP {
+                let Some(oldest) = ledger.order.pop_front() else {
+                    break;
+                };
+                ledger.entries.remove(&oldest);
+            }
+        }
+        ledger.entries.insert(
+            slot.clone(),
+            SealedComponentMetaRefusal {
+                status,
+                completeness,
+                recovery,
+                read_set_signature,
+                validated_at_generation,
+                retention: Some(charge),
+            },
+        );
+        ledger.order.push_back(slot);
+        Some(retained)
+    }
+
+    /// The retained refusal for one of `query`'s identities, if sealed.
+    /// Does not validate the signature: a failed validation keeps the entry
+    /// so a reverted edit can restore it.
+    pub(crate) fn refusal_for(
+        &self,
+        key: &ComponentMetaResultKey,
+        owner_whole_hash: Hash16,
+        query: &ComponentMetaRefusalQuery,
+    ) -> Option<ComponentMetaRetainedRefusal<P>> {
+        let ledger = self.lock_refusals();
+        for identity in query.reusable_identities() {
+            let slot = (key.clone(), owner_whole_hash, identity.clone());
+            let Some(sealed) = ledger.entries.get(&slot) else {
+                continue;
+            };
+            return Some(ComponentMetaRetainedRefusal {
+                identity,
+                status: sealed.status,
+                completeness: sealed.completeness,
+                recovery: Arc::clone(&sealed.recovery),
+                read_set_signature: sealed.read_set_signature.clone(),
+                validated_at_generation: sealed.validated_at_generation,
+            });
+        }
+        None
+    }
+
+    fn clear_refusals(&self) {
+        let mut ledger = self.lock_refusals();
+        ledger.entries.clear();
+        ledger.order.clear();
+    }
+
+    fn drop_refusals_for_owner(&self, owner_canonical: &str) {
+        let mut ledger = self.lock_refusals();
+        ledger
+            .order
+            .retain(|slot| slot.0.owner_canonical.as_ref() != owner_canonical);
+        ledger
+            .entries
+            .retain(|slot, _| slot.0.owner_canonical.as_ref() != owner_canonical);
+    }
+
     /// Remove the candidate for one owner content version. Returns the
     /// removed entry when present.
     #[cfg(any(test, feature = "test-support"))]
@@ -509,6 +848,7 @@ impl<P> ComponentMetaResultDb<P> {
         // accounting uniform with the other mutation sites and robust
         // should the `component_meta_live` counter ever be shared.)
         self.apply_live_delta(0, removed);
+        self.clear_refusals();
     }
 
     /// Invalidate every cached entry whose owner canonical matches
@@ -524,6 +864,7 @@ impl<P> ComponentMetaResultDb<P> {
         }
         // Net-subtract exactly the candidates this invalidation removed.
         self.apply_live_delta(0, removed);
+        self.drop_refusals_for_owner(owner_canonical);
         removed
     }
 
@@ -586,6 +927,7 @@ impl<P> crate::cache_schema::CacheSchemaVersioned for ComponentMetaResultDb<P> {
         // `clear` ran under the write guard — `count` is the exact live
         // count it dropped. Net-subtract it.
         self.apply_live_delta(0, count);
+        self.clear_refusals();
         count
     }
 }
@@ -624,5 +966,107 @@ impl<P> std::fmt::Debug for ComponentMetaResultDb<P> {
             .field("per_slot_cap", &self.per_slot_candidate_cap())
             .field("global_budget", &self.global_budget())
             .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod refusal_ledger_tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::semantic_query::{PartialReasonSet, ResultCompleteness};
+
+    fn key(owner: &str) -> ComponentMetaResultKey {
+        ComponentMetaResultKey {
+            owner_canonical: Arc::from(owner),
+            options_fingerprint: [0u8; 16],
+            project_identity: verter_session_query::resolution::ProjectIdentity([0u8; 16]),
+            parse_env_hash: [0u8; 16],
+            resolve_env_hash: [0u8; 16],
+            type_env_hash: [0u8; 16],
+            lib_env_hash: [0u8; 16],
+        }
+    }
+
+    fn query(root: &str, profile: u64, allowance: u64, context: u64) -> ComponentMetaRefusalQuery {
+        ComponentMetaRefusalQuery {
+            root: Arc::from(root),
+            profile,
+            entry_allowance: allowance,
+            context,
+        }
+    }
+
+    #[test]
+    fn retention_classes_follow_the_reason_set() {
+        let budget = ResultCompleteness::partial(PartialReasonSet::BUDGET_EXCEEDED);
+        assert_eq!(
+            classify_final_component_retention(budget, true),
+            FinalComponentRetention::Retain(ComponentMetaRefusalClass::OperationProfile)
+        );
+        let mixed = ResultCompleteness::partial(
+            PartialReasonSet::BUDGET_EXCEEDED.union(PartialReasonSet::MISSING_DEPENDENCY),
+        );
+        assert_eq!(
+            classify_final_component_retention(mixed, true),
+            FinalComponentRetention::NotAdmitted
+        );
+        let depth = ResultCompleteness::partial(PartialReasonSet::CONNECTED_QUERY_DEPTH_LIMIT);
+        assert_eq!(
+            classify_final_component_retention(depth, false),
+            FinalComponentRetention::NotAdmitted
+        );
+        assert_eq!(
+            classify_final_component_retention(depth, true),
+            FinalComponentRetention::Retain(ComponentMetaRefusalClass::IsolatedRoot)
+        );
+        assert_eq!(
+            classify_final_component_retention(ResultCompleteness::Complete, true),
+            FinalComponentRetention::Complete
+        );
+    }
+
+    #[test]
+    fn the_ledger_caps_at_256_and_invalidation_drops_refusals() {
+        let db: ComponentMetaResultDb<u32> = ComponentMetaResultDb::new();
+        let slot = key("/w/owner.vue");
+        let status = final_component_refusal_status(PartialReasonSet::OPERATION_BUDGET).unwrap();
+        for index in 0..=super::REFUSAL_LEDGER_CAP {
+            let identity = refusal_identity_for(
+                ComponentMetaRefusalClass::OperationProfile,
+                &query(&format!("root-{index}"), 4, 0, 0),
+            );
+            assert!(db
+                .seal_refusal(
+                    slot.clone(),
+                    [1u8; 16],
+                    identity,
+                    status,
+                    ResultCompleteness::partial(PartialReasonSet::OPERATION_BUDGET),
+                    Arc::new(index as u32),
+                    verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
+                    0,
+                )
+                .is_some());
+        }
+        assert_eq!(db.len(), 0);
+        assert!(db
+            .refusal_for(&slot, [1u8; 16], &query("root-0", 4, 0, 0))
+            .is_none());
+        assert!(db
+            .refusal_for(
+                &slot,
+                [1u8; 16],
+                &query(&format!("root-{}", super::REFUSAL_LEDGER_CAP), 4, 0, 0)
+            )
+            .is_some());
+        db.invalidate_owner("/w/owner.vue");
+        assert!(db
+            .refusal_for(
+                &slot,
+                [1u8; 16],
+                &query(&format!("root-{}", super::REFUSAL_LEDGER_CAP), 4, 0, 0)
+            )
+            .is_none());
     }
 }

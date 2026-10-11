@@ -77,10 +77,9 @@ pub struct ResolutionTemplate {
     pub surface_identities: Option<crate::meta_resolve::SurfaceNodeIdentities>,
     pub origin_graph: Option<verter_protocol::types::OriginGraphDto>,
     /// Per-result completeness preserved across the template round-trip.
-    /// Only `Complete` results are admitted to `ComponentMetaResultDb` (the
-    /// publication gate refuses partials), so a cached template is `Complete`
-    /// in production; preserving the typed value keeps rehydrate honest
-    /// rather than independently resetting the suppression bool to `false`.
+    /// Successful candidates are complete facts. A retained refusal keeps
+    /// this template as recovery, not as a successful candidate, and its
+    /// ledger entry carries the merged status separately.
     pub completeness: verter_type_engine::semantic_query::ResultCompleteness,
 }
 

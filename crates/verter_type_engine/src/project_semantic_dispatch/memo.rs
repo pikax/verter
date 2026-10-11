@@ -1325,6 +1325,121 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispat
             .then_some(entry)
     }
 
+    /// Axes of the demand that is asking to reuse a final-component refusal.
+    ///
+    /// With a request context installed, the profile is the host cap (a zero
+    /// cap is the legacy 2000) and the allowance and context are the paid
+    /// set at entry. Without one, the profile is `0` and the session fills
+    /// the host cap before lookup: a stored fresh refusal used that cap,
+    /// not profile `0`.
+    #[must_use]
+    pub fn component_meta_refusal_query(
+        &self,
+        root: &str,
+    ) -> crate::component_meta_result_db::ComponentMetaRefusalQuery {
+        if let Some(ctx) = crate::request_context::current_request_context() {
+            let entry = ctx.projection_budget.entry_state();
+            return crate::component_meta_result_db::ComponentMetaRefusalQuery {
+                root: Arc::from(root),
+                profile: ctx.projection_budget.effective_projection_op_budget() as u64,
+                entry_allowance: entry.paid_len() as u64,
+                context: entry.paid_digest(),
+            };
+        }
+        crate::component_meta_result_db::ComponentMetaRefusalQuery {
+            root: Arc::from(root),
+            profile: 0,
+            entry_allowance: 0,
+            context: 0,
+        }
+    }
+
+    /// Read a retained refusal. A stale signature or generation misses and
+    /// leaves the entry in place. A hit adopts the refusal's dependencies.
+    pub fn read_component_meta_refusal<P>(
+        &self,
+        db: &crate::component_meta_result_db::ComponentMetaResultDb<P>,
+        key: &crate::component_meta_result_db::ComponentMetaResultKey,
+        owner_whole_hash: verter_session_query::analysis::types::Hash16,
+        query: &crate::component_meta_result_db::ComponentMetaRefusalQuery,
+    ) -> Option<crate::component_meta_result_db::ComponentMetaRetainedRefusal<P>> {
+        if self.snapshot.flags().is_cancelled() || !db.is_current_schema() {
+            return None;
+        }
+        let retained = db.refusal_for(key, owner_whole_hash, query)?;
+        if retained.validated_at_generation != self.current_project_generation()
+            || !self.validates_fact_signature(&retained.read_set_signature.facts)
+        {
+            return None;
+        }
+        retained.read_set_signature.bubble(self.ctx);
+        Some(retained)
+    }
+
+    /// Retain an eligible refusal under the same publication fence as a
+    /// successful candidate. A complete status is not retained, and the
+    /// success map is not written.
+    pub fn admit_component_meta_refusal<P: verter_session_query::retention::RetainedFootprint>(
+        &self,
+        db: &crate::component_meta_result_db::ComponentMetaResultDb<P>,
+        key: crate::component_meta_result_db::ComponentMetaResultKey,
+        owner_whole_hash: verter_session_query::analysis::types::Hash16,
+        evidence: ComponentMetaEvidence,
+        identity: crate::component_meta_result_db::ComponentMetaRefusalIdentity,
+        status: crate::semantic_query::FactStatus,
+        completeness: crate::semantic_query::ResultCompleteness,
+        recovery: Arc<P>,
+        generation: u64,
+    ) -> Option<crate::component_meta_result_db::ComponentMetaRetainedRefusal<P>> {
+        if status.is_complete()
+            || self.snapshot.flags().is_cancelled()
+            || !db.is_current_schema()
+            || generation != evidence.generation
+            || generation != self.current_project_generation()
+            || evidence.external_fingerprint != self.ctx.current_external_supersession_fingerprint()
+            || self
+                .ctx
+                .authoritative_current_content_hash(&key.owner_canonical)
+                != Some(owner_whole_hash)
+            || !evidence.facts.iter().any(|fact| {
+                matches!(
+                    fact,
+                    FactVersionRef::FileWholeHash { canonical_id, hash }
+                        if canonical_id.as_str() == key.owner_canonical.as_ref()
+                            && *hash == owner_whole_hash
+                )
+            })
+        {
+            return None;
+        }
+        let facts = evidence
+            .facts
+            .iter()
+            .filter(|fact| {
+                !matches!(
+                    fact,
+                    FactVersionRef::DerivedFactHash {
+                        canonical_id,
+                        kind: verter_session_query::facts::fact_cache::DerivedFactKind::Route,
+                        ..
+                    } if canonical_id == key.owner_canonical.as_ref()
+                )
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+            .into();
+        db.seal_refusal(
+            key,
+            owner_whole_hash,
+            identity,
+            status,
+            completeness,
+            recovery,
+            ReadSetSignature::new(facts),
+            generation,
+        )
+    }
+
     /// Compute with an engine-owned tracer and seal the evidence for final
     /// component publication. Callers can choose a payload, never its facts.
     pub fn traced_component_meta_compute<R>(

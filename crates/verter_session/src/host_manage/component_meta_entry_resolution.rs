@@ -261,6 +261,7 @@ impl VerterHost {
             dispatch,
             self.project_type_store().component_meta_results(),
         );
+        let refusal_query = dispatch.component_meta_refusal_query(canonical.as_str());
         let maybe_resolved_analysis = results.compute_and_admit(
             canonical.as_str(),
             "with-resolution path",
@@ -331,6 +332,7 @@ impl VerterHost {
                     validated_at_generation,
                     seed_fence,
                     final_completeness,
+                    &refusal_query,
                 )
             },
         );

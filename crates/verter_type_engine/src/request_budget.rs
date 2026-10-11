@@ -134,6 +134,20 @@ pub struct RequestEntryState {
     paid_digest: u64,
 }
 
+impl RequestEntryState {
+    /// How many computations were already paid when the demand entered.
+    #[must_use]
+    pub(crate) fn paid_len(&self) -> usize {
+        self.paid_len
+    }
+
+    /// Order-independent digest of the paid set at entry.
+    #[must_use]
+    pub(crate) fn paid_digest(&self) -> u64 {
+        self.paid_digest
+    }
+}
+
 /// What one evaluation did to a request it ran in alone: the state it
 /// entered the request at, and its own effects from there — the operations
 /// it spent and the computations it paid.

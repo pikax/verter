@@ -822,30 +822,15 @@ impl VerterHost {
                 let _completeness_scope =
                     verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
                 let mut state = self.produce_vue_macro_codegen_inner(ctx, owner_canonical, demand);
-                // The producer's OWN completeness, with the CONTAINED
-                // classes subtracted: a body-derived return this substrate
-                // could not infer does not make the emitted TSX an
-                // incomplete surface (the declarations ride verbatim and
-                // the external checker types them), so it must not report
-                // the file-level result partial either. Every other reason
-                // class survives — including the declaration-local budget
-                // classification the class-member inference records
-                // precisely on its own rail.
-                //
-                // The FILE-level aggregate contains everything the two
-                // lanes contain BETWEEN them: a lane that refused recorded
-                // the refusal IN its entry, so the artifact is a faithful,
-                // deterministic record of it and warming that record is
-                // correct. The per-lane sets are what the two projections
-                // read, and they differ — see `MacroProjectionLane`.
+                // The file demand's own fact. Value-local reasons that no
+                // lane reads are not inputs of this summary, so they do not
+                // make the artifact recompute. Every request-integrity
+                // reason is an input, including a declaration-local budget.
+                // A lane that refused recorded that refusal in its entry.
                 let observed =
                     verter_type_engine::request_context::current_cold_compute_completeness();
-                let residual = macro_projection_residual(observed, MacroProjectionLane::File);
-                state.completeness = if residual.is_empty() {
-                    verter_type_engine::semantic_query::ResultCompleteness::Complete
-                } else {
-                    verter_type_engine::semantic_query::ResultCompleteness::Partial(residual)
-                };
+                state.completeness =
+                    demand_fact(MacroProjectionLane::File, observed).completeness();
                 state
             },
         );

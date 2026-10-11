@@ -570,6 +570,54 @@ impl VerterHost {
             }));
         }
 
+        if let Some(retained) =
+            self.replay_component_meta_refusal_with_view(canonical.as_str(), view, fixed)
+        {
+            let overlay =
+                std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+            let session_ctx = crate::resolver_core::SessionResolverContext::from_cold_seed(
+                self,
+                view,
+                fixed.cold_seed(),
+                overlay,
+            );
+            let ctx: &dyn crate::resolver_core::HostRequestContext = &session_ctx;
+            let dispatch =
+                &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+            let analysis = retained.recovery.analysis.clone();
+            let signature = retained.read_set_signature.clone();
+            let seed = with_resolution.then(|| {
+                crate::meta_resolve::output::ComponentMetaResolutionSeed::from_template(
+                    &retained.recovery.resolution_template,
+                )
+            });
+            let completeness = crate::meta_resolve::PublishedCompleteness::from_retained_refusal(
+                retained.completeness,
+            );
+            let (output, _output_read_set) = named_fact_tracer!(
+                &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
+                TracerScope::ComponentMetaOutput,
+                || {
+                    verter_type_engine::fact_signature_helpers::observe_fact_signature(
+                        &signature.facts,
+                    );
+                    crate::meta_resolve::projectors::build_component_meta_output(
+                        ctx,
+                        dispatch,
+                        canonical.as_str(),
+                        analysis,
+                        seed,
+                        completeness,
+                    )
+                }
+            );
+            let output = output?;
+            return Ok(Some(ComponentMetaOutputWithPublicationEvidence {
+                output,
+                publication_evidence: None,
+            }));
+        }
+
         // Cold: shared cold body (publishes the analysis cache entry
         // independently of the output result), then materialize under ONE
         // session-bound context derived from the SAME capture. Extraction
@@ -888,6 +936,7 @@ impl VerterHost {
             dispatch,
             self.project_type_store().component_meta_results(),
         );
+        let refusal_query = dispatch.component_meta_refusal_query(canonical);
         let ((resolved_opt, meta_opt), admitted) = results.compute_and_admit_with_entry(
             canonical,
             "view-aware path",
@@ -933,6 +982,7 @@ impl VerterHost {
                     validated_at_generation,
                     seed_fence,
                     final_completeness,
+                    &refusal_query,
                 )
             },
         );
@@ -990,6 +1040,65 @@ impl VerterHost {
         }
     }
 
+    /// Refusal identity for `canonical` on this dispatch.
+    ///
+    /// A probe that runs before a request context exists uses the host cap
+    /// (zero means the legacy 2000), an empty paid set, and a zero context.
+    /// That is the identity a fresh cold demand seals after the context is
+    /// installed.
+    fn component_meta_refusal_query(
+        &self,
+        dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+            '_,
+            crate::resolver_core::HostCapabilities,
+        >,
+        canonical: &str,
+    ) -> crate::component_meta_result_db::ComponentMetaRefusalQuery {
+        let mut query = dispatch.component_meta_refusal_query(canonical);
+        if verter_type_engine::request_context::current_request_context().is_none() {
+            let cap = self.config.projection_op_budget;
+            query.profile = if cap == 0 { 2000 } else { cap as u64 };
+            query.entry_allowance = 0;
+            query.context = 0;
+        }
+        query
+    }
+
+    /// Retained refusal for a view-aware probe. A missing current view is a
+    /// miss the success probe already counted.
+    fn replay_component_meta_refusal_with_view(
+        &self,
+        canonical: &str,
+        view: &dyn crate::session_view::SessionView,
+        fixed: &crate::resolver_store::BatchFixedView,
+    ) -> Option<
+        crate::component_meta_result_db::ComponentMetaRetainedRefusal<
+            crate::component_meta_cached_result::CachedComponentMetaResult,
+        >,
+    > {
+        if view.is_tombstoned(canonical) {
+            return None;
+        }
+        let owner_whole_hash = view.content_hash_for(canonical).or_else(|| {
+            self.shallow_file_state(canonical)
+                .map(|state| state.whole_hash)
+        })?;
+        let key = self.component_meta_result_key(canonical, &ComponentMetaOptions::default());
+        let current_view = fixed.current_view()?;
+        let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+        let ctx =
+            crate::resolver_core::HostResolverContext::from_current(self, current_view, overlay);
+        let dispatch =
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+        let query = self.component_meta_refusal_query(&dispatch, canonical);
+        crate::component_meta_result_admission::ComponentMetaResultRead::new(
+            &dispatch,
+            self.project_type_store().component_meta_results(),
+            self.provenance(),
+        )
+        .replay_refusal(&key, owner_whole_hash, &query)
+    }
+
     /// Look up the project-global final-result cache for the
     /// owner and return the warm payload only when its recorded fact
     /// signature revalidates against the live store view. Returns
@@ -1028,13 +1137,17 @@ impl VerterHost {
             crate::resolver_core::HostResolverContext::from_current(self, &current_view, overlay);
         let dispatch =
             verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
-        let entry = crate::component_meta_result_admission::ComponentMetaResultRead::new(
+        let read = crate::component_meta_result_admission::ComponentMetaResultRead::new(
             &dispatch,
             self.project_type_store().component_meta_results(),
             self.provenance(),
-        )
-        .peek(&key, owner_whole_hash)?;
-        Some(entry.payload.analysis.clone())
+        );
+        if let Some(entry) = read.peek(&key, owner_whole_hash) {
+            return Some(entry.payload.analysis.clone());
+        }
+        let query = self.component_meta_refusal_query(&dispatch, canonical);
+        read.replay_refusal(&key, owner_whole_hash, &query)
+            .map(|retained| retained.recovery.analysis.clone())
     }
 
     /// View-aware warm-cache fast path for component-meta queries.
@@ -1071,8 +1184,13 @@ impl VerterHost {
         view: &dyn crate::session_view::SessionView,
         fixed: &crate::resolver_store::BatchFixedView,
     ) -> Option<verter_session_query::analysis::component_meta::ComponentMetaAnalysis> {
-        self.try_component_meta_cache_entry_with_view(canonical, view, fixed)
-            .map(|(_, entry)| entry.payload.analysis.clone())
+        if let Some((_, entry)) =
+            self.try_component_meta_cache_entry_with_view(canonical, view, fixed)
+        {
+            return Some(entry.payload.analysis.clone());
+        }
+        self.replay_component_meta_refusal_with_view(canonical, view, fixed)
+            .map(|retained| retained.recovery.analysis.clone())
     }
 
     /// Entry-returning core of the view-aware warm probe: the exact key that
@@ -1301,31 +1419,37 @@ impl VerterHost {
         validated_at_generation: u64,
         seed_fence: &ColdSeedFence,
         final_completeness: verter_type_engine::semantic_query::ResultCompleteness,
+        refusal_query: &crate::component_meta_result_db::ComponentMetaRefusalQuery,
     ) -> crate::component_meta_result_db::ComponentMetaPublishDecision<
         crate::component_meta_cached_result::CachedComponentMetaResult,
     > {
-        // Refuse a partial result on ONE merged signal. `final_completeness` is
-        // `resolved.completeness.merge(extract_scope_completeness)`: the
-        // resolve-phase completeness merged with the WHOLE-extract scope (the
-        // pre-choke macro-DTO read + the fallthrough cold compute). It replaces
-        // the former source-enumerated gate
-        // (`resolved.synthesis_should_suppress || fallthrough_completeness`),
-        // so no partiality source can escape by construction. The dropped
-        // `synthesis_should_suppress` term is SUBSUMED: it is the bool
-        // projection of `resolved.completeness` (`= completeness.is_partial()`,
-        // `component_meta_result_db.rs`), already a merge operand here. This is
-        // COMPUTE completeness — a `LowerBound` accepted-surface SHAPE with a
-        // complete compute stays cacheable.
-        if final_completeness.is_partial() {
-            tracing::debug!(
-                target: "verter::audit::record",
-                file = %canonical,
-                "skipping component-meta cache promotion (view-aware path): partial result (merged extract+resolve completeness)",
-            );
-            return crate::component_meta_result_db::ComponentMetaPublishDecision::return_only(
-                verter_audit::NonAdmissionReason::PartialResult,
-            );
-        }
+        // Successful admission stays complete-only. An eligible refusal
+        // (certified divergence, this operation profile, or an isolated
+        // root) is retained with its original status. Every other partial,
+        // including a missing input or an abort, stays return-only.
+        let refusal_class = if final_completeness.is_partial() {
+            match crate::component_meta_result_db::classify_final_component_retention(
+                final_completeness,
+                refusal_query.entry_allowance == 0,
+            ) {
+                crate::component_meta_result_db::FinalComponentRetention::Retain(class) => {
+                    Some(class)
+                }
+                crate::component_meta_result_db::FinalComponentRetention::Complete
+                | crate::component_meta_result_db::FinalComponentRetention::NotAdmitted => {
+                    tracing::debug!(
+                        target: "verter::audit::record",
+                        file = %canonical,
+                        "skipping component-meta cache promotion (view-aware path): partial result is not an eligible refusal",
+                    );
+                    return crate::component_meta_result_db::ComponentMetaPublishDecision::return_only(
+                        verter_audit::NonAdmissionReason::PartialResult,
+                    );
+                }
+            }
+        } else {
+            None
+        };
         // Publish fence: a superseded or non-current snapshot never warms
         // the shared cache.
         if !self.validation_token_still_live(seed_fence, canonical, "view-aware path") {
@@ -1350,6 +1474,24 @@ impl VerterHost {
             canonical_id: Arc::from(canonical),
             whole_hash,
         };
+        if let Some(class) = refusal_class {
+            let Some(status) = crate::component_meta_result_db::final_component_refusal_status(
+                final_completeness.reasons(),
+            ) else {
+                return crate::component_meta_result_db::ComponentMetaPublishDecision::return_only(
+                    verter_audit::NonAdmissionReason::PartialResult,
+                );
+            };
+            return crate::component_meta_result_db::ComponentMetaPublishDecision::retain_refusal(
+                key,
+                whole_hash,
+                crate::component_meta_result_db::refusal_identity_for(class, refusal_query),
+                status,
+                final_completeness,
+                Arc::new(cached),
+                validated_at_generation,
+            );
+        }
         crate::component_meta_result_db::ComponentMetaPublishDecision::publish(
             key,
             whole_hash,
@@ -1382,31 +1524,36 @@ impl VerterHost {
         validated_at_generation: u64,
         seed_fence: &ColdSeedFence,
         final_completeness: verter_type_engine::semantic_query::ResultCompleteness,
+        refusal_query: &crate::component_meta_result_db::ComponentMetaRefusalQuery,
     ) -> crate::component_meta_result_db::ComponentMetaPublishDecision<
         crate::component_meta_cached_result::CachedComponentMetaResult,
     > {
-        // Refuse a partial result on ONE merged signal. `final_completeness` is
-        // `resolved.completeness.merge(extract_scope_completeness)`: the
-        // resolve-phase completeness merged with the WHOLE-extract scope (the
-        // pre-choke macro-DTO read + the fallthrough cold compute). It replaces
-        // the former source-enumerated gate
-        // (`resolved.synthesis_should_suppress || fallthrough_completeness`),
-        // so no partiality source can escape by construction. The dropped
-        // `synthesis_should_suppress` term is SUBSUMED: it is the bool
-        // projection of `resolved.completeness` (`= completeness.is_partial()`,
-        // `component_meta_result_db.rs`), already a merge operand here. This is
-        // COMPUTE completeness — a `LowerBound` accepted-surface SHAPE with a
-        // complete compute stays cacheable.
-        if final_completeness.is_partial() {
-            tracing::debug!(
-                target: "verter::audit::record",
-                file = %canonical,
-                "skipping component-meta cache promotion: partial result (merged extract+resolve completeness)",
-            );
-            return crate::component_meta_result_db::ComponentMetaPublishDecision::return_only(
-                verter_audit::NonAdmissionReason::PartialResult,
-            );
-        }
+        // Same classification as the view-aware decision: complete facts
+        // publish, eligible refusals are retained, and every other partial
+        // stays return-only.
+        let refusal_class = if final_completeness.is_partial() {
+            match crate::component_meta_result_db::classify_final_component_retention(
+                final_completeness,
+                refusal_query.entry_allowance == 0,
+            ) {
+                crate::component_meta_result_db::FinalComponentRetention::Retain(class) => {
+                    Some(class)
+                }
+                crate::component_meta_result_db::FinalComponentRetention::Complete
+                | crate::component_meta_result_db::FinalComponentRetention::NotAdmitted => {
+                    tracing::debug!(
+                        target: "verter::audit::record",
+                        file = %canonical,
+                        "skipping component-meta cache promotion: partial result is not an eligible refusal",
+                    );
+                    return crate::component_meta_result_db::ComponentMetaPublishDecision::return_only(
+                        verter_audit::NonAdmissionReason::PartialResult,
+                    );
+                }
+            }
+        } else {
+            None
+        };
         // Publish fence: recheck the seed view's validation token against
         // the live host immediately before promotion, AND decline a
         // non-current seed. A token mismatch means the snapshot the cold
@@ -1436,6 +1583,24 @@ impl VerterHost {
             canonical_id: Arc::from(canonical),
             whole_hash,
         };
+        if let Some(class) = refusal_class {
+            let Some(status) = crate::component_meta_result_db::final_component_refusal_status(
+                final_completeness.reasons(),
+            ) else {
+                return crate::component_meta_result_db::ComponentMetaPublishDecision::return_only(
+                    verter_audit::NonAdmissionReason::PartialResult,
+                );
+            };
+            return crate::component_meta_result_db::ComponentMetaPublishDecision::retain_refusal(
+                key,
+                whole_hash,
+                crate::component_meta_result_db::refusal_identity_for(class, refusal_query),
+                status,
+                final_completeness,
+                Arc::new(cached),
+                validated_at_generation,
+            );
+        }
         crate::component_meta_result_db::ComponentMetaPublishDecision::publish(
             key,
             whole_hash,

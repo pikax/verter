@@ -93,6 +93,26 @@ impl<'a, 'c, P: Send + Sync, C: ResolverCapabilities> ComponentMetaResultRead<'a
             .fetch_add(1, Ordering::Relaxed);
         Some(candidate)
     }
+
+    /// Replay an eligible refusal after a success miss. A hit adopts the
+    /// refusal's dependencies and does not count as a successful candidate.
+    pub(crate) fn replay_refusal(
+        &self,
+        key: &ComponentMetaResultKey,
+        owner_whole_hash: Hash16,
+        query: &verter_type_engine::component_meta_result_db::ComponentMetaRefusalQuery,
+    ) -> Option<verter_type_engine::component_meta_result_db::ComponentMetaRetainedRefusal<P>> {
+        let retained =
+            self.dispatch
+                .read_component_meta_refusal(self.db, key, owner_whole_hash, query)?;
+        #[cfg(feature = "semantic-observe")]
+        tracing::debug!(
+            target: "verter::audit::record",
+            file = %key.owner_canonical,
+            "replaying retained final-component refusal",
+        );
+        Some(retained)
+    }
 }
 
 /// Count a component-meta result miss the caller decided before reaching the
@@ -181,6 +201,38 @@ impl<'a, 'c, P: Send + Sync, C: ResolverCapabilities> ComponentMetaResultPublish
                         reason = %reason,
                         "skipping component-meta cache promotion: typed admission refusal",
                     );
+                }
+                ComponentMetaPublishDecision::RetainRefusal {
+                    key,
+                    owner_whole_hash,
+                    identity,
+                    status,
+                    completeness,
+                    recovery,
+                    validated_at_generation,
+                } => {
+                    let retained = self.dispatch.admit_component_meta_refusal(
+                        self.db,
+                        key,
+                        owner_whole_hash,
+                        evidence,
+                        identity,
+                        status,
+                        completeness,
+                        recovery,
+                        validated_at_generation,
+                    );
+                    #[cfg(feature = "semantic-observe")]
+                    if retained.is_some() {
+                        tracing::debug!(
+                            target: "verter::audit::record",
+                            file = %_canonical,
+                            path = %_path_label,
+                            "retained final-component refusal",
+                        );
+                    }
+                    #[cfg(not(feature = "semantic-observe"))]
+                    let _ = retained;
                 }
                 ComponentMetaPublishDecision::NoValue => {}
             },

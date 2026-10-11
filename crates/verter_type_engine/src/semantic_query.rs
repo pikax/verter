@@ -89,7 +89,7 @@ pub use intersection_input::{
 pub mod fact_result;
 #[cfg(test)]
 mod fact_result_tests;
-pub use fact_result::{ExecutionAbort, FactResult, FactStatus, MemberDomain};
+pub use fact_result::{root_narrowing_fact, ExecutionAbort, FactResult, FactStatus, MemberDomain};
 pub mod outcome;
 pub mod stable_key;
 #[cfg(test)]

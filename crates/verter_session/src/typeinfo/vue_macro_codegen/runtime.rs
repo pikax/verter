@@ -5,6 +5,7 @@
 //! parent module docs for the overall producer contract.
 
 use super::*;
+use verter_type_engine::semantic_query::{FactResult, PartialReason};
 
 /// Prove a row-local missing dependency without conflating it with an
 /// authored `unknown` or with a reference nested below a constructor-bearing
@@ -604,63 +605,34 @@ pub(super) enum MacroProjectionLane {
 }
 
 impl MacroProjectionLane {
-    /// The partial classes whose observation does NOT, on its own, make
-    /// this lane's output an incomplete surface.
+    /// Whether `reason` is an input of this demand.
     ///
-    /// The two DEGRADED-SUCCESS classes are contained by BOTH lanes. The
-    /// TSC projection is unaffected by construction (the declarations
-    /// ride verbatim), and faulting on them deleted the WHOLE props
-    /// projection over one class member's return type for programs the
-    /// checker types without difficulty. The RUNTIME projection does read
-    /// the value, but it reads it PER MEMBER and degrades per member: a
-    /// member carrying the positional marker, and every member of an
-    /// unverified frame, publish with `type: null` (validation and casting
-    /// off), while a member the substrate typed exactly keeps its real
-    /// constructor. Both classes leave a COMPLETE member set, which is
-    /// what makes containing them sound.
-    ///
-    /// [`PartialReasonSet::FLOW_RETURN_NO_SURFACE`] is where the lanes
-    /// part. It says the producer yielded no member set at all, so the
-    /// TSC splice is still whole and a derived option object is missing
-    /// members it cannot name. Containing it on the runtime lane and
-    /// relying on a structural "is the assembled surface empty" check
-    /// instead asks a per-SURFACE question of a per-CONTRIBUTION
-    /// invariant: one authored intersection arm, or one `interface …
-    /// extends` heritage clause, makes the surface non-empty and the
-    /// missing members disappear without a diagnostic.
-    ///
-    /// [`PartialReasonSet::UNDECIDED_CONDITIONAL`] parts the lanes the same
-    /// way: a conditional type the lane could not decide stands where the
-    /// checker's answer should be, and when it is the whole macro type
-    /// argument there is no member set to derive an option object from. At
-    /// ONE member's value the member classification contains it and encodes
-    /// that member's type as unknown, as it does a missing surface.
-    ///
-    /// The runtime lane still ALSO keeps the structural check, and it is
-    /// not redundant with this one: a DEGRADED SUCCESS whose marker sits
-    /// at the ROOT position (`{ ...new Box(), n: 1 }` — the literal fails
-    /// closed on a spread source it cannot evaluate) is a contained class
-    /// that nonetheless leaves no members. The class says the surface is
-    /// faithful; only the surface says it is empty.
-    ///
-    /// Every OTHER reason class still faults on BOTH lanes: a budget edge,
-    /// a cancellation, a superseded generation, an unstable view, a
-    /// recursion limit, a missing dependency, a semantic-query fault, and
-    /// the boolean-bridge `PROPAGATED` are all statements about the
-    /// REQUEST rather than about one declaration's inference. A
-    /// declaration-local budget the class-member inference records
-    /// precisely still reaches the FILE-level aggregate through its own
-    /// rail, so a budget-truncated class member keeps the entry `Complete`
-    /// (the authored splice is intact) while the file result reports
-    /// `BUDGET_EXCEEDED` and warms nothing.
-    const fn contained(self) -> PartialReasonSet {
-        match self {
-            Self::RuntimeOptions => PartialReasonSet::FLOW_RETURN_DEGRADED,
-            Self::Tsc | Self::RuntimeNames | Self::RuntimeMemberValue | Self::File => {
-                PartialReasonSet::FLOW_RETURN_DEGRADED
-                    .union(PartialReasonSet::FLOW_RETURN_NO_SURFACE)
-                    .union(PartialReasonSet::UNDECIDED_CONDITIONAL)
+    /// A degraded flow return is a value-local fact no lane reads as its
+    /// own input. A missing surface and an undecided conditional are inputs
+    /// only of the demand that renders option objects from the value. Every
+    /// request-integrity reason is an input of every demand.
+    fn reads_reason(self, reason: PartialReason) -> bool {
+        match reason {
+            PartialReason::FlowReturnUninferred | PartialReason::FlowReturnUnverified => false,
+            PartialReason::FlowReturnNoSurface | PartialReason::UndecidedConditional => {
+                matches!(self, Self::RuntimeOptions)
             }
+            PartialReason::BudgetExceeded
+            | PartialReason::Cancelled
+            | PartialReason::SupersededGeneration
+            | PartialReason::UnstableState
+            | PartialReason::SamePathRecursion
+            | PartialReason::WalkerFatal
+            | PartialReason::Propagated
+            | PartialReason::DeferredEvaluationLimit
+            | PartialReason::StructuralFactDemandLimit
+            | PartialReason::SemanticQueryFault
+            | PartialReason::MissingSemanticNodeData
+            | PartialReason::ProjectionWorkLimit
+            | PartialReason::ConnectedQueryDepthLimit
+            | PartialReason::MissingDependency
+            | PartialReason::ConnectedMemoryLimit
+            | PartialReason::OperationBudget => true,
         }
     }
 
@@ -676,19 +648,25 @@ impl MacroProjectionLane {
     }
 }
 
-/// Whether the observed completeness FAULTS `lane`'s projection.
-pub(super) fn macro_projection_faulted(lane: MacroProjectionLane) -> bool {
-    let completeness = verter_type_engine::request_context::current_cold_compute_completeness();
-    !macro_projection_residual(completeness, lane).is_empty()
+/// This demand's fact. Only the reasons the demand reads are inputs.
+/// An empty input set is a complete answer for this demand.
+pub(super) fn demand_fact(
+    lane: MacroProjectionLane,
+    observed: verter_type_engine::semantic_query::ResultCompleteness,
+) -> FactResult<()> {
+    let mut inputs = PartialReasonSet::empty();
+    for reason in observed.reasons().iter() {
+        if lane.reads_reason(reason) {
+            inputs = inputs.union(reason.bit());
+        }
+    }
+    FactResult::from_demand_inputs(inputs)
 }
 
-/// The reasons of `completeness` that FAULT `lane` — the observed set
-/// minus [`MacroProjectionLane::contained`].
-pub(super) fn macro_projection_residual(
-    completeness: verter_type_engine::semantic_query::ResultCompleteness,
-    lane: MacroProjectionLane,
-) -> PartialReasonSet {
-    completeness.reasons().without(lane.contained())
+/// Whether the observed completeness leaves `lane`'s fact inexact.
+pub(super) fn macro_projection_faulted(lane: MacroProjectionLane) -> bool {
+    let observed = verter_type_engine::request_context::current_cold_compute_completeness();
+    demand_fact(lane, observed).exact().is_none()
 }
 
 /// Whether a DEGRADED flow return was observed while deriving this
@@ -768,8 +746,12 @@ fn member_ordinal(index: usize) -> u32 {
 
 #[cfg(test)]
 mod lane_containment_tests {
-    use super::{macro_projection_residual, MacroProjectionLane};
-    use verter_type_engine::semantic_query::{PartialReasonSet, ResultCompleteness};
+    use super::{demand_fact, MacroProjectionLane};
+    use verter_type_engine::semantic_query::surface_resolution::NonEmptyReasons;
+    use verter_type_engine::semantic_query::{
+        root_narrowing_fact, FactResult, FactStatus, PartialReason, PartialReasonSet,
+        ResultCompleteness,
+    };
 
     #[test]
     fn exact_runtime_member_is_independent_of_an_earlier_failed_fact() {
@@ -816,8 +798,21 @@ mod lane_containment_tests {
         });
     }
 
-    fn residual(reason: PartialReasonSet, lane: MacroProjectionLane) -> PartialReasonSet {
-        macro_projection_residual(ResultCompleteness::Partial(reason), lane)
+    fn fact(reason: PartialReasonSet, lane: MacroProjectionLane) -> FactResult<()> {
+        demand_fact(lane, ResultCompleteness::Partial(reason))
+    }
+
+    fn assert_exact(reason: PartialReasonSet, lane: MacroProjectionLane) {
+        assert!(
+            fact(reason, lane).exact().is_some(),
+            "{reason:?} is not an input of {lane:?}"
+        );
+    }
+
+    fn assert_faults(reason: PartialReasonSet, lane: MacroProjectionLane) {
+        let result = fact(reason, lane);
+        assert!(result.exact().is_none(), "{reason:?} must fault {lane:?}");
+        assert_eq!(result.causes().map(|causes| causes.get()), Some(reason));
     }
 
     /// The lanes disagree on EXACTLY one class, and the disagreement is
@@ -841,47 +836,18 @@ mod lane_containment_tests {
             PartialReasonSet::FLOW_RETURN_UNINFERRED,
             PartialReasonSet::FLOW_RETURN_UNVERIFIED,
         ] {
-            assert!(
-                residual(degraded, MacroProjectionLane::Tsc).is_empty(),
-                "the authored splice is intact under {degraded:?}"
-            );
-            assert!(
-                residual(degraded, MacroProjectionLane::RuntimeOptions).is_empty(),
-                "{degraded:?} leaves a COMPLETE member set, so the runtime lane publishes it \
-                 with the affected members' validation off rather than deleting the module"
-            );
+            assert_exact(degraded, MacroProjectionLane::Tsc);
+            assert_exact(degraded, MacroProjectionLane::RuntimeOptions);
         }
 
         // The NO-SURFACE class: the lanes part, and they part on whether
         // the demand RENDERS an option object rather than on whether it is
         // nominally "runtime".
         let no_surface = PartialReasonSet::FLOW_RETURN_NO_SURFACE;
-        assert!(
-            residual(no_surface, MacroProjectionLane::Tsc).is_empty(),
-            "the TSC lane splices the AUTHORED declaration, which rides verbatim whatever the \
-             substrate could not compute"
-        );
-        assert_eq!(
-            residual(no_surface, MacroProjectionLane::RuntimeOptions),
-            no_surface,
-            "an option-rendering demand DERIVES its output from the value: a producer that \
-             yielded no member set leaves it missing members it cannot name, and no \
-             structural check on the ASSEMBLED surface can see that once a sibling arm \
-             contributed"
-        );
-        assert!(
-            residual(no_surface, MacroProjectionLane::RuntimeNames).is_empty(),
-            "a NAMES-ONLY (TSX / IDE) demand emits no option object, and the TSX it feeds \
-             splices the AUTHORED macro call — faulting it would delete the whole file's \
-             type-check surface to prevent bytes this demand never writes"
-        );
-        assert!(
-            residual(no_surface, MacroProjectionLane::RuntimeMemberValue).is_empty(),
-            "and at ONE MEMBER's classification the same class says that member's TYPE is \
-             unknown, which the lane encodes as `type: null` on that member — the observation \
-             is STICKY for the scope, so faulting here collapses every LATER member's \
-             constructor too"
-        );
+        assert_exact(no_surface, MacroProjectionLane::Tsc);
+        assert_faults(no_surface, MacroProjectionLane::RuntimeOptions);
+        assert_exact(no_surface, MacroProjectionLane::RuntimeNames);
+        assert_exact(no_surface, MacroProjectionLane::RuntimeMemberValue);
 
         // The FILE aggregate contains both lanes' sets: a lane that
         // refused recorded the refusal IN its entry, and warming that
@@ -891,11 +857,7 @@ mod lane_containment_tests {
             PartialReasonSet::FLOW_RETURN_UNVERIFIED,
             PartialReasonSet::FLOW_RETURN_NO_SURFACE,
         ] {
-            assert!(
-                residual(contained, MacroProjectionLane::File).is_empty(),
-                "{contained:?} must not make the whole codegen artifact recompute forever to \
-                 re-derive a refusal it already holds"
-            );
+            assert_exact(contained, MacroProjectionLane::File);
         }
 
         // CONTROL — every class that is a statement about the REQUEST
@@ -918,17 +880,14 @@ mod lane_containment_tests {
                 MacroProjectionLane::RuntimeMemberValue,
                 MacroProjectionLane::File,
             ] {
-                assert_eq!(
-                    residual(request_class, lane),
-                    request_class,
-                    "{request_class:?} is a statement about the DEMAND and faults {lane:?}"
+                assert_faults(request_class, lane);
+                let mixed = fact(
+                    request_class.union(PartialReasonSet::FLOW_RETURN_UNINFERRED),
+                    lane,
                 );
                 assert_eq!(
-                    residual(
-                        request_class.union(PartialReasonSet::FLOW_RETURN_UNINFERRED),
-                        lane
-                    ),
-                    request_class,
+                    mixed.causes().map(|causes| causes.get()),
+                    Some(request_class),
                     "a mixed observation keeps its faulting class on {lane:?}"
                 );
             }
@@ -948,17 +907,9 @@ mod lane_containment_tests {
             MacroProjectionLane::RuntimeMemberValue,
             MacroProjectionLane::File,
         ] {
-            assert!(
-                residual(undecided, lane).is_empty(),
-                "{lane:?} contains an undecided conditional"
-            );
+            assert_exact(undecided, lane);
         }
-        assert_eq!(
-            residual(undecided, MacroProjectionLane::RuntimeOptions),
-            undecided,
-            "an option object derived from an undecided conditional is missing members it \
-             cannot name"
-        );
+        assert_faults(undecided, MacroProjectionLane::RuntimeOptions);
         assert!(
             !PartialReasonSet::FLOW_RETURN_DEGRADED.contains(undecided)
                 && !PartialReasonSet::FLOW_RETURN_NO_SURFACE.contains(undecided),
@@ -985,5 +936,32 @@ mod lane_containment_tests {
                 .contains(PartialReasonSet::FLOW_RETURN_UNVERIFIED),
             "and the two must not alias"
         );
+    }
+
+    #[test]
+    fn an_authored_splice_stays_exact_when_the_runtime_claim_is_not() {
+        let no_surface = PartialReasonSet::FLOW_RETURN_NO_SURFACE;
+        assert!(fact(no_surface, MacroProjectionLane::Tsc).exact().is_some());
+        assert!(fact(no_surface, MacroProjectionLane::RuntimeOptions)
+            .exact()
+            .is_none());
+    }
+
+    #[test]
+    fn root_narrowing_does_not_borrow_a_sibling_status() {
+        let open = FactStatus::Unavailable(NonEmptyReasons::of(PartialReason::FlowReturnNoSurface));
+        assert!(root_narrowing_fact(&open, &[FactStatus::Complete])
+            .exact()
+            .is_none());
+        assert!(
+            root_narrowing_fact(&FactStatus::Complete, &[FactStatus::Complete])
+                .exact()
+                .is_some()
+        );
+        let missing =
+            FactStatus::Unavailable(NonEmptyReasons::of(PartialReason::MissingDependency));
+        assert!(root_narrowing_fact(&FactStatus::Complete, &[missing])
+            .exact()
+            .is_none());
     }
 }

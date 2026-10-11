@@ -3,9 +3,13 @@
 use std::sync::Arc;
 use verter_session_query::analysis::types::Hash16;
 pub use verter_type_engine::component_meta_result_db::{
-    footprint, ComponentMetaOptionsFingerprint, ComponentMetaResultDb, ComponentMetaResultEntry,
-    ComponentMetaResultKey,
+    classify_final_component_retention, final_component_refusal_status, footprint,
+    refusal_identity_for, ComponentMetaOptionsFingerprint, ComponentMetaRefusalClass,
+    ComponentMetaRefusalIdentity, ComponentMetaRefusalQuery, ComponentMetaResultDb,
+    ComponentMetaResultEntry, ComponentMetaResultKey, ComponentMetaRetainedRefusal,
+    FinalComponentRetention,
 };
+use verter_type_engine::semantic_query::{FactStatus, ResultCompleteness};
 
 /// Evidence carrier for the exact final-result entry admitted by one cold
 /// component-meta computation.
@@ -34,6 +38,16 @@ pub(crate) enum ComponentMetaPublishDecision<P> {
     },
     /// A valid caller-visible value must not warm this cache.
     ReturnOnly(verter_audit::NonAdmissionReason),
+    /// Retain an eligible refusal. It is not a successful candidate.
+    RetainRefusal {
+        key: ComponentMetaResultKey,
+        owner_whole_hash: Hash16,
+        identity: ComponentMetaRefusalIdentity,
+        status: FactStatus,
+        completeness: ResultCompleteness,
+        recovery: Arc<P>,
+        validated_at_generation: u64,
+    },
     /// The cold computation produced no result to retain.
     NoValue,
 }
@@ -57,6 +71,27 @@ impl<P> ComponentMetaPublishDecision<P> {
     #[inline]
     pub(crate) fn return_only(reason: verter_audit::NonAdmissionReason) -> Self {
         Self::ReturnOnly(reason)
+    }
+
+    #[inline]
+    pub(crate) fn retain_refusal(
+        key: ComponentMetaResultKey,
+        owner_whole_hash: Hash16,
+        identity: ComponentMetaRefusalIdentity,
+        status: FactStatus,
+        completeness: ResultCompleteness,
+        recovery: Arc<P>,
+        validated_at_generation: u64,
+    ) -> Self {
+        Self::RetainRefusal {
+            key,
+            owner_whole_hash,
+            identity,
+            status,
+            completeness,
+            recovery,
+            validated_at_generation,
+        }
     }
 
     #[inline]
@@ -520,5 +555,362 @@ mod tests {
         // Project-generation clear → counter 0.
         db.invalidate_all();
         assert_eq!(counter.load(Ordering::Relaxed), 0, "invalidate_all zeroes");
+    }
+
+    #[test]
+    fn eligible_refusals_replay_once_and_are_not_successful_candidates() {
+        use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+        use verter_type_engine::semantic_query::{PartialReasonSet, ResultCompleteness};
+
+        let host = crate::VerterHost::new_standalone(crate::types::HostConfig::default());
+        let canonical = "/w/owner.vue";
+        let _ = host
+            .upsert(crate::UpsertRequest {
+                canonical_id: Some(canonical.into()),
+                input_id: canonical.into(),
+                source: Arc::from(
+                    "<script setup lang=\"ts\">defineProps<{ x: string }>()</script>",
+                ),
+                file_language: crate::FileLanguage::vue(),
+                aliases: Vec::new(),
+            })
+            .unwrap();
+        let owner_hash = host.ensure_indexed_ready(canonical).unwrap().whole_hash;
+        let dep = "/w/dep.ts";
+        let dep_source = "export type Value = string;";
+        let _ = host
+            .upsert(crate::UpsertRequest {
+                canonical_id: Some(dep.into()),
+                input_id: dep.into(),
+                source: Arc::from(dep_source),
+                file_language: crate::FileLanguage::script_ts(),
+                aliases: Vec::new(),
+            })
+            .unwrap();
+        let dep_hash = host.ensure_indexed_ready(dep).unwrap().whole_hash;
+        let owner_fact = verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+            canonical_id: canonical.to_string(),
+            hash: owner_hash,
+        };
+        let dep_fact = verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+            canonical_id: dep.to_string(),
+            hash: dep_hash,
+        };
+        let key = mk_result_key(canonical, [0u8; 16]);
+        let db: ComponentMetaResultDb<u32> = ComponentMetaResultDb::new();
+        let dispatch =
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+        let publish =
+            crate::component_meta_result_admission::ComponentMetaResultPublish::new(&dispatch, &db);
+        let read = crate::component_meta_result_admission::ComponentMetaResultRead::new(
+            &dispatch,
+            &db,
+            host.provenance().as_ref(),
+        );
+        let generation = dispatch.current_project_generation();
+        let install = |budget: usize, id: u64| {
+            RequestContextGuard::install(RequestContext::with_kind_timing_and_projection_budget(
+                id,
+                Arc::from(canonical),
+                verter_audit::RequestKind::ComponentMeta,
+                false,
+                false,
+                None,
+                budget,
+            ))
+        };
+        let _low = install(4, 1);
+        let query = dispatch.component_meta_refusal_query(canonical);
+        assert_eq!(query.profile, 4);
+        assert_eq!(query.entry_allowance, 0);
+
+        let budget_partial = ResultCompleteness::partial(PartialReasonSet::BUDGET_EXCEEDED);
+        let operation = match classify_final_component_retention(budget_partial, true) {
+            FinalComponentRetention::Retain(class) => class,
+            other => panic!("pure budget refusal must be retained, got {other:?}"),
+        };
+        assert_eq!(operation, ComponentMetaRefusalClass::OperationProfile);
+        let mut producers = 0u32;
+        let served = publish.compute_and_admit(
+            canonical,
+            "operation-refusal",
+            || {
+                producers += 1;
+                verter_type_engine::resolver_core::resolver_context::observe_fan_out(
+                    owner_fact.clone(),
+                );
+                7u32
+            },
+            |_| {
+                ComponentMetaPublishDecision::retain_refusal(
+                    key.clone(),
+                    owner_hash,
+                    refusal_identity_for(operation, &query),
+                    final_component_refusal_status(budget_partial.reasons()).unwrap(),
+                    budget_partial,
+                    Arc::new(7u32),
+                    generation,
+                )
+            },
+        );
+        assert_eq!(served, 7);
+        assert_eq!(producers, 1);
+        assert_eq!(db.len(), 0, "a refusal is not a successful candidate");
+        let replayed = read
+            .replay_refusal(&key, owner_hash, &query)
+            .expect("the same profile replays");
+        assert_eq!(*replayed.recovery, 7);
+        assert_eq!(producers, 1, "replay does not run the producer");
+
+        drop(_low);
+        let _high = install(8, 2);
+        let higher = dispatch.component_meta_refusal_query(canonical);
+        assert!(
+            read.replay_refusal(&key, owner_hash, &higher).is_none(),
+            "a higher operation profile misses"
+        );
+        let healed = publish.compute_and_admit(
+            canonical,
+            "heal",
+            || {
+                producers += 1;
+                verter_type_engine::resolver_core::resolver_context::observe_fan_out(
+                    owner_fact.clone(),
+                );
+                9u32
+            },
+            |_| {
+                ComponentMetaPublishDecision::publish(
+                    key.clone(),
+                    owner_hash,
+                    Arc::new(9u32),
+                    generation,
+                )
+            },
+        );
+        assert_eq!(healed, 9);
+        assert_eq!(producers, 2);
+        assert_eq!(
+            *dispatch
+                .read_component_meta_result(&db, &key, owner_hash)
+                .expect("the healed fact is a successful candidate")
+                .payload,
+            9
+        );
+        drop(_high);
+        let _low_again = install(4, 3);
+        assert!(
+            dispatch
+                .read_component_meta_result(&db, &key, owner_hash)
+                .is_some(),
+            "after heal the complete fact hits for the lower profile too"
+        );
+
+        let divergence = ResultCompleteness::partial(PartialReasonSet::SAME_PATH_RECURSION);
+        let certified = match classify_final_component_retention(divergence, true) {
+            FinalComponentRetention::Retain(class) => class,
+            other => panic!("sole recursion must be certified, got {other:?}"),
+        };
+        let certified_key = mk_result_key(canonical, [2u8; 16]);
+        publish.compute_and_admit(
+            canonical,
+            "certified",
+            || {
+                verter_type_engine::resolver_core::resolver_context::observe_fan_out(
+                    owner_fact.clone(),
+                );
+                8u32
+            },
+            |_| {
+                ComponentMetaPublishDecision::retain_refusal(
+                    certified_key.clone(),
+                    owner_hash,
+                    refusal_identity_for(certified, &query),
+                    final_component_refusal_status(divergence.reasons()).unwrap(),
+                    divergence,
+                    Arc::new(8u32),
+                    generation,
+                )
+            },
+        );
+        drop(_low_again);
+        let _high_again = install(80, 4);
+        let high_query = dispatch.component_meta_refusal_query(canonical);
+        assert_eq!(
+            *read
+                .replay_refusal(&certified_key, owner_hash, &high_query)
+                .expect("certified divergence ignores the profile")
+                .recovery,
+            8
+        );
+
+        let depth = ResultCompleteness::partial(PartialReasonSet::CONNECTED_QUERY_DEPTH_LIMIT);
+        let isolated = match classify_final_component_retention(depth, true) {
+            FinalComponentRetention::Retain(class) => class,
+            other => panic!("isolated depth must be retained, got {other:?}"),
+        };
+        assert!(matches!(
+            classify_final_component_retention(depth, false),
+            FinalComponentRetention::NotAdmitted
+        ));
+        let isolated_key = mk_result_key(canonical, [3u8; 16]);
+        publish.compute_and_admit(
+            canonical,
+            "isolated",
+            || {
+                verter_type_engine::resolver_core::resolver_context::observe_fan_out(
+                    owner_fact.clone(),
+                );
+                verter_type_engine::resolver_core::resolver_context::observe_fan_out(
+                    dep_fact.clone(),
+                );
+                5u32
+            },
+            |_| {
+                ComponentMetaPublishDecision::retain_refusal(
+                    isolated_key.clone(),
+                    owner_hash,
+                    refusal_identity_for(isolated, &query),
+                    final_component_refusal_status(depth.reasons()).unwrap(),
+                    depth,
+                    Arc::new(5u32),
+                    generation,
+                )
+            },
+        );
+        assert!(read
+            .replay_refusal(&isolated_key, owner_hash, &query)
+            .is_some());
+        let mut other_allowance = query.clone();
+        other_allowance.entry_allowance = 1;
+        assert!(read
+            .replay_refusal(&isolated_key, owner_hash, &other_allowance)
+            .is_none());
+        let mut other_root = query.clone();
+        other_root.root = Arc::from("/w/other.vue");
+        assert!(read
+            .replay_refusal(&isolated_key, owner_hash, &other_root)
+            .is_none());
+        let mut other_context = query.clone();
+        other_context.context = 9;
+        assert!(read
+            .replay_refusal(&isolated_key, owner_hash, &other_context)
+            .is_none());
+
+        let _ = host
+            .upsert(crate::UpsertRequest {
+                canonical_id: Some(dep.into()),
+                input_id: dep.into(),
+                source: Arc::from("export type Value = number;"),
+                file_language: crate::FileLanguage::script_ts(),
+                aliases: Vec::new(),
+            })
+            .unwrap();
+        let _ = host.ensure_indexed_ready(dep).unwrap();
+        assert!(
+            read.replay_refusal(&isolated_key, owner_hash, &query)
+                .is_none(),
+            "a dependency edit misses"
+        );
+        let _ = host
+            .upsert(crate::UpsertRequest {
+                canonical_id: Some(dep.into()),
+                input_id: dep.into(),
+                source: Arc::from(dep_source),
+                file_language: crate::FileLanguage::script_ts(),
+                aliases: Vec::new(),
+            })
+            .unwrap();
+        let _ = host.ensure_indexed_ready(dep).unwrap();
+        assert!(
+            read.replay_refusal(&isolated_key, owner_hash, &query)
+                .is_some(),
+            "restoring the dependency restores the retained refusal"
+        );
+
+        let missing = ResultCompleteness::partial(PartialReasonSet::MISSING_DEPENDENCY);
+        assert!(matches!(
+            classify_final_component_retention(missing, true),
+            FinalComponentRetention::NotAdmitted
+        ));
+        let missing_key = mk_result_key(canonical, [4u8; 16]);
+        publish.compute_and_admit(
+            canonical,
+            "missing",
+            || {
+                verter_type_engine::resolver_core::resolver_context::observe_fan_out(
+                    owner_fact.clone(),
+                );
+                1u32
+            },
+            |_| {
+                ComponentMetaPublishDecision::return_only(
+                    verter_audit::NonAdmissionReason::PartialResult,
+                )
+            },
+        );
+        assert!(read
+            .replay_refusal(&missing_key, owner_hash, &query)
+            .is_none());
+        publish.compute_and_admit(
+            canonical,
+            "missing-healed",
+            || {
+                verter_type_engine::resolver_core::resolver_context::observe_fan_out(
+                    owner_fact.clone(),
+                );
+                2u32
+            },
+            |_| {
+                ComponentMetaPublishDecision::publish(
+                    missing_key.clone(),
+                    owner_hash,
+                    Arc::new(2u32),
+                    generation,
+                )
+            },
+        );
+        assert_eq!(
+            *dispatch
+                .read_component_meta_result(&db, &missing_key, owner_hash)
+                .unwrap()
+                .payload,
+            2
+        );
+
+        assert!(matches!(
+            classify_final_component_retention(
+                ResultCompleteness::partial(PartialReasonSet::CANCELLED),
+                true
+            ),
+            FinalComponentRetention::NotAdmitted
+        ));
+        let before = db.len();
+        let sibling = mk_result_key(canonical, [5u8; 16]);
+        publish.compute_and_admit(
+            canonical,
+            "sibling",
+            || {
+                verter_type_engine::resolver_core::resolver_context::observe_fan_out(
+                    owner_fact.clone(),
+                );
+                3u32
+            },
+            |_| {
+                ComponentMetaPublishDecision::publish(
+                    sibling.clone(),
+                    owner_hash,
+                    Arc::new(3u32),
+                    generation,
+                )
+            },
+        );
+        assert_eq!(db.len(), before + 1);
+        assert!(read
+            .replay_refusal(&isolated_key, owner_hash, &query)
+            .is_some());
+        assert!(dispatch
+            .read_component_meta_result(&db, &sibling, owner_hash)
+            .is_some());
     }
 }
