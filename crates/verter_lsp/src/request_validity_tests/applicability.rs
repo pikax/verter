@@ -929,6 +929,127 @@ async fn native_navigation_keeps_closed_reexport_intermediates_until_settlement(
     );
 }
 
+/// Extract's create is recorded by `answer_repaired_edit_foreground` before
+/// settlement. The file appearing on disk at that barrier — closed, with
+/// project authority unchanged — answers `ContentModified`. An unrelated
+/// file appearing the same way still delivers the extract, so the refusal
+/// is the recorded create and not the workspace notice itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_extract_create_that_appears_on_disk_before_settlement_is_content_modified() {
+    let fixture = Fixture::new().await;
+    fixture
+        .server()
+        .client_applies_versioned_edits
+        .store(true, std::sync::atomic::Ordering::Release);
+    let created_id = format!("{}/src/ExtractedComponent.vue", fixture.workspace_id);
+    let unrelated_id = format!("{}/src/Unrelated.vue", fixture.workspace_id);
+    let range = fixture.range("{{ msg }}");
+    let appeared = "<template>\n  <div></div>\n</template>\n";
+
+    let steady = extract_action(&fixture, range)
+        .await
+        .expect("the code action answers")
+        .expect("an absent extract create is delivered");
+    assert!(
+        format!("{steady:?}").contains("ExtractedComponent.vue"),
+        "the delivered action creates the sibling: {steady:?}"
+    );
+    assert!(
+        fixture
+            .server()
+            .documents
+            .host()
+            .workspace_read()
+            .read_file(&created_id)
+            .is_none(),
+        "precondition: the created path is not on disk"
+    );
+
+    fixture.barriers.clear();
+    appear_on_disk_at_settlement(&fixture, &unrelated_id, appeared);
+    let unrelated = extract_action(&fixture, range)
+        .await
+        .expect("an unrelated disk appearance still answers")
+        .expect("an unrelated disk appearance still delivers the extract");
+    assert!(
+        format!("{unrelated:?}").contains("ExtractedComponent.vue"),
+        "the create target is still absent: {unrelated:?}"
+    );
+
+    fixture.barriers.clear();
+    appear_on_disk_at_settlement(&fixture, &created_id, appeared);
+    let error = extract_action(&fixture, range)
+        .await
+        .expect_err("the created path appearing before settlement refuses the answer");
+    assert!(
+        fixture.barriers.arrivals(RequestBarrier::Settlement) >= 1,
+        "the request reached settlement"
+    );
+    assert_eq!(
+        error.code,
+        tower_lsp_server::jsonrpc::ErrorCode::ContentModified,
+        "a created path that appears on disk before settlement is content-modified"
+    );
+    assert!(
+        fixture
+            .server()
+            .documents
+            .open_uri_for_fs_path(&created_id)
+            .is_none(),
+        "the created path stayed closed"
+    );
+}
+
+fn appear_on_disk_at_settlement(fixture: &Fixture, canonical_id: &str, source: &str) {
+    let server = fixture.server().clone();
+    let canonical_id = canonical_id.to_string();
+    let source = source.to_string();
+    fixture.barriers.arm(
+        RequestBarrier::Settlement,
+        Arc::new(move |_| {
+            std::fs::write(&canonical_id, &source).expect("write the appeared file");
+            server
+                .documents
+                .host()
+                .notify_upsert(&canonical_id, Arc::from(source.as_str()));
+            Box::pin(async {})
+        }),
+    );
+}
+
+async fn extract_action(
+    fixture: &Fixture,
+    range: Range,
+) -> tower_lsp_server::jsonrpc::Result<Option<CodeAction>> {
+    let actions = fixture
+        .server()
+        .code_action(CodeActionParams {
+            text_document: TextDocumentIdentifier {
+                uri: fixture.uri.clone(),
+            },
+            range,
+            context: CodeActionContext {
+                diagnostics: Vec::new(),
+                only: Some(vec![CodeActionKind::REFACTOR_EXTRACT]),
+                trigger_kind: None,
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        })
+        .await?;
+    Ok(actions
+        .unwrap_or_default()
+        .into_iter()
+        .find_map(|action| match action {
+            CodeActionOrCommand::CodeAction(action)
+                if action.title.starts_with("Extract to <ExtractedComponent") =>
+            {
+                Some(action)
+            }
+            _ => None,
+        }))
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn native_assembly_retries_analysis_a_source_b_after_source_returns_to_a() {
     let scenario = Scenario::new(Client::ChangesOnly).await;

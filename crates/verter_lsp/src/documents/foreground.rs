@@ -1024,4 +1024,77 @@ mod tests {
             "a created path that appears after it is recorded and before settlement is content-modified"
         );
     }
+
+    /// The same recorded create, when the path appears on disk and stays
+    /// closed. `read_file` is the predicate that sees it; an open-document
+    /// appearance is a different arm. The directory index cached the miss at
+    /// record time, so the appearance is published the way a watcher
+    /// `FileChanged` is — that is what makes the later `read_file` observe
+    /// the bytes.
+    #[test]
+    fn a_created_path_that_appears_on_disk_settles_content_modified() {
+        let temp = tempfile::tempdir().expect("temp workspace");
+        let workspace = Arc::new(verter_workspace::FilesystemWorkspace::new(
+            verter_workspace::FilesystemOptions::default(),
+        ));
+        let host = Arc::new(verter_session::VerterHost::new(
+            verter_session::HostConfig::default(),
+            workspace.clone(),
+        ));
+        let documents = super::super::DocumentRegistry::new(host);
+        let source_path = temp.path().join("Source.ts");
+        std::fs::write(&source_path, "export const value = 1\n").expect("source");
+        let absent_path = temp.path().join("Absent.vue");
+        let source = file_uri(&source_path);
+        let absent = file_uri(&absent_path);
+        let absent_id = super::super::uri_to_canonical_id(&absent);
+        open_script(&documents, &source, 4);
+
+        let settlement = ForegroundRequest::admit(
+            &documents,
+            ForegroundRoute::CodeAction,
+            &source,
+            WorkspaceEditSupport::VersionedDocumentChanges,
+        );
+        let pending = vec![action_creating("extract absent", &source, &absent)];
+        settlement.record_absent_creates(&documents, &pending);
+        assert!(
+            matches!(settlement.settle(&documents, Some(())), Settled::Answer(_)),
+            "the create settles while the path is absent"
+        );
+        assert!(
+            settlement.authority.is_current(&documents.host()),
+            "precondition: authority is unchanged before the path appears"
+        );
+
+        std::fs::write(&absent_path, "<template><div/></template>\n").expect("appear on disk");
+        workspace.apply_changes(vec![verter_workspace::WorkspaceChange::FileChanged {
+            canonical_id: absent_id.clone(),
+            source: None,
+        }]);
+
+        assert!(
+            documents.open_uri_for_fs_path(&absent_id).is_none(),
+            "the created path is on disk and still closed"
+        );
+        assert!(
+            documents
+                .host()
+                .workspace_read()
+                .read_file(&absent_id)
+                .is_some(),
+            "the workspace read sees the bytes written on disk"
+        );
+        assert!(
+            settlement.authority.is_current(&documents.host()),
+            "a disk appearance must not replace project authority"
+        );
+        assert!(
+            matches!(
+                settlement.settle(&documents, Some(())),
+                Settled::ContentModified
+            ),
+            "a created path that appears on disk after it is recorded and before settlement is content-modified"
+        );
+    }
 }
