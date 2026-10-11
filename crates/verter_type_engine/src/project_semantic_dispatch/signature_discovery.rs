@@ -1241,6 +1241,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 crate::semantic_query::FlowReturnFailure::Budget(_),
             ) => Err(DiscoveryError::Incomplete(IncompleteReason::Budget)),
             crate::semantic_query::FlowReturnStep::Hold(_)
+            | crate::semantic_query::FlowReturnStep::Aborted(_)
             | crate::semantic_query::FlowReturnStep::NoValue(_) => Err(DiscoveryError::Incomplete(
                 IncompleteReason::UnresolvedObligation,
             )),

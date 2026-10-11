@@ -660,6 +660,11 @@ impl Subscription<'_> {
             return Joined::Retry;
         }
         let result = state.completed.clone().unwrap_or_else(|| {
+            if state.aborted {
+                return QueryResult::Error(QueryError::ExecutionAborted(
+                    crate::semantic_query::ExecutionAbort::Superseded,
+                ));
+            }
             QueryResult::Error(QueryError::Other(Arc::from(
                 "joiner woke without completion after retry budget exhausted",
             )))
@@ -690,6 +695,7 @@ impl Subscription<'_> {
         if result_is_partial
             && cost_receipt.is_none()
             && !matches!(result, QueryResult::Recursive(_))
+            && !matches!(&result, QueryResult::Error(error) if crate::semantic_query::ExecutionAbort::from_query_error(error).is_some())
         {
             attempt.produce_alone();
             return Joined::Retry;
@@ -713,7 +719,9 @@ impl Subscription<'_> {
         //
         // A recursion carrier is an operational escape, not a view-specific
         // value: it passes around a broken wait cycle without a fork.
-        if !matches!(result, QueryResult::Recursive(_)) {
+        if !matches!(result, QueryResult::Recursive(_))
+            && !matches!(&result, QueryResult::Error(error) if crate::semantic_query::ExecutionAbort::from_query_error(error).is_some())
+        {
             if let Some(ref carrier) = graph_carrier {
                 let view_validates = carrier.validate_with_self_roots(ctx, &producer_self_roots)
                     && !store.names_retired_kernel_epoch(&result);
@@ -828,6 +836,22 @@ impl<'s> ProducerLease<'s> {
         let result_is_partial = completeness.is_partial();
         let partial_reasons = completeness.reasons();
         let result = prepared::enforce_projection_value_shape(prepared.key(), result);
+        let result = match crate::request_context::current_execution_abort() {
+            Some(abort) => QueryResult::Error(QueryError::ExecutionAborted(abort)),
+            None => result,
+        };
+        let aborted = match &result {
+            QueryResult::Error(error) => {
+                crate::semantic_query::ExecutionAbort::from_query_error(error)
+            }
+            _ => None,
+        };
+        let cache_suppress = cache_suppress || aborted.is_some();
+        let result_is_partial = result_is_partial || aborted.is_some();
+        let partial_reasons = match aborted {
+            Some(abort) => partial_reasons.union(abort.reason_class()),
+            None => partial_reasons,
+        };
         // §3.4 default: a non-path build (`Instantiate`, `KeyOf`, `TypeOf`,
         // …) records no path-walk hops, so its satisfied projection defaults
         // to the single terminal point the slot's mode denotes at the key's
@@ -906,6 +930,16 @@ impl<'s> ProducerLease<'s> {
             };
         let admissible =
             !(cache_suppress || result_is_partial || !flow_proof_ok) && cost_receipt.is_some();
+        let result = match result {
+            QueryResult::Value(SemanticQueryValue::FlowReturn(value)) if result_is_partial => {
+                QueryResult::Value(SemanticQueryValue::FlowReturn(Arc::new(
+                    (*value).clone().with_observed_completeness(
+                        crate::semantic_query::ResultCompleteness::partial(partial_reasons),
+                    ),
+                )))
+            }
+            other => other,
+        };
         Ok(SettledProducer {
             store,
             prepared,
@@ -977,7 +1011,14 @@ impl SettledProducer<'_> {
                     true
                 }
                 WarmPublishOutcome::Skipped => true,
-                WarmPublishOutcome::Aborted => false,
+                WarmPublishOutcome::Aborted => {
+                    self.result = QueryResult::Error(QueryError::ExecutionAborted(
+                        crate::semantic_query::ExecutionAbort::Superseded,
+                    ));
+                    self.cache_suppress = true;
+                    self.result_is_partial = true;
+                    false
+                }
             };
             if !self.admission_linearized && flags.is_cancelled() {
                 if let Some(slot) = capture.publication.as_deref_mut() {
@@ -1120,6 +1161,21 @@ impl SettledProducer<'_> {
                 state.partial_reasons = partial_reasons;
                 state.walker_diagnostics = Some(Arc::clone(&walker_diagnostics));
                 state.cost_receipt = cost_receipt.clone();
+            } else {
+                drop(state);
+                inflight.ready.notify_all();
+                store.retire_inflight(&prepared, &inflight, independent);
+                return CacheRead {
+                    value: QueryResult::Error(QueryError::ExecutionAborted(
+                        crate::semantic_query::ExecutionAbort::Superseded,
+                    )),
+                    dep_signature,
+                    walker_diagnostics,
+                    cache_suppress: true,
+                    result_is_partial: true,
+                    partial_reasons: partial_reasons.union(PartialReasonSet::SUPERSEDED_GENERATION),
+                    receipt: crate::semantic_query::ReadReceipt::Unpriced,
+                };
             }
         }
         inflight.ready.notify_all();

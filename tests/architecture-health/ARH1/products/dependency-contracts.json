@@ -927,7 +927,7 @@
               "mode": "sole"
             }
           ],
-          "note": "sole owner of the flow-return compute frame and the admission budget outcome; the once-per-content-version FunctionFlowGraph and FlowSliceIR stay owned by the verter_semantic flow substrate (flow_graph.rs/flow_ir.rs)"
+          "note": "sole owner of the flow-return compute frame and the admission budget outcome; the once-per-content-version FunctionFlowGraph and FlowSliceIR stay owned by the verter_semantic flow substrate (flow_graph.rs/flow_ir.rs). FlowReturnStep and FunctionReturnNode carry typed execution aborts to consumers; the request_context validity scope cannot discard an abort with an optional proof observation. FlowReturnResult::fact exposes independent producer availability through semantic_query. These interfaces reuse the recorded request_context, semantic_query and semantic_query_memo import directions."
         },
         {
           "module": "crates/verter_type_engine/src/project_semantic_dispatch/flow_products.rs",

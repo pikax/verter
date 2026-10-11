@@ -71,6 +71,12 @@ impl<'a> FlowSliceDriver<'a> {
         &self,
         key: &FlowSliceFunctionKey,
     ) -> Result<Option<Arc<FlowGraphBundle>>, FlowBindingMapError> {
+        if self.flags.is_cancelled() {
+            crate::request_context::observe_execution_abort(
+                crate::semantic_query::ExecutionAbort::Cancelled,
+            );
+            return Ok(None);
+        }
         match self.stores.graphs.claim(key) {
             GraphClaim::Read(bundle) => Ok(Some(bundle)),
             GraphClaim::Produce(lease) => {

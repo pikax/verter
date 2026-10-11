@@ -126,6 +126,11 @@ impl TypeResolutionRequestError {
     pub fn from_query_error(err: &verter_type_engine::semantic_query::QueryError) -> Option<Self> {
         use verter_type_engine::semantic_query::QueryError;
         match err {
+            QueryError::ExecutionAborted(abort) => Some(match abort {
+                verter_type_engine::semantic_query::ExecutionAbort::Cancelled => Self::Cancelled,
+                verter_type_engine::semantic_query::ExecutionAbort::Superseded => Self::UnstableState { attempts: 1 },
+                verter_type_engine::semantic_query::ExecutionAbort::Shutdown => Self::Other(Arc::from("execution shut down")),
+            }),
             QueryError::Miss
             | QueryError::RecursiveRef { .. }
             | QueryError::DeclPlaceholder { .. }

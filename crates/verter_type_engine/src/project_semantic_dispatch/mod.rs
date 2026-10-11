@@ -829,6 +829,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 
     pub fn charge_connected_work(&self) -> Result<(), crate::semantic_query::PartialReasonSet> {
+        if self.snapshot.flags().is_cancelled() {
+            crate::request_context::observe_execution_abort(
+                crate::semantic_query::ExecutionAbort::Cancelled,
+            );
+        }
         self.connected_demand.charge()
     }
 
@@ -2832,10 +2837,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 cache_suppress: true,
                 partial_reasons,
             },
-            // A mutation-unstable prelude yields no fact list the rewrite
-            // can be soundly rooted on, so it suppresses caching (the value
-            // still flows; the memo refuses).
+            // The subject rewrite observed a moved domain, so the value has
+            // no coherent evaluated basis, independently of admission.
             verter_session_query::facts::fact_read_set::FactReadSetFinalise::MutationUnstable => {
+                crate::request_context::observe_execution_abort(
+                    crate::semantic_query::ExecutionAbort::Superseded,
+                );
                 CarrierNormalizationPrelude {
                     facts: None,
                     cache_suppress: true,
@@ -2985,9 +2992,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 output.walker_diagnostics.push(refusal);
             }
         }
-        // A build that observed cancellation or a superseded/torn view is no
-        // fact: its value flows to the caller but is never admitted.
+        // Compatibility quality can veto admission, but cannot validate delivery.
         output.cache_suppress |= output.projection_fact(key).is_err();
+        if let Some(abort) = crate::request_context::current_execution_abort() {
+            output.result = QueryResult::Error(QueryError::ExecutionAborted(abort));
+            output.flow_completion = None;
+            output.cache_suppress = true;
+            output.mark_partial();
+        }
         // Canonical-construction self-roots deposited during this build
         // (discarded structural duplicates included) join the build's
         // own observed roots on the memo entry.
@@ -3030,6 +3042,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         mut cache_read: CacheRead<QueryResult<SemanticQueryValue>>,
         carrier_prelude: &CarrierNormalizationPrelude,
     ) -> CacheRead<QueryResult<SemanticQueryValue>> {
+        if let QueryResult::Error(error) = &cache_read.value {
+            if let Some(abort) = crate::semantic_query::ExecutionAbort::from_query_error(error) {
+                crate::request_context::observe_execution_abort(abort);
+            }
+        }
+        if let Some(abort) = crate::request_context::current_execution_abort() {
+            cache_read.value = QueryResult::Error(QueryError::ExecutionAborted(abort));
+            cache_read.cache_suppress = true;
+            cache_read.result_is_partial = true;
+            cache_read.partial_reasons = cache_read.partial_reasons.union(abort.reason_class());
+        }
         // Attribute the dispatch by `SemanticQueryKey` kind +
         // cold/warm. Cold = the `traced_build` closure ran. Warm = the
         // memo short-circuited before the closure fired.
@@ -3356,6 +3379,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // funnel here, so this scope's inclusive time and heap traffic cover
         // every query-time type resolution in the request.
         verter_audit::attribute_scope!(SemanticDispatch);
+        let _validity = crate::request_context::ExecutionValidityScope::enter();
         #[cfg(feature = "test-support")]
         let _family = crate::cancel_trace::enter_family(key.tag());
         if let SemanticQueryKey::Relate { .. } = &key {
@@ -3854,6 +3878,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             SemanticQueryValue,
         > {
             cold_build_ran_for_closure.store(true, std::sync::atomic::Ordering::Relaxed);
+            let _validity = crate::request_context::ExecutionValidityScope::enter();
             // Open a cold-build-local taint frame for the duration of THIS
             // build. The shared read boundary folds every nested
             // sub-dispatch's discarded `CacheRead` metadata into this frame;
@@ -4310,6 +4335,14 @@ fn finalise_rooted_build_output<T, C: crate::resolver_core::ResolverCapabilities
         // A domain moved under the build: no fact list it observed can root
         // the entry.
         verter_session_query::facts::fact_read_set::FactReadSetFinalise::MutationUnstable => {
+            crate::request_context::observe_execution_abort(
+                crate::semantic_query::ExecutionAbort::Superseded,
+            );
+            output.result = QueryResult::Error(QueryError::ExecutionAborted(
+                crate::semantic_query::ExecutionAbort::Superseded,
+            ));
+            output.flow_completion = None;
+            output.mark_partial();
             output.cache_suppress = true;
         }
     }

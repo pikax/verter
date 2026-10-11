@@ -143,6 +143,7 @@ pub fn semantic_query_error_raw(err: &crate::semantic_query::QueryError) -> Stri
                 failure.domain
             )
         }
+        QueryError::ExecutionAborted(abort) => format!("executionAborted({abort:?})"),
         QueryError::Cancelled => spell::CANCELLED.to_string(),
         QueryError::UnstableState { attempts } => {
             format!("{}{attempts})", spell::UNSTABLE_STATE_PREFIX)

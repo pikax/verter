@@ -1652,14 +1652,13 @@ impl CompleteFlowResult {
     }
 }
 
-/// The normative three-way outcome of one flow solve: the complete
-/// proof-bearing result, a partial carrying its usable value, or a
-/// no-value failure. Only [`FlowSolveOutcome::Complete`] is a warm
-/// candidate; the other two arms keep the evaluated payload usable by
-/// tolerant consumers without ever minting admission.
+/// A flow solve's completion proof, usable approximation, unavailable value,
+/// or execution abort. Only [`FlowSolveOutcome::Complete`] admits; only
+/// `Complete` and `Partial` carry independently valid evaluated values.
 #[rustfmt::skip]
 #[derive(Debug, Clone)]
 pub enum FlowSolveOutcome {
+    Aborted(crate::semantic_query::ExecutionAbort),
     Complete(CompleteFlowResult),
     Partial(PartialFlowResult),
     NoValue(NoValueFlowResult),
@@ -1677,8 +1676,48 @@ impl FlowSolveOutcome {
     pub fn warm_candidate(&self) -> Option<&CompleteFlowResult> {
         match self {
             Self::Complete(complete) => Some(complete),
-            Self::Partial(_) | Self::NoValue(_) => None,
+            Self::Partial(_) | Self::NoValue(_) | Self::Aborted(_) => None,
         }
+    }
+}
+
+/// Classify rejected evidence separately from missing completion proof.
+pub(super) fn flow_refusal_outcome(
+    basis: FlowDemandBasis,
+    reason: FlowPartialReason,
+    value: &FlowReturnResult,
+) -> FlowSolveOutcome {
+    use crate::semantic_query::ExecutionAbort;
+    let abort = match &reason {
+        FlowPartialReason::StaleBasis | FlowPartialReason::ForeignProvenance => {
+            Some(ExecutionAbort::Superseded)
+        }
+        FlowPartialReason::Failed(failure) => match failure.class {
+            FlowFailureClass::Cancelled => Some(ExecutionAbort::Cancelled),
+            FlowFailureClass::StaleBasis => Some(ExecutionAbort::Superseded),
+            _ => None,
+        },
+        _ => None,
+    };
+    if let Some(abort) = abort {
+        crate::request_context::observe_execution_abort(abort);
+        return FlowSolveOutcome::Aborted(abort);
+    }
+    match reason {
+        FlowPartialReason::NoDemandInstalled
+        | FlowPartialReason::ObligationSetMismatch
+        | FlowPartialReason::Failed(FlowFailure {
+            class: FlowFailureClass::Panic | FlowFailureClass::Internal,
+        }) => FlowSolveOutcome::NoValue(NoValueFlowResult {
+            basis,
+            reason,
+            failure: crate::semantic_query::FlowReturnFailure::Unresolved,
+        }),
+        _ => FlowSolveOutcome::Partial(PartialFlowResult {
+            basis,
+            reason,
+            value: value.clone(),
+        }),
     }
 }
 
@@ -1694,7 +1733,8 @@ impl FlowSolveOutcome {
 /// runtime's current records with every obligation `Discharged`, and the
 /// runtime-observed convergence matches the plan's policy. Every gap,
 /// stale basis, cancellation, budget exhaustion, panic marker, internal
-/// failure, non-convergence, or degraded value is a typed partial.
+/// failure, non-convergence, or degraded value is classified from the rejected
+/// evidence: proof refusal may retain a value; invalid execution never does.
 ///
 /// VISIBILITY is crate-internal by design, and deliberately wider than
 /// the sole production caller (`finalize_flow_demand`). The mint is not
@@ -1719,7 +1759,7 @@ pub fn finalize_flow_solve(
     runtime: &ObligationRuntime, handle: FlowDemandHandle, plan: &FlowDemandPlan, completion: SealedFlowCompletion,
 ) -> FlowSolveOutcome {
     let value = completion.value().clone();
-    let partial = |reason: FlowPartialReason| FlowSolveOutcome::Partial(PartialFlowResult { basis: plan.basis().clone(), reason, value: value.clone() });
+    let partial = |reason: FlowPartialReason| flow_refusal_outcome(plan.basis().clone(), reason, &value);
 
     let Some(installed) = runtime.flow_basis(handle) else { return partial(FlowPartialReason::NoDemandInstalled) };
     if installed != plan.basis() { return partial(FlowPartialReason::StaleBasis); }

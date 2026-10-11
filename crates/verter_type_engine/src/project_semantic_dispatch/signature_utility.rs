@@ -399,7 +399,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             .discard();
         matches!(
             node,
-            super::flow_return::FunctionReturnNode::Flow(result) if result.degradation().is_some()
+            Ok(super::flow_return::FunctionReturnNode::Flow(result)) if result.degradation().is_some()
         )
     }
 }

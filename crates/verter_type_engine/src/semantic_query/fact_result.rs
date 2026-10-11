@@ -288,7 +288,7 @@ pub enum MemberDomain<T> {
 /// Not a fact status: an aborted computation's partial work is discarded,
 /// and whoever demanded it retries or gives up. It never reaches a cache or
 /// an output as an approximation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ExecutionAbort {
     /// The request was cancelled.
     Cancelled,
@@ -300,6 +300,26 @@ pub enum ExecutionAbort {
 }
 
 impl ExecutionAbort {
+    /// Explanatory compatibility class; never an execution-validity proof.
+    pub fn reason_class(self) -> PartialReasonSet {
+        match self {
+            Self::Cancelled => PartialReasonSet::CANCELLED,
+            Self::Superseded => PartialReasonSet::SUPERSEDED_GENERATION,
+            Self::Shutdown => PartialReasonSet::SEMANTIC_QUERY_FAULT,
+        }
+    }
+    /// Execution failures carried by the query protocol. Compatibility causes
+    /// do not participate: a proof refusal can explain an independently valid value.
+    pub fn from_query_error(error: &super::QueryError) -> Option<Self> {
+        match error {
+            super::QueryError::ExecutionAborted(abort) => Some(*abort),
+            super::QueryError::Cancelled => Some(Self::Cancelled),
+            super::QueryError::UnstableState { .. }
+            | super::QueryError::StaleSemanticOperand
+            | super::QueryError::ForeignSemanticOperand => Some(Self::Superseded),
+            _ => None,
+        }
+    }
     /// Whether the view the computation read was superseded (a newer view
     /// answers the same request), as opposed to the request being cancelled
     /// or the host shutting down.
@@ -312,9 +332,8 @@ impl ExecutionAbort {
     /// completeness: a cancelled read, or a read of a superseded or torn
     /// view. Such a computation publishes nothing.
     ///
-    /// A bridge: cancellation and supersession still travel through the
-    /// accumulator as reason classes until they get their own channel, and
-    /// this is the one place that reads them back as an abort.
+    /// Legacy non-flow projection bridge. Flow validity uses its originating
+    /// typed disposition and never classifies execution from this summary.
     #[must_use]
     pub fn observed_in(completeness: ResultCompleteness) -> Option<Self> {
         let reasons = completeness.reasons();

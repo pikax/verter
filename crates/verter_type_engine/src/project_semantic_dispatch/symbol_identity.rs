@@ -690,6 +690,7 @@ fn partial_reason(reasons: PartialReasonSet) -> PropCallableRoleUnresolvedReason
 #[must_use]
 pub fn query_error_partial_reasons(error: &QueryError) -> PartialReasonSet {
     match error {
+        QueryError::ExecutionAborted(abort) => abort.reason_class(),
         QueryError::Cancelled => PartialReasonSet::CANCELLED,
         QueryError::UnstableState { .. } | QueryError::StaleSemanticOperand => {
             PartialReasonSet::UNSTABLE_STATE
@@ -701,6 +702,7 @@ pub fn query_error_partial_reasons(error: &QueryError) -> PartialReasonSet {
 
 fn query_error_reason(error: &QueryError) -> PropCallableRoleUnresolvedReason {
     match error {
+        QueryError::ExecutionAborted(_) => PropCallableRoleUnresolvedReason::Fault,
         QueryError::Miss | QueryError::DeclPlaceholder { .. } | QueryError::RaiseMiss => {
             PropCallableRoleUnresolvedReason::MissingDependency
         }

@@ -793,7 +793,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     }
                     super::flow_return::FunctionReturnNode::Declared(hot) => hot.node(),
                     super::flow_return::FunctionReturnNode::DeclaredMiss
-                    | super::flow_return::FunctionReturnNode::NoValue(_) => {
+                    | super::flow_return::FunctionReturnNode::Aborted(_) | super::flow_return::FunctionReturnNode::NoValue(_) => {
                         ctx.record_interior_failure();
                         self.miss_node(&scope)
                     }

@@ -557,7 +557,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     .unwrap_or_default();
                 (step, recorded)
             })
-            .discard();
+            .discard()
+            .unwrap_or_else(|abort| (FlowReturnStep::Aborted(abort), CalleeKeys::default()));
         // An evaluation the instantiation transfer answered queued no
         // member, and needs none: every later demand is answered the same
         // way.
