@@ -419,7 +419,7 @@ pub struct GlobalContributorIndex {
     /// Drained from contribution collection, not from upsert, so fence
     /// flights stay cold.
     pending_overlay_ambient: parking_lot::Mutex<FxHashSet<Arc<str>>>,
-    /// Last fully scanned workspace snapshot revision. None forces a scan.
+    /// Last fully classified workspace snapshot revision; also serializes ingestion.
     ingested_snapshot_revision: parking_lot::Mutex<Option<u64>>,
     #[cfg(test)]
     publish_sorted_entries: AtomicU64,
@@ -500,12 +500,12 @@ impl GlobalContributorIndex {
         self.snapshot_scan_visits.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub(crate) fn snapshot_revision_is_ingested(&self, revision: Option<u64>) -> bool {
-        revision.is_some() && *self.ingested_snapshot_revision.lock() == revision
+    pub(crate) fn snapshot_ingestion_cursor(&self) -> parking_lot::MutexGuard<'_, Option<u64>> {
+        self.ingested_snapshot_revision.lock()
     }
 
-    pub(crate) fn set_ingested_snapshot_revision(&self, revision: Option<u64>) {
-        *self.ingested_snapshot_revision.lock() = revision;
+    pub(crate) fn retract_pending_overlay_ambient(&self, canonical: &str) {
+        self.pending_overlay_ambient.lock().remove(canonical);
     }
 
     #[cfg(test)]
@@ -583,6 +583,9 @@ impl GlobalContributorIndex {
     }
 
     pub fn clear(&self) {
+        // Ingestion can publish/retract records while holding its cursor.
+        // Take the cursor first here too, so reset cannot invert that order.
+        let mut cursor = self.snapshot_ingestion_cursor();
         let _mutate = self.mutate.lock();
         let _guard = self.publish.lock();
         self.records.clear();
@@ -594,7 +597,7 @@ impl GlobalContributorIndex {
             Arc::new(FxHashMap::default()),
         ));
         self.revision.store(0, Ordering::Release);
-        *self.ingested_snapshot_revision.lock() = None;
+        *cursor = None;
         #[cfg(test)]
         self.publish_sorted_entries.store(0, Ordering::Relaxed);
     }

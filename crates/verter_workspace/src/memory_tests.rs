@@ -2731,3 +2731,59 @@ fn published_authority_survives_only_an_equivalent_republication() {
         "a replacement workspace repeating the scalar generation"
     );
 }
+
+#[test]
+fn snapshot_change_cursors_coalesce_edits_and_keep_independent_removals() {
+    let mut snapshot = MemorySnapshot::new();
+    snapshot.inject("/a.ts".into(), Arc::from("first"));
+    snapshot.inject("/b.ts".into(), Arc::from("other"));
+    let first = snapshot.changes_since(None);
+    assert_eq!(first.members.len(), 2);
+    assert!(snapshot
+        .changes_since(Some(first.revision))
+        .members
+        .is_empty());
+    snapshot.inject("/a.ts".into(), Arc::from("second"));
+    snapshot.inject("/a.ts".into(), Arc::from("third"));
+    snapshot.remove("/b.ts");
+    let next = snapshot.changes_since(Some(first.revision));
+    assert_eq!(
+        next.members,
+        [
+            SnapshotMemberChange {
+                canonical: "/a.ts".into(),
+                present: true
+            },
+            SnapshotMemberChange {
+                canonical: "/b.ts".into(),
+                present: false
+            },
+        ]
+    );
+    assert_eq!(
+        snapshot.changes.len(),
+        2,
+        "edits replace history per member"
+    );
+    assert_eq!(
+        snapshot.changes_since(Some(first.revision)),
+        next,
+        "another reader must observe the same changes"
+    );
+    snapshot.inject("/a.ts".into(), Arc::from("third"));
+    snapshot.remove("/missing.ts");
+    assert!(snapshot
+        .changes_since(Some(next.revision))
+        .members
+        .is_empty());
+    snapshot.inject("/b.ts".into(), Arc::from("restored"));
+    let restored = snapshot.changes_since(Some(next.revision));
+    assert_eq!(
+        restored.members,
+        [SnapshotMemberChange {
+            canonical: "/b.ts".into(),
+            present: true
+        }]
+    );
+    assert_eq!(snapshot.changes.len(), 2);
+}

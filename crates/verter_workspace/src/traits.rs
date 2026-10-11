@@ -608,6 +608,14 @@ pub trait WorkspaceRead: Send + Sync {
         None
     }
 
+    /// Incremental injected-snapshot membership/content transitions. The batch
+    /// and its revision must be captured atomically; removals are explicit.
+    /// A cursor belongs to this workspace and may be used by multiple independent
+    /// readers. None selects the compatibility scan for custom workspaces.
+    fn snapshot_changes_since(&self, _since: Option<u64>) -> Option<crate::SnapshotChanges> {
+        None
+    }
+
     /// Injected/published snapshot members, not overlay buffers.
     /// Population completeness for never-upserted ambient roots uses this
     /// listing; it must not increment [`crate::known_canonicals_calls`].

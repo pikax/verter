@@ -1016,6 +1016,12 @@ impl VerterHost {
     /// `ensure_loaded()` re-integrates.
     pub fn evict(&self, canonical_id: &str) {
         self.ws().notify_close(canonical_id);
+        self.evict_loaded_content(canonical_id);
+    }
+
+    /// Discard host content for a workspace-only replacement while preserving
+    /// the workspace's active overlay and snapshot authority.
+    pub(crate) fn evict_loaded_content(&self, canonical_id: &str) {
         self.semantic_db().invalidate(canonical_id);
         // Release what the semantic substrate retained for this document:
         // its memo entries, node payloads, per-node sidecars, relation
