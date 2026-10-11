@@ -6221,6 +6221,7 @@ impl BroadRuntimeKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BroadRuntimeClassification {
     kinds: Arc<[BroadRuntimeKind]>,
+    status: FactStatus,
 }
 
 impl BroadRuntimeClassification {
@@ -6237,6 +6238,25 @@ impl BroadRuntimeClassification {
         }
         Self {
             kinds: Arc::from(ordered.into_boxed_slice()),
+            status: FactStatus::Complete,
+        }
+    }
+
+    /// A classifier that could not determine its demanded member's kinds.
+    pub(crate) fn unavailable(causes: surface_resolution::NonEmptyReasons) -> Self {
+        Self {
+            kinds: Arc::from([BroadRuntimeKind::Unknown]),
+            status: FactStatus::Unavailable(causes),
+        }
+    }
+
+    /// The producer's member-local guarantee, independent of an ancestor's
+    /// non-admission. Unknown can itself be an exact classification.
+    pub fn into_fact(self) -> FactResult<Self> {
+        match self.status {
+            FactStatus::Complete => FactResult::complete(self),
+            FactStatus::Approximate(causes) => FactResult::approximate(self, causes),
+            FactStatus::Unavailable(causes) => FactResult::unavailable(causes),
         }
     }
 

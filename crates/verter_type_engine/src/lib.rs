@@ -25,6 +25,7 @@ pub mod cancel_trace;
 #[cfg(any(test, feature = "test-support"))]
 pub mod capture_token;
 pub mod component_meta_caches;
+pub mod component_meta_result_db;
 pub mod engine_provenance;
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]

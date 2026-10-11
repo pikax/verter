@@ -154,6 +154,8 @@ mod component_meta_pick_omit_tests;
 #[cfg(test)]
 mod component_meta_publication_demand_tests;
 #[cfg(test)]
+mod component_meta_publication_fence_tests;
+#[cfg(test)]
 mod component_meta_read_once_tests;
 #[cfg(test)]
 mod component_meta_repo_first_pass_diagnosis_tests;

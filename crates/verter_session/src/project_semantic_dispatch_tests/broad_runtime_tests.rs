@@ -45,6 +45,45 @@ fn classify(
     }
 }
 
+#[test]
+fn runtime_fact_preserves_operation_refusal_and_certified_recovery() {
+    use verter_type_engine::semantic_query::{
+        CheckerDiagnostic, CheckerDiagnosticCode, CheckerDiagnosticOperation, FactResult,
+        RecoveryBasis,
+    };
+    let host = VerterHost::new_standalone(Default::default());
+    let graph = host.project_type_store().semantic_graph();
+    let diagnostic = CheckerDiagnostic {
+        code: CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
+        operation: CheckerDiagnosticOperation::InstantiationBudget,
+    };
+    crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
+        let dispatch = ProjectSemanticDispatch::new(ctx);
+        let refused = graph.intern_node(SemanticNodeData::Opaque(QueryError::CheckerRecovery {
+            diagnostic,
+            basis: RecoveryBasis::Budget,
+            origin: None,
+        }));
+        assert!(
+            matches!(
+                classify(&dispatch, refused).into_fact(),
+                FactResult::Unavailable { .. }
+            ),
+            "an operation allowance is a refusal, never a successful runtime fact"
+        );
+        let certified = graph.intern_node(SemanticNodeData::Opaque(QueryError::CheckerRecovery {
+            diagnostic,
+            basis: RecoveryBasis::Certified,
+            origin: None,
+        }));
+        let FactResult::Complete(classification) = classify(&dispatch, certified).into_fact()
+        else {
+            panic!("a certified checker recovery remains a complete classification");
+        };
+        assert_eq!(classification.kinds(), &[BroadRuntimeKind::Unknown]);
+    });
+}
+
 fn macro_classifier_key(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     canonical: &str,

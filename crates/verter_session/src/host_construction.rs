@@ -1819,6 +1819,10 @@ mod fact_validation_authority {
         }
     }
     impl FactValidation for crate::VerterHost {
+        fn publication_input_fingerprint(&self) -> Option<u64> {
+            Some(crate::VerterHost::current_external_supersession_fingerprint(self))
+        }
+
         fn current_external_supersession_fingerprint(&self) -> u64 {
             crate::VerterHost::current_external_supersession_fingerprint(self)
         }

@@ -1,0 +1,11 @@
+error[E0451]: fields `facts`, `generation` and `external_fingerprint` of struct `ComponentMetaEvidence` are private
+ --> tests/cases/compile-fail/final_component_evidence_not_forgeable.rs:5:9
+  |
+4 |     ComponentMetaEvidence {
+  |     --------------------- in this type
+5 |         facts: std::sync::Arc::from([]),
+  |         ^^^^^ private field
+6 |         generation: 0,
+  |         ^^^^^^^^^^ private field
+7 |         external_fingerprint: 0,
+  |         ^^^^^^^^^^^^^^^^^^^^ private field

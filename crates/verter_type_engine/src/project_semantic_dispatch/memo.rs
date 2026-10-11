@@ -17,6 +17,23 @@ use std::sync::{
 use verter_session_query::declarations::metadata::ResolvedTypeDeclaration;
 use verter_session_query::facts::fact_cache::FactVersionRef;
 use verter_session_query::facts::fact_cache::ReadSetSignature;
+
+/// Finalized evidence of one traced component computation. Only the engine
+/// can mint it; admission consumes it under its publication fence.
+pub struct ComponentMetaEvidence {
+    facts: Arc<[FactVersionRef]>,
+    generation: u64,
+    external_fingerprint: u64,
+}
+
+/// Tracer finalization for a component result. A refused trace cannot mint
+/// publication evidence.
+pub enum ComponentMetaTrace {
+    /// A stable, completely observed computation.
+    Observed(ComponentMetaEvidence),
+    /// A computation whose evidence cannot support retention.
+    ReturnOnly(NonAdmissionReason),
+}
 /// Selected output storage; there are no raw-resource accessors.
 pub(crate) struct SingleEntryAttachment<'a, K: Eq + std::hash::Hash + Clone, V> {
     entries: &'a DashMap<K, Arc<CacheEntry<V>>>,
@@ -1244,6 +1261,113 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispat
     #[must_use]
     pub fn validates_fact_signature(&self, facts: &[FactVersionRef]) -> bool {
         self.ctx.validates_fact_signature(facts)
+    }
+
+    /// Read a final component candidate against this request's generation
+    /// and exact dependency evidence. Passive storage exposes no raw read.
+    pub fn read_component_meta_result<P>(
+        &self,
+        db: &crate::component_meta_result_db::ComponentMetaResultDb<P>,
+        key: &crate::component_meta_result_db::ComponentMetaResultKey,
+        owner_whole_hash: verter_session_query::analysis::types::Hash16,
+    ) -> Option<Arc<crate::component_meta_result_db::ComponentMetaResultEntry<P>>> {
+        if self.snapshot.flags().is_cancelled() || !db.is_current_schema() {
+            return None;
+        }
+        let candidate = db.candidate(key, owner_whole_hash)?;
+        if candidate.value.validated_at_generation != self.current_project_generation()
+            || !self.validates_fact_signature(&candidate.value.read_set_signature.facts)
+        {
+            return None;
+        }
+        Some(Arc::new(candidate.value.clone()))
+    }
+
+    /// Admit a traced final result only while its complete external-input
+    /// publication fence still holds. Warm reads validate its precise facts.
+    pub fn admit_component_meta_result<P: verter_session_query::retention::RetainedFootprint>(
+        &self,
+        db: &crate::component_meta_result_db::ComponentMetaResultDb<P>,
+        key: crate::component_meta_result_db::ComponentMetaResultKey,
+        owner_whole_hash: verter_session_query::analysis::types::Hash16,
+        evidence: ComponentMetaEvidence,
+        payload: Arc<P>,
+        generation: u64,
+    ) -> Option<Arc<crate::component_meta_result_db::ComponentMetaResultEntry<P>>> {
+        if self.snapshot.flags().is_cancelled()
+            || !db.is_current_schema()
+            || generation != evidence.generation
+            || generation != self.current_project_generation()
+            || evidence.external_fingerprint != self.ctx.current_external_supersession_fingerprint()
+            || self.ctx.authoritative_current_content_hash(&key.owner_canonical) != Some(owner_whole_hash)
+            || !evidence.facts.iter().any(|fact| matches!(fact,
+                FactVersionRef::FileWholeHash { canonical_id, hash }
+                    if canonical_id.as_str() == key.owner_canonical.as_ref() && *hash == owner_whole_hash
+            ))
+        {
+            return None;
+        }
+        let facts = evidence.facts.iter().filter(|fact| !matches!(fact,
+            FactVersionRef::DerivedFactHash { canonical_id, kind: verter_session_query::facts::fact_cache::DerivedFactKind::Route, .. }
+                if canonical_id == key.owner_canonical.as_ref()
+        )).cloned().collect::<Vec<_>>().into();
+        let entry = Arc::new(crate::component_meta_result_db::ComponentMetaResultEntry {
+            payload,
+            read_set_signature: ReadSetSignature::new(facts),
+            validated_at_generation: generation,
+        });
+        // A cold trace can observe a freshly completed dependency that the
+        // request-entry snapshot could not yet validate. Its sound tracer
+        // evidence and unchanged publication fence authorize storage; every
+        // later read still validates the complete retained signature.
+        db.publish_core(key, owner_whole_hash, entry.as_ref().clone())
+            .then_some(entry)
+    }
+
+    /// Compute with an engine-owned tracer and seal the evidence for final
+    /// component publication. Callers can choose a payload, never its facts.
+    pub fn traced_component_meta_compute<R>(
+        &self,
+        owner_canonical: &str,
+        compute: impl FnOnce() -> R,
+    ) -> (R, ComponentMetaTrace) {
+        let generation = self.current_project_generation();
+        let external_fingerprint = self.ctx.publication_input_fingerprint();
+        let (value, finalise) = self.traced_compute(|| {
+            if let Some(hash) = self.ctx.authoritative_current_content_hash(owner_canonical) {
+                crate::resolver_core::resolver_context::observe_fan_out(
+                    FactVersionRef::FileWholeHash {
+                        canonical_id: owner_canonical.to_owned(),
+                        hash,
+                    },
+                );
+            }
+            compute()
+        });
+        let trace = match finalise {
+            verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(facts)
+                if external_fingerprint.is_some_and(|captured| {
+                    captured == self.ctx.current_external_supersession_fingerprint()
+                }) =>
+            {
+                ComponentMetaTrace::Observed(ComponentMetaEvidence {
+                    facts,
+                    generation,
+                    external_fingerprint: external_fingerprint
+                        .expect("checked captured fingerprint"),
+                })
+            }
+            verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(_) => {
+                ComponentMetaTrace::ReturnOnly(NonAdmissionReason::GenerationSuperseded)
+            }
+            verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_) => {
+                ComponentMetaTrace::ReturnOnly(NonAdmissionReason::UnresolvedProvenance)
+            }
+            verter_session_query::facts::fact_read_set::FactReadSetFinalise::MutationUnstable => {
+                ComponentMetaTrace::ReturnOnly(NonAdmissionReason::MutationUnstable)
+            }
+        };
+        (value, trace)
     }
 
     /// Run `compute` under a fresh fact tracer seeded from the request's live

@@ -2489,7 +2489,7 @@ fn incomplete_output(
         fence,
     ));
     output.cache_suppress = true;
-    output.set_partial(matches!(
+    output.fold_partial(matches!(
         reason,
         IncompleteReason::Budget | IncompleteReason::Cancelled
     ));

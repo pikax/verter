@@ -1783,7 +1783,9 @@ impl VerterHost {
                     constructors: classification.constructors,
                     skip_check: classification.skip_check,
                 },
-                Err(failure) => return failure.runtime(),
+                Err(failure) => {
+                    RuntimePropType::Degraded(MacroFailure::new(failure.member(), None))
+                }
             }
         } else {
             RuntimePropType::Unclassified

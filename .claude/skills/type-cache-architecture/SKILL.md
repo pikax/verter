@@ -36,6 +36,21 @@ End-state rule:
 
 ## Cache Runtime Hard Rules
 
+The generic final-component backing store is
+`verter_type_engine::component_meta_result_db`. The session owns its payload
+and publication policy. Production reads use the request dispatch's
+`read_component_meta_result`; publication consumes the opaque evidence returned
+by `traced_component_meta_compute` through `admit_component_meta_result`.
+Admission checks the observed owner whole-hash root, generation and unchanged
+external-input fingerprint before storage accepts a candidate. Warm reads
+validate every retained fact against their request view. Raw candidate access and storage writes are
+engine-private; seed/read/remove seams exposed for fixtures require test support.
+`FactValidation::publication_input_fingerprint` derives the fence from the
+captured request base and returns no fence for an unproven base. Normalize the
+request's immutable overlay out of this external comparison; additive loading
+and completion are not external supersession. Sampling a new live fingerprint
+at trace entry would incorrectly vouch for a request captured before an edit.
+
 Part of the `Cache Architecture (CRITICAL)` rule in `CLAUDE.md`. Binding for
 the cache-runtime overhaul and any feature admitting cache entries.
 

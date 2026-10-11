@@ -134,11 +134,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         &self,
         subject: SemanticNodeId,
     ) -> QueryBuildOutput<SemanticQueryValue> {
+        let frame = super::BuildLocalTaintGuard::push(&self.build_local_taint);
         let (_connected_guard, initial_trip) = self.enter_connected_demand(false);
         if let Some(reasons) = initial_trip {
             self.fold_local_partial_completeness(reasons);
         }
-        self.classify_broad_runtime_node_return_only_if(
+        let output = self.classify_broad_runtime_node_return_only_if(
             subject,
             initial_trip.is_some(),
             ObservedRuntimePartial::observe(
@@ -146,7 +147,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 initial_trip.unwrap_or(PartialReasonSet::empty()),
             ),
             true,
-        )
+        );
+        let observed = frame.finish();
+        self.fold_observed_frame_into_top(&observed);
+        output
     }
 
     /// Classify `subject` into broad runtime kinds.
@@ -434,14 +438,31 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             kinds.clear();
             kinds.push(BroadRuntimeKind::Unknown);
         }
-        let classification = BroadRuntimeClassification::new(kinds);
+        let classification = if undecidable {
+            let reasons = self
+                .build_local_taint
+                .borrow()
+                .last()
+                .map(|frame| frame.partial_reasons)
+                .unwrap_or_default();
+            BroadRuntimeClassification::unavailable(
+                crate::semantic_query::surface_resolution::NonEmptyReasons::new(reasons)
+                    .unwrap_or_else(|| {
+                        crate::semantic_query::surface_resolution::NonEmptyReasons::of(
+                            crate::semantic_query::PartialReason::SemanticQueryFault,
+                        )
+                    }),
+            )
+        } else {
+            BroadRuntimeClassification::new(kinds)
+        };
         let mut output: QueryBuildOutput<SemanticQueryValue> = (
             QueryResult::Value(SemanticQueryValue::BroadRuntime(classification)),
             self.project_generation_signature(),
         )
             .into();
         output.observed_self_roots = observed_self_roots;
-        output.set_partial(result_is_partial);
+        output.fold_partial(result_is_partial);
         if result_is_partial || force_return_only {
             output.cache_suppress = true;
         }
@@ -768,7 +789,14 @@ fn runtime_query_error_partial_reason(error: &QueryError) -> Option<PartialReaso
         // The checker's recovered error type is a complete answer.
         QueryError::Miss
         | QueryError::DeclPlaceholder { .. }
-        | QueryError::CheckerRecovery { .. } => None,
+        | QueryError::CheckerRecovery {
+            basis: crate::semantic_query::RecoveryBasis::Certified,
+            ..
+        } => None,
+        QueryError::CheckerRecovery {
+            basis: crate::semantic_query::RecoveryBasis::Budget,
+            ..
+        } => Some(PartialReasonSet::OPERATION_BUDGET),
         QueryError::BudgetExceeded(_) => Some(PartialReasonSet::BUDGET_EXCEEDED),
         QueryError::Cancelled => Some(PartialReasonSet::CANCELLED),
         QueryError::UnstableState { .. } | QueryError::StaleSemanticOperand => {

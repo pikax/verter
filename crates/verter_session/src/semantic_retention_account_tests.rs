@@ -729,7 +729,7 @@ fn no_reachable_candidate_store_retains_off_the_aggregate_account() {
 
     let results = crate::component_meta_result_db::ComponentMetaResultDb::<u32>::new();
     assert!(
-        Arc::ptr_eq(results.retention_account(), &process_local),
+        Arc::ptr_eq(results.retention_account_for_tests(), &process_local),
         "a component-meta result cache built without an explicit account must \
          charge the one process-local account"
     );

@@ -1,22 +1,22 @@
 //! Read and admission facades over the final component-meta result store.
 //!
-//! The store ([`ComponentMetaResultDb`]) is host-owned storage; this module
-//! owns its store-specific policy — the schema and project-generation gates,
-//! the hit/miss counters, the owner-route fact strip and the typed publish
-//! decision. Every validation and trace runs through narrow operations of the
+//! The store ([`ComponentMetaResultDb`]) is engine-owned storage; this module
+//! owns the native payload decision and optional hit/miss observations.
+//! Schema, dependency and publication checks run through narrow operations of the
 //! request's [`ProjectSemanticDispatch`], so the facade reads, validates and
 //! traces against exactly the request the dispatch serves, in the original
 //! order.
 
+#[cfg(any(test, feature = "semantic-observe"))]
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use verter_session_query::analysis::types::Hash16;
-use verter_session_query::facts::fact_read_set::FactReadSetFinalise;
+use verter_type_engine::project_semantic_dispatch::memo::ComponentMetaTrace;
 
 use crate::component_meta_result_db::{
-    strip_owner_route_fact, AdmittedComponentMetaResult, ComponentMetaPublishDecision,
-    ComponentMetaResultDb, ComponentMetaResultEntry, ComponentMetaResultKey,
+    AdmittedComponentMetaResult, ComponentMetaPublishDecision, ComponentMetaResultDb,
+    ComponentMetaResultEntry, ComponentMetaResultKey,
 };
 use crate::meta_provenance::MetaProvenance;
 use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
@@ -27,6 +27,7 @@ use verter_type_engine::resolver_core::ResolverCapabilities;
 pub(crate) struct ComponentMetaResultRead<'a, 'c, P, C: ResolverCapabilities> {
     db: &'a ComponentMetaResultDb<P>,
     dispatch: &'a ProjectSemanticDispatch<'c, C>,
+    #[cfg(any(test, feature = "semantic-observe"))]
     observations: &'a MetaProvenance,
 }
 
@@ -36,9 +37,12 @@ impl<'a, 'c, P: Send + Sync, C: ResolverCapabilities> ComponentMetaResultRead<'a
         db: &'a ComponentMetaResultDb<P>,
         observations: &'a MetaProvenance,
     ) -> Self {
+        #[cfg(not(any(test, feature = "semantic-observe")))]
+        let _ = observations;
         Self {
             db,
             dispatch,
+            #[cfg(any(test, feature = "semantic-observe"))]
             observations,
         }
     }
@@ -48,6 +52,7 @@ impl<'a, 'c, P: Send + Sync, C: ResolverCapabilities> ComponentMetaResultRead<'a
         key: &ComponentMetaResultKey,
         owner_whole_hash: Hash16,
     ) -> Option<Arc<ComponentMetaResultEntry<P>>> {
+        #[cfg(any(test, feature = "semantic-observe"))]
         let bump_miss = |observations: &MetaProvenance| {
             observations
                 .component_meta_result_cache_misses
@@ -63,60 +68,43 @@ impl<'a, 'c, P: Send + Sync, C: ResolverCapabilities> ComponentMetaResultRead<'a
                     .fetch_add(1, Ordering::Relaxed);
             }
         };
-        if !self.db.is_current_schema() {
-            bump_miss(self.observations);
-            return None;
-        }
-        // Clone the candidate `Arc` out of the slot before validating —
-        // a concurrent eviction cannot invalidate this borrow.
-        let candidate = match self.db.candidate(key, owner_whole_hash) {
-            Some(c) => c,
-            None => {
-                bump_miss(self.observations);
-                return None;
-            }
-        };
-        // Project-generation gate. The carrier validates only
-        // file-content whole-hashes; a `ProjectGeneration` reset bumps
-        // no file content, so an entry whose `validated_at_generation`
-        // no longer equals the live generation is stale even though its
-        // carrier still validates. Reject before the fact rail so the
-        // miss is attributed correctly.
-        if candidate.value.validated_at_generation != self.dispatch.current_project_generation() {
-            bump_miss(self.observations);
-            return None;
-        }
-        // Fact-precise validation: every entry in the signature must
-        // validate under the live view. An empty signature trivially
-        // passes (entries published outside an installed tracer scope —
-        // typically test fixtures — fall through to the legacy validator
-        // on the caller side).
-        if !self
-            .dispatch
-            .validates_fact_signature(&candidate.value.read_set_signature.facts)
-        {
-            bump_miss(self.observations);
-            return None;
-        }
+        let candidate =
+            match self
+                .dispatch
+                .read_component_meta_result(self.db, key, owner_whole_hash)
+            {
+                Some(candidate) => candidate,
+                None => {
+                    #[cfg(any(test, feature = "semantic-observe"))]
+                    bump_miss(self.observations);
+                    return None;
+                }
+            };
+        #[cfg(any(test, feature = "semantic-observe"))]
         if let Some(ctx) = verter_type_engine::request_context::current_request_context() {
             ctx.cache_counters
                 .component_meta
                 .hits
                 .fetch_add(1, Ordering::Relaxed);
         }
+        #[cfg(any(test, feature = "semantic-observe"))]
         self.observations
             .component_meta_result_cache_hits
             .fetch_add(1, Ordering::Relaxed);
-        Some(Arc::new(candidate.value.clone()))
+        Some(candidate)
     }
 }
 
 /// Count a component-meta result miss the caller decided before reaching the
 /// store (no current view to validate against).
 pub(crate) fn record_component_meta_result_miss(observations: &MetaProvenance) {
+    #[cfg(not(any(test, feature = "semantic-observe")))]
+    let _ = observations;
+    #[cfg(any(test, feature = "semantic-observe"))]
     observations
         .component_meta_result_cache_misses
         .fetch_add(1, Ordering::Relaxed);
+    #[cfg(any(test, feature = "semantic-observe"))]
     if let Some(ctx) = verter_type_engine::request_context::current_request_context() {
         ctx.cache_counters
             .component_meta
@@ -146,8 +134,8 @@ impl<'a, 'c, P: Send + Sync, C: ResolverCapabilities> ComponentMetaResultPublish
     /// retention reservation leaves the admitted carrier unset.
     pub(crate) fn compute_and_admit_with_entry<R, Compute, Decide>(
         &self,
-        canonical: &str,
-        path_label: &str,
+        _canonical: &str,
+        _path_label: &str,
         compute: Compute,
         decide: Decide,
     ) -> (R, Option<AdmittedComponentMetaResult<P>>)
@@ -156,32 +144,26 @@ impl<'a, 'c, P: Send + Sync, C: ResolverCapabilities> ComponentMetaResultPublish
         Decide: FnOnce(&R) -> ComponentMetaPublishDecision<P>,
         P: verter_session_query::retention::RetainedFootprint,
     {
-        let (value, finalise) = self.dispatch.traced_compute(compute);
+        let (value, finalise) = self
+            .dispatch
+            .traced_component_meta_compute(_canonical, compute);
         let mut admitted = None;
         match finalise {
-            FactReadSetFinalise::Ok(facts) => match decide(&value) {
+            ComponentMetaTrace::Observed(evidence) => match decide(&value) {
                 ComponentMetaPublishDecision::Publish {
                     key,
                     owner_whole_hash,
                     payload,
                     validated_at_generation,
                 } => {
-                    let admitted_facts = strip_owner_route_fact(&key.owner_canonical, &facts);
-                    let entry = Arc::new(ComponentMetaResultEntry {
+                    if let Some(entry) = self.dispatch.admit_component_meta_result(
+                        self.db,
+                        key.clone(),
+                        owner_whole_hash,
+                        evidence,
                         payload,
-                        read_set_signature:
-                            verter_session_query::facts::fact_cache::ReadSetSignature::new(
-                                admitted_facts,
-                            ),
                         validated_at_generation,
-                    });
-                    // A retention refusal leaves `admitted` unset: the
-                    // caller keeps its complete value, and no evidence
-                    // carrier claims an entry the cache never stored.
-                    if self
-                        .db
-                        .publish_core(key.clone(), owner_whole_hash, entry.as_ref().clone())
-                    {
+                    ) {
                         admitted = Some(AdmittedComponentMetaResult {
                             key,
                             owner_whole_hash,
@@ -191,35 +173,26 @@ impl<'a, 'c, P: Send + Sync, C: ResolverCapabilities> ComponentMetaResultPublish
                 }
                 ComponentMetaPublishDecision::ReturnOnly(reason) => {
                     verter_type_engine::cache_runtime::admission::propagate_non_admission(reason);
+                    #[cfg(feature = "semantic-observe")]
                     tracing::debug!(
                         target: "verter::audit::record",
-                        file = %canonical,
-                        path = %path_label,
+                        file = %_canonical,
+                        path = %_path_label,
                         reason = %reason,
                         "skipping component-meta cache promotion: typed admission refusal",
                     );
                 }
                 ComponentMetaPublishDecision::NoValue => {}
             },
-            FactReadSetFinalise::NonCacheable(_) => {
-                let reason = verter_audit::NonAdmissionReason::UnresolvedProvenance;
+            ComponentMetaTrace::ReturnOnly(reason) => {
                 verter_type_engine::cache_runtime::admission::propagate_non_admission(reason);
+                #[cfg(feature = "semantic-observe")]
                 tracing::debug!(
                     target: "verter::audit::record",
-                    file = %canonical,
-                    path = %path_label,
-                    "skipping component-meta cache promotion: cold compute consumed a non-cacheable read",
-                );
-            }
-            FactReadSetFinalise::MutationUnstable => {
-                let reason = verter_audit::NonAdmissionReason::MutationUnstable;
-                verter_type_engine::cache_runtime::admission::propagate_non_admission(reason);
-                tracing::debug!(
-                    target: "verter::audit::record",
-                    file = %canonical,
-                    path = %path_label,
-                    "skipping component-meta cache promotion: a compaction domain advanced \
-                     mid-compute",
+                    file = %_canonical,
+                    path = %_path_label,
+                    reason = %reason,
+                    "skipping component-meta cache promotion: trace refused publication evidence",
                 );
             }
         }
