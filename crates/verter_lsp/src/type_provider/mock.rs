@@ -161,6 +161,8 @@ mod inner {
     /// Shared state for the mock provider.
     #[derive(Default)]
     struct MockState {
+        carrier_metadata_block:
+            Option<(String, Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
         carrier_refresh_block: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
         carrier_batch_observer: Option<std::sync::Arc<tokio::sync::Notify>>,
         carrier_batch_block: Option<(
@@ -827,6 +829,21 @@ mod inner {
             let mut state = self.state.lock().unwrap();
             state.diagnostics_gate = Some(gate);
             state.carrier_refresh_block = Some((arrived.clone(), release.clone()));
+            (arrived, release)
+        }
+
+        /// Pause the next metadata write for this source without holding the mock lock.
+        pub(crate) fn block_carrier_metadata(
+            &self,
+            source: &str,
+        ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+            let arrived = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            self.state.lock().unwrap().carrier_metadata_block = Some((
+                source.to_string(),
+                Arc::clone(&arrived),
+                Arc::clone(&release),
+            ));
             (arrived, release)
         }
 
@@ -1604,7 +1621,7 @@ mod inner {
             content: &str,
             project_file_name: &str,
         ) -> ProviderFuture<'_, ()> {
-            let fail = {
+            let (fail, block) = {
                 let mut state = self.state.lock().unwrap();
                 state.calls.push(MockCall::RegisterCarrierMetadata {
                     source_path: source_path.to_string(),
@@ -1612,9 +1629,25 @@ mod inner {
                     content: content.to_string(),
                     project_file_name: project_file_name.to_string(),
                 });
-                state.fail_carrier_metadata_sources.contains(source_path)
+                let block = if state
+                    .carrier_metadata_block
+                    .as_ref()
+                    .is_some_and(|(source, _, _)| source == source_path)
+                {
+                    state.carrier_metadata_block.take()
+                } else {
+                    None
+                };
+                (
+                    state.fail_carrier_metadata_sources.contains(source_path),
+                    block,
+                )
             };
             Box::pin(async move {
+                if let Some((_, arrived, release)) = block {
+                    arrived.notify_one();
+                    release.notified().await;
+                }
                 if fail {
                     Err(TypeProviderError::new("mock carrier metadata failure"))
                 } else {

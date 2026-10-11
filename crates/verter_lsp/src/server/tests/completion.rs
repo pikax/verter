@@ -604,6 +604,10 @@ async fn completion_does_not_cold_load_children_for_native_enrichment() {
             version: 1,
             text: case.incomplete_parent_source.to_string(),
         });
+        // Establish the parent's IDE result or content-bound syntax verdict:
+        // the unfinished tag may legitimately have no IDE surface. This test
+        // isolates native enrichment after the parent's initial compilation.
+        let _ = server.documents.recompile_and_refresh_mapper(&app_uri);
         // Parent compilation may warm imports proactively. Hold the existing
         // publication lane while evicting so the approved detached self-heal
         // cannot win the post-request assertion; this test measures foreground
@@ -5472,6 +5476,10 @@ async fn virtual_file_completion_routes_actionable_handle_through_envelope() {
         version: 1,
         text: "<template><div/></template>".to_string(),
     });
+    assert!(
+        server.documents.get_ide(&source_uri).is_some(),
+        "precondition: materialize the backing carrier before seeding its provider surface"
+    );
 
     // Mark the source's provider sync state as IDE-loaded at the TSX path, so
     // `active_ide_path_for_uri(source)` returns the carrier path the virtual-file

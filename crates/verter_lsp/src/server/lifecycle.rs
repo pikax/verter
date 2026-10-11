@@ -633,13 +633,9 @@ pub(super) async fn handle_did_open(
     }
     server.documents.schedule_semantic_analysis(uri);
     let startup_policy = did_open_startup_policy(server.type_provider_kind);
-    let prewarm_imported_carrier_apis = startup_policy.sync_imported_carrier_apis
-        && matches!(
-            server.type_provider_kind,
-            crate::TypeProviderKind::Tsserver | crate::TypeProviderKind::EditorTsserver
-        )
-        // TEST SEAM: suppressed so the cross-file-rename child-closed lane proves
-        // `handle_rename`'s own sync-before-query is the sole sync of the child API.
+    let start_import_publication_early = startup_policy.sync_imported_carrier_apis
+        // Retain the test seam's ordering: suppressed warmup starts after the
+        // entry's own provider sync, as it did before background ownership.
         && !server.suppress_imported_carrier_prewarm;
     let imported_carrier_priority_ids =
         collect_imported_carrier_priority_ids_from_specifiers_for_publication(
@@ -667,20 +663,21 @@ pub(super) async fn handle_did_open(
         }
     }
 
-    if prewarm_imported_carrier_apis {
-        if let Ok(import_ids) = &imported_carrier_priority_ids {
-            for import_id in import_ids {
-                let _ = server
-                    .sync_imported_carrier_api_lightweight(import_id)
-                    .await;
-            }
-        }
+    if start_import_publication_early {
+        // The per-document background owner publishes imported APIs, barrel
+        // dependencies and the DependencyReady receipt together. Waiting for
+        // individual children here retains the entry's open handler during
+        // scan/replay and delays its own sync and diagnostics signal. A blocked
+        // child must keep diagnostics incomplete, without blocking this open.
+        server.spawn_import_dependency_publication(
+            uri,
+            super::import_publication::PublicationUrgency::Immediate,
+        );
     }
 
-    // Active file IDE sync FIRST (Interactive priority) — enables typed hover immediately.
-    // tsserver is the exception: imported carrier public APIs are warmed above so the
-    // initial open does not snapshot missing carrier provider modules into the
-    // configured project.
+    // Active file IDE sync (Interactive priority) enables typed hover immediately.
+    // Imported surfaces settle independently on the background lane; diagnostics
+    // still require the complete dependency receipt before certifying readiness.
     let provider_sync_policy = did_open_provider_sync_policy(server.type_provider_kind);
     if provider_sync_policy.await_ide_sync {
         // Use ensure_current_file_synced for immediate IDE-only sync
@@ -700,28 +697,6 @@ pub(super) async fn handle_did_open(
         .is_some()
     {
         server.sync_self_file_shadow_unresolved(uri).await;
-    }
-
-    // Imported carrier API warmup SECOND (Normal priority, never blocks active file).
-    // TEST SEAM: also gated off by `suppress_imported_carrier_prewarm` — the cross-
-    // file-rename discrimination lane must leave `handle_rename`'s own
-    // sync-before-query as the SOLE sync of an imported child's API surface, so
-    // BOTH the eager (above) and this deferred did_open warmup are suppressed.
-    if startup_policy.sync_imported_carrier_apis
-        && !prewarm_imported_carrier_apis
-        && !server.suppress_imported_carrier_prewarm
-    {
-        if let Ok(import_ids) = &imported_carrier_priority_ids {
-            for import_id in import_ids {
-                // The common imported-child wrapper owns TWO publications:
-                // provider bytes and the LSP-only component contract. An
-                // already-loaded API companion may still be missing/stale in
-                // the contract cache, so never bypass the wrapper here.
-                let _ = server
-                    .sync_imported_carrier_api_lightweight(import_id)
-                    .await;
-            }
-        }
     }
 
     // API sync (deferred — queued for coordinator)
@@ -752,16 +727,12 @@ pub(super) async fn handle_did_open(
             uri.as_str().to_string(),
             tokio::time::Instant::now(),
         );
-        // Background import-dependency publication (imported carrier APIs +
-        // the barrel re-export walk) for the freshly opened document. This —
-        // not any interactive request — is what mints the DependencyReady
-        // receipt navigation handlers capture; the per-import prewarm above
-        // stays as the latency head start, while this pass adds the barrel
-        // closure and the receipt.
-        server.spawn_import_dependency_publication(
-            uri,
-            super::import_publication::PublicationUrgency::Immediate,
-        );
+        if !start_import_publication_early {
+            server.spawn_import_dependency_publication(
+                uri,
+                super::import_publication::PublicationUrgency::Immediate,
+            );
+        }
     }
 
     if startup_policy.publish_diagnostics {

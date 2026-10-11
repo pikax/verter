@@ -235,6 +235,12 @@ impl DocumentRegistry {
         }
         drop(document);
 
+        tracing::debug!(
+            canonical_id,
+            ?document_revision,
+            semantic_generation,
+            "semantic analysis queued"
+        );
         let registry = Arc::clone(self);
         Some(tokio::spawn(async move {
             #[cfg(test)]
@@ -255,6 +261,12 @@ impl DocumentRegistry {
             }
 
             let semantic_host = registry.semantic_host();
+            tracing::debug!(
+                canonical_id,
+                ?document_revision,
+                semantic_generation,
+                "semantic analysis started"
+            );
             let work_source = Arc::clone(&source);
             let work_canonical = canonical_id.clone();
             let analysis = tokio::task::spawn_blocking(move || {
@@ -366,6 +378,13 @@ impl DocumentRegistry {
             .await
             .ok()
             .flatten();
+            tracing::debug!(
+                canonical_id,
+                ?document_revision,
+                semantic_generation,
+                available = analysis.is_some(),
+                "semantic analysis finished"
+            );
 
             if let Some((analysis, semantic_structure)) = analysis {
                 #[cfg(test)]

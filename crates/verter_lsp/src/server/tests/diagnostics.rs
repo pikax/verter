@@ -1125,6 +1125,10 @@ fn compute_verter_diagnostics_bypasses_cache_after_host_recompile() {
 
     let cached_verter_diags = Arc::new(DashMap::new());
 
+    // This cache test consumes an existing compiler verdict. A cold open only
+    // registers source, so demand the initial compile before reading that cache.
+    let _ = documents.recompile_and_refresh_mapper(&uri);
+
     // First call — should contain HOST_MISSING_MACRO_TYPE_DEP
     let diags1 =
         crate::server::document_diagnostics_for_test(&documents, &uri, &cached_verter_diags, None);

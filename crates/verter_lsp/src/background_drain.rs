@@ -385,6 +385,7 @@ pub(crate) async fn drain_pending_snapshot_provider_sync(
     };
 
     for canonical_id in pending_ids {
+        tracing::debug!(canonical_id, "pending provider retry started");
         // ONE lane per open document, shared with the interactive repair and the
         // coordinator. Asked here, at the point of delivery, so a drain pass that
         // started while the document was closed and finds it open now serializes
@@ -403,6 +404,7 @@ pub(crate) async fn drain_pending_snapshot_provider_sync(
             pending_snapshot_provider_sync,
         )
         .await;
+        tracing::debug!(canonical_id, ?outcome, "pending provider retry settled");
 
         // Dequeue when the file is fully reconciled (every intended kind synced),
         // when it settled into a TERMINAL no-owner state (never retried), or when
@@ -1080,6 +1082,7 @@ pub(super) async fn sync_pending_carrier_provider_file(
         pending_snapshot_provider_sync,
     )
     .await;
+    tracing::debug!(canonical_id, ?outcome, "pending carrier retry disposition");
     classify_carrier_apply_outcome(outcome)
 }
 
@@ -1299,6 +1302,7 @@ async fn close_dropped_owner_api_path(
 }
 
 /// The applied result of an owner-resolved both-kinds carrier gateway sync.
+#[derive(Debug)]
 enum CarrierApplyOutcome {
     /// Committed (tsserver `Published` membership, or tsgo `DirectOpen` buffer sync).
     /// `attempted` = the kinds with a target path this pass; `synced` = those that

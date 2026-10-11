@@ -998,15 +998,12 @@ impl DocumentRegistry {
         self.host()
             .notify_upsert(&canonical_id, Arc::clone(&submitted_source));
 
-        // Trigger compilation to populate the TSX cache (upsert only parses).
-        // IDE-sync: drive the IDE/TSX surface explicitly. This profile asks for
-        // the IDE product and template data, so it publishes no runtime node at
-        // all; `ensure_ide_compiled` is the route that serves what is read.
-        // `get_ide` below then reads the source map.
-        let carrier_compile = is_carrier.then(|| {
-            self.host()
-                .ensure_ide_compiled(&canonical_id, &self.tsx_profile.read())
-        });
+        // Opening commits text and registration, just like did_change. A
+        // restart replays every document through the same serve loop and
+        // document-commit lane: compiling here serializes all replayed files
+        // ahead of demand for the active entry and scanner completion. The
+        // scanner, coordinator and per-document repair already own compilation
+        // and install a source-fenced mapper when the IDE surface is demanded.
 
         let registered = is_carrier
             .then(|| {
@@ -1022,9 +1019,9 @@ impl DocumentRegistry {
         let document_revision = self.next_document_revision();
 
         // Build the document's provider projection.
-        // Always build on did_open — even if the host reports `changed: false`
-        // (e.g., because scan_workspace already loaded the same content), we still
-        // need the mapper for hover/definition/diagnostics.
+        // Reuse a current cached surface when the scanner already compiled it.
+        // A cold carrier starts without a mapper; get_ide's demand path and the
+        // sync owners install one before provider queries can capture a surface.
         //  - CARRIER (`.vue` / `.svelte`): the IDE TSX source-map projection.
         //  - SELF-FILE (rune module OR plain TS-family script): the line-only
         //    rewrite-aware projection (prelude-offset-only at did_open; the
@@ -1050,14 +1047,9 @@ impl DocumentRegistry {
                 line_index.as_ref(),
             )
         };
-        if let Some(outcome) = &carrier_compile {
-            self.account_carrier_ide_content_verdict(
-                &canonical_id,
-                &source,
-                outcome,
-                carrier_ide_read.is_some(),
-                projection.is_some(),
-            );
+        if is_carrier && projection.is_some() {
+            self.failed_carrier_ide_content_verdicts
+                .remove(&canonical_id);
         }
 
         let state = DocumentState {
@@ -1497,8 +1489,8 @@ impl DocumentRegistry {
     /// Install a carrier's provider projection from the host's CACHED IDE
     /// surface, but only when the document has none.
     ///
-    /// The document commit does not compile, so a carrier whose open-time
-    /// compile failed carries no projection — and a document with no projection
+    /// The document commit does not compile, so a cold carrier opens without
+    /// a projection — and a document with no projection
     /// fails closed on every capture (`capture_provider_request_surface`
     /// returns `None`) until a repair path compiles one: the attempt-bounded
     /// interactive repair serves the request in hand, while the debounced
@@ -2378,18 +2370,22 @@ mod tests {
         let registry = DocumentRegistry::new(host);
         let uri: Uri = "file:///home/user/App.vue".parse().unwrap();
 
-        // Open a Vue file — this compiles and builds the mapper
+        // Open a Vue file, then demand its IDE surface and mapper
         registry.did_open(&TextDocumentItem {
             uri: uri.clone(),
             language_id: "vue".to_string(),
             version: 1,
             text: "<template><div>hello</div></template><script setup lang=\"ts\">\nconst x = 1;\n</script>".to_string(),
         });
+        assert!(
+            registry.get_ide(&uri).is_some(),
+            "precondition: materialize the IDE surface"
+        );
 
-        // Verify mapper was built during did_open
+        // Verify the initial demand built the mapper
         assert!(
             registry.get_position_mapper(&uri).is_some(),
-            "mapper should be built during did_open"
+            "mapper should be built by initial IDE demand"
         );
 
         // Simulate the startup race: clear the projection to None
@@ -2581,9 +2577,9 @@ mod tests {
     }
 
     #[test]
-    fn did_open_svelte_builds_an_ide_position_mapper() {
+    fn opened_svelte_builds_an_ide_position_mapper_on_demand() {
         // The carrier-general compile gate (is_framework_carrier, not is_vue)
-        // must reach the Svelte IDE projection on did_open — the source map
+        // must reach the opened Svelte IDE projection on demand — the source map
         // yields a position mapper. A `.svelte` file with the Vue-only gate
         // would build NO mapper (the bug this pins).
         let host = Arc::new(verter_session::VerterHost::new_standalone(
@@ -2598,6 +2594,7 @@ mod tests {
             text: "<script lang=\"ts\">let count = 0;</script>\n<div>{count}</div>".to_string(),
         };
         let _ = registry.did_open(&item);
+        assert!(registry.get_ide(&item.uri).is_some());
 
         let state = registry
             .documents
@@ -2608,7 +2605,7 @@ mod tests {
                 state.projection,
                 Some(DocumentProviderProjection::CarrierIde { .. })
             ),
-            "did_open on a .svelte carrier must build an IDE (carrier) projection \
+            "IDE demand on an opened .svelte carrier must build a carrier projection \
              (the carrier-general compile gate reaches the Svelte projection)"
         );
     }
@@ -2637,6 +2634,10 @@ mod tests {
             version: 1,
             text: "<script lang=\"ts\">let count = 0;</script>\n<div>{count}</div>".to_string(),
         });
+        assert!(
+            registry.get_ide(&uri).is_some(),
+            "precondition: materialize the IDE surface"
+        );
 
         // Two independent reads of the unified mapper for the same document.
         let first = registry
@@ -2699,6 +2700,10 @@ mod tests {
             version: 1,
             text: "<script lang=\"ts\">let count = 0;</script>\n<div>{count}</div>".to_string(),
         });
+        assert!(
+            registry.get_ide(&uri).is_some(),
+            "precondition: materialize the IDE surface"
+        );
 
         // Capture the pre-edit mapper handle's allocation.
         let before = registry
@@ -2791,11 +2796,15 @@ mod tests {
             text: carrier_revision("v1"),
         });
         assert!(
+            registry.get_ide(&uri).is_some(),
+            "precondition: materialize the IDE surface"
+        );
+        assert!(
             registry
                 .get(&uri)
                 .and_then(|document| document.projection.clone())
                 .is_some(),
-            "precondition: the OPEN must establish the carrier's projection, so the \
+            "precondition: initial IDE demand must establish the carrier's projection, so the \
              edits below are steady-state commits"
         );
 

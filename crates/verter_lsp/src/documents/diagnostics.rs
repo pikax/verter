@@ -502,15 +502,37 @@ impl DocumentRegistry {
             .receipts
             .get(uri.as_str())
             .cloned();
-        receipt.is_some_and(|receipt| {
-            receipt.complete
+        let Some(receipt) = receipt else {
+            tracing::debug!(uri = uri.as_str(), "diagnostics readiness has no receipt");
+            return false;
+        };
+        if !tracing::enabled!(tracing::Level::DEBUG) {
+            return receipt.complete
                 && self.diagnostic_publication_is_current(uri, &receipt.publication)
-                && self.semantic_diagnostics_ready(uri, receipt.publication.basis.snapshot.revision)
+                && self
+                    .semantic_diagnostics_ready(uri, receipt.publication.basis.snapshot.revision)
                 && receipt.surface.is_none_or(|snapshot| {
                     self.provider_surfaces
                         .captured_snapshot_still_honored(&snapshot)
-                })
-        })
+                });
+        }
+        let publication_current = self.diagnostic_publication_is_current(uri, &receipt.publication);
+        let semantic_ready =
+            self.semantic_diagnostics_ready(uri, receipt.publication.basis.snapshot.revision);
+        let surface_current = receipt.surface.as_ref().is_none_or(|snapshot| {
+            self.provider_surfaces
+                .captured_snapshot_still_honored(snapshot)
+        });
+        tracing::debug!(
+            uri = uri.as_str(),
+            epoch = receipt.publication.epoch.0,
+            complete = receipt.complete,
+            publication_current,
+            semantic_ready,
+            surface_current,
+            "diagnostics readiness state"
+        );
+        receipt.complete && publication_current && semantic_ready && surface_current
     }
 }
 

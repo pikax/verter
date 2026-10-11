@@ -1,4 +1,105 @@
 use super::*;
+use crate::server::lifecycle::handle_did_open;
+
+/// A reopened entry must hand its import closure to the background owner.
+/// A slow child write cannot retain the open handler, but remains a real
+/// dependency barrier to diagnostics while the workspace scan is running.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn entry_open_does_not_wait_for_imported_carrier_publication() {
+    fn apply_metadata(provider: &MockTypeProvider, source: &str) {
+        for call in provider.calls() {
+            if let MockCall::RegisterCarrierMetadata {
+                source_path,
+                companion_path,
+                content,
+                ..
+            } = call
+            {
+                if source_path == source {
+                    provider.accept_unrecorded_delivery(&companion_path, &content);
+                }
+            }
+        }
+    }
+    struct Release(Arc<tokio::sync::Notify>);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            self.0.notify_one();
+        }
+    }
+    struct Drain(tokio::task::JoinHandle<()>);
+    impl Drop for Drain {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+    let root = unique_server_ws_root("entry_dependency_barrier");
+    let child = format!("{root}/src/Child.vue");
+    let app = format!("{root}/src/App.vue");
+    let provider = Arc::new(MockTypeProvider::new());
+    let service = make_hover_test_service(provider.clone());
+    let server = service.inner();
+    server.outbound().assume_initialized();
+    let mut wire = server.outbound().wire();
+    let _drain = Drain(tokio::spawn(
+        async move { while wire.next().await.is_some() {} },
+    ));
+    server.documents.set_semantic_analysis_enabled(false);
+    install_test_resolver_for_root(server, &root, Some(&format!("{root}/tsconfig.json")));
+    open_test_vue(server, &child,
+        "<script setup lang=\"ts\">defineProps<{ msg?: string }>()</script><template><div /></template>");
+    let uri: Uri = format!("file://{app}").parse().unwrap();
+    let (arrived, release) = provider.block_carrier_metadata(&child);
+    let _release_on_failure = Release(Arc::clone(&release));
+    server.sync_coordinator.set_workspace_scan_in_progress(true);
+    let opening_server = server.clone();
+    let opening_uri = uri.clone();
+    let mut opening = tokio::spawn(async move {
+        handle_did_open(&opening_server, DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: opening_uri,
+                language_id: "vue".into(),
+                version: 1,
+                text: "<script setup lang=\"ts\">import Child from './Child.vue'</script><template><Child /></template>".into(),
+            },
+        }).await;
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), arrived.notified())
+        .await
+        .expect("the child's provider publication must reach the barrier");
+    tokio::time::timeout(std::time::Duration::from_secs(5), &mut opening)
+        .await
+        .expect("an imported provider write must not retain the entry open handler")
+        .unwrap();
+    // Metadata acceptance alone is not engine application. Model the entry's
+    // already-submitted bytes reaching the mock engine while its child is held.
+    apply_metadata(&provider, &app);
+    server.sync_coordinator.signal_diagnostics_only(
+        app.clone(),
+        uri.as_str().into(),
+        tokio::time::Instant::now(),
+    );
+    server
+        .sync_coordinator
+        .await_until(
+            || server.sync_coordinator.dependency_holds() > 0,
+            || panic!("the scanner's dependency barrier must hold entry diagnostics"),
+        )
+        .await;
+    assert!(
+        !server.documents.diagnostics_ready(&uri),
+        "the entry cannot certify diagnostics while its child remains undelivered"
+    );
+    release.notify_one();
+    server.test_settle_import_dependencies(&uri).await;
+    apply_metadata(&provider, &child);
+    server.test_settle_open_document(&uri).await;
+    assert!(server.documents.diagnostics_ready(&uri));
+    assert!(
+        server.sync_coordinator.workspace_scan_in_progress(),
+        "the entry must complete independently of the rest of the scan"
+    );
+}
 
 #[test]
 fn needs_provider_sync_insert_and_remove() {
@@ -1117,7 +1218,7 @@ async fn broken_projectionless_carrier_fails_closed_and_bounds_content_verdicts(
     );
     assert!(
         !server.current_file_needs_inline_type_provider_sync(&uri),
-        "the open-time syntax verdict must bind these exact bytes"
+        "the initial IDE demand's syntax verdict must bind these exact bytes"
     );
     // A later revision, STILL malformed (the ordinary state of a file being
     // typed). The commit stores text only.
@@ -6555,15 +6656,6 @@ async fn sync_pending_carrier_provider_file_composes_external_template_into_ide_
             version: 1,
             text: "<template src=\"@/partials/panel.html\"></template>\n<script setup lang=\"ts\">\nimport type { Props } from '@/types'\nconst props = defineProps<Props>()\n</script>".to_string(),
         });
-    // The registered VFS read admits external bytes for classification,
-    // analysis, and the composed IDE surface below.
-    let external_source = host
-        .get_source(&format!("{workspace_id}/src/partials/panel.html"))
-        .expect("registered external source should be admitted from the VFS");
-    assert!(
-        external_source.contains("props.msg"),
-        "the admitted source must be the registered external template"
-    );
     // Type deps (types.ts) are resolved via VFS workspace read fallback during
     // compilation but may not be explicitly loaded into the scheduler.
     assert!(
@@ -6625,6 +6717,16 @@ async fn sync_pending_carrier_provider_file_composes_external_template_into_ide_
     )
     .await;
     assert_eq!(synced, SyncOutcome::FullyReconciled);
+
+    // The registered VFS read admits external bytes for classification,
+    // analysis, and the composed IDE surface below.
+    let external_source = host
+        .get_source(&format!("{workspace_id}/src/partials/panel.html"))
+        .expect("registered external source should be admitted from the VFS");
+    assert!(
+        external_source.contains("props.msg"),
+        "the admitted source must be the registered external template"
+    );
 
     let profile = documents.tsx_profile.read().clone();
     let ide = host
@@ -9080,6 +9182,7 @@ async fn guarded_decl_close_does_not_strand_concurrently_reopened_overlay() {
         .test_documents()
         .get_canonical_id(&r_uri)
         .expect("R.vue has a canonical id");
+    server.test_run_declaration_closure_pass(1).await;
     let shared_id = format!("{workspace_id}/src/Shared.vue");
     let shared_decl_path = host
         .declaration_carrier_path(&shared_id)
@@ -9091,7 +9194,6 @@ async fn guarded_decl_close_does_not_strand_concurrently_reopened_overlay() {
 
     // PRIME with only R open: the closure pass records `{Shared.d.vue.ts -> R}`
     // (R imports Shared) and opens the overlay in the provider.
-    server.test_run_declaration_closure_pass(1).await;
     let primed_shared_by_r = server
         .test_decl_overlay_owner()
         .test_slot_roots(&shared_decl_path)
@@ -11849,6 +11951,7 @@ async fn stale_close_is_superseded_when_a_reaching_root_reopens_the_overlay() {
         .test_documents()
         .get_canonical_id(&r_uri)
         .expect("R.vue has a canonical id");
+    server.test_run_declaration_closure_pass(1).await;
     let shared_id = format!("{workspace_id}/src/Shared.vue");
     let shared_decl_path = host
         .declaration_carrier_path(&shared_id)
@@ -11860,7 +11963,6 @@ async fn stale_close_is_superseded_when_a_reaching_root_reopens_the_overlay() {
 
     // PRIME with only R open: records `{Shared.d.vue.ts -> R}` at some generation G
     // and opens Shared in the provider.
-    server.test_run_declaration_closure_pass(1).await;
     assert!(
         provider.open_paths_snapshot().contains(&shared_decl_path),
         "priming pass opened Shared.d.vue.ts in the provider, open_paths={:?}",
@@ -12275,10 +12377,9 @@ async fn open_unresolved_drain_ide_sync_records_carrier_ide_surface() {
         version: 1,
         text: source.to_string(),
     });
-    let profile = documents.tsx_profile.read().clone();
-    let ide = host
-        .get_ide("/workspace/src/App.vue", &profile)
-        .expect("IDE output should exist for the open carrier");
+    let ide = documents
+        .get_ide(&uri)
+        .expect("the drain fixture requires an IDE surface");
 
     let provider = Arc::new(MockTypeProvider::new());
     let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
@@ -12341,9 +12442,9 @@ async fn open_unresolved_drain_ide_sync_records_carrier_ide_surface() {
         version: 1,
         text: source.to_string(),
     });
-    let other_ide = host
-        .get_ide("/workspace/src/Other.vue", &profile)
-        .expect("IDE output should exist for the second carrier");
+    let other_ide = documents
+        .get_ide(&other_uri)
+        .expect("the second drain fixture requires an IDE surface");
     provider.set_fail_sync_path("/workspace/src/Other.vue.tsx");
     let other_revision = documents
         .snapshot_identity(&other_uri)

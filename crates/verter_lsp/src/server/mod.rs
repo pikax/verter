@@ -466,12 +466,9 @@ pub struct ServerCore {
     type_provider_kind: crate::TypeProviderKind,
     /// WHICH engine is serving and who owns it — reporting only, never behaviour.
     pub(crate) type_provider_topology: crate::TypeProviderTopology,
-    /// TEST SEAM: when `true`, suppress the `did_open` imported-carrier-API
-    /// prewarm so a cross-file-rename lane can exercise the path where only
-    /// `handle_rename`'s own sync-before-query would sync a closed child's API
-    /// surface. That lane is `#[ignore]`'d (the Block H-membership tsserver
-    /// program-membership gap): suppression does NOT prove `handle_rename`'s own
-    /// sync closes the closed child today.
+    /// TEST SEAM: defer `did_open`'s imported-carrier publication until after
+    /// the entry's own provider sync. Background dependency publication still
+    /// runs; this suppresses its early start, not the dependency receipt owner.
     suppress_imported_carrier_prewarm: bool,
     /// E2E attribution seam for TypeScript-provider completion parity. Verter still
     /// owns carrier generation, synchronization, and source mapping, but its native

@@ -16,12 +16,42 @@ use super::{drain_pending_snapshot_provider_sync_owned, PendingSyncDrain, PENDIN
 /// compiled in only under the default-off `semantic-observe` feature.
 pub(super) fn spawn_heartbeat(server: &VerterLanguageServer) {
     let client = server.client.clone();
+    let weak_server = Arc::downgrade(&server.core);
     #[cfg(feature = "semantic-observe")]
     let handler_activity = Arc::clone(&server.handler_activity);
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
         loop {
             interval.tick().await;
+            if tracing::enabled!(tracing::Level::DEBUG) {
+                if let Some(core) = weak_server.upgrade() {
+                    let server = VerterLanguageServer { core };
+                    let pending: Vec<_> = server
+                        .pending_snapshot_provider_sync
+                        .iter()
+                        .map(|entry| entry.key().clone())
+                        .collect();
+                    let scanner_finished = server
+                        .workspace_scanner
+                        .try_lock()
+                        .ok()
+                        .map(|scanner| scanner.as_ref().map(|scanner| scanner.is_finished()));
+                    tracing::debug!(
+                        init_generation = server
+                            .init_generation
+                            .load(std::sync::atomic::Ordering::Acquire),
+                        scanning = server.sync_coordinator.workspace_scan_in_progress(),
+                        ?scanner_finished,
+                        ?pending,
+                        "readiness heartbeat state"
+                    );
+                    for uri in server.documents.open_uris() {
+                        if let Ok(uri) = uri.parse::<Uri>() {
+                            let _ = server.documents.diagnostics_ready(&uri);
+                        }
+                    }
+                }
+            }
             let ts = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as u64)
@@ -588,6 +618,7 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         .await;
     // Level 1 is on the wire — release the scan-complete waiter's gate.
     let _ = ready_announced_tx.send(());
+    tracing::debug!(gen = my_gen, "ready latch released");
 
     // Notify client about Vite configs that need trust approval
     for info in &trust_required {
@@ -628,6 +659,7 @@ async fn await_scan_complete_after_ready(
     if scan_complete.await.is_err() {
         return false;
     }
+    tracing::debug!("scan latch released; waiting for ready latch");
     ready_announced.await.is_ok()
 }
 

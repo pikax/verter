@@ -50,6 +50,10 @@ pub struct WorkspaceScannerHandle {
 }
 
 impl WorkspaceScannerHandle {
+    pub(crate) fn is_finished(&self) -> bool {
+        self.task.is_finished()
+    }
+
     /// Signal that a file was opened in the editor, promoting it and its
     /// directory siblings to the front of the scan queue.
     pub fn signal_priority(&self, canonical_id: String) {

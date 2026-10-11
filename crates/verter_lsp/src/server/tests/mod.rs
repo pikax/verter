@@ -1423,6 +1423,9 @@ fn open_test_vue(server: &VerterLanguageServer, path: &str, source: &str) -> Uri
         version: 1,
         text: source.to_string(),
     });
+    // This fixture models an already-materialized carrier. Startup tests use
+    // the production handler or register a cold document explicitly.
+    let _ = server.documents.recompile_and_refresh_mapper(&uri);
     uri
 }
 
@@ -2120,6 +2123,9 @@ pub(super) async fn make_definition_test_server_with_config(
             version: 1,
             text: (*source).to_string(),
         });
+        if matches!(*language_id, "vue" | "svelte") {
+            let _ = server.documents.get_ide(&uri);
+        }
         if enable_semantic_analysis && matches!(*language_id, "vue" | "svelte") {
             scheduled_semantic += 1;
             server.documents.schedule_semantic_analysis(&uri);
@@ -3489,6 +3495,10 @@ async fn make_virtual_file_fixture(
         version: 1,
         text: "<template><div/></template>".to_string(),
     });
+    assert!(
+        server.documents.get_ide(&source_uri).is_some(),
+        "virtual fixture needs its source mapper"
+    );
     server.provider_sync_states.insert(
         "/workspace/src/App.vue".to_string(),
         ProviderSyncState {

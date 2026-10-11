@@ -681,9 +681,16 @@ where
             content,
             project_file_name,
         } => {
-            provider
+            tracing::debug!(companion_path, "carrier metadata dispatch started");
+            let result = provider
                 .register_carrier_metadata(source_path, companion_path, content, project_file_name)
-                .await
+                .await;
+            tracing::debug!(
+                companion_path,
+                success = result.is_ok(),
+                "carrier metadata dispatch finished"
+            );
+            result
         }
         DesiredMutation::ActivateCarrier {
             source_path,

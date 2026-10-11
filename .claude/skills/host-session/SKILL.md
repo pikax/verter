@@ -676,10 +676,29 @@ is recorded in the plugin's `observedCarrierImportKeys` BEFORE the resolution
 attempt, so a publication that makes it ready counts as a relevant ready-version
 change and triggers that configured project's resolution-cache clear
 (`clearSemanticCache`); a store-dir handoff (the cold-start window before the LSP
-reports the store) clears it too. On the LSP side, `did_open` of a plain script
-prewarms each imported carrier's API through
-`sync_imported_carrier_api_lightweight` → `publish_carrier_to_external_ts`, and
-every publish advertises the COMPLETE companion set.
+reports the store) clears it too. On the LSP side, `did_open` enqueues the
+per-document background dependency publisher before syncing the entry's own
+buffers. That owner delivers imported APIs through
+`sync_imported_carrier_api_lightweight` → `publish_carrier_to_external_ts`, the
+barrel closure and child contracts, then certifies a stable DependencyReady
+receipt. Every publish advertises the COMPLETE companion set. A slow imported
+child must not retain the entry's open handler or delay its diagnostics signal;
+diagnostics still remain incomplete until dependencies are delivered.
+
+`DocumentRegistry::did_open`, like `did_change`, commits source and registration
+without compiling the IDE surface on the shared document-commit lane. Replayed
+opens must not serialize cold compilation ahead of an entry request or the
+workspace scanner. An already-current cached IDE surface can supply the initial
+mapper; otherwise the existing scanner, debounced coordinator, per-document
+repair or `get_ide` demand path compiles and installs it under source-identity
+fences. Opening a cold carrier is not evidence that its provider surface is ready.
+
+Readiness tracing records scan/ready latch releases, the existing heartbeat's
+init generation, scanner task state, pending provider IDs and retry dispositions,
+dependency pass keys, native semantic progress, diagnostics receipt freshness, and carrier
+refresh requested/dispatched/applied generations and the host-turn fence. These
+debug records distinguish blocked publication from a stale or incomplete receipt
+before a client timeout shuts down the server.
 
 Alias/`baseUrl` specifiers take the same target through the failed-lookup route;
 `baseUrl` containment is boundary-anchored over the host's canonical path identity

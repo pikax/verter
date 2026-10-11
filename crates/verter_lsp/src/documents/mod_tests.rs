@@ -3,6 +3,40 @@
 
 use super::*;
 
+#[test]
+fn did_open_registers_source_without_compiling_the_ide_surface() {
+    let host = Arc::new(verter_session::VerterHost::new_standalone(
+        verter_session::HostConfig::default(),
+    ));
+    let registry = DocumentRegistry::new(host.clone());
+    let canonical = "/replay/src/App.vue";
+    let uri: Uri = format!("file://{canonical}").parse().unwrap();
+    let _ = registry.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".into(),
+        version: 1,
+        text:
+            "<script setup lang=\"ts\">const msg = 'hello'</script><template>{{ msg }}</template>"
+                .into(),
+    });
+    assert_eq!(registry.get(&uri).unwrap().version, 1);
+    assert!(registry.snapshot_identity(&uri).is_some());
+    assert!(
+        host.get_ide(canonical, &registry.tsx_profile.read())
+            .is_none(),
+        "replayed opens must not compile on the shared document-commit lane"
+    );
+    assert!(registry.get_projection(&uri).is_none());
+    assert!(
+        registry.get_ide(&uri).is_some(),
+        "IDE demand must still produce the surface"
+    );
+    assert!(
+        registry.get_projection(&uri).is_some(),
+        "demand must install the current mapper"
+    );
+}
+
 // @ai-generated
 #[test]
 fn progressive_span_rejects_a_byte_offset_inside_a_utf8_code_point() {
@@ -106,6 +140,10 @@ mod source_identity_fence {
             version: 1,
             text: REVISION_A.into(),
         });
+        assert!(
+            registry.get_ide(&uri).is_some(),
+            "precondition: materialize revision A"
+        );
         assert!(
             registry.get_projection(&uri).is_some(),
             "precondition: revision A compiles"
@@ -333,6 +371,10 @@ fn position_mapper_not_overwritten_when_present() {
         text: "<template><div>hello</div></template><script setup lang=\"ts\">\nconst x = 1;\n</script>".into(),
     });
 
+    assert!(
+        registry.get_ide(&uri).is_some(),
+        "precondition: materialize the mapper"
+    );
     assert!(registry.get_position_mapper(&uri).is_some());
     assert!(registry.get_ide(&uri).is_some());
     assert!(registry.get_position_mapper(&uri).is_some());

@@ -2996,11 +2996,20 @@ fn schedule_carrier_refresh(
                 CarrierRefreshPriority::Background
             };
             let active = active_sources.read().iter().cloned().collect();
+            tracing::debug!(
+                target,
+                ?priority,
+                requested = refresh.requested_generation.load(Ordering::Acquire),
+                dispatched = refresh.dispatched_generation.load(Ordering::Acquire),
+                applied = refresh.applied_generation.load(Ordering::Acquire),
+                "carrier refresh started"
+            );
             let mark_dispatched = || {
                 refresh
                     .dispatched_generation
                     .fetch_max(target, Ordering::AcqRel);
                 refresh.completion.notify_waiters();
+                tracing::debug!(target, "carrier refresh dispatched");
             };
             if let Err(error) = notify_carriers_changed_inner(
                 Arc::clone(&transport),
@@ -3013,6 +3022,7 @@ fn schedule_carrier_refresh(
             .await
             {
                 if error.message.contains("background transaction preempted") {
+                    tracing::debug!(target, "carrier refresh preempted before its fence");
                     // Every background refresh is idempotent and represents a
                     // still-unapplied requested generation. Ordinary hover or
                     // completion also preempts this lane, without advancing
@@ -3041,6 +3051,7 @@ fn schedule_carrier_refresh(
                 return;
             }
             refresh.applied_generation.store(target, Ordering::Release);
+            tracing::debug!(target, "carrier refresh applied after host-turn fence");
             if priority == CarrierRefreshPriority::Interactive {
                 let _ = refresh.urgent_generation.fetch_update(
                     Ordering::AcqRel,

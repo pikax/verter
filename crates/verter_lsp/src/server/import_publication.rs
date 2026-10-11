@@ -284,6 +284,7 @@ impl VerterLanguageServer {
         // (post-lock, post-freshness). Dropped at scope end — after the receipt
         // write below — so a woken joiner re-reads a settled memo.
         let _in_flight = self.import_sync.begin_in_flight(canonical_id);
+        tracing::debug!(canonical_id, ?key, "dependency publication started");
 
         let mut outcome = self
             .ensure_imported_carrier_apis_synced(uri)
@@ -318,6 +319,9 @@ impl VerterLanguageServer {
                 self.sync_coordinator.dependencies_settled();
             }
         }
+        tracing::debug!(canonical_id, complete = outcome.is_complete(),
+            ?key, current_key = ?self.import_sync_freshness_key(),
+            "dependency publication finished");
     }
 
     /// Capture-only dependency readiness for interactive requests: never waits — a

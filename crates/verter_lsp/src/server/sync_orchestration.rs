@@ -3177,7 +3177,7 @@ impl VerterLanguageServer {
     }
 
     /// Re-read a non-open .vue file from disk, upsert, compile, and sync it to the provider.
-    /// Lightweight imported-Vue sync for `did_open`.
+    /// Lightweight imported-Vue sync for background dependency publication.
     ///
     /// Tries to generate and sync the required Vue artifacts without disk I/O:
     /// if the host already has the file in memory, `get_public_api` avoids
