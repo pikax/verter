@@ -96,10 +96,9 @@ pub fn foreign_ide_context_from_captured(
         return None;
     }
     // An open foreign carrier is governed by its editor buffer and must still
-    // byte-match the captured source. A closed imported carrier has no editor
-    // buffer to validate; its captured provider bytes + source map are the
-    // coherent generation the provider answered against, so it remains
-    // mappable. Requiring an open document here would make cross-file
+    // byte-match the captured source. A closed imported carrier uses the
+    // captured source/map for geometry and validates those source bytes against
+    // the workspace through the foreground target owner below. Requiring an open document here would make cross-file
     // navigation start working only after the user manually opened the target.
     //
     // The open revision whose bytes matched joins the current navigation or
@@ -120,6 +119,11 @@ pub fn foreign_ide_context_from_captured(
     if let Some((uri, identity)) = open_target {
         crate::documents::ForegroundRequest::bracket_target(&uri, identity);
     }
+    crate::documents::ForegroundRequest::host_target_source(
+        documents,
+        &snapshot.source_canonical,
+        Arc::clone(&snapshot.carrier_source),
+    )?;
     crate::documents::ForegroundRequest::bracket_decoded_surface(snapshot);
     Some(context)
 }
@@ -303,6 +307,17 @@ pub fn classify_captured_api_surface(
                 Some(ctx) => {
                     if let Some((uri, identity)) = open_target {
                         crate::documents::ForegroundRequest::bracket_target(&uri, identity);
+                    }
+                    if let Some(documents) = documents {
+                        if crate::documents::ForegroundRequest::host_target_source(
+                            documents,
+                            &snapshot.source_canonical,
+                            Arc::clone(&snapshot.carrier_source),
+                        )
+                        .is_none()
+                        {
+                            return ApiSurfaceResolution::VirtualDrop;
+                        }
                     }
                     crate::documents::ForegroundRequest::bracket_decoded_surface(snapshot);
                     ApiSurfaceResolution::Vouched(ctx)

@@ -177,10 +177,8 @@ impl VerterLanguageServer {
             let Some(export_name) = export_name else {
                 continue;
             };
-            let Some((resolved_id, _, _)) = self
-                .documents
-                .host()
-                .get_export_span_follow_reexports(&candidate, export_name)
+            let Some((resolved_id, _, _, _)) =
+                self.native_export_span_and_source(&candidate, export_name)
             else {
                 continue;
             };
@@ -200,11 +198,10 @@ impl VerterLanguageServer {
     /// it returns describes ONE committed content of that child, and record
     /// that content hash as the request's dependency evidence.
     ///
-    /// The content hash is sampled on both sides of `read`; equal samples
-    /// prove no commit of other bytes landed between the child reads (an
-    /// eviction re-committing the same bytes is no movement), so analysis
-    /// spans are never interpreted through another content's source or
-    /// geometry. A cold child is registered by the read itself, so a moved
+    /// A monotonic source state is sampled on both sides of `read`, so even
+    /// a source that changes and changes back cannot mix analysis and source.
+    /// Final settlement uses content identity: an already coherent answer
+    /// remains applicable after eviction and identical reload. A cold child is registered by the read itself, so a moved
     /// content is read once more at the content it settled on. Content that
     /// moves across that read too is a concurrent edit: the read yields
     /// nothing, and the request is marked unsettled so it answers
@@ -215,16 +212,13 @@ impl VerterLanguageServer {
         child_canonical_id: &str,
         mut read: impl FnMut() -> Option<T>,
     ) -> Option<T> {
-        let revision = || {
-            self.documents
-                .host()
-                .registered_source_whole_hash(child_canonical_id)
-        };
+        let host = self.documents.host();
+        let revision = || host.scheduler().capture_source_root();
         for _ in 0..2 {
             let before = revision();
-            let value = read()?;
+            let value = read();
             #[cfg(test)]
-            {
+            if value.is_some() {
                 let hook = self.child_read_hook.lock().take();
                 if let Some(mut hook) = hook {
                     hook();
@@ -232,11 +226,17 @@ impl VerterLanguageServer {
                 }
             }
             let after = revision();
-            if before == after {
-                if let Some(at) = after {
+            if !before.is_exhausted()
+                && !after.is_exhausted()
+                && before.lookup(child_canonical_id) == after.lookup(child_canonical_id)
+            {
+                if let Some(at) = verter_session::CommittedSourceContent::at_source_root(
+                    &after,
+                    child_canonical_id,
+                ) {
                     crate::documents::ForegroundRequest::bracket_dependency(child_canonical_id, at);
                 }
-                return Some(value);
+                return value;
             }
         }
         crate::documents::ForegroundRequest::mark_dependency_unsettled();
@@ -246,6 +246,43 @@ impl VerterLanguageServer {
     #[cfg(test)]
     pub(super) fn set_child_read_hook_for_test(&self, hook: Option<super::ChildReadHook>) {
         *self.child_read_hook.lock() = hook;
+    }
+
+    /// Read one native export through the host's coherent traversal, keeping
+    /// every intermediate dependency until foreground settlement.
+    pub(super) fn native_export_span_and_source(
+        &self,
+        canonical_id: &str,
+        binding_name: &str,
+    ) -> Option<(String, u32, u32, std::sync::Arc<str>)> {
+        let _ = crate::documents::ForegroundRequest::target_source(
+            &self.documents,
+            canonical_id,
+            || self.documents.host().get_source(canonical_id),
+        );
+        self.read_child_at_one_revision(canonical_id, || {
+            let capture = match self
+                .documents
+                .host()
+                .capture_export_span(canonical_id, binding_name)
+            {
+                verter_session::NativeExportRead::Captured(capture) => capture,
+                verter_session::NativeExportRead::Unavailable => return None,
+                verter_session::NativeExportRead::ContentModified => {
+                    crate::documents::ForegroundRequest::mark_dependency_unsettled();
+                    return None;
+                }
+            };
+            for (id, content) in &capture.dependencies {
+                crate::documents::ForegroundRequest::bracket_source_state(id, *content);
+            }
+            let source = crate::documents::ForegroundRequest::host_target_source(
+                &self.documents,
+                &capture.canonical_id,
+                capture.source,
+            )?;
+            Some((capture.canonical_id, capture.start, capture.end, source))
+        })
     }
 
     fn resolved_component_document(
@@ -470,18 +507,8 @@ impl VerterLanguageServer {
         target_canonical_id: &str,
         binding_name: &str,
     ) -> Option<Location> {
-        let host = &self.documents.host();
-        let (resolved_id, start, end) = host
-            .get_export_span_follow_reexports(target_canonical_id, binding_name)
-            .or_else(|| {
-                let (s, e) = host.get_export_span(target_canonical_id, binding_name)?;
-                Some((target_canonical_id.to_string(), s, e))
-            })?;
-        let target_source = crate::documents::ForegroundRequest::host_target_source(
-            &self.documents,
-            &resolved_id,
-            host.get_source(&resolved_id)?,
-        )?;
+        let (resolved_id, start, end, target_source) =
+            self.native_export_span_and_source(target_canonical_id, binding_name)?;
         let target_li = LineIndex::new(&target_source, self.position_encoding.read().clone());
         let start_pos = target_li.offset_to_position(start)?;
         let end_pos = target_li.offset_to_position(end)?;
@@ -800,75 +827,73 @@ impl VerterLanguageServer {
         uri: &Uri,
         position: &Position,
     ) -> Option<GotoDefinitionResponse> {
-        let doc = self.documents.get(uri)?;
-        let analysis = self.documents.get_analysis(uri)?;
-        let offset = doc.line_index.position_to_offset(position)?;
+        self.read_child_at_one_revision(&uri_to_canonical_id(uri), || {
+            let doc = self.documents.get(uri)?;
+            let analysis = self.documents.get_analysis(uri)?;
+            let offset = doc.line_index.position_to_offset(position)?;
 
-        let encoding = self.position_encoding.read().clone();
-        let host = &self.documents.host();
-        let canonical_id = uri_to_canonical_id(uri);
+            let encoding = self.position_encoding.read().clone();
+            let host = &self.documents.host();
+            let canonical_id = uri_to_canonical_id(uri);
 
-        for sig in analysis.export_signatures.iter() {
-            // Only handle re-exports (has a source module)
-            if sig.reexport_source.is_none() {
-                continue;
+            for sig in analysis.export_signatures.iter() {
+                // Only handle re-exports (has a source module)
+                if sig.reexport_source.is_none() {
+                    continue;
+                }
+
+                // Check if cursor is on the exported name span
+                let on_exported = offset >= sig.span.start && offset < sig.span.end;
+
+                // Check if cursor is on the local name span (for aliased re-exports)
+                let on_local = sig
+                    .local_span
+                    .as_ref()
+                    .is_some_and(|ls| offset >= ls.start && offset < ls.end);
+
+                if !on_exported && !on_local {
+                    continue;
+                }
+
+                // Determine the binding name to follow in the target module
+                let binding_to_follow = if on_local {
+                    // Clicking on local side (e.g., `default` in `export { default as Popup }`)
+                    // Follow this local name in the target
+                    sig.reexport_local.as_deref().unwrap_or(sig.name.as_str())
+                } else {
+                    // Clicking on exported side (e.g., `Overlay` in `export { default as Overlay }`)
+                    // The name exported from this file; follow via get_export_span_follow_reexports
+                    sig.name.as_str()
+                };
+
+                // Follow the re-export chain to the terminal
+                let terminal = if on_local {
+                    // For local side, resolve the source module first, then follow
+                    let resolved =
+                        host.resolve_import(&canonical_id, sig.reexport_source.as_ref()?)?;
+                    let local_name = sig.reexport_local.as_deref().unwrap_or(sig.name.as_str());
+                    self.native_export_span_and_source(&resolved, local_name)
+                } else {
+                    self.native_export_span_and_source(&canonical_id, binding_to_follow)
+                };
+
+                if let Some((resolved_id, start, end, target_source)) = terminal {
+                    let target_li = LineIndex::new(&target_source, encoding);
+                    let start_pos = target_li.offset_to_position(start)?;
+                    let end_pos = target_li.offset_to_position(end)?;
+                    let target_uri = merge::file_path_to_uri(&resolved_id)?;
+                    return Some(GotoDefinitionResponse::Scalar(Location {
+                        uri: target_uri,
+                        range: Range {
+                            start: start_pos,
+                            end: end_pos,
+                        },
+                    }));
+                }
             }
 
-            // Check if cursor is on the exported name span
-            let on_exported = offset >= sig.span.start && offset < sig.span.end;
-
-            // Check if cursor is on the local name span (for aliased re-exports)
-            let on_local = sig
-                .local_span
-                .as_ref()
-                .is_some_and(|ls| offset >= ls.start && offset < ls.end);
-
-            if !on_exported && !on_local {
-                continue;
-            }
-
-            // Determine the binding name to follow in the target module
-            let binding_to_follow = if on_local {
-                // Clicking on local side (e.g., `default` in `export { default as Popup }`)
-                // Follow this local name in the target
-                sig.reexport_local.as_deref().unwrap_or(sig.name.as_str())
-            } else {
-                // Clicking on exported side (e.g., `Overlay` in `export { default as Overlay }`)
-                // The name exported from this file; follow via get_export_span_follow_reexports
-                sig.name.as_str()
-            };
-
-            // Follow the re-export chain to the terminal
-            let terminal = if on_local {
-                // For local side, resolve the source module first, then follow
-                let resolved = host.resolve_import(&canonical_id, sig.reexport_source.as_ref()?)?;
-                let local_name = sig.reexport_local.as_deref().unwrap_or(sig.name.as_str());
-                host.get_export_span_follow_reexports(&resolved, local_name)
-            } else {
-                host.get_export_span_follow_reexports(&canonical_id, binding_to_follow)
-            };
-
-            if let Some((resolved_id, start, end)) = terminal {
-                let target_source = crate::documents::ForegroundRequest::host_target_source(
-                    &self.documents,
-                    &resolved_id,
-                    host.get_source(&resolved_id)?,
-                )?;
-                let target_li = LineIndex::new(&target_source, encoding);
-                let start_pos = target_li.offset_to_position(start)?;
-                let end_pos = target_li.offset_to_position(end)?;
-                let target_uri = merge::file_path_to_uri(&resolved_id)?;
-                return Some(GotoDefinitionResponse::Scalar(Location {
-                    uri: target_uri,
-                    range: Range {
-                        start: start_pos,
-                        end: end_pos,
-                    },
-                }));
-            }
-        }
-
-        None
+            None
+        })
     }
 
     /// Canonicalize a raw type-provider path into the shared canonical-ID form
@@ -889,45 +914,42 @@ impl VerterLanguageServer {
         start: u32,
         end: u32,
     ) -> Option<Location> {
-        let canonical = Self::canonicalize_provider_path(path);
-        let host = &self.documents.host();
-        let analysis = host.get_analysis(&canonical)?;
-        let (sig, matched_local) = analysis.export_signatures.iter().find_map(|sig| {
-            sig.reexport_source.as_ref()?;
-            if sig.span.start <= start && end <= sig.span.end {
-                return Some((sig, false));
-            }
-            if let Some(local_span) = sig.local_span.as_ref() {
-                if local_span.start <= start && end <= local_span.end {
-                    return Some((sig, true));
+        self.read_child_at_one_revision(&Self::canonicalize_provider_path(path), || {
+            let canonical = Self::canonicalize_provider_path(path);
+            let host = &self.documents.host();
+            let analysis = host.get_analysis(&canonical)?;
+            let (sig, matched_local) = analysis.export_signatures.iter().find_map(|sig| {
+                sig.reexport_source.as_ref()?;
+                if sig.span.start <= start && end <= sig.span.end {
+                    return Some((sig, false));
                 }
-            }
-            None
-        })?;
+                if let Some(local_span) = sig.local_span.as_ref() {
+                    if local_span.start <= start && end <= local_span.end {
+                        return Some((sig, true));
+                    }
+                }
+                None
+            })?;
 
-        let (terminal_id, terminal_start, terminal_end) = if matched_local {
-            let target = host.resolve_import(&canonical, sig.reexport_source.as_ref()?)?;
-            let binding = sig.reexport_local.as_deref().unwrap_or(sig.name.as_str());
-            host.get_export_span_follow_reexports(&target, binding)?
-        } else {
-            host.get_export_span_follow_reexports(&canonical, &sig.name)?
-        };
+            let (terminal_id, terminal_start, terminal_end, source) = if matched_local {
+                let target = host.resolve_import(&canonical, sig.reexport_source.as_ref()?)?;
+                let binding = sig.reexport_local.as_deref().unwrap_or(sig.name.as_str());
+                self.native_export_span_and_source(&target, binding)?
+            } else {
+                self.native_export_span_and_source(&canonical, &sig.name)?
+            };
 
-        let source = crate::documents::ForegroundRequest::host_target_source(
-            &self.documents,
-            &terminal_id,
-            host.get_source(&terminal_id)?,
-        )?;
-        let line_index = LineIndex::new(&source, self.position_encoding.read().clone());
-        let start_pos = line_index.offset_to_position(terminal_start)?;
-        let end_pos = line_index.offset_to_position(terminal_end)?;
-        let uri = merge::file_path_to_uri(&terminal_id)?;
-        Some(Location {
-            uri,
-            range: Range {
-                start: start_pos,
-                end: end_pos,
-            },
+            let line_index = LineIndex::new(&source, self.position_encoding.read().clone());
+            let start_pos = line_index.offset_to_position(terminal_start)?;
+            let end_pos = line_index.offset_to_position(terminal_end)?;
+            let uri = merge::file_path_to_uri(&terminal_id)?;
+            Some(Location {
+                uri,
+                range: Range {
+                    start: start_pos,
+                    end: end_pos,
+                },
+            })
         })
     }
 
@@ -945,45 +967,52 @@ impl VerterLanguageServer {
         let host = &self.documents.host();
 
         let resolve_location = |loc: Location| -> Location {
-            let canonical = uri_to_canonical_id(&loc.uri);
-            // Check if this file has re-export signatures at the target position
-            if let Some(analysis) = host.get_analysis(&canonical) {
-                // Find which export signature the target position falls within
-                if let Some(source) = host.get_source(&canonical).and_then(|source| {
-                    crate::documents::ForegroundRequest::host_target_source(
-                        &self.documents,
-                        &canonical,
-                        source,
-                    )
-                }) {
-                    let target_li = LineIndex::new(&source, encoding.clone());
-                    if let Some(offset) = target_li.position_to_offset(&loc.range.start) {
-                        for sig in analysis.export_signatures.iter() {
-                            if sig.reexport_source.is_none() {
-                                continue;
-                            }
-                            let on_sig = offset >= sig.span.start && offset < sig.span.end;
-                            let on_local = sig
-                                .local_span
-                                .as_ref()
-                                .is_some_and(|ls| offset >= ls.start && offset < ls.end);
-                            if !on_sig && !on_local {
-                                continue;
-                            }
-                            // Follow to terminal
-                            if let Some(end_offset) = target_li.position_to_offset(&loc.range.end) {
-                                if let Some(resolved) = self.resolve_barrel_type_provider_location(
-                                    &canonical, offset, end_offset,
-                                ) {
-                                    return resolved;
+            self.read_child_at_one_revision(&uri_to_canonical_id(&loc.uri), || {
+                let canonical = uri_to_canonical_id(&loc.uri);
+                // Check if this file has re-export signatures at the target position
+                if let Some(analysis) = host.get_analysis(&canonical) {
+                    // Find which export signature the target position falls within
+                    if let Some(source) = host.get_source(&canonical).and_then(|source| {
+                        crate::documents::ForegroundRequest::host_target_source(
+                            &self.documents,
+                            &canonical,
+                            source,
+                        )
+                    }) {
+                        let target_li = LineIndex::new(&source, encoding.clone());
+                        if let Some(offset) = target_li.position_to_offset(&loc.range.start) {
+                            for sig in analysis.export_signatures.iter() {
+                                if sig.reexport_source.is_none() {
+                                    continue;
                                 }
+                                let on_sig = offset >= sig.span.start && offset < sig.span.end;
+                                let on_local = sig
+                                    .local_span
+                                    .as_ref()
+                                    .is_some_and(|ls| offset >= ls.start && offset < ls.end);
+                                if !on_sig && !on_local {
+                                    continue;
+                                }
+                                // Follow to terminal
+                                if let Some(end_offset) =
+                                    target_li.position_to_offset(&loc.range.end)
+                                {
+                                    if let Some(resolved) = self
+                                        .resolve_barrel_type_provider_location(
+                                            &canonical, offset, end_offset,
+                                        )
+                                    {
+                                        return Some(resolved);
+                                    }
+                                }
+                                break;
                             }
-                            break;
                         }
                     }
                 }
-            }
-            loc
+                Some(loc.clone())
+            })
+            .unwrap_or(loc)
         };
 
         Some(match response {
@@ -1177,7 +1206,7 @@ impl VerterLanguageServer {
             component_name,
         )?;
 
-        let (analysis, child_structure) =
+        let (analysis, child_structure, inherited_attrs) =
             self.read_child_at_one_revision(&child_canonical_id, || {
                 let analysis = self
                     .documents
@@ -1188,7 +1217,11 @@ impl VerterLanguageServer {
                     .documents
                     .host()
                     .registered_file_structure_snapshot(&child_canonical_id)?;
-                Some((analysis, structure))
+                let inherited_attrs = super::server_utils::resolved_fallthrough_attr_names(
+                    &self.documents.host(),
+                    &child_canonical_id,
+                );
+                Some((analysis, structure, inherited_attrs))
             })?;
         let child_source = crate::documents::ForegroundRequest::host_target_source(
             &self.documents,
@@ -1198,11 +1231,6 @@ impl VerterLanguageServer {
         let child_uri = crate::uri::path_to_file_uri(&child_canonical_id)?;
         let blocks = project_carrier_blocks(&child_structure);
         let line_index = LineIndex::new(&child_source, self.documents.encoding());
-
-        let inherited_attrs = super::server_utils::resolved_fallthrough_attr_names(
-            &self.documents.host(),
-            &child_canonical_id,
-        );
 
         Some(crate::features::cross_file::ChildComponentContext {
             canonical_id: child_canonical_id,

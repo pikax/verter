@@ -33,6 +33,7 @@ use crate::features::action_utils::{
 use crate::provider_surface_store::ProviderSurfaceSnapshot;
 use verter_session::framework::api_projector::ComponentApiProjectionWitness;
 use verter_session::CommittedSourceContent;
+use verter_session_query::facts::fact_cache::FactVersionRef;
 
 /// Every foreground LSP route whose answer is settled against a request
 /// snapshot.
@@ -164,13 +165,17 @@ pub(crate) struct ForegroundRequest {
     /// both settle, and a surface that moves after its decode supersedes the
     /// answer built from it.
     decoded_surfaces: parking_lot::Mutex<Vec<Arc<ProviderSurfaceSnapshot>>>,
+    queries: parking_lot::Mutex<Vec<verter_type_runtime::provider_query::ProviderQuery>>,
+    closed_targets: parking_lot::Mutex<Vec<(String, Arc<str>)>>,
+    absent_targets: parking_lot::Mutex<Vec<String>>,
     /// The committed content hash of every imported source a native
     /// contribution of this request was read from — the explicit dependency
     /// evidence that ties native child-contract enrichment to one basis with the
     /// provider answer it is delivered beside. Two reads of one source with
     /// different content cannot both settle; an eviction and identical reload
     /// of the source, which re-commits the same bytes, keeps the evidence.
-    dependencies: parking_lot::Mutex<Vec<(Box<str>, CommittedSourceContent)>>,
+    dependencies: parking_lot::Mutex<Vec<(Box<str>, Option<CommittedSourceContent>)>>,
+    native_facts: parking_lot::Mutex<Vec<FactVersionRef>>,
     /// The producer witness of every published child contract a native
     /// contribution of this request was read from. The witness carries the
     /// contract's complete read sets, so a change to anything the contract
@@ -208,7 +213,11 @@ impl ForegroundRequest {
             document: documents.snapshot_identity(uri),
             authority: documents.host().capture_authority_view(),
             decoded_surfaces: parking_lot::Mutex::new(Vec::new()),
+            queries: parking_lot::Mutex::new(Vec::new()),
+            closed_targets: parking_lot::Mutex::new(Vec::new()),
+            absent_targets: parking_lot::Mutex::new(Vec::new()),
             dependencies: parking_lot::Mutex::new(Vec::new()),
+            native_facts: parking_lot::Mutex::new(Vec::new()),
             contract_publications: parking_lot::Mutex::new(Vec::new()),
             targets: parking_lot::Mutex::new(Vec::new()),
             target_incoherent: AtomicBool::new(false),
@@ -243,10 +252,24 @@ impl ForegroundRequest {
         });
     }
 
+    /// Keep the runtime's evaluated-query evidence through final settlement.
+    pub(crate) fn bracket_query(query: &verter_type_runtime::provider_query::ProviderQuery) {
+        let _ = ACTIVE_REQUEST.try_with(|request| request.queries.lock().push(query.clone()));
+    }
+
     /// Record that the current task's foreground request read a native
     /// contribution from the imported source `canonical_id` committed with
     /// content `content`. A no-op outside a foreground request.
     pub(crate) fn bracket_dependency(canonical_id: &str, content: CommittedSourceContent) {
+        Self::bracket_source_state(canonical_id, Some(content));
+    }
+
+    /// Record either captured content or an unavailable dependency observed
+    /// while selecting an export from multiple re-export branches.
+    pub(crate) fn bracket_source_state(
+        canonical_id: &str,
+        content: Option<CommittedSourceContent>,
+    ) {
         let _ = ACTIVE_REQUEST.try_with(|request| {
             let mut dependencies = request.dependencies.lock();
             if !dependencies
@@ -256,6 +279,13 @@ impl ForegroundRequest {
                 dependencies.push((Box::from(canonical_id), content));
             }
         });
+    }
+
+    /// Retain the producer's native semantic read set, including inherited
+    /// component dependencies not read as source directly by this request.
+    pub(crate) fn bracket_native_facts(facts: &[FactVersionRef]) {
+        let _ =
+            ACTIVE_REQUEST.try_with(|request| request.native_facts.lock().extend_from_slice(facts));
     }
 
     /// Record that the current task's foreground request read an imported
@@ -293,10 +323,23 @@ impl ForegroundRequest {
         path: &str,
         read: impl FnOnce() -> Option<Arc<str>>,
     ) -> Option<Arc<str>> {
-        match Self::capture_target(documents, path) {
-            Some(Some(identity)) => Some(Arc::clone(&identity.source)),
-            Some(None) | None => read(),
+        let retained = ACTIVE_REQUEST
+            .try_with(|request| {
+                request
+                    .queries
+                    .lock()
+                    .iter()
+                    .find_map(|query| query.decoded_target(path))
+            })
+            .ok()
+            .flatten();
+        if retained.is_none() {
+            if let Some(Some(identity)) = Self::capture_target(documents, path) {
+                return Some(identity.source);
+            }
         }
+        let source = retained.or_else(read)?;
+        Self::host_target_source(documents, path, source)
     }
 
     /// [`Self::target_source`] for positions the host's semantic tables
@@ -314,7 +357,29 @@ impl ForegroundRequest {
                 Self::mark_target_incoherent();
                 None
             }
-            Some(_) | None => Some(host_source),
+            Some(Some(identity)) => Some(identity.source),
+            Some(None) => {
+                let _ = ACTIVE_REQUEST.try_with(|request| {
+                    let mut targets = request.closed_targets.lock();
+                    if let Some((_, known)) = targets
+                        .iter()
+                        .find(|(known, _)| same_document_path(known, path))
+                    {
+                        if **known != *host_source {
+                            request.target_incoherent.store(true, Ordering::Release);
+                        }
+                    } else {
+                        targets.push((path.to_string(), Arc::clone(&host_source)));
+                    }
+                    if documents.host().workspace_read().read_file(path).as_deref()
+                        != Some(&*host_source)
+                    {
+                        request.target_incoherent.store(true, Ordering::Release);
+                    }
+                });
+                Some(host_source)
+            }
+            None => Some(host_source),
         }
     }
 
@@ -396,8 +461,26 @@ impl ForegroundRequest {
         documents: &DocumentRegistry,
         response: &mut T,
     ) -> Result<(), EditRefusal> {
-        let mut revision_of = |target: &Uri| self.edit_target_revision(documents, target);
         response.bind_each_edit(&mut |edit| {
+            if let Some(tower_lsp_server::ls_types::DocumentChanges::Operations(operations)) =
+                &edit.document_changes
+            {
+                for operation in operations {
+                    if let tower_lsp_server::ls_types::DocumentChangeOperation::Op(
+                        tower_lsp_server::ls_types::ResourceOp::Create(create),
+                    ) = operation
+                    {
+                        let path = uri_to_canonical_id(&create.uri);
+                        if documents.open_uri_for_fs_path(&path).is_some()
+                            || documents.host().workspace_read().read_file(&path).is_some()
+                        {
+                            return Err(EditRefusal::UnboundTarget(create.uri.clone()));
+                        }
+                        self.absent_targets.lock().push(path);
+                    }
+                }
+            }
+            let mut revision_of = |target: &Uri| self.edit_target_revision(documents, target);
             bind_workspace_edit(edit, self.edit_support, &mut revision_of)
         })
     }
@@ -424,8 +507,20 @@ impl ForegroundRequest {
             || documents.open_uri_for_fs_path(&target_path).is_some()
         {
             EditTargetRevision::Uncaptured
-        } else {
+        } else if self
+            .closed_targets
+            .lock()
+            .iter()
+            .any(|(path, _)| same_document_path(path, &target_path))
+            || self
+                .absent_targets
+                .lock()
+                .iter()
+                .any(|path| same_document_path(path, &target_path))
+        {
             EditTargetRevision::Closed
+        } else {
+            EditTargetRevision::Uncaptured
         }
     }
 
@@ -475,7 +570,13 @@ impl ForegroundRequest {
             .lock()
             .iter()
             .all(|surface| surfaces.captured_surface_is_current(surface));
-        if !surfaces_are_current {
+        if !surfaces_are_current
+            || !self
+                .queries
+                .lock()
+                .iter()
+                .all(|query| query.result_is_current())
+        {
             return Some(Superseded::ProviderSurface);
         }
         let targets_are_current = !self.target_incoherent.load(Ordering::Acquire)
@@ -484,6 +585,16 @@ impl ForegroundRequest {
                 .lock()
                 .iter()
                 .all(|(uri, identity)| documents.snapshot_identity_is_current(uri, identity));
+        let targets_are_current = targets_are_current
+            && self.closed_targets.lock().iter().all(|(path, source)| {
+                documents.open_uri_for_fs_path(path).is_none()
+                    && documents.host().workspace_read().read_file(path).as_deref()
+                        == Some(&**source)
+            })
+            && self.absent_targets.lock().iter().all(|path| {
+                documents.open_uri_for_fs_path(path).is_none()
+                    && documents.host().workspace_read().read_file(path).is_none()
+            });
         if !targets_are_current {
             return Some(Superseded::Target);
         }
@@ -494,7 +605,7 @@ impl ForegroundRequest {
                 .lock()
                 .iter()
                 .all(|(canonical_id, revision)| {
-                    host.registered_source_whole_hash(canonical_id) == Some(*revision)
+                    host.registered_source_whole_hash(canonical_id) == *revision
                 });
         let dependencies_are_current = dependencies_are_current
             && self
@@ -502,6 +613,8 @@ impl ForegroundRequest {
                 .lock()
                 .iter()
                 .all(|witness| witness.is_current(&host));
+        let dependencies_are_current =
+            dependencies_are_current && host.native_facts_are_current(&self.native_facts.lock());
         (!dependencies_are_current).then_some(Superseded::Dependency)
     }
 }

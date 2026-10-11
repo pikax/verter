@@ -1129,6 +1129,7 @@ pub(crate) fn resolved_fallthrough_attr_names(
     let Some(resolution) = host.resolve_fallthrough_surface(canonical_id) else {
         return std::collections::HashSet::new();
     };
+    crate::documents::ForegroundRequest::bracket_native_facts(&resolution.fact_versions);
     resolution
         .accepted_props
         .iter()

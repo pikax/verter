@@ -1923,6 +1923,25 @@ pub struct UpsertRequest {
     pub aliases: Vec<String>,
 }
 
+/// An export location and the immutable source its span indexes, captured
+/// together with every dependency used by re-export traversal.
+#[derive(Debug)]
+pub struct CapturedExportSpan {
+    pub canonical_id: String,
+    pub start: u32,
+    pub end: u32,
+    pub source: Arc<str>,
+    pub dependencies: Vec<(String, Option<crate::CommittedSourceContent>)>,
+}
+
+/// Whether native export traversal could assemble a coherent location.
+#[derive(Debug)]
+pub enum NativeExportRead {
+    Captured(CapturedExportSpan),
+    Unavailable,
+    ContentModified,
+}
+
 /// Descriptive content class. This is never block identity: callers correlate
 /// and apply content only through the sealed token and its captured stamps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

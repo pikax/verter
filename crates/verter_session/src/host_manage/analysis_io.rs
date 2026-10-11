@@ -2823,8 +2823,70 @@ impl VerterHost {
         if self.is_canonical_evicted(&canonical) {
             return None;
         }
-        let resolver = HostExportGraphResolver { host: self };
+        let resolver = HostExportGraphResolver {
+            host: self,
+            observed: None,
+        };
         resolver_get_export_span_follow_reexports_from_graph(&resolver, &canonical, binding_name)
+    }
+
+    /// Capture export spans, their source, and all traversed dependencies as
+    /// one coherent native read. Source transitions during assembly retry;
+    /// completed captures carry content evidence rather than historical roots.
+    pub fn capture_export_span(
+        &self,
+        canonical_or_alias: &str,
+        binding_name: &str,
+    ) -> crate::NativeExportRead {
+        let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
+        for _ in 0..2 {
+            let before = self.scheduler.capture_source_root();
+            let observed =
+                std::cell::RefCell::new(std::collections::HashSet::from([canonical.clone()]));
+            let resolver = HostExportGraphResolver {
+                host: self,
+                observed: Some(&observed),
+            };
+            let location = resolver_get_export_span_follow_reexports_from_graph(
+                &resolver,
+                &canonical,
+                binding_name,
+            )
+            .or_else(|| {
+                self.get_export_span(&canonical, binding_name)
+                    .map(|(start, end)| (canonical.clone(), start, end))
+            });
+            let value = location.and_then(|(id, start, end)| {
+                observed.borrow_mut().insert(id.clone());
+                Some((self.get_source(&id)?, id, start, end))
+            });
+            let after = self.scheduler.capture_source_root();
+            let observed = observed.into_inner();
+            if before.is_exhausted()
+                || after.is_exhausted()
+                || observed
+                    .iter()
+                    .any(|id| before.lookup(id) != after.lookup(id))
+            {
+                continue;
+            }
+            let Some((source, canonical_id, start, end)) = value else {
+                return crate::NativeExportRead::Unavailable;
+            };
+            let mut dependencies = Vec::with_capacity(observed.len());
+            for id in observed {
+                let content = crate::CommittedSourceContent::at_source_root(&after, &id);
+                dependencies.push((id, content));
+            }
+            return crate::NativeExportRead::Captured(crate::CapturedExportSpan {
+                canonical_id,
+                start,
+                end,
+                source,
+                dependencies,
+            });
+        }
+        crate::NativeExportRead::ContentModified
     }
 
     /// Resolve an import specifier to its canonical ID using the host's file map,
@@ -2858,7 +2920,10 @@ impl VerterHost {
         if self.is_canonical_evicted(&canonical) {
             return None;
         }
-        let resolver = HostExportGraphResolver { host: self };
+        let resolver = HostExportGraphResolver {
+            host: self,
+            observed: None,
+        };
         let is_declaration_file = canonical.ends_with(".d.ts")
             || canonical.ends_with(".d.mts")
             || canonical.ends_with(".d.cts");
@@ -2902,7 +2967,10 @@ impl VerterHost {
         if self.is_canonical_evicted(&canonical) {
             return Vec::new();
         }
-        let resolver = HostExportGraphResolver { host: self };
+        let resolver = HostExportGraphResolver {
+            host: self,
+            observed: None,
+        };
         let resolved = resolver_resolve_exports_from_graph_best_effort(&resolver, &canonical);
         resolved
             .into_iter()
