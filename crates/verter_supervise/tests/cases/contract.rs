@@ -8,6 +8,27 @@ use super::support::{
 const LIMITS: &[&str] = &["--mem-mb", "512", "--timeout-ms", "30000"];
 
 #[test]
+#[cfg(target_os = "macos")]
+fn cpu_bound_child_accounting_matches_its_own_resource_usage() {
+    let run = supervise("cpu-time", LIMITS, &["cpu", "1000"]);
+    assert_eq!(run.code, Some(0), "stderr: {}", run.stderr);
+    assert_eq!(run.result["errors"], serde_json::json!([]));
+    let child: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(run.dir.join("result.stdout.log")).unwrap())
+            .unwrap();
+    let reported = run.result["cpuUserMs"].as_f64().expect("user CPU time");
+    let own = child["userMs"].as_f64().unwrap();
+    assert!(own > 0.0);
+    assert!(
+        (reported - own).abs() / own <= 0.10,
+        "supervisor {reported} ms, child {own} ms"
+    );
+    assert!(run.result["cpuKernelMs"]
+        .as_f64()
+        .is_some_and(|ms| ms >= child["kernelMs"].as_f64().unwrap()));
+}
+
+#[test]
 #[cfg_attr(
     target_os = "linux",
     ignore = "needs a delegated cgroup v2 subtree (systemd-run --user --scope -p Delegate=yes)"

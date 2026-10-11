@@ -32,6 +32,8 @@ pub mod cli;
 pub mod disk;
 pub mod report;
 
+#[cfg(any(target_os = "macos", test))]
+mod cpu_accounting;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]

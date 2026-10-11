@@ -45,6 +45,7 @@ import {
   requiredStateComparison,
   sessionArmsOf,
   sessionInputs,
+  sessionAnswers,
 } from "./session-analyze.mjs";
 import {
   allSessions,
@@ -57,6 +58,7 @@ import {
 import { summarize, timerResolution } from "./summary.mjs";
 import { resolveSupervisor } from "./supervisor.mjs";
 import { rawFileProblems, validateRun } from "./validate.mjs";
+import { readSessionRecord } from "./session-record.mjs";
 
 // ---------------------------------------------------------------- canonical form
 
@@ -2110,7 +2112,12 @@ test("the observe arm must retain the production build's REQUIRED state", () => 
 test("a session killed after writing its complete record keeps its measurement; a kill inside a step is the engine's", () => {
   const killed = sessionRun();
   const inv = killed.sessionInvocations.find((i) => i.arm === "verter" && !i.warmup);
-  inv.supervisor = supervisorRecord({ killedBy: "memory", exitCode: null });
+  inv.supervisor = supervisorRecord({
+    killedBy: "memory",
+    exitCode: null,
+    backend: "windows-job-object",
+    killTriggerBytes: MEM_MB * 1024 * 1024,
+  });
   inv.supervisorExit = 137;
   inv.phase = "stats";
   resummarize(killed);
@@ -2157,6 +2164,106 @@ test("a component's metadata is matched only on equal prop names, required flags
     classifyMeta({ kind: "meta", outcome: { kind: "fault", detail: "x" } }, expect).class,
     "error",
   );
+});
+
+test("a killed session keeps completed answers and names only the running demand", () => {
+  const run = sessionRun();
+  const inv = run.sessionInvocations.find((i) => i.arm === "verter");
+  const session = allSessions().find((s) => s.id === inv.sessionId);
+  inv.supervisor = supervisorRecord({
+    killedBy: "memory",
+    exitCode: null,
+    backend: "windows-job-object",
+    killTriggerBytes: MEM_MB * 1024 * 1024,
+  });
+  inv.phase = "step-2";
+  inv.session.stage = "partial";
+  inv.session.steps = inv.session.steps.slice(0, 2);
+  const entries = sessionAnswers(inv, session, { budgetBytes: MEM_MB * 1024 * 1024 });
+  assert.ok(entries.some((e) => e.step < 2 && e.answer?.observed));
+  assert.ok(
+    entries.filter((e) => e.step < 2).every((e) => (e.answer?.end ?? e.end).kind === "exited"),
+  );
+  assert.ok(
+    entries.filter((e) => e.step === 2).every((e) => (e.answer?.end ?? e.end).kind === "killed"),
+  );
+  assert.ok(entries.every((e) => e.step <= 2));
+});
+
+test("session journals recover a flushed prefix and refuse corruption or reordered steps", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "session-journal-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const path = join(dir, "session.json");
+  const header = { schema: 1, tool: "verter", kind: "session", stage: "partial" };
+  const step = {
+    kind: "demand",
+    wallMicros: 17,
+    requests: [
+      {
+        file: "input.ts",
+        alias: "Answer",
+        outcome: { kind: "value" },
+        observation: { text: "42", error: null },
+      },
+    ],
+  };
+  const prefix =
+    [header, { index: 0, step }, { index: 1, step }].map(JSON.stringify).join("\n") + "\n";
+  writeFileSync(`${path}.steps.jsonl`, prefix + '{"index":2,"step":');
+  assert.deepEqual(readSessionRecord(path), { ...header, steps: [step, step] });
+  writeFileSync(`${path}.steps.jsonl`, prefix + JSON.stringify({ index: 3, step }) + "\n");
+  assert.throws(() => readSessionRecord(path), /invalid session journal step 2/);
+  const complete = { ...header, stage: "complete", steps: [step, step, step] };
+  writeFileSync(path, JSON.stringify(complete));
+  assert.deepEqual(readSessionRecord(path), complete);
+  writeFileSync(path, "{");
+  assert.throws(() => readSessionRecord(path));
+});
+
+test("partial session validation checks completed answers, provenance and phase bounds", () => {
+  const run = sessionRun();
+  const inv = run.sessionInvocations.find((i) => i.arm === "verter" && !i.warmup);
+  inv.supervisor = supervisorRecord({
+    killedBy: "memory",
+    exitCode: null,
+    backend: "windows-job-object",
+    killTriggerBytes: MEM_MB * 1024 * 1024,
+  });
+  inv.supervisorExit = 137;
+  inv.phase = "step-2";
+  inv.session.stage = "partial";
+  inv.session.steps = inv.session.steps.slice(0, 2);
+  delete inv.session.afterSteps;
+  delete inv.session.retention;
+  resummarize(run);
+  assert.deepEqual(validate(run).failures, []);
+  const arm = run.summary.sessions.cells[0].arms.verter;
+  assert.equal(arm.demands.find((d) => d.step === 0).class, "matched");
+  assert.equal(arm.demands.find((d) => d.step === 2).class, "killed");
+  assert.equal(arm.completedMeasured, 1);
+  inv.session.steps[0].requests[0].alias = "Other";
+  failsWith(resummarize(run), /answered other demands/);
+});
+
+test("a tsc session retains earlier answers and names its interrupted edit", () => {
+  const run = sessionRun();
+  const inv = run.sessionInvocations.find((i) => i.arm === "tsc-api" && !i.warmup);
+  inv.supervisor = supervisorRecord({
+    killedBy: "memory",
+    exitCode: null,
+    backend: "windows-job-object",
+    killTriggerBytes: MEM_MB * 1024 * 1024,
+  });
+  inv.supervisorExit = 137;
+  inv.phase = "step-1";
+  inv.session.stage = "partial";
+  inv.session.steps = inv.session.steps.slice(0, 1);
+  delete inv.session.serverAfterSteps;
+  resummarize(run);
+  assert.deepEqual(validate(run).failures, []);
+  const arm = run.summary.sessions.cells[0].arms["tsc-api"];
+  assert.equal(arm.demands.find((d) => d.step === 0).class, "reference");
+  assert.equal(arm.demands.find((d) => d.step === 1).class, "unverified");
 });
 
 test("the observe arm's build carries semantic-observe, the production probe never does, and both retain one REQUIRED state", () => {

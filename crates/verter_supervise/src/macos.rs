@@ -43,6 +43,7 @@ use std::ffi::{c_char, c_int, CString};
 use std::os::fd::AsRawFd;
 use std::time::{Duration, Instant};
 
+use crate::cpu_accounting::{CpuReading, TreeCpu};
 use crate::disk;
 
 use crate::report::{Containment, KilledBy, Report, Sample, SampleSeries};
@@ -190,6 +191,7 @@ pub(crate) fn supervise(launch: Launch<'_>, report: &mut Report) {
     let mut last_observation = started;
     let mut sweep_now = true;
     let mut tree_ever: BTreeSet<libc::pid_t> = known.clone();
+    let mut cpu = TreeCpu::default();
 
     let exited: Option<Exited> = loop {
         let mut kill = |why: KilledBy, link: &mut WatchdogLink, cause: &mut Option<KilledBy>| {
@@ -239,6 +241,7 @@ pub(crate) fn supervise(launch: Launch<'_>, report: &mut Report) {
                 && report.sampling.count == MIDRUN_FAULT_OBSERVATION;
             match sweep(pgid, &mut known, injected) {
                 Ok(outcome) => {
+                    cpu.observe(outcome.cpu);
                     let done = Instant::now();
                     for gone in &outcome.gone {
                         known.remove(gone);
@@ -326,6 +329,7 @@ pub(crate) fn supervise(launch: Launch<'_>, report: &mut Report) {
     };
 
     if let Some(exited) = &exited {
+        cpu.observe(exited.cpu.clone());
         report.wall_ms = Some(ns_to_ms(exited.exit_ns.saturating_sub(start_ns)));
         report.termination_latency_ms =
             kill_ns.map(|at| ns_to_ms(exited.exit_ns.saturating_sub(at)));
@@ -340,6 +344,14 @@ pub(crate) fn supervise(launch: Launch<'_>, report: &mut Report) {
         }
     }
     report.killed_by = cause;
+    if exited
+        .as_ref()
+        .is_some_and(|exited| exited.cpu.iter().any(|r| r.pid == pid))
+    {
+        let (user, kernel) = cpu.totals();
+        report.cpu_user_ms = Some(ns_to_ms(user));
+        report.cpu_kernel_ms = Some(ns_to_ms(kernel));
+    }
     report.peak_bytes = Some(peak);
     report.process_count = Some(tree_ever.len() as u64);
     report.samples = series.into_vec();
@@ -359,6 +371,19 @@ pub(crate) struct Workload {
 }
 
 impl Workload {
+    /// Capture the exited leader before reaping it, plus surviving members.
+    /// proc_pid_rusage accepts zombies, so even a short-lived root has its
+    /// exact final CPU counters. Descendants retain the sampled tail bound.
+    pub(crate) fn cpu_readings(&self) -> Vec<CpuReading> {
+        let mut members = group_members(self.pid);
+        members.push(self.pid);
+        members.sort_unstable();
+        members.dedup();
+        members
+            .into_iter()
+            .filter_map(|pid| usage(pid).ok().map(|r| cpu_reading(pid, &r)))
+            .collect()
+    }
     pub(crate) fn spawn(request: &SpawnRequest) -> Result<Workload, String> {
         Ok(Workload {
             pid: spawn_suspended(request)?,
@@ -504,6 +529,7 @@ fn sample_age_budget(interval: Duration) -> Duration {
 /// The result of one sweep over the tree.
 struct SweepOutcome {
     footprint: u64,
+    cpu: Vec<CpuReading>,
     discovered: Vec<libc::pid_t>,
     /// Tracked processes confirmed gone; forgotten so a reused pid is never
     /// mistaken for a member.
@@ -536,9 +562,16 @@ fn sweep(
         frontier.extend(children(member));
     }
     let mut total = 0u64;
+    let mut cpu = Vec::new();
     let mut escaped = None;
     let mut gone = Vec::new();
     for &member in &seen {
+        // Read CPU before the live-process check: exited but unreaped
+        // members still carry their final counters.
+        let sampled_usage = usage(member);
+        if let Ok(r) = &sampled_usage {
+            cpu.push(cpu_reading(member, r));
+        }
         let info = match bsd_info(member) {
             Ok(info) => info,
             Err(_) if !exists(member) => {
@@ -556,8 +589,8 @@ fn sweep(
         if info.pbi_pgid as libc::pid_t != pgid {
             escaped = Some(member);
         }
-        match footprint(member) {
-            Ok(bytes) => total += bytes,
+        match sampled_usage {
+            Ok(info) => total += info.ri_phys_footprint,
             Err(_) if !alive_not_zombie(member) => {}
             Err(error) => {
                 return Err(format!(
@@ -568,6 +601,7 @@ fn sweep(
     }
     Ok(SweepOutcome {
         footprint: total,
+        cpu,
         discovered,
         gone,
         escaped,
@@ -575,6 +609,22 @@ fn sweep(
 }
 
 fn footprint(pid: libc::pid_t) -> Result<u64, std::io::Error> {
+    usage(pid).map(|info| info.ri_phys_footprint)
+}
+
+fn cpu_reading(pid: libc::pid_t, info: &libc::rusage_info_v4) -> CpuReading {
+    CpuReading {
+        pid,
+        parent: bsd_info(pid).map_or(-1, |bsd| bsd.pbi_ppid as i32),
+        started: info.ri_proc_start_abstime,
+        user: info.ri_user_time,
+        kernel: info.ri_system_time,
+        child_user: info.ri_child_user_time,
+        child_kernel: info.ri_child_system_time,
+    }
+}
+
+fn usage(pid: libc::pid_t) -> Result<libc::rusage_info_v4, std::io::Error> {
     // SAFETY: the out-parameter is the V4 structure the flavor names.
     unsafe {
         let mut info: libc::rusage_info_v4 = std::mem::zeroed();
@@ -586,7 +636,7 @@ fn footprint(pid: libc::pid_t) -> Result<u64, std::io::Error> {
         {
             return Err(std::io::Error::last_os_error());
         }
-        Ok(info.ri_phys_footprint)
+        Ok(info)
     }
 }
 
