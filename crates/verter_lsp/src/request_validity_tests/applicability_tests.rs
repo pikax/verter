@@ -90,8 +90,9 @@ impl Scenario {
         }
     }
 
-    fn util_location(&self) -> wire::TypeLocation {
-        let (start, end) = Self::util_span("msg");
+    fn util_location(&self, source: &str) -> wire::TypeLocation {
+        let start = source.find("msg").expect("msg in provider source") as u32;
+        let end = start + "msg".len() as u32;
         wire::TypeLocation {
             path: self.util_canonical.clone(),
             start,
@@ -121,6 +122,10 @@ impl Scenario {
     /// Arm `route`'s provider answer and return its request position (and
     /// range, for a code action).
     async fn arm(&self, route: CrossFileRoute) -> Range {
+        self.arm_from_source(route, UTIL).await
+    }
+
+    async fn arm_from_source(&self, route: CrossFileRoute, source: &str) -> Range {
         let fixture = &self.fixture;
         let ctx = fixture.context().await;
         let path = ctx.tsx_path.clone();
@@ -143,7 +148,7 @@ impl Scenario {
                         }
                     })
                     .collect::<Vec<_>>();
-                let util = self.util_location();
+                let util = self.util_location(source);
                 locations.push(wire::RenameLocation {
                     path: util.path,
                     start: util.start,
@@ -157,7 +162,8 @@ impl Scenario {
             CrossFileRoute::CodeAction => {
                 let range = fixture.range("const msg");
                 let (literal_start, literal_end) = fixture.tsx_span(&ctx, "'hello'");
-                let (util_start, util_end) = Self::util_span("'util'");
+                let util_start = source.find("'util'").expect("literal in provider source") as u32;
+                let util_end = util_start + "'util'".len() as u32;
                 fixture.provider.set_code_actions(
                     &path,
                     at(range.start),
@@ -187,9 +193,11 @@ impl Scenario {
                 // `label` is an instance member no script binding declares, so
                 // only the provider resolves it.
                 let label = fixture.position("{{ label", 3);
-                fixture
-                    .provider
-                    .set_definitions(&path, at(label), vec![self.util_location()]);
+                fixture.provider.set_definitions(
+                    &path,
+                    at(label),
+                    vec![self.util_location(source)],
+                );
                 Range {
                     start: label,
                     end: label,
@@ -199,7 +207,7 @@ impl Scenario {
                 fixture.provider.set_references(
                     &path,
                     at(template_msg),
-                    vec![self.util_location()],
+                    vec![self.util_location(source)],
                 );
                 cursor
             }
@@ -750,6 +758,194 @@ async fn navigation_decodes_a_foreign_location_through_its_open_revision() {
                     && location.range == Scenario::util_range("msg")),
             "{route:?}: the location lands on the other document's authored token: {locations:?}"
         );
+    }
+}
+
+/// Equal LF counts do not prove that provider offsets address the editor's
+/// tokens: line breaks and columns can move independently of that count.
+#[tokio::test(flavor = "multi_thread")]
+async fn stale_open_target_with_equal_newline_count_never_delivers_coordinates() {
+    let stale_editor_sources = [
+        "// prefix\nexport const label = 'util'; export const msg = label\n",
+        "export const label =\n 'util'; export const msg = label\n",
+        "export const label = 'util'\nexport const     msg = label\n",
+    ];
+    for client in [Client::DocumentChanges, Client::ChangesOnly] {
+        for route in [
+            CrossFileRoute::Definition,
+            CrossFileRoute::References,
+            CrossFileRoute::Rename,
+            CrossFileRoute::CodeAction,
+        ] {
+            for editor_source in stale_editor_sources {
+                let scenario = Scenario::new(client).await;
+                let _ = scenario.fixture.server().documents.did_change(
+                    &scenario.util_uri,
+                    UTIL_VERSION + 1,
+                    editor_source,
+                );
+                scenario
+                    .fixture
+                    .provider
+                    .hold_engine_target(&scenario.util_canonical, UTIL);
+                let at = scenario.arm(route).await;
+                match route {
+                    CrossFileRoute::Definition | CrossFileRoute::References => {
+                        let locations = scenario
+                            .locations(route, at)
+                            .await
+                            .expect("navigation drops the incoherent target");
+                        assert!(
+                            !locations
+                                .iter()
+                                .any(|location| scenario.is_util(&location.uri)),
+                            "{client:?}/{route:?}: stale coordinates escaped: {locations:?}"
+                        );
+                    }
+                    CrossFileRoute::Rename | CrossFileRoute::CodeAction => {
+                        let error = match route {
+                            CrossFileRoute::Rename => scenario
+                                .rename(at)
+                                .await
+                                .expect_err("the whole rename is refused"),
+                            CrossFileRoute::CodeAction => scenario
+                                .code_action(at)
+                                .await
+                                .expect_err("the whole edit is refused"),
+                            _ => unreachable!(),
+                        };
+                        assert_eq!(
+                            error.code,
+                            tower_lsp_server::jsonrpc::ErrorCode::ContentModified,
+                            "{client:?}/{route:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A real import rewrite remains live, including declarations and edits to
+/// the right of the rewritten specifier on the same line. The public routes
+/// must undo its column shift rather than echo the provider's columns.
+#[tokio::test(flavor = "multi_thread")]
+async fn open_target_import_rewrite_maps_authored_columns_for_every_route() {
+    let authored = "import Target from './Target.vue'; export const label = 'util'; export const msg = label\n";
+    for client in [Client::DocumentChanges, Client::ChangesOnly] {
+        for route in [
+            CrossFileRoute::Definition,
+            CrossFileRoute::References,
+            CrossFileRoute::Rename,
+            CrossFileRoute::CodeAction,
+        ] {
+            let fixture = Fixture::with_files(
+                &[
+                    (APP_PATH, "vue", APP),
+                    (UTIL_PATH, "typescript", authored),
+                    (CARRIER_PATH, "vue", CARRIER),
+                ],
+                verter_session::HostConfig::default(),
+            )
+            .await;
+            let util_uri = workspace_uri(&fixture.workspace_id, UTIL_PATH);
+            let util_canonical = crate::documents::uri_to_canonical_id(&util_uri);
+            let scenario = Scenario {
+                fixture,
+                util_uri,
+                util_canonical,
+            };
+            let server = scenario.fixture.server();
+            let _ = server
+                .documents
+                .did_change(&scenario.util_uri, UTIL_VERSION, authored);
+            server.client_applies_versioned_edits.store(
+                client == Client::DocumentChanges,
+                std::sync::atomic::Ordering::Release,
+            );
+            assert!(
+                server
+                    .sync_self_file_shadow_unresolved(&scenario.util_uri)
+                    .await,
+                "the real self-file producer delivers its projection"
+            );
+            let projection = server
+                .documents
+                .provider_surfaces()
+                .current_snapshot(&scenario.util_canonical)
+                .expect("recorded self-file evidence");
+            assert_eq!(projection.carrier_source.as_ref(), authored);
+            assert_ne!(
+                projection.provider_content.as_ref(),
+                authored,
+                "the liveness control must contain a real rewrite"
+            );
+            assert!(
+                projection.provider_content.contains(".verter.ts"),
+                "the resolver selected the carrier API import"
+            );
+            scenario
+                .fixture
+                .provider
+                .hold_engine_target(&scenario.util_canonical, &projection.provider_content);
+            let at = scenario
+                .arm_from_source(route, &projection.provider_content)
+                .await;
+            // Source consumers also validate authored token text (for example
+            // a resolved prop declaration), so reads must stay in that space.
+            let documents = Arc::downgrade(&scenario.fixture.server().documents);
+            let canonical = scenario.util_canonical.clone();
+            scenario.fixture.barriers.arm(
+                RequestBarrier::ProviderDecode,
+                Arc::new(move |_| {
+                    let documents = documents.upgrade().expect("live fixture");
+                    let source = crate::documents::ForegroundRequest::target_source(
+                        &documents,
+                        &canonical,
+                        || documents.host().workspace_read().read_file(&canonical),
+                    );
+                    assert_eq!(source.as_deref(), Some(authored));
+                    Box::pin(async {})
+                }),
+            );
+            let needle = match route {
+                CrossFileRoute::CodeAction => "'util'",
+                _ => "msg",
+            };
+            let start = authored.find(needle).expect("authored token") as u32;
+            let index = crate::documents::line_index::LineIndex::new_utf16(authored);
+            let expected = Range {
+                start: index.offset_to_position(start).expect("authored start"),
+                end: index
+                    .offset_to_position(start + needle.len() as u32)
+                    .expect("authored end"),
+            };
+            match route {
+                CrossFileRoute::Definition | CrossFileRoute::References => {
+                    let locations = scenario
+                        .locations(route, at)
+                        .await
+                        .expect("coherent navigation");
+                    assert!(
+                        locations
+                            .iter()
+                            .any(|location| scenario.is_util(&location.uri)
+                                && location.range == expected),
+                        "{client:?}/{route:?}: {locations:?}"
+                    );
+                }
+                CrossFileRoute::Rename | CrossFileRoute::CodeAction => {
+                    let edit = match route {
+                        CrossFileRoute::Rename => scenario.rename(at).await,
+                        CrossFileRoute::CodeAction => scenario.code_action(at).await,
+                        _ => unreachable!(),
+                    }
+                    .expect("coherent edit")
+                    .expect("nonempty edit");
+                    assert_bound(&scenario, client, &edit, expected);
+                }
+            }
+        }
     }
 }
 

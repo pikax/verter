@@ -167,6 +167,8 @@ pub(crate) struct ForegroundRequest {
     /// answer built from it.
     decoded_surfaces: parking_lot::Mutex<Vec<Arc<ProviderSurfaceSnapshot>>>,
     queries: parking_lot::Mutex<Vec<verter_type_runtime::provider_query::ProviderQuery>>,
+    /// Authored source and rewrite maps proven against retained provider bytes.
+    mapped_targets: parking_lot::Mutex<Vec<Arc<ProviderSurfaceSnapshot>>>,
     closed_targets: parking_lot::Mutex<Vec<(String, ClosedTargetProof)>>,
     absent_targets: parking_lot::Mutex<Vec<String>>,
     /// The committed content hash of every imported source a native
@@ -215,6 +217,7 @@ impl ForegroundRequest {
             authority: documents.host().capture_authority_view(),
             decoded_surfaces: parking_lot::Mutex::new(Vec::new()),
             queries: parking_lot::Mutex::new(Vec::new()),
+            mapped_targets: parking_lot::Mutex::new(Vec::new()),
             closed_targets: parking_lot::Mutex::new(Vec::new()),
             absent_targets: parking_lot::Mutex::new(Vec::new()),
             dependencies: parking_lot::Mutex::new(Vec::new()),
@@ -310,18 +313,18 @@ impl ForegroundRequest {
         });
     }
 
-    /// The bytes a navigation location or edit of the current task's
-    /// foreground request decodes positions in `path` through.
+    /// The authored bytes a navigation location or edit of the current task's
+    /// foreground request addresses in `path`.
     ///
     /// For a navigation or edit request, a `path` open in the client resolves
     /// to the open revision's bytes, and that revision joins the request's
     /// captured targets: the first capture of a document is the one every later
     /// decode of it in this request reads and the one settlement validates.
-    /// A provider may retain a same-line rewrite of that open file. Offsets
-    /// into that rewrite round-trip to the provider's line/col, which still
-    /// addresses the client's document, so the decode uses the retained bytes.
-    /// A rewrite that moves line breaks is dropped and does not refuse the
-    /// rest of the answer. Anything else — a closed file, an informational
+    /// Rewritten bytes require a recorded map whose authored source equals
+    /// that captured revision and whose provider bytes equal the query's
+    /// retained decode bytes. The range decoder uses that same evidence.
+    /// An incoherent target drops the navigation location and refuses the
+    /// whole edit. Anything else — a closed file, an informational
     /// route, work outside a foreground request — is read through `read`.
     pub(crate) fn target_source(
         documents: &DocumentRegistry,
@@ -344,18 +347,83 @@ impl ForegroundRequest {
                 Some(bytes) if bytes.as_ref() == identity.source.as_ref() => {
                     return Some(identity.source);
                 }
-                // The engine indexed a same-line rewrite of this open file
-                // (import paths rewritten to carriers). Offsets round-trip to
-                // the provider's line/col only through those bytes, and that
-                // line/col still addresses the client's document.
-                Some(bytes) if same_newline_layout(bytes.as_ref(), identity.source.as_ref()) => {
-                    return Some(bytes);
+                Some(bytes) => {
+                    let surface = documents.provider_surfaces().current_snapshot(path);
+                    if let Some(surface) = surface.filter(|surface| {
+                        same_document_path(&surface.source_canonical, path)
+                            && surface.carrier_source.as_ref() == identity.source.as_ref()
+                            && surface.provider_content.as_ref() == bytes.as_ref()
+                            && surface.source_map.is_some()
+                    }) {
+                        Self::bracket_decoded_surface(&surface);
+                        let _ = ACTIVE_REQUEST.try_with(|request| {
+                            let mut targets = request.mapped_targets.lock();
+                            if !targets.iter().any(|known| Arc::ptr_eq(known, &surface)) {
+                                targets.push(surface);
+                            }
+                        });
+                        return Some(identity.source);
+                    }
+                    Self::refuse_incoherent_edit_target();
+                    return None;
                 }
-                Some(_) => return None,
             }
         }
         let source = retained.or_else(read)?;
         Self::host_target_source(documents, path, source, ClosedTargetAuthority::Workspace)
+    }
+
+    /// Decode retained offsets through the exact rewrite evidence accepted by
+    /// `target_source`, then emit authored coordinates in the client encoding.
+    pub(crate) fn target_range(
+        path: &str,
+        source: &str,
+        start: u32,
+        end: u32,
+        encoding: tower_lsp_server::ls_types::PositionEncodingKind,
+    ) -> Option<tower_lsp_server::ls_types::Range> {
+        use super::line_index::LineIndex;
+        let mapped = ACTIVE_REQUEST
+            .try_with(|request| {
+                request
+                    .mapped_targets
+                    .lock()
+                    .iter()
+                    .find(|surface| {
+                        same_document_path(&surface.stamp.provider_path, path)
+                            && surface.carrier_source.as_ref() == source
+                    })
+                    .cloned()
+            })
+            .ok()
+            .flatten();
+        if let Some(surface) = mapped {
+            let range = crate::type_provider::merge::api_surface_range_to_carrier_range(
+                start,
+                end,
+                &surface.provider_utf16_line_index,
+                surface.source_map.as_deref()?,
+                &surface.carrier_utf16_line_index,
+                &LineIndex::new(&surface.carrier_source, encoding),
+            );
+            if range.is_none() {
+                Self::refuse_incoherent_edit_target();
+            }
+            return range;
+        }
+        let index = LineIndex::new(source, encoding);
+        Some(tower_lsp_server::ls_types::Range {
+            start: index.offset_to_position(start)?,
+            end: index.offset_to_position(end)?,
+        })
+    }
+
+    fn refuse_incoherent_edit_target() {
+        let _ = ACTIVE_REQUEST.try_with(|request| {
+            if request.route.class() == ResponseClass::Edit {
+                request.target_incoherent.store(true, Ordering::Release);
+            }
+        });
     }
 
     /// Pin an open document at `path` without recording a closed target.
@@ -752,16 +820,6 @@ pub(crate) enum ClosedTargetAuthority {
 enum ClosedTargetProof {
     Workspace(Arc<str>),
     Committed(CommittedSourceContent),
-}
-
-/// Whether `left` and `right` break lines in the same places.
-///
-/// A same-line rewrite (a longer import specifier, nothing else) keeps the
-/// provider's line/col valid in the client's document. A rewrite that adds
-/// or removes a line does not.
-fn same_newline_layout(left: &str, right: &str) -> bool {
-    left.bytes().filter(|byte| *byte == b'\n').count()
-        == right.bytes().filter(|byte| *byte == b'\n').count()
 }
 
 /// Whether two canonical ids name one document.
