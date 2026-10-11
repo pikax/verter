@@ -519,6 +519,7 @@ async fn scanner_loop(
         let host = config.host.clone();
         let profile = config.tsx_profile.clone();
 
+        tracing::debug!(path, "workspace_scanner: carrier compile started");
         let compile_ok = tokio::task::spawn_blocking(move || {
             if !&host.host().ensure_loaded(&path_clone) {
                 return false;
@@ -534,11 +535,17 @@ async fn scanner_loop(
         })
         .await
         .unwrap_or(false);
+        tracing::debug!(
+            path,
+            compile_ok,
+            "workspace_scanner: carrier compile finished"
+        );
 
         // Sync to type provider
         if compile_ok
             && (config.project_sync.is_some() || config.carrier_publish_coordinator.is_some())
         {
+            tracing::debug!(path, "workspace_scanner: carrier publication started");
             sync_file_to_provider(
                 path,
                 &config.host.host(),
@@ -555,6 +562,7 @@ async fn scanner_loop(
                 Some(&mut published_companions),
             )
             .await;
+            tracing::debug!(path, "workspace_scanner: carrier publication finished");
         }
 
         batch_count += 1;
@@ -618,11 +626,19 @@ async fn scanner_loop(
                 1,
             )
             .await;
+            tracing::debug!(
+                pending = config.pending_snapshot_provider_sync.len(),
+                "workspace_scanner: carrier-phase retry drain finished"
+            );
         }
     }
 
     if !published_companions.is_empty() {
         if let Some(coordinator) = &config.carrier_publish_coordinator {
+            tracing::debug!(
+                companions = published_companions.len(),
+                "workspace_scanner: batched carrier refresh started"
+            );
             if let Err(error) = coordinator
                 .refresh_published_companions(&published_companions)
                 .await
@@ -632,6 +648,7 @@ async fn scanner_loop(
                     published_companions.len()
                 );
             }
+            tracing::debug!("workspace_scanner: batched carrier refresh finished");
         }
     }
 

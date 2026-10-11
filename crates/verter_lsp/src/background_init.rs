@@ -549,8 +549,14 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
             // The scanner may enqueue owner-aware carrier retries after the
             // pre-scan drain above. Settle those retries before announcing the
             // provider frontier; a non-empty queue means level 2 is not true yet.
+            tracing::debug!(
+                gen = my_gen,
+                pending = pending_drain.pending_snapshot_provider_sync.len(),
+                "post-scan provider drain started"
+            );
             drain_pending_snapshot_provider_sync_owned(pending_drain, PENDING_SYNC_REDRIVE, 1)
                 .await;
+            tracing::debug!(gen = my_gen, "post-scan provider drain finished");
 
             // The drain awaits provider work, so this generation may have been
             // superseded while it ran. Never publish level 2 for the old one.

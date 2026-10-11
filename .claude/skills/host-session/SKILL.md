@@ -578,6 +578,15 @@ The LSP delegates TypeScript type checking to an external **TypeProvider** proce
 
 During `initialized()`, the LSP spawns a priority-aware `WorkspaceScanner`. Filesystem-backed tsserver continues to resolve real `.ts`/`.tsx`/`.js`/`.jsx` and `node_modules` from disk. Framework carriers are compiled on the background lane and published by authored source identity into the durable plugin store; after the carrier pass, one coalesced refresh advances metadata without making every workspace carrier a Program root. No generated file is opened over the tsserver protocol. Before every carrier unit the scanner yields to active LSP handlers, with a bounded background-deferral interval so continuous editor traffic cannot starve project-wide warmup. TSGO retains its explicit eager project-input path for carrier and plain-source materialization. Verter semantic/type-info caches remain a separate host concern; they are not serialized into either TypeScript engine or used as a substitute for its project graph.
 
+For scan-completion diagnosis, enable `verter_lsp::workspace_scanner=debug` and
+`verter_lsp::server::background_init=debug` in the server log filter. The scanner
+records each carrier's compile and publication start/finish, the remaining retry
+count after the carrier-phase drain, and the batched refresh start/finish. The
+completion tail records its provider drain with the init generation. Preserve the
+LSP log and run summary before launching another E2E run: route-labelled artifacts
+are cleared at launch. A missing finish event identifies the unfinished phase;
+it does not alone establish the cause or certify provider readiness.
+
 ### Public-API Entries: Response-Only vs Projection
 
 The public-API surface has TWO consumer classes with distinct costs, split at the
