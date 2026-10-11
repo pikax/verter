@@ -319,6 +319,7 @@ fn transitive_type_dep_edit_misses_warm_component_meta() {
     assert!(prime.is_some(), "prime get_component_meta must resolve");
     let msg_pre = prime
         .unwrap()
+        .into_analysis()
         .props
         .into_iter()
         .find(|p| p.name == "msg")
@@ -362,6 +363,7 @@ fn transitive_type_dep_edit_misses_warm_component_meta() {
     // User-visible output: the recomputed `msg` prop reflects the new
     // transitive type.
     let msg_post = after
+        .into_analysis()
         .props
         .into_iter()
         .find(|p| p.name == "msg")

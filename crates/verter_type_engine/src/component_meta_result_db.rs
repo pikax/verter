@@ -179,9 +179,9 @@ pub enum ComponentMetaRefusalClass {
 }
 
 /// The request axes a refusal was sealed under, already normalized for its
-/// class. Certified divergence ignores profile and entry allowance. An
-/// operation-profile refusal ignores entry allowance. An isolated-root
-/// refusal uses every axis.
+/// class. Certified divergence ignores profile. Every class keeps the entry
+/// allowance of the demand that sealed it: a different allowance is a
+/// different refusal. An isolated-root refusal also keeps profile.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ComponentMetaRefusalIdentity {
     pub class: ComponentMetaRefusalClass,
@@ -212,9 +212,10 @@ impl ComponentMetaRefusalQuery {
     }
 }
 
-/// Normalize `class` onto `query`. A higher profile, a different root, a
-/// different context, or (for an isolated root) a different entry allowance
-/// produces a different identity.
+/// Normalize `class` onto `query`. A different root, context, or entry
+/// allowance produces a different identity. Certified divergence ignores
+/// profile. An operation-profile or isolated-root refusal also keeps profile.
+/// A higher entry allowance does not reuse a refusal sealed at a lower one.
 #[must_use]
 pub fn refusal_identity_for(
     class: ComponentMetaRefusalClass,
@@ -225,23 +226,18 @@ pub fn refusal_identity_for(
             class,
             profile: 0,
             root: Arc::clone(&query.root),
-            entry_allowance: 0,
-            context: query.context,
-        },
-        ComponentMetaRefusalClass::OperationProfile => ComponentMetaRefusalIdentity {
-            class,
-            profile: query.profile,
-            root: Arc::clone(&query.root),
-            entry_allowance: 0,
-            context: query.context,
-        },
-        ComponentMetaRefusalClass::IsolatedRoot => ComponentMetaRefusalIdentity {
-            class,
-            profile: query.profile,
-            root: Arc::clone(&query.root),
             entry_allowance: query.entry_allowance,
             context: query.context,
         },
+        ComponentMetaRefusalClass::OperationProfile | ComponentMetaRefusalClass::IsolatedRoot => {
+            ComponentMetaRefusalIdentity {
+                class,
+                profile: query.profile,
+                root: Arc::clone(&query.root),
+                entry_allowance: query.entry_allowance,
+                context: query.context,
+            }
+        }
     }
 }
 
@@ -261,6 +257,12 @@ pub enum FinalComponentRetention {
 /// `entered_isolated` is true when this demand entered with an empty paid
 /// set. A depth refusal under an enclosing paid set is not an isolated-root
 /// ledger entry and is not retained.
+///
+/// [`PartialReason::Propagated`] is the boolean-bridge marker: a child
+/// partiality folded without a class of its own. It is not a second cause.
+/// A sole eligible class stays that class when the marker is also present.
+/// A set that contains only the marker stays unadmitted, and any real other
+/// reason (a missing input, an abort, a flow-return cause) still vetoes.
 #[must_use]
 pub fn classify_final_component_retention(
     completeness: ResultCompleteness,
@@ -283,11 +285,12 @@ pub fn classify_final_component_retention(
             | PartialReason::StructuralFactDemandLimit => operation = true,
             PartialReason::SamePathRecursion => divergence = true,
             PartialReason::ConnectedQueryDepthLimit => depth = true,
+            // Spread marker only. See the function doc.
+            PartialReason::Propagated => {}
             PartialReason::Cancelled
             | PartialReason::SupersededGeneration
             | PartialReason::UnstableState
             | PartialReason::WalkerFatal
-            | PartialReason::Propagated
             | PartialReason::SemanticQueryFault
             | PartialReason::MissingSemanticNodeData
             | PartialReason::MissingDependency
@@ -1009,6 +1012,31 @@ mod refusal_ledger_tests {
         );
         assert_eq!(
             classify_final_component_retention(mixed, true),
+            FinalComponentRetention::NotAdmitted
+        );
+        // The boolean bridge rides along with the named work-limit class.
+        // It must not turn that operation refusal into a non-admission.
+        let bridged = ResultCompleteness::partial(
+            PartialReasonSet::PROJECTION_WORK_LIMIT.union(PartialReasonSet::PROPAGATED),
+        );
+        assert_eq!(
+            classify_final_component_retention(bridged, true),
+            FinalComponentRetention::Retain(ComponentMetaRefusalClass::OperationProfile)
+        );
+        assert_eq!(
+            classify_final_component_retention(
+                ResultCompleteness::partial(PartialReasonSet::PROPAGATED),
+                true
+            ),
+            FinalComponentRetention::NotAdmitted
+        );
+        let bridged_missing = ResultCompleteness::partial(
+            PartialReasonSet::BUDGET_EXCEEDED
+                .union(PartialReasonSet::MISSING_DEPENDENCY)
+                .union(PartialReasonSet::PROPAGATED),
+        );
+        assert_eq!(
+            classify_final_component_retention(bridged_missing, true),
             FinalComponentRetention::NotAdmitted
         );
         let depth = ResultCompleteness::partial(PartialReasonSet::CONNECTED_QUERY_DEPTH_LIMIT);

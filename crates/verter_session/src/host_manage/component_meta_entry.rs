@@ -279,7 +279,7 @@ impl VerterHost {
     pub fn get_component_meta(
         &self,
         canonical_or_alias: &str,
-    ) -> Option<verter_session_query::analysis::component_meta::ComponentMetaAnalysis> {
+    ) -> Option<crate::ComponentMetaDelivery> {
         self.try_get_component_meta(canonical_or_alias)
             .ok()
             .flatten()
@@ -290,7 +290,7 @@ impl VerterHost {
         &self,
         canonical_or_alias: &str,
     ) -> Result<
-        Option<verter_session_query::analysis::component_meta::ComponentMetaAnalysis>,
+        Option<crate::ComponentMetaDelivery>,
         verter_type_engine::semantic_query::ExecutionAbort,
     > {
         self.provenance
@@ -366,7 +366,8 @@ impl VerterHost {
         else {
             return Ok(None);
         };
-        let meta = cold.analysis;
+        let delivery =
+            crate::ComponentMetaDelivery::from_completeness(cold.analysis, cold.completeness.get());
 
         if let Some(started) = started {
             component_meta_debug(format!(
@@ -375,7 +376,7 @@ impl VerterHost {
                 started.elapsed(),
             ));
         }
-        Ok(Some(meta))
+        Ok(Some(delivery))
     }
 
     /// Output-bearing BASE-HOST component-meta entry: produce the
@@ -714,7 +715,7 @@ impl VerterHost {
         &self,
         canonical_or_alias: &str,
         view: &dyn crate::session_view::SessionView,
-    ) -> Option<verter_session_query::analysis::component_meta::ComponentMetaAnalysis> {
+    ) -> Option<crate::ComponentMetaDelivery> {
         // No caller-captured fixed view: the body takes its own store-view
         // reads and runs the per-call overlay pre-warm.
         self.get_component_meta_via_view_inner(canonical_or_alias, view, None)
@@ -741,7 +742,7 @@ impl VerterHost {
         view: &dyn crate::session_view::SessionView,
         fixed: &crate::resolver_store::BatchFixedView,
     ) -> Result<
-        Option<verter_session_query::analysis::component_meta::ComponentMetaAnalysis>,
+        Option<crate::ComponentMetaDelivery>,
         verter_type_engine::semantic_query::ExecutionAbort,
     > {
         self.get_component_meta_via_view_inner(canonical_or_alias, view, Some(fixed))
@@ -753,7 +754,7 @@ impl VerterHost {
         view: &dyn crate::session_view::SessionView,
         fixed: Option<&crate::resolver_store::BatchFixedView>,
     ) -> Result<
-        Option<verter_session_query::analysis::component_meta::ComponentMetaAnalysis>,
+        Option<crate::ComponentMetaDelivery>,
         verter_type_engine::semantic_query::ExecutionAbort,
     > {
         self.provenance
@@ -886,7 +887,8 @@ impl VerterHost {
         else {
             return Ok(None);
         };
-        let meta = cold.analysis;
+        let delivery =
+            crate::ComponentMetaDelivery::from_completeness(cold.analysis, cold.completeness.get());
 
         if let Some(started) = started {
             component_meta_debug(format!(
@@ -895,7 +897,7 @@ impl VerterHost {
                 started.elapsed(),
             ));
         }
-        Ok(Some(meta))
+        Ok(Some(delivery))
     }
 
     /// The SHARED view-path cold body: resolve PINNED to the caller's
@@ -1066,7 +1068,7 @@ impl VerterHost {
 
     /// Retained refusal for a view-aware probe. A missing current view is a
     /// miss the success probe already counted.
-    fn replay_component_meta_refusal_with_view(
+    pub(crate) fn replay_component_meta_refusal_with_view(
         &self,
         canonical: &str,
         view: &dyn crate::session_view::SessionView,
@@ -1106,7 +1108,7 @@ impl VerterHost {
     fn try_component_meta_cache_hit(
         &self,
         canonical: &str,
-    ) -> Option<verter_session_query::analysis::component_meta::ComponentMetaAnalysis> {
+    ) -> Option<crate::ComponentMetaDelivery> {
         let shallow = self.shallow_file_state(canonical)?;
         let owner_whole_hash = shallow.whole_hash;
         let key = self.component_meta_result_key(canonical, &ComponentMetaOptions::default());
@@ -1143,11 +1145,18 @@ impl VerterHost {
             self.provenance(),
         );
         if let Some(entry) = read.peek(&key, owner_whole_hash) {
-            return Some(entry.payload.analysis.clone());
+            return Some(crate::ComponentMetaDelivery::complete(
+                entry.payload.analysis.clone(),
+            ));
         }
         let query = self.component_meta_refusal_query(&dispatch, canonical);
         read.replay_refusal(&key, owner_whole_hash, &query)
-            .map(|retained| retained.recovery.analysis.clone())
+            .map(|retained| {
+                crate::ComponentMetaDelivery::refusal(
+                    retained.recovery.analysis.clone(),
+                    retained.status,
+                )
+            })
     }
 
     /// View-aware warm-cache fast path for component-meta queries.
@@ -1183,14 +1192,21 @@ impl VerterHost {
         canonical: &str,
         view: &dyn crate::session_view::SessionView,
         fixed: &crate::resolver_store::BatchFixedView,
-    ) -> Option<verter_session_query::analysis::component_meta::ComponentMetaAnalysis> {
+    ) -> Option<crate::ComponentMetaDelivery> {
         if let Some((_, entry)) =
             self.try_component_meta_cache_entry_with_view(canonical, view, fixed)
         {
-            return Some(entry.payload.analysis.clone());
+            return Some(crate::ComponentMetaDelivery::complete(
+                entry.payload.analysis.clone(),
+            ));
         }
         self.replay_component_meta_refusal_with_view(canonical, view, fixed)
-            .map(|retained| retained.recovery.analysis.clone())
+            .map(|retained| {
+                crate::ComponentMetaDelivery::refusal(
+                    retained.recovery.analysis.clone(),
+                    retained.status,
+                )
+            })
     }
 
     /// Entry-returning core of the view-aware warm probe: the exact key that

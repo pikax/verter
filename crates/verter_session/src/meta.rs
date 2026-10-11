@@ -694,10 +694,7 @@ impl MetaSession {
     pub fn get_component_meta(
         &self,
         canonical_or_alias: &str,
-    ) -> Result<
-        Option<verter_session_query::analysis::component_meta::ComponentMetaAnalysis>,
-        MetaError,
-    > {
+    ) -> Result<Option<crate::ComponentMetaDelivery>, MetaError> {
         self.check_alive()?;
         let host = self.project.host();
         // Share the fixed-view fast path with the batch analysis surface
@@ -745,15 +742,7 @@ impl MetaSession {
     pub fn get_component_meta_batch(
         &self,
         canonical_or_aliases: &[String],
-    ) -> Result<
-        Vec<
-            Result<
-                Option<verter_session_query::analysis::component_meta::ComponentMetaAnalysis>,
-                MetaError,
-            >,
-        >,
-        MetaError,
-    > {
+    ) -> Result<Vec<Result<Option<crate::ComponentMetaDelivery>, MetaError>>, MetaError> {
         use std::sync::Arc;
         self.check_alive()?;
         let scheduler = self.project.host().scheduler();

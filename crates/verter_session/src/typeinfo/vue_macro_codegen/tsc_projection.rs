@@ -5,9 +5,10 @@
 
 use super::runtime::{
     authored_emit_anchor, authored_emit_order, macro_projection_faulted, partial_failure,
-    resolution_failure, MacroProjectionLane,
+    resolution_failure, row_derivation_fact, MacroProjectionLane,
 };
 use super::*;
+use verter_type_engine::semantic_query::FactStatus;
 
 /// The ONE nameability fail-close every splice site inherits: a NOMINAL
 /// `typeof` carrier whose declaring identity is a script-setup local of
@@ -1266,9 +1267,11 @@ pub(super) fn tsc_emit_rows(
     payload_index: usize,
     effective_index: usize,
     counters: &mut VueMacroCodegenCounters,
+    published: &mut Vec<FactStatus>,
 ) -> Result<Vec<TscEmitRow>, ProjectionFailure> {
     let context = ProjectionReductionContext::published(ProjectionMode::Navigate);
     let mut rows = Vec::new();
+    let mut row_facts = Vec::new();
 
     for signature in surface.call_signatures.iter() {
         let callable = CallableNodeView::new(dispatch, signature.node);
@@ -1301,12 +1304,14 @@ pub(super) fn tsc_emit_rows(
             counters,
         )?;
         for name in names {
-            push_tsc_emit(
+            if push_tsc_emit(
                 &mut rows,
                 name.as_ref(),
                 parameters.clone(),
                 authored_emit_anchor(mac, payload_index, effective_index, name.as_ref()),
-            );
+            ) {
+                row_facts.push(row_derivation_fact().status());
+            }
         }
     }
 
@@ -1320,27 +1325,32 @@ pub(super) fn tsc_emit_rows(
         };
         let parameters =
             render_emit_payload_parameters(dispatch, owner_canonical, member.value, counters)?;
-        push_tsc_emit(
+        if push_tsc_emit(
             &mut rows,
             name.as_ref(),
             parameters,
             authored_emit_anchor(mac, payload_index, effective_index, name.as_ref()),
-        );
+        ) {
+            row_facts.push(row_derivation_fact().status());
+        }
     }
 
     for field in &mac.emit_fields {
-        push_tsc_emit(
+        if push_tsc_emit(
             &mut rows,
             field.name.as_str(),
             TscSpliceText::new("...args: unknown[]"),
             authored_emit_anchor(mac, payload_index, effective_index, field.name.as_str()),
-        );
+        ) {
+            row_facts.push(row_derivation_fact().status());
+        }
     }
     rows.sort_by_key(|row| authored_emit_order(row.anchor));
 
     if macro_projection_faulted(MacroProjectionLane::Tsc) {
         return Err(partial_failure());
     }
+    published.extend(row_facts);
     Ok(rows)
 }
 
@@ -1349,9 +1359,9 @@ fn push_tsc_emit(
     name: &str,
     parameters: TscSpliceText,
     anchor: MacroAnchor,
-) {
+) -> bool {
     if rows.iter().any(|row| row.name == name) {
-        return;
+        return false;
     }
     rows.push(TscEmitRow {
         name: name.to_owned(),
@@ -1359,6 +1369,7 @@ fn push_tsc_emit(
         handler_parameters: parameters,
         anchor,
     });
+    true
 }
 
 fn render_emit_payload_parameters(

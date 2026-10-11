@@ -5,7 +5,9 @@
 //! parent module docs for the overall producer contract.
 
 use super::*;
-use verter_type_engine::semantic_query::{FactResult, PartialReason};
+use verter_type_engine::semantic_query::{
+    root_narrowing_fact, FactResult, FactStatus, PartialReason,
+};
 
 /// Prove a row-local missing dependency without conflating it with an
 /// authored `unknown` or with a reference nested below a constructor-bearing
@@ -349,22 +351,25 @@ fn is_definitely_non_object_root(
 }
 
 /// Run the conservative non-object predicate in an exploratory completeness
-/// scope. A `false` result makes no authoritative claim: the following
-/// shallow-surface demand owns root completeness and will re-observe any real
-/// missing root/surface arm. A `true` result is authoritative and retains any
-/// partiality encountered while reaching the non-object terminal.
+/// scope.
+///
+/// A `true` result is the root-narrowing fact: the walk's own coverage is
+/// complete and the terminal is non-object. An incomplete walk is not that
+/// claim. Its partiality is discarded here; the following surface demand
+/// re-observes it and does not inherit a definitive negative.
 pub(super) fn probe_definitely_non_object_root(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     subject: verter_type_engine::semantic_query::SemanticNodeId,
 ) -> bool {
     let probe_scope = verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
     let definitely_non_object = is_definitely_non_object_root(dispatch, subject);
-    if definitely_non_object {
-        drop(probe_scope);
-    } else {
-        probe_scope.discard();
+    let observed = verter_type_engine::request_context::current_cold_compute_completeness();
+    probe_scope.discard();
+    if !definitely_non_object {
+        return false;
     }
-    definitely_non_object
+    let domain = demand_fact(observed).status();
+    root_narrowing_fact(&domain, &[]).exact().is_some()
 }
 
 pub(super) struct RuntimeClassification {
@@ -590,28 +595,23 @@ pub(super) enum MacroProjectionLane {
     /// file's type-check surface to prevent an option object this demand
     /// never emits.
     RuntimeNames,
-    /// The FILE-level aggregate — the producer's own `completeness`,
-    /// which governs warm admission of the whole codegen artifact rather
-    /// than the content of either lane's output.
-    ///
-    /// It contains everything BOTH lanes contain between them, because a
-    /// lane that refused recorded the refusal IN its entry: the artifact
-    /// is a faithful, deterministic record of that refusal and re-deriving
-    /// it would produce the identical bytes. Faulting the file here
-    /// instead would make every module carrying one unmodelled helper
-    /// recompute its whole macro codegen on every touch, forever, to
-    /// re-derive a refusal it already holds.
+    /// Request-integrity inputs of a file-sized demand. Production does
+    /// not construct this lane: the artifact summary is the published
+    /// facts. The predicate stays so a request-integrity reason is still
+    /// an input of every demand, including this one.
+    #[allow(dead_code)]
     File,
 }
 
 impl MacroProjectionLane {
-    /// Whether `reason` is an input of this demand.
+    /// Whether `reason` is an input this demand owns.
     ///
-    /// A degraded flow return is a value-local fact no lane reads as its
-    /// own input. A missing surface and an undecided conditional are inputs
-    /// only of the demand that renders option objects from the value. Every
-    /// request-integrity reason is an input of every demand.
-    fn reads_reason(self, reason: PartialReason) -> bool {
+    /// A degraded flow return is a value-local fact. It is not an input of
+    /// these demands. A missing surface and an undecided conditional are
+    /// inputs only of the demand that renders option objects from the value.
+    /// Every request-integrity reason is an input of every demand. The caller
+    /// passes only the owned set to [`demand_fact`]; nothing is stripped there.
+    fn owns_reason(self, reason: PartialReason) -> bool {
         match reason {
             PartialReason::FlowReturnUninferred | PartialReason::FlowReturnUnverified => false,
             PartialReason::FlowReturnNoSurface | PartialReason::UndecidedConditional => {
@@ -648,25 +648,56 @@ impl MacroProjectionLane {
     }
 }
 
-/// This demand's fact. Only the reasons the demand reads are inputs.
-/// An empty input set is a complete answer for this demand.
-pub(super) fn demand_fact(
+/// The completeness whose reasons are exactly the inputs `lane` owns.
+/// Reasons that belong to another demand are omitted here, before
+/// [`demand_fact`], and are not stripped inside it.
+pub(super) fn lane_inputs(
     lane: MacroProjectionLane,
     observed: verter_type_engine::semantic_query::ResultCompleteness,
-) -> FactResult<()> {
+) -> verter_type_engine::semantic_query::ResultCompleteness {
     let mut inputs = PartialReasonSet::empty();
     for reason in observed.reasons().iter() {
-        if lane.reads_reason(reason) {
+        if lane.owns_reason(reason) {
             inputs = inputs.union(reason.bit());
         }
     }
-    FactResult::from_demand_inputs(inputs)
+    if inputs.is_empty() {
+        verter_type_engine::semantic_query::ResultCompleteness::Complete
+    } else {
+        verter_type_engine::semantic_query::ResultCompleteness::partial(inputs)
+    }
+}
+
+/// This demand's fact from the inputs its own work observed.
+/// An empty input set is a complete answer. The caller has already omitted
+/// every reason that belongs to another demand.
+pub(super) fn demand_fact(
+    inputs: verter_type_engine::semantic_query::ResultCompleteness,
+) -> FactResult<()> {
+    FactResult::from_demand_inputs(inputs.reasons())
+}
+
+/// The fact of one testing row or one synthesized emit row that was emitted.
+///
+/// Emitting the row is that demand's answer. A typed degradation stays on
+/// the row (`unknown` plus the reason) and does not make the fact
+/// unavailable: one member's contained inference failure must not partial
+/// the file summary. A row that is not emitted publishes no fact, so it
+/// cannot borrow a sibling row's status.
+pub(super) fn row_derivation_fact() -> FactResult<()> {
+    FactResult::complete(())
 }
 
 /// Whether the observed completeness leaves `lane`'s fact inexact.
 pub(super) fn macro_projection_faulted(lane: MacroProjectionLane) -> bool {
     let observed = verter_type_engine::request_context::current_cold_compute_completeness();
-    demand_fact(lane, observed).exact().is_none()
+    demand_fact(lane_inputs(lane, observed)).exact().is_none()
+}
+
+/// Status of `lane` against the completeness active on this thread.
+pub(super) fn lane_fact_status(lane: MacroProjectionLane) -> FactStatus {
+    let observed = verter_type_engine::request_context::current_cold_compute_completeness();
+    demand_fact(lane_inputs(lane, observed)).status()
 }
 
 /// Whether a DEGRADED flow return was observed while deriving this
@@ -746,10 +777,10 @@ fn member_ordinal(index: usize) -> u32 {
 
 #[cfg(test)]
 mod lane_containment_tests {
-    use super::{demand_fact, MacroProjectionLane};
+    use super::{demand_fact, lane_inputs, MacroProjectionLane};
     use verter_type_engine::semantic_query::surface_resolution::NonEmptyReasons;
     use verter_type_engine::semantic_query::{
-        root_narrowing_fact, FactResult, FactStatus, PartialReason, PartialReasonSet,
+        root_narrowing_fact, summarize, FactResult, FactStatus, PartialReason, PartialReasonSet,
         ResultCompleteness,
     };
 
@@ -799,7 +830,7 @@ mod lane_containment_tests {
     }
 
     fn fact(reason: PartialReasonSet, lane: MacroProjectionLane) -> FactResult<()> {
-        demand_fact(lane, ResultCompleteness::Partial(reason))
+        demand_fact(lane_inputs(lane, ResultCompleteness::Partial(reason)))
     }
 
     fn assert_exact(reason: PartialReasonSet, lane: MacroProjectionLane) {
@@ -849,15 +880,26 @@ mod lane_containment_tests {
         assert_exact(no_surface, MacroProjectionLane::RuntimeNames);
         assert_exact(no_surface, MacroProjectionLane::RuntimeMemberValue);
 
-        // The FILE aggregate contains both lanes' sets: a lane that
-        // refused recorded the refusal IN its entry, and warming that
-        // faithful record is correct.
+        // The file summary is the published facts, not a filter that drops
+        // the runtime refusal. A no-surface runtime fact stays in it. A
+        // degraded-success class is not an input of either demand.
+        let no_surface = PartialReasonSet::FLOW_RETURN_NO_SURFACE;
+        let runtime = fact(no_surface, MacroProjectionLane::RuntimeOptions);
+        let tsc = fact(no_surface, MacroProjectionLane::Tsc);
+        assert!(runtime.exact().is_none());
+        assert!(tsc.exact().is_some());
+        assert!(
+            summarize([&runtime.status(), &tsc.status()]).is_partial(),
+            "the summary keeps the published runtime refusal"
+        );
         for contained in [
             PartialReasonSet::FLOW_RETURN_UNINFERRED,
             PartialReasonSet::FLOW_RETURN_UNVERIFIED,
-            PartialReasonSet::FLOW_RETURN_NO_SURFACE,
         ] {
-            assert_exact(contained, MacroProjectionLane::File);
+            let runtime = fact(contained, MacroProjectionLane::RuntimeOptions);
+            let tsc = fact(contained, MacroProjectionLane::Tsc);
+            assert!(runtime.exact().is_some() && tsc.exact().is_some());
+            assert!(!summarize([&runtime.status(), &tsc.status()]).is_partial());
         }
 
         // CONTROL — every class that is a statement about the REQUEST

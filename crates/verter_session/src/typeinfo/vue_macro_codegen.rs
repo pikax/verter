@@ -45,9 +45,9 @@ use verter_type_engine::project_semantic_dispatch::callable_view::CallableNodeVi
 use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
 use verter_type_engine::resolver_core::ResolverContext;
 use verter_type_engine::semantic_query::{
-    BroadRuntimeKind, ExecutionAbort, PartialReasonSet, PathSegment, ProjectionMode,
-    ProjectionReductionContext, QueryResult, ResolveDeclKey, ResultCompleteness, ScopeId,
-    SemanticNodeData, SemanticQueryApi, SemanticQueryKey, SemanticQueryValue,
+    summarize, BroadRuntimeKind, ExecutionAbort, FactStatus, PartialReasonSet, PathSegment,
+    ProjectionMode, ProjectionReductionContext, QueryResult, ResolveDeclKey, ResultCompleteness,
+    ScopeId, SemanticNodeData, SemanticQueryApi, SemanticQueryKey, SemanticQueryValue,
     SurfaceProvenanceContext, ValueRootKey,
 };
 
@@ -518,6 +518,10 @@ struct ProducerState {
     tsc_entries: Vec<MacroTscEntry>,
     dependency_failures: Vec<VueMacroDependencyFailure>,
     counters: VueMacroCodegenCounters,
+    /// Facts the demands that actually ran published. The file summary is
+    /// derived from these and never from a reason subtracted off the
+    /// ambient scope.
+    published: Vec<FactStatus>,
     completeness: ResultCompleteness,
 }
 
@@ -822,15 +826,10 @@ impl VerterHost {
                 let _completeness_scope =
                     verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
                 let mut state = self.produce_vue_macro_codegen_inner(ctx, owner_canonical, demand);
-                // The file demand's own fact. Value-local reasons that no
-                // lane reads are not inputs of this summary, so they do not
-                // make the artifact recompute. Every request-integrity
-                // reason is an input, including a declaration-local budget.
-                // A lane that refused recorded that refusal in its entry.
-                let observed =
-                    verter_type_engine::request_context::current_cold_compute_completeness();
-                state.completeness =
-                    demand_fact(MacroProjectionLane::File, observed).completeness();
+                // The artifact summary is the statuses of the facts this
+                // produce actually published. It does not authorize a fact,
+                // and it is not a filter over the ambient reason bag.
+                state.completeness = summarize(state.published.iter());
                 state
             },
         );
@@ -872,6 +871,7 @@ impl VerterHost {
                 producer_invocations: 1,
                 ..VueMacroCodegenCounters::default()
             },
+            published: Vec::new(),
             completeness: ResultCompleteness::Complete,
         };
 
@@ -906,8 +906,12 @@ impl VerterHost {
             // The analysis is staged above, so a refusal here is a
             // producer bug; fail closed to the empty (refusal-carrying)
             // state rather than guessing an inventory of our own.
-            Err(_) => return state,
+            Err(_) => {
+                publish_demanded_lane_facts(&mut state.published, demand);
+                return state;
+            }
         };
+        let mut published = std::mem::take(&mut state.published);
         for demand_row in semantic_input.demands() {
             let payload_index = demand_row.macro_index();
             let Some(mac) = macros.get(payload_index) else {
@@ -935,6 +939,7 @@ impl VerterHost {
                         &tsc_scope_inventory,
                         &mut state.counters,
                     );
+                    published.push(lane_fact_status(MacroProjectionLane::Tsc));
                     let macro_completeness =
                         verter_type_engine::request_context::current_cold_compute_completeness();
                     macro_scope.discard();
@@ -1031,12 +1036,16 @@ impl VerterHost {
 
             if demand.wants_runtime() {
                 let mut walker_diagnostics = Vec::new();
-                let outcome = {
+                let outcome = if let Some(failure) = runtime_payload_failure {
+                    // Decided on the macro scope. A fresh nested scope would
+                    // not see that refusal and would publish Complete.
+                    published.push(lane_fact_status(runtime_lane));
+                    failure.runtime()
+                } else {
                     let _runtime_scope =
                         verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
-                    match (runtime_payload_failure, payload) {
-                        (Some(failure), _) => failure.runtime(),
-                        (None, Some(payload)) => match mac.kind {
+                    let outcome = match payload {
+                        Some(payload) => match mac.kind {
                             AnalyzedMacroKind::DefineProps => {
                                 match dispatch
                                     .broad_runtime_subject_for_macro(&owner, payload_index)
@@ -1092,8 +1101,10 @@ impl VerterHost {
                             }
                             _ => unreachable!("codegen macro filter is exhaustive"),
                         },
-                        (None, None) => unreachable!("payload failure covers an absent payload"),
-                    }
+                        None => unreachable!("payload failure covers an absent payload"),
+                    };
+                    published.push(lane_fact_status(runtime_lane));
+                    outcome
                 };
                 record_unresolved_surface_arms(
                     &mut state.dependency_failures,
@@ -1110,12 +1121,14 @@ impl VerterHost {
 
             if demand.wants_tsc() {
                 let mut walker_diagnostics = Vec::new();
-                let outcome = {
+                let outcome = if let Some(failure) = tsc_payload_failure {
+                    published.push(lane_fact_status(MacroProjectionLane::Tsc));
+                    failure.tsc()
+                } else {
                     let _tsc_scope =
                         verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
-                    match (tsc_payload_failure, payload) {
-                        (Some(failure), _) => failure.tsc(),
-                        (None, Some(payload)) => self.project_tsc_macro(
+                    let outcome = match payload {
+                        Some(payload) => self.project_tsc_macro(
                             ctx,
                             &dispatch,
                             &mut attempt,
@@ -1127,9 +1140,12 @@ impl VerterHost {
                             &tsc_scope_inventory,
                             &mut state.counters,
                             &mut walker_diagnostics,
+                            &mut published,
                         ),
-                        (None, None) => unreachable!("payload failure covers an absent payload"),
-                    }
+                        None => unreachable!("payload failure covers an absent payload"),
+                    };
+                    published.push(lane_fact_status(MacroProjectionLane::Tsc));
+                    outcome
                 };
                 record_unresolved_surface_arms(
                     &mut state.dependency_failures,
@@ -1152,6 +1168,7 @@ impl VerterHost {
 
         state.dependency_failures.sort();
         state.dependency_failures.dedup();
+        state.published = published;
         state
     }
 
@@ -1171,6 +1188,7 @@ impl VerterHost {
         walker_diagnostics: &mut Vec<
             verter_type_engine::project_semantic_dispatch::walk::ShallowDiagnostic,
         >,
+        published: &mut Vec<FactStatus>,
     ) -> MacroTscOutcome {
         match mac.kind {
             AnalyzedMacroKind::DefineProps => {
@@ -1197,6 +1215,7 @@ impl VerterHost {
                 };
 
                 let mut testing_rows = Vec::new();
+                let mut row_facts = Vec::new();
                 for member in surface
                     .members
                     .iter()
@@ -1226,6 +1245,7 @@ impl VerterHost {
                             Err(failure) => return failure.tsc(),
                         }
                     };
+                    row_facts.push(row_derivation_fact().status());
                     testing_rows.push(TscPropRow {
                         name: member_name.to_string(),
                         optional: member.optional,
@@ -1239,6 +1259,7 @@ impl VerterHost {
                         Ok(scope) => scope,
                         Err(failure) => return failure.tsc(),
                     };
+                published.extend(row_facts);
                 MacroTscOutcome::Complete(MacroTscProjection::Props(TscPropsProjection {
                     public: TscPublicPropsProjection::AuthoredArgument {
                         anchor: MacroAnchor::MacroArgument {
@@ -1286,6 +1307,7 @@ impl VerterHost {
                     payload_index,
                     effective_index,
                     counters,
+                    published,
                 ) {
                     Ok(events) => events,
                     Err(failure) => return failure.tsc(),
@@ -1808,6 +1830,19 @@ impl VerterHost {
 /// (a partial terminal read's positive members) still projects, and a
 /// surface-less failure routes to the lane's `NonObjectRoot` failure exactly
 /// as a genuinely non-object root does.
+/// Record the lane fact of each demand this produce was asked for, from
+/// the completeness active on this thread.
+fn publish_demanded_lane_facts(published: &mut Vec<FactStatus>, demand: VueMacroCodegenDemand) {
+    if demand.wants_tsc() {
+        published.push(lane_fact_status(MacroProjectionLane::Tsc));
+    }
+    if demand.wants_runtime() {
+        published.push(lane_fact_status(MacroProjectionLane::runtime(
+            demand.wants_runtime_constructors(),
+        )));
+    }
+}
+
 fn authored_fallback_surface(
     resolution: verter_type_engine::semantic_query::surface_resolution::SurfaceResolution<
         crate::typeinfo::surface::TypeInfoSurface,

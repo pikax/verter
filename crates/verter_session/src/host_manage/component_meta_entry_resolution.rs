@@ -194,6 +194,19 @@ impl VerterHost {
             fixed.captured_validation_token(),
             fixed.is_current(),
         );
+        if let Some(retained) =
+            self.replay_component_meta_refusal_with_view(canonical.as_str(), &view, &fixed)
+        {
+            let cached = retained.recovery;
+            if let Some(snapshot) = reload_component_meta_template_snapshot(
+                self,
+                &cached.canonical_id,
+                cached.whole_hash,
+            ) {
+                let resolution = cached.resolution_template.rehydrate(snapshot, request_id);
+                return Ok(Some((cached.analysis.clone(), resolution)));
+            }
+        }
         let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
         let host_ctx = crate::resolver_core::HostResolverContext::from_cold_seed(
             self,
@@ -467,6 +480,47 @@ impl VerterHost {
             crate::component_meta_result_admission::record_component_meta_result_miss(
                 self.provenance(),
             );
+        }
+
+        if let Some(retained) =
+            self.replay_component_meta_refusal_with_view(canonical.as_str(), &view, &fixed)
+        {
+            let overlay =
+                std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+            let host_ctx = crate::resolver_core::HostResolverContext::from_cold_seed(
+                self,
+                fixed.cold_seed(),
+                overlay,
+            );
+            let ctx: &dyn crate::resolver_core::HostRequestContext = &host_ctx;
+            let dispatch =
+                &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+            let analysis = retained.recovery.analysis.clone();
+            let signature = retained.read_set_signature.clone();
+            let seed = crate::meta_resolve::output::ComponentMetaResolutionSeed::from_template(
+                &retained.recovery.resolution_template,
+            );
+            let completeness = crate::meta_resolve::PublishedCompleteness::from_retained_refusal(
+                retained.completeness,
+            );
+            let (output, _output_read_set) =
+                verter_type_engine::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx)
+                    .with_fact_tracer(|| {
+                        verter_type_engine::fact_signature_helpers::observe_fact_signature(
+                            &signature.facts,
+                        );
+                        crate::meta_resolve::projectors::build_component_meta_output(
+                            ctx,
+                            dispatch,
+                            canonical.as_str(),
+                            analysis,
+                            Some(seed),
+                            completeness,
+                        )
+                    });
+            return output
+                .map(|output| (Some(output), request_id))
+                .map_err(|err| (err.into(), request_id));
         }
 
         // Cold: seed + fence from the SAME capture, shared audited cold body

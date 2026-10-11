@@ -661,6 +661,13 @@ mod tests {
             .expect("the same profile replays");
         assert_eq!(*replayed.recovery, 7);
         assert_eq!(producers, 1, "replay does not run the producer");
+        let mut other_allowance = query.clone();
+        other_allowance.entry_allowance = 1;
+        assert!(
+            read.replay_refusal(&key, owner_hash, &other_allowance)
+                .is_none(),
+            "a different entry allowance does not reuse an operation-profile refusal"
+        );
 
         drop(_low);
         let _high = install(8, 2);
@@ -742,6 +749,13 @@ mod tests {
                 .expect("certified divergence ignores the profile")
                 .recovery,
             8
+        );
+        let mut certified_other_allowance = high_query.clone();
+        certified_other_allowance.entry_allowance = 3;
+        assert!(
+            read.replay_refusal(&certified_key, owner_hash, &certified_other_allowance)
+                .is_none(),
+            "certified divergence keeps the entry allowance"
         );
 
         let depth = ResultCompleteness::partial(PartialReasonSet::CONNECTED_QUERY_DEPTH_LIMIT);
@@ -912,5 +926,98 @@ mod tests {
         assert!(dispatch
             .read_component_meta_result(&db, &sibling, owner_hash)
             .is_some());
+    }
+
+    #[test]
+    fn retained_operation_refusal_does_not_rerun_component_meta() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+
+        let host = crate::VerterHost::new_standalone(crate::types::HostConfig {
+            projection_op_budget: 1,
+            ..crate::types::HostConfig::default()
+        });
+        let canonical = "/w/budget-refusal.vue";
+        let _ = host
+            .upsert(crate::UpsertRequest {
+                canonical_id: Some(canonical.into()),
+                input_id: canonical.into(),
+                source: Arc::from(
+                    "<script setup lang=\"ts\">defineProps<{ x: string }>()</script>",
+                ),
+                file_language: crate::FileLanguage::vue(),
+                aliases: Vec::new(),
+            })
+            .unwrap();
+
+        let first = host
+            .get_component_meta(canonical)
+            .expect("the refused demand still returns the recovery");
+        assert!(
+            !first.is_complete(),
+            "projection budget 1 is an operation-profile refusal, got {:?}",
+            first.status()
+        );
+
+        let ran = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&ran);
+        crate::host_manage::component_meta_entry::COLD_BODY_PRE_RESOLVE_HOOK.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || flag.store(true, Ordering::SeqCst)));
+        });
+        let second = host
+            .get_component_meta(canonical)
+            .expect("the retained refusal is delivered again");
+        assert!(
+            !ran.load(Ordering::SeqCst),
+            "replaying the refusal must not enter the cold body, status {:?}",
+            second.status()
+        );
+        assert_eq!(second.status(), first.status());
+        crate::host_manage::component_meta_entry::COLD_BODY_PRE_RESOLVE_HOOK
+            .with(|slot| *slot.borrow_mut() = None);
+
+        let ran_resolution = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&ran_resolution);
+        crate::host_manage::component_meta_entry::COLD_BODY_PRE_RESOLVE_HOOK.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || flag.store(true, Ordering::SeqCst)));
+        });
+        let resolved = host.get_component_meta_output_with_resolution(canonical);
+        assert!(
+            resolved.is_ok(),
+            "resolution replay returns the retained refusal, got {resolved:?}"
+        );
+        assert!(
+            !ran_resolution.load(Ordering::SeqCst),
+            "the resolution demand must not resolve again"
+        );
+        crate::host_manage::component_meta_entry::COLD_BODY_PRE_RESOLVE_HOOK
+            .with(|slot| *slot.borrow_mut() = None);
+
+        let _higher =
+            RequestContextGuard::install(RequestContext::with_kind_timing_and_projection_budget(
+                99,
+                Arc::from(canonical),
+                verter_audit::RequestKind::ComponentMeta,
+                false,
+                false,
+                None,
+                2000,
+            ));
+        let ran_higher = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&ran_higher);
+        crate::host_manage::component_meta_entry::COLD_BODY_PRE_RESOLVE_HOOK.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || flag.store(true, Ordering::SeqCst)));
+        });
+        let healed = host
+            .get_component_meta(canonical)
+            .expect("a higher profile recomputes");
+        assert!(
+            ran_higher.load(Ordering::SeqCst),
+            "a higher operation profile misses the retained refusal and recomputes, status {:?}",
+            healed.status()
+        );
+        crate::host_manage::component_meta_entry::COLD_BODY_PRE_RESOLVE_HOOK
+            .with(|slot| *slot.borrow_mut() = None);
     }
 }

@@ -908,6 +908,7 @@ fn get_meta(
         .get_component_meta(canonical_id)
         .unwrap()
         .expect("get_component_meta should return metadata")
+        .into_analysis()
 }
 
 /// Every root-chain step reachable from a resolved fallthrough surface.
