@@ -939,62 +939,65 @@ defineProps<{{ good: string; payload: Payload }}>()
         r#"<script setup lang="ts">defineProps<string>()</script>"#,
     );
 
-    let output = produce(
-        &host,
-        "/src/RefusedMember.vue",
-        VueMacroCodegenDemand::RuntimeAndTsc,
-    );
-    let props = props_projection(&output);
-    assert!(
-        matches!(
-            props.public,
-            verter_macro_dto::TscPublicPropsProjection::AuthoredArgument { .. }
-        ),
-        "the authored type argument stays a splice: {props:?}"
-    );
-    let good = props
-        .testing_rows
-        .iter()
-        .find(|row| row.name == "good")
-        .expect("exact sibling row");
-    assert_eq!(good.type_text.as_str(), "string");
-    assert!(
-        good.degraded.is_none(),
-        "the exact sibling is not the refusal"
-    );
-    let payload = props
-        .scope
-        .dependency_declarations
-        .iter()
-        .find(|dependency| dependency.name == "Payload")
-        .expect("refused member declaration");
-    assert_eq!(
-        payload.declaration_failure,
-        Some(TscDeclarationFailureReason::SemanticInferenceUnavailable(
-            TscSemanticInferenceUnavailableReason::WorkBudgetExceeded,
-        ))
-    );
-    assert!(
-        output
-            .completeness
-            .reasons()
-            .contains(verter_type_engine::semantic_query::PartialReasonSet::BUDGET_EXCEEDED),
-        "the refused member's budget stays in the summary, got {:?}",
-        output.completeness.reasons()
-    );
+    // bounded-loop: cold delivery, then the warm repeat of the same demand.
+    for pass in ["cold", "warm"] {
+        let output = produce(
+            &host,
+            "/src/RefusedMember.vue",
+            VueMacroCodegenDemand::RuntimeAndTsc,
+        );
+        let props = props_projection(&output);
+        assert!(
+            matches!(
+                props.public,
+                verter_macro_dto::TscPublicPropsProjection::AuthoredArgument { .. }
+            ),
+            "{pass}: the authored type argument stays a splice: {props:?}"
+        );
+        let good = props
+            .testing_rows
+            .iter()
+            .find(|row| row.name == "good")
+            .expect("exact sibling row");
+        assert_eq!(good.type_text.as_str(), "string");
+        assert!(
+            good.degraded.is_none(),
+            "{pass}: the exact sibling is not the refusal"
+        );
+        let payload = props
+            .scope
+            .dependency_declarations
+            .iter()
+            .find(|dependency| dependency.name == "Payload")
+            .expect("refused member declaration");
+        assert_eq!(
+            payload.declaration_failure,
+            Some(TscDeclarationFailureReason::SemanticInferenceUnavailable(
+                TscSemanticInferenceUnavailableReason::WorkBudgetExceeded,
+            ))
+        );
+        assert!(
+            output
+                .completeness
+                .reasons()
+                .contains(verter_type_engine::semantic_query::PartialReasonSet::BUDGET_EXCEEDED),
+            "{pass}: the refused member's budget stays in the summary, got {:?}",
+            output.completeness.reasons()
+        );
 
-    let runtime = output.runtime.expect("runtime bundle");
-    let MacroRuntimeOutcome::Complete(MacroRuntimeShape::Props(runtime_props)) =
-        &runtime.entries[0].outcome
-    else {
-        panic!("an exact sibling keeps the runtime surface: {runtime:?}");
-    };
-    let good_runtime = runtime_props
-        .props
-        .iter()
-        .find(|prop| prop.name == "good")
-        .expect("runtime sibling");
-    assert_eq!(constructors(good_runtime), [RuntimeConstructor::String]);
+        let runtime = output.runtime.expect("runtime bundle");
+        let MacroRuntimeOutcome::Complete(MacroRuntimeShape::Props(runtime_props)) =
+            &runtime.entries[0].outcome
+        else {
+            panic!("{pass}: an exact sibling keeps the runtime surface: {runtime:?}");
+        };
+        let good_runtime = runtime_props
+            .props
+            .iter()
+            .find(|prop| prop.name == "good")
+            .expect("runtime sibling");
+        assert_eq!(constructors(good_runtime), [RuntimeConstructor::String]);
+    }
 
     let narrowing = produce(
         &host,
