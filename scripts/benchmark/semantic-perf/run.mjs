@@ -8,6 +8,7 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { readSessionRecord } from "./session-record.mjs";
 
 import {
   ARMS,
@@ -1013,7 +1014,7 @@ export async function runSessions(
     let record = null;
     let sessionReadError = null;
     try {
-      record = JSON.parse(readFileSync(sessionOut, "utf8"));
+      record = readSessionRecord(sessionOut);
     } catch (err) {
       sessionReadError = String(err.message ?? err);
     }
