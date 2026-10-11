@@ -2245,7 +2245,7 @@ test("partial session validation checks completed answers, provenance and phase 
   failsWith(resummarize(run), /answered other demands/);
 });
 
-test("a tsc session retains earlier answers and names its interrupted edit", () => {
+test("a tsc session killed during an edit retains earlier answers and preserves attribution", () => {
   const run = sessionRun();
   const inv = run.sessionInvocations.find((i) => i.arm === "tsc-api" && !i.warmup);
   inv.supervisor = supervisorRecord({
