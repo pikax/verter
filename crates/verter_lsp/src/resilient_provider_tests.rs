@@ -144,7 +144,14 @@ async fn wait_for_restarting(
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while std::time::Instant::now() < deadline {
         crash_notify.notify_waiters();
-        if provider.get_hover("/probe.vue.tsx", 0).await.is_err() {
+        if provider
+            .get_hover(
+                &crate::type_provider::traits::ProviderQuery::at_engine_surface("/probe.vue.tsx"),
+                0,
+            )
+            .await
+            .is_err()
+        {
             return true;
         }
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
@@ -557,7 +564,12 @@ async fn resolve_completion_delegates_to_the_inner_provider() {
     let (provider, _crash_notify, _spawn_gate) = make_resilient(initial.clone(), replacement).await;
 
     let result = provider
-        .resolve_completion("/project/src/App.vue.tsx", key.clone())
+        .resolve_completion(
+            &crate::type_provider::traits::ProviderQuery::at_engine_surface(
+                "/project/src/App.vue.tsx",
+            ),
+            key.clone(),
+        )
         .await
         .unwrap();
 

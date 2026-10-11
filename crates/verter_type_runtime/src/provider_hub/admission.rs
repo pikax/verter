@@ -327,6 +327,53 @@ pub(super) struct AdmissionState {
     bindings: HashMap<String, ProjectWitness>,
     requests: HashMap<(String, String, Vec<CanonicalPath>), AdmittedRequest>,
     managed_requests: HashMap<String, AdmittedRequest>,
+    /// Generated-unit proofs a read-only query was admitted on, keyed by the
+    /// write set and retained with the membership inputs that decided them, so
+    /// a later query under the same publication and project generation reuses
+    /// the proof instead of re-running the membership query.
+    query_proofs: HashMap<(String, String, Vec<CanonicalPath>), MembershipInputs>,
+    /// Read-only admissions of generated units, keyed by the queried path and
+    /// reused while their membership inputs hold.
+    query_requests: HashMap<String, AdmittedRequest>,
+}
+
+/// The inputs that decide project membership: the exact publication (retained,
+/// so its identity cannot be reused by a later allocation) and the project
+/// generation. The workspace content generation is deliberately absent.
+#[derive(Clone)]
+struct MembershipInputs {
+    publication: Arc<PublishedRoot>,
+    project_generation: u64,
+}
+
+impl MembershipInputs {
+    fn of(basis: &ProjectBasis) -> Self {
+        Self {
+            publication: Arc::clone(&basis.publication),
+            project_generation: basis.project_generation,
+        }
+    }
+
+    fn decides(&self, basis: &ProjectBasis) -> bool {
+        Arc::ptr_eq(&self.publication, &basis.publication)
+            && self.project_generation == basis.project_generation
+    }
+}
+
+/// Drop every read-query cache entry retaining a publication other than
+/// `incoming`'s, so a republish releases the superseded workspace snapshot
+/// instead of keeping it alive until a cache fills. Entries under the same
+/// publication survive content edits, which read admission never compares.
+fn prune_superseded_query_caches(state: &mut AdmissionState, incoming: &ProjectBasis) {
+    state.query_requests.retain(|_, request| {
+        Arc::ptr_eq(
+            &request.witness.0.input.basis.publication,
+            &incoming.publication,
+        )
+    });
+    state
+        .query_proofs
+        .retain(|_, decided| Arc::ptr_eq(&decided.publication, &incoming.publication));
 }
 
 fn provider_identity<P: ?Sized>(provider: &Arc<P>) -> usize {
@@ -346,11 +393,63 @@ pub(super) fn check_current<P: ?Sized>(
 /// very publication, so the admitted units are still members of the bound
 /// project and an engine holding them holds nothing the live basis excludes.
 pub(super) fn membership_inputs_current(admission: &AdmittedRequest) -> bool {
-    let input = &admission.witness.0.input;
-    (input.current_basis)().is_some_and(|live| {
-        Arc::ptr_eq(&live.publication, &input.basis.publication)
-            && live.project_generation == input.basis.project_generation
-    })
+    witness_membership_current(&admission.witness)
+}
+
+fn witness_membership_current(witness: &ProjectWitness) -> bool {
+    let input = &witness.0.input;
+    (input.current_basis)().is_some_and(|live| MembershipInputs::of(&input.basis).decides(&live))
+}
+
+/// The currency of a READ-ONLY query: the witness still names the serving
+/// incarnation of this hub, and the inputs that decided its project and
+/// membership are still the live ones. A read writes nothing the engine keeps,
+/// so — unlike [`check_witness_for_serving`] — neither the workspace content
+/// generation nor the hub's warm binding memo takes part: an unrelated
+/// document's edit cannot refuse it. The coordinates the answer decodes
+/// against are the query's own capability, bound at its wire position.
+fn check_query_witness<P: ?Sized>(
+    shared: &Shared<P>,
+    witness: &ProjectWitness,
+) -> Result<(), AdmissionRefusal> {
+    let serving = shared
+        .serving()
+        .ok_or(AdmissionRefusal::NoServingProvider)?;
+    let bound = &witness.0;
+    if bound.hub_identity != std::ptr::from_ref(shared) as usize
+        || serving.epoch != bound.epoch
+        || provider_identity(&serving.provider) != bound.provider_identity
+    {
+        return Err(AdmissionRefusal::StaleProvider);
+    }
+    if !witness_membership_current(witness) {
+        return Err(AdmissionRefusal::StaleBasis);
+    }
+    Ok(())
+}
+
+/// Whether a complete generated-unit `proof` admits exactly `requested` into
+/// `witness`'s project under the publication the witness was bound to.
+fn validate_proof(
+    witness: &ProjectWitness,
+    requested: &[CanonicalPath],
+    proof: &GeneratedUnitAdmission,
+) -> Result<(), AdmissionRefusal> {
+    let GeneratedUnitAdmission::Admitted(admitted) = proof else {
+        return Err(AdmissionRefusal::GeneratedUnitExcluded);
+    };
+    if admitted.tsconfig_path() != &CanonicalPath::new(witness.project()) {
+        return Err(AdmissionRefusal::WrongProject);
+    }
+    if admitted.snapshot_identity()
+        != Arc::as_ptr(&witness.0.input.basis.publication.snapshot) as usize
+    {
+        return Err(AdmissionRefusal::StaleBasis);
+    }
+    if admitted.units() != requested {
+        return Err(AdmissionRefusal::IncompleteGeneratedProof);
+    }
+    Ok(())
 }
 
 /// Validate membership of bytes already replayed into this incarnation. A
@@ -503,6 +602,79 @@ pub(super) fn generated_request<P: ?Sized>(
     Ok(Some(request))
 }
 
+/// Admit a READ-ONLY query on the generated unit at `path` against `serving`.
+///
+/// A query admission whose membership inputs (the publication and project
+/// generation) still hold is reused; otherwise the resolver's proof binds a
+/// query-owned witness that neither joins nor evicts the warm write bindings.
+/// The workspace content generation decides neither: a read writes nothing the
+/// engine keeps.
+pub(super) fn generated_query<P: ?Sized>(
+    shared: &Shared<P>,
+    serving: &Serving<P>,
+    path: &str,
+    expected_project: Option<&str>,
+) -> Result<Option<AdmittedRequest>, AdmissionRefusal> {
+    let Some(resolve) = shared.generated_unit_resolver.get() else {
+        return Ok(None);
+    };
+    let cached = shared
+        .admission
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .query_requests
+        .get(path)
+        .cloned();
+    if let Some(request) = cached {
+        if check_query_witness(shared, &request.witness).is_ok() {
+            if expected_project.is_some_and(|p| p != request.witness.project()) {
+                return Err(AdmissionRefusal::WrongProject);
+            }
+            return Ok(Some(request));
+        }
+    }
+    let Some(input) = resolve(path) else {
+        return Ok(None);
+    };
+    let input = input?;
+    validate_generated_input(&input)?;
+    if expected_project.is_some_and(|p| p != input.binding.project) {
+        return Err(AdmissionRefusal::WrongProject);
+    }
+    if !input.units.contains(&CanonicalPath::new(path)) {
+        return Err(AdmissionRefusal::IncompleteGeneratedProof);
+    }
+    let witness = ProjectWitness(Arc::new(WitnessInner {
+        input: input.binding,
+        epoch: serving.epoch,
+        hub_identity: std::ptr::from_ref(shared) as usize,
+        provider_identity: provider_identity(&serving.provider),
+    }));
+    let mut units = input.units;
+    units.sort();
+    units.dedup();
+    let request = AdmittedRequest { witness, units };
+    check_query_witness(shared, &request.witness)?;
+    let mut state = shared.admission.lock().unwrap_or_else(|e| e.into_inner());
+    prune_superseded_query_caches(&mut state, &request.witness.0.input.basis);
+    if state.query_requests.len() >= 4096 {
+        state.query_requests.clear();
+    }
+    state
+        .query_requests
+        .insert(path.to_string(), request.clone());
+    Ok(Some(request))
+}
+
+/// Settle a read admitted by [`generated_query`]: the serving incarnation and
+/// the membership inputs it was admitted under, never the content generation.
+pub(super) fn check_query_current<P: ?Sized>(
+    shared: &Shared<P>,
+    admission: &AdmittedRequest,
+) -> Result<(), AdmissionRefusal> {
+    check_query_witness(shared, &admission.witness)
+}
+
 /// Rebind a replayed unit after a content-only edit without repeating its
 /// provider write. A changed membership basis still invalidates the install.
 pub(super) fn refresh_replay_request<P: ?Sized>(
@@ -644,6 +816,100 @@ where
         check_current(&self.state.shared, admission)
     }
 
+    /// Revalidate a read-only query's binding at execution and settlement:
+    /// the serving incarnation and the project membership it was bound under,
+    /// never the workspace content generation (see [`check_query_witness`]).
+    pub fn check_query(&self, witness: &ProjectWitness) -> Result<(), AdmissionRefusal> {
+        check_query_witness(&self.state.shared, witness)
+    }
+
+    /// [`Self::check_query`] for a read-only query on a generated unit.
+    pub fn check_query_admission(
+        &self,
+        admission: &AdmittedRequest,
+    ) -> Result<(), AdmissionRefusal> {
+        check_query_witness(&self.state.shared, &admission.witness)
+    }
+
+    /// Bind a READ-ONLY query to the serving incarnation and the project its
+    /// resolver facts name. Refused only when the membership inputs (the
+    /// publication and project generation) already moved, never on content
+    /// drift. The witness is the query's own: it neither joins nor evicts the
+    /// warm write bindings.
+    pub fn bind_query(
+        &self,
+        input: ProjectBindingInput,
+    ) -> Result<ProjectWitness, AdmissionRefusal> {
+        let shared = &self.state.shared;
+        let serving = shared
+            .serving()
+            .ok_or(AdmissionRefusal::NoServingProvider)?;
+        if input.source.is_empty() || input.project.is_empty() {
+            return Err(AdmissionRefusal::WrongProject);
+        }
+        let witness = ProjectWitness(Arc::new(WitnessInner {
+            input,
+            epoch: serving.epoch,
+            hub_identity: std::ptr::from_ref(shared.as_ref()) as usize,
+            provider_identity: provider_identity(&serving.provider),
+        }));
+        check_query_witness(shared, &witness)?;
+        Ok(witness)
+    }
+
+    /// Admit a READ-ONLY query on exactly the generated units a complete
+    /// workspace proof places in the witness's project. A proof decided under
+    /// the same publication and project generation is reused; content drift
+    /// never re-runs or refuses it.
+    pub fn admit_query(
+        &self,
+        witness: &ProjectWitness,
+        units: &[CanonicalPath],
+        resolve: impl FnOnce() -> GeneratedUnitAdmission,
+    ) -> Result<AdmittedRequest, AdmissionRefusal> {
+        let mut requested = units.to_vec();
+        requested.sort();
+        requested.dedup();
+        if requested.is_empty() {
+            return Err(AdmissionRefusal::IncompleteGeneratedProof);
+        }
+        let key = (
+            witness.source().to_string(),
+            witness.project().to_string(),
+            requested.clone(),
+        );
+        let basis = &witness.0.input.basis;
+        let proven = self
+            .state
+            .shared
+            .admission
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .query_proofs
+            .get(&key)
+            .is_some_and(|decided| decided.decides(basis));
+        if !proven {
+            validate_proof(witness, &requested, &resolve())?;
+            let mut state = self
+                .state
+                .shared
+                .admission
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            prune_superseded_query_caches(&mut state, basis);
+            if state.query_proofs.len() >= 4096 {
+                state.query_proofs.clear();
+            }
+            state.query_proofs.insert(key, MembershipInputs::of(basis));
+        }
+        let admission = AdmittedRequest {
+            witness: witness.clone(),
+            units: requested,
+        };
+        check_query_witness(&self.state.shared, &admission.witness)?;
+        Ok(admission)
+    }
+
     /// Bind resolver facts to the actual serving provider and its epoch. A
     /// complete same-basis binding is reused without another provider probe.
     pub fn bind_project(
@@ -699,20 +965,7 @@ where
             return Err(AdmissionRefusal::IncompleteGeneratedProof);
         }
         let proof = proof.ok_or(AdmissionRefusal::MissingGeneratedProof)?;
-        let GeneratedUnitAdmission::Admitted(admitted) = proof else {
-            return Err(AdmissionRefusal::GeneratedUnitExcluded);
-        };
-        if admitted.tsconfig_path() != &CanonicalPath::new(witness.project()) {
-            return Err(AdmissionRefusal::WrongProject);
-        }
-        if admitted.snapshot_identity()
-            != Arc::as_ptr(&witness.0.input.basis.publication.snapshot) as usize
-        {
-            return Err(AdmissionRefusal::StaleBasis);
-        }
-        if admitted.units() != requested {
-            return Err(AdmissionRefusal::IncompleteGeneratedProof);
-        }
+        validate_proof(witness, &requested, proof)?;
         let admission = AdmittedRequest {
             witness: witness.clone(),
             units: requested,

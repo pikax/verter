@@ -35,6 +35,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
+use verter_type_runtime::provider_query::ProviderQuery;
 
 use verter_session::external_ts::{
     AmbiguityCause, CarrierOwnershipResolution, GeneratedUnitAdmissionFact, ProjectBinding,
@@ -292,13 +293,26 @@ enum FeatureProviderSelection<P: SharedAttach> {
 }
 
 impl<P: SharedAttach> FeatureProviderSelection<P> {
-    async fn invoke<R, F, Fut>(self, invoke: F) -> Result<R, TypeProviderError>
+    async fn invoke<R, F, Fut>(
+        self,
+        query: &ProviderQuery,
+        invoke: F,
+    ) -> Result<R, TypeProviderError>
     where
-        F: Fn(Arc<dyn TypeProvider>) -> Fut,
+        F: Fn(Arc<dyn TypeProvider>, ProviderQuery) -> Fut,
         Fut: Future<Output = Result<R, TypeProviderError>>,
     {
+        let accepted = |attempt: &ProviderQuery, result: Result<R, TypeProviderError>| {
+            if result.is_ok() {
+                query.accept_result_from(attempt);
+            }
+            result
+        };
         match self {
-            Self::Managed(provider) => invoke(provider).await,
+            Self::Managed(provider) => {
+                let attempt = query.isolated_attempt();
+                accepted(&attempt, invoke(provider, attempt.clone()).await)
+            }
             Self::Shared {
                 hub,
                 managed,
@@ -317,10 +331,12 @@ impl<P: SharedAttach> FeatureProviderSelection<P> {
                     .is_synced()
                     || !still_serving()
                 {
-                    return invoke(managed).await;
+                    let attempt = query.isolated_attempt();
+                    return accepted(&attempt, invoke(managed, attempt.clone()).await);
                 }
                 let hub_handle: Arc<dyn TypeProvider> = hub.clone();
-                let shared_result = invoke(hub_handle).await;
+                let shared_attempt = query.isolated_attempt();
+                let shared_result = invoke(hub_handle, shared_attempt.clone()).await;
                 // A settled answer the captured epoch still owns is returned
                 // as-is (an engine error propagates exactly as before); any
                 // replacement or content desync converts success OR error
@@ -331,9 +347,10 @@ impl<P: SharedAttach> FeatureProviderSelection<P> {
                         .overlay_sync_state(&provider_path, transport_epoch)
                         .is_synced()
                 {
-                    shared_result
+                    accepted(&shared_attempt, shared_result)
                 } else {
-                    invoke(managed).await
+                    let attempt = query.isolated_attempt();
+                    accepted(&attempt, invoke(managed, attempt.clone()).await)
                 }
             }
         }
@@ -2070,13 +2087,14 @@ impl TypeProvider for TsgoCompositeProvider {
 
     fn get_completions(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         offset: u32,
         trigger_character: Option<&str>,
     ) -> ProviderFuture<'_, CompletionResult> {
         // MIXED: a denied carrier serves the empty external default (native completions
         // preserved by the handler merge); a non-carrier path is ungated.
-        let path = path.to_string();
+        let path = query.path().to_string();
+        let query = query.clone();
         let trigger_character = trigger_character.map(str::to_string);
         Box::pin(async move {
             if let Some(selection) = self
@@ -2084,12 +2102,11 @@ impl TypeProvider for TsgoCompositeProvider {
                 .await
             {
                 selection
-                    .invoke(|provider| {
-                        let path = path.clone();
+                    .invoke(&query, |provider, query| {
                         let trigger_character = trigger_character.clone();
                         async move {
                             provider
-                                .get_completions(&path, offset, trigger_character.as_deref())
+                                .get_completions(&query, offset, trigger_character.as_deref())
                                 .await
                         }
                     })
@@ -2105,12 +2122,13 @@ impl TypeProvider for TsgoCompositeProvider {
 
     fn get_completion_details<'a>(
         &'a self,
-        path: &'a str,
+        query: &'a ProviderQuery,
         offset: u32,
         items: &'a [Completion],
     ) -> ProviderFuture<'a, Vec<Completion>> {
         // MIXED: a denied carrier serves the empty external default.
-        let path = path.to_string();
+        let path = query.path().to_string();
+        let query = query.clone();
         let items = items.to_vec();
         Box::pin(async move {
             if let Some(selection) = self
@@ -2118,10 +2136,13 @@ impl TypeProvider for TsgoCompositeProvider {
                 .await
             {
                 selection
-                    .invoke(|provider| {
-                        let path = path.clone();
+                    .invoke(&query, |provider, query| {
                         let items = items.clone();
-                        async move { provider.get_completion_details(&path, offset, &items).await }
+                        async move {
+                            provider
+                                .get_completion_details(&query, offset, &items)
+                                .await
+                        }
                     })
                     .await
             } else {
@@ -2132,22 +2153,22 @@ impl TypeProvider for TsgoCompositeProvider {
 
     fn resolve_completion(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         data: CompletionResolveData,
     ) -> ProviderFuture<'_, Option<CompletionResolveResult>> {
         // EXTERNAL-ONLY: a denied carrier suppresses provider enrichment (None) — no
         // owned resolve call.
-        let path = path.to_string();
+        let path = query.path().to_string();
+        let query = query.clone();
         Box::pin(async move {
             if let Some(selection) = self
                 .feature_provider(ProviderFeature::ResolveCompletion, &path)
                 .await
             {
                 selection
-                    .invoke(|provider| {
-                        let path = path.clone();
+                    .invoke(&query, |provider, query| {
                         let data = data.clone();
-                        async move { provider.resolve_completion(&path, data).await }
+                        async move { provider.resolve_completion(&query, data).await }
                     })
                     .await
             } else {
@@ -2156,16 +2177,20 @@ impl TypeProvider for TsgoCompositeProvider {
         })
     }
 
-    fn get_hover(&self, path: &str, offset: u32) -> ProviderFuture<'_, Option<HoverInfo>> {
+    fn get_hover(
+        &self,
+        query: &ProviderQuery,
+        offset: u32,
+    ) -> ProviderFuture<'_, Option<HoverInfo>> {
         // MIXED: a denied carrier serves the None external default (the handler merge
         // preserves any native sub-answer); a non-carrier path is ungated.
-        let path = path.to_string();
+        let path = query.path().to_string();
+        let query = query.clone();
         Box::pin(async move {
             if let Some(selection) = self.feature_provider(ProviderFeature::Hover, &path).await {
                 selection
-                    .invoke(|provider| {
-                        let path = path.clone();
-                        async move { provider.get_hover(&path, offset).await }
+                    .invoke(&query, |provider, query| async move {
+                        provider.get_hover(&query, offset).await
                     })
                     .await
             } else {
@@ -2174,19 +2199,23 @@ impl TypeProvider for TsgoCompositeProvider {
         })
     }
 
-    fn get_definition(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
+    fn get_definition(
+        &self,
+        query: &ProviderQuery,
+        offset: u32,
+    ) -> ProviderFuture<'_, Vec<TypeLocation>> {
         // MIXED: a denied carrier serves the empty external default (native preserved by
         // the handler merge).
-        let path = path.to_string();
+        let path = query.path().to_string();
+        let query = query.clone();
         Box::pin(async move {
             if let Some(selection) = self
                 .feature_provider(ProviderFeature::Definition, &path)
                 .await
             {
                 selection
-                    .invoke(|provider| {
-                        let path = path.clone();
-                        async move { provider.get_definition(&path, offset).await }
+                    .invoke(&query, |provider, query| async move {
+                        provider.get_definition(&query, offset).await
                     })
                     .await
             } else {
@@ -2197,22 +2226,22 @@ impl TypeProvider for TsgoCompositeProvider {
 
     fn get_type_definition(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         offset: u32,
     ) -> ProviderFuture<'_, Vec<TypeLocation>> {
         // EXTERNAL-ONLY: a denied carrier serves the empty external default with NO owned
         // delegation (never a `--lsp` self-discovery fall-through); a non-carrier path is
         // ungated.
-        let path = path.to_string();
+        let path = query.path().to_string();
+        let query = query.clone();
         Box::pin(async move {
             if let Some(selection) = self
                 .feature_provider(ProviderFeature::TypeDefinition, &path)
                 .await
             {
                 selection
-                    .invoke(|provider| {
-                        let path = path.clone();
-                        async move { provider.get_type_definition(&path, offset).await }
+                    .invoke(&query, |provider, query| async move {
+                        provider.get_type_definition(&query, offset).await
                     })
                     .await
             } else {
@@ -2221,19 +2250,23 @@ impl TypeProvider for TsgoCompositeProvider {
         })
     }
 
-    fn get_references(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
+    fn get_references(
+        &self,
+        query: &ProviderQuery,
+        offset: u32,
+    ) -> ProviderFuture<'_, Vec<TypeLocation>> {
         // MIXED: a denied carrier serves the empty external default (native preserved by
         // the handler merge).
-        let path = path.to_string();
+        let path = query.path().to_string();
+        let query = query.clone();
         Box::pin(async move {
             if let Some(selection) = self
                 .feature_provider(ProviderFeature::References, &path)
                 .await
             {
                 selection
-                    .invoke(|provider| {
-                        let path = path.clone();
-                        async move { provider.get_references(&path, offset).await }
+                    .invoke(&query, |provider, query| async move {
+                        provider.get_references(&query, offset).await
                     })
                     .await
             } else {
@@ -2244,23 +2277,23 @@ impl TypeProvider for TsgoCompositeProvider {
 
     fn get_rename_locations(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         offset: u32,
     ) -> ProviderFuture<'_, Vec<RenameLocation>> {
         // MIXED: a denied carrier serves the empty external default (native rename only);
         // the LSP handler's existing incomplete-rename safety gates — a SEPARATE layer
         // this admission does not touch — still block unsafe partial edits. Never a
         // `--lsp` self-discovery fall-through after admission failure.
-        let path = path.to_string();
+        let path = query.path().to_string();
+        let query = query.clone();
         Box::pin(async move {
             if let Some(selection) = self
                 .feature_provider(ProviderFeature::RenameLocations, &path)
                 .await
             {
                 selection
-                    .invoke(|provider| {
-                        let path = path.clone();
-                        async move { provider.get_rename_locations(&path, offset).await }
+                    .invoke(&query, |provider, query| async move {
+                        provider.get_rename_locations(&query, offset).await
                     })
                     .await
             } else {
@@ -2271,20 +2304,20 @@ impl TypeProvider for TsgoCompositeProvider {
 
     fn get_signature_help(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         offset: u32,
     ) -> ProviderFuture<'_, Option<SignatureHelp>> {
         // EXTERNAL-ONLY: a denied carrier serves `None` with NO owned delegation.
-        let path = path.to_string();
+        let path = query.path().to_string();
+        let query = query.clone();
         Box::pin(async move {
             if let Some(selection) = self
                 .feature_provider(ProviderFeature::SignatureHelp, &path)
                 .await
             {
                 selection
-                    .invoke(|provider| {
-                        let path = path.clone();
-                        async move { provider.get_signature_help(&path, offset).await }
+                    .invoke(&query, |provider, query| async move {
+                        provider.get_signature_help(&query, offset).await
                     })
                     .await
             } else {
@@ -2295,7 +2328,7 @@ impl TypeProvider for TsgoCompositeProvider {
 
     fn get_code_actions(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         start_offset: u32,
         end_offset: u32,
         diagnostics: &[ProviderDiagnosticContext],
@@ -2305,7 +2338,8 @@ impl TypeProvider for TsgoCompositeProvider {
         // organize-imports, extract-component, macro/component/event actions,
         // action-engine fixes — are preserved by its merge); a non-carrier path is
         // ungated. Never a `--lsp` self-discovery fall-through after admission failure.
-        let path = path.to_string();
+        let path = query.path().to_string();
+        let query = query.clone();
         let diagnostics = diagnostics.to_vec();
         Box::pin(async move {
             if let Some(selection) = self
@@ -2313,12 +2347,11 @@ impl TypeProvider for TsgoCompositeProvider {
                 .await
             {
                 selection
-                    .invoke(|provider| {
-                        let path = path.clone();
+                    .invoke(&query, |provider, query| {
                         let diagnostics = diagnostics.clone();
                         async move {
                             provider
-                                .get_code_actions(&path, start_offset, end_offset, &diagnostics)
+                                .get_code_actions(&query, start_offset, end_offset, &diagnostics)
                                 .await
                         }
                     })
@@ -2329,19 +2362,19 @@ impl TypeProvider for TsgoCompositeProvider {
         })
     }
 
-    fn get_semantic_tokens(&self, path: &str) -> ProviderFuture<'_, Vec<SemanticToken>> {
+    fn get_semantic_tokens(&self, query: &ProviderQuery) -> ProviderFuture<'_, Vec<SemanticToken>> {
         // EXTERNAL-ONLY: a denied carrier serves the empty external default with NO owned
         // delegation.
-        let path = path.to_string();
+        let path = query.path().to_string();
+        let query = query.clone();
         Box::pin(async move {
             if let Some(selection) = self
                 .feature_provider(ProviderFeature::SemanticTokens, &path)
                 .await
             {
                 selection
-                    .invoke(|provider| {
-                        let path = path.clone();
-                        async move { provider.get_semantic_tokens(&path).await }
+                    .invoke(&query, |provider, query| async move {
+                        provider.get_semantic_tokens(&query).await
                     })
                     .await
             } else {
@@ -2352,21 +2385,21 @@ impl TypeProvider for TsgoCompositeProvider {
 
     fn get_document_highlights(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         offset: u32,
     ) -> ProviderFuture<'_, Vec<TypeDocumentHighlight>> {
         // MIXED: a denied carrier serves the empty external default (native preserved by
         // the handler merge).
-        let path = path.to_string();
+        let path = query.path().to_string();
+        let query = query.clone();
         Box::pin(async move {
             if let Some(selection) = self
                 .feature_provider(ProviderFeature::DocumentHighlights, &path)
                 .await
             {
                 selection
-                    .invoke(|provider| {
-                        let path = path.clone();
-                        async move { provider.get_document_highlights(&path, offset).await }
+                    .invoke(&query, |provider, query| async move {
+                        provider.get_document_highlights(&query, offset).await
                     })
                     .await
             } else {
@@ -2377,26 +2410,24 @@ impl TypeProvider for TsgoCompositeProvider {
 
     fn get_inlay_hints(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         start_offset: u32,
         end_offset: u32,
     ) -> ProviderFuture<'_, Vec<InlayHint>> {
         // MIXED: a denied carrier serves the empty external default (native preserved by
         // the handler merge).
-        let path = path.to_string();
+        let path = query.path().to_string();
+        let query = query.clone();
         Box::pin(async move {
             if let Some(selection) = self
                 .feature_provider(ProviderFeature::InlayHints, &path)
                 .await
             {
                 selection
-                    .invoke(|provider| {
-                        let path = path.clone();
-                        async move {
-                            provider
-                                .get_inlay_hints(&path, start_offset, end_offset)
-                                .await
-                        }
+                    .invoke(&query, |provider, query| async move {
+                        provider
+                            .get_inlay_hints(&query, start_offset, end_offset)
+                            .await
                     })
                     .await
             } else {

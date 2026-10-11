@@ -496,9 +496,10 @@ impl<P> ComponentMetaResultDb<P> {
             use verter_session_query::retention::RetainedFootprint as _;
             entry.retained_footprint_bytes()
         };
-        let charge = match self.retention_account().reserve(
-            verter_session_query::retention::ChargeClass::Retained,
+        let charge = match verter_session_query::facts::receipt::reserve_retained_with_evidence(
+            self.retention_account(),
             bytes,
+            &[&entry.read_set_signature.facts],
         ) {
             verter_session_query::retention::RetentionAdmission::Admitted(charge) => charge,
             verter_session_query::retention::RetentionAdmission::Refused(refusal) => {

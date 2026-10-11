@@ -13,7 +13,7 @@
 //!   request; never publishable.
 //! * `NoReuse` — a TRANSIENT refusal (broken decl-body lease, inference
 //!   budget stop, preparation failure) or an unattributed refusal
-//!   (fact-signature overflow, mutation instability). Not safe even for
+//!   (mutation instability). Not safe even for
 //!   request-scoped reuse.
 //!
 //! ## What reuse must never launder
@@ -185,8 +185,7 @@ fn shared_singleflight_follower_stays_cacheable() {
     let host = Arc::new(host);
     assert!(
         host.owner_import_route_witness_for_tests(owner).is_some(),
-        "control invariant: one unresolved specifier stays well within \
-         FACT_SIGNATURE_CAP and yields a rootable witness"
+        "control invariant: one unresolved specifier yields a rootable witness"
     );
 
     let view = host.resolver_store_view_read().into_owned_view();

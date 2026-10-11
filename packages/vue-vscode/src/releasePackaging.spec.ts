@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 // eslint-disable-next-line -- packaging helpers are JavaScript executed by package.mjs
 // @ts-expect-error -- stage-bin.mjs intentionally has no generated declaration file.
+import { matchPathFilters } from "../../../scripts/ci-impact.mjs";
 import { assertVsixContainsMcpEngine, listVsixEntries } from "../stage-bin.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -562,13 +563,13 @@ describe("CI Rust path eligibility", () => {
 
   // @ai-generated - Pins every non-Rust input consumed by the canonical Rust gate job.
   it("runs the Rust job when gate, harness, provider, or install-graph inputs change", () => {
-    const rustFilter = ci.match(/^ {12}rust:\n([\s\S]*?)(?=^ {12}[\w-]+:\n)/m)?.[1] ?? "";
     const requiredInputs = [
-      "packages/framework-conformance-harness/**",
-      "packages/language-shared/**",
-      "packages/svelte-jsx/**",
-      "packages/typescript-plugin/**",
-      "scripts/gate*.mjs",
+      "packages/framework-conformance-harness/package.json",
+      "packages/language-shared/src/index.ts",
+      "packages/svelte-jsx/package.json",
+      "packages/typescript-plugin/src/index.ts",
+      "scripts/gate.mjs",
+      "scripts/gate-internals.mjs",
       ".npmrc",
       ".nvmrc",
       "package.json",
@@ -576,12 +577,11 @@ describe("CI Rust path eligibility", () => {
       "pnpm-workspace.yaml",
     ];
 
-    expect(rustFilter, "detect-changes must define a rust path filter").not.toBe("");
     for (const input of requiredInputs) {
       expect(
-        rustFilter,
+        matchPathFilters([input]).hits.rust,
         `the Rust gate consumes \`${input}\`; changing it must make detect-changes.rust true`,
-      ).toContain(`'${input}'`);
+      ).toBe(true);
     }
   });
 });

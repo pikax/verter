@@ -1,0 +1,71 @@
+{
+  "schema": "MdxVersionLock",
+  "version": 1,
+  "product": "MdxVersionLock",
+  "node": "MDX0",
+  "kind": "lock",
+  "framework": "mdx",
+  "pinRule": "every-version-is-an-exact-pinned-version-with-a-named-official-source",
+  "release": {
+    "id": "mdx-3.1",
+    "line": "3.x",
+    "status": "admitted-current-stable",
+    "packages": [
+      {
+        "package": "@mdx-js/mdx",
+        "version": "3.1.1",
+        "role": "official compiler; test-only conformance oracle, never executed by a product path",
+        "source": "https://registry.npmjs.org/@mdx-js/mdx/3.1.1",
+        "integrity": "sha512-f6ZO2ifpwAQIpzGWaBQT2TXxPv6z3RBzQKpVftEWN78Vl/YweF1uwussDx8ECAXVtr3Rs89fKyG9YlzUs9DyGQ==",
+        "upstream": "https://github.com/mdx-js/mdx/tree/main/packages/mdx"
+      },
+      {
+        "package": "@mdx-js/react",
+        "version": "3.1.1",
+        "role": "React component provider (MDXProvider, useMDXComponents); the providerImportSource MDX-with-React activation requires",
+        "source": "https://registry.npmjs.org/@mdx-js/react/3.1.1",
+        "integrity": "sha512-f++rKLQgUVYDAtECQ6fn/is15GkEH9+nZPM3MS0RcxVqoTfawHvDlSCH7JbMhAM6uJ32v3eXLvLmLvjGu7PTQw==",
+        "upstream": "https://github.com/mdx-js/mdx/tree/main/packages/react"
+      },
+      {
+        "package": "@types/mdx",
+        "version": "2.0.14",
+        "role": "MDXProps / MDXContent / MDXComponents / MDXModule declarations; the native props facet source",
+        "source": "https://registry.npmjs.org/@types/mdx/2.0.14",
+        "integrity": "sha512-T48PeuJtvLosNTPVhfnIp3i/n3a4g4Bad7YCq5k64D4u7NwDrAotikQ+5+sjtUvBmxCMlbo3dVL+C2dP0rWHzg==",
+        "upstream": "https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/mdx"
+      }
+    ]
+  },
+  "reactProfile": {
+    "relation": "reference",
+    "profile": "React 19.x stable (RCT0 ratified release)",
+    "lock": "tests/framework-react/RCT0/products/react-version-lock.json",
+    "owner": "RCT0",
+    "secondReactLockAdmitted": false,
+    "pinEqualityCheck": "MDX1M-AC6",
+    "note": "MDX0 records no React version of its own. The one React profile is RCT0's; MDX1M-AC6 rejects any React pin here that differs from RCT0's lock."
+  },
+  "nextMajor": {
+    "admitted": false,
+    "rule": "A next MDX major (4.x) is admitted only once announced upstream and ratified by an MDX0 amendment; until then an installed 4.x resolves to unsupported-version."
+  },
+  "excluded": [
+    { "selector": "@mdx-js/mdx@<3", "reason": "legacy major (MDX 1/2); not admitted" },
+    { "selector": "@mdx-js/react@<3", "reason": "legacy major; not admitted" },
+    {
+      "selector": "@mdx-js/mdx@>=4",
+      "reason": "next major not yet announced and ratified by an MDX0 amendment"
+    },
+    {
+      "selector": "dist-tag next / ci / canary prereleases",
+      "reason": "floating and prerelease tags are never admitted"
+    }
+  ],
+  "floatingAdmitted": false,
+  "latestToolClaimsAdmitted": false,
+  "canaryAdmitted": false,
+  "legacyAdmitted": false,
+  "admissionReads": "resolved-installed-version",
+  "notes": "Pins are the current 3.x line of each package at ratification, read from the npm registry; integrities are the registry dist.integrity values. Activation compares the PM-resolved installed version against this lock (VID0 R08), never the declared range."
+}

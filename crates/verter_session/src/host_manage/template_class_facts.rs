@@ -35,7 +35,12 @@ use verter_type_engine::semantic_query::{
     SemanticNodeData, SemanticNodeId, ValueRootKey,
 };
 
-pub(crate) type SessionTemplateClassSemanticFacts = TemplateClassSemanticFacts<ReadSetSignature>;
+/// The session's template-class facts. The signature is `None` when the
+/// read set was refused as mutation-unstable: no observation set survives,
+/// so the facts carry no validity evidence rather than an empty signature
+/// that would validate vacuously.
+pub(crate) type SessionTemplateClassSemanticFacts =
+    TemplateClassSemanticFacts<Option<ReadSetSignature>>;
 
 #[derive(Clone, Copy)]
 pub(crate) struct TemplateClassScriptInputs<'a> {
@@ -50,7 +55,7 @@ pub(crate) struct TemplateClassScriptInputs<'a> {
 /// from. Artifact-cache warmth is deliberately NOT one of them: "the
 /// content-addressed artifact store holds no entry for this content hash yet"
 /// is neither an overlay nor a fenced input, and it appears in no enumerated
-/// `ReturnOnly` trigger (overflow, budget exhaustion, cancellation, generation
+/// `ReturnOnly` trigger (budget exhaustion, cancellation, generation
 /// supersession, incomplete self-rooting, unresolved provenance).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TemplateClassFenceReason {
@@ -185,13 +190,19 @@ pub(crate) fn build_template_class_semantic_facts(
             },
         );
 
+    // A refused read set keeps whatever evidence it has, but marks the facts
+    // `ReturnOnly`: `complete_dependency_signature` and
+    // `owner_only_publication_safe` both withhold a `ReturnOnly` signature
+    // from every rail, so it never authorises a warm read.
     let dependency_signature = match finalise {
-        FactReadSetFinalise::Ok(facts) => ReadSetSignature::new(facts),
-        FactReadSetFinalise::NonCacheable(_)
-        | FactReadSetFinalise::Overflow
-        | FactReadSetFinalise::MutationUnstable => {
+        FactReadSetFinalise::Ok(facts) => Some(ReadSetSignature::new(facts)),
+        FactReadSetFinalise::NonCacheable(facts) => {
             completeness = TemplateClassFactsCompleteness::ReturnOnly;
-            ReadSetSignature::overflow()
+            Some(ReadSetSignature::new(facts))
+        }
+        FactReadSetFinalise::MutationUnstable => {
+            completeness = TemplateClassFactsCompleteness::ReturnOnly;
+            None
         }
     };
     // A FENCED input is return-only: content-override bytes, session-overlay
@@ -237,6 +248,7 @@ pub(crate) fn complete_dependency_signature(
 ) -> Option<ReadSetSignature> {
     (facts.completeness() == TemplateClassFactsCompleteness::Complete)
         .then(|| facts.dependency_signature().clone())
+        .flatten()
 }
 
 /// Whether the pure-content publish is safe for these facts.
@@ -248,34 +260,33 @@ pub(crate) fn complete_dependency_signature(
 /// when every fact in it is attributable to the owner.
 pub(crate) fn owner_only_publication_safe(facts: &SessionTemplateClassSemanticFacts) -> bool {
     use verter_session_query::facts::fact_cache::FactAttribution;
+    let Some(signature) = facts.dependency_signature() else {
+        return false;
+    };
     facts.completeness() == TemplateClassFactsCompleteness::Complete
-        && facts
-            .dependency_signature()
-            .facts
-            .iter()
-            .all(|fact| match fact.attribution() {
-                FactAttribution::Canonical(canonical_id) => canonical_id == facts.owner_canonical(),
-                // Both are UNATTRIBUTABLE, and for opposite reasons: a
-                // project scalar describes no canonical, a domain
-                // aggregate stands in for an unbounded set of them.
-                // Either way the owner's content hash cannot be a
-                // complete validity oracle, so the publish is declined.
-                //
-                // Stated as its own arm because through the `Option`
-                // projection this was an ACCIDENT — an aggregate answered
-                // `None`, `None` failed `is_some_and`, and the right
-                // result arrived for a reason nothing recorded. That is
-                // one refactor away from becoming `true`, which would
-                // publish a cross-file-dependent compile output under a
-                // key that only tracks the owner's bytes.
-                // A consumed result's receipt stands for another result's
-                // whole evidence, which the owner's bytes cannot vouch for
-                // either.
-                FactAttribution::ProjectScalar
-                | FactAttribution::DomainAggregate(_)
-                | FactAttribution::StrictSelfRootWorld
-                | FactAttribution::ResultReceipt => false,
-            })
+        && signature.facts.iter().all(|fact| match fact.attribution() {
+            FactAttribution::Canonical(canonical_id) => canonical_id == facts.owner_canonical(),
+            // Both are UNATTRIBUTABLE, and for opposite reasons: a
+            // project scalar describes no canonical, a domain
+            // aggregate stands in for an unbounded set of them.
+            // Either way the owner's content hash cannot be a
+            // complete validity oracle, so the publish is declined.
+            //
+            // Stated as its own arm because through the `Option`
+            // projection this was an ACCIDENT — an aggregate answered
+            // `None`, `None` failed `is_some_and`, and the right
+            // result arrived for a reason nothing recorded. That is
+            // one refactor away from becoming `true`, which would
+            // publish a cross-file-dependent compile output under a
+            // key that only tracks the owner's bytes.
+            // A consumed result's receipt stands for another result's
+            // whole evidence, which the owner's bytes cannot vouch for
+            // either.
+            FactAttribution::ProjectScalar
+            | FactAttribution::DomainAggregate(_)
+            | FactAttribution::StrictSelfRootWorld
+            | FactAttribution::ResultReceipt => false,
+        })
 }
 
 #[derive(Debug, Clone)]
@@ -1072,8 +1083,10 @@ mod tests {
              a cold artifact store is not a fence",
         );
         assert!(
-            publishable.dependency_signature().facts.is_empty()
-                && !publishable.dependency_signature().overflowed,
+            publishable
+                .dependency_signature()
+                .as_ref()
+                .is_some_and(|signature| signature.facts.is_empty()),
             "a dependency-free fact set records an EMPTY PRESENT signature",
         );
         assert!(
@@ -1179,7 +1192,7 @@ mod attribution_tests {
             std::sync::Arc::from([]),
             std::sync::Arc::from([]),
             TemplateClassFactsCompleteness::Complete,
-            signature,
+            Some(signature),
         )
     }
 

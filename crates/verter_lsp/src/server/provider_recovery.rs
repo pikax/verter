@@ -11,7 +11,10 @@
 //!    EXACTLY once. A second failure fails closed to the caller's native
 //!    result — never a fabrication and never a spin. Navigation stays
 //!    forbidden from awaiting dependency publication; this heals transient
-//!    faults, it is not an admission gate.
+//!    faults, it is not an admission gate. A typed coordinate conflict (the
+//!    engine held other bytes than the captured surface the query was minted
+//!    from) needs no resync: the retry re-binds a fresh query to the surface
+//!    the server records now.
 //!
 //! ## The retry identity fence
 //!
@@ -30,6 +33,7 @@ use tower_lsp_server::ls_types::Position;
 
 use crate::type_provider::merge;
 use crate::type_provider::protocol::TypeProviderError;
+use crate::type_provider::traits::ProviderQuery;
 
 use super::TypeProviderContext;
 
@@ -47,10 +51,10 @@ pub(super) struct ProviderQueryOutcome<T> {
 
 /// Run `query` with the shared bounded transient-error recovery.
 ///
-/// `query` performs the provider call for ONE attempt against the given
-/// provider path + generated offset (callers pin any per-attempt state — e.g.
-/// the foreign carrier IDE/API sets — inside it, so a retry re-pins under the
-/// surface it actually queries). `resync` repairs the current file's provider
+/// `query` performs the provider call for ONE attempt with the provider query
+/// minted from that attempt's captured surface + generated offset (callers pin
+/// any per-attempt state — e.g. the foreign carrier IDE/API sets — inside it,
+/// so a retry re-pins under the surface it actually queries). `resync` repairs the current file's provider
 /// surface (production: `ensure_current_file_synced`); `recapture` captures
 /// the post-resync surface (production: `type_provider_context`). Both are
 /// injected so the protocol — including the identity fence — is directly
@@ -60,7 +64,7 @@ pub(super) async fn provider_query_with_bounded_recovery<T, QFut, RFut>(
     position: &Position,
     initial_ctx: TypeProviderContext,
     initial_offset: u32,
-    mut query: impl FnMut(String, u32) -> QFut,
+    mut query: impl FnMut(ProviderQuery, u32) -> QFut,
     resync: impl FnOnce() -> RFut,
     recapture: impl FnOnce() -> Option<TypeProviderContext>,
 ) -> ProviderQueryOutcome<T>
@@ -69,19 +73,24 @@ where
     RFut: std::future::Future<Output = ()>,
 {
     tracing::debug!("{feature}: querying type provider at tsx offset {initial_offset}");
-    match query(initial_ctx.tsx_path.clone(), initial_offset).await {
+    match query(initial_ctx.snapshot.provider_query(), initial_offset).await {
         Ok(value) => {
             return ProviderQueryOutcome {
                 value: Some(value),
                 ctx: initial_ctx,
             };
         }
+        Err(e) if e.query_conflict => {
+            // The captured surface is not the one the engine holds: re-bind
+            // to the surface recorded now, without a resync.
+            tracing::debug!("{feature}: {e} — re-binding to the current surface once");
+        }
         Err(e) => {
             tracing::warn!("{feature} type provider error: {e} — resyncing and retrying once");
+            resync().await;
         }
     }
 
-    resync().await;
     let Some(retry_ctx) = recapture() else {
         // No recapturable surface — fail closed to the native result.
         return ProviderQueryOutcome {
@@ -118,7 +127,7 @@ where
     };
 
     tracing::debug!("{feature}: retrying type provider at tsx offset {retry_offset}");
-    match query(retry_ctx.tsx_path.clone(), retry_offset).await {
+    match query(retry_ctx.snapshot.provider_query(), retry_offset).await {
         Ok(value) => ProviderQueryOutcome {
             value: Some(value),
             ctx: retry_ctx,

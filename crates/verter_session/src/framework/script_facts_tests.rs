@@ -1,8 +1,8 @@
 //! Unit tests for the resolved-validation script-fact seam: the
 //! content-addressed candidate store, the fact-rail-validated resolved-fact
 //! store, the strict-same-generation gate, and the two admission rails the
-//! entry-point folds together (a fenced import-route serve and a
-//! fact-signature overflow).
+//! entry-point folds together (a fenced import-route serve and the
+//! import-route scope's own non-cacheable read).
 
 use super::*;
 use crate::resolver_core::PermissiveStoreView;
@@ -199,13 +199,13 @@ fn resolved_fact_warm_read_requires_same_generation_and_fact_rail() {
 }
 
 #[test]
-fn overflowed_admission_never_warms_the_store_return_only() {
+fn refused_admission_never_warms_the_store_return_only() {
     let store = FrameworkScriptFactStore::new();
     let key = resolved_fact_key("/a.ts");
-    // An overflowed (NonCacheable) admission: the value is returned to the
+    // A refused (NonCacheable) admission: the value is returned to the
     // caller but the store is NOT warmed (the no-poison invariant).
     let admission = SignatureAdmission::from_finalise(
-        verter_session_query::facts::fact_read_set::FactReadSetFinalise::Overflow,
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::MutationUnstable,
     );
     let stored = store.publish_if_cacheable(
         key.clone(),
@@ -220,7 +220,7 @@ fn overflowed_admission_never_warms_the_store_return_only() {
         .as_any()
         .downcast_ref::<fixtures::FixtureFactPayload>()
         .is_some());
-    // ...but the store stays empty — the overflowed result was NOT warmed.
+    // ...but the store stays empty — the refused result was NOT warmed.
     assert!(store.is_empty());
     assert!(super::read_script_fact(&store, &key, &PermissiveStoreView, 5).is_none());
 }
@@ -232,6 +232,93 @@ fn cacheable_admission_warms_exactly_one_entry() {
     let admission = SignatureAdmission::Cacheable(ReadSetSignature::empty());
     store.publish_if_cacheable(key, ExactScriptFacts::new(fixture_payload()), &admission, 5);
     assert_eq!(store.len(), 1, "a Cacheable admission warms one entry");
+}
+
+/// A cacheable signature wider than one page, sealed into pages none of
+/// which a cache admission has claimed yet.
+fn wide_cacheable_admission() -> SignatureAdmission {
+    let facts = (0..2 * verter_session_query::facts::fact_read_set::FACT_PAGE_WIDTH + 3)
+        .map(|index| FactVersionRef::FileWholeHash {
+            canonical_id: format!("/wide/{index:05}.ts"),
+            hash: [1u8; 16],
+        })
+        .collect();
+    SignatureAdmission::Cacheable(ReadSetSignature::new(
+        verter_session_query::facts::fact_read_set::seal_canonical_signature(facts),
+    ))
+}
+
+fn signature_pages(
+    signature: &ReadSetSignature,
+) -> Vec<verter_session_query::facts::receipt::ResultReceipt> {
+    signature
+        .facts
+        .iter()
+        .filter_map(|fact| match fact {
+            FactVersionRef::Receipt(page) if page.is_page() => Some(page.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A cached wide entry owns its pages as refusable retained bytes; an
+/// account that refuses that footprint leaves the store empty while the
+/// caller still receives the complete payload, and the last holder's drop
+/// drains the pages.
+#[test]
+fn a_wide_cacheable_admission_claims_its_pages_and_is_refused_for_them() {
+    use verter_session_query::retention::{
+        ChargeClass, RetentionLimits, SemanticRetentionAccount, StoreAccount,
+    };
+    let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
+    let store =
+        FrameworkScriptFactStore::with_retention_account(StoreAccount::new(Arc::clone(&account)));
+    let stored = store.publish_if_cacheable(
+        resolved_fact_key("/a.ts"),
+        ExactScriptFacts::new(fixture_payload()),
+        &wide_cacheable_admission(),
+        5,
+    );
+    assert_eq!(store.len(), 1);
+    let pages = signature_pages(&stored.read_set_signature);
+    assert!(!pages.is_empty(), "premise: the signature is paged");
+    assert!(pages
+        .iter()
+        .all(|page| page.retained_charge_class() == Some(ChargeClass::Retained)));
+    let page_bytes: usize = pages.iter().map(|page| page.retained_charge_bytes()).sum();
+    assert_eq!(account.snapshot().retained_bytes, page_bytes);
+    drop((pages, stored, store));
+    assert_eq!(
+        account.snapshot().retained_bytes,
+        0,
+        "evicting the entry drains its pages"
+    );
+
+    let tight = SemanticRetentionAccount::new(RetentionLimits {
+        max_entry_bytes: 1,
+        ..RetentionLimits::defaults()
+    });
+    let store =
+        FrameworkScriptFactStore::with_retention_account(StoreAccount::new(Arc::clone(&tight)));
+    let stored = store.publish_if_cacheable(
+        resolved_fact_key("/a.ts"),
+        ExactScriptFacts::new(fixture_payload()),
+        &wide_cacheable_admission(),
+        5,
+    );
+    assert!(store.is_empty(), "a refused claim admits nothing");
+    assert!(stored
+        .payload
+        .facts()
+        .as_any()
+        .downcast_ref::<fixtures::FixtureFactPayload>()
+        .is_some());
+    let pages = signature_pages(&stored.read_set_signature);
+    assert!(!pages.is_empty(), "the delivered signature stays complete");
+    assert!(pages
+        .iter()
+        .all(|page| page.retained_charge_class() == Some(ChargeClass::Pinned)));
+    assert_eq!(tight.snapshot().retained_bytes, 0);
 }
 
 use crate::{HostConfig, UpsertRequest, VerterHost};
@@ -584,45 +671,34 @@ fn fenced_import_serve_refuses_script_facts_publication() {
 }
 
 /// The IMPORT-ROUTE resolution's cacheability tracer must refuse publication on
-/// its OWN fact-signature OVERFLOW — the second, independent non-admission
-/// condition alongside the fenced-serve rail the test above covers.
+/// its OWN non-cacheable read.
 ///
 /// The facts entry's `ReadSetSignature` is built from the SIBLING
 /// `provider.validate` tracer's finalised set, never from the import tracer's,
-/// so an overflow seen only by the import tracer has nowhere else to surface: it
+/// so a refusal seen only by the import tracer has nowhere else to surface: it
 /// must fold into the import tracer's CACHEABILITY verdict, or it is dropped on
-/// the floor and a compute whose curated signature provably does not cover
-/// everything it read warms the store.
+/// the floor and a compute whose curated signature does not cover everything it
+/// read warms the store.
 ///
-/// DISCRIMINATING — and the STICKY overflow knob canNOT discriminate here.
-/// Arming the sticky knob overflows the sibling validation tracer too, whose
+/// DISCRIMINATING — and the STICKY refusal knob canNOT discriminate here.
+/// Arming the sticky knob refuses from the sibling validation tracer too, whose
 /// `SignatureAdmission::from_finalise` refuses publication INDEPENDENTLY; the
-/// test would then pass even with the import tracer's overflow dropped. The
+/// test would then pass even with the import tracer's refusal dropped. The
 /// ONE-SHOT knob is armed FOR THE NAMED import-route scope and claimed by that
-/// scope alone, leaving the validation tracer cacheable, so the ONLY thing that
-/// can refuse the write is the boundary under test.
+/// scope alone; the validation tracer is its sibling, not nested inside it, so
+/// the ONLY thing that can refuse the write is the boundary under test.
 ///
-/// Four assertions pin exactly that:
-///   0. the overflow was claimed BY the import-route scope — the attribution
+/// Three assertions pin exactly that:
+///   0. the refusal was claimed BY the import-route scope — the attribution
 ///      check. A one-shot that was merely "consumed somewhere" proves nothing
-///      about WHICH boundary overflowed;
+///      about WHICH boundary refused;
 ///   1. the payload is still SERVED to the caller (ReturnOnly, never a refusal);
-///   2. the resolved-fact store is NOT warmed — the load-bearing one;
-///   3. the sibling VALIDATION tracer stayed CACHEABLE. Only a
-///      signature-CONSUMING `install_fact_tracer` emits the overflow audit event
-///      + host counter (the cacheability path peeks overflow without emitting),
-///        so a ZERO counter says no signature-consuming boundary overflowed — i.e.
-///        `provider.validate` finalised `Ok` and its `SignatureAdmission` was
-///        Cacheable. That is what makes (2) attributable to the import tracer
-///        ALONE rather than to a second, independent refusal.
+///   2. the resolved-fact store is NOT warmed — the load-bearing one.
 ///
-/// Reverting the import boundary to a raw tracer whose finalise is discarded
+/// Reverting the import boundary to a raw tracer whose verdict is discarded
 /// makes `import_non_cacheable` false and the entry publishes: (2) fails.
 #[test]
-fn import_route_tracer_overflow_refuses_script_facts_publication() {
-    use std::sync::atomic::Ordering;
-
-    let over_cap = verter_session_query::facts::fact_read_set::FACT_SIGNATURE_CAP + 1;
+fn import_route_tracer_refusal_refuses_script_facts_publication() {
     let registration = fixtures::import_gated_capability_free_fixture_registration();
 
     // Control — with no knob armed the fixture PUBLISHES, so the refusal below
@@ -641,16 +717,15 @@ fn import_route_tracer_overflow_refuses_script_facts_publication() {
     assert!(
         !control.framework_script_caches().facts.is_empty(),
         "control: an unarmed resolve warms the facts store (fixture invariant — otherwise \
-             the overflow assertion is vacuous)",
+             the refusal assertion is vacuous)",
     );
 
-    // Overflowed — ONLY the NAMED import-route resolution scope observes above the
-    // cap. The target is an identity, not a position: whatever else the flow opens,
-    // before or after, this scope is the one that overflows.
+    // Refused — ONLY the NAMED import-route resolution scope notes a
+    // non-cacheable read. The target is an identity, not a position: whatever
+    // else the flow opens, before or after, this scope is the one that refuses.
     let host = host_with_files();
-    verter_type_engine::engine_test_knobs::arm_fact_tracer_overflow_once(
+    verter_type_engine::engine_test_knobs::arm_fact_tracer_refusal_once(
         TracerScope::ScriptFactsImportRoute,
-        over_cap,
     );
     let facts = resolve_script_facts::<fixtures::FixtureFactPayload>(
         &host,
@@ -658,26 +733,24 @@ fn import_route_tracer_overflow_refuses_script_facts_publication() {
         "/proj/Consumer.ts",
     );
 
-    // (0) The overflow was applied to the SCOPE UNDER TEST. Asserting only that the
-    // one-shot was consumed would leave the boundary unattributed — the exact hole a
-    // positional knob hides behind.
+    // (0) The refusal was applied to the SCOPE UNDER TEST.
     assert_eq!(
-        verter_type_engine::engine_test_knobs::fact_tracer_overflow_claimed_by(),
+        verter_type_engine::engine_test_knobs::fact_tracer_refusal_claimed_by(),
         Some(TracerScope::ScriptFactsImportRoute),
-        "the forced overflow must be claimed BY the import-route scope — the boundary under \
+        "the forced refusal must be claimed BY the import-route scope — the boundary under \
              test. Any other claimant (or none) means the assertions below characterise a \
              different scope",
     );
     assert_eq!(
-        verter_type_engine::engine_test_knobs::peek_fact_tracer_overflow_once(),
+        verter_type_engine::engine_test_knobs::peek_fact_tracer_refusal_once(),
         None,
-        "fixture invariant: the one-shot overflow knob must be CLAIMED inside the entry-point \
-             (otherwise nothing overflowed and the assertions below are vacuous)",
+        "fixture invariant: the one-shot refusal knob must be CLAIMED inside the entry-point \
+             (otherwise nothing refused and the assertions below are vacuous)",
     );
 
     // (1) The payload is still SERVED to this caller (ReturnOnly).
     let facts = facts.expect_exact(
-        "an overflowed import-route tracer still serves the caller (ReturnOnly): refusal is \
+        "a refused import-route tracer still serves the caller (ReturnOnly): refusal is \
          CACHE-ONLY",
     );
     assert_eq!(facts.resolved_specifier, "./node_modules/fixture-fw/index");
@@ -685,68 +758,43 @@ fn import_route_tracer_overflow_refuses_script_facts_publication() {
     // (2) ...but the facts entry is NOT published. THE load-bearing assertion.
     assert!(
         host.framework_script_caches().facts.is_empty(),
-        "POISON: an import-route resolution whose fact-signature OVERFLOWED admitted the \
+        "POISON: an import-route resolution that consumed a non-cacheable read admitted the \
              facts entry. The entry's signature comes from the SIBLING validate tracer, so the \
-             import tracer's overflow has no other place to surface — it must fold into that \
-             boundary's cacheability verdict, else a compute whose curated signature provably \
-             does not cover everything it read warms the store",
-    );
-
-    // (3) The sibling VALIDATION tracer stayed CACHEABLE, so (2) is attributable
-    // to the IMPORT tracer alone. Only a signature-CONSUMING `install_fact_tracer`
-    // emits the overflow audit event + bumps this counter (the cacheability path
-    // peeks overflow without emitting), so a ZERO counter says NO
-    // signature-consuming boundary overflowed — `provider.validate` finalised `Ok`
-    // and its `SignatureAdmission` was Cacheable, i.e. it did NOT refuse the write
-    // independently. (The STICKY knob would overflow it too and this would read 1
-    // — the reason the sticky knob cannot discriminate this boundary.)
-    assert_eq!(
-        host.signature_overflow_at_install.load(Ordering::Relaxed),
-        0,
-        "the one-shot knob must overflow ONLY the import-route tracer; a non-zero \
-             signature-overflow counter means a signature-CONSUMING boundary overflowed — the \
-             sibling `provider.validate` tracer — whose `SignatureAdmission` refusal would \
-             refuse publication independently, making the assertion above non-discriminating",
+             import tracer's refusal has no other place to surface — it must fold into that \
+             boundary's cacheability verdict",
     );
 }
 
-/// The one-shot overflow knob is claimed by scope IDENTITY, never by scope ORDER.
+/// The one-shot refusal knob is claimed by scope IDENTITY, never by scope ORDER.
 ///
 /// An ORDER-keyed one-shot ("the next tracer scope entered on this thread takes
 /// it") is silently RETARGETED by any tracer scope that opens earlier — a scope
 /// added UPSTREAM by an unrelated change, or simply an enclosing scope in a
-/// different caller. The test above would then keep passing while overflowing a
-/// completely different boundary, so it would characterise nothing.
+/// different caller. The test above would then keep passing while refusing from
+/// a completely different boundary, so it would characterise nothing.
 ///
 /// This test reproduces exactly that hazard and pins the targeting against it: an
 /// unrelated cacheability scope is opened AFTER arming and BEFORE the entry-point.
-/// It is the "next scope entered", so an order-keyed knob hands it the count.
+/// It is the "next scope entered", so an order-keyed knob hands it the refusal.
 ///
 ///   * `unrelated_non_cacheable` — the upstream scope's own verdict. Order-keyed:
-///     it swallows `FACT_SIGNATURE_CAP + 1` synthetic observations and reports
-///     `true`. Identity-keyed: it is UNNAMED, claims nothing, and reports `false`.
+///     it claims the refusal and reports `true`. Identity-keyed: it is UNNAMED,
+///     claims nothing, and reports `false`.
 ///   * the one-shot stays ARMED across that scope, and is then claimed by the
 ///     import-route scope inside the entry-point — the attribution rail proves it.
-///   * the entry-point still refuses publication, i.e. the overflow landed on the
+///   * the entry-point still refuses publication, i.e. the refusal landed on the
 ///     RIGHT scope even though a foreign scope ran first.
-///
-/// Reverting the claim to "next scope entered" fails the first two assertions
-/// (the upstream scope non-cacheable, the one-shot disarmed before the
-/// entry-point) and then the third (the entry-point's tracers see zero forced
-/// observations, so the facts entry PUBLISHES).
 #[test]
-fn overflow_knob_targets_the_named_scope_not_the_next_scope_entered() {
-    let over_cap = verter_session_query::facts::fact_read_set::FACT_SIGNATURE_CAP + 1;
+fn refusal_knob_targets_the_named_scope_not_the_next_scope_entered() {
     let registration = fixtures::import_gated_capability_free_fixture_registration();
     let host = host_with_files();
 
-    verter_type_engine::engine_test_knobs::arm_fact_tracer_overflow_once(
+    verter_type_engine::engine_test_knobs::arm_fact_tracer_refusal_once(
         TracerScope::ScriptFactsImportRoute,
-        over_cap,
     );
 
     // The silent-retarget hazard: an UNRELATED tracer scope opens first. Under an
-    // order-keyed one-shot this scope consumes the count and overflows itself.
+    // order-keyed one-shot this scope claims the refusal itself.
     let ((), unrelated_non_cacheable) =
         verter_type_engine::fact_signature_helpers::with_cacheability_scope(
             &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(&*host),
@@ -756,17 +804,17 @@ fn overflow_knob_targets_the_named_scope_not_the_next_scope_entered() {
         !unrelated_non_cacheable,
         "an UNRELATED tracer scope that merely happens to open first must NOT claim a one-shot \
          armed for another scope. It did — so the knob is positional, and any scope added \
-         upstream of a boundary under test silently retargets its overflow while the test stays \
+         upstream of a boundary under test silently retargets its refusal while the test stays \
          green",
     );
     assert_eq!(
-        verter_type_engine::engine_test_knobs::fact_tracer_overflow_claimed_by(),
+        verter_type_engine::engine_test_knobs::fact_tracer_refusal_claimed_by(),
         None,
         "no scope may claim the one-shot before the NAMED target is entered",
     );
     assert_eq!(
-        verter_type_engine::engine_test_knobs::peek_fact_tracer_overflow_once(),
-        Some((TracerScope::ScriptFactsImportRoute, over_cap)),
+        verter_type_engine::engine_test_knobs::peek_fact_tracer_refusal_once(),
+        Some(TracerScope::ScriptFactsImportRoute),
         "the one-shot must survive an unrelated upstream scope intact, still armed for its \
          intended claimant",
     );
@@ -779,18 +827,18 @@ fn overflow_knob_targets_the_named_scope_not_the_next_scope_entered() {
         "/proj/Consumer.ts",
     );
     assert_eq!(
-        verter_type_engine::engine_test_knobs::fact_tracer_overflow_claimed_by(),
+        verter_type_engine::engine_test_knobs::fact_tracer_refusal_claimed_by(),
         Some(TracerScope::ScriptFactsImportRoute),
-        "the overflow must land on the NAMED import-route scope even though a foreign scope ran \
+        "the refusal must land on the NAMED import-route scope even though a foreign scope ran \
          first",
     );
     let _facts = facts
         .expect_exact("the refusal stays CACHE-ONLY: the payload is still served (ReturnOnly)");
     assert!(
         host.framework_script_caches().facts.is_empty(),
-        "POISON: the import-route scope's overflow did not refuse the publication. The count was \
+        "POISON: the import-route scope's refusal did not refuse the publication. It was \
          claimed by the unrelated upstream scope instead, so the boundary under test never \
-         overflowed",
+         refused",
     );
 }
 

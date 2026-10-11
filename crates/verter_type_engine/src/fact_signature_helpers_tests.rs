@@ -41,21 +41,10 @@ mod read_set_signature_unit_tests {
         // Empty carrier: facts empty. `validate_fact_signature`
         // returns true on empty input.
         let sig = ReadSetSignature::empty();
-        assert!(!sig.is_overflow(), "empty carrier must NOT be overflow");
         assert_eq!(sig.facts.len(), 0, "empty carrier carries no facts");
         // Don't assert validate without ctx — empty carrier's
         // `validate` short-circuits via empty fact list. Tested
         // separately in integration with a `ResolverContext` stub.
-    }
-
-    #[test]
-    fn read_set_signature_overflow_validate_returns_false() {
-        let sig = ReadSetSignature::overflow();
-        assert!(sig.is_overflow(), "overflow carrier must report overflow");
-        // We can't trivially construct a ResolverContext here, but
-        // the overflow short-circuit doesn't even call ctx — it
-        // returns false directly. Integration tests cover the live
-        // `validate(ctx)` call.
     }
 
     #[test]
@@ -161,7 +150,6 @@ mod read_set_signature_unit_tests {
         let facts: Arc<[FactVersionRef]> = Arc::from(vec![fact_filewhole("/a.ts", 1)]);
         let sig = ReadSetSignature::new(Arc::clone(&facts));
         assert_eq!(sig.facts.len(), 1);
-        assert!(!sig.overflowed);
         assert!(
             Arc::ptr_eq(&sig.facts, &facts),
             "new() stores facts verbatim"

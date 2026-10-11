@@ -469,6 +469,7 @@ fn corpus_records() -> Vec<journal::JournalRecord> {
         blob_rel: "blobs/blake3-aaaa.tsx".into(),
         map_rel: Some("maps/blake3-bbbb.json".into()),
         structure: None,
+        published_epoch: 0,
     };
     vec![
         journal::JournalRecord {

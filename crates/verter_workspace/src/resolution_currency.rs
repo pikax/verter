@@ -3222,7 +3222,9 @@ impl ResolutionTransaction {
         &mut self,
         witness: &verter_session_query::facts::fact_cache::ReadSetSignature,
     ) {
-        for fact in witness.facts.iter() {
+        // Read through the witness's evidence pages: a wide witness restates
+        // exactly the facts a narrow one would.
+        for fact in witness.entries() {
             if let FactVersionRef::ResolveImports(ResolveImportsFactRef::Resolution(resolution)) =
                 fact
             {
@@ -3587,16 +3589,14 @@ mod transaction_contract_tests {
 
     /// `SIG-1`: signature CARDINALITY alone must never refuse admission.
     ///
-    /// An over-cap observation set confined to ONE compaction domain lifts
-    /// that domain's precise bucket to its terminal aggregate and admits.
-    /// Written against existing API only, so it is a runnable red: at the
-    /// pre-change tree it fails with
-    /// `NonCacheable(SignatureOverflow)`.
+    /// An over-threshold observation set confined to ONE compaction domain
+    /// lifts that domain's precise bucket to its terminal aggregate and
+    /// admits.
     #[test]
     fn resolution_over_cap_single_domain_admits_instead_of_refusing() {
         let mut transaction = ResolutionTransaction::new(captured_world());
         transaction.set_query(query());
-        for index in 0..=verter_session_query::facts::fact_read_set::FACT_SIGNATURE_CAP {
+        for index in 0..=verter_session_query::facts::fact_read_set::FACT_DOMAIN_PRECISE_MAX {
             transaction.observe(ResolutionFactKey::PathProbe {
                 canonical: CanonicalResolutionId::new(format!("/p/{index}.ts")),
                 population: ResolutionPopulation::Base,
@@ -3605,12 +3605,12 @@ mod transaction_contract_tests {
 
         assert!(
             matches!(transaction.finish(), SignatureAdmission::Cacheable(_)),
-            "SIG-1: an over-cap observation set confined to one compaction domain must \
+            "SIG-1: an over-threshold observation set confined to one compaction domain must \
              compact that domain and ADMIT — signature cardinality is never a refusal reason"
         );
     }
 
-    /// `SIG-3`: compaction is DOMAIN-WISE. The over-cap domain lifts to a
+    /// `SIG-3`: compaction is DOMAIN-WISE. The over-threshold domain lifts to a
     /// single terminal aggregate carrying its population; every other
     /// domain in the same signature stays precise.
     ///
@@ -3624,7 +3624,7 @@ mod transaction_contract_tests {
     fn resolution_over_cap_lifts_only_its_own_domain() {
         let mut transaction = ResolutionTransaction::new(captured_world());
         transaction.set_query(query());
-        for index in 0..=verter_session_query::facts::fact_read_set::FACT_SIGNATURE_CAP {
+        for index in 0..=verter_session_query::facts::fact_read_set::FACT_DOMAIN_PRECISE_MAX {
             transaction.observe(ResolutionFactKey::PathProbe {
                 canonical: CanonicalResolutionId::new(format!("/p/{index}.ts")),
                 population: ResolutionPopulation::Base,
@@ -3636,7 +3636,7 @@ mod transaction_contract_tests {
         transaction.observe_foreign_fact_for_test(unrelated.clone());
 
         let SignatureAdmission::Cacheable(signature) = transaction.finish() else {
-            panic!("an over-cap single-domain observation set must compact, not refuse");
+            panic!("an over-threshold single-domain observation set must compact, not refuse");
         };
 
         let aggregates: Vec<_> = signature
@@ -3690,7 +3690,7 @@ mod transaction_contract_tests {
     fn a_lifted_resolution_domain_does_not_regrow() {
         let mut first = ResolutionTransaction::new(captured_world());
         first.set_query(query());
-        for index in 0..=verter_session_query::facts::fact_read_set::FACT_SIGNATURE_CAP {
+        for index in 0..=verter_session_query::facts::fact_read_set::FACT_DOMAIN_PRECISE_MAX {
             first.observe(ResolutionFactKey::PathProbe {
                 canonical: CanonicalResolutionId::new(format!("/p/{index}.ts")),
                 population: ResolutionPopulation::Base,

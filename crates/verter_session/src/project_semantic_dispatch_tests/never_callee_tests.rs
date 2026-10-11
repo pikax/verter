@@ -10,7 +10,7 @@
 //! `strictNullChecks` × `noImplicitAny` setting; `noImplicitAny` changes
 //! none.
 
-use super::checker_probe_lane_tests::{degradation_in, mismatches_in, ProbeProject};
+use super::checker_probe_lane_tests::{return_failures_in_one_host, ProbeProject};
 
 const NEVER: &str = "\
 declare function fail(): never;
@@ -50,7 +50,9 @@ export function q3(x: string | number) { if (typeof x === \"string\") { return x
 export function n21(x: string | number) { if (typeof x === \"string\") { return x; } mixb(2); }
 ";
 
-/// Assert each `(function, [strictNullChecks on, off])` return, complete.
+/// Assert each `(function, [strictNullChecks on, off])` return, complete:
+/// the module is checked once per setting, every function read from that
+/// one host, as the checker checks the file.
 fn assert_rows(rows: &[(&str, [&str; 2])]) {
     for (options, column) in [
         (r#"{ "strictNullChecks": true, "noImplicitAny": true }"#, 0),
@@ -65,21 +67,11 @@ fn assert_rows(rows: &[(&str, [&str; 2])]) {
             compiler_options: Some(options),
             ..ProbeProject::default()
         };
-        let probes: Vec<(String, &str)> = rows
+        let probe_rows: Vec<(&str, &str)> = rows
             .iter()
-            .map(|(name, answers)| (format!("ReturnType<typeof {name}>"), answers[column]))
+            .map(|(name, answers)| (*name, answers[column]))
             .collect();
-        let probe_rows: Vec<(&str, &str)> = probes
-            .iter()
-            .map(|(probe, checker)| (probe.as_str(), *checker))
-            .collect();
-        let mut failures = mismatches_in(project, NEVER, &probe_rows);
-        for (name, _) in rows {
-            match degradation_in(project, NEVER, name) {
-                Ok(None) => {}
-                other => failures.push(format!("`{name}` is not complete: {other:?}")),
-            }
-        }
+        let failures = return_failures_in_one_host(project, NEVER, &probe_rows);
         assert!(failures.is_empty(), "{options}:\n{}", failures.join("\n"));
     }
 }

@@ -761,10 +761,8 @@ impl SemanticOperandEvidence {
 /// force's typed incomplete refusal — never a silently SHRUNK root set.
 /// A shrunk set would validate at mint/force and let a
 /// `mint -> force -> mint` chain drop a producer root, serving
-/// stale-complete after a dead-operand edit. The one exception is an
-/// OVERFLOWED carrier, which keeps its (partial) evidence so the force
-/// maps the overflow flag to the typed `SignatureOverflow` refusal
-/// instead of the blander incomplete one.
+/// stale-complete after a dead-operand edit. The carrier's evidence pages
+/// are read through, so a wide carrier finds its roots like a narrow one.
 pub fn semantic_operand_evidence(
     read_set: &verter_session_query::facts::fact_cache::ReadSetSignature,
     self_root_canonicals: &[Arc<str>],
@@ -772,18 +770,15 @@ pub fn semantic_operand_evidence(
 ) -> Option<crate::semantic_query::operand::SemanticOperandEvidence> {
     let mut self_roots = Vec::with_capacity(self_root_canonicals.len());
     for canonical in self_root_canonicals {
-        let found = read_set.facts.iter().find_map(|fact| match fact {
+        let found = read_set.entries().find_map(|fact| match fact {
             verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
                 canonical_id,
                 hash,
             } if canonical_id == canonical.as_ref() => Some((Arc::clone(canonical), *hash)),
             _ => None,
         });
-        match found {
-            Some(root) => self_roots.push(root),
-            None if read_set.overflowed => {}
-            None => return None,
-        }
+        let root = found?;
+        self_roots.push(root);
     }
     Some(crate::semantic_query::operand::SemanticOperandEvidence {
         read_set: read_set.clone(),
@@ -2743,20 +2738,32 @@ pub fn semantic_graph_read_set_signature(
         });
     }
 
-    // Merge the traced fact set. A traced `FileWholeHash` for a
-    // self-root canonical is folded onto the observed self-root: it
-    // MUST agree with the observed hash (else the dependency rail and
-    // the observed self-root disagree on the keyed file's version — a
-    // torn read). Every other traced fact is kept verbatim so
-    // transitive cross-file invalidation is preserved.
-    for fact in traced_facts {
-        if let FactVersionRef::FileWholeHash { canonical_id, hash } = fact {
-            if let Some(observed_hash) = self_root_hashes.get(canonical_id.as_str()) {
-                if hash != observed_hash {
+    // Every traced `FileWholeHash` for a self-root canonical MUST agree
+    // with the observed hash (else the dependency rail and the observed
+    // self-root disagree on the keyed file's version — a torn read). A
+    // wide traced set holds its facts on evidence pages, so the check
+    // reads through them: a page is part of the rail, not a place a torn
+    // root can hide.
+    if !self_root_hashes.is_empty() {
+        for fact in verter_session_query::facts::fact_cache::signature_entries(traced_facts) {
+            if let FactVersionRef::FileWholeHash { canonical_id, hash } = fact {
+                if self_root_hashes
+                    .get(canonical_id.as_str())
+                    .is_some_and(|observed_hash| hash != observed_hash)
+                {
                     return Err(crate::cache_runtime::NonAdmissionReason::SelfRootConflict);
                 }
-                // Already emitted as a self-root above — do not
-                // duplicate.
+            }
+        }
+    }
+
+    // Merge the traced fact set. A top-level traced `FileWholeHash` for a
+    // self-root canonical is folded onto the observed self-root emitted
+    // above; every other traced entry (a page included) is kept verbatim
+    // so transitive cross-file invalidation is preserved.
+    for fact in traced_facts {
+        if let FactVersionRef::FileWholeHash { canonical_id, .. } = fact {
+            if self_root_hashes.contains_key(canonical_id.as_str()) {
                 continue;
             }
         }

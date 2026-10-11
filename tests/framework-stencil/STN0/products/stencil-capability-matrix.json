@@ -1,0 +1,209 @@
+{
+  "schema": "StencilCapabilityMatrix",
+  "version": 1,
+  "family": "stencil",
+  "profiles": ["stencil-tsx"],
+  "hosts": ["lsp-enhancement"],
+  "cells": [
+    {
+      "id": "literal-rename",
+      "operation": "framework-literal-rename",
+      "host": "lsp-enhancement",
+      "profile": "stencil-tsx",
+      "producer": "STN5R",
+      "acceptance": "STN5R-AC1",
+      "description": "Watch/listen literal rename as one LSO8 transaction; leave unrelated strings untouched",
+      "tsgoOperations": ["getSymbolAtPosition"],
+      "tsgoLimitations": [],
+      "evidenceClass": "contract-only",
+      "delivery": "LSPX11 position ownership; step back when covered; no follow-up to TS rename"
+    },
+    {
+      "id": "attribute-rename",
+      "operation": "framework-attribute-rename",
+      "host": "lsp-enhancement",
+      "profile": "stencil-tsx",
+      "producer": "STN5R",
+      "acceptance": "STN5R-AC1",
+      "description": "Dash-cased JSX attribute rename in the member's single LSO8 transaction; reject collisions and explicit attribute overrides",
+      "tsgoOperations": ["getSymbolAtPosition"],
+      "tsgoLimitations": [],
+      "evidenceClass": "contract-only",
+      "delivery": "LSPX11 position ownership; generated declarations untouched with regenerate-required"
+    },
+    {
+      "id": "tag-hover",
+      "operation": "hover-section",
+      "host": "lsp-enhancement",
+      "profile": "stencil-tsx",
+      "producer": "STN5",
+      "acceptance": "STN5-AC1",
+      "description": "Attributes, events, slots and encapsulation on a custom-element JSX tag",
+      "tsgoOperations": ["getTypeAtPosition", "getSymbolAtPosition"],
+      "tsgoLimitations": ["eventEmitterTypeArgument"],
+      "evidenceClass": "contract-only",
+      "delivery": "LSPX11 contributor after owns(capability, position)"
+    },
+    {
+      "id": "tag-definition",
+      "operation": "extra-tag-definition",
+      "host": "lsp-enhancement",
+      "profile": "stencil-tsx",
+      "producer": "STN5",
+      "acceptance": "STN5-AC2",
+      "description": "Add the @Component class location; never return the generated interface",
+      "tsgoOperations": ["getSymbolAtPosition"],
+      "tsgoLimitations": [],
+      "evidenceClass": "contract-only",
+      "delivery": "LSPX11 contributor after owns(capability, position)"
+    },
+    {
+      "id": "watch-definition",
+      "operation": "extra-watch-definition",
+      "host": "lsp-enhancement",
+      "profile": "stencil-tsx",
+      "producer": "STN5",
+      "acceptance": "STN5-AC3",
+      "description": "Resolved @Watch literal links to the prop",
+      "tsgoOperations": ["getSymbolAtPosition"],
+      "tsgoLimitations": [],
+      "evidenceClass": "contract-only",
+      "delivery": "LSPX11 contributor after owns(capability, position)"
+    },
+    {
+      "id": "listen-definition",
+      "operation": "extra-listen-definition",
+      "host": "lsp-enhancement",
+      "profile": "stencil-tsx",
+      "producer": "STN5",
+      "acceptance": "STN5-AC3",
+      "description": "Resolved @Listen literal links to the event",
+      "tsgoOperations": ["getSymbolAtPosition"],
+      "tsgoLimitations": [],
+      "evidenceClass": "contract-only",
+      "delivery": "LSPX11 contributor after owns(capability, position)"
+    },
+    {
+      "id": "framework-diagnostics",
+      "operation": "verter-diagnostics",
+      "host": "lsp-enhancement",
+      "profile": "stencil-tsx",
+      "producer": "STN8",
+      "acceptance": "STN8-AC3",
+      "description": "Verter-owned diagnostics with fixes that never edit components.d.ts",
+      "tsgoOperations": ["diagnostics"],
+      "tsgoLimitations": [],
+      "evidenceClass": "contract-only",
+      "delivery": "LSPX11 contributor after owns(capability, position)"
+    },
+    {
+      "id": "cem-projection",
+      "operation": "standards-cem-projection",
+      "host": "lsp-enhancement",
+      "profile": "stencil-tsx",
+      "producer": "HWC3",
+      "acceptance": "HWC3-AC2",
+      "description": "Project framework-owned facts into neutral standards/CEM data; not a Stencil output target",
+      "tsgoOperations": [],
+      "tsgoLimitations": [],
+      "evidenceClass": "contract-only",
+      "delivery": "Neutral HWC facts available to LSP consumers; CEM import/export belongs solely to HWC3"
+    }
+  ],
+  "facets": {
+    "props": {
+      "status": "authoritative",
+      "source": "@Prop resolved to @stencil/core",
+      "producer": "STN3",
+      "acceptance": "STN3-AC3",
+      "attributeBinding": {
+        "producer": "STN2",
+        "acceptance": "STN2-AC2"
+      }
+    },
+    "emits": {
+      "status": "authoritative",
+      "source": "@Event resolved to @stencil/core; EventEmitter<T> payload",
+      "producer": "STN3",
+      "acceptance": "STN3-AC1"
+    },
+    "slots": {
+      "status": "authoritative",
+      "source": "literal <slot> and <slot name=\"...\"> in render JSX",
+      "producer": "STN3",
+      "acceptance": "STN3-AC2"
+    },
+    "expose": {
+      "status": "authoritative",
+      "source": "@Method resolved to @stencil/core",
+      "producer": "STN3",
+      "acceptance": "STN3-AC2"
+    },
+    "model": {
+      "status": "UNSUPPORTED",
+      "reason": "No ratified Stencil model facet"
+    },
+    "options": {
+      "status": "UNSUPPORTED",
+      "reason": "No ratified Stencil Options facet; component/configuration facts do not create one"
+    }
+  },
+  "frameworkTag": {
+    "name": "FRAMEWORK_TAG_STENCIL",
+    "value": 8,
+    "producer": "STN1",
+    "acceptance": "STN1-AC1",
+    "landsWith": "registered carrier-less adapter",
+    "openCanonical": false
+  },
+  "evidenceHandoff": {
+    "producer": "STN3",
+    "acceptance": "STN3-AC2",
+    "consumer": "HWC3",
+    "consumerAcceptance": "HWC3-AC2",
+    "fields": [
+      "tag",
+      "attributes",
+      "events",
+      "slots",
+      "methods",
+      "scope",
+      "presence",
+      "completeness",
+      "provenance"
+    ],
+    "semantics": "Stencil binds decorators and types before handoff. HWC3 consumes neutral facts, never Stencil decorators or EventEmitter syntax.",
+    "cemOwner": "HWC3"
+  },
+  "exclusions": [
+    {
+      "id": "build",
+      "reason": "Never invoke the Stencil compiler or generate/build output targets"
+    },
+    {
+      "id": "output-target-build",
+      "reason": "outputTargets are CENV configuration facts only, never a build command"
+    },
+    {
+      "id": "hydrate-runtime",
+      "reason": "No execute, render, hydrate, dev server, runtime registration or instrumentation"
+    },
+    {
+      "id": "typescript-plugin",
+      "reason": "Stencil delivery is only through LSPX11; TS plugin gets no Stencil cells"
+    },
+    {
+      "id": "tsgo-reprovide",
+      "reason": "No TypeScript hover, completion, references, symbols, definition or rename passthrough"
+    },
+    {
+      "id": "stencil-cem-export",
+      "reason": "HWC3 alone owns CEM projection and import/export; Stencil never emits CEM bytes"
+    },
+    {
+      "id": "generic-rename",
+      "reason": "LSO4 occurrence roles do not by themselves prove a framework rename product"
+    }
+  ],
+  "supportClaim": false
+}

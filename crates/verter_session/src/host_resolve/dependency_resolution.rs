@@ -263,7 +263,7 @@ impl VerterHost {
             == Some(import_source)
         {
             return verter_workspace::ResolutionPublication::refused(
-                verter_audit::NonAdmissionReason::SignatureOverflow,
+                verter_audit::NonAdmissionReason::ForcedTestRefusal,
             );
         }
         match self.resolve_dependency_lane(

@@ -215,8 +215,7 @@ pub enum ObservedRefusal {
     /// A typed reason reached the scope through the marking chokepoint.
     Typed(NonCacheableReadReason),
     /// A cacheability scope reported non-cacheable while no typed reason
-    /// was recorded — a fact-signature overflow or a mutation-instability
-    /// verdict.
+    /// was recorded — a mutation-instability verdict.
     Unattributed,
 }
 

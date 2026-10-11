@@ -1,0 +1,296 @@
+{
+  "id": "registration-fixture-matrix.v1",
+  "schema": 1,
+  "contractNode": "CAT0",
+  "describesHead": {
+    "landingTitle": "docs(arch): ratify orthogonal identities and the exact-release law (#802)",
+    "date": "2026-10-09"
+  },
+  "companionInventory": "catalog-inventory.v1.json",
+  "rule": "Each case states its input, the required outcome and the forbidden outcome, the catalog rules it exercises (CR..), existing evidence at this head, and the node whose test makes it executable. CAT0 ships no test. 'Today' describes the described head; a required outcome that differs from today names the owner allowed to change it. Surfaces: registry, session, LSP, MCP, NAPI, WASM, client.",
+  "registrationMatrix": [
+    {
+      "id": "RM01",
+      "name": "default static registration is fact- and byte-equivalent",
+      "input": "A host built with default framework options (every composed vertical)",
+      "required": {
+        "registry": "Vue and Svelte semantic-profile rows; wire tag VUE and SVELTE resolve to them, REACT and SOLID are out of scope, NONE and OPEN_CANONICAL have no disposition",
+        "session": ".vue classifies as the Vue component carrier, .svelte as the Svelte component carrier, .svelte.ts and .svelte.js as Svelte adapter modules (non-component), the TS/JS rows as plain scripts, an unknown extension as plain script routing; the Vue grammar fingerprint keeps its v1 golden encoding",
+        "LSP": "carrier watch globs and file-operation filters cover exactly the .vue and .svelte carrier extensions",
+        "MCP": "component tools serve .vue and .svelte files through the same host catalog",
+        "NAPI": "default admission admits every composed vertical",
+        "WASM": "default admission admits every composed vertical",
+        "client": "client-framework-manifest.generated.ts and virtual-file-naming.generated.ts are byte-equal to the committed files"
+      },
+      "forbidden": "Any observable difference from the described head on these surfaces; a surface building its own registry instead of reading the snapshot",
+      "rules": ["CR01", "CR02", "CR10", "CR12"],
+      "existingEvidence": [
+        "verter_session framework::registry::tests::framework_registry_complete",
+        "verter_session framework::registry::tests::host_classifier_and_composed_catalog_agree_on_carriers",
+        "verter_language registry::tests::{classify_table_matches_built_in_rows, svelte_rune_modules_classify_as_non_component_adapter_modules, carrier_extensions_lists_vue_and_svelte, unknown_extension_falls_through_to_plain_script_routing, multi_segment_extensions_win_over_suffixes}",
+        "verter_language carrier_grammar::tests::canonical_vue_fingerprint_encoding_matches_the_v1_golden",
+        "verter_session framework::options::tests::default_admits_every_composed_vertical",
+        "verter_session tests/cases client_framework_manifest_ts_freshness and virtual_file_naming_ts_freshness"
+      ],
+      "executableOwner": "CPF1",
+      "receivingAcceptance": "CPF1-AC-R2"
+    },
+    {
+      "id": "RM02",
+      "name": "narrowed admission does not shrink the catalog",
+      "input": "A host built with admission narrowed to vue (the LSP --frameworks=vue flag, or NAPI/WASM admitting ['vue'])",
+      "required": {
+        "registry": "the CatalogSnapshot and its identity equal RM01's",
+        "session": "as today, .svelte falls through to plain-script routing, .svelte.ts and .svelte.js classify as plain scripts, no Svelte grammar is active and no Svelte script-fact provider runs; the withdrawal comes from the DemandPlan, not from a smaller catalog",
+        "LSP": "as today, the watch globs and file-operation filters are derived from the same classification and cover .vue only",
+        "MCP": "not applicable: the MCP server exposes no admission option at this head",
+        "NAPI": "as RM02 session",
+        "WASM": "as RM02 session",
+        "client": "generated mirrors are unchanged (they are rendered from the snapshot, never from admission)"
+      },
+      "forbidden": "A second, narrowed catalog; a snapshot identity that depends on admission; a Svelte row that is registered and still silently served",
+      "rules": ["CR06", "CR11"],
+      "existingEvidence": [
+        "verter_session framework::registry::tests::{a_narrowed_admission_composes_only_the_admitted_verticals, an_unadmitted_vertical_registers_no_carrier_grammar}",
+        "verter_session framework::language_classifier::tests::an_unadmitted_vertical_is_invisible_to_classification"
+      ],
+      "note": "Today a framework-surface request naming svelte on a Vue-only host is a typed MalformedPayload (unknown adapter id). CPF1 keeps that response at its cutover; changing the response of a registered but non-participating profile belongs to COX0 under COX0-AC1, never to the catalog shape.",
+      "executableOwner": "CPF1",
+      "receivingAcceptance": "CPF1-AC-R2",
+      "participationOwner": "COX0",
+      "participationAcceptance": "COX0-AC1"
+    },
+    {
+      "id": "RM03",
+      "name": "invalid admission is rejected without touching the catalog",
+      "input": "Admission naming an unregistered family ('react'), a duplicate ('vue', 'vue'), or nothing",
+      "required": "Each is a typed rejection naming the supported set, as today; the catalog is built the same way regardless",
+      "forbidden": "Silently admitting everything; an unknown name creating or removing a row",
+      "rules": ["CR11"],
+      "existingEvidence": [
+        "verter_session framework::options::tests::{unknown_name_is_rejected_naming_the_supported_set, duplicate_name_is_rejected, empty_admission_is_rejected}"
+      ],
+      "executableOwner": "COX0",
+      "receivingAcceptance": "COX0-AC1"
+    },
+    {
+      "id": "RM04",
+      "name": "two carrier rows share one editor language id",
+      "input": "Row providers registering two carrier rows with the same carrier language id",
+      "required": "Snapshot construction fails with a typed error naming both rows",
+      "forbidden": "Last-wins or first-wins registration; construction that succeeds and dispatches one of them",
+      "rules": ["CR07"],
+      "existingEvidence": [
+        "verter_session framework::registry::tests::{register_all_rejects_two_rows_that_share_one_carrier_language, register_all_rejects_a_mismatched_row}"
+      ],
+      "executableOwner": "CPF1",
+      "receivingAcceptance": "CPF1-AC-R2"
+    },
+    {
+      "id": "RM05",
+      "name": "two carrier rows claim one extension at the same precedence",
+      "input": "Two carrier rows both claiming .vue; separately, a row claiming .svelte.ts beside the plain .ts row",
+      "required": "The first fails construction naming both owners; the second is legal because the longer suffix has the higher precedence",
+      "forbidden": "Classification decided by provider order; rejecting a legal longer-suffix claim",
+      "rules": ["CR05", "CR07"],
+      "existingEvidence": [
+        "verter_language registry::tests::multi_segment_extensions_win_over_suffixes (legal half only)"
+      ],
+      "executableOwner": "CPF1",
+      "receivingAcceptance": "CPF1-AC-R2"
+    },
+    {
+      "id": "RM06",
+      "name": "duplicate semantic-profile key versus shared display family",
+      "input": "Two semantic-profile rows with the same FrameworkProfileId; separately, two rows with the same display family and different exact releases (the Vue 2.6 and Vue 3 fixture values of VID0 VC02)",
+      "required": "The first fails construction naming both owners; the second registers two rows with two identities",
+      "forbidden": "A display family used as the row key; one row silently shadowing the other",
+      "rules": ["CR07", "CR10"],
+      "existingEvidence": [],
+      "executableOwner": "CPF1",
+      "receivingAcceptance": "CPF1-AC-R2",
+      "identityOwner": "VID0T",
+      "identityAcceptance": "VID0T-AC3"
+    },
+    {
+      "id": "RM07",
+      "name": "dangling references fail construction",
+      "input": "A semantic-profile row claiming a carrier with no carrier row; a backend row for an unknown carrier; a carrier row with no grammar; a project-profile row overlaying an unknown semantic profile",
+      "required": "Each fails construction with a typed error naming the missing id",
+      "forbidden": "A partially built snapshot; a row dropped with a warning",
+      "rules": ["CR07", "CR08"],
+      "existingEvidence": [
+        "verter_session framework::registry::tests::composition_fails_closed_on_a_row_without_a_registered_grammar"
+      ],
+      "note": "The project-profile leg becomes executable when T04 exists; PPR0T adds it under PPR0T-AC1.",
+      "executableOwner": "CPF1",
+      "receivingAcceptance": "CPF1-AC-R2"
+    },
+    {
+      "id": "RM08",
+      "name": "a carrier with no compiler backend",
+      "input": "A carrier row with a frontend and no backend row (the HTML/Astro type-level frontend stubs)",
+      "required": "The snapshot builds; tooling surfaces read the carrier; compilation reports not applicable for that carrier",
+      "forbidden": "An Unsupported compiler implementation registered to fill the slot; a construction error for the missing backend",
+      "rules": ["CR08"],
+      "existingEvidence": [],
+      "executableOwner": "CPF1",
+      "receivingAcceptance": "CPF1-AC-R1"
+    },
+    {
+      "id": "RM09",
+      "name": "dormant family row is a data-only change",
+      "input": "A test composition root that adds one inert family through the public row-provider path: one carrier row with a test-only extension, one semantic-profile row, no backend, no participation, and the regenerated mirrors",
+      "required": "No neutral routing source changes (no new match arm, branch or switch); every RM01 Vue and Svelte outcome is unchanged; the snapshot identity differs from RM01; each generated mirror differs from RM01 only by the dormant entry; the dormant profile does zero work on .vue and .svelte files",
+      "forbidden": "Any edit to shared dispatch code to admit the row; a test-only constructor that bypasses snapshot validation",
+      "rules": ["CR06", "CR12", "CR13"],
+      "existingEvidence": [],
+      "executableOwner": "CPF1",
+      "receivingAcceptance": "CPF1-AC-R2",
+      "familyFileOwner": "REG0",
+      "familyFileAcceptance": "REG0-AC3"
+    },
+    {
+      "id": "RM10",
+      "name": "profile-qualified capability rows",
+      "input": "One capability key registered under two profiles; a gated language row with its capability bit off and then on",
+      "required": "Two distinct capability identities; the gated row resolves to its candidate only while the bit is on",
+      "forbidden": "One untagged capability shared across profiles; a process-wide gate",
+      "rules": ["CR10", "CR11"],
+      "existingEvidence": [
+        "verter_session framework::language_classifier::tests::gated_row_resolves_to_candidate_only_when_bit_is_on",
+        "verter_language registry::tests::gated_rows_surface_candidates_and_resolve_to_fallback_statically"
+      ],
+      "executableOwner": "COX0",
+      "receivingAcceptance": "COX0-AC2"
+    },
+    {
+      "id": "RM11",
+      "name": "conflicting external contributions",
+      "input": "Two data-manifest contributions claiming the same (kind, namespace, key) with different versions, admitted in both orders, including two XK09 interoperability relations on one carrier with different exclusive, coexisting or nested claims; one contribution claiming the FrameworkProfileId of an official-static row",
+      "required": "A deterministic typed conflict, identical for both admission orders, for a duplicate key and for two XK09 relations on one T06 key; the claim on an official row is rejected",
+      "forbidden": "First-loaded or fastest-returning wins; an official row replaced by a contribution",
+      "rules": ["CR04", "CR14"],
+      "existingEvidence": [],
+      "executableOwner": "XSDK1",
+      "receivingAcceptance": "XSDK1-AC2"
+    },
+    {
+      "id": "RM12",
+      "name": "a contribution cannot replace a core authority",
+      "input": "A contribution declaring a replacement parser for a registered carrier, a replacement type resolver, or a cache-validity rule",
+      "required": "Admission rejects it with a typed error",
+      "forbidden": "Any contribution changing parse, identity, type semantics, resolution, cache validity or edit-transaction authority",
+      "rules": ["CR04", "CR14"],
+      "existingEvidence": [],
+      "contractAcceptance": "XSDK0-AC2",
+      "executableOwner": "XSDK1",
+      "receivingAcceptance": "XSDK1-AC1"
+    }
+  ],
+  "determinismCases": [
+    {
+      "id": "DM01",
+      "name": "provider order and hash seeds do not matter",
+      "input": "The RM01 rows provided Vue-first and Svelte-first, each under two hasher seeds",
+      "required": "Equal snapshot identity, equal table order and byte-equal generated mirrors in all four builds",
+      "forbidden": "Table order or identity following provider order or map iteration",
+      "rules": ["CR05", "CR06", "CR09"],
+      "existingEvidence": [
+        "verter_session framework::project_capabilities::tests::hash_is_over_derived_bits_and_order_independent",
+        "verter_session framework::options::tests::admission_is_an_order_insensitive_set_with_sorted_ids"
+      ],
+      "note": "verter_session framework::registry::tests::composed_rows_keep_the_frontend_catalog_order pins today's static provider order; CPF1 replaces it with this case (CAT-F02).",
+      "executableOwner": "CPF1",
+      "receivingAcceptance": "CPF1-AC-R2"
+    },
+    {
+      "id": "DM02",
+      "name": "identity is stable across constructions and processes",
+      "input": "The same rows built twice in one process and once in another process",
+      "required": "Equal snapshot identity and equal canonical encoding bytes",
+      "forbidden": "An identity that includes an address, a counter, a timestamp or a process id",
+      "rules": ["CR06"],
+      "existingEvidence": [
+        "verter_language carrier_grammar::tests::grammar_fingerprint_is_stable_across_authority_lifetimes (same property for grammar fingerprints)"
+      ],
+      "executableOwner": "CPF1",
+      "receivingAcceptance": "CPF1-AC2"
+    },
+    {
+      "id": "DM03",
+      "name": "identity excludes what is not registration",
+      "input": "RM01 rows built under different admission options, different workspaces and different type-engine bindings",
+      "required": "Equal snapshot identity",
+      "forbidden": "Admission, workspace, project, revision or backend identity in the snapshot key",
+      "rules": ["CR06", "CR11"],
+      "existingEvidence": [],
+      "executableOwner": "CPF1",
+      "receivingAcceptance": "CPF1-AC2"
+    },
+    {
+      "id": "DM04",
+      "name": "identity moves with every semantic change",
+      "input": "RM01 rows, then: one row added; one descriptor column changed (a virtual-file suffix); the ProfileSchemaEpoch bumped; one exact release changed",
+      "required": "Each change yields a different snapshot identity",
+      "forbidden": "A semantic row change that leaves the identity equal",
+      "rules": ["CR06"],
+      "existingEvidence": [
+        "verter_language carrier_grammar::tests::every_canonical_grammar_input_discriminates_the_fingerprint (same property for grammar fingerprints)"
+      ],
+      "note": "The release-change leg is VID0 VC11's catalog half (CPF1-AC2).",
+      "executableOwner": "CPF1",
+      "receivingAcceptance": "CPF1-AC2"
+    },
+    {
+      "id": "DM05",
+      "name": "presentation order is not identity",
+      "input": "RM01 rows with the Vue and Svelte presentation ranks swapped",
+      "required": "Generated mirrors list Svelte before Vue; snapshot identity and dispatch are unchanged",
+      "forbidden": "Presentation rank entering the snapshot identity or any dispatch decision",
+      "rules": ["CR06", "CR09"],
+      "existingEvidence": [],
+      "executableOwner": "CPF1",
+      "receivingAcceptance": "CPF1-AC2"
+    }
+  ],
+  "manifestBytePinning": [
+    {
+      "id": "MB01",
+      "name": "mirrors regenerate byte-equal from the snapshot",
+      "input": "The RM01 snapshot rendered by the two generators",
+      "required": "Bytes equal to the committed client-framework-manifest.generated.ts and virtual-file-naming.generated.ts",
+      "forbidden": "A generator reading descriptor.rs or the extension table directly after the cutover; two sources for one mirror",
+      "rules": ["CR12"],
+      "existingEvidence": [
+        "verter_session tests/cases client_framework_manifest_ts_freshness and virtual_file_naming_ts_freshness"
+      ],
+      "executableOwner": "CPF1",
+      "receivingAcceptance": "CPF1-AC2"
+    },
+    {
+      "id": "MB02",
+      "name": "a hand edit fails freshness",
+      "input": "One byte of a committed mirror edited by hand",
+      "required": "The freshness test fails",
+      "forbidden": "A freshness check that regenerates and passes without comparing",
+      "rules": ["CR12"],
+      "existingEvidence": [
+        "verter_session tests/cases client_framework_manifest_ts_freshness and virtual_file_naming_ts_freshness"
+      ],
+      "executableOwner": "CPF1",
+      "receivingAcceptance": "CPF1-AC2"
+    },
+    {
+      "id": "MB03",
+      "name": "per-family split keeps the index bytes",
+      "input": "The mirrors split into one generated file per family behind the two index files",
+      "required": "Consumers of the two index files see unchanged Vue and Svelte bytes",
+      "forbidden": "A family file written by hand; an index that lists families by a hard-coded name list",
+      "rules": ["CR12", "CR13"],
+      "existingEvidence": [],
+      "executableOwner": "REG0",
+      "receivingAcceptance": "REG0-AC1"
+    }
+  ]
+}

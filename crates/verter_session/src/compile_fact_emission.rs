@@ -8,8 +8,9 @@
 //! through [`verter_session_query::facts::fact_cache::SignatureAdmission::from_finalise`]
 //! and stores the `Cacheable` arm's [`verter_session_query::facts::fact_cache::ReadSetSignature`]
 //! as the `fact_dep_signature` of the new [`crate::types::CompileSlot`].
-//! An overflowed tracer routes the freshly computed virtual file
-//! back to the caller without admitting a slot.
+//! A refused tracer (a non-cacheable read, mutation instability)
+//! routes the freshly computed virtual file back to the caller
+//! without admitting a slot.
 //!
 //! ## Why path-precision (R28)
 //!
@@ -95,6 +96,12 @@ pub(crate) fn observe_compile_tier_dependencies(
     macro_type_deps: &[MacroTypeDep],
     external_requests: &[ExternalSourceRequest],
 ) {
+    #[cfg(test)]
+    EXTRA_COMPILE_OBSERVATIONS.with(|facts| {
+        if let Some(facts) = facts.borrow().as_ref() {
+            verter_type_engine::fact_signature_helpers::observe_fact_signature(facts);
+        }
+    });
     // 1. Per-import `ImportRef` observation (R12 — parse-domain
     //    fact carrying the unresolved binding shape on the OWNER's
     //    file). Adding / removing the binding on the owner side
@@ -278,6 +285,27 @@ pub(crate) fn observe_compile_tier_dependencies(
     if !script_imports.is_empty() || !macro_type_deps.is_empty() || !external_requests.is_empty() {
         host.observe_owner_import_route_witness(canonical_id);
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    static EXTRA_COMPILE_OBSERVATIONS: std::cell::RefCell<Option<Arc<[FactVersionRef]>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Exercise opaque consumed-result evidence at the real compile admission.
+#[cfg(test)]
+pub(crate) fn with_extra_compile_observations<T>(
+    facts: Arc<[FactVersionRef]>,
+    run: impl FnOnce() -> T,
+) -> T {
+    struct Restore(Option<Arc<[FactVersionRef]>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            EXTRA_COMPILE_OBSERVATIONS.with(|cell| *cell.borrow_mut() = self.0.take());
+        }
+    }
+    let _restore = Restore(EXTRA_COMPILE_OBSERVATIONS.with(|cell| cell.replace(Some(facts))));
+    run()
 }
 
 /// Observe a `FactVersionRef::FileWholeHash` for `canonical_id`

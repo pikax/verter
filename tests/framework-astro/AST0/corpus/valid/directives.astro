@@ -1,0 +1,27 @@
+---
+import Counter from "../components/Counter.vue";
+import Chart from "../components/Chart.svelte";
+import Widget from "../components/Widget.tsx";
+import Avatar from "../components/Avatar.astro";
+const rows = [1, 2, 3];
+const active = true;
+const html = "<em>trusted</em>";
+const accent = "rebeccapurple";
+---
+
+<Counter client:load />
+<Chart client:visible data={rows} />
+<Widget client:idle />
+<Widget client:media="(max-width: 600px)" />
+<Counter client:only="vue" />
+<Avatar server:defer />
+<div set:html={html} />
+<p set:text={html} />
+<div is:raw>{ not an expression } and <b>literal markup</b></div>
+<p class:list={["base", { active }, active && "on"]}>class list</p>
+<h1 transition:name="hero" transition:animate="slide">title</h1>
+<style define:vars={{ accent }}>
+  h1 {
+    color: var(--accent);
+  }
+</style>

@@ -1442,3 +1442,124 @@ fn a_demand_from_a_retired_importer_is_served_but_not_retained() {
         "with no decision node behind it, the witness observes the target itself"
     );
 }
+
+#[test]
+fn lazy_resolution_retention_claims_wide_consumed_evidence_at_publication() {
+    use verter_session_query::facts::{
+        fact_cache::{FactVersionRef, ReadSetSignature, ResolveImportsFactRef},
+        fact_read_set::seal_canonical_signature,
+        receipt::ResultReceipt,
+        resolution::{CanonicalResolutionId, ResolutionFactKey, ResolutionFactRef},
+    };
+    use verter_session_query::retention::{
+        ChargeClass, ResolutionRetention, RetentionLimits, SemanticRetentionAccount,
+    };
+    for overlay_lane in [false, true] {
+        for admitted in [true, false] {
+            let workspace = ownership_workspace();
+            let importer = "/p/owner.ts";
+            workspace.inject_file(importer.into(), Arc::from("import './dep'"));
+            for index in 0..1025 {
+                workspace.inject_file(
+                    format!("/p/wide/{index}.ts"),
+                    Arc::from("export const value = 1"),
+                );
+            }
+            let world = WorkspaceRead::capture_resolution_world(&workspace).expect("world");
+            let facts = (0..1025)
+                .map(|index| {
+                    let key = ResolutionFactKey::PathProbe {
+                        canonical: CanonicalResolutionId::new(format!("/p/wide/{index}.ts")),
+                        population: verter_session_query::resolution::ResolutionPopulation::Base,
+                    };
+                    let version = world.fact_version(&key);
+                    FactVersionRef::ResolveImports(ResolveImportsFactRef::Resolution(
+                        ResolutionFactRef::new(key, version),
+                    ))
+                })
+                .collect();
+            let facts = seal_canonical_signature(facts);
+            let pages: Vec<_> = facts
+                .iter()
+                .filter_map(|fact| match fact {
+                    FactVersionRef::Receipt(page) => Some(page.clone()),
+                    _ => None,
+                })
+                .collect();
+            let page_bytes: usize = pages.iter().map(|page| page.retained_charge_bytes()).sum();
+            assert!(!pages.is_empty());
+            let consumed = ResultReceipt::new(facts.to_vec());
+            drop(facts);
+            let witness = ReadSetSignature::new(Arc::from(vec![FactVersionRef::Receipt(consumed)]));
+            assert!(witness.validates(world.as_ref()));
+            let account = SemanticRetentionAccount::new(RetentionLimits {
+                max_entry_bytes: if admitted { usize::MAX } else { page_bytes - 1 },
+                ..RetentionLimits::defaults()
+            });
+            WorkspaceAccess::install_resolution_retention(
+                &workspace,
+                Arc::new(ResolutionRetention::new(Arc::clone(&account))),
+            );
+            let overlay = crate::resolution_currency::ResolutionOverlaySnapshot::new(
+                vec![(
+                    "/p/overlay-only.ts".to_string(),
+                    Arc::<str>::from("export const value = 1"),
+                )],
+                std::iter::empty::<String>(),
+            );
+            let baseline = residency(&workspace);
+            let overlay_baseline = workspace.resource_snapshot().overlay_resolution_slots;
+            let outcome =
+                super::resolution_test_hooks::with_extra_resolution_witness(witness, || {
+                    if overlay_lane {
+                        let outcome = workspace.resolve_import_outcome_with_overlay(
+                            &overlay,
+                            importer,
+                            "./overlay-only",
+                            OWNERSHIP_CONTEXT,
+                        );
+                        assert_eq!(
+                            outcome.result().map(|result| result.source_id.as_str()),
+                            Some("/p/overlay-only.ts")
+                        );
+                        outcome
+                    } else {
+                        resolve_owned(&workspace, importer, "./dep")
+                    }
+                });
+            assert_eq!(outcome.trace().published(), admitted);
+            assert_eq!(
+                residency(&workspace).slots,
+                baseline.slots + usize::from(admitted && !overlay_lane)
+            );
+            assert_eq!(
+                residency(&workspace).derived_nodes,
+                baseline.derived_nodes + usize::from(admitted && !overlay_lane)
+            );
+            assert_eq!(
+                workspace.resource_snapshot().overlay_resolution_slots,
+                overlay_baseline + usize::from(admitted && overlay_lane)
+            );
+            let expected = if admitted {
+                ChargeClass::Retained
+            } else {
+                ChargeClass::Pinned
+            };
+            assert!(pages
+                .iter()
+                .all(|page| page.retained_charge_class() == Some(expected)));
+            if !overlay_lane {
+                assert_eq!(
+                    outcome.non_admission_reason(),
+                    if admitted {
+                        None
+                    } else {
+                        Some(verter_audit::NonAdmissionReason::RetentionPressure)
+                    }
+                );
+            }
+            drop((outcome, world, workspace, overlay, pages));
+            assert_eq!(account.snapshot().retained_bytes, 0);
+        }
+    }
+}

@@ -89,15 +89,15 @@ fn reentrant_observe_does_not_panic_and_both_signatures_non_empty() {
     match inner_finalise {
         FactReadSetFinalise::Ok(sig) => assert!(!sig.is_empty(), "inner scope must be non-empty"),
         FactReadSetFinalise::NonCacheable(_) => panic!("inner scope unexpectedly non-cacheable"),
-        FactReadSetFinalise::Overflow | FactReadSetFinalise::MutationUnstable => {
-            panic!("inner scope overflowed")
+        FactReadSetFinalise::MutationUnstable => {
+            panic!("inner scope was mutation-unstable")
         }
     }
     match outer_finalise {
         FactReadSetFinalise::Ok(sig) => assert!(!sig.is_empty(), "outer scope must be non-empty"),
         FactReadSetFinalise::NonCacheable(_) => panic!("outer scope unexpectedly non-cacheable"),
-        FactReadSetFinalise::Overflow | FactReadSetFinalise::MutationUnstable => {
-            panic!("outer scope overflowed")
+        FactReadSetFinalise::MutationUnstable => {
+            panic!("outer scope was mutation-unstable")
         }
     }
 }

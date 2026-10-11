@@ -116,6 +116,33 @@ thread_local! {
     /// A lower tail budget for the ledgers this thread installs, set by
     /// [`TailBudgetForTests`].
     static TAIL_STEPS_FOR_TESTS: Cell<Option<u32>> = const { Cell::new(None) };
+    /// A lower work budget for the ledgers this thread installs, set by
+    /// [`WorkBudgetForTests`].
+    static WORK_FOR_TESTS: Cell<Option<usize>> = const { Cell::new(None) };
+}
+
+/// Install `limit` as the connected-work budget of every ledger this
+/// thread creates until the guard drops — the production budget's code
+/// path at an amount of work a test can reach quickly. Test-only.
+#[cfg(any(test, feature = "test-support"))]
+pub struct WorkBudgetForTests {
+    previous: Option<usize>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl WorkBudgetForTests {
+    pub fn install(limit: usize) -> Self {
+        Self {
+            previous: WORK_FOR_TESTS.with(|slot| slot.replace(Some(limit))),
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Drop for WorkBudgetForTests {
+    fn drop(&mut self) {
+        WORK_FOR_TESTS.with(|slot| slot.set(self.previous));
+    }
 }
 
 /// Install `limit` as the tail budget of every ledger this thread creates
@@ -271,7 +298,14 @@ impl<'a> ConnectedDemandLedger<'a> {
             cancellation,
             active: Cell::new(false),
             work_used: Cell::new(0),
+            #[cfg(not(any(test, feature = "test-support")))]
             work_limit: Cell::new(MAX_CONNECTED_PROJECTION_WORK),
+            #[cfg(any(test, feature = "test-support"))]
+            work_limit: Cell::new(
+                WORK_FOR_TESTS
+                    .with(Cell::get)
+                    .unwrap_or(MAX_CONNECTED_PROJECTION_WORK),
+            ),
             bytes_used: Cell::new(0),
             bytes_limit: Cell::new(MAX_CONNECTED_CONSTRUCTION_BYTES),
             query_depth: Cell::new(0),

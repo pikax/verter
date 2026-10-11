@@ -67,8 +67,8 @@ fn warm_hit_bubbles_facts_into_active_tracer() {
             );
         }
         FactReadSetFinalise::NonCacheable(_) => panic!("tracer unexpectedly non-cacheable"),
-        FactReadSetFinalise::Overflow | FactReadSetFinalise::MutationUnstable => {
-            panic!("tracer overflowed")
+        FactReadSetFinalise::MutationUnstable => {
+            panic!("tracer was mutation-unstable")
         }
     }
 }
@@ -103,8 +103,8 @@ fn cold_compute_bubbles_facts_after_resolve() {
             );
         }
         FactReadSetFinalise::NonCacheable(_) => panic!("tracer unexpectedly non-cacheable"),
-        FactReadSetFinalise::Overflow | FactReadSetFinalise::MutationUnstable => {
-            panic!("tracer overflowed")
+        FactReadSetFinalise::MutationUnstable => {
+            panic!("tracer was mutation-unstable")
         }
     }
 }
@@ -137,8 +137,8 @@ fn cold_miss_returns_none_and_tracer_empty() {
         FactReadSetFinalise::NonCacheable(_) => {
             panic!("empty-path tracer unexpectedly non-cacheable")
         }
-        FactReadSetFinalise::Overflow | FactReadSetFinalise::MutationUnstable => {
-            panic!("tracer overflowed on empty path")
+        FactReadSetFinalise::MutationUnstable => {
+            panic!("tracer was mutation-unstable on empty path")
         }
     }
 }

@@ -26,6 +26,7 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
+use verter_lsp::type_provider::traits::ProviderQuery;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
@@ -1122,7 +1123,7 @@ impl TypeProvider for OwnedBaselineDouble {
     }
     fn get_completions(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _offset: u32,
         _trigger: Option<&str>,
     ) -> ProviderFuture<'_, CompletionResult> {
@@ -1133,61 +1134,76 @@ impl TypeProvider for OwnedBaselineDouble {
             })
         })
     }
-    fn get_hover(&self, _path: &str, _offset: u32) -> ProviderFuture<'_, Option<HoverInfo>> {
+    fn get_hover(
+        &self,
+        _query: &ProviderQuery,
+        _offset: u32,
+    ) -> ProviderFuture<'_, Option<HoverInfo>> {
         Box::pin(async move { Ok(None) })
     }
     fn get_diagnostics(&self, _path: &str) -> ProviderFuture<'_, Vec<TypeDiagnostic>> {
         Box::pin(async move { Ok(Vec::new()) })
     }
-    fn get_definition(&self, _path: &str, _offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
-        Box::pin(async move { Ok(Vec::new()) })
-    }
-    fn get_type_definition(
+    fn get_definition(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _offset: u32,
     ) -> ProviderFuture<'_, Vec<TypeLocation>> {
         Box::pin(async move { Ok(Vec::new()) })
     }
-    fn get_references(&self, _path: &str, _offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
+    fn get_type_definition(
+        &self,
+        _query: &ProviderQuery,
+        _offset: u32,
+    ) -> ProviderFuture<'_, Vec<TypeLocation>> {
+        Box::pin(async move { Ok(Vec::new()) })
+    }
+    fn get_references(
+        &self,
+        _query: &ProviderQuery,
+        _offset: u32,
+    ) -> ProviderFuture<'_, Vec<TypeLocation>> {
         Box::pin(async move { Ok(Vec::new()) })
     }
     fn get_rename_locations(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _offset: u32,
     ) -> ProviderFuture<'_, Vec<RenameLocation>> {
         Box::pin(async move { Ok(Vec::new()) })
     }
     fn get_signature_help(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _offset: u32,
     ) -> ProviderFuture<'_, Option<SignatureHelp>> {
         Box::pin(async move { Ok(None) })
     }
     fn get_code_actions(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _start: u32,
         _end: u32,
         _diagnostics: &[ProviderDiagnosticContext],
     ) -> ProviderFuture<'_, Vec<TypeCodeAction>> {
         Box::pin(async move { Ok(Vec::new()) })
     }
-    fn get_semantic_tokens(&self, _path: &str) -> ProviderFuture<'_, Vec<SemanticToken>> {
+    fn get_semantic_tokens(
+        &self,
+        _query: &ProviderQuery,
+    ) -> ProviderFuture<'_, Vec<SemanticToken>> {
         Box::pin(async move { Ok(Vec::new()) })
     }
     fn get_document_highlights(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _offset: u32,
     ) -> ProviderFuture<'_, Vec<TypeDocumentHighlight>> {
         Box::pin(async move { Ok(Vec::new()) })
     }
     fn get_inlay_hints(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _start: u32,
         _end: u32,
     ) -> ProviderFuture<'_, Vec<InlayHint>> {
@@ -1739,7 +1755,10 @@ async fn composite_successful_shared_route_never_activates_managed_fallback() {
         as u32;
     let hover = tokio::time::timeout(
         Duration::from_secs(45),
-        h.composite.get_hover(&carrier_tsx, label_offset),
+        h.composite.get_hover(
+            &verter_lsp::type_provider::traits::ProviderQuery::at_engine_surface(&carrier_tsx),
+            label_offset,
+        ),
     )
     .await
     .expect("shared hover timed out")
@@ -1813,12 +1832,18 @@ async fn composite_attach_failure_activates_managed_fallback_exactly_once() {
 
     let offset = ide_code.find("props.label").unwrap() as u32;
     assert!(composite
-        .get_hover(&carrier_tsx, offset)
+        .get_hover(
+            &verter_lsp::type_provider::traits::ProviderQuery::at_engine_surface(&carrier_tsx),
+            offset
+        )
         .await
         .unwrap()
         .is_none());
     assert!(composite
-        .get_hover(&carrier_tsx, offset)
+        .get_hover(
+            &verter_lsp::type_provider::traits::ProviderQuery::at_engine_surface(&carrier_tsx),
+            offset
+        )
         .await
         .unwrap()
         .is_none());
@@ -2112,7 +2137,10 @@ async fn assert_template_member_served_typed(h: &CompositeHarness, topology: &st
 
     let hover = tokio::time::timeout(
         Duration::from_secs(45),
-        h.composite.get_hover(&carrier_tsx, member_offset),
+        h.composite.get_hover(
+            &verter_lsp::type_provider::traits::ProviderQuery::at_engine_surface(&carrier_tsx),
+            member_offset,
+        ),
     )
     .await
     .expect("shared template hover timed out")
@@ -2126,8 +2154,11 @@ async fn assert_template_member_served_typed(h: &CompositeHarness, topology: &st
 
     let completions = tokio::time::timeout(
         Duration::from_secs(45),
-        h.composite
-            .get_completions(&carrier_tsx, member_offset, None),
+        h.composite.get_completions(
+            &verter_lsp::type_provider::traits::ProviderQuery::at_engine_surface(&carrier_tsx),
+            member_offset,
+            None,
+        ),
     )
     .await
     .expect("shared template completion timed out")

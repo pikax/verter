@@ -23,7 +23,7 @@
 //!   (the resolved facts do not depend on lib/type data). Warm reads pass TWO
 //!   gates: a strict same-generation gate AND a `ReadSetSignature.facts`
 //!   validation against the caller's live view; publication is ONLY via
-//!   [`SignatureAdmission::Cacheable`] — an overflowed signature returns the
+//!   [`SignatureAdmission::Cacheable`] — a refused admission returns the
 //!   computed value to the caller alone and never warms the store.
 //!
 //! Svelte registers the production provider; Vue's macro analysis stays inside
@@ -549,11 +549,13 @@ pub struct StoredResolvedFact {
 ///
 /// Query-identity discipline: warm reads pass a strict same-generation gate AND
 /// a fact-rail validation against the caller's live view; cold writes admit
-/// ONLY via [`SignatureAdmission::Cacheable`]. An overflowed signature is never
+/// ONLY via [`SignatureAdmission::Cacheable`]. A refused admission is never
 /// warmed.
 #[derive(Default)]
 pub struct FrameworkScriptFactStore {
     entries: DashMap<ResolvedFactKey, Arc<StoredResolvedFact>>,
+    /// The account an admitted entry's evidence pages are claimed into.
+    retention_account: verter_session_query::retention::StoreAccount,
 }
 
 impl std::fmt::Debug for FrameworkScriptFactStore {
@@ -571,6 +573,15 @@ impl FrameworkScriptFactStore {
         Self::default()
     }
 
+    /// A store whose admissions claim their evidence pages into `account`.
+    #[cfg(test)]
+    fn with_retention_account(account: verter_session_query::retention::StoreAccount) -> Self {
+        Self {
+            retention_account: account,
+            ..Self::default()
+        }
+    }
+
     /// Clone the cached resolved fact for request-owned validation.
     #[must_use]
     pub fn candidate(&self, key: &ResolvedFactKey) -> Option<Arc<StoredResolvedFact>> {
@@ -581,10 +592,14 @@ impl FrameworkScriptFactStore {
     /// [`SignatureAdmission::Cacheable`], returning the canonical `Arc` on
     /// admission.
     ///
-    /// An overflowed / non-cacheable admission NEVER warms the store — the
+    /// A non-cacheable admission NEVER warms the store — the
     /// computed value is returned to the caller alone (the no-poison invariant).
     /// The returned `Arc` lets a non-admitting caller still hand back the
     /// computed payload without a store entry.
+    ///
+    /// A cacheable entry retains its signature's evidence pages, so its
+    /// admission claims them into a refusable reservation; a refused claim
+    /// returns the complete payload, with its signature, uncached.
     pub(crate) fn publish_if_cacheable(
         &self,
         key: ResolvedFactKey,
@@ -601,7 +616,19 @@ impl FrameworkScriptFactStore {
             validated_at_generation: generation,
         });
         if admission.cacheable().is_some() {
-            self.entries.insert(key, Arc::clone(&stored));
+            match verter_session_query::facts::receipt::claim_evidence_pages(
+                self.retention_account.get(),
+                &stored.read_set_signature.facts,
+            ) {
+                Ok(()) => {
+                    self.entries.insert(key, Arc::clone(&stored));
+                }
+                Err(refusal) => {
+                    verter_type_engine::cache_runtime::admission::propagate_non_admission(
+                        refusal.non_admission_reason(),
+                    );
+                }
+            }
         }
         stored
     }
@@ -639,7 +666,7 @@ impl FrameworkScriptFactStore {
 /// PROVISIONAL: this cache pair is a host field OUTSIDE the single
 /// `ProjectTypeStore`. Both stores are fact-validated — the candidate store is
 /// content-addressed and [`FrameworkScriptFactStore::publish_if_cacheable`]
-/// admits only `Cacheable` results (ReturnOnly on overflow) — so the logic is
+/// admits only `Cacheable` results (ReturnOnly on a refusal) — so the logic is
 /// correct today, but the pair is a temporary off-`ProjectTypeStore` cache still
 /// to be consolidated onto `ProjectTypeStore`.
 #[derive(Debug, Default)]
@@ -852,13 +879,11 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
     // has no enclosing tracer, so the outer surface tracer cannot cover it).
     //
     // The facts entry's signature comes from the `provider.validate` tracer below,
-    // never from THIS one, so this boundary reads the CACHEABILITY verdict — which
-    // folds the non-cacheable-read bit together with a
-    // `FactReadSetFinalise::Overflow` (an observation set no signature can root:
-    // a second, INDEPENDENT non-admission condition that must not be dropped here,
-    // since nothing downstream inspects this tracer's finalised set).
+    // never from THIS one, so this boundary reads the CACHEABILITY verdict — the
+    // non-cacheable-read bit, which must not be dropped here, since nothing
+    // downstream inspects this tracer's finalised set.
     //
-    // The scope is opened by NAME so a test can target THIS boundary's overflow
+    // The scope is opened by NAME so a test can target THIS boundary's refusal
     // rail specifically — see `named_cacheability_scope!`. The name is erased in a
     // production build.
     let (resolved_import_targets_opt, mut import_non_cacheable): (
@@ -1310,7 +1335,7 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
             )),
         };
     }
-    // Cacheable-only publication; overflow returns the value to this caller
+    // Cacheable-only publication; a refusal returns the value to this caller
     // alone (never warms the store).
     let stored = host.framework_script_caches().facts.publish_if_cacheable(
         fact_key,

@@ -167,8 +167,14 @@ impl<'a> OwnerImportRequestDriver<'a> {
                     );
                     return None;
                 }
-                self.db
-                    .insert_owned(Arc::clone(&surface.owner_canonical), Arc::clone(&surface));
+                if let Err(refusal) = self
+                    .db
+                    .insert_owned(Arc::clone(&surface.owner_canonical), Arc::clone(&surface))
+                {
+                    verter_type_engine::cache_runtime::admission::propagate_non_admission(
+                        refusal.non_admission_reason(),
+                    );
+                }
                 Some(surface)
             }
             (
@@ -209,31 +215,10 @@ impl<'a> OwnerImportRequestDriver<'a> {
                     value: surface,
                     ..
                 },
-                verter_session_query::facts::fact_read_set::FactReadSetFinalise::Overflow,
-            ) => {
-                host.provenance
-                    .owner_import_surface_overflow_refusals
-                    .fetch_add(1, Ordering::Relaxed);
-                verter_type_engine::cache_runtime::admission::propagate_non_admission(
-                    verter_audit::NonAdmissionReason::SignatureOverflow,
-                );
-                Some(surface)
-            }
-            (
-                verter_type_engine::cache_runtime::singleflight::ComputeAdmission::Cacheable(
-                    surface,
-                )
-                | verter_type_engine::cache_runtime::singleflight::ComputeAdmission::ReturnOnly {
-                    value: surface,
-                    ..
-                },
                 verter_session_query::facts::fact_read_set::FactReadSetFinalise::MutationUnstable,
             ) => {
-                // Same refusal as the overflow arm above, attributed
-                // truthfully: a compaction domain moved mid-scope, which
-                // is a STABILITY failure and not a size one, so it
-                // neither propagates `SignatureOverflow` nor inflates the
-                // overflow-refusal counter.
+                // A compaction domain moved mid-scope: a STABILITY
+                // failure, refused under its own reason.
                 verter_type_engine::cache_runtime::admission::propagate_non_admission(
                     verter_audit::NonAdmissionReason::MutationUnstable,
                 );

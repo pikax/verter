@@ -1,0 +1,42 @@
+{
+  "schema": "ProbeManifest",
+  "version": 1,
+  "node": "GLM0",
+  "kind": "lock",
+  "products": [
+    "GlimmerVersionLock",
+    "GlimmerCapabilityMatrix",
+    "GlimmerActivationPolicy"
+  ],
+  "productFiles": {
+    "GlimmerVersionLock": "tests/framework-ember-glimmer/GLM0/products/glimmer-version-lock.json",
+    "GlimmerCapabilityMatrix": "tests/framework-ember-glimmer/GLM0/products/glimmer-capability-matrix.json",
+    "GlimmerActivationPolicy": "tests/framework-ember-glimmer/GLM0/products/glimmer-activation-policy.json"
+  },
+  "mandatoryCases": [
+    "GLM0-policy-lock",
+    "GLM0-AC1",
+    "GLM0-AC2",
+    "GLM0-AC3",
+    "GLM0-AC4",
+    "GLM0-AC5"
+  ],
+  "cases": [
+    { "id": "GLM0-policy-lock", "disposition": "accept", "table": "tests/framework-ember-glimmer/GLM0/cases.md" },
+    { "id": "GLM0-AC1", "disposition": "reject", "table": "tests/framework-ember-glimmer/GLM0/cases.md" },
+    { "id": "GLM0-AC2", "disposition": "reject", "table": "tests/framework-ember-glimmer/GLM0/cases.md" },
+    { "id": "GLM0-AC3", "disposition": "reject", "table": "tests/framework-ember-glimmer/GLM0/cases.md" },
+    { "id": "GLM0-AC4", "disposition": "reject", "table": "tests/framework-ember-glimmer/GLM0/cases.md" },
+    { "id": "GLM0-AC5", "disposition": "reject", "table": "tests/framework-ember-glimmer/GLM0/cases.md" }
+  ],
+  "validator": {
+    "status": "not-landed",
+    "owner": "GLM1G",
+    "acceptance": "GLM1G-ACV",
+    "test": "node --test tests/framework-ember-glimmer/GLM0/glimmer-lock.spec.ts",
+    "discoveredBy": "scripts/run-framework-locks.mjs"
+  },
+  "doc": "docs/arch/framework-ember-glimmer.md",
+  "runtimeCorrectness": false,
+  "notes": "Ratification lock for the Ember/Glimmer vertical. Data and text only: no validator, spec, CI gate or package.json script lands with it. FWA1 and FCH1 read the products as data; the lock is not CI-checked until GLM1G lands its validator. No production route, activation or public shape is authorized by this lock."
+}

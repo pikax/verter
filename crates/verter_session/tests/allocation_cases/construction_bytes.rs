@@ -143,3 +143,53 @@ fn a_template_holds_no_more_than_it_reserved() {
         "peak live {peak} bytes past the {charged} bytes reserved"
     );
 }
+
+/// `S` and `T` unions of `count` single-property objects aligned arm for
+/// arm; the target property is `number` when `related` and `string` when
+/// not, so the relation holds or fails at the first arm.
+fn aligned_unions(count: usize, related: bool) -> String {
+    let source: Vec<String> = (0..count).map(|i| format!("{{ p{i}: {i} }}")).collect();
+    let property = if related { "number" } else { "string" };
+    let target: Vec<String> = (0..count)
+        .map(|i| format!("{{ p{i}: {property} }}"))
+        .collect();
+    format!(
+        "export type S = {};\nexport type T = {};\n",
+        source.join(" | "),
+        target.join(" | ")
+    )
+}
+
+/// Bytes the allocator hands out on this thread relating aligned `S` to
+/// `T` over `count` arms, with the declarations already read, and whether
+/// `S` holds.
+fn aligned_relation_bytes(count: usize, related: bool) -> (bool, u64) {
+    let host = host_with(&aligned_unions(count, related));
+    let _ = verter_session::for_tests::relate_named_types_for_tests(&host, FILE, "S", "S", None);
+    let _ = verter_session::for_tests::relate_named_types_for_tests(&host, FILE, "T", "T", None);
+    reset_alloc_counter();
+    let (assignable, _work, _charged) =
+        verter_session::for_tests::relate_named_types_for_tests(&host, FILE, "S", "T", None);
+    (assignable, super::alloc_bytes())
+}
+
+/// Aligned unions of 200, 400 and 800 arms, true and false: the relation
+/// decides as the checker does, and each doubling of the arms at most about
+/// doubles the bytes allocated, so neither series allocates superlinearly.
+#[test]
+fn aligned_relation_allocation_grows_linearly_with_the_arms() {
+    for related in [true, false] {
+        let bytes = [200, 400, 800].map(|count| {
+            let (assignable, bytes) = aligned_relation_bytes(count, related);
+            assert_eq!(assignable, related, "{count} arms");
+            bytes
+        });
+        for step in 0..2 {
+            assert!(
+                bytes[step + 1] * 10 <= bytes[step] * 25,
+                "doubling the arms at most about doubles the bytes allocated \
+                 (related {related}): {bytes:?}"
+            );
+        }
+    }
+}

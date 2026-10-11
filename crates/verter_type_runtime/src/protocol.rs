@@ -15,6 +15,12 @@ pub struct TypeProviderError {
     pub message: String,
     #[serde(skip)]
     pub admission_refusal: Option<crate::provider_hub::AdmissionRefusal>,
+    /// The query's coordinates could not be bound to the bytes the engine
+    /// evaluated ([`crate::provider_query::ProviderQueryConflict`]): no answer
+    /// was decoded. A one-byte marker so the error keeps its size; the message
+    /// names the file that moved.
+    #[serde(skip)]
+    pub query_conflict: bool,
 }
 
 impl std::fmt::Display for TypeProviderError {
@@ -30,6 +36,7 @@ impl TypeProviderError {
         Self {
             message: message.into(),
             admission_refusal: None,
+            query_conflict: false,
         }
     }
 
@@ -37,7 +44,24 @@ impl TypeProviderError {
         Self {
             message: format!("generated-unit admission refused: {reason:?}"),
             admission_refusal: Some(reason),
+            query_conflict: false,
         }
+    }
+
+    /// The typed outcome of a query whose delivered bytes moved under it.
+    #[must_use]
+    pub fn query_conflict(conflict: &crate::provider_query::ProviderQueryConflict) -> Self {
+        Self {
+            message: conflict.to_string(),
+            admission_refusal: None,
+            query_conflict: true,
+        }
+    }
+}
+
+impl From<crate::provider_query::ProviderQueryConflict> for TypeProviderError {
+    fn from(conflict: crate::provider_query::ProviderQueryConflict) -> Self {
+        Self::query_conflict(&conflict)
     }
 }
 

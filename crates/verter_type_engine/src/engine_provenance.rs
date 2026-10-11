@@ -47,8 +47,6 @@ pub struct EngineProvenance {
     /// `install_fact_tracer` wrap count for `MemoEntry` (semantic
     /// query memo cold builds).
     pub memo_entry_fact_tracer_installs: std::sync::atomic::AtomicU64,
-    /// `install_fact_tracer` overflow-refusal count for `MemoEntry`.
-    pub memo_entry_overflow_refusals: std::sync::atomic::AtomicU64,
 }
 
 impl Default for EngineProvenance {
@@ -66,7 +64,6 @@ impl Default for EngineProvenance {
                 std::sync::atomic::AtomicU64::new(0)
             }),
             memo_entry_fact_tracer_installs: std::sync::atomic::AtomicU64::new(0),
-            memo_entry_overflow_refusals: std::sync::atomic::AtomicU64::new(0),
         }
     }
 }

@@ -1,0 +1,62 @@
+{
+  "schema": "ErbActivationPolicy",
+  "version": 1,
+  "product": "ErbActivationPolicy",
+  "node": "ERB0",
+  "kind": "lock",
+  "framework": "erb",
+  "activationAuthority": "FWA1 FrameworkActivation record (FWA1-AC7); this product is the erb row FWA1 reads as data",
+  "sources": [
+    {
+      "id": "gemfile-lock",
+      "provenance": "lockfile",
+      "file": "Gemfile.lock at the package root",
+      "read": "as data: the resolved specs (name and exact version) of the lockfile's GEM sections",
+      "never": ["Gemfile", "bundle", "ruby", "any gem or Rails process"],
+      "selection": [
+        { "order": 1, "gem": "actionview", "profile": "erb.erubi-1.13.1", "release": "actionview-8.1.4", "exactVersion": "8.1.4" },
+        { "order": 2, "gem": "erubi", "profile": "erb.erubi-1.13.1", "release": "erubi-1.13.1", "exactVersion": "1.13.1" },
+        { "order": 3, "gem": "erb", "profile": "erb.erb-6.0.7", "release": "erb-6.0.7", "exactVersion": "6.0.7" }
+      ],
+      "selectionRule": "the first gem present in the resolved specs decides; a later gem is never consulted once an earlier one is present. A present gem different from its exact ratified pin gives unsupported-version with that version, never a fallback to a later gem",
+      "engineReleaseCheck": "when actionview 8.1.4 selects erb.erubi-1.13.1, erubi must resolve to exactly 1.13.1; any other resolved version gives unsupported-version, and a missing erubi spec gives unavailable-engine-release, never an inferred pin",
+      "identityRule": "activation retains the selected exact resolved release and, for Action View, the exact engine release; profile identity comes from the ratified exact-release row, never releaseLine"
+    },
+    {
+      "id": "explicit-on",
+      "provenance": "explicit",
+      "setting": "frameworks.erb = on, naming one profile id from erb-version-lock.json",
+      "rule": "without a lockfile, only an explicit on that names a profile activates; on without a profile, or naming an unknown or unadmitted profile, activates nothing and reports why. With a lockfile, on never admits a release the lockfile resolves different from an exact ratified pin"
+    }
+  ],
+  "states": [
+    { "setting": "off", "result": "off for every file; zero ERB work" },
+    { "setting": "auto", "lockfile": "present, admitted", "result": "active with provenance lockfile, the exact resolved release and selected exact-release profile" },
+    { "setting": "auto", "lockfile": "present, gem differs from exact ratified pin", "result": "unsupported-version with the resolved version and reason" },
+    { "setting": "auto", "lockfile": "present, none of the three gems", "result": "inactive" },
+    { "setting": "auto", "lockfile": "absent", "result": "inactive" },
+    { "setting": "on <profile>", "lockfile": "absent", "result": "active with provenance explicit at the named exact-release profile and its ratified pins" },
+    { "setting": "on", "lockfile": "absent", "result": "not activated: on must name a profile" }
+  ],
+  "forbiddenSources": [
+    { "id": "file-name", "example": "a file named show.html.erb exists", "reason": "an association says how a claimed file is hosted; it never activates the framework" },
+    { "id": "script-src", "example": "<script src=\"/assets/rails-ujs.js\">", "reason": "a URL is not an installed release" },
+    { "id": "unread-gemfile", "example": "Gemfile declares gem \"rails\", \"~> 8.1\"", "reason": "a requirement is not a resolved version, and the Gemfile is never read" },
+    { "id": "importmap", "example": "config/importmap.rb pins", "reason": "not an ERB engine source" }
+  ],
+  "associations": [
+    { "pattern": "*.html.erb", "claim": "gated", "host": "html", "gate": "FWA1 erb active" },
+    { "pattern": "*.turbo_stream.erb", "claim": "gated", "host": "html", "gate": "FWA1 erb active" },
+    { "pattern": "*.erb", "claim": "configured", "host": "html", "gate": "FWA1 erb active and an explicit configuration entry naming the file or glob as an HTML host (key bound by ERBP0)" },
+    { "pattern": "*.js.erb", "claim": "never", "reason": "non-HTML host" },
+    { "pattern": "*.text.erb", "claim": "never", "reason": "non-HTML host" },
+    { "pattern": "*.<other-non-html-format>.erb", "claim": "never", "examples": ["*.json.erb", "*.xml.erb", "*.css.erb", "*.yml.erb"], "reason": "non-HTML host" },
+    { "pattern": "*.html+<variant>.erb", "claim": "not-ratified", "reason": "an Action View variant spelling is not named by the ERB0 association decision; claiming it needs an amendment to this lock" }
+  ],
+  "associationOwner": "ERBP0 owns file associations, document selectors and CLI globs (ERBP0-AC1, ERBP0-AC3); this table is their contract",
+  "vendoredFrameworks": [
+    { "gem": "stimulus-rails", "rule": "its admission is STIM0's vendored-version table; ERB treats its helpers as opaque Ruby" },
+    { "gem": "turbo-rails", "rule": "its admission is STIM0's vendored-version table; ERB treats its helpers as opaque Ruby" }
+  ],
+  "notes": "Executable proof is FWA1-AC7 (activation) and ERB1G-ACV (planted rows in cases.md)."
+}

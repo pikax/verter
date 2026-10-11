@@ -409,6 +409,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             read.cache_suppress,
             read.partial_reason_classes(),
         );
+        self.deposit_operation_refusals(read.walker_diagnostics.iter());
         read
     }
 
@@ -556,6 +557,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             read.cache_suppress,
             read.partial_reason_classes(),
         );
+        self.deposit_operation_refusals(read.walker_diagnostics.iter());
         match read.value {
             QueryResult::Value(SemanticQueryValue::TypeNode(node)) => node,
             _ => self.opaque(QueryError::Miss),
@@ -680,7 +682,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             std::mem::take(&mut frame.taint),
             finalise,
             &CarrierNormalizationPrelude::none(),
-            None,
             &frame.key,
         );
         let lease = frame

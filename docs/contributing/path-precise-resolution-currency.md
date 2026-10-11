@@ -691,9 +691,10 @@ There is no sibling resolution signature, cache, validator, overflow
 convention, or empty-signature fallback. `ResolvedImportFactsDb` moves onto
 this existing bounded multi-candidate substrate during the cutover.
 
-The fact-signature bound is `FACT_SIGNATURE_CAP = 1_024`. Empty means
-dependency-free and cacheable. Overflow means the computed result is valid but
-non-cacheable; it is not represented as an empty signature.
+Signature width is never a refusal. A canonical set wider than
+`FACT_PAGE_WIDTH = 1_024` is sealed into immutable, retention-charged evidence
+pages and validated in full. Empty means dependency-free and cacheable; a
+refusal is never represented as an empty signature.
 
 `FactReadSet::finalise` is the single canonicaliser: it sorts + dedups the
 observed set under the derived `Ord` on `FactVersionRef`, so an identical
@@ -723,7 +724,6 @@ NonCacheable(NonAdmissionReason)
 The following are typed non-admission and use
 `CacheAdmission::ReturnOnly`/skip-publish:
 
-- signature overflow;
 - `Inaccessible` or `Unknown` probe outcome;
 - unstable or newer-than-root I/O without an event-bridge publication;
 - incomplete provenance or an untracked resolver branch;
@@ -946,8 +946,8 @@ to `EsmImport`, then re-normalises, so a `.d.ts` companion appearing beside
 an already-resolving `.js` target retargets the edge through an INTERMEDIATE
 lane's observation.
 
-`None` — an unreadable parse surface, a refused resolution, or a union that
-overflows `FACT_SIGNATURE_CAP` — is unrootable. The consumer serves its value
+`None` — an unreadable parse surface or a refused resolution — is
+unrootable. The consumer serves its value
 and refuses its own admission, and the refusal raises the enclosing
 cold-compute suppression chokepoint. It is never represented by a truncated
 or empty signature.

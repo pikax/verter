@@ -130,7 +130,7 @@ impl ComponentApiProjectionWitness {
             target_canonical: &str,
             augmenter_canonical: &str,
         ) -> (bool, bool) {
-            let shape = signature.facts.iter().any(|fact| {
+            let shape = signature.entries().any(|fact| {
                 matches!(
                     fact,
                     verter_session_query::facts::fact_cache::FactVersionRef::RouteSurface(route)
@@ -144,7 +144,7 @@ impl ComponentApiProjectionWitness {
                         )
                 )
             });
-            let contributor = signature.facts.iter().any(|fact| {
+            let contributor = signature.entries().any(|fact| {
                 matches!(
                     fact,
                     verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash { canonical_id, .. }

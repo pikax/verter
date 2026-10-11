@@ -1,0 +1,492 @@
+{
+  "id": "embedded-inventory.v1",
+  "schema": 1,
+  "contractNode": "EMB0",
+  "describesHead": {
+    "landingTitle": "docs(arch): ratify the Angular release, activation, parser, host and (#822)",
+    "date": "2026-10-10"
+  },
+  "finalOwner": "typed immutable universal catalog and demand-selected kernel services",
+  "implementationHome": "verter_language::embedded",
+  "companionFiles": ["embedded-route-ledger.v1.json", "embedded-case-table.v1.json"],
+  "outcomes": [
+    {
+      "id": "EMB-O01",
+      "outcome": "SourceUnitId/RegionId/AttachmentId nested lineage and base-URI consumption",
+      "implementationOwner": "EMB0I",
+      "successorPath": ["EMB0", "EMB0I"],
+      "receivingAcceptance": "EMB0I-AC3"
+    },
+    {
+      "id": "EMB-O02",
+      "outcome": "Catalog T05 profile-declared raw/cooked and delimiter/escape/CRLF/indentation/hole policies",
+      "implementationOwner": "EMB0I",
+      "successorPath": ["EMB0", "EMB0I"],
+      "receivingAcceptance": "EMB0I-AC1"
+    },
+    {
+      "id": "EMB-O03",
+      "outcome": "CookedText scalar validation before parsing with NonUnicodeCookedLiteral and MissingCookedValue",
+      "implementationOwner": "EMB0I",
+      "successorPath": ["EMB0", "EMB0I"],
+      "receivingAcceptance": "EMB0I-AC2"
+    },
+    {
+      "id": "EMB-O04",
+      "outcome": "AuthoredMapChain distinct syntax/compiler/runtime/code-generation provenance and exact or Unmappable positions",
+      "implementationOwner": "EMB0I",
+      "successorPath": ["EMB0", "EMB0I"],
+      "receivingAcceptance": "EMB0I-AC3"
+    },
+    {
+      "id": "EMB-O05",
+      "outcome": "Incremental splice/fuzz and deterministic work/allocation corpus",
+      "implementationOwner": "EMB0I",
+      "successorPath": ["EMB0", "EMB0I"],
+      "receivingAcceptance": "EMB0I-AC4"
+    },
+    {
+      "id": "EMB-O06",
+      "outcome": "Executable inventory validator: missing members, unknown/pathless owners, conflicting assignments",
+      "implementationOwner": "UAO0",
+      "successorPath": ["EMB0", "EAK1", "UAO0"],
+      "receivingAcceptance": "UAO0-AC-R1"
+    }
+  ],
+  "consumers": [
+    {
+      "id": "EMB-C01",
+      "consumer": "Alpine attribute directive value codecs",
+      "kind": "implementation",
+      "implementationOwner": "ALP1",
+      "successorPath": ["EMB0", "EMB0I", "ALP1"],
+      "receivingAcceptance": "ALP1-AC-EMB",
+      "adoption": "Use shared primitives; language activation/grammar/hole meaning remains owner-local. No private literal decoder or map composer."
+    },
+    {
+      "id": "EMB-C02",
+      "consumer": "Angular syntax geometry without activation",
+      "kind": "implementation",
+      "implementationOwner": "ANG1",
+      "successorPath": ["EMB0", "EMB0I", "ANG1"],
+      "receivingAcceptance": "ANG1-AC-EMB",
+      "adoption": "Use shared primitives; language activation/grammar/hole meaning remains owner-local. No private literal decoder or map composer."
+    },
+    {
+      "id": "EMB-C03",
+      "consumer": "Angular inline/external template/style attachments and resource bases",
+      "kind": "implementation",
+      "implementationOwner": "ANG1M",
+      "successorPath": ["EMB0", "EMB0I", "ANG1M"],
+      "receivingAcceptance": "ANG1M-AC-EMB",
+      "adoption": "Use shared primitives; language activation/grammar/hole meaning remains owner-local. No private literal decoder or map composer."
+    },
+    {
+      "id": "EMB-C04",
+      "consumer": "Astro grammar recovery geometry",
+      "kind": "implementation",
+      "implementationOwner": "AST1",
+      "successorPath": ["EMB0", "EMB0I", "AST1"],
+      "receivingAcceptance": "AST1-AC-EMB",
+      "adoption": "Use shared primitives; language activation/grammar/hole meaning remains owner-local. No private literal decoder or map composer."
+    },
+    {
+      "id": "EMB-C05",
+      "consumer": "Astro frontmatter/expression/script/style attachments",
+      "kind": "implementation",
+      "implementationOwner": "AST1M",
+      "successorPath": ["EMB0", "EMB0I", "AST1M"],
+      "receivingAcceptance": "AST1M-AC-EMB",
+      "adoption": "Use shared primitives; language activation/grammar/hole meaning remains owner-local. No private literal decoder or map composer."
+    },
+    {
+      "id": "EMB-C06",
+      "consumer": "Markdown fence embedded-region isolation",
+      "kind": "implementation",
+      "implementationOwner": "DATA5",
+      "successorPath": ["EMB0", "EMB0I", "DATA5"],
+      "receivingAcceptance": "DATA5-AC-EMB",
+      "adoption": "Use shared primitives; language activation/grammar/hole meaning remains owner-local. No private literal decoder or map composer."
+    },
+    {
+      "id": "EMB-C07",
+      "consumer": "DynamoDB expressions in authored literals",
+      "kind": "implementation",
+      "implementationOwner": "DDB1",
+      "successorPath": ["EMB0", "EMB0I", "DDB1"],
+      "receivingAcceptance": "DDB1-AC-EMB",
+      "adoption": "Use shared primitives; language activation/grammar/hole meaning remains owner-local. No private literal decoder or map composer."
+    },
+    {
+      "id": "EMB-C08",
+      "consumer": "Pug expansion and repeated mixin origins",
+      "kind": "implementation",
+      "implementationOwner": "DIAL2",
+      "successorPath": ["EMB0", "EMB0I", "DIAL2"],
+      "receivingAcceptance": "DIAL2-AC-EMB",
+      "adoption": "Use shared primitives; language activation/grammar/hole meaning remains owner-local. No private literal decoder or map composer."
+    },
+    {
+      "id": "EMB-C09",
+      "consumer": "Stylesheet/PostCSS transform maps and unmappable edits",
+      "kind": "implementation",
+      "implementationOwner": "DIAL7",
+      "successorPath": ["EMB0", "EMB0I", "DIAL7"],
+      "receivingAcceptance": "DIAL7-AC-EMB",
+      "adoption": "Use shared primitives; language activation/grammar/hole meaning remains owner-local. No private literal decoder or map composer."
+    },
+    {
+      "id": "EMB-C10",
+      "consumer": "Vue proven defineComponent template literal extraction",
+      "kind": "implementation",
+      "implementationOwner": "EAK1",
+      "successorPath": ["EMB0", "EMB0I", "EAK1"],
+      "receivingAcceptance": "EAK1-AC-EMB",
+      "adoption": "Use shared primitives; language activation/grammar/hole meaning remains owner-local. No private literal decoder or map composer."
+    },
+    {
+      "id": "EMB-C11",
+      "consumer": "Glimmer/Handlebars syntax geometry",
+      "kind": "implementation",
+      "implementationOwner": "GLM1",
+      "successorPath": ["EMB0", "EMB0I", "GLM1"],
+      "receivingAcceptance": "GLM1-AC-EMB",
+      "adoption": "Use shared primitives; language activation/grammar/hole meaning remains owner-local. No private literal decoder or map composer."
+    },
+    {
+      "id": "EMB-C12",
+      "consumer": "GJS/GTS tag and colocated template attachments",
+      "kind": "implementation",
+      "implementationOwner": "GLM1M",
+      "successorPath": ["EMB0", "EMB0I", "GLM1M"],
+      "receivingAcceptance": "GLM1M-AC-EMB",
+      "adoption": "Use shared primitives; language activation/grammar/hole meaning remains owner-local. No private literal decoder or map composer."
+    },
+    {
+      "id": "EMB-C13",
+      "consumer": "htmx attribute value codecs",
+      "kind": "implementation",
+      "implementationOwner": "HTX1",
+      "successorPath": ["EMB0", "EMB0I", "HTX1"],
+      "receivingAcceptance": "HTX1-AC-EMB",
+      "adoption": "Use shared primitives; language activation/grammar/hole meaning remains owner-local. No private literal decoder or map composer."
+    },
+    {
+      "id": "EMB-C14",
+      "consumer": "Lit dialect profiles consume INT-TT adapter, no Lit-local codec",
+      "kind": "implementation",
+      "implementationOwner": "LIT1",
+      "successorPath": ["EMB0", "EMB0I", "LIT1"],
+      "receivingAcceptance": "LIT1-AC-EMB",
+      "adoption": "Use shared primitives; language activation/grammar/hole meaning remains owner-local. No private literal decoder or map composer."
+    },
+    {
+      "id": "EMB-C15",
+      "consumer": "Carrier recovery preserves region geometry",
+      "kind": "implementation",
+      "implementationOwner": "LSO1",
+      "successorPath": ["EMB0", "EMB0I", "LSO1"],
+      "receivingAcceptance": "LSO1-AC-EMB",
+      "adoption": "Use shared primitives; language activation/grammar/hole meaning remains owner-local. No private literal decoder or map composer."
+    },
+    {
+      "id": "EMB-C16",
+      "consumer": "MDX ESM/expression/JSX attachments",
+      "kind": "implementation",
+      "implementationOwner": "MDX1M",
+      "successorPath": ["EMB0", "EMB0I", "MDX1M"],
+      "receivingAcceptance": "MDX1M-AC-EMB",
+      "adoption": "Use shared primitives; language activation/grammar/hole meaning remains owner-local. No private literal decoder or map composer."
+    },
+    {
+      "id": "EMB-C17",
+      "consumer": "Marko grammar recovery geometry",
+      "kind": "implementation",
+      "implementationOwner": "MRK1",
+      "successorPath": ["EMB0", "EMB0I", "MRK1"],
+      "receivingAcceptance": "MRK1-AC-EMB",
+      "adoption": "Use shared primitives; language activation/grammar/hole meaning remains owner-local. No private literal decoder or map composer."
+    },
+    {
+      "id": "EMB-C18",
+      "consumer": "Marko script/style/expression attachments",
+      "kind": "implementation",
+      "implementationOwner": "MRK1M",
+      "successorPath": ["EMB0", "EMB0I", "MRK1M"],
+      "receivingAcceptance": "MRK1M-AC-EMB",
+      "adoption": "Use shared primitives; language activation/grammar/hole meaning remains owner-local. No private literal decoder or map composer."
+    },
+    {
+      "id": "EMB-C19",
+      "consumer": "Preact carrier attachments",
+      "kind": "implementation",
+      "implementationOwner": "PRE1",
+      "successorPath": ["EMB0", "EMB0I", "PRE1"],
+      "receivingAcceptance": "PRE1-AC-EMB",
+      "adoption": "Use shared primitives; language activation/grammar/hole meaning remains owner-local. No private literal decoder or map composer."
+    },
+    {
+      "id": "EMB-C20",
+      "consumer": "Qwik 2 carrier attachments",
+      "kind": "implementation",
+      "implementationOwner": "QWK1",
+      "successorPath": ["EMB0", "EMB0I", "QWK1"],
+      "receivingAcceptance": "QWK1-AC-EMB",
+      "adoption": "Use shared primitives; language activation/grammar/hole meaning remains owner-local. No private literal decoder or map composer."
+    },
+    {
+      "id": "EMB-C21",
+      "consumer": "React carrier attachments",
+      "kind": "implementation",
+      "implementationOwner": "RCT1",
+      "successorPath": ["EMB0", "EMB0I", "RCT1"],
+      "receivingAcceptance": "RCT1-AC-EMB",
+      "adoption": "Use shared primitives; language activation/grammar/hole meaning remains owner-local. No private literal decoder or map composer."
+    },
+    {
+      "id": "EMB-C22",
+      "consumer": "Regex host-literal and pattern map levels",
+      "kind": "implementation",
+      "implementationOwner": "RGX1",
+      "successorPath": ["EMB0", "EMB0I", "RGX1"],
+      "receivingAcceptance": "RGX1-AC-EMB",
+      "adoption": "Use shared primitives; language activation/grammar/hole meaning remains owner-local. No private literal decoder or map composer."
+    },
+    {
+      "id": "EMB-C23",
+      "consumer": "Solid carrier attachments",
+      "kind": "implementation",
+      "implementationOwner": "SLD1",
+      "successorPath": ["EMB0", "EMB0I", "SLD1"],
+      "receivingAcceptance": "SLD1-AC-EMB",
+      "adoption": "Use shared primitives; language activation/grammar/hole meaning remains owner-local. No private literal decoder or map composer."
+    },
+    {
+      "id": "EMB-C24",
+      "consumer": "Stencil carrier attachments",
+      "kind": "implementation",
+      "implementationOwner": "STN1",
+      "successorPath": ["EMB0", "EMB0I", "STN1"],
+      "receivingAcceptance": "STN1-AC-EMB",
+      "adoption": "Use shared primitives; language activation/grammar/hole meaning remains owner-local. No private literal decoder or map composer."
+    },
+    {
+      "id": "EMB-C25",
+      "consumer": "External blocks and preprocessor source-identity maps",
+      "kind": "implementation",
+      "implementationOwner": "STP38",
+      "successorPath": ["EMB0", "EMB0I", "STP38"],
+      "receivingAcceptance": "STP38-AC-EMB",
+      "adoption": "Use shared primitives; language activation/grammar/hole meaning remains owner-local. No private literal decoder or map composer."
+    },
+    {
+      "id": "EMB-C26",
+      "consumer": "Shared tagged-template adapter, tag-profile registry and hole placeholders over EMB0I",
+      "kind": "implementation",
+      "implementationOwner": "INT-TT",
+      "successorPath": ["EMB0", "EMB0I", "INT-TT"],
+      "receivingAcceptance": "INT-TT-AC5",
+      "adoption": "Use shared primitives; language activation/grammar/hole meaning remains owner-local. No private literal decoder or map composer."
+    },
+    {
+      "id": "EMB-C27",
+      "consumer": "Angular external/inline proof",
+      "kind": "findings-only-probe",
+      "implementationOwner": "ANGP",
+      "successorPath": ["EMB0", "ANGP"],
+      "receivingAcceptance": "ANGP-AC2",
+      "adoption": "Reads this contract; does not own shared primitive implementation or consumer deletion."
+    },
+    {
+      "id": "EMB-C28",
+      "consumer": "Astro heterogeneous carrier proof",
+      "kind": "findings-only-probe",
+      "implementationOwner": "ASTP",
+      "successorPath": ["EMB0", "ASTP"],
+      "receivingAcceptance": "ASTP-AC2",
+      "adoption": "Reads this contract; does not own shared primitive implementation or consumer deletion."
+    },
+    {
+      "id": "EMB-C29",
+      "consumer": "Lit hole-map proof",
+      "kind": "findings-only-probe",
+      "implementationOwner": "LITP",
+      "successorPath": ["EMB0", "LITP"],
+      "receivingAcceptance": "LITP-AC2",
+      "adoption": "Reads this contract; does not own shared primitive implementation or consumer deletion."
+    },
+    {
+      "id": "EMB-C30",
+      "consumer": "Dialect preprocessing/map contract",
+      "kind": "contract",
+      "implementationOwner": "DIAL0",
+      "successorPath": ["EMB0", "DIAL0"],
+      "receivingAcceptance": "DIAL0-AC1",
+      "adoption": "Reads this contract; does not own shared primitive implementation or consumer deletion."
+    },
+    {
+      "id": "EMB-C31",
+      "consumer": "Formatter exact reversible-map eligibility contract",
+      "kind": "contract",
+      "implementationOwner": "FMK0",
+      "successorPath": ["EMB0", "FMK0"],
+      "receivingAcceptance": "FMK0-AC1",
+      "adoption": "Reads this contract; does not own shared primitive implementation or consumer deletion."
+    },
+    {
+      "id": "EMB-C32",
+      "consumer": "GraphQL embedded operation authority contract",
+      "kind": "contract",
+      "implementationOwner": "GQL0",
+      "successorPath": ["EMB0", "GQL0"],
+      "receivingAcceptance": "GQL0-AC1",
+      "adoption": "Reads this contract; does not own shared primitive implementation or consumer deletion."
+    },
+    {
+      "id": "EMB-C33",
+      "consumer": "RecoverySnapshot map-basis and partial-result contract",
+      "kind": "contract",
+      "implementationOwner": "LSO1C",
+      "successorPath": ["EMB0", "LSO1C"],
+      "receivingAcceptance": "LSO1C-AC3",
+      "adoption": "Reads this contract; does not own shared primitive implementation or consumer deletion."
+    },
+    {
+      "id": "EMB-C34",
+      "consumer": "Shared primitive implementation and executable corpus",
+      "kind": "implementation",
+      "implementationOwner": "EMB0I",
+      "successorPath": ["EMB0", "EMB0I"],
+      "receivingAcceptance": "EMB0I-AC1"
+    },
+    {
+      "id": "EMB-C35",
+      "consumer": "Ownership validator",
+      "kind": "validator",
+      "implementationOwner": "UAO0",
+      "successorPath": ["EMB0", "EAK1", "UAO0"],
+      "receivingAcceptance": "UAO0-AC-R1"
+    }
+  ],
+  "checkpoint": {
+    "node": "TC-EXPANSION-KERNEL-1",
+    "successorPath": ["EMB0", "TC-EXPANSION-KERNEL-1"],
+    "role": "read-only-conformance",
+    "receivingCriterion": "Controller conformance checkpoint over the delivered expansion.kernel train; no runtime implementation or deletion authority and no charter acceptance ID exists."
+  },
+  "inheritedBoundaries": [
+    {
+      "boundary": "CarrierProfileId, FrameworkProfileId, ProjectProfileId",
+      "referenceFile": "tests/kernel/VID0/products/identity-inventory.v1.json",
+      "referenceRows": "I03-I06",
+      "scope": "Inherited owner; referenced, not reassigned by EMB0",
+      "implementationOwner": "VID0T",
+      "successorPath": ["VID0", "VID0T"],
+      "receivingAcceptance": "VID0T-AC1"
+    },
+    {
+      "boundary": "CatalogSnapshot construction",
+      "referenceFile": "tests/kernel/CAT0/products/catalog-inventory.v1.json",
+      "referenceRows": "T01-T04; embedded T05 is EMB-O02",
+      "scope": "Inherited owner; referenced, not reassigned by EMB0",
+      "implementationOwner": "CPF1",
+      "successorPath": ["CAT0", "CPF1"],
+      "receivingAcceptance": "CPF1-AC2"
+    },
+    {
+      "boundary": "DemandPlan submission",
+      "referenceFile": "tests/kernel/DEM0/products/demand-inventory.v1.json",
+      "referenceRows": "DEM-O05",
+      "scope": "Inherited owner; referenced, not reassigned by EMB0",
+      "implementationOwner": "COX0",
+      "successorPath": ["DEM0", "COX0"],
+      "receivingAcceptance": "COX0-AC2"
+    },
+    {
+      "boundary": "TypeInfoRequest view",
+      "referenceFile": "tests/kernel/TIF0/products/typeinfo-inventory.v1.json",
+      "referenceRows": "TypeInfo request/view",
+      "scope": "Inherited owner; referenced, not reassigned by EMB0",
+      "implementationOwner": "TIF1",
+      "successorPath": ["TIF0", "TIF1"],
+      "receivingAcceptance": "TIF1-AC2"
+    },
+    {
+      "boundary": "EmbeddedByteOffset/Range",
+      "referenceFile": "tests/kernel/ENC0/products/coordinate-inventory.v1.json",
+      "referenceRows": "CD4",
+      "scope": "Inherited owner; referenced, not reassigned by EMB0",
+      "implementationOwner": "ENC0T",
+      "successorPath": ["ENC0", "ENC0T"],
+      "receivingAcceptance": "ENC0T-AC1"
+    }
+  ],
+  "sourceCensus": [
+    {
+      "surface": "crates/verter_language/src",
+      "symbols": [
+        "LanguageRegistry",
+        "FrameworkSyntaxProfile",
+        "SourceSpaceId",
+        "ArtifactBlockRef",
+        "SourceSpaceIdentity::DerivedTransformOutput",
+        "SourceSpan"
+      ],
+      "files": [
+        "crates/verter_language/src/registry.rs",
+        "crates/verter_language/src/parse_identity.rs",
+        "crates/verter_language/src/parse_artifact/carrier_inventory.rs"
+      ],
+      "state": "Framework-shaped routing and artifact-local UTF-8 geometry exist; embedded module and cooked literal geometry absent.",
+      "references": ["EMB-O01", "EMB-O02", "EMB-O03", "EMB-C34"]
+    },
+    {
+      "surface": "crates/verter_session/src",
+      "symbols": ["QualifiedBlockContentSourceMap", "valid_source_map_v3", "ContentMapper"],
+      "files": [
+        "crates/verter_session/src/block_content.rs",
+        "crates/verter_session/src/content_mapper.rs"
+      ],
+      "state": "Existing qualified external/preprocessor map basis and exact projection/refusal authority retained; future attachment consumers use shared codecs.",
+      "references": ["EMB-O04", "EMB-C03", "EMB-C05", "EMB-C16", "EMB-C25", "EMB-C26"]
+    },
+    {
+      "surface": "crates/verter_protocol/src",
+      "symbols": ["TypeInfoRequest", "TypeInfoGraphRequest"],
+      "files": [
+        "crates/verter_protocol/src/typeinfo.rs",
+        "crates/verter_protocol/src/typeinfo/graph.rs"
+      ],
+      "state": "TypeInfoRequest aliases current graph request; codec creates no wire coordinate or component authority.",
+      "references": ["TypeInfoRequest view"]
+    },
+    {
+      "surface": "crates/verter_identity/src",
+      "symbols": [
+        "SourceUnitId",
+        "SourceRevision",
+        "ContentId",
+        "MapRevision",
+        "PlacementMapId",
+        "SourceProjectionMapId",
+        "RuntimeSourceMapDataId",
+        "EncodedSourceMapId"
+      ],
+      "files": ["crates/verter_identity/src/identity.rs", "crates/verter_identity/src/mapping.rs"],
+      "state": "Source lineage and map identities exist; AttachmentId/RegionId and successor profile IDs are VID0T obligations.",
+      "references": ["EMB-O01", "EMB-O04", "CarrierProfileId, FrameworkProfileId, ProjectProfileId"]
+    }
+  ],
+  "completenessAudit": {
+    "population": "All six reconciled subblocks, four named source surfaces, six named API/data boundaries, eight web-product delta families, all 34 direct EMB0 successors and INT-TT.",
+    "directSuccessorAccounting": "26 implementation consumers include INT-TT; 7 contract/probe consumers; EMB0I implementation; controller checkpoint. UAO0 is reached through EAK1.",
+    "emptyAtDescribedHead": [
+      "verter_language::embedded",
+      "CookedText/AuthoredMapChain APIs",
+      "Angular/Lit authored literal decoders",
+      "standalone EmbeddedSourceId"
+    ],
+    "rule": "Existing API owners and deletion ledgers remain authoritative; this inventory does not claim their future implementations are shipped."
+  },
+  "receivingAcceptanceBasis": "Operator ruling embedded-receiving-codec-acceptance, 2026-10-10: ratified <owner>-AC-EMB for the 25 implementation consumers; INT-TT retains AC5 for sole-codec adoption and AC1/AC3/AC4 for maps, placeholders and incremental behavior. These receiving amendments preserve each consumer scope; executable proof follows EMB0."
+}

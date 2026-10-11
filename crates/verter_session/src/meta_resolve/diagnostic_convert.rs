@@ -39,11 +39,6 @@ use verter_type_engine::project_semantic_dispatch::walk::ShallowDiagnostic;
 #[must_use]
 pub(crate) fn shallow_to_expansion(diag: &ShallowDiagnostic) -> ExpansionDiagnostic {
     match diag {
-        ShallowDiagnostic::SignatureOverflow => ExpansionDiagnostic {
-            reason: ExpansionStopReason::BudgetExceeded,
-            context: "signature-overflow".to_string(),
-            property_name: None,
-        },
         ShallowDiagnostic::ProjectionWorkLimit { root } => ExpansionDiagnostic {
             reason: ExpansionStopReason::ProjectionWorkLimit,
             context: format!("projection-work-limit@{:?}", root),
@@ -126,6 +121,13 @@ pub(crate) fn shallow_to_expansion(diag: &ShallowDiagnostic) -> ExpansionDiagnos
         ShallowDiagnostic::PendingFlowRoot { gap } => ExpansionDiagnostic {
             reason: ExpansionStopReason::UnsupportedOperator,
             context: format!("pending-flow-root::{gap:?}"),
+            property_name: None,
+        },
+        // A relation refused at its comparison allowance (TS2859): the
+        // operation budget stopped it, naming the check's two subjects.
+        ShallowDiagnostic::RelationTooComplex { source, target } => ExpansionDiagnostic {
+            reason: ExpansionStopReason::BudgetExceeded,
+            context: format!("relation-too-complex@{source:?}->{target:?}"),
             property_name: None,
         },
     }

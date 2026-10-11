@@ -245,10 +245,10 @@ pub struct MetaProvenance {
     // - `<cache>_fact_tracer_installs` — number of cold-compute calls
     //   wrapped in `install_fact_tracer` (advances once per cold
     //   producer entry).
-    // - `<cache>_overflow_refusals` — number of cold-compute calls
-    //   whose observation set exceeded `FACT_SIGNATURE_CAP` (1024) and
-    //   were therefore NOT admitted to the warm cache (caller
-    //   cold-recomputes on next request).
+    // - `app_config_proof_non_cacheable_refusals` — number of cold-compute
+    //   calls whose tracer consumed a non-cacheable read and were therefore
+    //   NOT admitted to the warm cache (caller cold-recomputes on next
+    //   request).
     //
     // Caches: `MemoEntry`, `AppConfigNoOverrideProofDb`, `OwnerImportSurfaceDb`.
     /// Structural-materialiser `install_fact_tracer` wrap count. No
@@ -261,14 +261,12 @@ pub struct MetaProvenance {
     pub materialize_structure_overflow_refusals: std::sync::atomic::AtomicU64,
     /// `install_fact_tracer` wrap count for `AppConfigNoOverrideProofDb`.
     pub app_config_proof_fact_tracer_installs: std::sync::atomic::AtomicU64,
-    /// `install_fact_tracer` overflow-refusal count for
-    /// `AppConfigNoOverrideProofDb`.
-    pub app_config_proof_overflow_refusals: std::sync::atomic::AtomicU64,
+    /// `install_fact_tracer` non-cacheable-read refusal count for
+    /// `AppConfigNoOverrideProofDb`. Measurement only.
+    #[cfg(feature = "semantic-observe")]
+    pub app_config_proof_non_cacheable_refusals: std::sync::atomic::AtomicU64,
     /// `install_fact_tracer` wrap count for `OwnerImportSurfaceDb`.
     pub owner_import_surface_fact_tracer_installs: std::sync::atomic::AtomicU64,
-    /// `install_fact_tracer` overflow-refusal count for
-    /// `OwnerImportSurfaceDb`.
-    pub owner_import_surface_overflow_refusals: std::sync::atomic::AtomicU64,
     /// Admission refusals for `OwnerImportSurfaceDb` because an
     /// unresolved direct import could not be rooted in the owner's
     /// path-precise resolution witness (no coverage for the skipped specifier).
@@ -341,9 +339,9 @@ impl Default for MetaProvenance {
             materialize_structure_fact_tracer_installs: std::sync::atomic::AtomicU64::new(0),
             materialize_structure_overflow_refusals: std::sync::atomic::AtomicU64::new(0),
             app_config_proof_fact_tracer_installs: std::sync::atomic::AtomicU64::new(0),
-            app_config_proof_overflow_refusals: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(feature = "semantic-observe")]
+            app_config_proof_non_cacheable_refusals: std::sync::atomic::AtomicU64::new(0),
             owner_import_surface_fact_tracer_installs: std::sync::atomic::AtomicU64::new(0),
-            owner_import_surface_overflow_refusals: std::sync::atomic::AtomicU64::new(0),
             owner_import_surface_unrooted_skip_refusals: std::sync::atomic::AtomicU64::new(0),
             owner_import_surface_fenced_serve_refusals: std::sync::atomic::AtomicU64::new(0),
         }
@@ -631,18 +629,15 @@ impl MetaProvenance {
                 .engine
                 .memo_entry_fact_tracer_installs
                 .load(Relaxed),
-            memo_entry_overflow_refusals: self.engine.memo_entry_overflow_refusals.load(Relaxed),
             app_config_proof_fact_tracer_installs: self
                 .app_config_proof_fact_tracer_installs
                 .load(Relaxed),
-            app_config_proof_overflow_refusals: self
-                .app_config_proof_overflow_refusals
+            #[cfg(feature = "semantic-observe")]
+            app_config_proof_non_cacheable_refusals: self
+                .app_config_proof_non_cacheable_refusals
                 .load(Relaxed),
             owner_import_surface_fact_tracer_installs: self
                 .owner_import_surface_fact_tracer_installs
-                .load(Relaxed),
-            owner_import_surface_overflow_refusals: self
-                .owner_import_surface_overflow_refusals
                 .load(Relaxed),
             owner_import_surface_unrooted_skip_refusals: self
                 .owner_import_surface_unrooted_skip_refusals
@@ -735,12 +730,11 @@ impl MetaProvenance {
         self.engine
             .memo_entry_fact_tracer_installs
             .store(0, Relaxed);
-        self.engine.memo_entry_overflow_refusals.store(0, Relaxed);
         self.app_config_proof_fact_tracer_installs.store(0, Relaxed);
-        self.app_config_proof_overflow_refusals.store(0, Relaxed);
-        self.owner_import_surface_fact_tracer_installs
+        #[cfg(feature = "semantic-observe")]
+        self.app_config_proof_non_cacheable_refusals
             .store(0, Relaxed);
-        self.owner_import_surface_overflow_refusals
+        self.owner_import_surface_fact_tracer_installs
             .store(0, Relaxed);
         self.owner_import_surface_unrooted_skip_refusals
             .store(0, Relaxed);
@@ -860,16 +854,14 @@ pub struct MetaProvenanceSnapshot {
     pub materialize_structure_overflow_refusals: u64,
     /// `install_fact_tracer` wrap count for `MemoEntry`.
     pub memo_entry_fact_tracer_installs: u64,
-    /// `install_fact_tracer` overflow-refusal count for `MemoEntry`.
-    pub memo_entry_overflow_refusals: u64,
     /// `install_fact_tracer` wrap count for `AppConfigNoOverrideProofDb`.
     pub app_config_proof_fact_tracer_installs: u64,
-    /// `install_fact_tracer` overflow-refusal count for `AppConfigNoOverrideProofDb`.
-    pub app_config_proof_overflow_refusals: u64,
+    /// `install_fact_tracer` non-cacheable-read refusal count for
+    /// `AppConfigNoOverrideProofDb`. Measurement only.
+    #[cfg(feature = "semantic-observe")]
+    pub app_config_proof_non_cacheable_refusals: u64,
     /// `install_fact_tracer` wrap count for `OwnerImportSurfaceDb`.
     pub owner_import_surface_fact_tracer_installs: u64,
-    /// `install_fact_tracer` overflow-refusal count for `OwnerImportSurfaceDb`.
-    pub owner_import_surface_overflow_refusals: u64,
     pub owner_import_surface_unrooted_skip_refusals: u64,
     pub owner_import_surface_fenced_serve_refusals: u64,
 }

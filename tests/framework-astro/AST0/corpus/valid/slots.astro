@@ -1,0 +1,13 @@
+---
+const hasFooter = Astro.slots.has("footer");
+const header = await Astro.slots.render("header");
+---
+
+<header set:html={header} />
+<main>
+  <slot />
+</main>
+<aside>
+  <slot name="sidebar">fallback sidebar</slot>
+</aside>
+{hasFooter && <footer><slot name="footer" /></footer>}

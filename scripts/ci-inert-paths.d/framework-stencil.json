@@ -1,0 +1,6 @@
+[
+  {
+    "glob": "tests/framework-stencil/**",
+    "reason": "Reviewed Stencil contract data; no ci.yml lane reads it. Executable lock proofs belong to the later adapter delivery, which must register its consuming lane's path ownership."
+  }
+]

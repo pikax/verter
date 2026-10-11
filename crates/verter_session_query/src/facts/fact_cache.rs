@@ -13,7 +13,7 @@ use crate::facts::resolution::ResolutionFactKey;
 #[cfg(test)]
 use crate::resolution::ResolutionPopulation;
 
-pub use crate::facts::receipt::{drop_subsumed_receipts, ReceiptWalk, ResultReceipt};
+pub use crate::facts::receipt::{drop_subsumed_receipts, EvidenceKind, ReceiptWalk, ResultReceipt};
 pub use crate::facts::version::{
     compaction_domain, AggregatePopulation, AggregateStamp, CompactionDomain,
     CompletionOverlayState, DerivedFactKind, DomainGenerationFact, FactAttribution, FactHash16,
@@ -396,40 +396,82 @@ pub fn validates_through_receipts(
     }
 }
 
+/// Every entry of a signature with its evidence PAGES read through: the
+/// facts a computation observed and the receipts of the results it
+/// consumed, never a page itself. A wide signature's top level holds only
+/// pages (see [`crate::facts::fact_read_set::FACT_PAGE_WIDTH`]); a consumer
+/// looking for one particular fact of the signature reads through them
+/// here, while a consumed result's receipt stays one entry.
+pub fn signature_entries(facts: &[FactVersionRef]) -> SignatureEntries<'_> {
+    SignatureEntries {
+        stack: vec![facts.iter()],
+    }
+}
+
+/// Iterator of [`signature_entries`]: an explicit stack of page levels.
+pub struct SignatureEntries<'a> {
+    stack: Vec<std::slice::Iter<'a, FactVersionRef>>,
+}
+
+impl<'a> Iterator for SignatureEntries<'a> {
+    type Item = &'a FactVersionRef;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let level = self.stack.last_mut()?;
+            match level.next() {
+                Some(FactVersionRef::Receipt(page)) if page.is_page() => {
+                    self.stack.push(page.facts().iter());
+                }
+                Some(entry) => return Some(entry),
+                None => {
+                    self.stack.pop();
+                }
+            }
+        }
+    }
+}
+
+/// A computation's complete dependency evidence: every fact it observed,
+/// paged when wide, and the receipts of the results it consumed. Width is
+/// never a refusal reason, so a signature always holds its whole read set;
+/// whether that evidence may authorise shared-cache admission is decided at
+/// admission ([`SignatureAdmission`]), never by a flag on the signature.
 #[derive(Clone, Debug)]
 pub struct ReadSetSignature {
     pub facts: Arc<[FactVersionRef]>,
-    pub overflowed: bool,
 }
 
 impl ReadSetSignature {
     #[must_use]
     pub fn new(facts: Arc<[FactVersionRef]>) -> Self {
-        Self {
-            facts,
-            overflowed: false,
-        }
-    }
-
-    #[must_use]
-    pub fn overflow() -> Self {
-        Self {
-            facts: Arc::from([]),
-            overflowed: true,
-        }
+        Self { facts }
     }
 
     #[must_use]
     pub fn empty() -> Self {
         Self {
             facts: Arc::from([]),
-            overflowed: false,
         }
     }
 
     #[must_use]
     pub fn validates(&self, validator: &dyn FactVersionValidator) -> bool {
-        !self.overflowed && validator.validates_fact_signature(&self.facts)
+        validator.validates_fact_signature(&self.facts)
+    }
+
+    /// Every entry of this signature with its evidence pages read through
+    /// (see [`signature_entries`]).
+    pub fn entries(&self) -> SignatureEntries<'_> {
+        signature_entries(&self.facts)
+    }
+
+    /// How many entries this signature holds once its evidence pages are
+    /// read through: the logical width of its own read set, which no
+    /// longer equals `facts.len()` once the signature is paged.
+    #[must_use]
+    pub fn entry_count(&self) -> usize {
+        self.entries().count()
     }
 
     /// Every canonical this signature depends on, in first-observation
@@ -603,16 +645,6 @@ impl ReadSetSignature {
     }
 
     #[must_use]
-    pub const fn is_overflow(&self) -> bool {
-        self.overflowed
-    }
-
-    #[must_use]
-    pub const fn is_cacheable(&self) -> bool {
-        !self.overflowed
-    }
-
-    #[must_use]
     pub fn resolution_fact_version(
         &self,
         key: &ResolutionFactKey,
@@ -646,9 +678,6 @@ impl SignatureAdmission {
             FactReadSetFinalise::Ok(facts) => Self::Cacheable(ReadSetSignature::new(facts)),
             FactReadSetFinalise::NonCacheable(_) => {
                 Self::NonCacheable(verter_audit::NonAdmissionReason::UnresolvedProvenance)
-            }
-            FactReadSetFinalise::Overflow => {
-                Self::NonCacheable(verter_audit::NonAdmissionReason::SignatureOverflow)
             }
             FactReadSetFinalise::MutationUnstable => {
                 Self::NonCacheable(verter_audit::NonAdmissionReason::MutationUnstable)

@@ -752,6 +752,202 @@ fn a_sealed_refusal_answers_its_repeat_without_evaluating() {
     );
 }
 
+/// Imported modules whose relation [`wide_refusal_root`] reads: enough that
+/// the refusal's proving prefix spans more than one evidence page while
+/// every fact domain stays precise.
+const WIDE_PREFIX_MODULES: usize = 300;
+
+/// Work units that refuse [`wide_refusal_root`] only after it has read every
+/// module.
+const WIDE_PREFIX_WORK: usize = 2_000;
+
+/// A host whose probe relates `S`, a union of one type imported from each
+/// of [`WIDE_PREFIX_MODULES`] sibling modules, to the reversed union `T`,
+/// and that relation as a root key.
+fn wide_refusal_root() -> (
+    Arc<VerterHost>,
+    verter_type_engine::semantic_query::SemanticQueryKey,
+) {
+    let names: Vec<String> = (0..WIDE_PREFIX_MODULES)
+        .map(|i| format!("m{i:04}.ts"))
+        .collect();
+    let sources: Vec<String> = (0..WIDE_PREFIX_MODULES)
+        .map(|i| format!("export type A{i} = {{ p{i}: {i} }};\n"))
+        .collect();
+    let files: Vec<(&str, &str)> = names
+        .iter()
+        .map(String::as_str)
+        .zip(sources.iter().map(String::as_str))
+        .collect();
+    let project = super::checker_probe_lane_tests::ProbeProject {
+        files: &files,
+        ..Default::default()
+    };
+    let host = super::checker_probe_lane_tests::probe_host(project);
+    let imports: String = (0..WIDE_PREFIX_MODULES)
+        .map(|i| format!("import type {{ A{i} }} from \"./m{i:04}\";\n"))
+        .collect();
+    let source_arms: Vec<String> = (0..WIDE_PREFIX_MODULES).map(|i| format!("A{i}")).collect();
+    let target_arms: Vec<String> = (0..WIDE_PREFIX_MODULES)
+        .rev()
+        .map(|i| format!("{{ p{i}: number }}"))
+        .collect();
+    let source = format!(
+        "{imports}type S = {};\ntype T = {};\n",
+        source_arms.join(" | "),
+        target_arms.join(" | ")
+    );
+    let key = super::checker_probe_lane_tests::with_probe_on_host(
+        &host,
+        project,
+        &source,
+        "[S, T]",
+        |dispatch, node| {
+            let elements = match dispatch.graph().node_data(node).as_deref() {
+                Some(verter_type_engine::semantic_query::SemanticNodeData::Tuple {
+                    elements,
+                    ..
+                }) => elements
+                    .iter()
+                    .map(|element| element.value)
+                    .collect::<Vec<_>>(),
+                other => panic!("the probe reads the pair [S, T], got {other:?}"),
+            };
+            dispatch
+                .relate_key_for(elements[0], elements[1])
+                .to_query_key()
+        },
+    );
+    (host, key)
+}
+
+/// A refusal whose proving prefix is wider than one evidence page is sealed
+/// whole and replayed like a narrow one: the root, out of work after reading
+/// every imported module, seals a refusal whose carrier pages every fact it
+/// read; the sealed refusal keeps its pages charged; an exact repeat answers
+/// it without evaluating; a follower parked on a producer's flight answers
+/// as the root does alone; and a change to the one fact on the carrier's
+/// LAST page — the project generation — misses the refusal, so the root
+/// evaluates afresh.
+#[test]
+fn a_wide_refusal_is_replayed_whole_and_missed_by_a_last_page_edit() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use verter_session_query::facts::fact_cache::{FactVersionRef, ResultReceipt};
+    use verter_session_query::facts::fact_read_set::FACT_PAGE_WIDTH;
+
+    let (host, key) = wide_refusal_root();
+    let refused = root_read(&host, &key, WIDE_PREFIX_WORK);
+    assert!(
+        refused.partial,
+        "{WIDE_PREFIX_WORK} units cannot relate {WIDE_PREFIX_MODULES} reversed arms"
+    );
+    let store = Arc::clone(host.project_type_store().semantic_graph());
+    let carriers = store.refusal_carriers_for_tests();
+    assert_eq!(carriers.len(), 1, "the refused root sealed its refusal");
+    let carrier = &carriers[0];
+    let pages: Vec<ResultReceipt> = carrier
+        .facts
+        .iter()
+        .filter_map(|entry| match entry {
+            FactVersionRef::Receipt(page) if page.is_page() => Some(page.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        carrier.entries().count() > FACT_PAGE_WIDTH && pages.len() >= 2,
+        "the proving prefix is wider than one page and held on pages: {} entries on {} pages",
+        carrier.entries().count(),
+        pages.len()
+    );
+    assert!(
+        pages.iter().all(|page| page.retained_charge_class()
+            == Some(verter_session_query::retention::ChargeClass::Retained)),
+        "sealing the refusal claimed its pages into its retained reservation"
+    );
+    let last_page = pages
+        .iter()
+        .max_by(|a, b| a.facts().last().cmp(&b.facts().last()))
+        .expect("pages");
+    let is_generation =
+        |fact: &FactVersionRef| matches!(fact, FactVersionRef::ProjectGeneration { .. });
+    assert!(
+        last_page.facts().iter().any(is_generation)
+            && pages
+                .iter()
+                .filter(|page| page.facts().iter().any(is_generation))
+                .count()
+                == 1,
+        "the project generation is read on the carrier's last page alone"
+    );
+
+    let misses = semantic_misses(&host);
+    assert_eq!(
+        root_read(&host, &key, WIDE_PREFIX_WORK),
+        refused,
+        "the repeat answers the sealed refusal, charged as the refused root"
+    );
+    assert_eq!(semantic_misses(&host), misses, "and evaluates nothing");
+
+    host.project_type_store().bump_project_generation();
+    let _ = root_read(&host, &key, WIDE_PREFIX_WORK);
+    assert!(
+        semantic_misses(&host) > misses,
+        "a change to the fact on the last page misses the refusal"
+    );
+
+    store.invalidate_all();
+    assert!(
+        pages.iter().all(|page| page.retained_charge_class()
+            == Some(verter_session_query::retention::ChargeClass::Retained)
+            && page.retained_charge_bytes() > 0),
+        "a page outliving the refusal that claimed it stays charged while a holder lives"
+    );
+    drop(pages);
+    drop(carriers);
+
+    // A follower parked on a producer's flight answers as the root alone.
+    let (host, key) = wide_refusal_root();
+    let store = Arc::clone(host.project_type_store().semantic_graph());
+    let claimed = Arc::new(AtomicBool::new(false));
+    let held = Arc::new(AtomicBool::new(false));
+    let joined_before = store.test_joiner_on_condvar_count();
+    let hook: verter_type_engine::semantic_query_memo::test_support::ProduceHookForTests = {
+        let (key, claimed, held, store) = (
+            key.clone(),
+            claimed.clone(),
+            held.clone(),
+            Arc::clone(&store),
+        );
+        Arc::new(move |claimed_key, _| {
+            if claimed_key != &key || held.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            claimed.store(true, Ordering::SeqCst);
+            wait_until("the follower to park on the producer's flight", || {
+                store.test_joiner_on_condvar_count() > joined_before
+            });
+        })
+    };
+    let _hook = ProduceHookGuard::install(&store, hook);
+    let (producer, follower) = std::thread::scope(|scope| {
+        let producer = scope.spawn(|| root_read(&host, &key, WIDE_PREFIX_WORK));
+        wait_until("the producer to claim the root", || {
+            claimed.load(Ordering::SeqCst)
+        });
+        let follower = scope.spawn(|| root_read(&host, &key, WIDE_PREFIX_WORK));
+        (
+            producer.join().expect("the producer completes"),
+            follower.join().expect("the follower completes"),
+        )
+    });
+    assert!(
+        store.test_joiner_on_condvar_count() > joined_before,
+        "the follower joined the producer's flight"
+    );
+    assert_eq!(producer, refused, "the producer answers as the root alone");
+    assert_eq!(follower, refused, "the follower answers as the root alone");
+}
+
 /// The relation `S` to `T` of [`reversed_unions`] with `arms` arms, as a
 /// root query key on `host`.
 fn reversed_relation_key(
@@ -794,6 +990,8 @@ struct RootAnswer {
     reasons: verter_type_engine::semantic_query::PartialReasonSet,
     work: usize,
     bytes: usize,
+    /// The operation refusals the read reports.
+    refusals: Vec<super::walk::ShallowDiagnostic>,
 }
 
 /// Run `key` as an isolated root demand with `work` units over a fresh
@@ -824,6 +1022,12 @@ fn root_read(
         reasons: read.partial_reason_classes(),
         work: dispatch.connected_demand().work_used_for_tests(),
         bytes: dispatch.connected_demand().bytes_used_for_tests(),
+        refusals: read
+            .walker_diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.is_operation_refusal())
+            .cloned()
+            .collect(),
     }
 }
 
@@ -977,6 +1181,142 @@ fn an_operation_refusal_answers_its_repeat_without_evaluating() {
         "the checker's comparison allowance relates them"
     );
     assert!(semantic_misses(&host) > before, "another profile evaluates");
+}
+
+/// `[S] extends [T] ? 1 : 2` over [`reversed_unions`] with `arms` arms, as
+/// a root query key on `host`, with the check and extends types it relates.
+fn reversed_conditional_key(
+    host: &Arc<VerterHost>,
+    arms: usize,
+) -> (
+    verter_type_engine::semantic_query::SemanticQueryKey,
+    [verter_type_engine::semantic_query::SemanticNodeId; 2],
+) {
+    super::checker_probe_lane_tests::with_probe_on_host(
+        host,
+        Default::default(),
+        &reversed_unions(arms),
+        "[[S], [T], 1, 2]",
+        |dispatch, node| {
+            let elements = match dispatch.graph().node_data(node).as_deref() {
+                Some(verter_type_engine::semantic_query::SemanticNodeData::Tuple {
+                    elements,
+                    ..
+                }) if elements.len() == 4 => elements
+                    .iter()
+                    .map(|element| element.value)
+                    .collect::<Vec<_>>(),
+                other => panic!("the probe reads [[S], [T], 1, 2], got {other:?}"),
+            };
+            (
+                verter_type_engine::semantic_query::SemanticQueryKey::Conditional {
+                    check: elements[0],
+                    extends: elements[1],
+                    true_branch: elements[2],
+                    false_branch: elements[3],
+                    distributive: false,
+                    pending: None,
+                },
+                [elements[0], elements[1]],
+            )
+        },
+    )
+}
+
+/// A relation refused at its comparison allowance (TS2859) names the two
+/// types its check compared, and the refusal rides with every read
+/// composed over it: the conditional consuming the check answers its false
+/// branch as a resource partial and reports the same refusal, naming the
+/// check and extends types, on the cold read and on its sealed repeat
+/// alike. Under the checker's allowance nothing is refused and nothing is
+/// reported.
+#[test]
+fn a_relation_refusal_names_its_subjects_through_its_consumer() {
+    use super::walk::ShallowDiagnostic;
+    use verter_type_engine::semantic_query::checker_policy::with_relation_comparisons_for_tests;
+    use verter_type_engine::semantic_query::{PartialReasonSet, SemanticQueryKey};
+    let host = super::checker_probe_lane_tests::default_probe_host();
+    let full = super::connected_demand::MAX_CONNECTED_PROJECTION_WORK;
+    let limited = |key: &SemanticQueryKey| {
+        with_relation_comparisons_for_tests(50, || root_read(&host, key, full))
+    };
+
+    let relation = reversed_relation_key(&host, 40, false);
+    let SemanticQueryKey::Relate { source, target, .. } = &relation else {
+        panic!("the relation key relates a pair, got {relation:?}");
+    };
+    let named = vec![ShallowDiagnostic::RelationTooComplex {
+        source: *source,
+        target: *target,
+    }];
+    let refused = limited(&relation);
+    assert!(
+        refused.reasons.contains(PartialReasonSet::OPERATION_BUDGET),
+        "50 comparisons cannot relate 40 reversed arms: {refused:?}"
+    );
+    assert_eq!(
+        refused.refusals, named,
+        "the refusal names the check's pair"
+    );
+    assert_eq!(
+        limited(&relation),
+        refused,
+        "its sealed repeat reports it too"
+    );
+    assert!(
+        root_read(&host, &relation, full).refusals.is_empty(),
+        "the checker's allowance refuses nothing"
+    );
+
+    let (conditional, [check, extends]) = reversed_conditional_key(&host, 40);
+    let consumed = limited(&conditional);
+    assert_eq!(
+        (consumed.partial, consumed.reasons),
+        (true, PartialReasonSet::OPERATION_BUDGET),
+        "the conditional is a resource partial of the operation budget alone"
+    );
+    assert_eq!(
+        consumed.refusals,
+        vec![ShallowDiagnostic::RelationTooComplex {
+            source: check,
+            target: extends,
+        }],
+        "the conditional reports the refusal of its check"
+    );
+    assert_eq!(limited(&conditional), consumed, "cold and repeat agree");
+    let decided = root_read(&host, &conditional, full);
+    assert!(
+        !decided.partial && decided.refusals.is_empty(),
+        "the checker's allowance decides the conditional: {decided:?}"
+    );
+}
+
+/// Each relation check starts with the whole allowance: two checks of one
+/// demand, each within it but not together, both relate. Forty reversed
+/// arms record about 820 comparisons; an allowance of 1,000 holds each check
+/// and not their sum.
+#[test]
+fn each_relation_check_records_against_a_fresh_allowance() {
+    use verter_type_engine::semantic_query::checker_policy::with_relation_comparisons_for_tests;
+    let arms = |prefix: &str| {
+        let source: Vec<String> = (0..40).map(|i| format!("{{ {prefix}{i}: {i} }}")).collect();
+        let target: Vec<String> = (0..40)
+            .rev()
+            .map(|i| format!("{{ {prefix}{i}: number }}"))
+            .collect();
+        (source.join(" | "), target.join(" | "))
+    };
+    let (s, t) = arms("p");
+    let (u, v) = arms("q");
+    let source = format!("type S = {s};\ntype T = {t};\ntype U = {u};\ntype V = {v};\n");
+    let probe = "[[S] extends [T] ? 1 : 2, [U] extends [V] ? 1 : 2]";
+    with_relation_comparisons_for_tests(1_000, || {
+        let failures = super::checker_probe_lane_tests::mismatches(&source, &[(probe, "[1, 1]")]);
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    });
+    with_relation_comparisons_for_tests(500, || {
+        super::checker_probe_lane_tests::with_recovered_probe(&source, probe, |_, _| {});
+    });
 }
 
 /// A relation warmed under the checker's comparison allowance never

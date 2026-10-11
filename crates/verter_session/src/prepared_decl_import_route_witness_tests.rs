@@ -244,7 +244,7 @@ fn a_second_bundle_read_through_one_view_warm_hits() {
 /// admits exactly that uninvalidatable candidate. `decline_import_route_witness`
 /// marks the enclosing compute non-cacheable, but `insert_arc_with_kind`
 /// never consults that mark — a lone `FileWholeHash` is a well-formed,
-/// non-empty, non-overflowing signature — so the producer is the only
+/// non-empty signature — so the producer is the only
 /// correct refusal point.
 ///
 #[test]
@@ -302,8 +302,7 @@ fn a_rootable_witness_still_admits_a_warm_bundle_candidate() {
     );
     assert!(
         host.owner_import_route_witness_for_tests(OWNER).is_some(),
-        "fixture invariant: one unresolved specifier must stay well within \
-         FACT_SIGNATURE_CAP and yield a rootable witness"
+        "fixture invariant: one unresolved specifier must yield a rootable witness"
     );
 
     let view = host.resolver_store_view_read().into_owned_view();

@@ -33,8 +33,6 @@ pub(crate) const OPEN_SURFACE: &str = "projectedOpenSurface";
 pub const UNMODELED_POSITION: &str = "unmodeledPosition";
 /// `QueryError::Cancelled`.
 pub(crate) const CANCELLED: &str = "cancelled";
-/// `QueryError::SignatureOverflow`.
-pub(crate) const SEMANTIC_SIGNATURE_OVERFLOW: &str = "semanticSignatureOverflow";
 /// `QueryError::ForeignSemanticOperand`.
 pub(crate) const SEMANTIC_FOREIGN_OPERAND: &str = "semanticForeignOperand";
 /// `QueryError::StaleSemanticOperand`.
@@ -169,7 +167,6 @@ pub fn semantic_query_error_raw(err: &crate::semantic_query::QueryError) -> Stri
         QueryError::UnrepresentableSurfaceMember => spell::SEMANTIC_SURFACE_MEMBER.to_string(),
         QueryError::OpenSurface => spell::OPEN_SURFACE.to_string(),
         QueryError::UnmodeledPosition => spell::UNMODELED_POSITION.to_string(),
-        QueryError::SignatureOverflow => spell::SEMANTIC_SIGNATURE_OVERFLOW.to_string(),
         QueryError::ForeignSemanticOperand => spell::SEMANTIC_FOREIGN_OPERAND.to_string(),
         QueryError::StaleSemanticOperand => spell::SEMANTIC_STALE_OPERAND.to_string(),
         QueryError::IncompleteSemanticOperand { reasons } => {

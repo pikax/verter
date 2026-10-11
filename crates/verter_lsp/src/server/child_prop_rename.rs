@@ -439,9 +439,10 @@ impl VerterLanguageServer {
         &self,
         rename_class: &mut ChildPropRenameClass,
         type_provider: &dyn crate::type_provider::traits::TypeProvider,
-        parent_tsx_path: &str,
+        parent_query: &crate::type_provider::traits::ProviderQuery,
         parent_tsx_offset: u32,
     ) {
+        let parent_tsx_path = parent_query.path();
         // Only a confirmed rename with an UNKNOWN declaration needs the hop.
         let ChildPropRenameClass::Confirmed(target) = rename_class else {
             return;
@@ -455,11 +456,16 @@ impl VerterLanguageServer {
         // returned foreign carrier location maps through the generation this
         // request began against.
         let foreign_ide_set = self.capture_foreign_carrier_ide_set();
+        // Every foreign location decodes through exactly the surface this set
+        // maps it through.
+        let definition_query = parent_query
+            .clone()
+            .with_targets(std::sync::Arc::new(foreign_ide_set.clone()));
 
         // Resolve the declaration target via the provider DEFINITION hop, mapped to
         // a source `{uri, range}` exactly as go-to-definition maps it.
         let Ok(type_defs) = type_provider
-            .get_definition(parent_tsx_path, parent_tsx_offset)
+            .get_definition(&definition_query, parent_tsx_offset)
             .await
         else {
             return;

@@ -1,0 +1,96 @@
+{
+  "id": "marko-activation-policy.v1",
+  "schema": 1,
+  "contractNode": "MRK0",
+  "family": "marko",
+  "activationAuthority": {
+    "source": "FWA1 FrameworkActivation record",
+    "recordShape": "FrameworkActivation { package, framework, state: active | inactive | unsupported-version | off, admittedRelease, mode, provenance }",
+    "home": "crates/verter_session/src/framework/project_capabilities.rs (FWA1), family rule row in crates/verter_session/src/framework/families/marko.rs (REG0 shape, FWA1 writes the activation slot)",
+    "sole": true,
+    "abortConditionCheck": "FWA1 expresses a per-package, version-admitted record: detection from PM3 resolved package facts, admission of the resolved installed version against this family's version lock, and the frameworks.<f> switch. The MRK0 abort condition does not apply."
+  },
+  "activationRow": {
+    "framework": "marko",
+    "detection": {
+      "packages": ["marko"],
+      "readFrom": "PM3 project snapshot: the resolved installed version of `marko` for the owning package (PM2 resolution, workspace catalogs and aliases included)",
+      "neverFrom": [
+        "the `.marko` file extension",
+        "the declared dependency range in package.json",
+        "a string-prefix version read (the displaced Svelte route V-D05 is not copied)",
+        "@marko/compiler, @marko/run, @marko/vite or any other @marko/* package alone",
+        "the presence of a marko.json taglib file"
+      ]
+    },
+    "admission": {
+      "table": "tests/framework-marko/MRK0/products/marko-version-lock.json admittedReleases",
+      "admitted": ["6.4.3"],
+      "otherwise": "unsupported-version, with the excludedReleases reason (XR01-XR04)"
+    },
+    "mode": {
+      "values": ["tags"],
+      "note": "The admitted release has one mode. The Class API is not a mode: it is excluded (XR03)."
+    },
+    "switch": {
+      "key": "frameworks.marko",
+      "values": ["auto", "on", "off"],
+      "readThrough": "CFG0 declarative configuration capture",
+      "auto": "active only when detection finds an admitted installed release",
+      "on": "active only at an admitted release; on naming an unadmitted release gives unsupported-version (FWA1-AC6); in a package with no `marko` entry, on naming 6.4.3 gives active with provenance explicit",
+      "off": "the whole vertical does zero work for the package"
+    },
+    "capabilityBit": "FWA1's admitted result sets the Marko bit of ProjectCapabilitySnapshot, which gates the `.marko` LanguageRow::gated row in crates/verter_language/src/registry.rs (via REG0's families/marko.rs)"
+  },
+  "zeroWorkWhenInactive": {
+    "states": ["inactive", "unsupported-version", "off"],
+    "noWorkOf": [
+      "carrier parse (MRK1)",
+      "region attachment and maps (MRK1M)",
+      "carrier diagnostics, symbols, folding, tokens (MRK1S)",
+      "binding and index contribution (MRK2)",
+      "type and component projection (MRK3)",
+      "semantic facts (MRK4, MRK7, EFF3-MARKO)",
+      "TS-host companion projection and tsgo carrier sync (MRK6)",
+      "lint-host scheduling (MRK8)",
+      "formatting (MRK8F)"
+    ],
+    "receivingAcceptance": ["MRK1M-AC5", "MRK1S-AC5", "MRK8-AC1"],
+    "lintPackSwitches": "LK6 keeps only the lint.marko pack switches; it is never a second activation source."
+  },
+  "hostPolicy": {
+    "ruling": "ruling 1 (tsgo)",
+    "tsRegions": {
+      "covers": ["placeholders ${} and $!{}", "attribute values and attribute arguments", "tag parameters |...|", "tag variables /x", "statements (import, export, static, server, client, $ scriptlets)", "<script> bodies", "method-shorthand attributes"],
+      "host": "tsgo through the Verter LSP TypeProvider tsgo routes over the MRK6 companion",
+      "order": [
+        "TsgoCompositeProvider (crates/verter_lsp/src/tsgo/composite.rs): shared tsgo first (TsgoSharedProvider, relay-shim attach)",
+        "then managed tsgo (TsgoOwnedBackend over crates/verter_tsgo_api)"
+      ],
+      "companionSync": "crates/verter_lsp/src/tsgo/carrier_sync.rs with ProjectBinding",
+      "mapBack": "ProviderPositionMapper (crates/verter_lsp/src/documents/provider_projection.rs), generated-only spans suppressed",
+      "verterComputedAnswer": "forbidden: a TS-region answer Verter computes itself is a duplicate"
+    },
+    "carrierOnly": {
+      "host": "Verter LSP (crates/verter_lsp)",
+      "operations": [
+        "native HTML tag and attribute completion",
+        "attribute-tag name completion from MRK3 slots and custom-tag name completion from MRK2 discovery",
+        "concise-mode and HTML-mode structure symbols, folding and selection",
+        "carrier syntax diagnostics",
+        "carrier semantic tokens",
+        "auto-close (HTML mode only)"
+      ],
+      "stepDown": "answered only where LSPX11 owns(capability, position) resolves to Verter; Unknown means Verter owns"
+    },
+    "tsserver": {
+      "forwarding": "none",
+      "typescriptPlugin": "keeps only its existing carrier-generic carrier-store compatibility (MRK6-AC6); it carries no Marko-specific code"
+    },
+    "newClientTransport": "none needed: every TS-region row is a manifest row over the existing tsgo routes, so the MRK0 rescope trigger does not fire"
+  },
+  "parserAuthority": {
+    "marko": "Verter-owned dedicated frontend (PAR0 CL13, home H04 crates/verter_marko_syntax, owner MRK1)",
+    "@marko/compiler": "oracle only; never parser authority"
+  }
+}

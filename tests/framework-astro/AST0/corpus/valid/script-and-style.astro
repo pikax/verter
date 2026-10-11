@@ -1,0 +1,27 @@
+---
+const greeting = "hi";
+---
+
+<button id="greet">{greeting}</button>
+
+<script>
+  const button = document.querySelector<HTMLButtonElement>("#greet");
+  button?.addEventListener("click", () => console.log("clicked"));
+</script>
+
+<script is:inline>
+  window.inlineReady = true;
+</script>
+
+<style>
+  button {
+    font-weight: bold;
+  }
+</style>
+
+<style lang="scss" is:global>
+  $gap: 4px;
+  body {
+    margin: $gap;
+  }
+</style>

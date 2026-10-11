@@ -1368,32 +1368,15 @@ impl<L: RequestBoundLifecycle> FactValidation for RequestBoundAdapter<L> {
             facts,
         )
     }
-    fn record_signature_overflow(&self) {
-        verter_type_engine::count_resolver_context_call!(
-            "FactValidation::record_signature_overflow"
-        );
+    #[cfg(any(test, feature = "test-support"))]
+    fn tracer_forcing(&self) -> bool {
+        verter_type_engine::count_resolver_context_call!("FactValidation::tracer_forcing");
         self.0
             .host()
-            .signature_overflow_at_install
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }
-    #[cfg(any(test, feature = "test-support"))]
-    fn tracer_forcing(&self) -> (bool, usize) {
-        verter_type_engine::count_resolver_context_call!("FactValidation::tracer_forcing");
-        (
-            self.0
-                .host()
-                .test_force
-                .engine
-                .force_fact_tracer_non_cacheable_read
-                .load(std::sync::atomic::Ordering::Relaxed),
-            self.0
-                .host()
-                .test_force
-                .engine
-                .force_fact_tracer_overflow_observations
-                .load(std::sync::atomic::Ordering::Relaxed),
-        )
+            .test_force
+            .engine
+            .force_fact_tracer_non_cacheable_read
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     #[inline]

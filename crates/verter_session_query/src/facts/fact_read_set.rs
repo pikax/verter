@@ -8,10 +8,10 @@
 //!   a `Candidate::fact_dep_signature`.
 //! - [`FactReadSetCell`] — interior-mutability wrapper so trait
 //!   methods can record observations through `&self`.
-//! - [`FactReadSetFinalise`] — the result of finalising a tracer:
-//!   either the immutable signature (`Ok`) or a bounded-overflow
-//!   sentinel (`Overflow`) when the observation count exceeds
-//!   [`FACT_SIGNATURE_CAP`].
+//! - [`FactReadSetFinalise`] — the result of finalising a tracer: the
+//!   immutable signature (`Ok`), the same complete signature marked
+//!   unable to authorise admission (`NonCacheable`), or a stability
+//!   refusal (`MutationUnstable`).
 //!
 //! ## Push vs pull
 //!
@@ -29,16 +29,20 @@
 //! graph, and the tracer accumulates an exact, ordered, deduplicated
 //! list of every fact the compute actually consumed.
 //!
-//! ## Bounded by `FACT_SIGNATURE_CAP`
+//! ## Wide signatures are paged, never refused
 //!
-//! Finalisation enforces the same cap the warm-validation path
-//! enforces: at most [`FACT_SIGNATURE_CAP`] (= 1024) facts per
-//! candidate. Tracers that exceed the cap return
-//! [`FactReadSetFinalise::Overflow`]; callers admit the result as
-//! non-cacheable and emit a structured audit event via the
-//! per-domain admission path (the event surface itself is wired by a
-//! separate fact-signature-overflow audit hookup; this module only
-//! reports overflow back to the caller).
+//! Signature width is never a refusal reason. Every fact a compute
+//! observed is recorded and validated. A canonical set wider than
+//! [`FACT_PAGE_WIDTH`] is sealed into immutable evidence PAGES
+//! ([`ResultReceipt::page`]): fixed-width contiguous runs of the
+//! canonical order, each one shared entry of the signature, paged again
+//! until the top level fits one page. Paging is deterministic — the same
+//! observed set always seals to the same pages — and lossless: a page
+//! validates exactly when every fact it holds validates, projects every
+//! canonical it holds into reverse-index registration, and is shared by
+//! `Arc` with every candidate, refusal summary and enclosing signature
+//! that absorbs it. Each page's storage is charged against the process
+//! retention account for the page's whole life.
 //!
 //! ## R24 zero-allocation guarantee on the warm-hit path
 //!
@@ -67,7 +71,7 @@
 //! therefore records its facts into its own cell AND into every
 //! enclosing one, so an outer compute's observation set stays complete
 //! while the inner one can make its OWN admission decision (a nested
-//! non-cacheable read or a nested signature overflow refuses the inner
+//! non-cacheable read or nested mutation instability refuses the inner
 //! entry without silently laundering into the outer signature). The
 //! per-cell `!Send + !Sync` lifetime above is unchanged — the stack is
 //! thread-local, and each cell still belongs to exactly one compute.
@@ -82,19 +86,19 @@ use crate::facts::fact_cache::{
     compaction_domain, AggregateGenerations, AggregatePopulation, CompactionDomain,
     DomainGenerationFact, FactVersionRef, ViewPopulation,
 };
+use crate::facts::receipt::ResultReceipt;
 use crate::resolution::ResolutionPopulation;
 
-pub const FACT_SIGNATURE_CAP: usize = 1_024;
+/// How many entries one evidence page — and a sealed signature's top
+/// level — holds. A layout width, never a refusal threshold: a canonical
+/// set wider than this is paged (see [`seal_canonical_signature`]), never
+/// truncated or refused.
+pub const FACT_PAGE_WIDTH: usize = 1_024;
 
 /// Per-domain precision threshold: a compaction domain stays PRECISE while
 /// its deduplicated bucket holds at most this many facts, and lifts to its
 /// terminal aggregate at the first fact beyond it.
-///
-/// Deliberately the same number as [`FACT_SIGNATURE_CAP`], and read with
-/// the same `>` comparison, so "the size at which a single-domain
-/// observation set used to be refused" and "the size at which that domain
-/// now compacts" are the same boundary rather than two that can drift.
-pub const FACT_DOMAIN_PRECISE_MAX: usize = FACT_SIGNATURE_CAP;
+pub const FACT_DOMAIN_PRECISE_MAX: usize = 1_024;
 
 /// The population `fact`'s bucket is keyed by, and that an aggregate
 /// minted for that bucket speaks for. `None` when nothing in scope can
@@ -292,9 +296,8 @@ pub enum NonCacheablePropagation {
 /// [`FactReadSet::observe`] / [`FactReadSet::observe_borrowed_signature`],
 /// and seal via [`FactReadSet::finalise`].
 ///
-/// Bounded by [`FACT_SIGNATURE_CAP`]: finalisation returns
-/// [`FactReadSetFinalise::Overflow`] when the deduplicated signature
-/// exceeds the cap.
+/// Unbounded in width: finalisation pages a canonical set wider than
+/// [`FACT_PAGE_WIDTH`] instead of refusing it.
 ///
 /// `!Send + !Sync` by design: the tracer is per-compute, per-thread
 /// state and must never cross a task boundary. The `PhantomData<*const ()>`
@@ -589,9 +592,7 @@ impl FactReadSet {
     /// canonical run into them.
     ///
     /// Idempotent, and leaves the tracer in an equivalent state (all facts
-    /// in `observations`, no runs outstanding), so a mid-scope
-    /// [`Self::would_overflow`] peek can call it without disturbing a later
-    /// [`Self::finalise`].
+    /// in `observations`, no runs outstanding).
     fn canonicalise(&mut self) {
         self.rewrites = self.rewrites.wrapping_add(1);
         self.observations.sort_unstable_by(compare_fact_refs);
@@ -616,55 +617,18 @@ impl FactReadSet {
         self.observations = SmallVec::from_vec(canonical);
     }
 
-    /// Whether sealing this tracer WOULD report
-    /// [`FactReadSetFinalise::Overflow`] — WITHOUT sealing it.
+    /// Seal the tracer into its immutable, complete signature.
     ///
-    /// The overflow-only peek for a consumer that reads the tracer's
-    /// CACHEABILITY verdict but builds its cache entry's signature from
-    /// another source (a carrier's `dep_signature`, a keyed canonical's
-    /// observed hash). Such a consumer never needs the finalised set, so
-    /// it must not pay [`Self::finalise`]'s `Arc<[FactVersionRef]>`
-    /// allocation — nor emit the overflow audit event, which stays owned
-    /// by the ONE signature-consuming [`Self::finalise`] boundary per
-    /// compute (a nested peek that also emitted would multiply one
-    /// overflowing compute's event + counter across every enclosing
-    /// tracer level).
-    ///
-    /// Cheap by construction: dedup can only SHRINK the observation set,
-    /// so a raw count at-or-under [`FACT_SIGNATURE_CAP`] — local
-    /// observations PLUS every absorbed run, since the cap is a property
-    /// of the finalised set — cannot overflow and short-circuits before
-    /// any sort. The over-cap branch collapses the tracer to canonical
-    /// form in place; the collapse is equivalence-preserving and
-    /// idempotent, so a later `finalise` still sees the same set.
-    #[must_use]
-    pub fn would_overflow(&mut self) -> bool {
-        if self.len() <= FACT_SIGNATURE_CAP {
-            return false;
-        }
-        self.canonicalise();
-        self.observations.len() > FACT_SIGNATURE_CAP
-    }
-
-    /// Seal the tracer into either an immutable signature or an
-    /// overflow sentinel.
-    ///
-    /// Sort + dedup the observed facts in canonical order; if the
-    /// deduplicated set exceeds [`FACT_SIGNATURE_CAP`], return
-    /// [`FactReadSetFinalise::Overflow`]. Overflow is not a panic;
-    /// the caller is responsible for refusing admission and emitting
-    /// the appropriate audit event.
+    /// Sort + dedup the observed facts in canonical order, then page a set
+    /// wider than [`FACT_PAGE_WIDTH`] (see [`seal_canonical_signature`]).
+    /// Every observed fact survives into the signature, however many there
+    /// are.
     #[must_use]
     pub fn finalise(mut self) -> FactReadSetFinalise {
         // Width of the read set this compute observed, charged before the
-        // stability / cardinality outcomes are decided so an overflowing or
-        // unstable compute is still counted for what it actually read.
+        // stability outcome is decided so an unstable compute is still
+        // counted for what it actually read.
         verter_audit::attribute_n!(ReadSetSignatureBuild, self.observations.len());
-        // STABILITY is settled before CARDINALITY, and stays a separate
-        // outcome. An unstable attempt must never be reported as a size
-        // failure: it would be refused under a rail that is about the
-        // number of facts, and the caller could not tell a genuinely
-        // wide compute from a racing one.
         if self.mutation_unstable {
             return FactReadSetFinalise::MutationUnstable;
         }
@@ -684,12 +648,9 @@ impl FactReadSet {
             self.canonicalise();
         }
         crate::probe_tally!(OBS_POST_DEDUP, self.observations.len());
-        if self.observations.len() > FACT_SIGNATURE_CAP {
-            return FactReadSetFinalise::Overflow;
-        }
         let arc: Arc<[FactVersionRef]> = {
             crate::probe_scope!(FINISH_ARC);
-            Arc::from(self.observations.into_vec())
+            Arc::from(page_canonical(self.observations.into_vec()))
         };
         if self.non_cacheable_propagation.is_some() {
             FactReadSetFinalise::NonCacheable(arc)
@@ -702,28 +663,21 @@ impl FactReadSet {
 /// Outcome of [`FactReadSet::finalise`].
 #[derive(Debug, Clone)]
 pub enum FactReadSetFinalise {
-    /// Successfully sealed: an immutable, sorted, deduplicated
-    /// signature ready to install as a `Candidate::fact_dep_signature`.
+    /// Successfully sealed: an immutable, sorted, deduplicated (and, when
+    /// wide, paged) signature ready to install as a
+    /// `Candidate::fact_dep_signature`.
     Ok(Arc<[FactVersionRef]>),
     /// The observation set is complete and remains available for bubbling into
     /// an enclosing tracer, but this compute consumed a read whose validating
     /// basis cannot be represented by those facts. The value may be returned;
     /// these facts must never authorize shared-cache admission.
     NonCacheable(Arc<[FactVersionRef]>),
-    /// Signature exceeded [`FACT_SIGNATURE_CAP`]; the caller must
-    /// refuse admission. No partial signature is returned — the
-    /// tracer is consumed regardless of outcome.
-    Overflow,
     /// A compaction domain this scope was COMPACTING advanced between
     /// its basis being installed and this finalisation, so the terminal
     /// aggregate would claim the domain held as of a generation these
     /// observations do not come from.
     ///
-    /// Terminal on the first unstable attempt — no automatic retry — and
-    /// deliberately NOT foldable into [`Self::Overflow`]. Degrading a
-    /// stability failure into a cardinality one refuses the attempt for
-    /// the wrong reason, under exactly the size rail this substrate
-    /// exists to remove.
+    /// Terminal on the first unstable attempt — no automatic retry.
     MutationUnstable,
 }
 
@@ -864,23 +818,57 @@ impl FactReadSetCell {
         self.0.borrow().is_empty()
     }
 
-    /// Whether sealing this cell WOULD overflow — the non-finalising,
-    /// non-emitting overflow peek through `&self`. See
-    /// [`FactReadSet::would_overflow`]. Readable MID-SCOPE (the tracer
-    /// accumulates monotonically), so a cacheability scope can consult its
-    /// verdict at an admission point without popping the cell.
-    #[inline]
-    #[must_use]
-    pub fn would_overflow(&self) -> bool {
-        self.0.borrow_mut().would_overflow()
-    }
-
     /// Consume the cell and return the underlying [`FactReadSet`].
     #[inline]
     #[must_use]
     pub fn into_inner(self) -> FactReadSet {
         self.0.into_inner()
     }
+}
+
+/// Seal an already-CANONICAL (strictly increasing) entry set as a
+/// signature: kept as is while it fits [`FACT_PAGE_WIDTH`], otherwise cut
+/// into fixed-width contiguous runs, each held by one immutable evidence
+/// page ([`ResultReceipt::page`]), and the pages paged again until the top
+/// level fits one page.
+///
+/// Lossless and deterministic: every entry is held by exactly one page of
+/// the first level, the cut points are positions in the canonical order,
+/// and the returned top level is itself canonical, so it absorbs into an
+/// enclosing tracer as a canonical run like any finalised signature.
+fn page_canonical(entries: Vec<FactVersionRef>) -> Vec<FactVersionRef> {
+    page_canonical_at_width(entries, FACT_PAGE_WIDTH)
+}
+
+/// [`page_canonical`] at an explicit `width`, so the multi-level index is
+/// reachable by a test without materialising `width²` facts.
+fn page_canonical_at_width(mut entries: Vec<FactVersionRef>, width: usize) -> Vec<FactVersionRef> {
+    while entries.len() > width {
+        let mut pages: Vec<FactVersionRef> = entries
+            .chunks(width)
+            .map(|run| FactVersionRef::Receipt(ResultReceipt::page(run.to_vec())))
+            .collect();
+        // A page orders by its digest, so the level of pages is put into
+        // canonical order before it is used as entries.
+        pages.sort_unstable_by(compare_fact_refs);
+        entries = pages;
+    }
+    entries
+}
+
+/// Seal an arbitrary fact collection as a complete signature: sort,
+/// deduplicate, drop receipts another receipt in the set already consumed,
+/// and page it when it is wider than [`FACT_PAGE_WIDTH`].
+///
+/// The one sealer for a signature a producer assembles by hand (a union
+/// of operand evidence, a self-root rewrite) rather than through a
+/// tracer. It never compacts: compaction needs a tracer's live basis.
+#[must_use]
+pub fn seal_canonical_signature(mut facts: Vec<FactVersionRef>) -> Arc<[FactVersionRef]> {
+    facts.sort_unstable_by(compare_fact_refs);
+    facts.dedup();
+    crate::facts::fact_cache::drop_subsumed_receipts(&mut facts);
+    Arc::from(page_canonical(facts))
 }
 
 /// Canonical ordering for [`FactVersionRef`] values. Used by
@@ -984,14 +972,23 @@ mod finalise_tests {
     }
 
     #[test]
-    fn overflow_dominates_non_cacheability() {
+    fn a_wide_non_cacheable_set_keeps_every_fact() {
         let mut read_set = FactReadSet::new();
         read_set.note_non_cacheable_read(NonCacheablePropagation::Transitive);
-        for index in 0..=FACT_SIGNATURE_CAP {
+        for index in 0..=FACT_PAGE_WIDTH {
             read_set.observe(fact(index));
         }
 
-        assert!(matches!(read_set.finalise(), FactReadSetFinalise::Overflow));
+        let FactReadSetFinalise::NonCacheable(facts) = read_set.finalise() else {
+            panic!("a wide non-cacheable observation set stays non-cacheable, never refused");
+        };
+        let signature = crate::facts::fact_cache::ReadSetSignature::new(facts);
+        let mut leaves = 0usize;
+        assert!(signature.all_leaves(|_| {
+            leaves += 1;
+            true
+        }));
+        assert_eq!(leaves, FACT_PAGE_WIDTH + 1);
     }
 }
 

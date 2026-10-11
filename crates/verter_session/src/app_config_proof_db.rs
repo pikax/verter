@@ -180,12 +180,24 @@ impl AppConfigNoOverrideProofDb {
     /// derivation is no longer performed at publish time — the
     /// producer is the single authority for the entry's
     /// validation contract.
+    ///
+    /// The entry retains the signature's evidence pages, so publication
+    /// first claims them into a refusable reservation; a refused claim
+    /// publishes nothing.
     #[cfg(any(test, feature = "test-support"))]
     pub fn publish(
         &self,
         key: AppConfigNoOverrideProofKey,
         fact_dep_signature: Arc<[FactVersionRef]>,
     ) {
+        if verter_session_query::facts::receipt::claim_evidence_pages(
+            &verter_session_query::retention::SemanticRetentionAccount::process_local(),
+            &fact_dep_signature,
+        )
+        .is_err()
+        {
+            return;
+        }
         let entry = Arc::new(AppConfigNoOverrideProofEntry { fact_dep_signature });
         if self.entries.insert(key, entry).is_none() {
             self.live_counter.fetch_add(1, Ordering::Relaxed);
@@ -298,9 +310,9 @@ impl verter_type_engine::invalidation_domain::InvalidationByCanonical
 /// **Cold-build outcome semantics:**
 /// - `Some(entry)` published — proof is valid. The fast-path
 ///   consumer can rely on the fact-signature for warm-hit revalidation.
-/// - On `FactReadSetFinalise::Overflow` — refuse cache admission;
-///   the next call cold-recomputes. The provenance counter
-///   `app_config_proof_overflow_refusals` advances.
+/// - On `FactReadSetFinalise::NonCacheable` — refuse cache admission;
+///   the next call cold-recomputes. In a `semantic-observe` build the
+///   provenance counter `app_config_proof_non_cacheable_refusals` advances.
 ///
 /// Resolver-tier producer that takes `&dyn ResolverContext` to stay
 /// inside the request-port contract (the five ports in
@@ -408,20 +420,14 @@ pub(crate) fn app_config_no_override_proof_get_or_compute<
             ))
         }
         verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_) => {
+            #[cfg(feature = "semantic-observe")]
             provenance
-                .app_config_proof_overflow_refusals
+                .app_config_proof_non_cacheable_refusals
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             None
         }
-        verter_session_query::facts::fact_read_set::FactReadSetFinalise::Overflow => {
-            provenance
-                .app_config_proof_overflow_refusals
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            None
-        }
-        // Refuses like an overflow and is counted as neither: the
-        // overflow counter is a SIZE observable and a stability refusal
-        // must not inflate it.
+        // Refuses too, but is not a non-cacheable read: a compaction domain
+        // moved mid-compute.
         verter_session_query::facts::fact_read_set::FactReadSetFinalise::MutationUnstable => None,
     }
 }

@@ -1,0 +1,6 @@
+[
+  {
+    "glob": "tests/framework-marko/**",
+    "reason": "Reviewed Marko contract data; no ci.yml lane reads it yet. Replace this entry with consuming-lane ownership when executable validation lands."
+  }
+]

@@ -1923,6 +1923,25 @@ pub struct UpsertRequest {
     pub aliases: Vec<String>,
 }
 
+/// An export location and the immutable source its span indexes, captured
+/// together with every dependency used by re-export traversal.
+#[derive(Debug)]
+pub struct CapturedExportSpan {
+    pub canonical_id: String,
+    pub start: u32,
+    pub end: u32,
+    pub source: Arc<str>,
+    pub dependencies: Vec<(String, Option<crate::CommittedSourceContent>)>,
+}
+
+/// Whether native export traversal could assemble a coherent location.
+#[derive(Debug)]
+pub enum NativeExportRead {
+    Captured(CapturedExportSpan),
+    Unavailable,
+    ContentModified,
+}
+
 /// Descriptive content class. This is never block identity: callers correlate
 /// and apply content only through the sealed token and its captured stamps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3294,11 +3313,10 @@ pub(crate) struct CompileSlot {
     /// the consumer's warm hit misses without any eager invalidation.
     ///
     /// Carrier invariant: `present in compile_slots` implies admitted
-    /// cache entry. A tracer that finalised with `Overflow` MUST NOT
+    /// cache entry. A tracer whose finalise refuses admission MUST NOT
     /// publish here — the cold-build producer refuses the
-    /// `compile_slots.insert` on overflow and returns the freshly
-    /// computed value to its single caller without admitting. An
-    /// empty fact rail (`facts.is_empty() && !overflowed`) is a valid
+    /// `compile_slots.insert` and returns the freshly computed value to
+    /// its single caller without admitting. An empty fact rail is a valid
     /// admitted state: the warm-hit oracle validates vacuously and
     /// falls back to the existing `semantic_hash`/override-hash
     /// pre-filter.
@@ -3725,6 +3743,7 @@ impl DerivedRawState {
         &mut self,
         template: Arc<verter_session_query::analysis::template::TemplateAnalysisSnapshot>,
         admission: RawTemplateSlotAdmission,
+        account: &Arc<verter_session_query::retention::SemanticRetentionAccount>,
     ) {
         let Some(source_version) = admission.admitted_version() else {
             return;
@@ -3737,6 +3756,14 @@ impl DerivedRawState {
             .as_ref()
             .is_none_or(|entry| entry.source_version <= source_version);
         if supersedes {
+            if verter_session_query::facts::receipt::claim_evidence_pages(
+                account,
+                &template_class_signature.facts,
+            )
+            .is_err()
+            {
+                return;
+            }
             self.raw_template_analysis = Some(RawTemplateAnalysisEntry {
                 template,
                 source_version,

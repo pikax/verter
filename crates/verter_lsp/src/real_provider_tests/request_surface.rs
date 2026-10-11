@@ -155,7 +155,7 @@ real_provider_test!(
                     loop {
                         let typed = session
                             .provider()
-                            .get_completions(&ctx.tsx_path, 0, None)
+                            .get_completions(&crate::type_provider::traits::ProviderQuery::at_engine_surface(&ctx.tsx_path), 0, None)
                             .await
                             .is_ok_and(|result| !result.items.is_empty());
                         if typed {

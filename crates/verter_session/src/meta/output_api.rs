@@ -347,8 +347,8 @@ impl MetaSession {
         let mut facts = fallthrough_fact_versions.unwrap_or_else(|| resolved.fact_versions.clone());
         // Output-materialization dependencies join the ENCODED-payload
         // validation rail: an edit to any file the materialization observed
-        // misses the warm payload read. A signature overflow refuses payload
-        // admission (ReturnOnly) — the payload is still returned.
+        // misses the warm payload read. A refused output read set refuses
+        // payload admission (ReturnOnly) — the payload is still returned.
         let output_facts_admissible = match output_read_set.finalise() {
             verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(output_facts) => {
                 let mut seen: rustc_hash::FxHashSet<
@@ -364,10 +364,9 @@ impl MetaSession {
             verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_) => {
                 false
             }
-            verter_session_query::facts::fact_read_set::FactReadSetFinalise::Overflow => false,
             // A compaction domain moved mid-scope: the observation set
             // cannot be merged into the output signature, so the output
-            // facts are inadmissible exactly as an overflow's are.
+            // facts are inadmissible.
             verter_session_query::facts::fact_read_set::FactReadSetFinalise::MutationUnstable => {
                 false
             }

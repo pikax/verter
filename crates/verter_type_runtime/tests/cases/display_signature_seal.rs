@@ -15,6 +15,7 @@ use verter_type_runtime::protocol::{
     SemanticToken, SignatureHelp, TypeCodeAction, TypeDiagnostic, TypeDocumentHighlight,
     TypeLocation,
 };
+use verter_type_runtime::provider_query::ProviderQuery;
 use verter_type_runtime::{ProviderFuture, TypeProvider};
 
 /// A minimal provider impl: possession of a provider impl is the ONLY
@@ -44,7 +45,7 @@ impl TypeProvider for WitnessOnlyProvider {
 
     fn get_completions(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _offset: u32,
         _trigger: Option<&str>,
     ) -> ProviderFuture<'_, CompletionResult> {
@@ -56,7 +57,11 @@ impl TypeProvider for WitnessOnlyProvider {
         })
     }
 
-    fn get_hover(&self, _path: &str, _offset: u32) -> ProviderFuture<'_, Option<HoverInfo>> {
+    fn get_hover(
+        &self,
+        _query: &ProviderQuery,
+        _offset: u32,
+    ) -> ProviderFuture<'_, Option<HoverInfo>> {
         Box::pin(async move { Ok(None) })
     }
 
@@ -64,25 +69,33 @@ impl TypeProvider for WitnessOnlyProvider {
         Box::pin(async move { Ok(Vec::new()) })
     }
 
-    fn get_definition(&self, _path: &str, _offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
-        Box::pin(async move { Ok(Vec::new()) })
-    }
-
-    fn get_type_definition(
+    fn get_definition(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _offset: u32,
     ) -> ProviderFuture<'_, Vec<TypeLocation>> {
         Box::pin(async move { Ok(Vec::new()) })
     }
 
-    fn get_references(&self, _path: &str, _offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
+    fn get_type_definition(
+        &self,
+        _query: &ProviderQuery,
+        _offset: u32,
+    ) -> ProviderFuture<'_, Vec<TypeLocation>> {
+        Box::pin(async move { Ok(Vec::new()) })
+    }
+
+    fn get_references(
+        &self,
+        _query: &ProviderQuery,
+        _offset: u32,
+    ) -> ProviderFuture<'_, Vec<TypeLocation>> {
         Box::pin(async move { Ok(Vec::new()) })
     }
 
     fn get_rename_locations(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _offset: u32,
     ) -> ProviderFuture<'_, Vec<RenameLocation>> {
         Box::pin(async move { Ok(Vec::new()) })
@@ -90,7 +103,7 @@ impl TypeProvider for WitnessOnlyProvider {
 
     fn get_signature_help(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _offset: u32,
     ) -> ProviderFuture<'_, Option<SignatureHelp>> {
         Box::pin(async move { Ok(None) })
@@ -98,7 +111,7 @@ impl TypeProvider for WitnessOnlyProvider {
 
     fn get_code_actions(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _start: u32,
         _end: u32,
         _diagnostics: &[ProviderDiagnosticContext],
@@ -106,13 +119,16 @@ impl TypeProvider for WitnessOnlyProvider {
         Box::pin(async move { Ok(Vec::new()) })
     }
 
-    fn get_semantic_tokens(&self, _path: &str) -> ProviderFuture<'_, Vec<SemanticToken>> {
+    fn get_semantic_tokens(
+        &self,
+        _query: &ProviderQuery,
+    ) -> ProviderFuture<'_, Vec<SemanticToken>> {
         Box::pin(async move { Ok(Vec::new()) })
     }
 
     fn get_document_highlights(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _offset: u32,
     ) -> ProviderFuture<'_, Vec<TypeDocumentHighlight>> {
         Box::pin(async move { Ok(Vec::new()) })
@@ -120,7 +136,7 @@ impl TypeProvider for WitnessOnlyProvider {
 
     fn get_inlay_hints(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _start: u32,
         _end: u32,
     ) -> ProviderFuture<'_, Vec<InlayHint>> {

@@ -1,0 +1,282 @@
+{
+  "schema": 1,
+  "contractNode": "PRE0",
+  "family": "preact",
+  "kind": "lock",
+  "id": "preact-capability-matrix.v1",
+  "rules": [
+    "Each operation × host × profile cell has one producer and one receiving acceptance. Dependencies are fact owners, not additional producers.",
+    "All admitted cells use LSPX11 lsp-enhancement with owns(capability, position); stepped-down and inactive cells do zero work.",
+    "Release is orthogonal to the two profiles; each cell applies separately to one admitted resolved release, not both releases in one package contribution.",
+    "Static contract data is not support, conformance or runtime evidence; FCH1 must join delivered fixtures."
+  ],
+  "facets": {
+    "Props": {
+      "disposition": "authoritative",
+      "source": "Preact JSX namespace and canonical function/class/generic/compat component props",
+      "owner": "PRE3",
+      "acceptance": "PRE3-AC2"
+    },
+    "Emits": {
+      "disposition": "derived",
+      "rule": "callback props",
+      "provenance": "callback prop",
+      "owner": "PRE3",
+      "acceptance": "PRE3-AC3"
+    },
+    "Slots": {
+      "disposition": "derived",
+      "rule": "children and render props",
+      "provenance": "children/render prop",
+      "owner": "PRE3",
+      "acceptance": "PRE3-AC3"
+    },
+    "Expose": {
+      "disposition": "derived",
+      "rule": "useImperativeHandle from preact/hooks; compat forwardRef wrapper identity",
+      "owner": "PRE3",
+      "acceptance": "PRE3-AC3"
+    },
+    "Model": {
+      "disposition": "UNSUPPORTED"
+    },
+    "Options": {
+      "disposition": "UNSUPPORTED"
+    }
+  },
+  "frameworkTag": {
+    "name": "FRAMEWORK_TAG_PREACT",
+    "value": 6,
+    "structuralNonTag": "OPEN_CANONICAL",
+    "allocationOwner": "REG0",
+    "registrationOwner": "PRE1",
+    "acceptance": "PRE1-AC1",
+    "currentState": "not present in baseline proto; no proto edit in this contract"
+  },
+  "cells": [
+    {
+      "id": "preact-native:component-hover",
+      "operation": "textDocument/hover: Preact component section",
+      "producer": "PRE5",
+      "acceptance": "PRE5-AC1",
+      "facts": ["PRE3-AC1", "PRE3-AC2", "PRE3-AC3", "PRE3-AC4"],
+      "tsgoOperations": ["getSymbolAtPosition", "getTypeAtPosition", "typeToString"],
+      "tsgoLimitations": ["getPropertiesOfType", "getSignaturesOfType"],
+      "qualification": "Only Preact profile, props and derived facets with completeness; typeToString is display only.",
+      "profile": "preact-native",
+      "host": "lsp-enhancement",
+      "seam": "LSPX11",
+      "releases": ["preact-10", "preact-11"],
+      "reprovidesTsgo": false,
+      "state": "contract-only; producer delivery pending"
+    },
+    {
+      "id": "preact-native:signal-hover",
+      "operation": "textDocument/hover: signal read section",
+      "producer": "PRE5",
+      "acceptance": "PRE5-AC2",
+      "facts": ["PRE2-AC3", "PRE4-AC2"],
+      "tsgoOperations": ["getSymbolAtPosition"],
+      "tsgoLimitations": [],
+      "qualification": "Only an admitted optional signals binding in JSX; include its source declaration. Ordinary identifiers get no section.",
+      "profile": "preact-native",
+      "host": "lsp-enhancement",
+      "seam": "LSPX11",
+      "releases": ["preact-10", "preact-11"],
+      "reprovidesTsgo": false,
+      "state": "contract-only; producer delivery pending",
+      "requiresOptionalPackage": "@preact/signals"
+    },
+    {
+      "id": "preact-native:context-provider-definition",
+      "operation": "textDocument/definition: extra context provider targets",
+      "producer": "PRE5",
+      "acceptance": "PRE5-AC2",
+      "facts": ["PRE2-AC1"],
+      "tsgoOperations": ["getSymbolAtPosition"],
+      "tsgoLimitations": [],
+      "qualification": "Canonical useContext identity and indexed provider sites; no ordinary TypeScript definition is re-provided.",
+      "profile": "preact-native",
+      "host": "lsp-enhancement",
+      "seam": "LSPX11",
+      "releases": ["preact-10", "preact-11"],
+      "reprovidesTsgo": false,
+      "state": "contract-only; producer delivery pending"
+    },
+    {
+      "id": "preact-native:framework-diagnostics",
+      "operation": "textDocument/diagnostic: Verter Preact rules",
+      "producer": "PRE8",
+      "acceptance": "PRE8-AC3",
+      "facts": ["PRE4-AC1", "PRE4-AC2", "PRE4-AC3"],
+      "tsgoOperations": [],
+      "tsgoLimitations": [],
+      "qualification": "Verter diagnostics only, with profile-specific applicability and JSX suppression spans. TypeScript diagnostics stay with tsgo/TS.",
+      "profile": "preact-native",
+      "host": "lsp-enhancement",
+      "seam": "LSPX11",
+      "releases": ["preact-10", "preact-11"],
+      "reprovidesTsgo": false,
+      "state": "contract-only; producer delivery pending"
+    },
+    {
+      "id": "preact-native:framework-code-actions",
+      "operation": "textDocument/codeAction: fixes for Verter Preact diagnostics",
+      "producer": "PRE8",
+      "acceptance": "PRE8-AC3",
+      "facts": ["PRE4-AC1", "PRE4-AC2"],
+      "tsgoOperations": [],
+      "tsgoLimitations": [],
+      "qualification": "Only owned diagnostics; existing LSO8 edit transactions with reversible authored spans and verified applicability.",
+      "profile": "preact-native",
+      "host": "lsp-enhancement",
+      "seam": "LSPX11",
+      "releases": ["preact-10", "preact-11"],
+      "reprovidesTsgo": false,
+      "state": "contract-only; producer delivery pending"
+    },
+    {
+      "id": "preact-compat:component-hover",
+      "operation": "textDocument/hover: Preact component section",
+      "producer": "PRE5",
+      "acceptance": "PRE5-AC1",
+      "facts": ["PRE3-AC1", "PRE3-AC2", "PRE3-AC3", "PRE3-AC4"],
+      "tsgoOperations": ["getSymbolAtPosition", "getTypeAtPosition", "typeToString"],
+      "tsgoLimitations": ["getPropertiesOfType", "getSignaturesOfType"],
+      "qualification": "Only Preact profile, props and derived facets with completeness; typeToString is display only.",
+      "profile": "preact-compat",
+      "host": "lsp-enhancement",
+      "seam": "LSPX11",
+      "releases": ["preact-10", "preact-11"],
+      "reprovidesTsgo": false,
+      "state": "contract-only; producer delivery pending"
+    },
+    {
+      "id": "preact-compat:signal-hover",
+      "operation": "textDocument/hover: signal read section",
+      "producer": "PRE5",
+      "acceptance": "PRE5-AC2",
+      "facts": ["PRE2-AC3", "PRE4-AC2"],
+      "tsgoOperations": ["getSymbolAtPosition"],
+      "tsgoLimitations": [],
+      "qualification": "Only an admitted optional signals binding in JSX; include its source declaration. Ordinary identifiers get no section.",
+      "profile": "preact-compat",
+      "host": "lsp-enhancement",
+      "seam": "LSPX11",
+      "releases": ["preact-10", "preact-11"],
+      "reprovidesTsgo": false,
+      "state": "contract-only; producer delivery pending",
+      "requiresOptionalPackage": "@preact/signals"
+    },
+    {
+      "id": "preact-compat:context-provider-definition",
+      "operation": "textDocument/definition: extra context provider targets",
+      "producer": "PRE5",
+      "acceptance": "PRE5-AC2",
+      "facts": ["PRE2-AC1"],
+      "tsgoOperations": ["getSymbolAtPosition"],
+      "tsgoLimitations": [],
+      "qualification": "Canonical useContext identity and indexed provider sites; no ordinary TypeScript definition is re-provided.",
+      "profile": "preact-compat",
+      "host": "lsp-enhancement",
+      "seam": "LSPX11",
+      "releases": ["preact-10", "preact-11"],
+      "reprovidesTsgo": false,
+      "state": "contract-only; producer delivery pending"
+    },
+    {
+      "id": "preact-compat:framework-diagnostics",
+      "operation": "textDocument/diagnostic: Verter Preact rules",
+      "producer": "PRE8",
+      "acceptance": "PRE8-AC3",
+      "facts": ["PRE4-AC1", "PRE4-AC2", "PRE4-AC3"],
+      "tsgoOperations": [],
+      "tsgoLimitations": [],
+      "qualification": "Verter diagnostics only, with profile-specific applicability and JSX suppression spans. TypeScript diagnostics stay with tsgo/TS.",
+      "profile": "preact-compat",
+      "host": "lsp-enhancement",
+      "seam": "LSPX11",
+      "releases": ["preact-10", "preact-11"],
+      "reprovidesTsgo": false,
+      "state": "contract-only; producer delivery pending"
+    },
+    {
+      "id": "preact-compat:framework-code-actions",
+      "operation": "textDocument/codeAction: fixes for Verter Preact diagnostics",
+      "producer": "PRE8",
+      "acceptance": "PRE8-AC3",
+      "facts": ["PRE4-AC1", "PRE4-AC2"],
+      "tsgoOperations": [],
+      "tsgoLimitations": [],
+      "qualification": "Only owned diagnostics; existing LSO8 edit transactions with reversible authored spans and verified applicability.",
+      "profile": "preact-compat",
+      "host": "lsp-enhancement",
+      "seam": "LSPX11",
+      "releases": ["preact-10", "preact-11"],
+      "reprovidesTsgo": false,
+      "state": "contract-only; producer delivery pending"
+    }
+  ],
+  "exclusions": [
+    {
+      "id": "ordinary-language-features",
+      "operations": [
+        "ordinary hover",
+        "ordinary definition",
+        "completion",
+        "references",
+        "documentSymbol",
+        "ordinary rename"
+      ],
+      "reason": "Owned by tsgo/TS; no Preact re-provision."
+    },
+    {
+      "id": "framework-rename",
+      "operations": ["framework-only rename"],
+      "reason": "PRE5 registers LSO4 roles but names no Preact-only rename operation; no delivery claimed by this lock."
+    },
+    {
+      "id": "ts-plugin",
+      "operations": ["TS-plugin enhancements"],
+      "reason": "No TS-plugin cells; compatibility work only."
+    },
+    {
+      "id": "build",
+      "operations": [
+        "build",
+        "bundle",
+        "transform",
+        "HMR setup",
+        "@preact/preset-vite integration"
+      ],
+      "reason": "Excluded from this delivery contract; official presets remain untouched. A separate upstream build bridge does not authorize a cell here."
+    },
+    {
+      "id": "runtime",
+      "operations": [
+        "execute",
+        "render",
+        "hydrate",
+        "instrument",
+        "dev server",
+        "runtime observation"
+      ],
+      "reason": "No runtime work in this vertical; render/hydrate source calls can be classified statically only."
+    },
+    {
+      "id": "parser",
+      "operations": ["Preact parser", "Preact FileLanguage", "Preact attachment codec"],
+      "reason": "JSX overlay reuses the shared TSX/JSX parser; no carrier language or attachments."
+    },
+    {
+      "id": "formatter",
+      "operations": ["Preact printer"],
+      "reason": "Shared TSX/JSX printer; PRE8F-AC1 through PRE8F-AC3 own corpus proof, not a new Preact enhancement."
+    },
+    {
+      "id": "facets",
+      "operations": ["Model", "Options"],
+      "reason": "UNSUPPORTED; never represented as empty supported facets."
+    }
+  ]
+}

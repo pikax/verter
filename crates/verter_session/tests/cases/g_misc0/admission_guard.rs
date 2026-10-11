@@ -1,15 +1,15 @@
 //! `ValidatedFactCache` admission-guard discrimination.
 //!
-//! `ValidatedFactCache::insert_arc_with_kind` enforces two pre-publish
-//! gates:
+//! `ValidatedFactCache::insert_arc_with_kind` enforces one pre-publish
+//! gate, and deliberately not a second:
 //!
-//! - **Over-cap signature** → admission refused, `FactSignatureOverflow`
-//!   emitted, `signature_overflow_count` advances.
 //! - **Empty signature on a source-dependent cache** → admission
 //!   refused, `FactSignatureAdmissionRefused` emitted,
 //!   `admission_refused_count` advances.
+//! - **Signature width** is never a refusal: a signature wider than one
+//!   evidence page is paged and admitted whole.
 //!
-//! Both refusal paths preserve correctness by falling back to cold
+//! The refusal path preserves correctness by falling back to cold
 //! recompute every time — they never poison the cache with torn
 //! state.
 //!
@@ -17,8 +17,8 @@
 //!
 //! - `empty_signature_refuses_admission` — a non-empty signature is
 //!   admitted (control); an empty signature is refused (effect).
-//! - `oversized_signature_refuses_admission` — a signature at the
-//!   cap is admitted; a signature one over the cap is refused.
+//! - `wide_signature_admits_paged` — signatures at and one over the
+//!   page width are both admitted.
 //! - `admission_guard_returns_correct_value_on_cold_recompute` —
 //!   the R20 contract requires that an admission-refused cache
 //!   miss falls through to a correct cold compute. We assert this
@@ -29,7 +29,7 @@ use verter_session::resolver_core::ValidatedFactCache;
 use verter_session_query::analysis::types::Hash16;
 use verter_session_query::facts::{
     fact_cache::{FactVersionRef, ParseFactRef},
-    fact_read_set::FACT_SIGNATURE_CAP,
+    fact_read_set::FACT_PAGE_WIDTH,
 };
 use verter_session_query::facts::{FactKey, FactLane, SymbolSpace};
 
@@ -58,7 +58,6 @@ fn non_empty_signature_admits_normally_as_control() {
     // signature is the happy path under the strict admission
     // contract.
     assert_eq!(cache.admission_refused_count(), 0);
-    assert_eq!(cache.signature_overflow_count(), 0);
     assert_eq!(cache.len(), 1);
 }
 
@@ -80,11 +79,6 @@ fn empty_signature_refuses_admission_for_source_dependent_cache() {
         1,
         "admission_refused_count must advance on the empty-signature refusal"
     );
-    assert_eq!(
-        cache.signature_overflow_count(),
-        0,
-        "an empty-signature refusal is NOT an overflow refusal"
-    );
 }
 
 #[test]
@@ -103,46 +97,38 @@ fn loose_insert_arc_admits_empty_signature_for_legacy_callers() {
 }
 
 #[test]
-fn oversized_signature_refuses_admission() {
+fn wide_signature_admits_paged() {
     let cache: ValidatedFactCache<&'static str, u32> = ValidatedFactCache::default();
 
-    // Signature at exactly the cap is admitted (boundary control).
-    let mut at_cap = Vec::with_capacity(FACT_SIGNATURE_CAP);
-    for i in 0..FACT_SIGNATURE_CAP {
-        at_cap.push(fake_fact(&format!("F{i}")));
-    }
-    assert_eq!(at_cap.len(), FACT_SIGNATURE_CAP);
-    cache.insert_arc_with_kind("at_cap", std::sync::Arc::new(1u32), at_cap, "test_cache");
-    assert_eq!(cache.len(), 1, "signature at cap admits normally");
-    assert_eq!(cache.signature_overflow_count(), 0);
-
-    // Signature one over the cap → admission refused.
-    let mut over_cap = Vec::with_capacity(FACT_SIGNATURE_CAP + 1);
-    for i in 0..=FACT_SIGNATURE_CAP {
-        over_cap.push(fake_fact(&format!("G{i}")));
-    }
-    assert_eq!(over_cap.len(), FACT_SIGNATURE_CAP + 1);
+    let at_width: Vec<FactVersionRef> = (0..FACT_PAGE_WIDTH)
+        .map(|i| fake_fact(&format!("F{i}")))
+        .collect();
     cache.insert_arc_with_kind(
-        "over_cap",
-        std::sync::Arc::new(2u32),
-        over_cap,
+        "at_width",
+        std::sync::Arc::new(1u32),
+        at_width,
         "test_cache",
     );
+    assert_eq!(cache.len(), 1, "a signature of exactly one page admits");
 
-    assert_eq!(
-        cache.len(),
-        1,
-        "over-cap admission must not add a new entry"
+    let over_width: Vec<FactVersionRef> = (0..=FACT_PAGE_WIDTH)
+        .map(|i| fake_fact(&format!("G{i}")))
+        .collect();
+    cache.insert_arc_with_kind(
+        "over_width",
+        std::sync::Arc::new(2u32),
+        over_width,
+        "test_cache",
     );
     assert_eq!(
-        cache.signature_overflow_count(),
-        1,
-        "signature_overflow_count must advance on the over-cap refusal"
+        cache.len(),
+        2,
+        "a signature one fact wider than a page is paged and admitted, never refused"
     );
     assert_eq!(
         cache.admission_refused_count(),
         0,
-        "an over-cap refusal is NOT an empty-signature refusal"
+        "width is not an admission refusal"
     );
 }
 

@@ -350,6 +350,22 @@ pub struct ReadyFile {
     pub map_rel: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub structure: Option<ReadyStructureStamp>,
+    /// The store epoch of the commit that published these bytes under this
+    /// provider: a republication of identical bytes keeps it, any change takes
+    /// the publishing commit's epoch. Epochs of one store instance are never
+    /// reused, so together with the instance it is the row's non-reusable
+    /// publication stamp — the same for every writer process. `0` for a row
+    /// written before the field existed.
+    #[serde(skip_serializing_if = "is_zero", default)]
+    pub published_epoch: u64,
+}
+
+#[allow(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde skip predicate signature"
+)]
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 /// One project's manifest entry: its full owned carrier set plus the subset that is
@@ -1065,6 +1081,9 @@ impl CarrierPublishStore {
                             script_content_ranges: structure.script_content_ranges.clone(),
                             markup_opening_ranges: structure.markup_opening_ranges.clone(),
                         }),
+                    // Stamped at commit, against the folded state the record
+                    // is resolved on.
+                    published_epoch: 0,
                 },
             ));
         }
@@ -1177,7 +1196,7 @@ impl CarrierPublishStore {
 fn reconcile_publish_ops(
     state: &StoreState,
     batch: &PublishBatch,
-    ready_entries: Vec<(String, ReadyFile)>,
+    mut ready_entries: Vec<(String, ReadyFile)>,
 ) -> Vec<JournalOp> {
     let project_uri = batch.project_uri.as_str();
     let mut ops = Vec::new();
@@ -1191,6 +1210,20 @@ fn reconcile_publish_ops(
             &empty
         }
     };
+    // This record commits at the next epoch. A row republished with the bytes
+    // and map it already carries keeps its publication stamp; any other row
+    // is published by this commit.
+    let publishing_epoch = state.epoch + 1;
+    for (provider_uri, file) in &mut ready_entries {
+        file.published_epoch = match project.ready.get(provider_uri.as_str()) {
+            Some(held)
+                if held.content_hash == file.content_hash && held.map_hash == file.map_hash =>
+            {
+                held.published_epoch
+            }
+            _ => publishing_epoch,
+        };
+    }
     let groups = group_by_source(&batch.owned_sources);
     match batch.owned_scope {
         // Authoritative: REWRITE the owned set (when the batch carries one — an
@@ -1415,6 +1448,94 @@ impl PublishedStoreReader {
     #[must_use]
     pub fn work(&self) -> StoreWork {
         self.work
+    }
+}
+
+/// The carrier store as the tsserver plugin reads it, as the publication
+/// authority of every carrier byte that engine reads out of band.
+///
+/// Reads follow the published state — every writer's commits, not only this
+/// process's — through an incremental [`PublishedStoreReader`], so a query
+/// settles against what the plugin can serve, never against a local record of
+/// what this process registered.
+pub struct CarrierStorePublications {
+    reader: parking_lot::Mutex<PublishedStoreReader>,
+}
+
+impl CarrierStorePublications {
+    /// The authority over the store at `dir` (the directory the plugin is
+    /// pointed at).
+    #[must_use]
+    pub fn open(dir: impl Into<PathBuf>) -> Self {
+        Self {
+            reader: parking_lot::Mutex::new(PublishedStoreReader::open(dir)),
+        }
+    }
+}
+
+impl verter_type_runtime::provider_query::SurfacePublications for CarrierStorePublications {
+    fn position(&self) -> Option<verter_type_runtime::provider_query::PublicationPosition> {
+        let mut reader = self.reader.lock();
+        reader.refresh().ok()?;
+        let cursor = reader.cursor.as_ref()?;
+        Some(verter_type_runtime::provider_query::PublicationPosition {
+            instance: std::sync::Arc::from(cursor.instance.as_str()),
+            epoch: cursor.state.epoch,
+        })
+    }
+
+    fn attest(&self, path: &str, bytes: &str) -> verter_type_runtime::provider_query::Attestation {
+        use verter_type_runtime::provider_query::{Attestation, PublicationPosition};
+        let mut reader = self.reader.lock();
+        if reader.refresh().is_err() {
+            return Attestation::Unreadable;
+        }
+        let Some(cursor) = reader.cursor.as_ref() else {
+            return Attestation::Unpublished;
+        };
+        let wanted = verter_span::path::canonicalize_path(path);
+        let names = |uri: &str| verter_span::path::canonicalize_path(uri) == wanted;
+        // The plugin serves a companion under its provider path, and an IDE
+        // companion also under its authored source path.
+        let mut rows: Vec<&ReadyFile> = Vec::new();
+        for project in cursor.state.projects.values() {
+            rows.extend(
+                project
+                    .ready
+                    .iter()
+                    .filter(|(provider, _)| names(provider))
+                    .map(|(_, file)| file),
+            );
+            for (source, owned) in project.owned_groups() {
+                if !names(source) {
+                    continue;
+                }
+                rows.extend(
+                    owned
+                        .iter()
+                        .filter(|row| row.role == ManifestRole::CarrierIde)
+                        .filter_map(|row| project.ready.get(&row.provider_uri)),
+                );
+            }
+        }
+        if rows.is_empty() {
+            return Attestation::Unpublished;
+        }
+        let digest = blake3::hash(bytes.as_bytes());
+        let mut h16 = [0u8; 16];
+        h16.copy_from_slice(&digest.as_bytes()[..16]);
+        let content_hash = hex16(&h16);
+        if rows.iter().any(|row| row.content_hash != content_hash) {
+            return Attestation::Contradicted;
+        }
+        Attestation::Attested(PublicationPosition {
+            instance: std::sync::Arc::from(cursor.instance.as_str()),
+            epoch: rows
+                .iter()
+                .map(|row| row.published_epoch)
+                .max()
+                .unwrap_or(0),
+        })
     }
 }
 

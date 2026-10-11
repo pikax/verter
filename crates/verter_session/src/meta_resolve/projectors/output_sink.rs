@@ -490,9 +490,8 @@ fn member_shape_peek_or_compute(
         //
         // The admit below builds its own signature from the carrier's `dep_signature`,
         // NOT from a tracer's finalised set, so the boundary reads the scope's
-        // CACHEABILITY verdict — which folds the non-cacheable-read bit together with a
-        // fact-signature overflow (a second, INDEPENDENT non-admission condition that
-        // must not be dropped here).
+        // CACHEABILITY verdict — the non-cacheable-read bit together with mutation
+        // instability, neither of which may be dropped here.
         let materialized =
             crate::meta_resolve::materialize::reduce_member_value_graph_native_with_context(
                 dispatch,
@@ -628,8 +627,8 @@ fn merge_gate_fence_into_materialized(
 /// Returns the input `value` verbatim when:
 /// - the enclosing cacheability scope reports NON-CACHEABLE (`probe`): a FENCED
 ///   (ReturnOnly, `store_published == false`) `IndexedReady` serve, a broken
-///   decl-body lease, an unrootable route, an unobservable source env, or a
-///   fact-signature overflow was consumed ANYWHERE in the producing compute —
+///   decl-body lease, an unrootable route, or an unobservable source env was
+///   consumed ANYWHERE in the producing compute —
 ///   the key classification, a gate verdict, or the carrier raise. Such a
 ///   value's fact stamps read the LIVE view while its payload came from a
 ///   served-without-publication / unrootable basis, so no read-side rail can

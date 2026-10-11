@@ -1200,9 +1200,8 @@ fn mytype_member_slice_via_production_store_materializes_no_sibling_and_no_mytyp
         | verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(facts) => {
             facts.iter().map(|fact| format!("{fact:?}")).collect()
         }
-        verter_session_query::facts::fact_read_set::FactReadSetFinalise::Overflow
-        | verter_session_query::facts::fact_read_set::FactReadSetFinalise::MutationUnstable => {
-            panic!("the slice chain must not overflow or destabilize the fact tracer")
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::MutationUnstable => {
+            panic!("the slice chain must not destabilize the fact tracer")
         }
     };
     assert!(
@@ -1462,9 +1461,8 @@ pub(crate) fn flow_graph_build_is_shallow_interned_no_lowering_lazy_regions() {
                  production), got {facts:?}"
             );
         }
-        verter_session_query::facts::fact_read_set::FactReadSetFinalise::Overflow
-        | verter_session_query::facts::fact_read_set::FactReadSetFinalise::MutationUnstable => {
-            panic!("the build path must not overflow or destabilize the fact tracer")
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::MutationUnstable => {
+            panic!("the build path must not destabilize the fact tracer")
         }
     }
 }

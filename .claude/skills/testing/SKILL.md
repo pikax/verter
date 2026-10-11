@@ -140,6 +140,13 @@ Tests are evidence, not a quota. At preflight, map each changed contract to the 
 - Incremental, cancellation, stale-publication, counter, allocation, soak, and performance evidence applies only when the change touches the corresponding authority or hot path. Otherwise record it as not applicable with a terse boundary-based rationale.
 - New features and bug fixes still require adequate regression evidence. Refactors must keep applicable existing coverage green; they do not earn new tests merely by changing structure.
 
+### LSP request barriers
+
+LSP mock foreign-target checks settle after both `ProviderDispatch` and
+`ProviderDecode` barrier waits. Capture the held target bytes before the
+response and compare them immediately before return; checking inside the
+barriered answer misses changes made by the decode barrier.
+
 ### A declared check must be bound to a lane
 
 A committed test that no command runs is not coverage — it reads as coverage,
@@ -343,8 +350,9 @@ are structurally eliminated repo-wide.)
   regardless. That plant deliberately bypasses the clippy `disallowed-macros` rail described above: the
   two rails are independent, and this one has to hold on its own for the `#[cfg(debug_assertions)]` and
   overflow-checks classes the clippy ban does not reach.
-- **NOT covered, explicitly.** It is not an optimised build: the profile inherits dev codegen (opt-level 0,
-  no LTO, many codegen units), so optimisation-, inlining- and LTO-dependent behaviour is out of scope. It
+- **NOT covered, explicitly.** It is not an optimised build of the workspace: the profile inherits dev
+  codegen (workspace crates at opt-level 0, dependencies at opt-level 2 exactly as `dev`, no LTO, many
+  codegen units), so optimisation-, inlining- and LTO-dependent behaviour is out of scope. It
   covers only `verter_shipped_cfg_contract`'s own tests, not the whole workspace — a `debug_assertions`-
   dependent regression in an untested production path elsewhere is not covered by step (b) (step (a) still
   catches a `cfg(debug_assertions)`-hidden COMPILE failure anywhere in the workspace). The real `release`

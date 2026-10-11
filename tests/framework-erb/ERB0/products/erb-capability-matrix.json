@@ -1,0 +1,1059 @@
+{
+  "schema": "ErbCapabilityMatrix",
+  "version": 1,
+  "product": "ErbCapabilityMatrix",
+  "node": "ERB0",
+  "kind": "lock",
+  "cellRule": "one cell per operation x host x profile; each cell names exactly one producer node and the acceptance items that prove it; an operation Verter does not provide is a truthful exclusion with no producer",
+  "profiles": [
+    "erb.erubi-1.13.1",
+    "erb.erb-6.0.7"
+  ],
+  "hosts": [
+    {
+      "id": "verter-lsp.erb-document",
+      "kind": "lsp-enhancement",
+      "server": "crates/verter_lsp",
+      "document": "erb",
+      "tsgoOperations": [],
+      "tsgoLimitations": [],
+      "typescriptPlugin": "none",
+      "note": "Verter serves the carrier document itself; there is no tsgo route and no TS projection"
+    }
+  ],
+  "operations": [
+    {
+      "id": "scan.islands",
+      "description": "Island boundaries, tag kinds and the first-%> close rule, per profile tag set",
+      "layer": "parse",
+      "producer": "ERB1",
+      "acceptance": [
+        "ERB1-AC1"
+      ]
+    },
+    {
+      "id": "scan.block-structure",
+      "description": "Ruby block keyword pairing (if/else/end, do/end) through the boundary lexer",
+      "layer": "parse",
+      "producer": "ERB1",
+      "acceptance": [
+        "ERB1-AC3"
+      ]
+    },
+    {
+      "id": "scan.recovery",
+      "description": "Recovery of unterminated islands with exact later offsets",
+      "layer": "parse",
+      "producer": "ERB1",
+      "acceptance": [
+        "ERB1-AC2"
+      ]
+    },
+    {
+      "id": "scan.incremental",
+      "description": "Island-local rescan; fresh equals incremental",
+      "layer": "parse",
+      "producer": "ERB1",
+      "acceptance": [
+        "ERB1-AC5"
+      ]
+    },
+    {
+      "id": "compose.templated-html",
+      "description": "HWC2 facts for text, holes and branches (shared with Liquid)",
+      "layer": "compose",
+      "producer": "ERBH1",
+      "acceptance": [
+        "ERBH1-AC1",
+        "ERBH1-AC2",
+        "ERBH1-AC3",
+        "ERBH1-AC4"
+      ]
+    },
+    {
+      "id": "compose.regions",
+      "description": "HTML, <style> and <script> composition through EMB0 with exact maps",
+      "layer": "compose",
+      "producer": "ERB2",
+      "acceptance": [
+        "ERB2-AC1",
+        "ERB2-AC2",
+        "ERB2-AC4"
+      ]
+    },
+    {
+      "id": "compose.hosts",
+      "description": "Composition only for claimed hosts; <%# %> produces no HTML",
+      "layer": "compose",
+      "producer": "ERB2",
+      "acceptance": [
+        "ERB2-AC3"
+      ]
+    },
+    {
+      "id": "activation.inactive-zero-work",
+      "description": "With erb off or inactive, the claimed hosts do zero ERB work",
+      "layer": "activation",
+      "producer": "ERB2",
+      "acceptance": [
+        "ERB2-AC5"
+      ]
+    },
+    {
+      "id": "op.block-pairs",
+      "description": "Go-to-matching across block pairs",
+      "layer": "lsp",
+      "producer": "ERB3",
+      "acceptance": [
+        "ERB3-AC1"
+      ]
+    },
+    {
+      "id": "op.linked-editing",
+      "description": "Linked editing of tag pairs; none for branch-split pairs",
+      "layer": "lsp",
+      "producer": "ERB3",
+      "acceptance": [
+        "ERB3-AC2"
+      ]
+    },
+    {
+      "id": "op.html-features",
+      "description": "HTML completion and hover through HWCI0 over composed facts; nothing inside a Ruby island",
+      "layer": "lsp",
+      "producer": "ERB3",
+      "acceptance": [
+        "ERB3-AC3"
+      ]
+    },
+    {
+      "id": "op.semantic-tokens",
+      "description": "Delimiter and trim-marker tokens; Ruby is one opaque class",
+      "layer": "lsp",
+      "producer": "ERB3",
+      "acceptance": [
+        "ERB3-AC4"
+      ]
+    },
+    {
+      "id": "op.structure",
+      "description": "Public erb.structure block tree with completeness (DX1 row, generated MCP tool)",
+      "layer": "public",
+      "producer": "ERB3",
+      "acceptance": [
+        "ERB3-AC5"
+      ]
+    },
+    {
+      "id": "sinks.raw-output",
+      "description": "Raw-output sink facts with context and unknown trust",
+      "layer": "facts",
+      "producer": "ERB4S",
+      "acceptance": [
+        "ERB4S-AC1",
+        "ERB4S-AC2",
+        "ERB4S-AC3"
+      ]
+    },
+    {
+      "id": "format.document",
+      "description": "Formatting with Ruby bytes verbatim, block indentation, idempotence",
+      "layer": "lsp",
+      "producer": "ERB5F",
+      "acceptance": [
+        "ERB5F-AC1",
+        "ERB5F-AC2",
+        "ERB5F-AC3"
+      ]
+    },
+    {
+      "id": "lint.markup",
+      "description": "Markup lint through the shared element view; holes are not absence; suppression",
+      "layer": "lsp",
+      "producer": "ERB4",
+      "acceptance": [
+        "ERB4-AC1",
+        "ERB4-AC2",
+        "ERB4-AC4"
+      ]
+    },
+    {
+      "id": "lint.percent-close-in-ruby-string",
+      "description": "Diagnostic at the byte where a %> inside a Ruby string ends the tag",
+      "layer": "lsp",
+      "producer": "ERB4",
+      "acceptance": [
+        "ERB4-AC3"
+      ]
+    },
+    {
+      "id": "assists.structure",
+      "description": "Template assists with declared applicability, whole-or-nothing edits and explain-branches",
+      "layer": "lsp",
+      "producer": "ERBA",
+      "acceptance": [
+        "ERBA-AC1",
+        "ERBA-AC2",
+        "ERBA-AC3",
+        "ERBA-AC4"
+      ]
+    },
+    {
+      "id": "fragments.html-response",
+      "description": "HRF1 fragment facts: conditional frames, holes, turbo-stream elements, invalidation",
+      "layer": "facts",
+      "producer": "HRF1-ERB",
+      "acceptance": [
+        "HRF1-ERB-AC1",
+        "HRF1-ERB-AC2",
+        "HRF1-ERB-AC3",
+        "HRF1-ERB-AC4"
+      ]
+    },
+    {
+      "id": "client.registration",
+      "description": "File associations, client manifest capability truth and CLI globs",
+      "layer": "public",
+      "producer": "ERBP0",
+      "acceptance": [
+        "ERBP0-AC1",
+        "ERBP0-AC2",
+        "ERBP0-AC3"
+      ]
+    },
+    {
+      "id": "qualification.conformance",
+      "description": "Every admitted cell joined to a passing fixture; boundary corpus",
+      "layer": "qualification",
+      "producer": "ERB9",
+      "acceptance": [
+        "ERB9-AC1",
+        "ERB9-AC2"
+      ]
+    },
+    {
+      "id": "qualification.incremental",
+      "description": "Edit/revert equals fresh load; cancellation publishes no partial",
+      "layer": "qualification",
+      "producer": "ERB9",
+      "acceptance": [
+        "ERB9-AC3"
+      ]
+    },
+    {
+      "id": "qualification.exposure",
+      "description": "Operations pass through the browser host, the native host and the editor lane",
+      "layer": "qualification",
+      "producer": "ERB9",
+      "acceptance": [
+        "ERB9-AC4"
+      ]
+    },
+    {
+      "id": "terminal.capability-truth",
+      "description": "Generated ERB rows equal this matrix cell for cell and profile for profile",
+      "layer": "terminal",
+      "producer": "ERBT",
+      "acceptance": [
+        "ERBT-AC1"
+      ]
+    },
+    {
+      "id": "terminal.step-down",
+      "description": "Zero work for capabilities a chosen competitor owns",
+      "layer": "terminal",
+      "producer": "ERBT",
+      "acceptance": [
+        "ERBT-AC2"
+      ]
+    },
+    {
+      "id": "terminal.mcp",
+      "description": "Every DX1 row resolves to a generated MCP tool",
+      "layer": "terminal",
+      "producer": "ERBT",
+      "acceptance": [
+        "ERBT-AC3"
+      ]
+    },
+    {
+      "id": "terminal.docs",
+      "description": "Every ERB docs example runs under DOC1",
+      "layer": "terminal",
+      "producer": "ERBT",
+      "acceptance": [
+        "ERBT-AC4"
+      ]
+    }
+  ],
+  "cells": [
+    {
+      "id": "scan.islands@erb.erubi-1.13.1",
+      "operation": "scan.islands",
+      "profile": "erb.erubi-1.13.1",
+      "host": "verter-lsp.erb-document",
+      "producer": "ERB1",
+      "acceptance": [
+        "ERB1-AC1"
+      ],
+      "layer": "parse",
+      "status": "admitted",
+      "profileNote": "<%== is a raw-output tag under Action View; standalone Erubi escaping is unknown; %%> is not recognised"
+    },
+    {
+      "id": "scan.islands@erb.erb-6.0.7",
+      "operation": "scan.islands",
+      "profile": "erb.erb-6.0.7",
+      "host": "verter-lsp.erb-document",
+      "producer": "ERB1",
+      "acceptance": [
+        "ERB1-AC1"
+      ],
+      "layer": "parse",
+      "status": "admitted",
+      "profileNote": "%%> is a literal %> inside a tag; <%== is not a tag; <%- and -%> are delimiters only under trim modes - and %-"
+    },
+    {
+      "id": "scan.block-structure@erb.erubi-1.13.1",
+      "operation": "scan.block-structure",
+      "profile": "erb.erubi-1.13.1",
+      "host": "verter-lsp.erb-document",
+      "producer": "ERB1",
+      "acceptance": [
+        "ERB1-AC3"
+      ],
+      "layer": "parse",
+      "status": "admitted"
+    },
+    {
+      "id": "scan.block-structure@erb.erb-6.0.7",
+      "operation": "scan.block-structure",
+      "profile": "erb.erb-6.0.7",
+      "host": "verter-lsp.erb-document",
+      "producer": "ERB1",
+      "acceptance": [
+        "ERB1-AC3"
+      ],
+      "layer": "parse",
+      "status": "admitted"
+    },
+    {
+      "id": "scan.recovery@erb.erubi-1.13.1",
+      "operation": "scan.recovery",
+      "profile": "erb.erubi-1.13.1",
+      "host": "verter-lsp.erb-document",
+      "producer": "ERB1",
+      "acceptance": [
+        "ERB1-AC2"
+      ],
+      "layer": "parse",
+      "status": "admitted"
+    },
+    {
+      "id": "scan.recovery@erb.erb-6.0.7",
+      "operation": "scan.recovery",
+      "profile": "erb.erb-6.0.7",
+      "host": "verter-lsp.erb-document",
+      "producer": "ERB1",
+      "acceptance": [
+        "ERB1-AC2"
+      ],
+      "layer": "parse",
+      "status": "admitted"
+    },
+    {
+      "id": "scan.incremental@erb.erubi-1.13.1",
+      "operation": "scan.incremental",
+      "profile": "erb.erubi-1.13.1",
+      "host": "verter-lsp.erb-document",
+      "producer": "ERB1",
+      "acceptance": [
+        "ERB1-AC5"
+      ],
+      "layer": "parse",
+      "status": "admitted"
+    },
+    {
+      "id": "scan.incremental@erb.erb-6.0.7",
+      "operation": "scan.incremental",
+      "profile": "erb.erb-6.0.7",
+      "host": "verter-lsp.erb-document",
+      "producer": "ERB1",
+      "acceptance": [
+        "ERB1-AC5"
+      ],
+      "layer": "parse",
+      "status": "admitted"
+    },
+    {
+      "id": "compose.templated-html@erb.erubi-1.13.1",
+      "operation": "compose.templated-html",
+      "profile": "erb.erubi-1.13.1",
+      "host": "verter-lsp.erb-document",
+      "producer": "ERBH1",
+      "acceptance": [
+        "ERBH1-AC1",
+        "ERBH1-AC2",
+        "ERBH1-AC3",
+        "ERBH1-AC4"
+      ],
+      "layer": "compose",
+      "status": "admitted"
+    },
+    {
+      "id": "compose.templated-html@erb.erb-6.0.7",
+      "operation": "compose.templated-html",
+      "profile": "erb.erb-6.0.7",
+      "host": "verter-lsp.erb-document",
+      "producer": "ERBH1",
+      "acceptance": [
+        "ERBH1-AC1",
+        "ERBH1-AC2",
+        "ERBH1-AC3",
+        "ERBH1-AC4"
+      ],
+      "layer": "compose",
+      "status": "admitted"
+    },
+    {
+      "id": "compose.regions@erb.erubi-1.13.1",
+      "operation": "compose.regions",
+      "profile": "erb.erubi-1.13.1",
+      "host": "verter-lsp.erb-document",
+      "producer": "ERB2",
+      "acceptance": [
+        "ERB2-AC1",
+        "ERB2-AC2",
+        "ERB2-AC4"
+      ],
+      "layer": "compose",
+      "status": "admitted"
+    },
+    {
+      "id": "compose.regions@erb.erb-6.0.7",
+      "operation": "compose.regions",
+      "profile": "erb.erb-6.0.7",
+      "host": "verter-lsp.erb-document",
+      "producer": "ERB2",
+      "acceptance": [
+        "ERB2-AC1",
+        "ERB2-AC2",
+        "ERB2-AC4"
+      ],
+      "layer": "compose",
+      "status": "admitted"
+    },
+    {
+      "id": "compose.hosts@erb.erubi-1.13.1",
+      "operation": "compose.hosts",
+      "profile": "erb.erubi-1.13.1",
+      "host": "verter-lsp.erb-document",
+      "producer": "ERB2",
+      "acceptance": [
+        "ERB2-AC3"
+      ],
+      "layer": "compose",
+      "status": "admitted"
+    },
+    {
+      "id": "compose.hosts@erb.erb-6.0.7",
+      "operation": "compose.hosts",
+      "profile": "erb.erb-6.0.7",
+      "host": "verter-lsp.erb-document",
+      "producer": "ERB2",
+      "acceptance": [
+        "ERB2-AC3"
+      ],
+      "layer": "compose",
+      "status": "admitted"
+    },
+    {
+      "id": "activation.inactive-zero-work@erb.erubi-1.13.1",
+      "operation": "activation.inactive-zero-work",
+      "profile": "erb.erubi-1.13.1",
+      "host": "verter-lsp.erb-document",
+      "producer": "ERB2",
+      "acceptance": [
+        "ERB2-AC5"
+      ],
+      "layer": "activation",
+      "status": "admitted"
+    },
+    {
+      "id": "activation.inactive-zero-work@erb.erb-6.0.7",
+      "operation": "activation.inactive-zero-work",
+      "profile": "erb.erb-6.0.7",
+      "host": "verter-lsp.erb-document",
+      "producer": "ERB2",
+      "acceptance": [
+        "ERB2-AC5"
+      ],
+      "layer": "activation",
+      "status": "admitted"
+    },
+    {
+      "id": "op.block-pairs@erb.erubi-1.13.1",
+      "operation": "op.block-pairs",
+      "profile": "erb.erubi-1.13.1",
+      "host": "verter-lsp.erb-document",
+      "producer": "ERB3",
+      "acceptance": [
+        "ERB3-AC1"
+      ],
+      "layer": "lsp",
+      "status": "admitted"
+    },
+    {
+      "id": "op.block-pairs@erb.erb-6.0.7",
+      "operation": "op.block-pairs",
+      "profile": "erb.erb-6.0.7",
+      "host": "verter-lsp.erb-document",
+      "producer": "ERB3",
+      "acceptance": [
+        "ERB3-AC1"
+      ],
+      "layer": "lsp",
+      "status": "admitted"
+    },
+    {
+      "id": "op.linked-editing@erb.erubi-1.13.1",
+      "operation": "op.linked-editing",
+      "profile": "erb.erubi-1.13.1",
+      "host": "verter-lsp.erb-document",
+      "producer": "ERB3",
+      "acceptance": [
+        "ERB3-AC2"
+      ],
+      "layer": "lsp",
+      "status": "admitted"
+    },
+    {
+      "id": "op.linked-editing@erb.erb-6.0.7",
+      "operation": "op.linked-editing",
+      "profile": "erb.erb-6.0.7",
+      "host": "verter-lsp.erb-document",
+      "producer": "ERB3",
+      "acceptance": [
+        "ERB3-AC2"
+      ],
+      "layer": "lsp",
+      "status": "admitted"
+    },
+    {
+      "id": "op.html-features@erb.erubi-1.13.1",
+      "operation": "op.html-features",
+      "profile": "erb.erubi-1.13.1",
+      "host": "verter-lsp.erb-document",
+      "producer": "ERB3",
+      "acceptance": [
+        "ERB3-AC3"
+      ],
+      "layer": "lsp",
+      "status": "admitted"
+    },
+    {
+      "id": "op.html-features@erb.erb-6.0.7",
+      "operation": "op.html-features",
+      "profile": "erb.erb-6.0.7",
+      "host": "verter-lsp.erb-document",
+      "producer": "ERB3",
+      "acceptance": [
+        "ERB3-AC3"
+      ],
+      "layer": "lsp",
+      "status": "admitted"
+    },
+    {
+      "id": "op.semantic-tokens@erb.erubi-1.13.1",
+      "operation": "op.semantic-tokens",
+      "profile": "erb.erubi-1.13.1",
+      "host": "verter-lsp.erb-document",
+      "producer": "ERB3",
+      "acceptance": [
+        "ERB3-AC4"
+      ],
+      "layer": "lsp",
+      "status": "admitted"
+    },
+    {
+      "id": "op.semantic-tokens@erb.erb-6.0.7",
+      "operation": "op.semantic-tokens",
+      "profile": "erb.erb-6.0.7",
+      "host": "verter-lsp.erb-document",
+      "producer": "ERB3",
+      "acceptance": [
+        "ERB3-AC4"
+      ],
+      "layer": "lsp",
+      "status": "admitted"
+    },
+    {
+      "id": "op.structure@erb.erubi-1.13.1",
+      "operation": "op.structure",
+      "profile": "erb.erubi-1.13.1",
+      "host": "verter-lsp.erb-document",
+      "producer": "ERB3",
+      "acceptance": [
+        "ERB3-AC5"
+      ],
+      "layer": "public",
+      "status": "admitted"
+    },
+    {
+      "id": "op.structure@erb.erb-6.0.7",
+      "operation": "op.structure",
+      "profile": "erb.erb-6.0.7",
+      "host": "verter-lsp.erb-document",
+      "producer": "ERB3",
+      "acceptance": [
+        "ERB3-AC5"
+      ],
+      "layer": "public",
+      "status": "admitted"
+    },
+    {
+      "id": "sinks.raw-output@erb.erubi-1.13.1",
+      "operation": "sinks.raw-output",
+      "profile": "erb.erubi-1.13.1",
+      "host": "verter-lsp.erb-document",
+      "producer": "ERB4S",
+      "acceptance": [
+        "ERB4S-AC1",
+        "ERB4S-AC2",
+        "ERB4S-AC3"
+      ],
+      "layer": "facts",
+      "status": "admitted",
+      "profileNote": "under Action View <%== is raw and <%= escaped (both forms raw for text/plain templates); standalone Erubi escaping is unknown"
+    },
+    {
+      "id": "sinks.raw-output@erb.erb-6.0.7",
+      "operation": "sinks.raw-output",
+      "profile": "erb.erb-6.0.7",
+      "host": "verter-lsp.erb-document",
+      "producer": "ERB4S",
+      "acceptance": [
+        "ERB4S-AC1",
+        "ERB4S-AC2",
+        "ERB4S-AC3"
+      ],
+      "layer": "facts",
+      "status": "admitted",
+      "profileNote": "<%= is never escaped by this engine, so every output hole is a raw sink"
+    },
+    {
+      "id": "format.document@erb.erubi-1.13.1",
+      "operation": "format.document",
+      "profile": "erb.erubi-1.13.1",
+      "host": "verter-lsp.erb-document",
+      "producer": "ERB5F",
+      "acceptance": [
+        "ERB5F-AC1",
+        "ERB5F-AC2",
+        "ERB5F-AC3"
+      ],
+      "layer": "lsp",
+      "status": "admitted"
+    },
+    {
+      "id": "format.document@erb.erb-6.0.7",
+      "operation": "format.document",
+      "profile": "erb.erb-6.0.7",
+      "host": "verter-lsp.erb-document",
+      "producer": "ERB5F",
+      "acceptance": [
+        "ERB5F-AC1",
+        "ERB5F-AC2",
+        "ERB5F-AC3"
+      ],
+      "layer": "lsp",
+      "status": "admitted"
+    },
+    {
+      "id": "lint.markup@erb.erubi-1.13.1",
+      "operation": "lint.markup",
+      "profile": "erb.erubi-1.13.1",
+      "host": "verter-lsp.erb-document",
+      "producer": "ERB4",
+      "acceptance": [
+        "ERB4-AC1",
+        "ERB4-AC2",
+        "ERB4-AC4"
+      ],
+      "layer": "lsp",
+      "status": "admitted"
+    },
+    {
+      "id": "lint.markup@erb.erb-6.0.7",
+      "operation": "lint.markup",
+      "profile": "erb.erb-6.0.7",
+      "host": "verter-lsp.erb-document",
+      "producer": "ERB4",
+      "acceptance": [
+        "ERB4-AC1",
+        "ERB4-AC2",
+        "ERB4-AC4"
+      ],
+      "layer": "lsp",
+      "status": "admitted"
+    },
+    {
+      "id": "lint.percent-close-in-ruby-string@erb.erubi-1.13.1",
+      "operation": "lint.percent-close-in-ruby-string",
+      "profile": "erb.erubi-1.13.1",
+      "host": "verter-lsp.erb-document",
+      "producer": "ERB4",
+      "acceptance": [
+        "ERB4-AC3"
+      ],
+      "layer": "lsp",
+      "status": "admitted",
+      "profileNote": "Erubi does not recognise %%>; ERB4 offers only a fix this profile reads, or records why there is none"
+    },
+    {
+      "id": "lint.percent-close-in-ruby-string@erb.erb-6.0.7",
+      "operation": "lint.percent-close-in-ruby-string",
+      "profile": "erb.erb-6.0.7",
+      "host": "verter-lsp.erb-document",
+      "producer": "ERB4",
+      "acceptance": [
+        "ERB4-AC3"
+      ],
+      "layer": "lsp",
+      "status": "admitted",
+      "profileNote": "the %%> fix applies: this engine reads %%> as a literal %>"
+    },
+    {
+      "id": "assists.structure@erb.erubi-1.13.1",
+      "operation": "assists.structure",
+      "profile": "erb.erubi-1.13.1",
+      "host": "verter-lsp.erb-document",
+      "producer": "ERBA",
+      "acceptance": [
+        "ERBA-AC1",
+        "ERBA-AC2",
+        "ERBA-AC3",
+        "ERBA-AC4"
+      ],
+      "layer": "lsp",
+      "status": "admitted"
+    },
+    {
+      "id": "assists.structure@erb.erb-6.0.7",
+      "operation": "assists.structure",
+      "profile": "erb.erb-6.0.7",
+      "host": "verter-lsp.erb-document",
+      "producer": "ERBA",
+      "acceptance": [
+        "ERBA-AC1",
+        "ERBA-AC2",
+        "ERBA-AC3",
+        "ERBA-AC4"
+      ],
+      "layer": "lsp",
+      "status": "admitted"
+    },
+    {
+      "id": "fragments.html-response@erb.erubi-1.13.1",
+      "operation": "fragments.html-response",
+      "profile": "erb.erubi-1.13.1",
+      "host": "verter-lsp.erb-document",
+      "producer": "HRF1-ERB",
+      "acceptance": [
+        "HRF1-ERB-AC1",
+        "HRF1-ERB-AC2",
+        "HRF1-ERB-AC3",
+        "HRF1-ERB-AC4"
+      ],
+      "layer": "facts",
+      "status": "admitted"
+    },
+    {
+      "id": "fragments.html-response@erb.erb-6.0.7",
+      "operation": "fragments.html-response",
+      "profile": "erb.erb-6.0.7",
+      "host": "verter-lsp.erb-document",
+      "producer": "HRF1-ERB",
+      "acceptance": [
+        "HRF1-ERB-AC1",
+        "HRF1-ERB-AC2",
+        "HRF1-ERB-AC3",
+        "HRF1-ERB-AC4"
+      ],
+      "layer": "facts",
+      "status": "admitted"
+    },
+    {
+      "id": "client.registration@erb.erubi-1.13.1",
+      "operation": "client.registration",
+      "profile": "erb.erubi-1.13.1",
+      "host": "verter-lsp.erb-document",
+      "producer": "ERBP0",
+      "acceptance": [
+        "ERBP0-AC1",
+        "ERBP0-AC2",
+        "ERBP0-AC3"
+      ],
+      "layer": "public",
+      "status": "admitted"
+    },
+    {
+      "id": "client.registration@erb.erb-6.0.7",
+      "operation": "client.registration",
+      "profile": "erb.erb-6.0.7",
+      "host": "verter-lsp.erb-document",
+      "producer": "ERBP0",
+      "acceptance": [
+        "ERBP0-AC1",
+        "ERBP0-AC2",
+        "ERBP0-AC3"
+      ],
+      "layer": "public",
+      "status": "admitted"
+    },
+    {
+      "id": "qualification.conformance@erb.erubi-1.13.1",
+      "operation": "qualification.conformance",
+      "profile": "erb.erubi-1.13.1",
+      "host": "verter-lsp.erb-document",
+      "producer": "ERB9",
+      "acceptance": [
+        "ERB9-AC1",
+        "ERB9-AC2"
+      ],
+      "layer": "qualification",
+      "status": "admitted"
+    },
+    {
+      "id": "qualification.conformance@erb.erb-6.0.7",
+      "operation": "qualification.conformance",
+      "profile": "erb.erb-6.0.7",
+      "host": "verter-lsp.erb-document",
+      "producer": "ERB9",
+      "acceptance": [
+        "ERB9-AC1",
+        "ERB9-AC2"
+      ],
+      "layer": "qualification",
+      "status": "admitted"
+    },
+    {
+      "id": "qualification.incremental@erb.erubi-1.13.1",
+      "operation": "qualification.incremental",
+      "profile": "erb.erubi-1.13.1",
+      "host": "verter-lsp.erb-document",
+      "producer": "ERB9",
+      "acceptance": [
+        "ERB9-AC3"
+      ],
+      "layer": "qualification",
+      "status": "admitted"
+    },
+    {
+      "id": "qualification.incremental@erb.erb-6.0.7",
+      "operation": "qualification.incremental",
+      "profile": "erb.erb-6.0.7",
+      "host": "verter-lsp.erb-document",
+      "producer": "ERB9",
+      "acceptance": [
+        "ERB9-AC3"
+      ],
+      "layer": "qualification",
+      "status": "admitted"
+    },
+    {
+      "id": "qualification.exposure@erb.erubi-1.13.1",
+      "operation": "qualification.exposure",
+      "profile": "erb.erubi-1.13.1",
+      "host": "verter-lsp.erb-document",
+      "producer": "ERB9",
+      "acceptance": [
+        "ERB9-AC4"
+      ],
+      "layer": "qualification",
+      "status": "admitted"
+    },
+    {
+      "id": "qualification.exposure@erb.erb-6.0.7",
+      "operation": "qualification.exposure",
+      "profile": "erb.erb-6.0.7",
+      "host": "verter-lsp.erb-document",
+      "producer": "ERB9",
+      "acceptance": [
+        "ERB9-AC4"
+      ],
+      "layer": "qualification",
+      "status": "admitted"
+    },
+    {
+      "id": "terminal.capability-truth@erb.erubi-1.13.1",
+      "operation": "terminal.capability-truth",
+      "profile": "erb.erubi-1.13.1",
+      "host": "verter-lsp.erb-document",
+      "producer": "ERBT",
+      "acceptance": [
+        "ERBT-AC1"
+      ],
+      "layer": "terminal",
+      "status": "admitted"
+    },
+    {
+      "id": "terminal.capability-truth@erb.erb-6.0.7",
+      "operation": "terminal.capability-truth",
+      "profile": "erb.erb-6.0.7",
+      "host": "verter-lsp.erb-document",
+      "producer": "ERBT",
+      "acceptance": [
+        "ERBT-AC1"
+      ],
+      "layer": "terminal",
+      "status": "admitted"
+    },
+    {
+      "id": "terminal.step-down@erb.erubi-1.13.1",
+      "operation": "terminal.step-down",
+      "profile": "erb.erubi-1.13.1",
+      "host": "verter-lsp.erb-document",
+      "producer": "ERBT",
+      "acceptance": [
+        "ERBT-AC2"
+      ],
+      "layer": "terminal",
+      "status": "admitted"
+    },
+    {
+      "id": "terminal.step-down@erb.erb-6.0.7",
+      "operation": "terminal.step-down",
+      "profile": "erb.erb-6.0.7",
+      "host": "verter-lsp.erb-document",
+      "producer": "ERBT",
+      "acceptance": [
+        "ERBT-AC2"
+      ],
+      "layer": "terminal",
+      "status": "admitted"
+    },
+    {
+      "id": "terminal.mcp@erb.erubi-1.13.1",
+      "operation": "terminal.mcp",
+      "profile": "erb.erubi-1.13.1",
+      "host": "verter-lsp.erb-document",
+      "producer": "ERBT",
+      "acceptance": [
+        "ERBT-AC3"
+      ],
+      "layer": "terminal",
+      "status": "admitted"
+    },
+    {
+      "id": "terminal.mcp@erb.erb-6.0.7",
+      "operation": "terminal.mcp",
+      "profile": "erb.erb-6.0.7",
+      "host": "verter-lsp.erb-document",
+      "producer": "ERBT",
+      "acceptance": [
+        "ERBT-AC3"
+      ],
+      "layer": "terminal",
+      "status": "admitted"
+    },
+    {
+      "id": "terminal.docs@erb.erubi-1.13.1",
+      "operation": "terminal.docs",
+      "profile": "erb.erubi-1.13.1",
+      "host": "verter-lsp.erb-document",
+      "producer": "ERBT",
+      "acceptance": [
+        "ERBT-AC4"
+      ],
+      "layer": "terminal",
+      "status": "admitted"
+    },
+    {
+      "id": "terminal.docs@erb.erb-6.0.7",
+      "operation": "terminal.docs",
+      "profile": "erb.erb-6.0.7",
+      "host": "verter-lsp.erb-document",
+      "producer": "ERBT",
+      "acceptance": [
+        "ERBT-AC4"
+      ],
+      "layer": "terminal",
+      "status": "admitted"
+    }
+  ],
+  "exclusions": [
+    {
+      "id": "x.render",
+      "operation": "render, compile or evaluate a template",
+      "reason": "no runtime: no template is rendered, compiled or evaluated with data"
+    },
+    {
+      "id": "x.ruby-execution",
+      "operation": "run Ruby, Bundler, Rails, a gem or a generator",
+      "reason": "no Ruby process ever runs; Ruby stays opaque past ERB1's boundary lexer"
+    },
+    {
+      "id": "x.ruby-semantics",
+      "operation": "Ruby completion, hover, definition, references, rename, types or diagnostics inside an island",
+      "reason": "Ruby is opaque to Verter; Ruby LSP provides Ruby semantics in ERB (erb-coexistence.json)"
+    },
+    {
+      "id": "x.tsgo",
+      "operation": "any tsgo or TypeScript-provider route for an ERB document",
+      "reason": "carrier documents have no TS projection"
+    },
+    {
+      "id": "x.typescript-plugin",
+      "operation": "any packages/typescript-plugin work",
+      "reason": "carrier documents have no TS plugin route"
+    },
+    {
+      "id": "x.non-html-host",
+      "operation": "any operation on .js.erb, .text.erb or another non-HTML host",
+      "reason": "never claimed (erb-activation-policy.json associations)"
+    },
+    {
+      "id": "x.build",
+      "operation": "build, bundle or asset-pipeline integration",
+      "reason": "Verter does not compile ERB"
+    },
+    {
+      "id": "x.facets-and-tag",
+      "operation": "ComponentInfo facets or a FrameworkTag for ERB",
+      "reason": "server-template carriers have no descriptor surface and no wire tag; partials are carrier facts"
+    },
+    {
+      "id": "x.helper-semantics",
+      "operation": "meaning of turbo-rails, stimulus-rails or Action View helper calls",
+      "reason": "helper calls are opaque Ruby; a fact that needs one is unknown"
+    }
+  ],
+  "consumers": [
+    {
+      "node": "STIM1E",
+      "reads": "ERBH1 templated-HTML facts (compose.templated-html); never island text"
+    },
+    {
+      "node": "HRF1-ERB",
+      "reads": "ERBH1 and ERB2 facts; it is also the producer of fragments.html-response"
+    },
+    {
+      "node": "FWA1",
+      "reads": "erb-activation-policy.json and erb-version-lock.json as data"
+    },
+    {
+      "node": "FCH1",
+      "reads": "this matrix as data"
+    },
+    {
+      "node": "ERB1G",
+      "reads": "every product; owns the executable lock validator"
+    }
+  ],
+  "noBuild": true,
+  "noRuntime": true,
+  "wireTag": null,
+  "facets": null,
+  "notes": "No cell cites a TextMate grammar, an installed parser or syntax highlighting as support evidence."
+}

@@ -861,7 +861,7 @@ export const out = obj.;
 
         let mut items = Vec::new();
         for _ in 0..8 {
-            if let Ok(r) = session.provider().get_completions(&path, off, Some(".")).await {
+            if let Ok(r) = session.provider().get_completions(&crate::type_provider::traits::ProviderQuery::at_engine_surface(&path), off, Some(".")).await {
                 if !r.items.is_empty() {
                     items = r.items;
                     break;

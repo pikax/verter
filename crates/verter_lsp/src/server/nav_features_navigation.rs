@@ -37,37 +37,6 @@ use super::rename_prepare::{
 use super::server_utils::location_from_span;
 use super::VerterLanguageServer;
 
-/// Read an export's declaration span (re-export chains followed) together with
-/// the source that span indexes, both at ONE committed content of the declaring
-/// file, recording that content as the foreground request's dependency evidence.
-fn export_span_and_source(
-    server: &VerterLanguageServer,
-    canonical_id: &str,
-    binding_name: &str,
-) -> Option<(String, u32, u32, std::sync::Arc<str>)> {
-    let host = server.documents.host();
-    let lookup = || {
-        host.get_export_span_follow_reexports(canonical_id, binding_name)
-            .or_else(|| {
-                let (s, e) = host.get_export_span(canonical_id, binding_name)?;
-                Some((canonical_id.to_string(), s, e))
-            })
-    };
-    let (declaring_id, _, _) = lookup()?;
-    server.read_child_at_one_revision(&declaring_id, || {
-        let (resolved_id, start, end) = lookup()?;
-        if resolved_id != declaring_id {
-            return None;
-        }
-        let source = crate::documents::ForegroundRequest::host_target_source(
-            &server.documents,
-            &resolved_id,
-            host.get_source(&resolved_id)?,
-        )?;
-        Some((resolved_id, start, end, source))
-    })
-}
-
 /// Resolve a named export's declaration `Location` in a REAL source file through
 /// the host's export tables (re-export chains followed). Fail-closed `None` when
 /// the export, source, or position conversion is unavailable.
@@ -77,7 +46,7 @@ fn host_export_location(
     binding_name: &str,
 ) -> Option<Location> {
     let (resolved_id, start, end, source) =
-        export_span_and_source(server, canonical_id, binding_name)?;
+        server.native_export_span_and_source(canonical_id, binding_name)?;
     let encoding = server.position_encoding.read().clone();
     let li = LineIndex::new(&source, encoding);
     let range = Range {
@@ -232,7 +201,10 @@ async fn handle_goto_definition_attempt(
             let tsx_path = vf_ctx.tsx_path.clone();
             let vf_li = vf_ctx.line_index.clone();
             if let Some(offset) = vf_li.position_to_offset(position) {
-                if let Ok(type_defs) = tp.get_definition(&tsx_path, offset).await {
+                if let Ok(type_defs) = tp
+                    .get_definition(&vf_ctx.snapshot.provider_query(), offset)
+                    .await
+                {
                     // Post-await validation (fail closed): a response produced
                     // against a superseded surface must not be mapped.
                     if !server.virtual_request_surface_still_valid(uri, &vf_ctx) {
@@ -372,7 +344,7 @@ async fn handle_goto_definition_attempt(
         let encoding = server.position_encoding.read().clone();
         let resolve_export = |target_canonical_id: &str, binding_name: &str| -> Option<Location> {
             let (resolved_id, start, end, target_source) =
-                export_span_and_source(server, target_canonical_id, binding_name)?;
+                server.native_export_span_and_source(target_canonical_id, binding_name)?;
             let target_li = LineIndex::new(&target_source, encoding.clone());
             let start_pos = target_li.offset_to_position(start)?;
             let end_pos = target_li.offset_to_position(end)?;
@@ -559,7 +531,7 @@ async fn definition_provider_attempt(
                     position,
                     initial_ctx,
                     initial_offset,
-                    |tsx_path: String, offset: u32| async move {
+                    |query: crate::type_provider::traits::ProviderQuery, offset: u32| async move {
                         // Pin the FOREIGN carrier IDE surfaces BEFORE the query
                         // (per attempt — a retry re-pins under the surface it
                         // queries), so a returned foreign location maps through
@@ -571,7 +543,10 @@ async fn definition_provider_attempt(
                             .capture_lifecycle_root();
                         let foreign_ide_set = lifecycle_root.carrier_ide_set();
                         let foreign_api_set = lifecycle_root.carrier_api_set();
-                        let type_defs = tp.get_definition(&tsx_path, offset).await?;
+                        // Every foreign location decodes through exactly the
+                        // surface this root maps it through.
+                        let query = query.with_targets(std::sync::Arc::new(lifecycle_root));
+                        let type_defs = tp.get_definition(&query, offset).await?;
                         Ok((type_defs, foreign_ide_set, foreign_api_set))
                     },
                     || server.ensure_current_file_synced(uri),
@@ -676,7 +651,10 @@ async fn definition_provider_attempt(
                     );
                     let mut probe_defs = Vec::new();
                     for probe_offset in nav_probe_offsets {
-                        match tp.get_definition(&ctx.tsx_path, probe_offset).await {
+                        match tp
+                            .get_definition(&ctx.snapshot.provider_query(), probe_offset)
+                            .await
+                        {
                             Ok(defs) => probe_defs.extend(defs),
                             Err(e) => {
                                 tracing::warn!(
@@ -797,7 +775,10 @@ pub(super) async fn handle_goto_type_definition(
             let tsx_path = vf_ctx.tsx_path.clone();
             let vf_li = vf_ctx.line_index.clone();
             if let Some(offset) = vf_li.position_to_offset(position) {
-                if let Ok(type_defs) = tp.get_type_definition(&tsx_path, offset).await {
+                if let Ok(type_defs) = tp
+                    .get_type_definition(&vf_ctx.snapshot.provider_query(), offset)
+                    .await
+                {
                     // Post-await validation (fail closed): a response produced
                     // against a superseded surface must not be mapped.
                     if !server.virtual_request_surface_still_valid(uri, &vf_ctx) {
@@ -876,7 +857,7 @@ pub(super) async fn handle_goto_type_definition(
                     position,
                     initial_ctx,
                     initial_offset,
-                    |tsx_path: String, offset: u32| async move {
+                    |query: crate::type_provider::traits::ProviderQuery, offset: u32| async move {
                         // Pin the FOREIGN carrier IDE surfaces BEFORE the query
                         // (per attempt — see handle_goto_definition).
                         let lifecycle_root = server
@@ -885,7 +866,10 @@ pub(super) async fn handle_goto_type_definition(
                             .capture_lifecycle_root();
                         let foreign_ide_set = lifecycle_root.carrier_ide_set();
                         let foreign_api_set = lifecycle_root.carrier_api_set();
-                        let type_defs = tp.get_type_definition(&tsx_path, offset).await?;
+                        // Every foreign location decodes through exactly the
+                        // surface this root maps it through.
+                        let query = query.with_targets(std::sync::Arc::new(lifecycle_root));
+                        let type_defs = tp.get_type_definition(&query, offset).await?;
                         Ok((type_defs, foreign_ide_set, foreign_api_set))
                     },
                     || server.ensure_current_file_synced(uri),
@@ -979,7 +963,10 @@ pub(super) async fn handle_references(
             let tsx_path = vf_ctx.tsx_path.clone();
             let vf_li = vf_ctx.line_index.clone();
             if let Some(offset) = vf_li.position_to_offset(position) {
-                if let Ok(type_refs) = tp.get_references(&tsx_path, offset).await {
+                if let Ok(type_refs) = tp
+                    .get_references(&vf_ctx.snapshot.provider_query(), offset)
+                    .await
+                {
                     // Post-await validation (fail closed): a response produced
                     // against a superseded surface must not be mapped.
                     if !server.virtual_request_surface_still_valid(uri, &vf_ctx) {
@@ -1122,9 +1109,14 @@ pub(super) async fn handle_references(
                 }
                 tracing::debug!("references: querying tp at tsx offset {}", tsx_offset);
                 // Pin the FOREIGN carrier IDE surfaces BEFORE the query (see
-                // handle_goto_definition).
+                // handle_goto_definition); every foreign location decodes through
+                // exactly the surface this set maps it through.
                 let foreign_ide_set = server.capture_foreign_carrier_ide_set();
-                match tp.get_references(&ctx.tsx_path, tsx_offset).await {
+                let query = ctx
+                    .snapshot
+                    .provider_query()
+                    .with_targets(std::sync::Arc::new(foreign_ide_set.clone()));
+                match tp.get_references(&query, tsx_offset).await {
                     Ok(type_refs) => {
                         // Post-await validation: a response produced against a
                         // surface that no longer matches must be DROPPED (fail
@@ -1348,6 +1340,12 @@ pub(super) async fn handle_rename(
                     // so a returned foreign `.vue.tsx` location maps through the
                     // generation this request began against.
                     let foreign_ide_set = lifecycle_root.carrier_ide_set();
+                    // Every location the rename maps decodes through exactly the
+                    // surface this request captured for it.
+                    let rename_query = ctx
+                        .snapshot
+                        .provider_query()
+                        .with_targets(std::sync::Arc::new(lifecycle_root.clone()));
 
                     // IMPORTED-TYPE declaration UPGRADE: a `defineProps<ImportedType>()`
                     // child prop has no inline macro-field span (its declaration lives
@@ -1362,12 +1360,12 @@ pub(super) async fn handle_rename(
                         .upgrade_imported_child_prop_declaration(
                             &mut rename_class,
                             tp.as_ref(),
-                            &ctx.tsx_path,
+                            &rename_query,
                             tsx_offset,
                         )
                         .await;
 
-                    match tp.get_rename_locations(&ctx.tsx_path, tsx_offset).await {
+                    match tp.get_rename_locations(&rename_query, tsx_offset).await {
                         // Post-await validation as a match guard: the provider's
                         // locations are consumed ONLY while the captured surface is
                         // still honored and the open document still matches it.

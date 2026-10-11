@@ -248,7 +248,7 @@ struct BundleMemoEntry {
 ///
 /// [`Self::insert`] itself refuses anything that is not
 /// [`ReuseClass::is_request_reusable`] — a cancelled, partial,
-/// lease-missed, mutation-unstable or overflow-refused materialisation
+/// lease-missed or mutation-unstable materialisation
 /// cannot be memoised even by a caller that asks. That keeps the rule at
 /// ONE place instead of at every producer.
 #[derive(Default)]

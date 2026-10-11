@@ -1,0 +1,1087 @@
+{
+  "schema": 1,
+  "kind": "FrameworkCapabilityMatrix",
+  "evidenceClass": "static-proof",
+  "promotion": "Contract ratification only. Each cell needs STIM9-AC1 passing fixture coverage and STIMT promotion before it is advertised.",
+  "stages": [
+    {
+      "producer": "STIM0",
+      "purpose": "delivery and exact-release contract"
+    },
+    {
+      "producer": "STIM1",
+      "purpose": "activation, attribute and descriptor codecs"
+    },
+    {
+      "producer": "STIM2",
+      "purpose": "controller registry and static declarations"
+    },
+    {
+      "producer": "STIM3",
+      "purpose": "generated members as TypeInfo facts"
+    },
+    {
+      "producer": "STIM4",
+      "purpose": "scope/action/outlet semantics"
+    },
+    {
+      "producer": "STIM4T",
+      "purpose": "static Turbo semantics"
+    },
+    {
+      "producer": "STIM1E",
+      "purpose": "templated HWC facts"
+    },
+    {
+      "producer": "STIM5",
+      "purpose": "authored navigation"
+    },
+    {
+      "producer": "STIM5R",
+      "purpose": "authored rename transactions"
+    },
+    {
+      "producer": "STIM7",
+      "purpose": "style/accessibility facts"
+    },
+    {
+      "producer": "STIM8",
+      "purpose": "lint"
+    },
+    {
+      "producer": "STIM8F",
+      "purpose": "shared formatting integration"
+    },
+    {
+      "producer": "STIMA",
+      "purpose": "assists"
+    },
+    {
+      "producer": "STIM9",
+      "purpose": "conformance and incremental qualification"
+    },
+    {
+      "producer": "STIMT",
+      "purpose": "product terminal"
+    }
+  ],
+  "cancelledStages": [
+    {
+      "stage": 6,
+      "reason": "Served as authored; no Verter transform and no map chain."
+    }
+  ],
+  "hosts": {
+    "html": "HWCI0 html selector and capability masks over HWC2 neutral facts; never provide standard tags, attributes or emmet",
+    "erb": "Only ERBH1 HWC facts, via ERB2 and STIM1E; no ERB island reads. Promotion waits for ERBT (STIMT-AC4).",
+    "javascript": "Additive LSPX11 location/assist rows; language answers remain tsgo-owned.",
+    "typescript": "Additive LSPX11 location/assist rows; generated controller members are TypeInfo facts only."
+  },
+  "facets": [
+    {
+      "facet": "props",
+      "disposition": "does-not-exist",
+      "reason": "Controller static values are controller members, not component inputs."
+    },
+    {
+      "facet": "events",
+      "disposition": "does-not-exist",
+      "reason": "this.dispatch and Turbo events are DOM-event facts, not component events."
+    },
+    {
+      "facet": "slots",
+      "disposition": "does-not-exist",
+      "reason": "Targets, outlets and stream templates are DOM relations, not component slots."
+    },
+    {
+      "facet": "expose",
+      "disposition": "does-not-exist",
+      "reason": "Controller instances and generated members are TypeInfo facts, not component imperative handles."
+    }
+  ],
+  "wireTag": {
+    "disposition": "does-not-exist",
+    "reason": "An HTML attribute overlay is neither a carrier adapter nor a component descriptor."
+  },
+  "cells": [
+    {
+      "id": "stimulus:html:completion:authored-attribute",
+      "profile": "stimulus-3.2.2",
+      "framework": "stimulus",
+      "operation": "completion",
+      "host": "lsp-enhancement",
+      "selector": "html",
+      "position": "authored-attribute",
+      "producer": "STIM5",
+      "receivingAcceptance": "STIM5-AC1",
+      "reason": "Framework descriptor parts, scope and typed members; shared HTML features stay with HWCI0.",
+      "tsgoOperations": ["type and symbol at a position", "source files"],
+      "tsgoLimitation": "If a required operation is absent, return Unavailable(tsgoLimitation: op) through $/verter/tsgoLimitation; never parse typeToString.",
+      "evidence": "planned; not shipped coverage"
+    },
+    {
+      "id": "stimulus:html:definition:authored-attribute",
+      "profile": "stimulus-3.2.2",
+      "framework": "stimulus",
+      "operation": "definition",
+      "host": "lsp-enhancement",
+      "selector": "html",
+      "position": "authored-attribute",
+      "producer": "STIM5",
+      "receivingAcceptance": "STIM5-AC2",
+      "reason": "Framework descriptor parts, scope and typed members; shared HTML features stay with HWCI0.",
+      "tsgoOperations": ["type and symbol at a position", "source files"],
+      "tsgoLimitation": "If a required operation is absent, return Unavailable(tsgoLimitation: op) through $/verter/tsgoLimitation; never parse typeToString.",
+      "evidence": "planned; not shipped coverage"
+    },
+    {
+      "id": "stimulus:html:references:authored-attribute",
+      "profile": "stimulus-3.2.2",
+      "framework": "stimulus",
+      "operation": "references",
+      "host": "lsp-enhancement",
+      "selector": "html",
+      "position": "authored-attribute",
+      "producer": "STIM5",
+      "receivingAcceptance": "STIM5-AC3",
+      "reason": "Framework descriptor parts, scope and typed members; shared HTML features stay with HWCI0.",
+      "tsgoOperations": [],
+      "tsgoLimitation": "If a required operation is absent, return Unavailable(tsgoLimitation: op) through $/verter/tsgoLimitation; never parse typeToString.",
+      "evidence": "planned; not shipped coverage"
+    },
+    {
+      "id": "stimulus:html:hover:authored-attribute",
+      "profile": "stimulus-3.2.2",
+      "framework": "stimulus",
+      "operation": "hover",
+      "host": "lsp-enhancement",
+      "selector": "html",
+      "position": "authored-attribute",
+      "producer": "STIM5",
+      "receivingAcceptance": "STIM9-AC1",
+      "reason": "Framework descriptor parts, scope and typed members; shared HTML features stay with HWCI0.",
+      "tsgoOperations": ["type and symbol at a position", "source files"],
+      "tsgoLimitation": "If a required operation is absent, return Unavailable(tsgoLimitation: op) through $/verter/tsgoLimitation; never parse typeToString.",
+      "evidence": "planned; not shipped coverage"
+    },
+    {
+      "id": "stimulus:html:rename:authored-attribute",
+      "profile": "stimulus-3.2.2",
+      "framework": "stimulus",
+      "operation": "rename",
+      "host": "lsp-enhancement",
+      "selector": "html",
+      "position": "authored-attribute",
+      "producer": "STIM5R",
+      "receivingAcceptance": "STIM5R-AC1",
+      "reason": "LSO8 authored binding transaction; refuse whole plan through a hole.",
+      "tsgoOperations": [],
+      "tsgoLimitation": "If a required operation is absent, return Unavailable(tsgoLimitation: op) through $/verter/tsgoLimitation; never parse typeToString.",
+      "evidence": "planned; not shipped coverage"
+    },
+    {
+      "id": "stimulus:html:diagnostics:authored-attribute",
+      "profile": "stimulus-3.2.2",
+      "framework": "stimulus",
+      "operation": "diagnostics",
+      "host": "lsp-enhancement",
+      "selector": "html",
+      "position": "authored-attribute",
+      "producer": "STIM8",
+      "receivingAcceptance": "STIM8-AC1",
+      "reason": "Completeness-gated framework rules, routed through LNT2.",
+      "tsgoOperations": [],
+      "tsgoLimitation": "If a required operation is absent, return Unavailable(tsgoLimitation: op) through $/verter/tsgoLimitation; never parse typeToString.",
+      "evidence": "planned; not shipped coverage"
+    },
+    {
+      "id": "turbo:html:completion:authored-attribute",
+      "profile": "turbo-8.0.23",
+      "framework": "turbo",
+      "operation": "completion",
+      "host": "lsp-enhancement",
+      "selector": "html",
+      "position": "authored-attribute",
+      "producer": "STIM5",
+      "receivingAcceptance": "STIM5-AC1",
+      "reason": "Static frame/stream vocabulary and frame-id relations; no browser behavior.",
+      "tsgoOperations": [],
+      "tsgoLimitation": "If a required operation is absent, return Unavailable(tsgoLimitation: op) through $/verter/tsgoLimitation; never parse typeToString.",
+      "evidence": "planned; not shipped coverage"
+    },
+    {
+      "id": "turbo:html:definition:authored-attribute",
+      "profile": "turbo-8.0.23",
+      "framework": "turbo",
+      "operation": "definition",
+      "host": "lsp-enhancement",
+      "selector": "html",
+      "position": "authored-attribute",
+      "producer": "STIM5",
+      "receivingAcceptance": "STIM5-AC2",
+      "reason": "Static frame/stream vocabulary and frame-id relations; no browser behavior.",
+      "tsgoOperations": [],
+      "tsgoLimitation": "If a required operation is absent, return Unavailable(tsgoLimitation: op) through $/verter/tsgoLimitation; never parse typeToString.",
+      "evidence": "planned; not shipped coverage"
+    },
+    {
+      "id": "turbo:html:references:authored-attribute",
+      "profile": "turbo-8.0.23",
+      "framework": "turbo",
+      "operation": "references",
+      "host": "lsp-enhancement",
+      "selector": "html",
+      "position": "authored-attribute",
+      "producer": "STIM5",
+      "receivingAcceptance": "STIM5-AC3",
+      "reason": "Static frame/stream vocabulary and frame-id relations; no browser behavior.",
+      "tsgoOperations": [],
+      "tsgoLimitation": "If a required operation is absent, return Unavailable(tsgoLimitation: op) through $/verter/tsgoLimitation; never parse typeToString.",
+      "evidence": "planned; not shipped coverage"
+    },
+    {
+      "id": "turbo:html:hover:authored-attribute",
+      "profile": "turbo-8.0.23",
+      "framework": "turbo",
+      "operation": "hover",
+      "host": "lsp-enhancement",
+      "selector": "html",
+      "position": "authored-attribute",
+      "producer": "STIM5",
+      "receivingAcceptance": "STIM9-AC1",
+      "reason": "Static frame/stream vocabulary and frame-id relations; no browser behavior.",
+      "tsgoOperations": [],
+      "tsgoLimitation": "If a required operation is absent, return Unavailable(tsgoLimitation: op) through $/verter/tsgoLimitation; never parse typeToString.",
+      "evidence": "planned; not shipped coverage"
+    },
+    {
+      "id": "turbo:html:rename:authored-attribute",
+      "profile": "turbo-8.0.23",
+      "framework": "turbo",
+      "operation": "rename",
+      "host": "lsp-enhancement",
+      "selector": "html",
+      "position": "authored-attribute",
+      "producer": "STIM5R",
+      "receivingAcceptance": "STIM5R-AC1",
+      "reason": "LSO8 authored binding transaction; refuse whole plan through a hole.",
+      "tsgoOperations": [],
+      "tsgoLimitation": "If a required operation is absent, return Unavailable(tsgoLimitation: op) through $/verter/tsgoLimitation; never parse typeToString.",
+      "evidence": "planned; not shipped coverage"
+    },
+    {
+      "id": "turbo:html:diagnostics:authored-attribute",
+      "profile": "turbo-8.0.23",
+      "framework": "turbo",
+      "operation": "diagnostics",
+      "host": "lsp-enhancement",
+      "selector": "html",
+      "position": "authored-attribute",
+      "producer": "STIM8",
+      "receivingAcceptance": "STIM8-AC2",
+      "reason": "Completeness-gated framework rules, routed through LNT2.",
+      "tsgoOperations": [],
+      "tsgoLimitation": "If a required operation is absent, return Unavailable(tsgoLimitation: op) through $/verter/tsgoLimitation; never parse typeToString.",
+      "evidence": "planned; not shipped coverage"
+    },
+    {
+      "id": "stimulus:html:formatting:data-action",
+      "profile": "stimulus-3.2.2",
+      "framework": "stimulus",
+      "operation": "formatting",
+      "host": "lsp-enhancement",
+      "selector": "html",
+      "position": "data-action",
+      "producer": "STIM8F",
+      "receivingAcceptance": "STIM8F-AC1",
+      "reason": "Shared formatter preserves descriptor order, separators and malformed bytes; no overlay printer.",
+      "tsgoOperations": [],
+      "tsgoLimitation": "If a required operation is absent, return Unavailable(tsgoLimitation: op) through $/verter/tsgoLimitation; never parse typeToString.",
+      "evidence": "planned; not shipped coverage"
+    },
+    {
+      "id": "stimulus:html:codeAction:authored-attribute",
+      "profile": "stimulus-3.2.2",
+      "framework": "stimulus",
+      "operation": "codeAction",
+      "host": "lsp-enhancement",
+      "selector": "html",
+      "position": "authored-attribute",
+      "producer": "STIMA",
+      "receivingAcceptance": "STIMA-AC1",
+      "reason": "Assists consume shared ACT1/ACT2 and LSO8 plans; applicability is explicit.",
+      "tsgoOperations": [],
+      "tsgoLimitation": "If a required operation is absent, return Unavailable(tsgoLimitation: op) through $/verter/tsgoLimitation; never parse typeToString.",
+      "evidence": "planned; not shipped coverage"
+    },
+    {
+      "id": "turbo:html:codeAction:frame-wrap",
+      "profile": "turbo-8.0.23",
+      "framework": "turbo",
+      "operation": "codeAction",
+      "host": "lsp-enhancement",
+      "selector": "html",
+      "position": "frame-wrap",
+      "producer": "STIMA",
+      "receivingAcceptance": "STIMA-AC1",
+      "reason": "Wrap-in-frame has-placeholders, behavior-changing; no edit across a template hole.",
+      "tsgoOperations": [],
+      "tsgoLimitation": "If a required operation is absent, return Unavailable(tsgoLimitation: op) through $/verter/tsgoLimitation; never parse typeToString.",
+      "evidence": "planned; not shipped coverage"
+    },
+    {
+      "id": "stimulus:erb:completion:ERBH1-HWC-attribute",
+      "profile": "stimulus-3.2.2",
+      "framework": "stimulus",
+      "operation": "completion",
+      "host": "lsp-enhancement",
+      "selector": "erb",
+      "position": "ERBH1-HWC-attribute",
+      "producer": "STIM5",
+      "receivingAcceptance": "STIM5-AC1",
+      "reason": "Framework descriptor parts, scope and typed members; shared HTML features stay with HWCI0.",
+      "tsgoOperations": ["type and symbol at a position", "source files"],
+      "tsgoLimitation": "If a required operation is absent, return Unavailable(tsgoLimitation: op) through $/verter/tsgoLimitation; never parse typeToString.",
+      "evidence": "planned; not shipped coverage"
+    },
+    {
+      "id": "stimulus:erb:definition:ERBH1-HWC-attribute",
+      "profile": "stimulus-3.2.2",
+      "framework": "stimulus",
+      "operation": "definition",
+      "host": "lsp-enhancement",
+      "selector": "erb",
+      "position": "ERBH1-HWC-attribute",
+      "producer": "STIM5",
+      "receivingAcceptance": "STIM5-AC2",
+      "reason": "Framework descriptor parts, scope and typed members; shared HTML features stay with HWCI0.",
+      "tsgoOperations": ["type and symbol at a position", "source files"],
+      "tsgoLimitation": "If a required operation is absent, return Unavailable(tsgoLimitation: op) through $/verter/tsgoLimitation; never parse typeToString.",
+      "evidence": "planned; not shipped coverage"
+    },
+    {
+      "id": "stimulus:erb:references:ERBH1-HWC-attribute",
+      "profile": "stimulus-3.2.2",
+      "framework": "stimulus",
+      "operation": "references",
+      "host": "lsp-enhancement",
+      "selector": "erb",
+      "position": "ERBH1-HWC-attribute",
+      "producer": "STIM5",
+      "receivingAcceptance": "STIM5-AC3",
+      "reason": "Framework descriptor parts, scope and typed members; shared HTML features stay with HWCI0.",
+      "tsgoOperations": [],
+      "tsgoLimitation": "If a required operation is absent, return Unavailable(tsgoLimitation: op) through $/verter/tsgoLimitation; never parse typeToString.",
+      "evidence": "planned; not shipped coverage"
+    },
+    {
+      "id": "stimulus:erb:hover:ERBH1-HWC-attribute",
+      "profile": "stimulus-3.2.2",
+      "framework": "stimulus",
+      "operation": "hover",
+      "host": "lsp-enhancement",
+      "selector": "erb",
+      "position": "ERBH1-HWC-attribute",
+      "producer": "STIM5",
+      "receivingAcceptance": "STIM9-AC1",
+      "reason": "Framework descriptor parts, scope and typed members; shared HTML features stay with HWCI0.",
+      "tsgoOperations": ["type and symbol at a position", "source files"],
+      "tsgoLimitation": "If a required operation is absent, return Unavailable(tsgoLimitation: op) through $/verter/tsgoLimitation; never parse typeToString.",
+      "evidence": "planned; not shipped coverage"
+    },
+    {
+      "id": "stimulus:erb:rename:ERBH1-HWC-attribute",
+      "profile": "stimulus-3.2.2",
+      "framework": "stimulus",
+      "operation": "rename",
+      "host": "lsp-enhancement",
+      "selector": "erb",
+      "position": "ERBH1-HWC-attribute",
+      "producer": "STIM5R",
+      "receivingAcceptance": "STIM5R-AC1",
+      "reason": "LSO8 authored binding transaction; refuse whole plan through a hole.",
+      "tsgoOperations": [],
+      "tsgoLimitation": "If a required operation is absent, return Unavailable(tsgoLimitation: op) through $/verter/tsgoLimitation; never parse typeToString.",
+      "evidence": "planned; not shipped coverage"
+    },
+    {
+      "id": "stimulus:erb:diagnostics:ERBH1-HWC-attribute",
+      "profile": "stimulus-3.2.2",
+      "framework": "stimulus",
+      "operation": "diagnostics",
+      "host": "lsp-enhancement",
+      "selector": "erb",
+      "position": "ERBH1-HWC-attribute",
+      "producer": "STIM8",
+      "receivingAcceptance": "STIM8-AC1",
+      "reason": "Completeness-gated framework rules, routed through LNT2.",
+      "tsgoOperations": [],
+      "tsgoLimitation": "If a required operation is absent, return Unavailable(tsgoLimitation: op) through $/verter/tsgoLimitation; never parse typeToString.",
+      "evidence": "planned; not shipped coverage"
+    },
+    {
+      "id": "turbo:erb:completion:ERBH1-HWC-attribute",
+      "profile": "turbo-8.0.23",
+      "framework": "turbo",
+      "operation": "completion",
+      "host": "lsp-enhancement",
+      "selector": "erb",
+      "position": "ERBH1-HWC-attribute",
+      "producer": "STIM5",
+      "receivingAcceptance": "STIM5-AC1",
+      "reason": "Static frame/stream vocabulary and frame-id relations; no browser behavior.",
+      "tsgoOperations": [],
+      "tsgoLimitation": "If a required operation is absent, return Unavailable(tsgoLimitation: op) through $/verter/tsgoLimitation; never parse typeToString.",
+      "evidence": "planned; not shipped coverage"
+    },
+    {
+      "id": "turbo:erb:definition:ERBH1-HWC-attribute",
+      "profile": "turbo-8.0.23",
+      "framework": "turbo",
+      "operation": "definition",
+      "host": "lsp-enhancement",
+      "selector": "erb",
+      "position": "ERBH1-HWC-attribute",
+      "producer": "STIM5",
+      "receivingAcceptance": "STIM5-AC2",
+      "reason": "Static frame/stream vocabulary and frame-id relations; no browser behavior.",
+      "tsgoOperations": [],
+      "tsgoLimitation": "If a required operation is absent, return Unavailable(tsgoLimitation: op) through $/verter/tsgoLimitation; never parse typeToString.",
+      "evidence": "planned; not shipped coverage"
+    },
+    {
+      "id": "turbo:erb:references:ERBH1-HWC-attribute",
+      "profile": "turbo-8.0.23",
+      "framework": "turbo",
+      "operation": "references",
+      "host": "lsp-enhancement",
+      "selector": "erb",
+      "position": "ERBH1-HWC-attribute",
+      "producer": "STIM5",
+      "receivingAcceptance": "STIM5-AC3",
+      "reason": "Static frame/stream vocabulary and frame-id relations; no browser behavior.",
+      "tsgoOperations": [],
+      "tsgoLimitation": "If a required operation is absent, return Unavailable(tsgoLimitation: op) through $/verter/tsgoLimitation; never parse typeToString.",
+      "evidence": "planned; not shipped coverage"
+    },
+    {
+      "id": "turbo:erb:hover:ERBH1-HWC-attribute",
+      "profile": "turbo-8.0.23",
+      "framework": "turbo",
+      "operation": "hover",
+      "host": "lsp-enhancement",
+      "selector": "erb",
+      "position": "ERBH1-HWC-attribute",
+      "producer": "STIM5",
+      "receivingAcceptance": "STIM9-AC1",
+      "reason": "Static frame/stream vocabulary and frame-id relations; no browser behavior.",
+      "tsgoOperations": [],
+      "tsgoLimitation": "If a required operation is absent, return Unavailable(tsgoLimitation: op) through $/verter/tsgoLimitation; never parse typeToString.",
+      "evidence": "planned; not shipped coverage"
+    },
+    {
+      "id": "turbo:erb:rename:ERBH1-HWC-attribute",
+      "profile": "turbo-8.0.23",
+      "framework": "turbo",
+      "operation": "rename",
+      "host": "lsp-enhancement",
+      "selector": "erb",
+      "position": "ERBH1-HWC-attribute",
+      "producer": "STIM5R",
+      "receivingAcceptance": "STIM5R-AC1",
+      "reason": "LSO8 authored binding transaction; refuse whole plan through a hole.",
+      "tsgoOperations": [],
+      "tsgoLimitation": "If a required operation is absent, return Unavailable(tsgoLimitation: op) through $/verter/tsgoLimitation; never parse typeToString.",
+      "evidence": "planned; not shipped coverage"
+    },
+    {
+      "id": "turbo:erb:diagnostics:ERBH1-HWC-attribute",
+      "profile": "turbo-8.0.23",
+      "framework": "turbo",
+      "operation": "diagnostics",
+      "host": "lsp-enhancement",
+      "selector": "erb",
+      "position": "ERBH1-HWC-attribute",
+      "producer": "STIM8",
+      "receivingAcceptance": "STIM8-AC2",
+      "reason": "Completeness-gated framework rules, routed through LNT2.",
+      "tsgoOperations": [],
+      "tsgoLimitation": "If a required operation is absent, return Unavailable(tsgoLimitation: op) through $/verter/tsgoLimitation; never parse typeToString.",
+      "evidence": "planned; not shipped coverage"
+    },
+    {
+      "id": "stimulus:erb:formatting:data-action",
+      "profile": "stimulus-3.2.2",
+      "framework": "stimulus",
+      "operation": "formatting",
+      "host": "lsp-enhancement",
+      "selector": "erb",
+      "position": "data-action",
+      "producer": "STIM8F",
+      "receivingAcceptance": "STIM8F-AC1",
+      "reason": "Shared formatter preserves descriptor order, separators and malformed bytes; no overlay printer.",
+      "tsgoOperations": [],
+      "tsgoLimitation": "If a required operation is absent, return Unavailable(tsgoLimitation: op) through $/verter/tsgoLimitation; never parse typeToString.",
+      "evidence": "planned; not shipped coverage"
+    },
+    {
+      "id": "stimulus:erb:codeAction:authored-attribute",
+      "profile": "stimulus-3.2.2",
+      "framework": "stimulus",
+      "operation": "codeAction",
+      "host": "lsp-enhancement",
+      "selector": "erb",
+      "position": "authored-attribute",
+      "producer": "STIMA",
+      "receivingAcceptance": "STIMA-AC1",
+      "reason": "Assists consume shared ACT1/ACT2 and LSO8 plans; applicability is explicit.",
+      "tsgoOperations": [],
+      "tsgoLimitation": "If a required operation is absent, return Unavailable(tsgoLimitation: op) through $/verter/tsgoLimitation; never parse typeToString.",
+      "evidence": "planned; not shipped coverage"
+    },
+    {
+      "id": "turbo:erb:codeAction:frame-wrap",
+      "profile": "turbo-8.0.23",
+      "framework": "turbo",
+      "operation": "codeAction",
+      "host": "lsp-enhancement",
+      "selector": "erb",
+      "position": "frame-wrap",
+      "producer": "STIMA",
+      "receivingAcceptance": "STIMA-AC1",
+      "reason": "Wrap-in-frame has-placeholders, behavior-changing; no edit across a template hole.",
+      "tsgoOperations": [],
+      "tsgoLimitation": "If a required operation is absent, return Unavailable(tsgoLimitation: op) through $/verter/tsgoLimitation; never parse typeToString.",
+      "evidence": "planned; not shipped coverage"
+    },
+    {
+      "id": "stimulus:javascript:references:static-entry",
+      "profile": "stimulus-3.2.2",
+      "framework": "stimulus",
+      "operation": "references",
+      "host": "lsp-enhancement",
+      "selector": "javascript",
+      "position": "static-entry",
+      "producer": "STIM5",
+      "receivingAcceptance": "STIM5-AC3",
+      "reason": "Only additional HTML uses beside tsgo locations; never duplicate TS locations.",
+      "tsgoOperations": ["symbol at a position", "source files"],
+      "tsgoLimitation": "If a required operation is absent, return Unavailable(tsgoLimitation: op) through $/verter/tsgoLimitation; never parse typeToString.",
+      "evidence": "planned; not shipped coverage"
+    },
+    {
+      "id": "stimulus:javascript:definition:registration",
+      "profile": "stimulus-3.2.2",
+      "framework": "stimulus",
+      "operation": "definition",
+      "host": "lsp-enhancement",
+      "selector": "javascript",
+      "position": "registration",
+      "producer": "STIM5",
+      "receivingAcceptance": "STIM9-AC1",
+      "reason": "Only additional framework registration/HTML locations through LSPX11 ownership; tsgo retains language definitions.",
+      "tsgoOperations": ["symbol at a position", "source files"],
+      "tsgoLimitation": "If a required operation is absent, return Unavailable(tsgoLimitation: op) through $/verter/tsgoLimitation; never parse typeToString.",
+      "evidence": "planned; not shipped coverage"
+    },
+    {
+      "id": "stimulus:typescript:references:static-entry",
+      "profile": "stimulus-3.2.2",
+      "framework": "stimulus",
+      "operation": "references",
+      "host": "lsp-enhancement",
+      "selector": "typescript",
+      "position": "static-entry",
+      "producer": "STIM5",
+      "receivingAcceptance": "STIM5-AC3",
+      "reason": "Only additional HTML uses beside tsgo locations; never duplicate TS locations.",
+      "tsgoOperations": ["symbol at a position", "source files"],
+      "tsgoLimitation": "If a required operation is absent, return Unavailable(tsgoLimitation: op) through $/verter/tsgoLimitation; never parse typeToString.",
+      "evidence": "planned; not shipped coverage"
+    },
+    {
+      "id": "stimulus:typescript:definition:registration",
+      "profile": "stimulus-3.2.2",
+      "framework": "stimulus",
+      "operation": "definition",
+      "host": "lsp-enhancement",
+      "selector": "typescript",
+      "position": "registration",
+      "producer": "STIM5",
+      "receivingAcceptance": "STIM9-AC1",
+      "reason": "Only additional framework registration/HTML locations through LSPX11 ownership; tsgo retains language definitions.",
+      "tsgoOperations": ["symbol at a position", "source files"],
+      "tsgoLimitation": "If a required operation is absent, return Unavailable(tsgoLimitation: op) through $/verter/tsgoLimitation; never parse typeToString.",
+      "evidence": "planned; not shipped coverage"
+    },
+    {
+      "id": "stimulus:typescript:codeAction:declare-members",
+      "profile": "stimulus-3.2.2",
+      "framework": "stimulus",
+      "operation": "codeAction",
+      "host": "lsp-enhancement",
+      "selector": "typescript",
+      "position": "declare-members",
+      "producer": "STIMA",
+      "receivingAcceptance": "STIMA-AC2",
+      "reason": "Explicit generate-declare-members assist from TypeInfo facts; no implicit program injection.",
+      "tsgoOperations": ["type and symbol at a position", "source files"],
+      "tsgoLimitation": "If a required operation is absent, return Unavailable(tsgoLimitation: op) through $/verter/tsgoLimitation; never parse typeToString.",
+      "evidence": "planned; not shipped coverage"
+    }
+  ],
+  "factProducers": [
+    {
+      "producer": "STIM1",
+      "receivingAcceptance": "STIM1-AC1",
+      "fact": "Exact descriptor parts and spans",
+      "activation": "stimulus"
+    },
+    {
+      "producer": "STIM2",
+      "receivingAcceptance": "STIM2-AC1",
+      "fact": "Registry and declaration completeness",
+      "activation": "stimulus"
+    },
+    {
+      "producer": "STIM3",
+      "receivingAcceptance": "STIM3-AC1",
+      "fact": "Typed generated controller members",
+      "activation": "stimulus"
+    },
+    {
+      "producer": "STIM4",
+      "receivingAcceptance": "STIM4-AC1",
+      "fact": "Scope and outlet relations",
+      "activation": "stimulus"
+    },
+    {
+      "producer": "STIM4T",
+      "receivingAcceptance": "STIM4T-AC2",
+      "fact": "Static Turbo elements, actions and target relations",
+      "activation": "turbo"
+    },
+    {
+      "producer": "STIM1E",
+      "receivingAcceptance": "STIM1E-AC2",
+      "fact": "Partial templated attributes and uncertain populations",
+      "activation": "each record independently"
+    },
+    {
+      "producer": "STIM7",
+      "receivingAcceptance": "STIM7-AC1",
+      "fact": "Conditional style and accessibility contributions",
+      "activation": "stimulus"
+    }
+  ],
+  "exclusions": [
+    {
+      "operations": ["build", "bundle", "transform", "runtime"],
+      "hosts": ["all"],
+      "reason": "Served as authored; no Verter transform and no map chain. No execution, fetch, hydration, lifecycle instrumentation or runtime claim."
+    },
+    {
+      "operations": ["all"],
+      "hosts": ["typescript-plugin"],
+      "reason": "No TS plugin cell or work for this reduced overlay."
+    },
+    {
+      "operations": ["hover", "completion", "diagnostics", "rename"],
+      "hosts": ["javascript", "typescript"],
+      "reason": "These language-document answers belong to tsgo/TS; controller declarations add locations and explicit assists only."
+    },
+    {
+      "operations": ["formatting"],
+      "frameworks": ["turbo"],
+      "hosts": ["html", "erb"],
+      "reason": "No Turbo-specific formatter; standard HTML formatting stays shared."
+    },
+    {
+      "operations": ["all"],
+      "frameworks": ["turbo"],
+      "hosts": ["javascript", "typescript"],
+      "reason": "Static Turbo overlay admits HTML-producing carriers only; no controller-file Turbo operation."
+    },
+    {
+      "operations": ["parse-template", "evaluate-helper"],
+      "hosts": ["erb"],
+      "reason": "ERBH1 owns template facts; opaque Ruby helpers and holes stay unknown."
+    }
+  ],
+  "coexistence": [
+    {
+      "cell": "stimulus:html:completion:authored-attribute",
+      "competitor": "Stimulus LSP",
+      "contract": "COXD1",
+      "ownership": "LSPX11 owns(capability, position): tsgo probe, COXD2, per-capability choice; Unknown means Verter owns.",
+      "overlap": "Probe this capability/position independently; presence of an extension is not proof it serves every cell.",
+      "receivingAcceptance": "STIMT-AC1",
+      "stepDown": "Zero demands before compute; never compute then hide or stack follow-ups."
+    },
+    {
+      "cell": "stimulus:html:definition:authored-attribute",
+      "competitor": "Stimulus LSP",
+      "contract": "COXD1",
+      "ownership": "LSPX11 owns(capability, position): tsgo probe, COXD2, per-capability choice; Unknown means Verter owns.",
+      "overlap": "Probe this capability/position independently; presence of an extension is not proof it serves every cell.",
+      "receivingAcceptance": "STIMT-AC1",
+      "stepDown": "Zero demands before compute; never compute then hide or stack follow-ups."
+    },
+    {
+      "cell": "stimulus:html:references:authored-attribute",
+      "competitor": "Stimulus LSP",
+      "contract": "COXD1",
+      "ownership": "LSPX11 owns(capability, position): tsgo probe, COXD2, per-capability choice; Unknown means Verter owns.",
+      "overlap": "Probe this capability/position independently; presence of an extension is not proof it serves every cell.",
+      "receivingAcceptance": "STIMT-AC1",
+      "stepDown": "Zero demands before compute; never compute then hide or stack follow-ups."
+    },
+    {
+      "cell": "stimulus:html:hover:authored-attribute",
+      "competitor": "Stimulus LSP",
+      "contract": "COXD1",
+      "ownership": "LSPX11 owns(capability, position): tsgo probe, COXD2, per-capability choice; Unknown means Verter owns.",
+      "overlap": "Probe this capability/position independently; presence of an extension is not proof it serves every cell.",
+      "receivingAcceptance": "STIMT-AC1",
+      "stepDown": "Zero demands before compute; never compute then hide or stack follow-ups."
+    },
+    {
+      "cell": "stimulus:html:rename:authored-attribute",
+      "competitor": "Stimulus LSP",
+      "contract": "COXD1",
+      "ownership": "LSPX11 owns(capability, position): tsgo probe, COXD2, per-capability choice; Unknown means Verter owns.",
+      "overlap": "Probe this capability/position independently; presence of an extension is not proof it serves every cell.",
+      "receivingAcceptance": "STIMT-AC1",
+      "stepDown": "Zero demands before compute; never compute then hide or stack follow-ups."
+    },
+    {
+      "cell": "stimulus:html:diagnostics:authored-attribute",
+      "competitor": "Stimulus LSP",
+      "contract": "COXD1",
+      "ownership": "LSPX11 owns(capability, position): tsgo probe, COXD2, per-capability choice; Unknown means Verter owns.",
+      "overlap": "Probe this capability/position independently; presence of an extension is not proof it serves every cell.",
+      "receivingAcceptance": "STIMT-AC1",
+      "stepDown": "Zero demands before compute; never compute then hide or stack follow-ups."
+    },
+    {
+      "cell": "turbo:html:completion:authored-attribute",
+      "competitor": "Stimulus LSP",
+      "contract": "COXD1",
+      "ownership": "LSPX11 owns(capability, position): tsgo probe, COXD2, per-capability choice; Unknown means Verter owns.",
+      "overlap": "Probe this capability/position independently; presence of an extension is not proof it serves every cell.",
+      "receivingAcceptance": "STIMT-AC1",
+      "stepDown": "Zero demands before compute; never compute then hide or stack follow-ups."
+    },
+    {
+      "cell": "turbo:html:definition:authored-attribute",
+      "competitor": "Stimulus LSP",
+      "contract": "COXD1",
+      "ownership": "LSPX11 owns(capability, position): tsgo probe, COXD2, per-capability choice; Unknown means Verter owns.",
+      "overlap": "Probe this capability/position independently; presence of an extension is not proof it serves every cell.",
+      "receivingAcceptance": "STIMT-AC1",
+      "stepDown": "Zero demands before compute; never compute then hide or stack follow-ups."
+    },
+    {
+      "cell": "turbo:html:references:authored-attribute",
+      "competitor": "Stimulus LSP",
+      "contract": "COXD1",
+      "ownership": "LSPX11 owns(capability, position): tsgo probe, COXD2, per-capability choice; Unknown means Verter owns.",
+      "overlap": "Probe this capability/position independently; presence of an extension is not proof it serves every cell.",
+      "receivingAcceptance": "STIMT-AC1",
+      "stepDown": "Zero demands before compute; never compute then hide or stack follow-ups."
+    },
+    {
+      "cell": "turbo:html:hover:authored-attribute",
+      "competitor": "Stimulus LSP",
+      "contract": "COXD1",
+      "ownership": "LSPX11 owns(capability, position): tsgo probe, COXD2, per-capability choice; Unknown means Verter owns.",
+      "overlap": "Probe this capability/position independently; presence of an extension is not proof it serves every cell.",
+      "receivingAcceptance": "STIMT-AC1",
+      "stepDown": "Zero demands before compute; never compute then hide or stack follow-ups."
+    },
+    {
+      "cell": "turbo:html:rename:authored-attribute",
+      "competitor": "Stimulus LSP",
+      "contract": "COXD1",
+      "ownership": "LSPX11 owns(capability, position): tsgo probe, COXD2, per-capability choice; Unknown means Verter owns.",
+      "overlap": "Probe this capability/position independently; presence of an extension is not proof it serves every cell.",
+      "receivingAcceptance": "STIMT-AC1",
+      "stepDown": "Zero demands before compute; never compute then hide or stack follow-ups."
+    },
+    {
+      "cell": "turbo:html:diagnostics:authored-attribute",
+      "competitor": "Stimulus LSP",
+      "contract": "COXD1",
+      "ownership": "LSPX11 owns(capability, position): tsgo probe, COXD2, per-capability choice; Unknown means Verter owns.",
+      "overlap": "Probe this capability/position independently; presence of an extension is not proof it serves every cell.",
+      "receivingAcceptance": "STIMT-AC1",
+      "stepDown": "Zero demands before compute; never compute then hide or stack follow-ups."
+    },
+    {
+      "cell": "stimulus:html:formatting:data-action",
+      "competitor": "Stimulus LSP",
+      "contract": "COXD1",
+      "ownership": "LSPX11 owns(capability, position): tsgo probe, COXD2, per-capability choice; Unknown means Verter owns.",
+      "overlap": "Probe this capability/position independently; presence of an extension is not proof it serves every cell.",
+      "receivingAcceptance": "STIMT-AC1",
+      "stepDown": "Zero demands before compute; never compute then hide or stack follow-ups."
+    },
+    {
+      "cell": "stimulus:html:codeAction:authored-attribute",
+      "competitor": "Stimulus LSP",
+      "contract": "COXD1",
+      "ownership": "LSPX11 owns(capability, position): tsgo probe, COXD2, per-capability choice; Unknown means Verter owns.",
+      "overlap": "Probe this capability/position independently; presence of an extension is not proof it serves every cell.",
+      "receivingAcceptance": "STIMT-AC1",
+      "stepDown": "Zero demands before compute; never compute then hide or stack follow-ups."
+    },
+    {
+      "cell": "turbo:html:codeAction:frame-wrap",
+      "competitor": "Stimulus LSP",
+      "contract": "COXD1",
+      "ownership": "LSPX11 owns(capability, position): tsgo probe, COXD2, per-capability choice; Unknown means Verter owns.",
+      "overlap": "Probe this capability/position independently; presence of an extension is not proof it serves every cell.",
+      "receivingAcceptance": "STIMT-AC1",
+      "stepDown": "Zero demands before compute; never compute then hide or stack follow-ups."
+    },
+    {
+      "cell": "stimulus:erb:completion:ERBH1-HWC-attribute",
+      "competitor": "Stimulus LSP",
+      "contract": "COXD1",
+      "ownership": "LSPX11 owns(capability, position): tsgo probe, COXD2, per-capability choice; Unknown means Verter owns.",
+      "overlap": "Probe this capability/position independently; presence of an extension is not proof it serves every cell.",
+      "receivingAcceptance": "STIMT-AC1",
+      "stepDown": "Zero demands before compute; never compute then hide or stack follow-ups."
+    },
+    {
+      "cell": "stimulus:erb:definition:ERBH1-HWC-attribute",
+      "competitor": "Stimulus LSP",
+      "contract": "COXD1",
+      "ownership": "LSPX11 owns(capability, position): tsgo probe, COXD2, per-capability choice; Unknown means Verter owns.",
+      "overlap": "Probe this capability/position independently; presence of an extension is not proof it serves every cell.",
+      "receivingAcceptance": "STIMT-AC1",
+      "stepDown": "Zero demands before compute; never compute then hide or stack follow-ups."
+    },
+    {
+      "cell": "stimulus:erb:references:ERBH1-HWC-attribute",
+      "competitor": "Stimulus LSP",
+      "contract": "COXD1",
+      "ownership": "LSPX11 owns(capability, position): tsgo probe, COXD2, per-capability choice; Unknown means Verter owns.",
+      "overlap": "Probe this capability/position independently; presence of an extension is not proof it serves every cell.",
+      "receivingAcceptance": "STIMT-AC1",
+      "stepDown": "Zero demands before compute; never compute then hide or stack follow-ups."
+    },
+    {
+      "cell": "stimulus:erb:hover:ERBH1-HWC-attribute",
+      "competitor": "Stimulus LSP",
+      "contract": "COXD1",
+      "ownership": "LSPX11 owns(capability, position): tsgo probe, COXD2, per-capability choice; Unknown means Verter owns.",
+      "overlap": "Probe this capability/position independently; presence of an extension is not proof it serves every cell.",
+      "receivingAcceptance": "STIMT-AC1",
+      "stepDown": "Zero demands before compute; never compute then hide or stack follow-ups."
+    },
+    {
+      "cell": "stimulus:erb:rename:ERBH1-HWC-attribute",
+      "competitor": "Stimulus LSP",
+      "contract": "COXD1",
+      "ownership": "LSPX11 owns(capability, position): tsgo probe, COXD2, per-capability choice; Unknown means Verter owns.",
+      "overlap": "Probe this capability/position independently; presence of an extension is not proof it serves every cell.",
+      "receivingAcceptance": "STIMT-AC1",
+      "stepDown": "Zero demands before compute; never compute then hide or stack follow-ups."
+    },
+    {
+      "cell": "stimulus:erb:diagnostics:ERBH1-HWC-attribute",
+      "competitor": "Stimulus LSP",
+      "contract": "COXD1",
+      "ownership": "LSPX11 owns(capability, position): tsgo probe, COXD2, per-capability choice; Unknown means Verter owns.",
+      "overlap": "Probe this capability/position independently; presence of an extension is not proof it serves every cell.",
+      "receivingAcceptance": "STIMT-AC1",
+      "stepDown": "Zero demands before compute; never compute then hide or stack follow-ups."
+    },
+    {
+      "cell": "turbo:erb:completion:ERBH1-HWC-attribute",
+      "competitor": "Stimulus LSP",
+      "contract": "COXD1",
+      "ownership": "LSPX11 owns(capability, position): tsgo probe, COXD2, per-capability choice; Unknown means Verter owns.",
+      "overlap": "Probe this capability/position independently; presence of an extension is not proof it serves every cell.",
+      "receivingAcceptance": "STIMT-AC1",
+      "stepDown": "Zero demands before compute; never compute then hide or stack follow-ups."
+    },
+    {
+      "cell": "turbo:erb:definition:ERBH1-HWC-attribute",
+      "competitor": "Stimulus LSP",
+      "contract": "COXD1",
+      "ownership": "LSPX11 owns(capability, position): tsgo probe, COXD2, per-capability choice; Unknown means Verter owns.",
+      "overlap": "Probe this capability/position independently; presence of an extension is not proof it serves every cell.",
+      "receivingAcceptance": "STIMT-AC1",
+      "stepDown": "Zero demands before compute; never compute then hide or stack follow-ups."
+    },
+    {
+      "cell": "turbo:erb:references:ERBH1-HWC-attribute",
+      "competitor": "Stimulus LSP",
+      "contract": "COXD1",
+      "ownership": "LSPX11 owns(capability, position): tsgo probe, COXD2, per-capability choice; Unknown means Verter owns.",
+      "overlap": "Probe this capability/position independently; presence of an extension is not proof it serves every cell.",
+      "receivingAcceptance": "STIMT-AC1",
+      "stepDown": "Zero demands before compute; never compute then hide or stack follow-ups."
+    },
+    {
+      "cell": "turbo:erb:hover:ERBH1-HWC-attribute",
+      "competitor": "Stimulus LSP",
+      "contract": "COXD1",
+      "ownership": "LSPX11 owns(capability, position): tsgo probe, COXD2, per-capability choice; Unknown means Verter owns.",
+      "overlap": "Probe this capability/position independently; presence of an extension is not proof it serves every cell.",
+      "receivingAcceptance": "STIMT-AC1",
+      "stepDown": "Zero demands before compute; never compute then hide or stack follow-ups."
+    },
+    {
+      "cell": "turbo:erb:rename:ERBH1-HWC-attribute",
+      "competitor": "Stimulus LSP",
+      "contract": "COXD1",
+      "ownership": "LSPX11 owns(capability, position): tsgo probe, COXD2, per-capability choice; Unknown means Verter owns.",
+      "overlap": "Probe this capability/position independently; presence of an extension is not proof it serves every cell.",
+      "receivingAcceptance": "STIMT-AC1",
+      "stepDown": "Zero demands before compute; never compute then hide or stack follow-ups."
+    },
+    {
+      "cell": "turbo:erb:diagnostics:ERBH1-HWC-attribute",
+      "competitor": "Stimulus LSP",
+      "contract": "COXD1",
+      "ownership": "LSPX11 owns(capability, position): tsgo probe, COXD2, per-capability choice; Unknown means Verter owns.",
+      "overlap": "Probe this capability/position independently; presence of an extension is not proof it serves every cell.",
+      "receivingAcceptance": "STIMT-AC1",
+      "stepDown": "Zero demands before compute; never compute then hide or stack follow-ups."
+    },
+    {
+      "cell": "stimulus:erb:formatting:data-action",
+      "competitor": "Stimulus LSP",
+      "contract": "COXD1",
+      "ownership": "LSPX11 owns(capability, position): tsgo probe, COXD2, per-capability choice; Unknown means Verter owns.",
+      "overlap": "Probe this capability/position independently; presence of an extension is not proof it serves every cell.",
+      "receivingAcceptance": "STIMT-AC1",
+      "stepDown": "Zero demands before compute; never compute then hide or stack follow-ups."
+    },
+    {
+      "cell": "stimulus:erb:codeAction:authored-attribute",
+      "competitor": "Stimulus LSP",
+      "contract": "COXD1",
+      "ownership": "LSPX11 owns(capability, position): tsgo probe, COXD2, per-capability choice; Unknown means Verter owns.",
+      "overlap": "Probe this capability/position independently; presence of an extension is not proof it serves every cell.",
+      "receivingAcceptance": "STIMT-AC1",
+      "stepDown": "Zero demands before compute; never compute then hide or stack follow-ups."
+    },
+    {
+      "cell": "turbo:erb:codeAction:frame-wrap",
+      "competitor": "Stimulus LSP",
+      "contract": "COXD1",
+      "ownership": "LSPX11 owns(capability, position): tsgo probe, COXD2, per-capability choice; Unknown means Verter owns.",
+      "overlap": "Probe this capability/position independently; presence of an extension is not proof it serves every cell.",
+      "receivingAcceptance": "STIMT-AC1",
+      "stepDown": "Zero demands before compute; never compute then hide or stack follow-ups."
+    },
+    {
+      "cell": "stimulus:javascript:references:static-entry",
+      "competitor": "Stimulus LSP",
+      "contract": "COXD1",
+      "ownership": "LSPX11 owns(capability, position): tsgo probe, COXD2, per-capability choice; Unknown means Verter owns.",
+      "overlap": "Probe this capability/position independently; presence of an extension is not proof it serves every cell.",
+      "receivingAcceptance": "STIMT-AC1",
+      "stepDown": "Zero demands before compute; never compute then hide or stack follow-ups."
+    },
+    {
+      "cell": "stimulus:javascript:definition:registration",
+      "competitor": "Stimulus LSP",
+      "contract": "COXD1",
+      "ownership": "LSPX11 owns(capability, position): tsgo probe, COXD2, per-capability choice; Unknown means Verter owns.",
+      "overlap": "Probe this capability/position independently; presence of an extension is not proof it serves every cell.",
+      "receivingAcceptance": "STIMT-AC1",
+      "stepDown": "Zero demands before compute; never compute then hide or stack follow-ups."
+    },
+    {
+      "cell": "stimulus:typescript:references:static-entry",
+      "competitor": "Stimulus LSP",
+      "contract": "COXD1",
+      "ownership": "LSPX11 owns(capability, position): tsgo probe, COXD2, per-capability choice; Unknown means Verter owns.",
+      "overlap": "Probe this capability/position independently; presence of an extension is not proof it serves every cell.",
+      "receivingAcceptance": "STIMT-AC1",
+      "stepDown": "Zero demands before compute; never compute then hide or stack follow-ups."
+    },
+    {
+      "cell": "stimulus:typescript:definition:registration",
+      "competitor": "Stimulus LSP",
+      "contract": "COXD1",
+      "ownership": "LSPX11 owns(capability, position): tsgo probe, COXD2, per-capability choice; Unknown means Verter owns.",
+      "overlap": "Probe this capability/position independently; presence of an extension is not proof it serves every cell.",
+      "receivingAcceptance": "STIMT-AC1",
+      "stepDown": "Zero demands before compute; never compute then hide or stack follow-ups."
+    },
+    {
+      "cell": "stimulus:typescript:codeAction:declare-members",
+      "competitor": "Stimulus LSP",
+      "contract": "COXD1",
+      "ownership": "LSPX11 owns(capability, position): tsgo probe, COXD2, per-capability choice; Unknown means Verter owns.",
+      "overlap": "Probe this capability/position independently; presence of an extension is not proof it serves every cell.",
+      "receivingAcceptance": "STIMT-AC1",
+      "stepDown": "Zero demands before compute; never compute then hide or stack follow-ups."
+    }
+  ],
+  "publicOperations": [
+    {
+      "operation": "stimulus.controllers",
+      "producer": "STIM5",
+      "receivingAcceptance": "STIM5-AC4",
+      "host": "DX1 generated MCP descriptor",
+      "result": "usages and declarations with completeness"
+    },
+    {
+      "operation": "assist.stimulus/add-target",
+      "producer": "STIMA",
+      "receivingAcceptance": "STIMA-AC1",
+      "host": "DX1 generated MCP descriptor",
+      "activation": "stimulus"
+    },
+    {
+      "operation": "assist.stimulus/add-value",
+      "producer": "STIMA",
+      "receivingAcceptance": "STIMA-AC1",
+      "host": "DX1 generated MCP descriptor",
+      "activation": "stimulus"
+    },
+    {
+      "operation": "assist.stimulus/create-controller",
+      "producer": "STIMA",
+      "receivingAcceptance": "STIMA-AC1",
+      "host": "DX1 generated MCP descriptor",
+      "activation": "stimulus"
+    },
+    {
+      "operation": "assist.stimulus/stub-action-method",
+      "producer": "STIMA",
+      "receivingAcceptance": "STIMA-AC1",
+      "host": "DX1 generated MCP descriptor",
+      "activation": "stimulus"
+    },
+    {
+      "operation": "assist.stimulus/generate-declare-members",
+      "producer": "STIMA",
+      "receivingAcceptance": "STIMA-AC1",
+      "host": "DX1 generated MCP descriptor",
+      "activation": "stimulus"
+    },
+    {
+      "operation": "assist.stimulus/explain-scope",
+      "producer": "STIMA",
+      "receivingAcceptance": "STIMA-AC1",
+      "host": "DX1 generated MCP descriptor",
+      "activation": "stimulus"
+    },
+    {
+      "operation": "assist.turbo/wrap-in-frame",
+      "producer": "STIMA",
+      "receivingAcceptance": "STIMA-AC1",
+      "host": "DX1 generated MCP descriptor",
+      "activation": "turbo"
+    }
+  ],
+  "performance": "Inactive and stepped-down cells do zero demands. No runtime, latency or allocation claim is made by this contract; STIM9 compares answer classes/work growth and records timings as advisory."
+}

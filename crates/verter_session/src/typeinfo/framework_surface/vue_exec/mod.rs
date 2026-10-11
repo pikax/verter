@@ -1125,15 +1125,10 @@ pub(crate) fn vue_macro_dtos_with_ctx<C: crate::session_attachment::SessionCapab
                 completeness,
             }
         }
-        // Tracer overflowed: the DTOs are valid but cannot be admitted safely
-        // (the observation set was truncated). Return the freshly-computed
-        // bundle WITHOUT caching — a repeat request recomputes, never serves an
-        // under-validated entry.
-        // Neither an over-cap nor a mutation-unstable scope yields a
-        // signature the bundle can be admitted under; both serve the DTOs
-        // and publish nothing.
-        verter_session_query::facts::fact_read_set::FactReadSetFinalise::Overflow
-        | verter_session_query::facts::fact_read_set::FactReadSetFinalise::MutationUnstable => {
+        // A mutation-unstable scope yields no signature the bundle can be
+        // admitted under: serve the DTOs and publish nothing — a repeat
+        // request recomputes, never serves an under-validated entry.
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::MutationUnstable => {
             MacroDtosRead {
                 dtos: Arc::new(dtos),
                 completeness,

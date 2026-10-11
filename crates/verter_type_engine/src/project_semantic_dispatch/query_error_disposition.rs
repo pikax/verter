@@ -215,7 +215,7 @@ pub const fn classify_query_error(err: &QueryError) -> QueryErrorClass {
         // The three publish DIFFERENT reasons: a budget trip, a cancellation
         // and a fence that gave up because the world moved under the read are
         // three distinct diagnostics.
-        QueryError::BudgetExceeded(_) | QueryError::SignatureOverflow => (
+        QueryError::BudgetExceeded(_) => (
             QueryErrorDisposition::Partial,
             ClosedLiteralDomainUnresolvedReason::BudgetExceeded,
         ),

@@ -26,7 +26,12 @@ real_provider_test!(
         let refs = session.references(&uri, pos).await;
         assert!(refs.len() >= 2, "increment should have >= 2 references, got: {}", refs.len());
 
-        // formatCount → ≥2 references, AND the cross-file declaration in utils.ts must carry its
+        // formatCount → ≥2 references. Delivered, the cross-file declaration decodes through the
+        // bytes the engine evaluated; a file the engine reads itself never decodes a provider
+        // range (the provider leg is a typed conflict and the native result is served).
+        let utils_uri = session.open_fixture_file("src/utils.ts").await;
+        session.ensure_synced(&utils_uri).await;
+        // The cross-file declaration in utils.ts must carry its
         // REAL range (line 0 of utils.ts: `export function formatCount(...)`), never the line-0
         // placeholder that the merge used to substitute for every cross-file target.
         let pos = session.find_position(&uri, "formatCount", 0);

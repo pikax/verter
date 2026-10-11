@@ -78,7 +78,7 @@ subset. Retained functions: `resolved_dag_budget`, `len`, `is_empty`,
 `handles`, `into_handles`, `new`, `with_executor`, `new_sync`,
 `new_sync_with_executor`, `execute_scoped_cache_node`, `submit_request`,
 `submit_batch_atomic`, `wait_batch`, `account_batch_submission`,
-`counters`, `try_get_source`, `try_get_witnessed_source`,
+`counters`, `dependency_occupancy`, `try_get_source`, `try_get_witnessed_source`,
 `try_get_source_for_witness`, `capture_source_root`, `source_directory`,
 `try_get_analysis`, `try_get_artifact`, `try_get_last_known_good`,
 `has_node`, `node_ids`, `reset`, `restart_driver`, `quiesce`,
@@ -193,7 +193,7 @@ should verify:
 
 The executable boundary is
 `arh12_dependency_and_visibility_contracts_are_enforced` in
-`crates/verter_session/tests/cases/architecture_guards.rs`; it derives the
+`crates/verter_source_policy_gate/tests/cases/architecture_dependencies.rs`; it derives the
 current manifests and source tree rather than matching historical filenames.
 
 ## Related pages

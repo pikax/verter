@@ -1,0 +1,47 @@
+{
+  "schema": "ProbeManifest",
+  "version": 1,
+  "node": "STIM0",
+  "kind": "lock",
+  "evidenceClass": "static-proof",
+  "products": [
+    "products/stimulus-version-lock.json",
+    "products/stimulus-vocabulary.json",
+    "products/turbo-vocabulary.json",
+    "products/stimulus-capability-matrix.json",
+    "products/stimulus-activation-policy.json"
+  ],
+  "mandatoryCases": ["STIM0-AC1", "STIM0-AC2", "STIM0-AC3", "STIM0-AC4"],
+  "cases": [
+    {
+      "id": "STIM0-AC1",
+      "evidence": "cases.md",
+      "disposition": "accept",
+      "proofStatus": "reviewed-data; executable proof not yet delivered"
+    },
+    {
+      "id": "STIM0-AC2",
+      "evidence": "cases.md",
+      "disposition": "accept",
+      "proofStatus": "reviewed-data; executable proof not yet delivered"
+    },
+    {
+      "id": "STIM0-AC3",
+      "evidence": "cases.md",
+      "disposition": "accept",
+      "proofStatus": "reviewed-data; executable proof not yet delivered"
+    },
+    {
+      "id": "STIM0-AC4",
+      "evidence": "cases.md",
+      "disposition": "accept",
+      "proofStatus": "reviewed-data; executable proof not yet delivered"
+    }
+  ],
+  "executableOwner": "STIM1",
+  "receivingAcceptance": "STIM1-ACV",
+  "futureProof": "node --test tests/framework-stimulus/STIM0/stimulus-lock.spec.ts",
+  "discoveryOwner": "REG0 scripts/run-framework-locks.mjs",
+  "runtimeCorrectness": false,
+  "notes": "Contract data only. No executable validator, test, CI gate, schema enforcement or package.json edit lands here. Future proof is an obligation, not a command that exists or ran."
+}

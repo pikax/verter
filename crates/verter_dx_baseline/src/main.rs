@@ -369,7 +369,13 @@ impl Bridge {
         }
 
         let result = match q.method {
-            QueryMethod::Hover => match provider.get_hover(&q.path, q.offset).await {
+            QueryMethod::Hover => match provider
+                .get_hover(
+                    &verter_type_runtime::provider_query::ProviderQuery::at_engine_surface(&q.path),
+                    q.offset,
+                )
+                .await
+            {
                 Ok(h) => QueryResult::Hover {
                     hover: h.as_ref().map(NormalizedHover::from),
                 },
@@ -377,7 +383,13 @@ impl Bridge {
             },
             QueryMethod::Completion => {
                 match provider
-                    .get_completions(&q.path, q.offset, q.trigger_character.as_deref())
+                    .get_completions(
+                        &verter_type_runtime::provider_query::ProviderQuery::at_engine_surface(
+                            &q.path,
+                        ),
+                        q.offset,
+                        q.trigger_character.as_deref(),
+                    )
                     .await
                 {
                     Ok(c) => QueryResult::Completion {
@@ -387,21 +399,41 @@ impl Bridge {
                     Err(e) => return Response::error(ErrorKind::ProviderError, e.to_string()),
                 }
             }
-            QueryMethod::Definition => match provider.get_definition(&q.path, q.offset).await {
+            QueryMethod::Definition => match provider
+                .get_definition(
+                    &verter_type_runtime::provider_query::ProviderQuery::at_engine_surface(&q.path),
+                    q.offset,
+                )
+                .await
+            {
                 Ok(locs) => QueryResult::Definition {
                     locations: locs.iter().map(NormalizedLocation::from).collect(),
                 },
                 Err(e) => return Response::error(ErrorKind::ProviderError, e.to_string()),
             },
             QueryMethod::TypeDefinition => {
-                match provider.get_type_definition(&q.path, q.offset).await {
+                match provider
+                    .get_type_definition(
+                        &verter_type_runtime::provider_query::ProviderQuery::at_engine_surface(
+                            &q.path,
+                        ),
+                        q.offset,
+                    )
+                    .await
+                {
                     Ok(locs) => QueryResult::Definition {
                         locations: locs.iter().map(NormalizedLocation::from).collect(),
                     },
                     Err(e) => return Response::error(ErrorKind::ProviderError, e.to_string()),
                 }
             }
-            QueryMethod::References => match provider.get_references(&q.path, q.offset).await {
+            QueryMethod::References => match provider
+                .get_references(
+                    &verter_type_runtime::provider_query::ProviderQuery::at_engine_surface(&q.path),
+                    q.offset,
+                )
+                .await
+            {
                 Ok(locs) => QueryResult::Definition {
                     locations: locs.iter().map(NormalizedLocation::from).collect(),
                 },
@@ -429,7 +461,13 @@ impl Bridge {
         if let ProbeStatus::Stale { have } = self.overlay.probe_path_status(&r.path, r.version) {
             return Response::stale(&r.uri, r.version, have);
         }
-        match provider.resolve_completion(&r.path, r.data).await {
+        match provider
+            .resolve_completion(
+                &verter_type_runtime::provider_query::ProviderQuery::at_engine_surface(&r.path),
+                r.data,
+            )
+            .await
+        {
             Ok(resolved) => {
                 self.baseline_ran += 1;
                 let resolved = resolved.unwrap_or_default();

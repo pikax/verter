@@ -1,6 +1,7 @@
 //! Discriminating unit tests for the composite's project-bound admission and
 //! shared-session lifecycle.
 
+use crate::type_provider::traits::ProviderQuery;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -181,7 +182,7 @@ impl TypeProvider for RecordingAttach {
 
     fn get_completions(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _offset: u32,
         _trigger_character: Option<&str>,
     ) -> ProviderFuture<'_, CompletionResult> {
@@ -195,7 +196,7 @@ impl TypeProvider for RecordingAttach {
 
     fn get_completion_details<'a>(
         &'a self,
-        _path: &'a str,
+        _query: &'a ProviderQuery,
         _offset: u32,
         items: &'a [Completion],
     ) -> ProviderFuture<'a, Vec<Completion>> {
@@ -205,13 +206,18 @@ impl TypeProvider for RecordingAttach {
 
     fn resolve_completion(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _data: CompletionResolveData,
     ) -> ProviderFuture<'_, Option<CompletionResolveResult>> {
         Box::pin(async { Ok(None) })
     }
 
-    fn get_hover(&self, path: &str, _offset: u32) -> ProviderFuture<'_, Option<HoverInfo>> {
+    fn get_hover(
+        &self,
+        query: &ProviderQuery,
+        _offset: u32,
+    ) -> ProviderFuture<'_, Option<HoverInfo>> {
+        let path = query.path();
         let gated = self.hover_gated.load(std::sync::atomic::Ordering::SeqCst);
         self.ops.lock().push(format!("hover:{path}"));
         Box::pin(async move {
@@ -223,25 +229,33 @@ impl TypeProvider for RecordingAttach {
         })
     }
 
-    fn get_definition(&self, _path: &str, _offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
-        Box::pin(async { Ok(Vec::new()) })
-    }
-
-    fn get_type_definition(
+    fn get_definition(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _offset: u32,
     ) -> ProviderFuture<'_, Vec<TypeLocation>> {
         Box::pin(async { Ok(Vec::new()) })
     }
 
-    fn get_references(&self, _path: &str, _offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
+    fn get_type_definition(
+        &self,
+        _query: &ProviderQuery,
+        _offset: u32,
+    ) -> ProviderFuture<'_, Vec<TypeLocation>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn get_references(
+        &self,
+        _query: &ProviderQuery,
+        _offset: u32,
+    ) -> ProviderFuture<'_, Vec<TypeLocation>> {
         Box::pin(async { Ok(Vec::new()) })
     }
 
     fn get_rename_locations(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _offset: u32,
     ) -> ProviderFuture<'_, Vec<RenameLocation>> {
         Box::pin(async { Ok(Vec::new()) })
@@ -249,7 +263,7 @@ impl TypeProvider for RecordingAttach {
 
     fn get_signature_help(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _offset: u32,
     ) -> ProviderFuture<'_, Option<SignatureHelp>> {
         Box::pin(async { Ok(None) })
@@ -257,7 +271,7 @@ impl TypeProvider for RecordingAttach {
 
     fn get_code_actions(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _start_offset: u32,
         _end_offset: u32,
         _diagnostics: &[ProviderDiagnosticContext],
@@ -265,13 +279,16 @@ impl TypeProvider for RecordingAttach {
         Box::pin(async { Ok(Vec::new()) })
     }
 
-    fn get_semantic_tokens(&self, _path: &str) -> ProviderFuture<'_, Vec<SemanticToken>> {
+    fn get_semantic_tokens(
+        &self,
+        _query: &ProviderQuery,
+    ) -> ProviderFuture<'_, Vec<SemanticToken>> {
         Box::pin(async { Ok(Vec::new()) })
     }
 
     fn get_document_highlights(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _offset: u32,
     ) -> ProviderFuture<'_, Vec<TypeDocumentHighlight>> {
         Box::pin(async { Ok(Vec::new()) })
@@ -279,7 +296,7 @@ impl TypeProvider for RecordingAttach {
 
     fn get_inlay_hints(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _start_offset: u32,
         _end_offset: u32,
     ) -> ProviderFuture<'_, Vec<InlayHint>> {
@@ -1197,10 +1214,10 @@ async fn feature_invocation_revalidates_epoch_after_selection() {
         transport_epoch: serving.epoch,
     };
     let hover = selection
-        .invoke(|provider| {
-            let path = path.to_string();
-            async move { provider.get_hover(&path, 0).await }
-        })
+        .invoke(
+            &ProviderQuery::at_engine_surface(path),
+            |provider, query| async move { provider.get_hover(&query, 0).await },
+        )
         .await
         .expect("epoch mismatch activates managed fallback");
 
@@ -1220,6 +1237,111 @@ async fn feature_invocation_revalidates_epoch_after_selection() {
     );
 }
 
+#[tokio::test]
+async fn discarded_completed_shared_result_does_not_poison_managed_evidence() {
+    let source = "d:/ws/src/Foo.vue";
+    let path = "d:/ws/src/Foo.vue.tsx";
+    let (overlay, _ws, attach, backend) = recording_overlay_over(
+        &[(source, "<template></template>")],
+        fixture_snapshot(r#"{ "include": ["src"] }"#),
+    )
+    .await;
+    let core = overlay.inner.hub.overlay_state();
+    core.record_content_at_priority(
+        path,
+        "export const value = 1;",
+        OverlayPriority::Interactive,
+    );
+    let serving = serve_recording(&overlay).await;
+    // Sync the carrier through the REAL write gate (a hub-issued admission).
+    let permit = overlay
+        .generated_unit_write_permit(core, path)
+        .expect("the carrier's generated units are admitted");
+    overlay
+        .inner
+        .hub
+        .synchronize(
+            serving.epoch,
+            overlay.sweep_generation(),
+            |candidate, _| candidate == path,
+            |_| {
+                Some(
+                    verter_type_runtime::provider_hub::overlay::GeneratedUnitWritePermit::admitted(
+                        permit.admission().unwrap().clone(),
+                    ),
+                )
+            },
+        )
+        .await
+        .unwrap();
+    assert!(core.sync_state_for_epoch(path, serving.epoch).is_synced());
+
+    let managed = Arc::new(RecordingAttach::new());
+    let query = crate::type_provider::traits::ProviderQuery::at_engine_surface(path);
+    let prior_live = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let managed_live = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let prior = Arc::clone(&prior_live);
+    query.retain_validity(Arc::new(move || {
+        prior.load(std::sync::atomic::Ordering::SeqCst)
+    }));
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let selection = FeatureProviderSelection::Shared {
+        hub: Arc::clone(&overlay.inner.hub),
+        managed: Arc::clone(&managed) as Arc<dyn TypeProvider>,
+        core: Arc::clone(&overlay.inner),
+        provider_path: path.to_string(),
+        transport_epoch: serving.epoch,
+    };
+    let answer = selection
+        .invoke(&query, |provider, query| {
+            let backend = Arc::clone(&backend);
+            let hub = Arc::clone(&overlay.inner.hub);
+            let calls = Arc::clone(&calls);
+            let managed_live = Arc::clone(&managed_live);
+            async move {
+                let index = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let result = provider.get_hover(&query, 0).await?;
+                if index == 0 {
+                    query
+                        .check_intended_target("/ws/shared.ts", Some(&Arc::from("shared")))
+                        .expect("shared bytes");
+                    backend.retire_serving(&hub).await;
+                } else {
+                    query
+                        .check_intended_target("/ws/managed.ts", Some(&Arc::from("managed")))
+                        .expect("managed bytes");
+                    query.retain_validity(Arc::new(move || {
+                        managed_live.load(std::sync::atomic::Ordering::SeqCst)
+                    }));
+                }
+                Ok(result)
+            }
+        })
+        .await
+        .expect("managed fallback");
+    assert!(answer.is_none());
+    assert_eq!(attach.count("hover:"), 1);
+    assert_eq!(managed.count("hover:"), 1);
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert!(query.result_is_current());
+    assert!(query.decoded_target("/ws/shared.ts").is_none());
+    assert_eq!(
+        query.decoded_target("/ws/managed.ts").as_deref(),
+        Some("managed")
+    );
+    prior_live.store(false, std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        !query.result_is_current(),
+        "fallback preserves prior accepted evidence"
+    );
+    prior_live.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(query.result_is_current());
+    managed_live.store(false, std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        !query.result_is_current(),
+        "accepted managed evidence survives the selector"
+    );
+}
 /// Revalidate again after the shared await: the incarnation can be retired WHILE an
 /// epoch-A request is in flight. Its stale answer is discarded by the hub's epoch
 /// settlement and managed serves the admitted carrier instead.
@@ -1276,10 +1398,10 @@ async fn feature_invocation_discards_stale_error_after_inflight_reconnect() {
             transport_epoch: serving.epoch,
         };
         selection
-            .invoke(|provider| {
-                let path = path.to_string();
-                async move { provider.get_hover(&path, 0).await }
-            })
+            .invoke(
+                &ProviderQuery::at_engine_surface(path),
+                |provider, query| async move { provider.get_hover(&query, 0).await },
+            )
             .await
     });
     // The shared hover is in flight (the attach reached it) ...

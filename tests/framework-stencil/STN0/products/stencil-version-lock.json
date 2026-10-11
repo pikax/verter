@@ -1,0 +1,50 @@
+{
+  "schema": "StencilVersionLock",
+  "version": 1,
+  "family": "stencil",
+  "admittedReleaseSet": [
+    {
+      "package": "@stencil/core",
+      "major": 4,
+      "channel": "stable"
+    }
+  ],
+  "referenceRelease": {
+    "package": "@stencil/core",
+    "version": "4.45.2",
+    "registry": "npm",
+    "source": "https://registry.npmjs.org/@stencil%2fcore/4.45.2",
+    "tarball": "https://registry.npmjs.org/@stencil/core/-/core-4.45.2.tgz",
+    "integrity": "sha512-CNkPVZsqyNMjFMX9bEkMJsvBbQxjLw480OaoamoqiLPdQCFjJQReeOjnWX1A5ivSn3UYEIJ6MoN5VXDkaHGt8Q=="
+  },
+  "profiles": [
+    {
+      "id": "stencil-tsx",
+      "kind": "jsx-overlay-with-decorators",
+      "package": "@stencil/core",
+      "referenceVersion": "4.45.2",
+      "source": "referenceRelease"
+    }
+  ],
+  "resolutionPolicy": {
+    "authority": "FWA1 resolved installed package version and canonical package role",
+    "supported": "Exact resolved stable 4.x version; a manifest range is not a resolved version",
+    "evidencePin": "Every reference to the oracle release must equal referenceRelease.version; do not require an installed user's supported 4.x patch to equal the oracle patch",
+    "rejected": [
+      "legacy majors including 2.x",
+      "floating or latest evidence pins",
+      "canary",
+      "nightly",
+      "dev",
+      "prerelease",
+      "diverged reference pins"
+    ]
+  },
+  "nextMajor": {
+    "major": 5,
+    "disposition": "not-admitted",
+    "rule": "Announcement alone does not widen this lock. Admit a near-future next major only through explicit ratification with its own exact reference release and cases."
+  },
+  "runtimeOrBuildOracle": false,
+  "dependencyChange": false
+}

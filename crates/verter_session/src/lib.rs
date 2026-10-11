@@ -753,25 +753,8 @@ pub struct VerterHost {
     /// thread-local shard (`WASM_DECL_LOWERING_SHARD`) the job runs
     /// inline against — still lease-pinned, NOT a re-parse per demand.
     pub(crate) decl_lowering: Arc<verter_semantic_source::decl_lowering::DeclLoweringService>,
-    /// Per-host test-injection knob for the compile-tier cold-build
-    /// path. When set to `N > 0`, the `Session` cold-compute closure
-    /// observes `N` synthetic `FileWholeHash` facts via `observe_fan_out`
-    /// after the normal compile-tier observation step, deterministically
-    /// forcing the installed fact tracer to either overflow (when `N >
-    /// FACT_SIGNATURE_CAP`) or accumulate a large signature. Drives the
-    /// refuse-publish-on-overflow tests without a pathological workspace
-    /// fixture.
-    ///
-    /// Armed/cleared by the host-scoped RAII guard
-    /// [`crate::host_resolve::CompileForceOverflowGuard`]. Per-host
-    /// (not process-global) so a test arming it on one host never
-    /// poisons concurrent compiles on a different host running on
-    /// another test thread. Production reads it once per `Session` cold
-    /// compute as a relaxed atomic load (~1 ns) on a path that already
-    /// takes locks, so the cost is in the noise.
-    pub(crate) compile_force_overflow_observations: std::sync::atomic::AtomicUsize,
-    /// Per-host relation-engine knobs: the overflow / budget test-injection
-    /// triggers — see [`verter_type_engine::project_semantic_dispatch::relation_knobs::RelationHostKnobs`].
+    /// Per-host relation-engine knobs: the budget test-injection
+    /// trigger — see [`verter_type_engine::project_semantic_dispatch::relation_knobs::RelationHostKnobs`].
     pub(crate) relation_knobs: Arc<verter_type_engine::project_semantic_dispatch::relation_knobs::RelationHostKnobs>,
     /// Per-host test-injection knob for the cross-file declaration-augmentation
     /// folder ([`verter_type_engine::project_semantic_dispatch`]'s
@@ -809,14 +792,6 @@ pub struct VerterHost {
     /// routing test reads.
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) compile_tier_prefetch_invocations: std::sync::atomic::AtomicUsize,
-    /// Per-host counter for `FactReadSetFinalise::Overflow` hits at the
-    /// `install_fact_tracer` boundary. Monotonically increasing for the
-    /// host's lifetime; reset only when the host is dropped. Readable
-    /// from tests via
-    /// [`verter_type_engine::fact_signature_helpers::read_signature_overflow_at_install`].
-    /// Per-host so an overflow forced on one host's tracer never bumps
-    /// the counter a different host's delta assertion reads.
-    pub(crate) signature_overflow_at_install: Arc<std::sync::atomic::AtomicU64>,
     /// Exclusive ownership token for a shared test worker substrate. Declared
     /// last so it is released only after every production host field (including
     /// the scheduler/driver) has been dropped.

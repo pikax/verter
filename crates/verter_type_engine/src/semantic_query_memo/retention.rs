@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use verter_session_query::retention::{
-    ChargeClass, RetainedFootprint, RetentionAdmission, RetentionCharge, RetentionRefusal,
+    RetainedFootprint, RetentionAdmission, RetentionCharge, RetentionRefusal,
     SemanticRetentionAccount, StoreAccount,
 };
 
@@ -77,7 +77,13 @@ impl SemanticGraphStore {
     /// against the same account, for as long as it lives
     /// ([`DemandCostReceipt::reserve_retention`]).
     ///
+    /// The candidate's own reservation also claims every evidence page its
+    /// carrier holds that no earlier admission claimed, so a wide candidate
+    /// is refused for the whole footprint it would newly retain
+    /// ([`reserve_retained_with_evidence`]).
+    ///
     /// [`DemandCostReceipt::reserve_retention`]: crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt::reserve_retention
+    /// [`reserve_retained_with_evidence`]: verter_session_query::facts::receipt::reserve_retained_with_evidence
     pub(super) fn reserve_memo_candidate(
         &self,
         entry: &MemoEntry,
@@ -86,9 +92,11 @@ impl SemanticGraphStore {
             .cost_receipt
             .reserve_retention(self.retention_account())
         {
-            Ok(()) => self
-                .retention_account()
-                .reserve(ChargeClass::Retained, entry.retained_footprint_bytes()),
+            Ok(()) => verter_session_query::facts::receipt::reserve_retained_with_evidence(
+                self.retention_account(),
+                entry.retained_footprint_bytes(),
+                &[&entry.read_set_signature.facts],
+            ),
             Err(refusal) => RetentionAdmission::Refused(refusal),
         };
         match admission {

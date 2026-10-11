@@ -1,0 +1,115 @@
+{
+  "schema": 1,
+  "kind": "TurboVocabulary",
+  "profile": "turbo-8.0.23",
+  "staticOnly": true,
+  "sources": {
+    "frame": "https://raw.githubusercontent.com/hotwired/turbo/v8.0.23/src/elements/frame_element.js",
+    "stream": "https://raw.githubusercontent.com/hotwired/turbo/v8.0.23/src/elements/stream_element.js",
+    "streamSource": "https://raw.githubusercontent.com/hotwired/turbo/v8.0.23/src/elements/stream_source_element.js",
+    "actions": "https://raw.githubusercontent.com/hotwired/turbo/v8.0.23/src/core/streams/stream_actions.js",
+    "visitActions": "https://raw.githubusercontent.com/hotwired/turbo/v8.0.23/src/util.js",
+    "frameRelations": "https://raw.githubusercontent.com/hotwired/turbo/v8.0.23/src/core/frames/frame_controller.js",
+    "documentFrameRelations": "https://raw.githubusercontent.com/hotwired/turbo/v8.0.23/src/core/frames/frame_redirector.js",
+    "autoscroll": "https://raw.githubusercontent.com/hotwired/turbo/v8.0.23/src/core/frames/frame_renderer.js",
+    "prefetchMeta": "https://raw.githubusercontent.com/hotwired/turbo/v8.0.23/src/observers/link_prefetch_observer.js",
+    "attributes": "https://turbo.hotwired.dev/reference/attributes",
+    "frames": "https://turbo.hotwired.dev/reference/frames",
+    "streams": "https://turbo.hotwired.dev/reference/streams",
+    "pinnedImplementation": "https://github.com/hotwired/turbo/tree/v8.0.23/src"
+  },
+  "elements": [
+    {
+      "name": "turbo-frame",
+      "attributes": {
+        "id": "frame identity",
+        "src": "URL fact; never fetched",
+        "loading": ["eager", "lazy"],
+        "target": "frame id or _top/_self/_parent keyword; see frameKeywordRules",
+        "disabled": "presence",
+        "autoscroll": "presence",
+        "refresh": ["morph"],
+        "recurse": "space-separated frame ids"
+      },
+      "observedStateOnly": ["busy", "complete", "aria-busy"]
+    },
+    {
+      "name": "turbo-stream",
+      "attributes": {
+        "action": "streamActions",
+        "target": "element id",
+        "targets": "CSS selector through shared CSS3 parser",
+        "method": "replace/update: morph; refresh: replace or morph",
+        "request-id": "opaque request id",
+        "scroll": ["reset", "preserve"]
+      },
+      "content": "HTML template element; no execution of its contents"
+    },
+    {
+      "name": "turbo-stream-source",
+      "attributes": {
+        "src": "source URL fact; no EventSource or WebSocket connection"
+      }
+    }
+  ],
+  "streamActions": [
+    "append",
+    "prepend",
+    "replace",
+    "update",
+    "remove",
+    "before",
+    "after",
+    "refresh"
+  ],
+  "streamRules": "replace/update may name method=morph; refresh may name method/scroll and request-id without a target. Other actions describe target(s) and template content statically, never perform mutations.",
+  "frameKeywords": ["_top", "_self", "_parent"],
+  "frameKeywordRules": {
+    "_self": "Frame-origin navigation: the current frame controller looks up the literal document id _self before falling back to the current frame. An enabled turbo-frame with id=_self takes precedence; retain its authored definition/reference/rename relation. Without that literal frame, the current frame is selected even when its target is _top; retain the current-frame relation, with no missing-frame diagnostic or literal-ID rename relation. A disabled literal frame prevents interception rather than falling back to the current frame. Document-origin navigation: the redirector selects only an enabled literal turbo-frame with id=_self; without one, it selects no frame. Partial target population remains unknown.",
+    "_parent": "Frame-origin navigation: the current frame controller resolves the nearest ancestor turbo-frame from its parent element, without literal-id precedence. With no ancestor, that controller does not intercept; no missing-frame diagnostic or authored frame-id rename relation. With an ancestor, retain the ancestor relation and its disabled-state condition. Document-origin navigation: the frame redirector resolves data-turbo-frame by literal document id, including _parent, selecting only an enabled turbo-frame. Retain the authored definition/reference/rename relation to that literal ID. The selected frame controller then resolves its own ancestor, falling back to the selected frame if no ancestor exists. An absent or disabled literal _parent frame is not selected by the redirector; do not infer an ancestor relation or diagnose a missing reserved target. Partial ancestry or target population remains unknown."
+  },
+  "dataAttributes": {
+    "data-turbo": ["true", "false"],
+    "data-turbo-track": ["reload", "dynamic"],
+    "data-turbo-frame": "frame id or frame keyword",
+    "data-turbo-preload": "presence",
+    "data-turbo-prefetch": ["false"],
+    "data-turbo-action": ["advance", "replace", "restore"],
+    "data-turbo-permanent": "presence; requires id",
+    "data-turbo-temporary": "presence",
+    "data-turbo-eval": ["false"],
+    "data-turbo-method": "HTTP method token",
+    "data-turbo-stream": "presence",
+    "data-turbo-confirm": "text",
+    "data-turbo-submits-with": "text",
+    "data-autoscroll-block": ["start", "end", "center", "nearest"],
+    "data-autoscroll-behavior": ["auto", "smooth"]
+  },
+  "observedStateOnly": {
+    "data-turbo-preview": "visit preview",
+    "data-turbo-visit-direction": ["forward", "back", "none"],
+    "disabled": "form submitter",
+    "aria-busy": "html/form/frame",
+    "busy": "frame"
+  },
+  "meta": {
+    "turbo-cache-control": ["no-cache", "no-preview"],
+    "turbo-visit-control": ["reload"],
+    "turbo-root": "URL root",
+    "turbo-refresh-method": ["replace", "morph"],
+    "turbo-refresh-scroll": ["reset", "preserve"],
+    "turbo-prefetch": ["false"],
+    "turbo-prefetch-cache-time": "number conversion of literal milliseconds; zero/NaN fall back to the pinned default, without simulating a cache"
+  },
+  "standardHtml": ["download", "view-transition meta remain shared HTML facts"],
+  "partial": "Template holes and Ruby helpers preserve unknown tokens/population completeness; never fabricate frame ids or selector matches.",
+  "excluded": [
+    "navigation execution",
+    "fetch",
+    "morph execution",
+    "cache behavior simulation",
+    "stream execution",
+    "Rails helper evaluation",
+    "runtime state observation"
+  ]
+}

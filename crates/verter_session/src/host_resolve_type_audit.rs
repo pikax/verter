@@ -156,9 +156,6 @@ impl TypeResolutionRequestError {
             QueryError::UnstableState { attempts } => Some(Self::UnstableState {
                 attempts: *attempts,
             }),
-            QueryError::SignatureOverflow => Some(Self::Other(Arc::from(
-                "semantic operand dependency signature overflow",
-            ))),
             QueryError::ForeignSemanticOperand => Some(Self::Other(Arc::from(
                 "semantic operand belongs to a different graph",
             ))),

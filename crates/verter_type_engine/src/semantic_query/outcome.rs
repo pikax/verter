@@ -169,7 +169,6 @@ impl IncompleteReason {
             QueryError::UnsupportedIntrinsic { .. } => Self::Unsupported,
             QueryError::Miss
             | QueryError::UnstableState { .. }
-            | QueryError::SignatureOverflow
             | QueryError::ForeignSemanticOperand
             | QueryError::StaleSemanticOperand
             | QueryError::IncompleteSemanticOperand { .. } => Self::UnsettledInput,

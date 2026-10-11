@@ -1,0 +1,47 @@
+{
+  "schema": "StencilActivation",
+  "version": 1,
+  "family": "stencil",
+  "activationOwner": "FWA1",
+  "setting": "frameworks.stencil",
+  "modes": {
+    "auto": "Require admitted resolved @stencil/core package role and file-local canonical decorator symbols",
+    "on": "Explicitly request Stencil but still require an admitted resolved package role and canonical decorator identity",
+    "off": "Inactive; zero adapter, TypeInfo, index, tsgo or contributor work"
+  },
+  "row": {
+    "profile": "stencil-tsx",
+    "extension": ".tsx",
+    "packageRole": "resolved @stencil/core",
+    "versionSource": "resolved installed version",
+    "fileEvidence": "Decorators resolved through TS symbols to @stencil/core; @Component establishes a component class",
+    "exclusiveWith": ["react", "preact", "solid", "qwik"],
+    "selection": "FWA1 record selects exactly one framework; a package in the workspace alone never claims all .tsx files"
+  },
+  "identity": {
+    "aliases": "Resolve imported aliases/re-exports to the canonical declaration",
+    "forbidden": [
+      "regex",
+      "decorator spelling",
+      "class naming",
+      "extension alone",
+      "config execution",
+      "local or other-package same-named decorators"
+    ]
+  },
+  "ordinaryInputs": [
+    {
+      "path": "src/components.d.ts",
+      "role": "ordinary TS type input; stale or missing reported, never regenerated",
+      "producer": "STN2",
+      "acceptance": "STN2-AC4"
+    },
+    {
+      "path": "stencil.config.ts",
+      "role": "static CENV1C outputTargets facts; computed values unknown; not activation authority",
+      "producer": "STN2",
+      "acceptance": "STN2-AC1"
+    }
+  ],
+  "unknownOrUnsupported": "Unadmitted or unresolved release is unsupported with reason, never forced active"
+}

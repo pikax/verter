@@ -1,0 +1,1280 @@
+{
+  "id": "export-activation-inventory.v1",
+  "schema": 1,
+  "contractNode": "EAK0",
+  "finalOwner": "expansion.kernel: typed immutable universal catalog and demand-selected kernel services",
+  "currentOwner": "framework-shaped host/session registries and untagged public boundaries",
+  "describesHead": {
+    "landingTitle": "docs(arch): record the parser decision, ownership, reuse and lineage (#812)",
+    "date": "2026-10-09"
+  },
+  "companionCaseTable": "export-activation-case-table.v1.json",
+  "inherits": {
+    "nodes": ["UAK0", "VID0", "CAT0", "PAR0", "DEM0"],
+    "files": [
+      "tests/kernel/UAK0/products/deletion-retag-ledger.v1.json",
+      "tests/kernel/VID0/products/identity-inventory.v1.json",
+      "tests/kernel/CAT0/products/catalog-inventory.v1.json",
+      "tests/kernel/PAR0/products/parser-inventory.v1.json",
+      "tests/kernel/DEM0/products/demand-inventory.v1.json"
+    ],
+    "rule": "UAK0, VID0, CAT0, PAR0 and DEM0 rows keep their owners except DEM-D04, transferred to EAK2-AC1 in both decisions; EAK0 references the remaining rows by id. DEM0 DEM-O09 (canonical role evidence read by P2 and P3, EAK1-AC2) is the outcome EAK0 specifies; it does not move it. EAK0 adds role-registry row kinds, contract rules ER01-ER30, outcomes EAK-O01-EAK-O10, consumers EAK-C01-EAK-C09, displaced routes EAK-D01-EAK-D14, boundaries EAK-B01-EAK-B04 and findings EAK-F01-EAK-F07. TIF1, COX0 and CPF1 are not successors of EAK0, so their rows are referenced only."
+  },
+  "subblocks": [
+    {
+      "n": 1,
+      "subblock": "Canonical package/export role registry",
+      "rules": ["ER01", "ER02", "ER03", "ER04"]
+    },
+    {
+      "n": 2,
+      "subblock": "Capture imports, namespace/destructuring, aliases, immutable const chains and local barrels/re-exports",
+      "rules": ["ER05", "ER06", "ER07", "ER08", "ER09"]
+    },
+    {
+      "n": 3,
+      "subblock": "Shadowing, mutation, wrapper and conditional failure",
+      "rules": ["ER10", "ER11", "ER12", "ER13", "ER14", "ER15", "ER16", "ER17"]
+    },
+    {
+      "n": 4,
+      "subblock": "Package-resolution and read-set provenance",
+      "rules": ["ER18", "ER19", "ER20", "ER21", "ER22"]
+    },
+    {
+      "n": 5,
+      "subblock": "Activation evidence for verticals",
+      "rules": ["ER23", "ER24", "ER25", "ER26", "ER27", "ER28"]
+    },
+    {
+      "n": 6,
+      "subblock": "Positive and same-spelling negative corpus (EAK1 builds and runs it)",
+      "rules": ["ER29", "ER30"]
+    }
+  ],
+  "roleRowKinds": [
+    {
+      "kind": "PackageExport",
+      "key": "RoleId (FrameworkProfileId or ProjectProfileId, RoleKey)",
+      "holds": "ordered explicit CanonicalExport entries (package name, export subpath, export name, Value|Type), phase Projection|PostSnapshot, declared regions",
+      "home": "T03 row of CatalogSnapshot; T04 publication is the referenced PPR0T accepting surface",
+      "existsAtHead": false,
+      "owner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC2"
+    },
+    {
+      "kind": "ProfileIntrinsic",
+      "key": "RoleId",
+      "holds": "region role, reserved name, scope law Reserved|UnshadowedFree, release",
+      "home": "T03 row of CatalogSnapshot",
+      "existsAtHead": false,
+      "owner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC2"
+    }
+  ],
+  "outcomeKinds": ["Proven", "NotRole", "Unproven", "Ambiguous", "BudgetExceeded", "Cancelled"],
+  "notRoleCauses": [
+    "Shadowed",
+    "Mutable",
+    "LocalDeclaration",
+    "Wrapped",
+    "Conditional",
+    "Cycle",
+    "Unbound",
+    "Unsupported",
+    "TypeOnlyLink",
+    "NotCanonical",
+    "OutsideRegion"
+  ],
+  "contractRules": [
+    {
+      "id": "ER01",
+      "group": "registry",
+      "rule": "Role rows are catalog data. Each T03 semantic-profile row (CAT0) carries its role rows, and each T04 project-profile row carries its project roles. EAK1 owns the shared role vocabulary and T03 role data; PPR0T remains the sole owner of T04 publication through its typed project-profile contribution interface (PPR0T-AC1, PPR0T-AC4). NUX0 supplies Nuxt-specific captured contributions through that interface; it neither owns the row family nor writes a parallel registry. Adding a role is a data change (CAT0 CR13). Rows are ordered by the canonical encoding of RoleId (CAT0 CR05) and are part of the CatalogSnapshot identity (VID0 I09). There is no role table beside the snapshot.",
+      "owner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC2"
+    },
+    {
+      "id": "ER02",
+      "group": "registry",
+      "rule": "A role row declares exactly one origin: PackageExport { entries } listing every admitted CanonicalExport (package name, export subpath, export name, Value|Type space) of the exact release explicitly, with no prefix, glob or package family; or ProfileIntrinsic { region role, name, scope law Reserved|UnshadowedFree }.",
+      "owner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC2"
+    },
+    {
+      "id": "ER03",
+      "group": "registry",
+      "rule": "A role row declares its phase: Projection (decidable from the ER05-ER09 link forms without types) or PostSnapshot (needs the shared type resolver). A PostSnapshot role never activates projection and feeds DEM0 P3 only; it is never promoted to Projection.",
+      "owner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC2"
+    },
+    {
+      "id": "ER04",
+      "group": "registry",
+      "rule": "A profile intrinsic is proven only inside its declared region role, under its scope law, for the admitted release. An import of the same name from a package is not intrinsic evidence; the call outside the region is NotRole { OutsideRegion }.",
+      "owner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC2"
+    },
+    {
+      "id": "ER05",
+      "group": "capture",
+      "rule": "Captured links: named import (including renamed); namespace import plus a static dot member or string-literal computed member; const object destructuring of a namespace binding with identifier or string-literal keys; immutable const alias whose initializer is a link, through parentheses and the erasable TS wrappers as, satisfies, non-null and angle-bracket assertion; local barrels (export { x as y } from, export *, export * as ns, import then export {}).",
+      "owner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC2"
+    },
+    {
+      "id": "ER06",
+      "group": "capture",
+      "rule": "Not captured: dynamic import(), require, module.exports and CommonJS interop, optional-chained members, non-literal computed keys and rest elements (NotRole { Unsupported }); a default import of a role export the release does not declare as default (NotCanonical); a free reference with no binding (NotRole { Unbound }) unless ER09 binds it through a project-profile contribution.",
+      "owner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC2"
+    },
+    {
+      "id": "ER07",
+      "group": "capture",
+      "rule": "A type-only link carries only Type-space roles; a Value-space role reached through one is NotRole { TypeOnlyLink }.",
+      "owner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC2"
+    },
+    {
+      "id": "ER08",
+      "group": "capture",
+      "rule": "Chains are followed one module hop at a time through a captured RoleResolutionSnapshot: a projection-safe view of the existing module resolution owner's answers, negative probes, package-manifest facts and installed releases, plus the parse owner's export inventories. EAK1 implements the capture/view boundary as part of its evidence producer; it creates no second resolver or manifest authority and does not wait for a new PM implementation. Each hop reads the captured resolution answer and the hop's (SourceUnitId, ContentId) export inventory (the IndexedReady export table, PAR0's parse once per identity). All reads belong to one coherent captured basis; missing facts produce Unproven and require a new capture before retry. Stage one performs no live file, manifest or resolver reads. A hop never reads TypeScript, the shared type resolver (ProjectSemanticDispatch), TypeInfo or a package's declaration bodies. It also never rescans raw source.",
+      "owner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC2"
+    },
+    {
+      "id": "ER09",
+      "group": "capture",
+      "rule": "The terminal is canonical only when the hop resolves into a package-backed module (workspace_is_package_backed) whose manifest name and export subpath equal a role-row entry. A specifier that a paths or alias mapping sends to a workspace file is workspace-owned: NotRole { NotCanonical }, whatever its bytes. A project-profile contribution hop is a link only when the profile generated facts declare it, and it records that contribution identity.",
+      "owner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC2"
+    },
+    {
+      "id": "ER10",
+      "group": "failure",
+      "rule": "Shadowing: the binding lexical scoping resolves for the head (blocks, parameters, catch, class and function names, hoisting) is the only first link; a nearer non-link binding is NotRole { Shadowed }.",
+      "owner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC1"
+    },
+    {
+      "id": "ER11",
+      "group": "failure",
+      "rule": "Mutation: only import and const bindings are links. let, var, parameters and object properties are NotRole { Mutable } even when never reassigned; a local function or class declaration of the same name is NotRole { LocalDeclaration }; a re-export of a mutable workspace binding is Mutable.",
+      "owner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC1"
+    },
+    {
+      "id": "ER12",
+      "group": "failure",
+      "rule": "Wrappers: a call, .bind, new, spread, or object or array literal around a link is NotRole { Wrapped }.",
+      "owner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC1"
+    },
+    {
+      "id": "ER13",
+      "group": "failure",
+      "rule": "Conditionals: ?:, &&, ||, ??, destructuring or parameter defaults and assignment under control flow are NotRole { Conditional }.",
+      "owner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC1"
+    },
+    {
+      "id": "ER14",
+      "group": "failure",
+      "rule": "An unresolved hop or a package with no proven installed release is Unproven { needs }: never a warm negative, never a name guess; later proof mints a new evidence identity (DEM0 DR24).",
+      "owner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC1"
+    },
+    {
+      "id": "ER15",
+      "group": "failure",
+      "rule": "Two export * providers supplying the name with different terminals are Ambiguous { candidates } and prove no role. Two paths to one terminal are not ambiguous; the recorded chain is the least by canonical encoding.",
+      "owner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC1"
+    },
+    {
+      "id": "ER16",
+      "group": "failure",
+      "rule": "Revisiting a (module, export name) pair is NotRole { Cycle }; exhausting the BudgetProfile hop bound is BudgetExceeded (ReturnOnly).",
+      "owner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC1"
+    },
+    {
+      "id": "ER17",
+      "group": "failure",
+      "rule": "Closed outcome set: Proven, NotRole { cause }, Unproven { needs }, Ambiguous { candidates }, BudgetExceeded, Cancelled. Only Proven activates. Unproven, Ambiguous, BudgetExceeded and Cancelled are ReturnOnly (DEM0 DR30). NotRole is definitive and cacheable only when every read in its read set completed.",
+      "owner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC1"
+    },
+    {
+      "id": "ER18",
+      "group": "provenance",
+      "rule": "RoleEvidence::Proven carries: - site: (SourceUnitId, ContentId, authored range); - a separate current SourceRevision publication stamp, excluded from evidence identity; - role: the RoleId; - chain: hops in authored-to-terminal order; - terminal: the CanonicalExport; - package: package name plus the ReleaseId the activation record admits; - read_set. Hop kinds are LocalImport, NamespaceMember, Destructure, ConstAlias, ReExport { module, specifier bytes, export name } and ProjectContribution { ProjectProfileId, contribution identity }.",
+      "owner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC2"
+    },
+    {
+      "id": "ER19",
+      "group": "provenance",
+      "rule": "The read set lists, in canonical encoding order: - the site unit's content-addressed parse-domain facts identity; - every hop module's (SourceUnitId, ContentId) export inventory; - the content identity of every captured module-resolution answer consulted, including negative probes; - the manifest identity of each package touched (name and export-map digest) and its installed release; - the role row's identity inside CatalogSnapshot; - any project-profile contribution identity. Evidence identity is the canonical tagged encoding of (site, role, outcome, read-set identity) (VID0 R12, R13). It carries no path string and no backend or process identity (VID0 R14). Read-set identity uses canonical fact values, never host revision tokens or snapshot generations. Capture generations and publication stamps remain validity fences; they are revalidated even when the fact values are unchanged.",
+      "owner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC2"
+    },
+    {
+      "id": "ER20",
+      "group": "provenance",
+      "rule": "Invalidation follows the read set exactly. An edit to a member invalidates exactly the evidence that read it, and an edit to a non-member invalidates nothing. Restoring all consulted content values yields the same evidence identity, and incremental evidence equals fresh evidence for that basis. The current publication stamp may differ and must be renewed; old work cannot publish merely because content reverted. DEM0 DR09 includes the ordered role-evidence identities in the stage-one plan identity. A change to a consulted captured fact, including a PM resolution or manifest fact, requires revalidation and reaches stage one only as a new stage-one plan when its evidence identity changes, never as an in-place edit of the current generation (DEM0 DR12, DR13).",
+      "owner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC3"
+    },
+    {
+      "id": "ER21",
+      "group": "provenance",
+      "rule": "Query keys stay content-free; validity is the read set, revalidated on every warm hit; work admitted under a superseded epoch never publishes (DEM0 DR25).",
+      "owner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC3"
+    },
+    {
+      "id": "ER22",
+      "group": "provenance",
+      "rule": "Deterministic order: evidence by site range then RoleId encoding; chains authored to terminal; ambiguity candidates by canonical encoding; registration, discovery and completion order never decide.",
+      "owner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC2"
+    },
+    {
+      "id": "ER23",
+      "group": "exposure",
+      "rule": "Projection-phase evidence is DEM0 P2 role input (DR07); PostSnapshot evidence is P3 input (DR11). Verticals read evidence by RoleId and never re-derive a role from an identifier, callee name, import-source string, file extension or text search.",
+      "owner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC2"
+    },
+    {
+      "id": "ER24",
+      "group": "exposure",
+      "rule": "A projection region opens only from Proven evidence of a Projection role whose row declares that region (for example the template option of a proven Vue defineComponent call). Region geometry and codecs are EMB0.",
+      "owner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC2"
+    },
+    {
+      "id": "ER25",
+      "group": "exposure",
+      "rule": "No oracle: evidence production calls no TypeScript provider and no TCM3 stage and executes no package. PostSnapshot roles use the shared type resolver only inside P3, through the exact-route authority resolve_authored_reference_route.",
+      "owner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC4"
+    },
+    {
+      "id": "ER26",
+      "group": "exposure",
+      "rule": "Under the DEM0 Explain purpose (DR17) consumers surface the Proven chain and the cause of every other outcome; audit capture is optional and required evidence state survives capture off.",
+      "owner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC2"
+    },
+    {
+      "id": "ER27",
+      "group": "exposure",
+      "rule": "Evidence is computed only for role sites a demand reaches whose head binds to an import, a namespace or a captured contribution; each hop module export inventory is read once per (SourceUnitId, ContentId); a unit with no such binding does no evidence work beyond its existing import inventory (DEM0 DR26, DR27).",
+      "owner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC4"
+    },
+    {
+      "id": "ER28",
+      "group": "exposure",
+      "rule": "A TypeInfoRequest never carries a role name, package spelling or specifier as a selector; framework surfaces are addressed through P3 claims (TIF0 owns the request vocabulary).",
+      "owner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC2"
+    },
+    {
+      "id": "ER29",
+      "group": "corpus",
+      "rule": "The corpus is export-activation-case-table.v1.json; each positive case has a same-spelling negative differing only in the failing link. EAK1 builds and runs it in its existing test lanes; EAK0 ships no test.",
+      "owner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC-R1"
+    },
+    {
+      "id": "ER30",
+      "group": "corpus",
+      "rule": "Runtime compile backends keep the official compiler recognition of intrinsics under Compiled-Output Conformance (EAK-B01); a backend needing a PackageExport role reads RoleEvidence like any consumer.",
+      "owner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC-R1"
+    }
+  ],
+  "outcomes": [
+    {
+      "id": "EAK-O01",
+      "outcome": "Shared role vocabulary and T03 role rows with origin and phase (ER01-ER04); T04 publication remains PPR0T-AC1/AC4",
+      "owner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC2"
+    },
+    {
+      "id": "EAK-O02",
+      "outcome": "Link capture: imports, namespace members, destructuring, const alias chains and local barrels (subblock 2; ER05-ER09)",
+      "owner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC2"
+    },
+    {
+      "id": "EAK-O03",
+      "outcome": "Shadowing, mutation, wrapper, conditional, unresolved, ambiguous and cycle failure with the closed outcome set (subblock 3; ER10-ER17)",
+      "owner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC1"
+    },
+    {
+      "id": "EAK-O04",
+      "outcome": "RoleEvidence record, read set, identity and deterministic order (subblock 4; ER18, ER19, ER22)",
+      "owner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC2"
+    },
+    {
+      "id": "EAK-O05",
+      "outcome": "Read-set invalidation, revert equality and no degraded warming (subblock 4; ER20, ER21)",
+      "owner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC3"
+    },
+    {
+      "id": "EAK-O06",
+      "outcome": "Evidence exposure to verticals, Explain and the request boundary (subblock 5; ER23, ER24, ER26, ER28)",
+      "owner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC2"
+    },
+    {
+      "id": "EAK-O07",
+      "outcome": "No oracle and bounded, demand-scoped evidence work (subblock 5; ER25, ER27)",
+      "owner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC4"
+    },
+    {
+      "id": "EAK-O08",
+      "outcome": "Positive and same-spelling negative corpus EC01-EC30, built and run (subblock 6; ER29, ER30)",
+      "owner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC-R1"
+    },
+    {
+      "id": "EAK-O09",
+      "outcome": "Nuxt-specific captured auto-import contributions submitted through the PPR0T typed interface as ProjectContribution links",
+      "owner": "NUX0",
+      "successorPath": ["EAK0", "EMB0", "FMK0", "VIM1", "PM4", "SM3", "NUX0"],
+      "receivingAcceptance": "NUX0-AC1",
+      "acceptingOwner": "PPR0T",
+      "acceptingAcceptance": ["PPR0T-AC1", "PPR0T-AC4"]
+    },
+    {
+      "id": "EAK-O10",
+      "outcome": "Executable ownership validator over tests/kernel/EAK0/products/ and its negative controls",
+      "owner": "UAO0",
+      "successorPath": ["EAK0", "EMB0", "EAK1", "UAO0"],
+      "receivingAcceptance": "UAO0-AC-R1"
+    }
+  ],
+  "consumers": [
+    {
+      "id": "EAK-C01",
+      "consumer": "Vue IDE projection: options API, binding views, script setup and props facts",
+      "reads": ["Projection evidence", "ProfileIntrinsic rows"],
+      "paths": ["crates/verter_compiler/src/ide/vue_projection/"],
+      "owner": "EAK2",
+      "successorPath": ["EAK0", "EMB0", "EAK1", "EAK2"],
+      "receivingAcceptance": "EAK2-AC1"
+    },
+    {
+      "id": "EAK-C02",
+      "consumer": "Vue embedded-template region activation from a proven defineComponent call (ER24)",
+      "reads": ["Projection evidence"],
+      "paths": [
+        "crates/verter_session/src/framework/embedded_activation.rs",
+        "crates/verter_compiler/src/framework_common/vue_embedded_template.rs"
+      ],
+      "pathsNote": "Both files are new in EAK1; absent at this head.",
+      "owner": "EAK1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"],
+      "receivingAcceptance": "EAK1-AC2"
+    },
+    {
+      "id": "EAK-C03",
+      "consumer": "Consumers of the typed Vue API classification: MCP tools, LSP hover, completion, organize-imports and document symbols, file-usage provide/inject facts",
+      "reads": ["evidence-minted classification"],
+      "paths": [
+        "crates/verter_mcp/src/server.rs",
+        "crates/verter_lsp/src/features/",
+        "crates/verter_semantic/src/analysis/file_usage.rs"
+      ],
+      "owner": "EAK2",
+      "successorPath": ["EAK0", "EMB0", "EAK1", "EAK2"],
+      "receivingAcceptance": "EAK2-AC1"
+    },
+    {
+      "id": "EAK-C04",
+      "consumer": "Template-class and binding-return wrapper facts",
+      "reads": ["PostSnapshot evidence"],
+      "paths": [
+        "crates/verter_session/src/host_manage/template_class_facts.rs",
+        "crates/verter_type_engine/src/project_semantic_dispatch/reactive_wrapper.rs"
+      ],
+      "owner": "EAK2",
+      "successorPath": ["EAK0", "EMB0", "EAK1", "EAK2"],
+      "receivingAcceptance": "EAK2-AC1"
+    },
+    {
+      "id": "EAK-C05",
+      "consumer": "Svelte script-fact resolved validation (Snippet, legacy dispatcher)",
+      "reads": ["Projection evidence", "PostSnapshot evidence"],
+      "paths": [
+        "crates/verter_session/src/framework/script_facts.rs",
+        "crates/verter_semantic/src/analysis/framework_facts/svelte.rs"
+      ],
+      "owner": "EAK2",
+      "successorPath": ["EAK0", "EMB0", "EAK1", "EAK2"],
+      "receivingAcceptance": "EAK2-AC1"
+    },
+    {
+      "id": "EAK-C06",
+      "consumer": "Vue Custom Element producer and consumer retrofit (defineCustomElement and component definitions)",
+      "reads": ["Projection evidence"],
+      "paths": [],
+      "pathsNote": "No custom-element producer exists at this head.",
+      "owner": "VCE0",
+      "successorPath": ["EAK0", "EMB0", "EAK1", "VCE0"],
+      "receivingAcceptance": "VCE0-AC2"
+    },
+    {
+      "id": "EAK-C07",
+      "consumer": "Vue lint rules migrated onto the lint service",
+      "reads": ["evidence by RoleId"],
+      "paths": ["crates/verter_diagnostics/src/rules/"],
+      "owner": "LVU1",
+      "successorPath": [
+        "EAK0",
+        "EMB0",
+        "FMK0",
+        "UAP0",
+        "LSO0",
+        "LSO2",
+        "LSO4",
+        "LSO5",
+        "LSO8",
+        "ACT1",
+        "LK2",
+        "LK4",
+        "LVU1-DIRECTIVES",
+        "LVU1-STRUCTURE",
+        "LVU1"
+      ],
+      "receivingAcceptance": "LVU1-AC1"
+    },
+    {
+      "id": "EAK-C08",
+      "consumer": "Nuxt-specific captured auto-import contributions through the generic project-profile service",
+      "reads": ["ProjectContribution links"],
+      "paths": [],
+      "pathsNote": "No auto-import contribution reaches role recognition at this head.",
+      "owner": "NUX0",
+      "successorPath": ["EAK0", "EMB0", "FMK0", "VIM1", "PM4", "SM3", "NUX0"],
+      "receivingAcceptance": "NUX0-AC1",
+      "acceptingOwner": "PPR0T",
+      "acceptingAcceptance": ["PPR0T-AC1", "PPR0T-AC4"]
+    },
+    {
+      "id": "EAK-C09",
+      "consumer": "Embedded-region activation by binding-resolved tags and sinks",
+      "reads": ["evidence by RoleId"],
+      "paths": [],
+      "pathsNote": "Interpretation activation is new in INT5.",
+      "owner": "INT5",
+      "successorPath": ["EAK0", "EMB0", "FMK0", "UAP0", "LSO0", "LSO2", "INT1", "INT2", "INT5"],
+      "receivingAcceptance": "INT5-AC5"
+    }
+  ],
+  "referencedConsumers": [
+    {
+      "id": "DEM-O09",
+      "node": "DEM0",
+      "why": "Canonical role evidence read by P2 (projection-time) and P3 (post-snapshot); EAK0 specifies the outcome DEM0 assigned to EAK1",
+      "owner": "EAK1",
+      "receivingAcceptance": "EAK1-AC2"
+    },
+    {
+      "id": "DR07",
+      "node": "DEM0",
+      "why": "Stage one reads EAK1 projection-time role evidence",
+      "owner": "COX0",
+      "receivingAcceptance": "COX0-AC2"
+    },
+    {
+      "id": "DR11",
+      "node": "DEM0",
+      "why": "Stage two uses canonical role provenance that needs resolution",
+      "owner": "COX0",
+      "receivingAcceptance": "COX0-AC2"
+    },
+    {
+      "id": "DEM-C07",
+      "node": "DEM0",
+      "why": "Host audit runtime receiving plan records",
+      "owner": "COX0",
+      "receivingAcceptance": "COX0-AC4"
+    }
+  ],
+  "chartedConsumers": {
+    "line": "Role identification by canonical symbol (EAK0 provenance through the owner facts), never by identifier spelling.",
+    "note": "Each listed node is a successor of EAK0 and owns this obligation in its own charter; EAK0 assigns them nothing.",
+    "nodes": [
+      "CPD1-ASTRO",
+      "CPD1-NEXT",
+      "CPD1-NUXT",
+      "CPD1-SVELTEKIT",
+      "CTX1-ANGULAR",
+      "CTX1-LIT",
+      "CTX1-PREACT",
+      "CTX1-QWIK",
+      "CTX1-REACT",
+      "CTX1-SOLID",
+      "CTX1-SVELTE",
+      "CTX1-VUE",
+      "EFF3-ALPINE",
+      "EFF3-ANGULAR",
+      "EFF3-EMBER",
+      "EFF3-LIT",
+      "EFF3-MARKO",
+      "EFF3-PREACT",
+      "EFF3-QWIK",
+      "EFF3-REACT",
+      "EFF3-SOLID",
+      "EFF3-STENCIL",
+      "EFF3-SVELTE",
+      "EFF3-VUE",
+      "FWD1-ANGULAR",
+      "FWD1-ASTRO",
+      "FWD1-EMBER",
+      "FWD1-LIT",
+      "FWD1-MARKO",
+      "FWD1-MDX",
+      "FWD1-PREACT",
+      "FWD1-QWIK",
+      "FWD1-REACT",
+      "FWD1-SOLID",
+      "FWD1-STENCIL",
+      "FWD1-SVELTE",
+      "FWD1-VUE",
+      "HYD1-ANGULAR",
+      "HYD1-PREACT",
+      "HYD1-REACT",
+      "HYD1-SOLID",
+      "HYD1-SVELTE",
+      "HYD1-VUE",
+      "RND1-ALPINE",
+      "RND1-ANGULAR",
+      "RND1-ASTRO",
+      "RND1-EMBER",
+      "RND1-LIT",
+      "RND1-MARKO",
+      "RND1-MDX",
+      "RND1-PREACT",
+      "RND1-QWIK",
+      "RND1-REACT",
+      "RND1-SOLID",
+      "RND1-STENCIL",
+      "RND1-SVELTE",
+      "RND1-VUE",
+      "TRN1-ANGULAR",
+      "TRN1-ASTRO",
+      "TRN1-NEXT",
+      "TRN1-NUXT",
+      "TRN1-QWIK",
+      "TRN1-SOLID",
+      "TRN1-SVELTEKIT"
+    ]
+  },
+  "displacedRoutes": [
+    {
+      "id": "EAK-D01",
+      "category": "central-framework-switch",
+      "population": "duplicated-macro-or-import-recognizer",
+      "unit": "Shared Vue API classification by specifier spelling fills AnalyzedImportBinding.vue_api",
+      "symbols": [
+        "is_vue_source",
+        "classify_vue_api",
+        "analyze_import_declaration",
+        "VueApiClassification"
+      ],
+      "paths": [
+        "crates/verter_semantic/src/analysis/imports.rs",
+        "crates/verter_semantic/src/analysis/classify.rs",
+        "crates/verter_session_query/src/analysis/types.rs"
+      ],
+      "disposition": "replace",
+      "successor": "PackageExport evidence; consumers keep a typed classification minted from evidence (EAK-C03)",
+      "deletionOwner": "EAK2",
+      "receivingAcceptance": "EAK2-AC1",
+      "productionCapable": true,
+      "successorPath": ["EAK0", "EMB0", "EAK1", "EAK2"]
+    },
+    {
+      "id": "EAK-D02",
+      "category": "name-shape-role-recognizer",
+      "population": "duplicated-macro-or-import-recognizer",
+      "unit": "Bare-callee Vue API detection in the verter_parser script usage walk, feeding file-usage provide/inject, lifecycle and watcher facts",
+      "symbols": ["detect_vue_api_call", "check_expression_for_usage"],
+      "paths": [
+        "crates/verter_parser/src/utils/oxc/vue/script/usage.rs",
+        "crates/verter_parser/src/utils/oxc/vue/script/setup.rs"
+      ],
+      "disposition": "replace",
+      "successor": "PackageExport evidence",
+      "deletionOwner": "EAK2",
+      "receivingAcceptance": "EAK2-AC1",
+      "productionCapable": true,
+      "successorPath": ["EAK0", "EMB0", "EAK1", "EAK2"]
+    },
+    {
+      "id": "EAK-D03",
+      "category": "central-framework-switch",
+      "population": "duplicated-macro-or-import-recognizer",
+      "unit": "Macro-usage visitor helper set built from imp.source == \"vue\"",
+      "symbols": ["build_script_analysis", "vue_value_imports", "MacroUsageVisitor::is_vue_helper"],
+      "paths": [
+        "crates/verter_semantic/src/analysis/build.rs",
+        "crates/verter_semantic/src/analysis/macro_usage.rs"
+      ],
+      "disposition": "replace",
+      "successor": "PackageExport evidence",
+      "deletionOwner": "EAK2",
+      "receivingAcceptance": "EAK2-AC1",
+      "productionCapable": true,
+      "successorPath": ["EAK0", "EMB0", "EAK1", "EAK2"]
+    },
+    {
+      "id": "EAK-D04",
+      "category": "central-framework-switch",
+      "population": "duplicated-macro-or-import-recognizer",
+      "unit": "Four \"vue\" import-alias collectors in the IDE projection with differing alias semantics",
+      "symbols": [
+        "options_api::vue_runtime_imports",
+        "binding_views::vue_runtime_imports",
+        "vue_runtime_macro_imports",
+        "proven_vue_async_component_bindings"
+      ],
+      "paths": [
+        "crates/verter_compiler/src/ide/vue_projection/options_api.rs",
+        "crates/verter_compiler/src/ide/vue_projection/binding_views.rs",
+        "crates/verter_compiler/src/ide/vue_projection/script_setup.rs",
+        "crates/verter_compiler/src/ide/script/type_constructs.rs"
+      ],
+      "disposition": "replace",
+      "successor": "one RoleEvidence read",
+      "deletionOwner": "EAK2",
+      "receivingAcceptance": "EAK2-AC1",
+      "productionCapable": true,
+      "successorPath": ["EAK0", "EMB0", "EAK1", "EAK2"]
+    },
+    {
+      "id": "EAK-D05",
+      "category": "name-shape-role-recognizer",
+      "population": "duplicated-macro-or-import-recognizer",
+      "unit": "Free-name acceptance: an unbound defineComponent, defineOptions or factory name (ref, computed, reactive, …) is treated as Vue's",
+      "symbols": ["is_vue_wrapper", "factory_export", "FACTORY_EXPORTS"],
+      "paths": [
+        "crates/verter_compiler/src/ide/vue_projection/options_api.rs",
+        "crates/verter_compiler/src/ide/vue_projection/binding_views.rs"
+      ],
+      "disposition": "reject",
+      "successor": "NotRole { Unbound } (ER06)",
+      "deletionOwner": "EAK2",
+      "receivingAcceptance": "EAK2-AC1",
+      "productionCapable": true,
+      "successorPath": ["EAK0", "EMB0", "EAK1", "EAK2"]
+    },
+    {
+      "id": "EAK-D06",
+      "category": "name-shape-role-recognizer",
+      "population": "duplicated-macro-or-import-recognizer",
+      "unit": "Bare-callee Vue API recognizers in the IDE script path, and the extract-bare-text action finding an existing computed/unref import by local name",
+      "symbols": [
+        "detect_use_attrs_calls",
+        "detect_gci_in_expr",
+        "record_ref_variable_call",
+        "maybe_record_use_template_ref_call",
+        "find_or_extend_vue_import"
+      ],
+      "paths": [
+        "crates/verter_compiler/src/ide/script/detectors.rs",
+        "crates/verter_compiler/src/ide/script/template_ref.rs",
+        "crates/verter_actions/src/providers/extract_bare_text.rs"
+      ],
+      "disposition": "replace",
+      "successor": "PackageExport evidence",
+      "deletionOwner": "EAK2",
+      "receivingAcceptance": "EAK2-AC1",
+      "productionCapable": true,
+      "successorPath": ["EAK0", "EMB0", "EAK1", "EAK2"]
+    },
+    {
+      "id": "EAK-D07",
+      "category": "central-framework-switch",
+      "population": "duplicated-macro-or-import-recognizer",
+      "unit": ".tsc stub decisions by spelling: defineComponent import inject by local name and \"vue\" source; useAttrs by bare name",
+      "symbols": ["generate_options_api_stub", "detect_use_attrs_type_arg_tsc"],
+      "paths": ["crates/verter_compiler/src/tsc/script.rs"],
+      "disposition": "replace",
+      "successor": "PackageExport evidence",
+      "deletionOwner": "EAK2",
+      "receivingAcceptance": "EAK2-AC1",
+      "productionCapable": true,
+      "successorPath": ["EAK0", "EMB0", "EAK1", "EAK2"]
+    },
+    {
+      "id": "EAK-D08",
+      "category": "duplicated-intrinsic-vocabulary",
+      "population": "duplicated-macro-or-import-recognizer",
+      "unit": "Duplicated intrinsic-macro vocabularies in Verter-owned analysis and IDE paths",
+      "symbols": [
+        "classify_macro",
+        "COMPILER_MACRO_NAMES",
+        "script_setup::MACRO_NAMES",
+        "script_recover::MACRO_NAMES",
+        "ScriptPropFacts::note_value",
+        "call_name",
+        "svelte_payload::is_rune_call",
+        "collect_bindable_and_defaults",
+        "scan_nodes_for_host"
+      ],
+      "paths": [
+        "crates/verter_semantic/src/analysis/macros.rs",
+        "crates/verter_semantic/src/analysis/build.rs",
+        "crates/verter_compiler/src/ide/vue_projection/script_setup.rs",
+        "crates/verter_compiler/src/ide/script_recover.rs",
+        "crates/verter_compiler/src/ide/vue_projection/props.rs",
+        "crates/verter_semantic/src/analysis/framework_facts/svelte_payload.rs",
+        "crates/verter_semantic/src/analysis/framework_facts/svelte.rs",
+        "crates/verter_compiler/src/svelte/ide/projector/special.rs",
+        "crates/verter_compiler/src/svelte/ide/projector/template_mode.rs"
+      ],
+      "disposition": "replace",
+      "successor": "ProfileIntrinsic rows; scope law is row data (ER04)",
+      "deletionOwner": "EAK2",
+      "receivingAcceptance": "EAK2-AC1",
+      "productionCapable": true,
+      "successorPath": ["EAK0", "EMB0", "EAK1", "EAK2"]
+    },
+    {
+      "id": "EAK-D09",
+      "category": "central-framework-switch",
+      "population": "duplicated-macro-or-import-recognizer",
+      "unit": "Type-engine wrapper role gate by spelling: terminal_import_source == \"vue\", minted package \"vue\", private wrapper vocabulary",
+      "symbols": ["wrapper_candidate_for_route", "wrapper_role_for_vue_export"],
+      "paths": ["crates/verter_type_engine/src/project_semantic_dispatch/reactive_wrapper.rs"],
+      "disposition": "replace",
+      "successor": "role row plus manifest package identity; the exact-route authority stays",
+      "deletionOwner": "EAK2",
+      "receivingAcceptance": "EAK2-AC1",
+      "productionCapable": true,
+      "successorPath": ["EAK0", "EMB0", "EAK1", "EAK2"]
+    },
+    {
+      "id": "EAK-D10",
+      "category": "central-framework-switch",
+      "population": "duplicated-macro-or-import-recognizer",
+      "unit": "Svelte package identity from specifier bytes and imported-name capture of Snippet and createEventDispatcher",
+      "symbols": [
+        "resolved_package_for_import",
+        "bare_specifier_package_name",
+        "collect_snippet_imports",
+        "SvelteSnippetImportCandidate"
+      ],
+      "paths": [
+        "crates/verter_session/src/framework/script_facts.rs",
+        "crates/verter_semantic/src/analysis/framework_facts/svelte.rs"
+      ],
+      "disposition": "replace",
+      "successor": "ER09 manifest identity and Svelte role rows",
+      "deletionOwner": "EAK2",
+      "receivingAcceptance": "EAK2-AC1",
+      "productionCapable": true,
+      "successorPath": ["EAK0", "EMB0", "EAK1", "EAK2"]
+    },
+    {
+      "id": "EAK-D11",
+      "category": "central-framework-switch",
+      "population": "duplicated-macro-or-import-recognizer",
+      "unit": "Rule-local Vue role spelling: deprecated set/delete by local name from \"vue\"; useAttrs type-parameter text search and its action twin",
+      "symbols": [
+        "no_deprecated_delete_set::check_script",
+        "prefer_script_attrs::has_type_parameter",
+        "extract_type_parameter"
+      ],
+      "paths": [
+        "crates/verter_diagnostics/src/rules/vue/no_deprecated_delete_set.rs",
+        "crates/verter_diagnostics/src/rules/script/prefer_script_attrs.rs",
+        "crates/verter_actions/src/providers/prefer_script_attrs.rs"
+      ],
+      "disposition": "replace",
+      "successor": "RoleEvidence when the rule moves onto the lint service",
+      "deletionOwner": "LVU1",
+      "receivingAcceptance": "LVU1-AC1",
+      "productionCapable": true,
+      "successorPath": [
+        "EAK0",
+        "EMB0",
+        "FMK0",
+        "UAP0",
+        "LSO0",
+        "LSO2",
+        "LSO4",
+        "LSO5",
+        "LSO8",
+        "ACT1",
+        "LK2",
+        "LK4",
+        "LVU1-DIRECTIVES",
+        "LVU1-STRUCTURE",
+        "LVU1"
+      ]
+    },
+    {
+      "id": "EAK-D12",
+      "category": "central-framework-switch",
+      "population": "duplicated-macro-or-import-recognizer",
+      "unit": "Rule-local Vue role spelling in SFC rules",
+      "symbols": [
+        "no_import_compiler_macros::check_script",
+        "no_reserved_component_names::is_allowed_source"
+      ],
+      "paths": [
+        "crates/verter_diagnostics/src/rules/script/no_import_compiler_macros.rs",
+        "crates/verter_diagnostics/src/rules/vue/no_reserved_component_names.rs"
+      ],
+      "disposition": "replace",
+      "successor": "RoleEvidence",
+      "deletionOwner": "LVU2-SFC",
+      "receivingAcceptance": "LVU2-SFC-AC1",
+      "productionCapable": true,
+      "successorPath": [
+        "EAK0",
+        "EMB0",
+        "FMK0",
+        "UAP0",
+        "LSO0",
+        "LSO2",
+        "LSO4",
+        "LSO5",
+        "LSO8",
+        "ACT1",
+        "LK2",
+        "LK4",
+        "LVU2-SFC"
+      ]
+    },
+    {
+      "id": "EAK-D13",
+      "category": "name-shape-role-recognizer",
+      "population": "duplicated-macro-or-import-recognizer",
+      "unit": "Store-role spelling: Pinia/Vuex by specifier and name, use*Store plus a /store path substring",
+      "symbols": ["classify_store_api", "is_store_composable_call", "is_store_source"],
+      "paths": [
+        "crates/verter_semantic/src/analysis/classify.rs",
+        "crates/verter_diagnostics/src/rules/store/no_unused_store_import.rs"
+      ],
+      "disposition": "replace",
+      "successor": "PackageExport role rows for the store packages",
+      "deletionOwner": "LVU2-STORES",
+      "receivingAcceptance": "LVU2-STORES-AC1",
+      "productionCapable": true,
+      "successorPath": [
+        "EAK0",
+        "EMB0",
+        "FMK0",
+        "UAP0",
+        "LSO0",
+        "LSO2",
+        "LSO4",
+        "LSO5",
+        "LSO8",
+        "ACT1",
+        "LK2",
+        "LK4",
+        "LVU2-STORES"
+      ]
+    },
+    {
+      "id": "EAK-D14",
+      "category": "name-shape-role-recognizer",
+      "population": "duplicated-macro-or-import-recognizer",
+      "unit": "Built-in Vue component spelling list separate from the reserved-name list",
+      "symbols": ["BUILTIN_COMPONENTS"],
+      "paths": ["crates/verter_diagnostics/src/rules/vue/no_undef_components.rs"],
+      "disposition": "replace",
+      "successor": "role rows for the release built-in components",
+      "deletionOwner": "LVU1-BINDINGS",
+      "receivingAcceptance": "LVU1-BINDINGS-AC1",
+      "productionCapable": true,
+      "successorPath": [
+        "EAK0",
+        "EMB0",
+        "FMK0",
+        "UAP0",
+        "LSO0",
+        "LSO2",
+        "LSO4",
+        "LSO5",
+        "LSO8",
+        "ACT1",
+        "LK2",
+        "LK4",
+        "LVU1-DIRECTIVES",
+        "LVU1-BINDINGS"
+      ]
+    }
+  ],
+  "referencedRoutes": [
+    {
+      "id": "DEM-D04",
+      "node": "DEM0",
+      "category": "central-framework-switch",
+      "why": "should_ignore_external_macro_type compares import_source == \"vue\"",
+      "owner": "EAK2",
+      "receivingAcceptance": "EAK2-AC1"
+    },
+    {
+      "id": "DEM-D05",
+      "node": "DEM0",
+      "category": "eager-or-single-claim-selector",
+      "why": "Nuxt server/client detection by file-name suffix",
+      "owner": "NUX0",
+      "receivingAcceptance": "NUX0-AC1"
+    },
+    {
+      "id": "D07",
+      "node": "UAK0",
+      "category": "central-framework-switch",
+      "why": "One framework per file by extension",
+      "owner": "CPF1",
+      "receivingAcceptance": "CPF1-AC1"
+    },
+    {
+      "id": "D08",
+      "node": "UAK0",
+      "category": "untagged-coordinate-or-public-identity",
+      "why": "FileLanguage conflates carrier and claim",
+      "owner": "CPF1",
+      "receivingAcceptance": "CPF1-AC1"
+    },
+    {
+      "id": "D10",
+      "node": "UAK0",
+      "category": "central-framework-switch",
+      "why": "Per-framework LSP branches",
+      "owner": "COX0",
+      "receivingAcceptance": "COX0-AC1"
+    },
+    {
+      "id": "D11",
+      "node": "UAK0",
+      "category": "central-framework-switch",
+      "why": "MCP tool gates on is_vue()",
+      "owner": "COX0",
+      "receivingAcceptance": "COX0-AC1"
+    },
+    {
+      "id": "D12",
+      "node": "UAK0",
+      "category": "duplicate-component-information-authority",
+      "why": "Component-meta resolver authority, including the .vue path-suffix carrier check (DEM0 DEM-F03)",
+      "owner": "TIF1",
+      "receivingAcceptance": "TIF1-AC1"
+    },
+    {
+      "id": "V-D02",
+      "node": "VID0",
+      "category": "untagged-coordinate-or-public-identity",
+      "why": "Open framework_adapter_id selector string",
+      "owner": "TIF1",
+      "receivingAcceptance": "TIF1-AC1"
+    },
+    {
+      "id": "CAT-D06",
+      "node": "CAT0",
+      "category": "central-framework-switch",
+      "why": "ActiveProviderIndex and its import-specifier gate (DEM0 DEM-F02)",
+      "owner": "COX0",
+      "receivingAcceptance": "COX0-AC1"
+    }
+  ],
+  "categoryCoverage": [
+    {
+      "category": "central-framework-switch",
+      "recorded": [
+        "EAK-D01",
+        "EAK-D03",
+        "EAK-D04",
+        "EAK-D07",
+        "EAK-D09",
+        "EAK-D10",
+        "EAK-D11",
+        "EAK-D12"
+      ],
+      "referenced": ["DEM-D04", "D07", "D10", "D11", "CAT-D06"],
+      "note": "Package/source gates in these routes choose framework meaning; other recognizer categories are listed separately."
+    },
+    {
+      "category": "untagged-coordinate-or-public-identity",
+      "recorded": [],
+      "referenced": ["D08", "V-D02"],
+      "note": "Role evidence adds no public identity route; every evidence identity is tagged (ER19)."
+    },
+    {
+      "category": "duplicate-component-information-authority",
+      "recorded": [],
+      "referenced": ["D12", "DEM-D05"],
+      "note": "The recognizers feed existing authorities and are not authorities themselves."
+    },
+    {
+      "category": "name-shape-role-recognizer",
+      "recorded": ["EAK-D02", "EAK-D05", "EAK-D06", "EAK-D13", "EAK-D14"],
+      "referenced": [],
+      "note": "Bare-callee, free-name, store-composable name-shape and built-in component recognition, not package-role switches."
+    },
+    {
+      "category": "duplicated-intrinsic-vocabulary",
+      "recorded": ["EAK-D08"],
+      "referenced": [],
+      "note": "Analysis and IDE macro/rune vocabularies; official runtime compiler recognition stays outside the migration."
+    }
+  ],
+  "boundaries": [
+    {
+      "id": "EAK-B01",
+      "unit": "Runtime compile backends recognize intrinsics by spelling and scope as the official compilers do",
+      "symbols": [
+        "rune_scan",
+        "needs_context::is_rune_call",
+        "expr::state_rune_call",
+        "reactive_analysis",
+        "store_subscriptions::store_base_candidates",
+        "client_surface dispatcher_locals",
+        "verter_parser vue script macros",
+        "classify_call_expression",
+        "check_macro_call",
+        "collect_call_section"
+      ],
+      "paths": [
+        "crates/verter_compiler/src/svelte/runtime/",
+        "crates/verter_compiler/src/compile/macro_scope_check.rs",
+        "crates/verter_compiler/src/script/process.rs",
+        "crates/verter_parser/src/utils/oxc/vue/script/"
+      ],
+      "why": "Compiled-Output Conformance governs their output; role evidence does not displace them (ER30). Duplicated rune vocabularies are EAK-F05."
+    },
+    {
+      "id": "EAK-B02",
+      "unit": "Specifier as the rule subject",
+      "symbols": [
+        "prefer_import_from_vue::check_script",
+        "INTERNAL_VUE_PACKAGES",
+        "replace_content::fixes_for_diagnostic"
+      ],
+      "paths": [
+        "crates/verter_diagnostics/src/rules/script/prefer_import_from_vue.rs",
+        "crates/verter_actions/src/providers/replace_content.rs"
+      ],
+      "why": "The rule reports the import specifier itself and recognizes no role. List disagreement is EAK-F06."
+    },
+    {
+      "id": "EAK-B03",
+      "unit": "Template instance globals $props, $emit, $slots mapped to macros by LSP definition",
+      "symbols": ["definition_at_position"],
+      "paths": ["crates/verter_lsp/src/features/definition.rs"],
+      "why": "Instance-surface members, not package exports."
+    },
+    {
+      "id": "EAK-B04",
+      "unit": "Framework asset location by manifest name",
+      "symbols": ["vue_assets", "svelte_assets"],
+      "paths": ["crates/verter_lsp/src/vue_assets.rs", "crates/verter_lsp/src/svelte_assets.rs"],
+      "why": "Package detection, owned by FWA1 activation records, not role activation."
+    }
+  ],
+  "findings": [
+    {
+      "id": "EAK-F01",
+      "finding": "is_vue_wrapper and factory_export accept a free (unbound) defineComponent, defineOptions or factory name as Vue's; ER06 makes it NotRole { Unbound } (EAK-D05).",
+      "route": "EAK-D05",
+      "receiver": "EAK2",
+      "receivingAcceptance": "EAK2-AC1",
+      "successorPath": ["EAK0", "EMB0", "EAK1", "EAK2"]
+    },
+    {
+      "id": "EAK-F02",
+      "finding": "Alias semantics disagree across the IDE collectors: vue_runtime_macro_imports and generate_options_api_stub key on the local name (an aliased real import is missed or double-injected; import { x as defineComponent } is accepted), while three other collectors key on the imported name.",
+      "route": "EAK-D04",
+      "receiver": "EAK2",
+      "receivingAcceptance": "EAK2-AC1",
+      "successorPath": ["EAK0", "EMB0", "EAK1", "EAK2"]
+    },
+    {
+      "id": "EAK-F03",
+      "finding": "classify_macro and ScriptPropFacts::note_value match the callee spelling without consulting a binding; ER04 makes the scope law row data checked against the release.",
+      "route": "EAK-D08",
+      "receiver": "EAK2",
+      "receivingAcceptance": "EAK2-AC1",
+      "successorPath": ["EAK0", "EMB0", "EAK1", "EAK2"]
+    },
+    {
+      "id": "EAK-F04",
+      "finding": "bare_specifier_package_name takes the leading specifier segment once the resolved file is package-backed, so a paths mapping of svelte onto another package's file claims svelte; ER09 takes the name from the resolved manifest.",
+      "route": "EAK-D10",
+      "receiver": "EAK2",
+      "receivingAcceptance": "EAK2-AC1",
+      "successorPath": ["EAK0", "EMB0", "EAK1", "EAK2"]
+    },
+    {
+      "id": "EAK-F05",
+      "finding": "$bindable, $inspect, $props and the rune-name lists each have two to four spellings across the Svelte runtime and IDE paths, and the Svelte IDE uses text prefilters (contains(\"$props\"), contains(\"$host\")). The IDE copies are EAK-D08's population; the runtime copies stay EAK-B01.",
+      "route": "EAK-D08",
+      "receiver": "EAK2",
+      "receivingAcceptance": "EAK2-AC1",
+      "successorPath": ["EAK0", "EMB0", "EAK1", "EAK2"]
+    },
+    {
+      "id": "EAK-F06",
+      "finding": "prefer_import_from_vue lists five internal @vue/* packages while its replace_content fix handles four, missing @vue/composition-api.",
+      "route": "EAK-B02",
+      "receiver": "LVU2-SFC",
+      "receivingAcceptance": "LVU2-SFC-AC1",
+      "successorPath": [
+        "EAK0",
+        "EMB0",
+        "FMK0",
+        "UAP0",
+        "LSO0",
+        "LSO2",
+        "LSO4",
+        "LSO5",
+        "LSO8",
+        "ACT1",
+        "LK2",
+        "LK4",
+        "LVU2-SFC"
+      ]
+    },
+    {
+      "id": "EAK-F07",
+      "finding": "resolve_authored_reference_route already composes authored aliases, imports, re-exports and local alias hops into a ResolvedReferenceRoute with exactness. It is the PostSnapshot half of ER25; the Projection half (ER08) must reach the same chain without the type resolver, and EAK1 proves the two agree on PostSnapshot cases (EC30).",
+      "route": "ER25",
+      "receiver": "EAK1",
+      "receivingAcceptance": "EAK1-AC2",
+      "successorPath": ["EAK0", "EMB0", "EAK1"]
+    }
+  ],
+  "emptyPopulations": [
+    {
+      "unit": "Role rows and role identities",
+      "evidence": "No RoleId, RoleEvidence, CanonicalExport or role table exists under crates/; T03 rows do not exist yet (CPF1).",
+      "consequence": "EAK-O01 and EAK-O04 are new; EAK1 implements them."
+    },
+    {
+      "unit": "Projection-time role evidence",
+      "evidence": "Every projection-time recognizer is a spelling test; the only provenance-carrying role route is the post-snapshot ResolvedReferenceRoute (EAK-F07).",
+      "consequence": "EAK-O02 is new."
+    },
+    {
+      "unit": "Projection-time barrel following",
+      "evidence": "No projection-time recognizer follows a re-export, namespace destructuring or const alias chain; proven_vue_async_component_bindings alone follows a namespace member.",
+      "consequence": "No route to delete beyond EAK-D04."
+    },
+    {
+      "unit": "Project-profile roles",
+      "evidence": "No auto-import contribution reaches role recognition; T04 has no rows (CAT0).",
+      "consequence": "EAK-O09 is new; NUX0 produces the first contribution."
+    },
+    {
+      "unit": "Ambiguity outcome",
+      "evidence": "No recognizer can report an ambiguous barrel.",
+      "consequence": "ER15 has no displaced route."
+    }
+  ],
+  "transferredObligations": [
+    {
+      "obligation": "Executable inventory validator over tests/kernel/EAK0/products/ and its negative controls: missing inventory member, unknown or pathless owner, missing receiving AC, conflicting assignment",
+      "receiver": "UAO0",
+      "receivingAcceptance": "UAO0-AC-R1",
+      "successorPath": ["EAK0", "EMB0", "EAK1", "UAO0"]
+    },
+    {
+      "obligation": "Build and run the positive and same-spelling negative corpus EC01-EC30: the exact Vue alias example activates; userland defineComponent, reassigned aliases, unresolved packages and ambiguous barrels do not; incremental invalidation follows every provenance read",
+      "receiver": "EAK1",
+      "receivingAcceptance": "EAK1-AC-R1",
+      "successorPath": ["EAK0", "EMB0", "EAK1"]
+    },
+    {
+      "obligation": "Migrate and delete/reject EAK-D01-D10 and DEM-D04 through the shared evidence producer; integrate EAK-C01/C03/C04/C05 and resolve EAK-F01-F05 while preserving the LVU owners and runtime boundary",
+      "receiver": "EAK2",
+      "receivingAcceptance": "EAK2-AC1",
+      "successorPath": ["EAK0", "EMB0", "EAK1", "EAK2"]
+    },
+    {
+      "obligation": "NUX0 contributes Nuxt-only facts through the PPR0T-owned T04 ingestion/publication boundary; no T04 publication ownership is transferred to NUX0 or EAK1",
+      "receiver": "NUX0",
+      "receivingAcceptance": "NUX0-AC1",
+      "acceptingOwner": "PPR0T",
+      "acceptingAcceptance": ["PPR0T-AC1", "PPR0T-AC4"],
+      "successorPath": ["EAK0", "EMB0", "FMK0", "VIM1", "PM4", "SM3", "NUX0"]
+    }
+  ],
+  "openQuestions": [
+    {
+      "id": "eak0-vue-alias-example-text",
+      "affects": ["EC01"],
+      "defaultApplied": "EC01 stays as pinned; EAK1 may add the verbatim text as an extra positive row"
+    }
+  ],
+  "referencedRowFamilies": [
+    {
+      "id": "T04",
+      "node": "CAT0",
+      "owner": "PPR0T",
+      "receivingAcceptance": ["PPR0T-AC1", "PPR0T-AC4"],
+      "surface": "Generic typed project-profile contribution ingestion and role/realm/generated-fact snapshot publication",
+      "contributor": "NUX0",
+      "contributorAcceptance": "NUX0-AC1",
+      "dependency": "NUX0 already has PPR0T as a direct predecessor",
+      "rule": "EAK1 defines shared role evidence and T03 data; NUX0 supplies only Nuxt-specific captured contributions. Neither publishes T04 outside the generic service."
+    }
+  ]
+}

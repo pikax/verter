@@ -49,8 +49,8 @@ pub fn observe_fan_out_borrowed_for_tests(
 /// Bracket one cold-compute closure with a push-style fact tracer.
 ///
 /// Thin re-export of [`verter_type_engine::fact_signature_helpers::install_fact_tracer`]
-/// for integration tests that need to verify tracer finalisation,
-/// overflow telemetry, and the returned `FactReadSetFinalise` variant.
+/// for integration tests that need to verify tracer finalisation and the
+/// returned `FactReadSetFinalise` variant.
 pub fn install_fact_tracer_for_tests<F, R>(
     host: &crate::VerterHost,
     f: F,
@@ -104,63 +104,35 @@ pub fn dep_signature_to_fact_signature_for_tests(
     verter_type_engine::fact_signature_helpers::dep_signature_to_fact_signature(sig)
 }
 
-/// Read `host`'s per-host overflow-at-install counter value.
-///
-/// Integration tests use this to verify that `FactSignatureOverflow`
-/// telemetry fires and the counter increments on overflow. Per-host so
-/// an overflow forced on one host never bumps the counter another host's
-/// delta assertion reads.
-pub fn read_signature_overflow_at_install(host: &crate::VerterHost) -> u64 {
-    host.signature_overflow_at_install
-        .load(std::sync::atomic::Ordering::Relaxed)
+/// Arm `host`'s fact-tracer refusal knob: every tracer scope the host
+/// installs notes one non-cacheable read, so every traced admission boundary
+/// refuses (the value still flows to its caller). The returned guard disarms
+/// the knob on drop, so a panicking test never leaks the forced state.
+pub fn force_fact_tracer_refusal_for_tests(host: &crate::VerterHost) -> FactTracerRefusalGuard<'_> {
+    host.test_force
+        .engine
+        .force_fact_tracer_non_cacheable_read
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    FactTracerRefusalGuard { host }
 }
 
-/// Arm the per-host relation-memo fact-injection knob and return an RAII
-/// guard that zeroes it on drop — the relation engine's overflow-refusal
-/// path.
-pub fn relation_force_overflow_observations_for_tests(
-    host: &crate::VerterHost,
-    n: usize,
-) -> RelationForceOverflowGuard<'_> {
-    RelationForceOverflowGuard::arm(host, n)
-}
-
-/// Host-scoped RAII guard that arms and clears the per-host relation-memo
-/// fact-injection knob
-/// the host's `relation_knobs.force_overflow_observations` knob.
-///
-/// When the knob is set to `N > 0`, the relation engine's cold-compute path
-/// observes `N` synthetic `FileWholeHash` facts before finalising the
-/// read-set, deterministically forcing overflow (when `N > FACT_SIGNATURE_CAP`)
-/// so the overflow-returns-result-without-admission test discriminates without
-/// a pathological multi-file fixture. The knob is zeroed on drop so a panicking
-/// test never leaks the forced state into a concurrent relation on another host.
-pub struct RelationForceOverflowGuard<'h> {
+/// Guard returned by [`force_fact_tracer_refusal_for_tests`].
+pub struct FactTracerRefusalGuard<'h> {
     host: &'h crate::VerterHost,
 }
 
-impl<'h> RelationForceOverflowGuard<'h> {
-    /// Set `host`'s forced observation count to `n` and return the guard.
-    fn arm(host: &'h crate::VerterHost, n: usize) -> Self {
-        host.relation_knobs
-            .force_overflow_observations
-            .store(n, std::sync::atomic::Ordering::Relaxed);
-        Self { host }
-    }
-}
-
-impl Drop for RelationForceOverflowGuard<'_> {
+impl Drop for FactTracerRefusalGuard<'_> {
     fn drop(&mut self) {
         self.host
-            .relation_knobs
-            .force_overflow_observations
-            .store(0, std::sync::atomic::Ordering::Relaxed);
+            .test_force
+            .engine
+            .force_fact_tracer_non_cacheable_read
+            .store(false, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
 /// Arm the per-host augmentation-folder torn-contributor injection knob and
-/// return an RAII guard that clears it on drop. Mirrors
-/// [`relation_force_overflow_observations_for_tests`] for the cross-file
+/// return an RAII guard that clears it on drop: the cross-file
 /// declaration-augmentation fold's `source_env_unobservable` no-warm rail.
 ///
 /// Gated `#[cfg(any(test, feature = "test-support"))]` alongside the host field
@@ -206,25 +178,6 @@ impl Drop for AugmentationForceUnobservableGuard<'_> {
             .store(false, std::sync::atomic::Ordering::Relaxed);
     }
 }
-
-/// Arm `host`'s compile-tier test-only fact-injection knob with `n`
-/// synthetic `FileWholeHash` observations per cold-compute call. When
-/// `n > FACT_SIGNATURE_CAP` (1024), the cold compute's installed fact
-/// tracer finalises with `Overflow`, exercising the
-/// refuse-publish-on-overflow contract on `CompileSlot` without
-/// requiring a workspace fixture that organically emits thousands of
-/// facts. The returned guard zeroes the knob on drop. Per-host so the
-/// forced state never leaks into a concurrent compile on a different
-/// host.
-pub fn compile_force_overflow_observations_for_tests(
-    host: &crate::VerterHost,
-    n: usize,
-) -> CompileForceOverflowGuard<'_> {
-    CompileForceOverflowGuard::arm(host, n)
-}
-
-#[doc(hidden)]
-pub use crate::host_resolve::CompileForceOverflowGuard;
 
 /// Reset `host`'s compile-tier prefetch invocation counter to zero. Call
 /// immediately before a cold compute so the post-compute read counts
@@ -657,7 +610,7 @@ pub fn compile_scheduler_artifact_present_for_tests(
 /// a stale artifact left in the map (because the refusal arm did not
 /// call `remove_artifact_not_newer_than`) is invisible to
 /// `try_get_artifact` after a generation bump, but visible here via
-/// `last_known_good_artifact`. After an overflowed compile that
+/// `last_known_good_artifact`. After a refused compile that
 /// follows a successful one this MUST return `false`.
 pub fn compile_scheduler_last_known_good_artifact_present_for_tests(
     host: &crate::VerterHost,

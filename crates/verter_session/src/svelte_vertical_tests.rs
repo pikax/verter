@@ -1122,27 +1122,26 @@ let { title }: Props = $props();
 <p>{title}</p>
 "#;
 
-    // A targeted output-tracer overflow leaves the consumer-visible result
+    // A targeted output-tracer refusal leaves the consumer-visible result
     // intact while refusing only reusable publication evidence.
-    let overflow_host = host();
-    upsert_svelte(&overflow_host, "/Overflow.svelte", CHILD);
-    overflow_host
-        .get_component_meta("/Overflow.svelte")
+    let refused_host = host();
+    upsert_svelte(&refused_host, "/Refused.svelte", CHILD);
+    refused_host
+        .get_component_meta("/Refused.svelte")
         .expect("prime admitted analysis");
-    verter_type_engine::engine_test_knobs::arm_fact_tracer_overflow_once(
+    verter_type_engine::engine_test_knobs::arm_fact_tracer_refusal_once(
         verter_type_engine::engine_test_knobs::TracerScope::ComponentMetaOutput,
-        verter_session_query::facts::fact_read_set::FACT_SIGNATURE_CAP + 1,
     );
-    let overflow = overflow_host
-        .get_public_api_projection("/Overflow.svelte")
-        .expect("overflow projection request")
-        .expect("overflow still returns the projection");
+    let refused = refused_host
+        .get_public_api_projection("/Refused.svelte")
+        .expect("refused projection request")
+        .expect("a refused output scope still returns the projection");
     assert_eq!(
-        verter_type_engine::engine_test_knobs::fact_tracer_overflow_claimed_by(),
+        verter_type_engine::engine_test_knobs::fact_tracer_refusal_claimed_by(),
         Some(verter_type_engine::engine_test_knobs::TracerScope::ComponentMetaOutput),
-        "the forced overflow must land on the separately-finalized output scope",
+        "the forced refusal must land on the separately-finalized output scope",
     );
-    assert!(overflow.publication_witness.is_none());
+    assert!(refused.publication_witness.is_none());
 
     // A non-cacheable observation on the warm output leg has the same typed
     // response-only outcome.

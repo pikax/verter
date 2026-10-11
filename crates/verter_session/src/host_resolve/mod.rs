@@ -66,23 +66,9 @@ pub(crate) use vue_script_extract::{
     ordered_sfc_structure_analysis, sfc_script_setup_type_params, template_converter_inputs,
 };
 
-// Test-only knob: arm the compile-tier producer's fact-injection slot.
-// Re-exported through the parent module so `crate::for_tests` can
-// publish it without forming a name dependency on the
-// `virtual_file_pipeline` private module path.
-//
-// The cfg gate MUST match the target's gate in `virtual_file_pipeline.rs`
-// (`CompileForceOverflowGuard` is `#[cfg(any(test, feature = "test-support"))]`).
-// A `pub use` of a cfg-stripped item is an unresolved-import error in
-// release builds (`cargo build --release`, where `debug_assertions` is
-// off), so the gate is required, not optional.
-#[cfg(any(test, feature = "test-support"))]
-#[doc(hidden)]
-pub use virtual_file_pipeline::CompileForceOverflowGuard;
-
 // Test-only introspection for the Session-only compile-tier prefetch
-// gate. Same cfg gate as above (a `pub use` of a cfg-stripped item is an
-// unresolved-import error in release builds).
+// gate. The cfg gate is required: a `pub use` of a cfg-stripped item is an
+// unresolved-import error in release builds.
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub use virtual_file_pipeline::{

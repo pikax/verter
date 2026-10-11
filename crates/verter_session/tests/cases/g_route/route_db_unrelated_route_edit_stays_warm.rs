@@ -220,8 +220,8 @@ fn unrelated_route_eviction_keeps_original_warm() {
             );
         }
         FactReadSetFinalise::NonCacheable(_) => panic!("warm tracer unexpectedly non-cacheable"),
-        FactReadSetFinalise::Overflow | FactReadSetFinalise::MutationUnstable => {
-            panic!("warm-after-foreign-evict tracer overflowed")
+        FactReadSetFinalise::MutationUnstable => {
+            panic!("warm-after-foreign-evict tracer was mutation-unstable")
         }
     }
 }

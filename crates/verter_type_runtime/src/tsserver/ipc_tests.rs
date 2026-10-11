@@ -713,6 +713,7 @@ async fn tsserver_shutdown_completes_within_timeout() {
         crash_notify: None,
         membership_recovery: Mutex::new(None),
         cancellation: None,
+        ledger: Default::default(),
     });
 
     let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -940,12 +941,9 @@ fn test_parse_tsserver_location_without_content() {
         "end": { "line": 2, "offset": 8 },
     });
 
-    let parsed = parse_one_tsserver_location(&loc, &cache).unwrap();
-    // Without content, should use packed fallback (0-based)
-    let expected_start = ((2 - 1) << 16) | ((7 - 1) & 0xFFFF);
-    assert_eq!(
-        parsed.start, expected_start,
-        "without content, should use packed fallback"
+    assert!(
+        parse_one_tsserver_location(&loc, &cache).is_none(),
+        "a location in a file with no resolved bytes drops; it is never packed"
     );
 }
 
@@ -974,8 +972,11 @@ fn test_parse_tsserver_location_line_10_not_packed() {
     assert!(parsed.start < 200, "start should be a small byte offset");
 }
 
+/// The parser decodes only through the bytes the caller resolved for the
+/// answer: a target present on disk but absent from the resolved map is never
+/// read after the answer arrived.
 #[test]
-fn test_parse_tsserver_location_without_cache_reads_disk_content() {
+fn test_parse_tsserver_location_never_reads_disk_after_the_answer() {
     let temp_root = unique_temp_dir("verter-tsserver-location-disk");
     let _ = std::fs::remove_dir_all(&temp_root);
     std::fs::create_dir_all(&temp_root).unwrap();
@@ -991,9 +992,7 @@ fn test_parse_tsserver_location_without_cache_reads_disk_content() {
         "end": { "line": 2, "offset": 8 },
     });
 
-    let parsed = parse_one_tsserver_location(&loc, &cache).unwrap();
-    assert_eq!(parsed.start, 27);
-    assert_eq!(parsed.end, 32);
+    assert!(parse_one_tsserver_location(&loc, &cache).is_none());
 
     let _ = std::fs::remove_dir_all(&temp_root);
 }
@@ -1014,17 +1013,11 @@ fn test_parse_tsserver_rename_span_with_content() {
     assert!(parsed.start < 100, "must not be packed");
 }
 
-/// A cross-file rename span whose GROUP file is absent from the in-memory contents cache must
-/// resolve its byte offsets against THAT file's own on-disk content (the per-target disk
-/// fallback) — the SAME content resolution `parse_tsserver_locations` gives references and the
-/// tsgo rename path gives its workspace edits.
-///
-/// Fails if a cache-miss span packs a 0-based `(line << 16) | col` sentinel the merge layer cannot
-/// map to a real range, silently dropping the cross-file edit (incomplete rename). The renamed
-/// symbol sits on line 3 (1-based), NOT line 0, so a packed line:col fallback is unmistakably
-/// distinguishable from the real byte offset.
+/// A rename span decodes only through the bytes the caller resolved for the
+/// answer: a group file present on disk but absent from the resolved map is
+/// never read after the answer arrived, and its spans drop.
 #[test]
-fn test_parse_tsserver_rename_span_without_cache_reads_disk_content() {
+fn test_parse_tsserver_rename_span_never_reads_disk_after_the_answer() {
     let temp_root = unique_temp_dir("verter-tsserver-rename-disk");
     let _ = std::fs::remove_dir_all(&temp_root);
     std::fs::create_dir_all(&temp_root).unwrap();
@@ -1032,33 +1025,14 @@ fn test_parse_tsserver_rename_span_without_cache_reads_disk_content() {
     let content = "// header\nconst pad = 1;\nexport const renamed = 2;\n";
     std::fs::write(&file_path, content).unwrap();
     let file_key = file_path.to_string_lossy().replace('\\', "/");
-    // CACHE MISS for this path → forces the per-target disk fallback.
     let cache = HashMap::new();
 
-    // tsserver positions are 1-based: `renamed` is on line 3, column 14.
     let span = serde_json::json!({
         "start": { "line": 3, "offset": 14 },
         "end": { "line": 3, "offset": 21 },
     });
 
-    let parsed = parse_one_tsserver_rename_span(&span, &file_key, &cache).unwrap();
-    let want_start = content.find("renamed").unwrap() as u32;
-    let want_end = want_start + "renamed".len() as u32;
-    assert_eq!(
-        (parsed.start, parsed.end),
-        (want_start, want_end),
-        "cross-file rename span must resolve against the target's own disk content (byte offsets \
-         {want_start}..{want_end}), not pack a line-0 sentinel — got {}..{}",
-        parsed.start,
-        parsed.end,
-    );
-    // Discriminating negative: assert the offset is the real byte offset, not the packed
-    // line:col fallback `(2 << 16) | 13`.
-    let packed_start = ((3u32.saturating_sub(1)) << 16) | ((14u32.saturating_sub(1)) & 0xFFFF);
-    assert_ne!(
-        parsed.start, packed_start,
-        "must NOT be the packed (line<<16)|col fallback (the dropped/corrupting path)"
-    );
+    assert!(parse_one_tsserver_rename_span(&span, &file_key, &cache).is_none());
 
     let _ = std::fs::remove_dir_all(&temp_root);
 }
@@ -1223,6 +1197,7 @@ async fn test_configure_tsserver_session_sends_no_inferred_project_options() {
         crash_notify: None,
         membership_recovery: Mutex::new(None),
         cancellation: None,
+        ledger: Default::default(),
     });
 
     let seen_commands = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -1300,6 +1275,7 @@ async fn run_update_file_capture(
         crash_notify: None,
         membership_recovery: Mutex::new(None),
         cancellation: None,
+        ledger: Default::default(),
     });
 
     let contents_cache: Arc<Mutex<HashMap<String, Arc<str>>>> =
@@ -1474,6 +1450,7 @@ async fn run_notify_carriers_changed_capture(companions: &[&str]) -> Vec<serde_j
         crash_notify: None,
         membership_recovery: Mutex::new(None),
         cancellation: TsserverCancellation::create().map(Arc::new),
+        ledger: Default::default(),
     });
 
     let files: Vec<String> = companions
@@ -1545,6 +1522,7 @@ async fn carrier_refresh_receipt_waits_for_deferred_plugin_graph_application() {
         crash_notify: None,
         membership_recovery: Mutex::new(None),
         cancellation: TsserverCancellation::create().map(Arc::new),
+        ledger: Default::default(),
     });
     let refresh = Arc::new(TsserverCarrierRefresh::default());
     schedule_carrier_refresh(
@@ -1789,14 +1767,14 @@ async fn diagnostic_pull_requires_success_from_every_category_even_with_cached_c
         let transport = Arc::new(test_transport(stdin_tx));
         let generation = AtomicU64::new(0);
         let file = "/proj/src/control.ts".to_string();
+        transport.ledger.record_out_of_band([SurfaceEffect::deliver(
+            file.clone(),
+            Arc::from("export {};"),
+        )]);
         let query = DiagnosticsQuery {
             file: file.clone(),
             diagnostic_file: file.clone(),
             transport: Arc::clone(&transport),
-            contents_cache: Arc::new(Mutex::new(HashMap::from([(
-                file.clone(),
-                Arc::from("export {};"),
-            )]))),
             carrier_companions: Default::default(),
             normalize_response_paths: false,
             active_sources: Default::default(),
@@ -2231,6 +2209,7 @@ async fn run_resync_capture(
         crash_notify: None,
         membership_recovery: Mutex::new(None),
         cancellation: None,
+        ledger: Default::default(),
     });
 
     let opened_files: Arc<Mutex<HashMap<String, OpenKind>>> = Arc::new(Mutex::new(HashMap::new()));
@@ -2378,6 +2357,7 @@ async fn carrier_open_send_failure_rolls_back_tracking_for_retry() {
         crash_notify: None,
         membership_recovery: Mutex::new(None),
         cancellation: None,
+        ledger: Default::default(),
     };
 
     let file = "/project/src/App.vue.tsx";
@@ -2428,6 +2408,7 @@ async fn carrier_activation_rolls_back_when_transient_bootstrap_cannot_be_sent()
         crash_notify: None,
         membership_recovery: Mutex::new(None),
         cancellation: None,
+        ledger: Default::default(),
     });
     let active = Arc::new(parking_lot::RwLock::new(BTreeSet::new()));
     let projects = Arc::new(parking_lot::RwLock::new(HashMap::new()));
@@ -2472,6 +2453,7 @@ async fn duplicate_carrier_activation_is_a_control_plane_noop() {
         crash_notify: None,
         membership_recovery: Mutex::new(None),
         cancellation: None,
+        ledger: Default::default(),
     });
     let file = "/project/src/App.svelte".to_string();
     let active = Arc::new(parking_lot::RwLock::new(BTreeSet::from([file.clone()])));
@@ -2555,6 +2537,7 @@ async fn carrier_activation_bootstraps_then_retains_the_authored_source() {
         crash_notify: None,
         membership_recovery: Mutex::new(None),
         cancellation: None,
+        ledger: Default::default(),
     });
     let file = "/project/src/App.svelte".to_string();
     let companion = "/project/src/App.svelte.__verter.tsx".to_string();
@@ -3271,24 +3254,20 @@ fn parse_tsserver_file_code_edits_drops_inverted_span() {
     );
 }
 
-/// A code-edit whose target file is absent from the contents cache but PRESENT on disk resolves its
-/// byte offsets against THAT file's own on-disk content (the per-target disk fallback), matching the
-/// rename/location paths' content resolution.
+/// A code edit decodes only through the bytes the caller resolved for the
+/// answer: a target present on disk but absent from the resolved map is never
+/// read after the answer arrived, and its edit drops.
 #[test]
-fn parse_tsserver_file_code_edits_reads_disk_content_on_cache_miss() {
+fn parse_tsserver_file_code_edits_never_read_disk_after_the_answer() {
     let temp_root = unique_temp_dir("verter-tsserver-codeedit-disk");
     let _ = std::fs::remove_dir_all(&temp_root);
     std::fs::create_dir_all(&temp_root).unwrap();
     let file_path = temp_root.join("child.ts");
     let content = "// header\nconst pad = 1;\nexport const renamed = 2;\n";
     std::fs::write(&file_path, content).unwrap();
-    // The fn canonicalizes `fileName`; feed the already-canonical form so the on-disk read targets
-    // the file we wrote (forward slashes, lowercase drive letter on Windows).
     let file_key = verter_span::path::canonicalize_path(&file_path.to_string_lossy());
-    // CACHE MISS for this path → forces the per-target disk fallback.
     let cache: HashMap<String, Arc<str>> = HashMap::new();
 
-    // tsserver positions are 1-based: `renamed` is on line 3, column 14.
     let changes = vec![serde_json::json!({
         "fileName": file_key,
         "textChanges": [
@@ -3301,25 +3280,7 @@ fn parse_tsserver_file_code_edits_reads_disk_content_on_cache_miss() {
     })];
 
     let edits = parse_tsserver_file_code_edits(&changes, &cache).unwrap();
-    let want_start = content.find("renamed").unwrap() as u32;
-    let want_end = want_start + "renamed".len() as u32;
-    assert_eq!(edits.len(), 1, "the disk-resolved edit must survive");
-    assert_eq!(
-        (edits[0].start, edits[0].end),
-        (want_start, want_end),
-        "the edit must resolve against the target's own disk content (byte offsets {want_start}..\
-         {want_end}), not a packed sentinel — got {}..{}",
-        edits[0].start,
-        edits[0].end,
-    );
-    assert_eq!(edits[0].new_text, "renamedSymbol");
-    // Discriminating negative: assert the offset is the real byte offset, not the packed
-    // line:col fallback `(2 << 16) | 13`.
-    let packed_start = ((3u32.saturating_sub(1)) << 16) | ((14u32.saturating_sub(1)) & 0xFFFF);
-    assert_ne!(
-        edits[0].start, packed_start,
-        "must NOT be the packed (line<<16)|col fallback (the corrupting path)"
-    );
+    assert!(edits.is_empty(), "{edits:?}");
 
     let _ = std::fs::remove_dir_all(&temp_root);
 }
@@ -3427,6 +3388,7 @@ fn resync_harness() -> ResyncHarness {
         crash_notify: None,
         membership_recovery: Mutex::new(None),
         cancellation: None,
+        ledger: Default::default(),
     });
     ResyncHarness {
         transport,
@@ -3631,6 +3593,7 @@ async fn resync_generation_gate_rejects_close_reopen_aba() {
         crash_notify: None,
         membership_recovery: Mutex::new(None),
         cancellation: None,
+        ledger: Default::default(),
     };
 
     let opened_files: Mutex<HashMap<String, OpenKind>> = Mutex::new(HashMap::new());
@@ -3765,6 +3728,7 @@ fn storm_harness_with_crash_notify(crash_notify: Arc<Notify>) -> StormHarness {
         crash_notify: Some(Arc::clone(&crash_notify)),
         membership_recovery: Mutex::new(None),
         cancellation: None,
+        ledger: Default::default(),
     });
     StormHarness {
         transport,
@@ -3885,6 +3849,7 @@ impl RealReloadHarness {
             Some(&plugin_path.to_string_lossy()),
             Some(&carrier_store_dir.to_string_lossy()),
             false,
+            None,
             None,
         )
         .await
@@ -4272,7 +4237,15 @@ async fn real_publication_refresh_admits_plugin_carriers() {
         real.provider.applied_content(&path),
         crate::traits::AppliedContent::Applied(Arc::from(after))
     );
-    let hover = real.provider.get_hover(&path, 15).await.unwrap().unwrap();
+    let hover = real
+        .provider
+        .get_hover(
+            &crate::provider_query::ProviderQuery::at_engine_surface(&path),
+            15,
+        )
+        .await
+        .unwrap()
+        .unwrap();
     assert!(
         hover.contents.contains("receipt: string"),
         "{}",
@@ -4322,7 +4295,15 @@ async fn real_close_of_a_file_tsserver_does_not_hold_open_succeeds() {
 
     // The engine is still the one that served before the closes.
     real.provider.open_file(&path, content).await.unwrap();
-    let hover = real.provider.get_hover(&path, 15).await.unwrap().unwrap();
+    let hover = real
+        .provider
+        .get_hover(
+            &crate::provider_query::ProviderQuery::at_engine_surface(&path),
+            15,
+        )
+        .await
+        .unwrap()
+        .unwrap();
     assert!(
         hover.contents.contains("closedTwice: number"),
         "{}",
@@ -4369,6 +4350,7 @@ fn test_transport(stdin_tx: mpsc::Sender<TsserverStdinMessage>) -> TsserverTrans
         crash_notify: None,
         membership_recovery: Mutex::new(None),
         cancellation: TsserverCancellation::create().map(Arc::new),
+        ledger: Default::default(),
     }
 }
 
@@ -4385,7 +4367,102 @@ fn test_transport_with_notify(
         crash_notify: Some(crash_notify),
         membership_recovery: Mutex::new(None),
         cancellation: TsserverCancellation::create().map(Arc::new),
+        ledger: Default::default(),
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn bound_stdin_reservation_respects_the_ambient_deadline_without_recovery() {
+    for background_epoch in [None, Some(0)] {
+        let (stdin_tx, mut stdin_rx) = mpsc::channel(1);
+        stdin_tx
+            .try_send(TsserverStdinMessage::Frame(vec![]))
+            .unwrap();
+        let transport = test_transport(stdin_tx);
+        let budget = std::time::Duration::from_secs(1);
+        let started = tokio::time::Instant::now();
+        let result = crate::deadline::with_deadline(budget, async {
+            tokio::time::timeout(
+                budget,
+                transport.request_bound(
+                    "quickinfo",
+                    WireBinding::Plain(serde_json::json!({})),
+                    background_epoch,
+                ),
+            )
+            .await
+        })
+        .await
+        .expect("the transport must refuse before the caller deadline");
+        assert!(result
+            .err()
+            .expect("the writer cannot accept a frame")
+            .message
+            .contains("stdin enqueue timed out"));
+        assert!(started.elapsed() < budget);
+        assert_eq!(pending_len(&transport), 0);
+        assert!(
+            transport
+                .cancellation
+                .as_ref()
+                .unwrap()
+                .written
+                .lock()
+                .unwrap()
+                .is_empty(),
+            "an unplaced request must not cancel an unseen sequence"
+        );
+        assert_eq!(transport.pending.background_seq.load(Ordering::Acquire), 0);
+        assert_eq!(
+            transport.liveness.strikes(),
+            0,
+            "a shortened wait is not hang evidence"
+        );
+        stdin_rx.recv().await.unwrap();
+        assert!(
+            matches!(stdin_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "no query frame was placed"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn bound_stdin_reservation_has_a_backstop_without_an_ambient_deadline() {
+    let (stdin_tx, mut stdin_rx) = mpsc::channel(1);
+    stdin_tx
+        .try_send(TsserverStdinMessage::Frame(vec![]))
+        .unwrap();
+    let transport = test_transport(stdin_tx);
+    let result = tokio::time::timeout(
+        LOADING_WEDGE_SILENCE_CAP * 2,
+        transport.request_bound("quickinfo", WireBinding::Plain(serde_json::json!({})), None),
+    )
+    .await
+    .expect("an unscoped transport without recovery must not wait forever");
+    assert!(result
+        .err()
+        .expect("the writer cannot accept a frame")
+        .message
+        .contains("stdin enqueue timed out"));
+    assert_eq!(pending_len(&transport), 0);
+    assert!(transport
+        .cancellation
+        .as_ref()
+        .unwrap()
+        .written
+        .lock()
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        transport.liveness.strikes(),
+        1,
+        "a full silent writer-stall wait is hang evidence"
+    );
+    stdin_rx.recv().await.unwrap();
+    assert!(matches!(
+        stdin_rx.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
 }
 
 #[tokio::test]

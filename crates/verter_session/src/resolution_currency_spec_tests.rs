@@ -19,7 +19,7 @@ use verter_session_query::facts::fact_cache::ReadSetSignature;
 use verter_session_query::facts::fact_cache::SignatureAdmission;
 use verter_session_query::facts::{
     fact_cache::{FactVersionRef, ResolveImportsFactRef},
-    fact_read_set::{FactReadSetFinalise, FACT_SIGNATURE_CAP},
+    fact_read_set::FactReadSetFinalise,
 };
 use verter_type_engine::cache_runtime::CacheAdmission;
 
@@ -577,20 +577,16 @@ fn resolution_world_publication_is_odd_during_all_four_write_steps() {
 }
 
 #[test]
-fn signature_bound_and_typed_non_admission_use_the_existing_substrate() {
-    assert_eq!(FACT_SIGNATURE_CAP, 1_024);
+fn typed_non_admission_uses_the_existing_substrate() {
     let empty = SignatureAdmission::from_finalise(FactReadSetFinalise::Ok(Arc::from([])));
-    let overflow = SignatureAdmission::from_finalise(FactReadSetFinalise::Overflow);
+    let unstable = SignatureAdmission::from_finalise(FactReadSetFinalise::MutationUnstable);
     assert!(matches!(
         empty,
-        SignatureAdmission::Cacheable(ReadSetSignature {
-            overflowed: false,
-            ..
-        })
+        SignatureAdmission::Cacheable(ReadSetSignature { .. })
     ));
     assert!(matches!(
-        overflow,
-        SignatureAdmission::NonCacheable(NonAdmissionReason::SignatureOverflow)
+        unstable,
+        SignatureAdmission::NonCacheable(NonAdmissionReason::MutationUnstable)
     ));
     let return_only: CacheAdmission<()> = CacheAdmission::ReturnOnly {
         value: (),

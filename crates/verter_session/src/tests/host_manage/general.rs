@@ -1054,10 +1054,6 @@ const label = 'plain'
          cannot decide publication scope",
     );
     assert!(
-        !signature.overflowed,
-        "a dependency-free class-fact set is not an overflow",
-    );
-    assert!(
         signature.facts.is_empty(),
         "a dependency-free class-fact set records an EMPTY PRESENT signature; \
          got {} facts",

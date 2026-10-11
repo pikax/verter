@@ -17,6 +17,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use verter_lsp::type_provider::traits::ProviderQuery;
 
 use verter_lsp::tsgo::composite::TsgoCompositeProvider;
 use verter_lsp::tsgo::project_binding::{
@@ -205,7 +206,7 @@ impl TypeProvider for MarkerOwned {
     }
     fn get_completions(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _offset: u32,
         _trigger: Option<&str>,
     ) -> ProviderFuture<'_, CompletionResult> {
@@ -222,7 +223,7 @@ impl TypeProvider for MarkerOwned {
     }
     fn get_completion_details<'a>(
         &'a self,
-        _path: &'a str,
+        _query: &'a ProviderQuery,
         _offset: u32,
         items: &'a [Completion],
     ) -> ProviderFuture<'a, Vec<Completion>> {
@@ -231,7 +232,7 @@ impl TypeProvider for MarkerOwned {
     }
     fn resolve_completion(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _data: CompletionResolveData,
     ) -> ProviderFuture<'_, Option<CompletionResolveResult>> {
         self.resolve_completion_calls.fetch_add(1, Ordering::SeqCst);
@@ -242,29 +243,41 @@ impl TypeProvider for MarkerOwned {
             }))
         })
     }
-    fn get_hover(&self, _path: &str, _offset: u32) -> ProviderFuture<'_, Option<HoverInfo>> {
+    fn get_hover(
+        &self,
+        _query: &ProviderQuery,
+        _offset: u32,
+    ) -> ProviderFuture<'_, Option<HoverInfo>> {
         self.hover_calls.fetch_add(1, Ordering::SeqCst);
         Box::pin(async move { Ok(Some(marker_hover())) })
     }
-    fn get_definition(&self, _path: &str, _offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
+    fn get_definition(
+        &self,
+        _query: &ProviderQuery,
+        _offset: u32,
+    ) -> ProviderFuture<'_, Vec<TypeLocation>> {
         self.definition_calls.fetch_add(1, Ordering::SeqCst);
         Box::pin(async move { Ok(vec![marker_location()]) })
     }
     fn get_type_definition(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _offset: u32,
     ) -> ProviderFuture<'_, Vec<TypeLocation>> {
         self.type_definition_calls.fetch_add(1, Ordering::SeqCst);
         Box::pin(async move { Ok(vec![marker_location()]) })
     }
-    fn get_references(&self, _path: &str, _offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
+    fn get_references(
+        &self,
+        _query: &ProviderQuery,
+        _offset: u32,
+    ) -> ProviderFuture<'_, Vec<TypeLocation>> {
         self.references_calls.fetch_add(1, Ordering::SeqCst);
         Box::pin(async move { Ok(vec![marker_location()]) })
     }
     fn get_rename_locations(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _offset: u32,
     ) -> ProviderFuture<'_, Vec<RenameLocation>> {
         self.rename_locations_calls.fetch_add(1, Ordering::SeqCst);
@@ -278,7 +291,7 @@ impl TypeProvider for MarkerOwned {
     }
     fn get_signature_help(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _offset: u32,
     ) -> ProviderFuture<'_, Option<SignatureHelp>> {
         self.signature_help_calls.fetch_add(1, Ordering::SeqCst);
@@ -292,7 +305,7 @@ impl TypeProvider for MarkerOwned {
     }
     fn get_code_actions(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _start: u32,
         _end: u32,
         _diagnostics: &[ProviderDiagnosticContext],
@@ -300,7 +313,10 @@ impl TypeProvider for MarkerOwned {
         self.code_actions_calls.fetch_add(1, Ordering::SeqCst);
         Box::pin(async move { Ok(vec![marker_code_action()]) })
     }
-    fn get_semantic_tokens(&self, _path: &str) -> ProviderFuture<'_, Vec<SemanticToken>> {
+    fn get_semantic_tokens(
+        &self,
+        _query: &ProviderQuery,
+    ) -> ProviderFuture<'_, Vec<SemanticToken>> {
         self.semantic_tokens_calls.fetch_add(1, Ordering::SeqCst);
         Box::pin(async move {
             Ok(vec![SemanticToken {
@@ -313,7 +329,7 @@ impl TypeProvider for MarkerOwned {
     }
     fn get_document_highlights(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _offset: u32,
     ) -> ProviderFuture<'_, Vec<TypeDocumentHighlight>> {
         self.document_highlights_calls
@@ -322,7 +338,7 @@ impl TypeProvider for MarkerOwned {
     }
     fn get_inlay_hints(
         &self,
-        _path: &str,
+        _query: &ProviderQuery,
         _start: u32,
         _end: u32,
     ) -> ProviderFuture<'_, Vec<InlayHint>> {
@@ -772,7 +788,10 @@ async fn feature_external_only_denied_carrier_serves_empty_no_owned_call() {
     let carrier = format!("{WS_ROOT}/src/Widget.vue.tsx");
 
     let type_def = c
-        .get_type_definition(&carrier, 0)
+        .get_type_definition(
+            &verter_lsp::type_provider::traits::ProviderQuery::at_engine_surface(&carrier),
+            0,
+        )
         .await
         .expect("type_definition");
     assert!(
@@ -781,7 +800,10 @@ async fn feature_external_only_denied_carrier_serves_empty_no_owned_call() {
          leak); got {type_def:?}"
     );
     let sig = c
-        .get_signature_help(&carrier, 0)
+        .get_signature_help(
+            &verter_lsp::type_provider::traits::ProviderQuery::at_engine_surface(&carrier),
+            0,
+        )
         .await
         .expect("signature_help");
     assert!(
@@ -789,7 +811,9 @@ async fn feature_external_only_denied_carrier_serves_empty_no_owned_call() {
         "a denied carrier's signature_help must be None"
     );
     let toks = c
-        .get_semantic_tokens(&carrier)
+        .get_semantic_tokens(
+            &verter_lsp::type_provider::traits::ProviderQuery::at_engine_surface(&carrier),
+        )
         .await
         .expect("semantic_tokens");
     assert!(
@@ -820,15 +844,32 @@ async fn feature_external_only_bound_carrier_delegates_to_owned() {
     let carrier = format!("{WS_ROOT}/src/Widget.vue.tsx");
 
     assert!(
-        !c.get_type_definition(&carrier, 0).await.unwrap().is_empty(),
+        !c.get_type_definition(
+            &verter_lsp::type_provider::traits::ProviderQuery::at_engine_surface(&carrier),
+            0
+        )
+        .await
+        .unwrap()
+        .is_empty(),
         "a BOUND carrier delegates type_definition — the OWNED marker surfaces"
     );
     assert!(
-        c.get_signature_help(&carrier, 0).await.unwrap().is_some(),
+        c.get_signature_help(
+            &verter_lsp::type_provider::traits::ProviderQuery::at_engine_surface(&carrier),
+            0
+        )
+        .await
+        .unwrap()
+        .is_some(),
         "a BOUND carrier delegates signature_help — the OWNED marker surfaces"
     );
     assert!(
-        !c.get_semantic_tokens(&carrier).await.unwrap().is_empty(),
+        !c.get_semantic_tokens(
+            &verter_lsp::type_provider::traits::ProviderQuery::at_engine_surface(&carrier)
+        )
+        .await
+        .unwrap()
+        .is_empty(),
         "a BOUND carrier delegates semantic_tokens — the OWNED marker surfaces"
     );
 
@@ -846,7 +887,13 @@ async fn feature_external_only_plain_ts_is_ungated() {
     let plain = format!("{WS_ROOT}/src/plain.ts");
 
     assert!(
-        !c.get_type_definition(&plain, 0).await.unwrap().is_empty(),
+        !c.get_type_definition(
+            &verter_lsp::type_provider::traits::ProviderQuery::at_engine_surface(&plain),
+            0
+        )
+        .await
+        .unwrap()
+        .is_empty(),
         "a plain `.ts` type_definition is UNGATED — it delegates to OWNED (marker surfaces)"
     );
     assert_eq!(
@@ -867,36 +914,55 @@ async fn feature_mixed_read_denied_carrier_serves_external_default_no_owned_call
     let carrier = format!("{WS_ROOT}/src/Widget.vue.tsx");
 
     assert!(
-        c.get_hover(&carrier, 0).await.expect("hover").is_none(),
+        c.get_hover(
+            &verter_lsp::type_provider::traits::ProviderQuery::at_engine_surface(&carrier),
+            0
+        )
+        .await
+        .expect("hover")
+        .is_none(),
         "a denied carrier's hover must be the None external default (native preserved by \
          the handler merge)"
     );
     assert!(
-        c.get_definition(&carrier, 0)
-            .await
-            .expect("definition")
-            .is_empty(),
+        c.get_definition(
+            &verter_lsp::type_provider::traits::ProviderQuery::at_engine_surface(&carrier),
+            0
+        )
+        .await
+        .expect("definition")
+        .is_empty(),
         "a denied carrier's definition must be the empty external default"
     );
     assert!(
-        c.get_references(&carrier, 0)
-            .await
-            .expect("references")
-            .is_empty(),
+        c.get_references(
+            &verter_lsp::type_provider::traits::ProviderQuery::at_engine_surface(&carrier),
+            0
+        )
+        .await
+        .expect("references")
+        .is_empty(),
         "a denied carrier's references must be the empty external default"
     );
     assert!(
-        c.get_document_highlights(&carrier, 0)
-            .await
-            .expect("document_highlights")
-            .is_empty(),
+        c.get_document_highlights(
+            &verter_lsp::type_provider::traits::ProviderQuery::at_engine_surface(&carrier),
+            0
+        )
+        .await
+        .expect("document_highlights")
+        .is_empty(),
         "a denied carrier's document_highlights must be the empty external default"
     );
     assert!(
-        c.get_inlay_hints(&carrier, 0, 1)
-            .await
-            .expect("inlay_hints")
-            .is_empty(),
+        c.get_inlay_hints(
+            &verter_lsp::type_provider::traits::ProviderQuery::at_engine_surface(&carrier),
+            0,
+            1
+        )
+        .await
+        .expect("inlay_hints")
+        .is_empty(),
         "a denied carrier's inlay_hints must be the empty external default"
     );
 
@@ -933,26 +999,54 @@ async fn feature_mixed_read_bound_carrier_delegates_to_owned() {
     let carrier = format!("{WS_ROOT}/src/Widget.vue.tsx");
 
     assert!(
-        c.get_hover(&carrier, 0).await.unwrap().is_some(),
+        c.get_hover(
+            &verter_lsp::type_provider::traits::ProviderQuery::at_engine_surface(&carrier),
+            0
+        )
+        .await
+        .unwrap()
+        .is_some(),
         "a BOUND carrier delegates hover — the OWNED marker surfaces"
     );
     assert!(
-        !c.get_definition(&carrier, 0).await.unwrap().is_empty(),
+        !c.get_definition(
+            &verter_lsp::type_provider::traits::ProviderQuery::at_engine_surface(&carrier),
+            0
+        )
+        .await
+        .unwrap()
+        .is_empty(),
         "a BOUND carrier delegates definition"
     );
     assert!(
-        !c.get_references(&carrier, 0).await.unwrap().is_empty(),
+        !c.get_references(
+            &verter_lsp::type_provider::traits::ProviderQuery::at_engine_surface(&carrier),
+            0
+        )
+        .await
+        .unwrap()
+        .is_empty(),
         "a BOUND carrier delegates references"
     );
     assert!(
-        !c.get_document_highlights(&carrier, 0)
-            .await
-            .unwrap()
-            .is_empty(),
+        !c.get_document_highlights(
+            &verter_lsp::type_provider::traits::ProviderQuery::at_engine_surface(&carrier),
+            0
+        )
+        .await
+        .unwrap()
+        .is_empty(),
         "a BOUND carrier delegates document_highlights"
     );
     assert!(
-        !c.get_inlay_hints(&carrier, 0, 1).await.unwrap().is_empty(),
+        !c.get_inlay_hints(
+            &verter_lsp::type_provider::traits::ProviderQuery::at_engine_surface(&carrier),
+            0,
+            1
+        )
+        .await
+        .unwrap()
+        .is_empty(),
         "a BOUND carrier delegates inlay_hints"
     );
 
@@ -981,7 +1075,11 @@ async fn feature_completion_denied_carrier_serves_native_only_no_owned_call() {
     let carrier = format!("{WS_ROOT}/src/Widget.vue.tsx");
 
     let completions = c
-        .get_completions(&carrier, 0, None)
+        .get_completions(
+            &verter_lsp::type_provider::traits::ProviderQuery::at_engine_surface(&carrier),
+            0,
+            None,
+        )
         .await
         .expect("completions");
     assert!(
@@ -990,7 +1088,11 @@ async fn feature_completion_denied_carrier_serves_native_only_no_owned_call() {
          `is_incomplete: true` marker must NOT leak)"
     );
     let details = c
-        .get_completion_details(&carrier, 0, &[])
+        .get_completion_details(
+            &verter_lsp::type_provider::traits::ProviderQuery::at_engine_surface(&carrier),
+            0,
+            &[],
+        )
         .await
         .expect("completion_details");
     assert!(
@@ -999,7 +1101,10 @@ async fn feature_completion_denied_carrier_serves_native_only_no_owned_call() {
     );
     // resolve enrichment is SUPPRESSED (None) when admission is absent.
     let resolved = c
-        .resolve_completion(&carrier, lsp_resolve_data())
+        .resolve_completion(
+            &verter_lsp::type_provider::traits::ProviderQuery::at_engine_surface(&carrier),
+            lsp_resolve_data(),
+        )
         .await
         .expect("resolve_completion");
     assert!(
@@ -1030,19 +1135,33 @@ async fn feature_completion_bound_carrier_delegates_to_owned() {
     let carrier = format!("{WS_ROOT}/src/Widget.vue.tsx");
 
     assert!(
-        c.get_completions(&carrier, 0, None)
-            .await
-            .unwrap()
-            .is_incomplete,
+        c.get_completions(
+            &verter_lsp::type_provider::traits::ProviderQuery::at_engine_surface(&carrier),
+            0,
+            None
+        )
+        .await
+        .unwrap()
+        .is_incomplete,
         "a BOUND carrier delegates completions — the OWNED `is_incomplete` marker surfaces"
     );
     // completion_details echoes the input items; delegation is proven by the counter.
-    let _ = c.get_completion_details(&carrier, 0, &[]).await.unwrap();
+    let _ = c
+        .get_completion_details(
+            &verter_lsp::type_provider::traits::ProviderQuery::at_engine_surface(&carrier),
+            0,
+            &[],
+        )
+        .await
+        .unwrap();
     assert!(
-        c.resolve_completion(&carrier, lsp_resolve_data())
-            .await
-            .unwrap()
-            .is_some(),
+        c.resolve_completion(
+            &verter_lsp::type_provider::traits::ProviderQuery::at_engine_surface(&carrier),
+            lsp_resolve_data()
+        )
+        .await
+        .unwrap()
+        .is_some(),
         "a BOUND carrier delegates resolve_completion — the OWNED enrichment surfaces"
     );
 
@@ -1062,7 +1181,10 @@ async fn feature_rename_denied_carrier_serves_native_only_no_owned_call() {
     let carrier = format!("{WS_ROOT}/src/Widget.vue.tsx");
 
     let renames = c
-        .get_rename_locations(&carrier, 0)
+        .get_rename_locations(
+            &verter_lsp::type_provider::traits::ProviderQuery::at_engine_surface(&carrier),
+            0,
+        )
         .await
         .expect("rename_locations");
     assert!(
@@ -1084,10 +1206,13 @@ async fn feature_rename_bound_carrier_delegates_to_owned() {
     let carrier = format!("{WS_ROOT}/src/Widget.vue.tsx");
 
     assert!(
-        !c.get_rename_locations(&carrier, 0)
-            .await
-            .unwrap()
-            .is_empty(),
+        !c.get_rename_locations(
+            &verter_lsp::type_provider::traits::ProviderQuery::at_engine_surface(&carrier),
+            0
+        )
+        .await
+        .unwrap()
+        .is_empty(),
         "a BOUND carrier delegates rename_locations — the OWNED marker surfaces"
     );
     assert_eq!(owned.rename_locations_calls.load(Ordering::SeqCst), 1);
@@ -1107,7 +1232,12 @@ async fn feature_code_actions_denied_carrier_serves_native_only_no_owned_call() 
     let carrier = format!("{WS_ROOT}/src/Widget.vue.tsx");
 
     let actions = c
-        .get_code_actions(&carrier, 0, 1, &[])
+        .get_code_actions(
+            &verter_lsp::type_provider::traits::ProviderQuery::at_engine_surface(&carrier),
+            0,
+            1,
+            &[],
+        )
         .await
         .expect("code_actions");
     assert!(
@@ -1129,10 +1259,15 @@ async fn feature_code_actions_bound_carrier_delegates_to_owned() {
     let carrier = format!("{WS_ROOT}/src/Widget.vue.tsx");
 
     assert!(
-        !c.get_code_actions(&carrier, 0, 1, &[])
-            .await
-            .unwrap()
-            .is_empty(),
+        !c.get_code_actions(
+            &verter_lsp::type_provider::traits::ProviderQuery::at_engine_surface(&carrier),
+            0,
+            1,
+            &[]
+        )
+        .await
+        .unwrap()
+        .is_empty(),
         "a BOUND carrier delegates code_actions — the OWNED marker surfaces"
     );
     assert_eq!(owned.code_actions_calls.load(Ordering::SeqCst), 1);
@@ -1146,10 +1281,15 @@ async fn feature_code_actions_plain_ts_is_ungated() {
     let plain = format!("{WS_ROOT}/src/plain.ts");
 
     assert!(
-        !c.get_code_actions(&plain, 0, 1, &[])
-            .await
-            .unwrap()
-            .is_empty(),
+        !c.get_code_actions(
+            &verter_lsp::type_provider::traits::ProviderQuery::at_engine_surface(&plain),
+            0,
+            1,
+            &[]
+        )
+        .await
+        .unwrap()
+        .is_empty(),
         "a plain `.ts` code_actions is UNGATED — it delegates to OWNED (marker surfaces)"
     );
     assert_eq!(

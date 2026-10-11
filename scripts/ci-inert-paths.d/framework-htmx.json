@@ -1,0 +1,6 @@
+[
+  {
+    "glob": "tests/framework-htmx/HTX0/**",
+    "reason": "Reviewed htmx contract data; no ci.yml lane reads these bytes yet. Executable validation and lane ownership are deferred to the htmx contract consumer."
+  }
+]

@@ -1338,7 +1338,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             || self.resolve_carrier_subject_node_inner(node, context),
         );
         // Order is LOAD-BEARING: finish the local frame, OR the nested tracer's
-        // non-cacheability AND its overflow into `observed.cache_suppress`, and
+        // non-cacheability AND its instability into `observed.cache_suppress`, and
         // ONLY THEN re-fold the merged observation into the enclosing frame.
         // Re-folding the Rail-1-only frame before adding the tracer bits would
         // recreate the gap the nested tracer exists to close.
@@ -1351,12 +1351,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
         // A `matches!` is NOT exhaustive, so a new refusal variant
         // compiles clean here while silently skipping the suppression.
-        // Both size and stability refusals yield no fact list this
-        // carrier can be rooted on, so both suppress.
+        // A stability refusal yields no fact list this carrier can be
+        // rooted on, so it suppresses.
         if matches!(
             finalise,
-            verter_session_query::facts::fact_read_set::FactReadSetFinalise::Overflow
-                | verter_session_query::facts::fact_read_set::FactReadSetFinalise::MutationUnstable
+            verter_session_query::facts::fact_read_set::FactReadSetFinalise::MutationUnstable
         ) {
             observed.cache_suppress = true;
         }

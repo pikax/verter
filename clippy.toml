@@ -23,3 +23,12 @@ disallowed-macros = [
   { path = "std::debug_assert_eq", reason = "use verter_debug_assert::verter_debug_assert_eq! — precompute any side-effecting value first, the raw macro's arguments never evaluate in a shipped build" },
   { path = "std::debug_assert_ne", reason = "use verter_debug_assert::verter_debug_assert_ne! — precompute any side-effecting value first, the raw macro's arguments never evaluate in a shipped build" },
 ]
+
+# `ignore-interior-mutability` lets a `FactVersionRef` key hash sets and
+# maps. A `ResultReceipt`'s `Eq`/`Ord`/`Hash` read only its immutable
+# evidence (digest, kind, facts); the only interior mutability it reaches is
+# the process retention account behind an evidence page's `RetentionCharge`,
+# which never participates in a receipt's identity. `bytes::Bytes` keeps
+# clippy's default. Per-crate clippy.toml files carry their own copy (clippy
+# does not merge this file into a crate that has its own).
+ignore-interior-mutability = ["bytes::Bytes", "verter_session_query::facts::receipt::ResultReceipt"]

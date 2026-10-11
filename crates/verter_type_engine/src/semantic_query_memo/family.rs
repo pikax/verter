@@ -168,9 +168,8 @@ impl MemoEntry {
     /// self-root `FileWholeHash` *strictly*.
     ///
     /// Returns `true` only when the path-precise fact rail validates
-    /// (self-roots strict, cross-file dependency facts lazy). An
-    /// overflow carrier always fails (it must never warm-hit). An
-    /// empty carrier with no self-roots validates vacuously.
+    /// (self-roots strict, cross-file dependency facts lazy), every
+    /// evidence page of a wide carrier included. An empty carrier with no self-roots validates vacuously.
     ///
     /// This is the strict warm-read validation entry point: a
     /// same-canonical content edit on any self-root canonical, or a

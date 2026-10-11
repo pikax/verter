@@ -1,0 +1,20 @@
+---
+const items = ["a", "b", "c"];
+const groups = [{ name: "x", members: [1, 2] }];
+const visible = true;
+---
+
+<ul>
+  {items.map((i) => <li>{i}</li>)}
+</ul>
+{visible && <p class="shown">visible</p>}
+{visible ? <strong>yes</strong> : <em>no</em>}
+{groups.map((group) => (
+  <section>
+    <h2>{group.name}</h2>
+    <ol>
+      {group.members.map((member) => <li data-member={member}>{member}</li>)}
+    </ol>
+  </section>
+))}
+{items.length > 2 && items.filter((i) => i !== "b").map((i) => <>{i}<br /></>)}

@@ -292,24 +292,15 @@ impl VerterHost {
         {
             return self.decline_import_route_witness();
         }
-        let witness = self.observed_import_route_witness(canonical_id, specifiers)?;
-        if witness.len() > verter_session_query::facts::fact_read_set::FACT_SIGNATURE_CAP {
-            // Overflow: the witness cannot represent the complete
-            // observation set, so it is not rootable. Never represented
-            // by a truncated or empty signature (`.DECISION.md` §3).
-            return self.decline_import_route_witness();
-        }
-        Some(witness)
+        self.observed_import_route_witness(canonical_id, specifiers)
     }
 
-    /// The deduped observation set, in first-observation order, with the
-    /// signature bound NOT yet applied.
+    /// The deduped observation set, in first-observation order — every
+    /// observation, however many: the consuming producer's tracer pages a
+    /// wide set rather than refusing it.
     ///
-    /// `None` means a specifier's resolution was REFUSED — the other reason
-    /// a witness is unrootable, and a genuinely different one: a refusal
-    /// carries no observations at all, while an overflow carries too many.
-    /// Splitting them here is what lets a fixture assert which of the two it
-    /// is exercising instead of asserting the `None` both produce.
+    /// `None` means a specifier's resolution was REFUSED, so the witness is
+    /// unrootable: a refusal carries no observations at all.
     fn observed_import_route_witness(
         &self,
         canonical_id: &str,
@@ -424,15 +415,10 @@ impl VerterHost {
         self.owner_import_route_witness(canonical_id)
     }
 
-    /// The size of the owner's deduped observation set BEFORE the signature
-    /// bound is applied; `None` when a specifier's resolution was refused.
-    ///
-    /// A fixture asserting only that the witness is `None` cannot tell
-    /// overflow from refusal, so it cannot notice when a change to the bound
-    /// or to witness composition silently converts it from one into the
-    /// other. This reports the quantity the bound is compared against, so
-    /// the fixture can state which case it stages and how much headroom it
-    /// holds.
+    /// The size of the owner's deduped observation set; `None` when a
+    /// specifier's resolution was refused. Lets a fixture state the witness
+    /// width it stages, so a change to witness composition that flattens it
+    /// is visible as growth rather than hidden behind a rootable witness.
     #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn owner_import_route_observation_count_for_tests(

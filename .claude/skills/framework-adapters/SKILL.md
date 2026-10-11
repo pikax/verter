@@ -485,7 +485,7 @@ The seam splits across the crate that owns each domain:
   `validate` receives NEUTRAL data (`ResolvedValidationCx`: candidates,
   resolved-import targets, a capability lookup) so the trait stays free of
   session resolver types. Publication is `SignatureAdmission::Cacheable`-only
-  and accepts only producer-minted `ExactScriptFacts` (overflow ⇒ `ReturnOnly`,
+  and accepts only producer-minted `ExactScriptFacts` (refusal ⇒ `ReturnOnly`,
   no warm); partial and unavailable results never warm. The cold tracer
   observes the owner's request-bound path-precise resolution witness (a
   re-route stale-serves otherwise).

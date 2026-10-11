@@ -1,0 +1,94 @@
+{
+  "schema": 1,
+  "kind": "FrameworkActivationPolicy",
+  "owner": "FWA1",
+  "recordKey": ["workspacePackage", "file", "framework"],
+  "rows": [
+    {
+      "framework": "stimulus",
+      "profile": "stimulus-3.2.2",
+      "packages": [
+        {
+          "identity": "@hotwired/stimulus",
+          "dependencyRoles": [
+            "dependency",
+            "devDependency",
+            "peerDependency",
+            "optionalDependency"
+          ],
+          "source": "PM resolved installed package identity and release"
+        }
+      ],
+      "gem": "stimulus-rails",
+      "gemSource": "package-root Gemfile.lock resolved GEM specs joined to the vendoredVersions table",
+      "admittedMajors": [3],
+      "explicitOnRelease": "3.2.2",
+      "consumers": [
+        "STIM1",
+        "STIM2",
+        "STIM3",
+        "STIM4",
+        "STIM5",
+        "STIM5R",
+        "STIM7",
+        "STIM8",
+        "STIM8F",
+        "STIMA"
+      ]
+    },
+    {
+      "framework": "turbo",
+      "profile": "turbo-8.0.23",
+      "packages": [
+        {
+          "identity": "@hotwired/turbo",
+          "dependencyRoles": [
+            "dependency",
+            "devDependency",
+            "peerDependency",
+            "optionalDependency"
+          ],
+          "source": "PM resolved installed package identity and release"
+        },
+        {
+          "identity": "@hotwired/turbo-rails",
+          "dependencyRoles": [
+            "dependency",
+            "devDependency",
+            "peerDependency",
+            "optionalDependency"
+          ],
+          "source": "PM resolved wrapper and its installed @hotwired/turbo dependency, both checked against the exact lock"
+        }
+      ],
+      "gem": "turbo-rails",
+      "gemSource": "package-root Gemfile.lock resolved GEM specs joined to the vendoredVersions table",
+      "admittedMajors": [8],
+      "explicitOnRelease": "8.0.23",
+      "consumers": ["STIM4T", "STIM5", "STIM5R", "STIM8", "STIMA"]
+    }
+  ],
+  "switches": {
+    "off": "off; zero overlay, semantic, diagnostic and editor work",
+    "auto": "active only with admitted resolved package or sourced gem evidence; no evidence means inactive",
+    "on": "explicit admitted release without dependency evidence; never overrides unsupported installed evidence"
+  },
+  "provenance": [
+    "PM resolved package proof",
+    "Gemfile.lock exact vendored mapping",
+    "explicit admitted release"
+  ],
+  "forbiddenEvidence": [
+    "importmap pin",
+    "script URL",
+    "CDN host",
+    "data-controller spelling",
+    "data-turbo spelling",
+    "the other framework activation record",
+    "Gemfile execution",
+    "Ruby or bundle process"
+  ],
+  "independence": "Never derive turbo from stimulus or stimulus from turbo. Each record has its own state, release, provenance and switch. A pair of gems yields two records, not a Hotwire aggregate.",
+  "conflict": "Contradictory resolved package/gem releases cannot be guessed into one profile; retain provenance and refuse admission until FWA1 has an unambiguous exact release.",
+  "files": "FWA1 supplies per-package/per-file records; INT5 finds embedded regions. The overlay consumes neutral HWC facts and never activates from attribute spelling."
+}

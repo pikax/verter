@@ -8,7 +8,9 @@ pub(crate) use analysis::SemanticReady;
 pub(crate) use analysis::SEMANTIC_ANALYSIS_QUIET_WINDOW;
 pub(crate) use diagnostics::BackgroundPublication;
 pub(crate) use diagnostics::DiagnosticsRefresh;
-pub(crate) use foreground::{EditBearing, ForegroundRequest, ForegroundRoute, Settled};
+pub(crate) use foreground::{
+    ClosedTargetAuthority, EditBearing, ForegroundRequest, ForegroundRoute, Settled,
+};
 pub use guarded_host::{HostRef, SharedHost};
 pub mod carrier_structure;
 pub mod line_index;
@@ -882,6 +884,29 @@ impl DocumentRegistry {
     /// Get the negotiated encoding.
     pub fn encoding(&self) -> PositionEncodingKind {
         self.encoding.read().clone()
+    }
+
+    /// Open `uri` in the client map without a host upsert.
+    ///
+    /// Creation-absence settlement drives a path from absent to open between
+    /// mapping and settlement. A host upsert would replace project authority
+    /// and settle for that reason alone.
+    #[cfg(test)]
+    pub(crate) fn appear_open_for_test(&self, uri: &Uri, text: &str) {
+        let source: Arc<str> = Arc::from(text);
+        let state = DocumentState {
+            canonical_id: uri_to_canonical_id(uri),
+            version: 1,
+            document_revision: self.next_document_revision(),
+            source: Arc::clone(&source),
+            line_index: Arc::new(LineIndex::new(&source, self.encoding())),
+            feature_snapshot: None,
+            progressive_analysis: None,
+            projection: None,
+            language_id: "vue".to_string(),
+            virtual_source_uri: None,
+        };
+        self.documents.insert(uri.as_str().to_string(), state);
     }
 
     /// Resolve the [`FileLanguage`] row for an editor document.

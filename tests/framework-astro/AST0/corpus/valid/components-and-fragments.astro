@@ -1,0 +1,17 @@
+---
+import Card from "../components/Card.astro";
+import * as UI from "../components/ui";
+---
+
+<Card title="Plain" />
+<UI.Card title="Namespaced">
+  <span>child</span>
+</UI.Card>
+<>
+  <p>first</p>
+  <p>second</p>
+</>
+<Fragment>
+  <p>third</p>
+</Fragment>
+<Fragment set:html={"<b>raw</b>"} />

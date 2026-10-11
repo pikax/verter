@@ -86,6 +86,11 @@ impl ProviderEstablisher<dyn TypeProvider> for TsserverBackend {
                 Some(&inputs.carrier_store_dir),
                 inputs.plugin_response_remap,
                 Some(crash_signal),
+                // The plugin reads carriers out of this store while it
+                // evaluates: every query settles against its publications.
+                Some(Arc::new(
+                    crate::external_ts::CarrierStorePublications::open(&inputs.carrier_store_dir),
+                )),
             )
             .await?;
             Ok(Arc::new(provider) as Arc<dyn TypeProvider>)

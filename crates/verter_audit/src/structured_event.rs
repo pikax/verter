@@ -76,19 +76,17 @@ pub enum NonAdmissionReason {
     /// every world and is deliberately never cached as a fact-validated
     /// entry.
     IntrinsicNonCacheable,
-    /// The path-precise fact signature exceeded the size cap. The value
-    /// is correct; the signature is too large to admit safely.
+    /// No producer: a fact signature is paged when wide, never refused
+    /// for its width. The variant stays on the audit wire as a schema value
+    /// pending a wire-contract retirement.
     SignatureOverflow,
     /// A compaction domain the compute was COMPACTING advanced between
     /// the moment its basis was installed and the moment it tried to
     /// admit. Its terminal aggregate would assert that the domain held
     /// as of a generation the observations do not come from.
     ///
-    /// DISTINCT from [`Self::SignatureOverflow`] on purpose, and never
-    /// folded into it: instability is a STABILITY failure, not a
-    /// CARDINALITY one. Reporting it as overflow would refuse the
-    /// attempt under a rail that is about size, and leave the caller
-    /// unable to tell a genuinely wide compute from a racing one.
+    /// A STABILITY failure, reported under its own reason so a caller can
+    /// tell a racing compute from any other refusal.
     ///
     /// Terminal on the first unstable attempt — no automatic retry. A
     /// retry re-runs closures whose accumulators append and whose
@@ -402,20 +400,14 @@ pub enum StructuredAuditEvent {
         /// Canonical id of the file whose upsert triggered the drain.
         canonical_id: Arc<str>,
     },
-    /// R20 typed event: a `ValidatedFactCache` candidate's
-    /// `fact_dep_signature` exceeded the
-    /// `FACT_SIGNATURE_CAP` size cap and was admitted as
-    /// `NonCacheable`. Producers fall back to cold recompute;
-    /// correctness is preserved but the warm-cache slot is
-    /// skipped for this candidate.
+    /// No producer: a fact signature is paged when wide, never refused
+    /// for its width. The event stays on the audit wire as a schema value
+    /// pending a wire-contract retirement.
     FactSignatureOverflow {
         /// Number of `FactVersionRef` entries the producer
         /// attempted to admit.
         candidate_size: u32,
-        /// Configured cap value at admission time. Today this
-        /// equals `verter_session_query::facts::fact_read_set::FACT_SIGNATURE_CAP`
-        /// (1024); the field is recorded explicitly so the audit
-        /// trail survives future cap tuning.
+        /// Width bound recorded with the event.
         cap: u32,
     },
     /// R20 typed event: a `ValidatedFactCache` candidate failed the

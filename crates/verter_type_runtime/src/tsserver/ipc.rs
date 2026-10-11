@@ -22,6 +22,10 @@ use crate::codec::{
 use crate::contents_snapshot::{convert_per_target, with_target_index};
 use crate::pending::{watch_engine_silence, EngineLiveness, PendingRequestTable, PendingWorkClock};
 use crate::protocol::*;
+use crate::provider_query::{
+    BoundQuery, DeliveryLedger, DispatchRefusal, PreparedQuery, ProviderQuery, PublicationPosition,
+    SurfaceEffect, SurfacePublications,
+};
 use crate::traits::{ProviderFuture, TypeProvider};
 
 /// Environment variables to strip from child processes to prevent VS Code/Electron
@@ -341,6 +345,74 @@ struct TsserverTransport {
     /// session could not create its cancellation directory, in which case an
     /// abandoned request still releases its slot but the engine keeps working.
     cancellation: Option<Arc<TsserverCancellation>>,
+    /// The bytes this tsserver incarnation holds, recorded at the stdin
+    /// position of the frame that delivered them. tsserver evaluates its stdin
+    /// in order, so a query bound at its own frame's position names exactly
+    /// the bytes the engine answers against.
+    ledger: DeliveryLedger,
+}
+
+/// How one request frame meets the delivery ledger at its stdin position.
+enum WireBinding<'a> {
+    /// The frame neither delivers bytes nor decodes positions.
+    Plain(serde_json::Value),
+    /// The frame delivers or withdraws file bytes; the ledger records them at
+    /// the frame's position.
+    Deliver(serde_json::Value, Vec<SurfaceEffect>),
+    /// The first frame the engine evaluates after re-reading its publisher:
+    /// the ledger records the publisher position observed before the re-read
+    /// was requested as adopted at the frame's position.
+    Adopt(serde_json::Value, Option<PublicationPosition>),
+    /// The frame is a positional query: its arguments are built from the
+    /// bytes the engine holds for the prepared file at the frame's position,
+    /// and the binding it returns retains that surface for decoding.
+    Query {
+        prepared: PreparedQuery,
+        arguments: QueryArguments<'a>,
+    },
+}
+
+/// How the frames of one background transaction meet the delivery ledger.
+enum BatchBinding<'a> {
+    /// No frame delivers bytes or decodes positions.
+    #[cfg(test)]
+    Plain,
+    /// Every frame decodes positions in this file, bound at its own position.
+    Query(&'a str),
+    /// The frames make the engine re-read its publisher; the last one is the
+    /// first the engine evaluates after the re-read, and adopts the publisher
+    /// position observed before the transaction.
+    Refresh(Option<PublicationPosition>),
+}
+
+/// Builds a query's arguments from the requested file's bytes at dispatch, or
+/// declines (`None`) when no request is representable in them.
+type QueryArguments<'a> = Box<dyn FnOnce(&str) -> Option<serde_json::Value> + Send + 'a>;
+
+/// Whether a request frame reached stdin.
+enum Placement {
+    /// Placed and answered; a query frame carries its binding.
+    Sent(Option<Box<BoundQuery>>, serde_json::Value),
+    /// A query frame that was never placed: no bytes to convert against, or
+    /// its arguments declined them.
+    Unplaced,
+}
+
+/// Why a query frame was not placed under the ledger lock.
+enum QueryUnplaced {
+    Declined,
+    Failed(TypeProviderError),
+}
+
+impl WireBinding<'_> {
+    fn summary(&self) -> String {
+        match self {
+            Self::Plain(arguments) | Self::Deliver(arguments, _) | Self::Adopt(arguments, _) => {
+                summarize_tsserver_args(arguments)
+            }
+            Self::Query { .. } => "query=bound".to_string(),
+        }
+    }
 }
 
 /// Number of consecutive request timeouts before the transport signals a hang.
@@ -541,6 +613,7 @@ impl TsserverTransport {
         self.request_inner(command, arguments, None, None).await
     }
 
+    #[cfg(test)]
     /// Run a cancellable, single-flight background request only while the
     /// interactive lane is idle. If user traffic arrives, tsserver is cancelled
     /// out of band and the background request retries after the lane drains.
@@ -556,6 +629,7 @@ impl TsserverTransport {
             .expect("a one-frame background batch returns one response"))
     }
 
+    #[cfg(test)]
     /// Admit an ordered background transaction under one editor-idle quiet
     /// window. Every frame remains independently cancellable; if interactive
     /// traffic preempts any frame, the whole idempotent transaction restarts
@@ -570,6 +644,7 @@ impl TsserverTransport {
             .collect()
     }
 
+    #[cfg(test)]
     /// Collect all diagnostic categories before deciding whether the complete
     /// pull succeeded. Admission and preemption are transaction-wide; ordinary
     /// command errors remain frame-local so later categories are still queried.
@@ -581,6 +656,7 @@ impl TsserverTransport {
             .await
     }
 
+    #[cfg(test)]
     async fn request_background_batch_results_once(
         &self,
         requests: &[(&str, serde_json::Value)],
@@ -589,11 +665,99 @@ impl TsserverTransport {
             .await
     }
 
+    #[cfg(test)]
     async fn request_background_batch_results_with_preemption(
         &self,
         requests: &[(&str, serde_json::Value)],
         retry_after_preemption: bool,
     ) -> Result<Vec<Result<serde_json::Value, TypeProviderError>>, TypeProviderError> {
+        Ok(self
+            .request_background_frames(requests, BatchBinding::Plain, retry_after_preemption)
+            .await?
+            .into_iter()
+            .map(|frame| frame.map(|(_, body)| body))
+            .collect())
+    }
+
+    /// A one-shot background publisher re-read: `requests` make the engine
+    /// re-read its publisher, and their last frame — the first the engine
+    /// evaluates after the re-read — records `observed` as adopted.
+    async fn request_background_refresh_once(
+        &self,
+        requests: &[(&str, serde_json::Value)],
+        observed: Option<PublicationPosition>,
+    ) -> Result<(), TypeProviderError> {
+        self.request_background_frames(requests, BatchBinding::Refresh(observed), false)
+            .await?
+            .into_iter()
+            .try_for_each(|frame| frame.map(drop))
+    }
+
+    /// [`Self::request_background_refresh_once`] on the interactive lane.
+    async fn request_interactive_refresh(
+        &self,
+        requests: &[(&str, serde_json::Value)],
+        observed: Option<PublicationPosition>,
+    ) -> Result<(), TypeProviderError> {
+        let _interactive = self.begin_interactive_request();
+        let Some(((fence, fence_arguments), reread)) = requests.split_last() else {
+            return Ok(());
+        };
+        for (command, arguments) in reread {
+            self.request_inner(command, arguments.clone(), None, None)
+                .await?;
+        }
+        match self
+            .request_bound(
+                fence,
+                WireBinding::Adopt(fence_arguments.clone(), observed),
+                None,
+            )
+            .await?
+        {
+            Placement::Sent(..) => Ok(()),
+            Placement::Unplaced => Err(TypeProviderError::new(format!(
+                "request '{fence}' was not placed"
+            ))),
+        }
+    }
+
+    /// The pull-diagnostics transaction for `path`: every category's frame is
+    /// bound to the delivered surface at its own stdin position, so each
+    /// category's ranges decode against exactly the bytes the engine evaluated
+    /// for it.
+    async fn request_background_bound_batch(
+        &self,
+        path: &str,
+        requests: &[(&str, serde_json::Value)],
+    ) -> Result<Vec<Result<(BoundQuery, serde_json::Value), TypeProviderError>>, TypeProviderError>
+    {
+        Ok(self
+            .request_background_frames(requests, BatchBinding::Query(path), true)
+            .await?
+            .into_iter()
+            .map(|frame| {
+                frame.and_then(|(query, body)| {
+                    query
+                        .map(|query| (query, body))
+                        .ok_or_else(|| TypeProviderError::new("a bound frame mints its capability"))
+                })
+            })
+            .collect())
+    }
+
+    /// The background transaction core: `requests` admitted under one
+    /// editor-idle window, each frame meeting the delivery ledger as `binding`
+    /// says.
+    async fn request_background_frames(
+        &self,
+        requests: &[(&str, serde_json::Value)],
+        binding: BatchBinding<'_>,
+        retry_after_preemption: bool,
+    ) -> Result<
+        Vec<Result<(Option<BoundQuery>, serde_json::Value), TypeProviderError>>,
+        TypeProviderError,
+    > {
         if requests.is_empty() {
             return Ok(Vec::new());
         }
@@ -632,11 +796,30 @@ impl TsserverTransport {
             }
             let mut responses = Vec::with_capacity(requests.len());
             let mut preempted = false;
-            for (command, arguments) in requests {
-                match self
-                    .request_inner(command, arguments.clone(), None, Some(epoch))
-                    .await
-                {
+            for (index, (command, arguments)) in requests.iter().enumerate() {
+                let frame = match &binding {
+                    #[cfg(test)]
+                    BatchBinding::Plain => WireBinding::Plain(arguments.clone()),
+                    BatchBinding::Query(path) => WireBinding::Query {
+                        prepared: self
+                            .ledger
+                            .prepare(&ProviderQuery::at_engine_surface(path), path)?,
+                        // The diagnostic request names no position.
+                        arguments: Box::new(|_| Some(arguments.clone())),
+                    },
+                    BatchBinding::Refresh(observed) if index + 1 == requests.len() => {
+                        WireBinding::Adopt(arguments.clone(), observed.clone())
+                    }
+                    BatchBinding::Refresh(_) => WireBinding::Plain(arguments.clone()),
+                };
+                let placed = match self.request_bound(command, frame, Some(epoch)).await {
+                    Ok(Placement::Sent(query, body)) => Ok((query.map(|query| *query), body)),
+                    Ok(Placement::Unplaced) => Err(TypeProviderError::new(format!(
+                        "request '{command}' was not placed"
+                    ))),
+                    Err(error) => Err(error),
+                };
+                match placed {
                     Ok(response) => responses.push(Ok(response)),
                     Err(error)
                         if (error.message.contains("preempted")
@@ -663,21 +846,6 @@ impl TsserverTransport {
             }
             return Ok(responses);
         }
-    }
-
-    async fn request_interactive_batch(
-        &self,
-        requests: &[(&str, serde_json::Value)],
-    ) -> Result<Vec<serde_json::Value>, TypeProviderError> {
-        let _interactive = self.begin_interactive_request();
-        let mut responses = Vec::with_capacity(requests.len());
-        for (command, arguments) in requests {
-            responses.push(
-                self.request_inner(command, arguments.clone(), None, None)
-                    .await?,
-            );
-        }
-        Ok(responses)
     }
 
     /// Send a tsserver request with a custom configured response timeout. Split
@@ -933,23 +1101,132 @@ impl TsserverTransport {
         arguments: serde_json::Value,
         background_epoch: Option<u64>,
     ) -> Result<serde_json::Value, TypeProviderError> {
+        match self
+            .request_bound(command, WireBinding::Plain(arguments), background_epoch)
+            .await?
+        {
+            Placement::Sent(_, body) => Ok(body),
+            Placement::Unplaced => Err(TypeProviderError::new(format!(
+                "request '{command}' was not placed"
+            ))),
+        }
+    }
+
+    /// Send an interactive frame that delivers (or withdraws) file bytes, so
+    /// the ledger records them at the frame's stdin position.
+    async fn request_delivering(
+        &self,
+        command: &str,
+        arguments: serde_json::Value,
+        effects: Vec<SurfaceEffect>,
+    ) -> Result<serde_json::Value, TypeProviderError> {
+        let _interactive = self.begin_interactive_request();
+        match self
+            .request_bound(command, WireBinding::Deliver(arguments, effects), None)
+            .await?
+        {
+            Placement::Sent(_, body) => Ok(body),
+            Placement::Unplaced => Err(TypeProviderError::new(format!(
+                "request '{command}' was not placed"
+            ))),
+        }
+    }
+
+    /// Send one interactive positional query for `query` on `path` (the
+    /// adapter's key for its file), bound at its frame's stdin position.
+    /// `arguments` converts the request against the bytes the engine holds
+    /// there; the returned binding retains them, and the delivered surface of
+    /// every other file, for decoding the answer.
+    ///
+    /// `Ok(None)` when `arguments` declined to send a frame — a position not
+    /// representable in the delivered bytes (never a fabricated position).
+    ///
+    /// # Errors
+    /// The typed conflict when the engine holds other bytes than `query`
+    /// intends; no frame is sent then.
+    async fn request_query<'a>(
+        &self,
+        command: &str,
+        query: &ProviderQuery,
+        path: &str,
+        arguments: impl FnOnce(&str) -> Option<serde_json::Value> + Send + 'a,
+    ) -> Result<Option<(BoundQuery, serde_json::Value)>, TypeProviderError> {
+        let prepared = self.ledger.prepare(query, path)?;
+        let _interactive = self.begin_interactive_request();
+        let binding = WireBinding::Query {
+            prepared,
+            arguments: Box::new(arguments),
+        };
+        Ok(match self.request_bound(command, binding, None).await? {
+            Placement::Sent(bound, body) => bound.map(|bound| (*bound, body)),
+            Placement::Unplaced => None,
+        })
+    }
+
+    /// [`Self::request_query`] on the background lane: admitted only while the
+    /// interactive lane is idle and re-bound from scratch each time interactive
+    /// traffic preempts it, so every attempt converts against the surface its
+    /// own frame meets.
+    async fn request_background_query<'a>(
+        &self,
+        command: &str,
+        query: &ProviderQuery,
+        path: &str,
+        arguments: impl Fn(&str) -> Option<serde_json::Value> + Send + Sync + 'a,
+    ) -> Result<Option<(BoundQuery, serde_json::Value)>, TypeProviderError> {
+        if self.cancellation.is_none() {
+            return Err(TypeProviderError::new(
+                "tsserver background work requires an out-of-band cancellation channel",
+            ));
+        }
+        let _gate = self.pending.background_gate.lock().await;
+        loop {
+            self.wait_for_interactive_idle().await;
+            let epoch = self
+                .pending
+                .background_preemption_epoch
+                .load(Ordering::Acquire);
+            tokio::time::sleep(BACKGROUND_IDLE_GRACE).await;
+            if self.pending.interactive_in_flight.load(Ordering::Acquire) != 0
+                || self
+                    .pending
+                    .background_preemption_epoch
+                    .load(Ordering::Acquire)
+                    != epoch
+            {
+                continue;
+            }
+            let binding = WireBinding::Query {
+                prepared: self.ledger.prepare(query, path)?,
+                arguments: Box::new(&arguments),
+            };
+            match self.request_bound(command, binding, Some(epoch)).await {
+                Ok(Placement::Sent(bound, body)) => return Ok(bound.map(|bound| (*bound, body))),
+                Ok(Placement::Unplaced) => return Ok(None),
+                Err(error)
+                    if (error.message.contains("preempted")
+                        || error.message.contains("canceled"))
+                        && self
+                            .pending
+                            .background_preemption_epoch
+                            .load(Ordering::Acquire)
+                            != epoch => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    async fn request_bound(
+        &self,
+        command: &str,
+        binding: WireBinding<'_>,
+        background_epoch: Option<u64>,
+    ) -> Result<Placement, TypeProviderError> {
         crate::type_runtime_trace_scope_async!(
             "tsserver_transport_request",
-            format!(
-                "command={} {}",
-                command,
-                summarize_tsserver_args(&arguments),
-            ),
+            format!("command={} {}", command, binding.summary()),
             async {
                 let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
-                let message = serde_json::json!({
-                    "seq": seq,
-                    "type": "request",
-                    "command": command,
-                    "arguments": arguments,
-                });
-                let body = serde_json::to_string(&message)
-                    .map_err(|error| TypeProviderError::new(format!("serialize error: {error}")))?;
 
                 let (tx, rx) = oneshot::channel();
                 if !self.pending.table.insert(seq, tx) {
@@ -986,17 +1263,100 @@ impl TsserverTransport {
                     None
                 };
 
-                let frame = format!("{body}\n");
-                if self
-                    .stdin_tx
-                    .send(TsserverStdinMessage::Frame(frame.into_bytes()))
-                    .await
-                    .is_err()
-                {
+                // The stdin slot is reserved first, so placing the frame is a
+                // synchronous step the ledger can bracket: nothing else reaches
+                // stdin between a frame's ledger record and its position.
+                // A blocked writer has made no engine progress. Bound this wait
+                // even when no recovery notifier or caller deadline is installed;
+                // once placed, healthy slow engine work keeps its unbounded wait.
+                let hop = crate::deadline::hop_budget(LOADING_WEDGE_SILENCE_CAP);
+                let issued_at = std::time::Instant::now();
+                let permit = match tokio::time::timeout(hop, self.stdin_tx.reserve()).await {
+                    Ok(Ok(permit)) => permit,
+                    Ok(Err(_)) => {
+                        registration.disarm();
+                        self.pending.table.take(seq);
+                        return Err(TypeProviderError::new("stdin writer closed"));
+                    }
+                    Err(_) => {
+                        // The frame was never placed: release the registration
+                        // without cancelling a sequence the engine has not seen.
+                        registration.disarm();
+                        self.pending.table.take(seq);
+                        if hop >= LOADING_WEDGE_SILENCE_CAP {
+                            self.note_hang_failure(command, issued_at);
+                        }
+                        return Err(TypeProviderError::new(format!(
+                            "request '{command}' stdin enqueue timed out after {hop:?}"
+                        )));
+                    }
+                };
+                let frame = |arguments: serde_json::Value| {
+                    let message = serde_json::json!({
+                        "seq": seq,
+                        "type": "request",
+                        "command": command,
+                        "arguments": arguments,
+                    });
+                    serde_json::to_string(&message)
+                        .map(|body| format!("{body}\n").into_bytes())
+                        .map_err(|error| {
+                            TypeProviderError::new(format!("serialize error: {error}"))
+                        })
+                };
+                let placed = match binding {
+                    WireBinding::Plain(arguments) => frame(arguments)
+                        .map(|frame| permit.send(TsserverStdinMessage::Frame(frame)))
+                        .map(|()| Some(None)),
+                    WireBinding::Deliver(arguments, effects) => frame(arguments).map(|frame| {
+                        self.ledger.deliver_with(effects, || {
+                            permit.send(TsserverStdinMessage::Frame(frame));
+                        });
+                        Some(None)
+                    }),
+                    WireBinding::Adopt(arguments, observed) => frame(arguments).map(|frame| {
+                        self.ledger.adopt_with(observed, || {
+                            permit.send(TsserverStdinMessage::Frame(frame));
+                        });
+                        Some(None)
+                    }),
+                    WireBinding::Query {
+                        prepared,
+                        arguments,
+                    } => match self.ledger.dispatch_with(prepared, |requested| {
+                        // A positional query declines when there are no bytes
+                        // to place it in: the frame is not placed.
+                        let arguments = arguments(requested).ok_or(QueryUnplaced::Declined)?;
+                        let frame = frame(arguments).map_err(QueryUnplaced::Failed)?;
+                        permit.send(TsserverStdinMessage::Frame(frame));
+                        Ok(())
+                    }) {
+                        Ok((bound, ())) => Ok(Some(Some(Box::new(bound)))),
+                        Err(DispatchRefusal::Unplaced(QueryUnplaced::Declined)) => Ok(None),
+                        Err(DispatchRefusal::Unplaced(QueryUnplaced::Failed(error))) => Err(error),
+                        Err(DispatchRefusal::Conflict(conflict)) => Err(conflict.into()),
+                    },
+                };
+                // A reserved permit cannot report a receiver lost before send.
+                // Refuse that delivery before awaiting a response it cannot earn.
+                if matches!(placed.as_ref(), Ok(Some(_))) && self.stdin_tx.is_closed() {
                     registration.disarm();
                     self.pending.table.take(seq);
                     return Err(TypeProviderError::new("stdin writer closed"));
                 }
+                let query = match placed {
+                    Ok(Some(query)) => query,
+                    Ok(None) => {
+                        registration.disarm();
+                        self.pending.table.take(seq);
+                        return Ok(Placement::Unplaced);
+                    }
+                    Err(error) => {
+                        registration.disarm();
+                        self.pending.table.take(seq);
+                        return Err(error);
+                    }
+                };
 
                 let value = match rx.await {
                     Ok(value) => value,
@@ -1014,6 +1374,7 @@ impl TsserverTransport {
                 };
                 registration.disarm();
                 self.finish_response(command, seq, value)
+                    .map(|body| Placement::Sent(query, body))
             }
         )
         .await
@@ -1024,6 +1385,18 @@ impl TsserverTransport {
         &self,
         command: &str,
         arguments: serde_json::Value,
+    ) -> Result<(), TypeProviderError> {
+        self.command_delivering(command, arguments, Vec::new())
+            .await
+    }
+
+    /// Send a response-less command that delivers (or withdraws) file bytes,
+    /// recording them at the command's stdin position.
+    async fn command_delivering(
+        &self,
+        command: &str,
+        arguments: serde_json::Value,
+        effects: Vec<SurfaceEffect>,
     ) -> Result<(), TypeProviderError> {
         crate::type_runtime_trace_scope_async!(
             "tsserver_transport_command",
@@ -1045,10 +1418,14 @@ impl TsserverTransport {
                     .map_err(|e| TypeProviderError::new(format!("serialize error: {e}")))?;
 
                 let frame = format!("{body}\n");
-                self.stdin_tx
-                    .send(TsserverStdinMessage::Frame(frame.into_bytes()))
+                let permit = self
+                    .stdin_tx
+                    .reserve()
                     .await
                     .map_err(|_| TypeProviderError::new("stdin writer closed"))?;
+                self.ledger.deliver_with(effects, || {
+                    permit.send(TsserverStdinMessage::Frame(frame.into_bytes()));
+                });
 
                 crate::type_runtime_trace_event!(
                     "tsserver_transport_command_result",
@@ -1714,12 +2091,13 @@ impl ContentReceipt {
 /// A `TypeProvider` backed by a tsserver process (`node tsserver.js`).
 pub struct TsserverTypeProvider {
     transport: Arc<TsserverTransport>,
-    /// tsserver child process. Killed on drop.
-    child: Child,
+    /// tsserver child process. Killed on drop. Absent only for a provider a
+    /// unit test drives over an in-memory transport.
+    child: Option<Child>,
     /// Process-tree handle armed immediately after spawn, before Node can be
     /// treated as a live provider. It also registers the tree with the LSP
     /// client-lifetime monitor for abrupt editor death.
-    tree: verter_tsgo_api::process::TreeKill,
+    tree: Option<verter_tsgo_api::process::TreeKill>,
     /// Cached file contents for position conversion.
     contents: Arc<Mutex<HashMap<String, Arc<str>>>>,
     /// Registered carrier candidates and bytes confirmed by an engine acknowledgement.
@@ -1816,7 +2194,6 @@ struct DiagnosticsQuery<'a> {
     file: String,
     diagnostic_file: String,
     transport: Arc<TsserverTransport>,
-    contents_cache: Arc<Mutex<HashMap<String, Arc<str>>>>,
     carrier_companions: Arc<parking_lot::RwLock<HashMap<String, String>>>,
     normalize_response_paths: bool,
     active_sources: Arc<parking_lot::RwLock<BTreeSet<String>>>,
@@ -1831,7 +2208,6 @@ impl DiagnosticsQuery<'_> {
             file,
             diagnostic_file,
             transport,
-            contents_cache,
             carrier_companions,
             normalize_response_paths,
             active_sources,
@@ -1839,7 +2215,6 @@ impl DiagnosticsQuery<'_> {
             carrier_refresh_generation,
             project_file_name,
         } = self;
-        let content = contents_cache.lock().await.get(&file).cloned();
 
         // Pull all three tsserver diagnostic passes synchronously and union
         // them: SEMANTIC (type errors), SYNTACTIC (parse errors), and
@@ -1887,18 +2262,20 @@ impl DiagnosticsQuery<'_> {
                     ),
                 ),
             ];
-            let (semantic, syntactic, suggestion) =
-                match transport.request_background_batch_results(&requests).await {
-                    Ok(results) => {
-                        let mut results = results.into_iter();
-                        (
-                            results.next().expect("diagnostic batch has semantic frame"),
-                            results.next(),
-                            results.next(),
-                        )
-                    }
-                    Err(error) => (Err(error), None, None),
-                };
+            let (semantic, syntactic, suggestion) = match transport
+                .request_background_bound_batch(&file, &requests)
+                .await
+            {
+                Ok(results) => {
+                    let mut results = results.into_iter();
+                    (
+                        results.next().expect("diagnostic batch has semantic frame"),
+                        results.next(),
+                        results.next(),
+                    )
+                }
+                Err(error) => (Err(error), None, None),
+            };
             match &semantic {
                 Err(error)
                     if tsserver_diag_error_is_companion_not_ready(&error.message)
@@ -1920,34 +2297,37 @@ impl DiagnosticsQuery<'_> {
         };
 
         match semantic_result {
-            Ok(semantic_body) => {
-                // One index for all three diagnostic passes: semantic,
-                // syntactic and suggestion all resolve against the same
-                // content snapshot, so the document is scanned once for the
-                // whole pull rather than twice per diagnostic per pass.
-                let index = content.as_deref().map(SourceIndex::new_utf16);
-                let semantic = parse_tsserver_diagnostics_body(
-                    &semantic_body,
-                    index.as_ref(),
-                    Some(file.as_str()),
-                );
-
-                let syntactic_body = syntactic_result.ok_or_else(|| {
+            Ok(semantic) => {
+                let syntactic = syntactic_result.ok_or_else(|| {
                     TypeProviderError::new("missing syntactic diagnostic response")
                 })??;
-                let suggestion_body = suggestion_result.ok_or_else(|| {
+                let suggestion = suggestion_result.ok_or_else(|| {
                     TypeProviderError::new("missing suggestion diagnostic response")
                 })??;
-                let syntactic = parse_tsserver_diagnostics_body(
-                    &syntactic_body,
-                    index.as_ref(),
-                    Some(file.as_str()),
-                );
-                let suggestion = parse_tsserver_diagnostics_body(
-                    &suggestion_body,
-                    index.as_ref(),
-                    Some(file.as_str()),
-                );
+                for (query, _) in [&semantic, &syntactic, &suggestion] {
+                    transport.ledger.settle(query, [])?;
+                }
+                // Each pass decodes against the bytes its own frame met. The
+                // passes almost always met the same delivery, so that document
+                // is indexed once for the whole pull, not once per pass.
+                let shared = semantic.0.requested();
+                let shared_index = SourceIndex::new_utf16(shared);
+                let decode = |(query, body): &(BoundQuery, serde_json::Value)| {
+                    let bytes = query.requested();
+                    if Arc::ptr_eq(bytes, shared) {
+                        parse_tsserver_diagnostics_body(
+                            body,
+                            Some(&shared_index),
+                            Some(file.as_str()),
+                        )
+                    } else {
+                        let index = SourceIndex::new_utf16(bytes);
+                        parse_tsserver_diagnostics_body(body, Some(&index), Some(file.as_str()))
+                    }
+                };
+                let semantic = decode(&semantic);
+                let syntactic = decode(&syntactic);
+                let suggestion = decode(&suggestion);
 
                 let mut diags = merge_diagnostic_sets(semantic, syntactic, suggestion);
                 for diagnostic in &mut diags {
@@ -1968,8 +2348,12 @@ impl DiagnosticsQuery<'_> {
 
 impl Drop for TsserverTypeProvider {
     fn drop(&mut self) {
-        self.tree.kill_tree();
-        let _ = self.child.start_kill();
+        if let Some(tree) = &self.tree {
+            tree.kill_tree();
+        }
+        if let Some(child) = &mut self.child {
+            let _ = child.start_kill();
+        }
     }
 }
 
@@ -2238,6 +2622,11 @@ impl TsserverTypeProvider {
     /// VS Code DIRECT surface (the editor's own TS server + the plugin, no
     /// verter_lsp in the response path) leaves it `true`, where the plugin IS the
     /// only mapper; that surface is represented by a test that passes `true`.
+    /// `publications`: the publisher of the store at `carrier_store_dir` — every
+    /// writer's publications, as the plugin reads them. A query decoding through
+    /// bytes the plugin serves settles against it; without it those bytes are
+    /// attested by their local registration alone.
+    #[allow(clippy::too_many_arguments)]
     pub async fn spawn(
         node_path: &str,
         tsserver_path: &str,
@@ -2246,6 +2635,7 @@ impl TsserverTypeProvider {
         carrier_store_dir: Option<&str>,
         plugin_response_remap: bool,
         crash_notify: Option<Arc<Notify>>,
+        publications: Option<Arc<dyn SurfacePublications>>,
     ) -> Result<Self, TypeProviderError> {
         // Per-request cancellation is a transport invariant. Without it an
         // abandoned background diagnostic keeps the single JavaScript thread
@@ -2265,6 +2655,9 @@ impl TsserverTypeProvider {
             carrier_store_dir,
             plugin_response_remap,
         )?;
+        // Before the process exists: every publication the ledger observes as
+        // adopted is in place before the engine can first read its store.
+        let ledger = DeliveryLedger::new(publications);
 
         let child = cmd
             .stdin(Stdio::piped())
@@ -2304,6 +2697,7 @@ impl TsserverTypeProvider {
             crash_notify: crash_notify.clone(),
             membership_recovery: Mutex::new(None),
             cancellation: Some(Arc::clone(&cancellation)),
+            ledger,
         });
         if let Some(notify) = crash_notify.as_ref() {
             tokio::spawn(watch_engine_silence(
@@ -2316,9 +2710,6 @@ impl TsserverTypeProvider {
                 "tsserver",
             ));
         }
-
-        let contents_cache: Arc<Mutex<HashMap<String, Arc<str>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
 
         // Start the read loop
         tokio::spawn(read_loop(
@@ -2352,11 +2743,30 @@ impl TsserverTypeProvider {
 
         let ws_root = configure_tsserver_session(Arc::clone(&transport), workspace_root).await?;
 
-        Ok(Self {
+        Ok(Self::over_transport(
+            transport,
+            Some(child),
+            Some(tree),
+            ws_root,
+            plugin_response_remap,
+        ))
+    }
+
+    /// Assemble a provider around an established transport. Production passes
+    /// the spawned child and its tree handle; a unit test passes neither and
+    /// plays the engine on the transport's channels.
+    fn over_transport(
+        transport: Arc<TsserverTransport>,
+        child: Option<Child>,
+        tree: Option<verter_tsgo_api::process::TreeKill>,
+        ws_root: String,
+        plugin_response_remap: bool,
+    ) -> Self {
+        Self {
             transport,
             child,
             tree,
-            contents: contents_cache,
+            contents: Arc::new(Mutex::new(HashMap::new())),
             accepted: Arc::new(parking_lot::RwLock::new(HashMap::new())),
             document_gate: Mutex::new(()),
             opened_files: Arc::new(Mutex::new(HashMap::new())),
@@ -2371,7 +2781,7 @@ impl TsserverTypeProvider {
             active_carrier_sources: Arc::new(parking_lot::RwLock::new(BTreeSet::new())),
             project_bootstraps: Arc::new(parking_lot::RwLock::new(HashMap::new())),
             carrier_refresh: Arc::new(TsserverCarrierRefresh::default()),
-        })
+        }
     }
 
     /// Normalize a file path for tsserver (canonical forward-slash form).
@@ -2479,6 +2889,12 @@ async fn notify_carriers_changed_inner(
     // fence: the plugin's `setImmediate` graph reconciliation runs between the
     // two input turns, so a following diagnostic/hover cannot observe the new
     // store manifest with the old configured-project roots.
+    //
+    // The plugin adopts store bytes only here — its carrier ScriptInfos are
+    // virtual and reload on this refresh alone — so every publication the
+    // store holds before `configurePlugin` is placed is what the engine
+    // evaluates from the fence frame on, and is recorded as adopted there.
+    let observed = transport.ledger.publication_position();
     let requests = [
         (
             "configurePlugin",
@@ -2495,16 +2911,15 @@ async fn notify_carriers_changed_inner(
     match priority {
         CarrierRefreshPriority::Background => {
             transport
-                .request_background_batch_results_once(&requests)
-                .await?
-                .into_iter()
-                .collect::<Result<Vec<_>, _>>()?;
+                .request_background_refresh_once(&requests, observed)
+                .await
         }
         CarrierRefreshPriority::Interactive => {
-            transport.request_interactive_batch(&requests).await?;
+            transport
+                .request_interactive_refresh(&requests, observed)
+                .await
         }
     }
-    Ok(())
 }
 
 fn schedule_carrier_refresh(
@@ -2790,6 +3205,10 @@ async fn activate_published_carrier_inner(
 
 struct CarrierMetadataCaches<'a> {
     contents: &'a Mutex<HashMap<String, Arc<str>>>,
+    /// The plugin serves registered carrier bytes out of band; the ledger
+    /// records them so a query converts and decodes against them once the
+    /// engine has adopted their publication.
+    ledger: &'a DeliveryLedger,
     generations: &'a ContentGenerations,
     projects: &'a parking_lot::RwLock<HashMap<String, String>>,
     sources: &'a parking_lot::RwLock<HashMap<String, String>>,
@@ -2842,6 +3261,16 @@ async fn cache_carrier_metadata(
             != Some(source);
         content_changed |= source_changed;
     }
+    // The plugin serves one publication under both identities: both are
+    // recorded under one ledger lock, so no query binds half of it. The
+    // record names the bytes a query converts and decodes against; the engine
+    // evaluates them only once a refresh fence adopts their publication, which
+    // the ledger requires before it binds or settles through them.
+    let mut effects = vec![SurfaceEffect::deliver(file, Arc::clone(&content))];
+    if is_ide_companion {
+        effects.push(SurfaceEffect::deliver(source, content));
+    }
+    caches.ledger.record_out_of_band(effects);
     content_changed || project_changed
 }
 
@@ -2930,7 +3359,7 @@ impl TypeProvider for TsserverTypeProvider {
                     // updateOpen acknowledges the content before it becomes a receipt.
                     // projectRootPath tells tsserver where to find tsconfig.json.
                     transport
-                        .request(
+                        .request_delivering(
                             "updateOpen",
                             serde_json::json!({
                                 "openFiles": [{
@@ -2943,6 +3372,10 @@ impl TypeProvider for TsserverTypeProvider {
                                     "projectRootPath": project_root,
                                 }]
                             }),
+                            vec![SurfaceEffect::deliver(
+                                file.clone(),
+                                Arc::from(content.as_str()),
+                            )],
                         )
                         .await?;
                     crate::type_runtime_trace_event!(
@@ -2966,7 +3399,10 @@ impl TypeProvider for TsserverTypeProvider {
         // sync overwhelms tsserver and blocks user requests for 15-20 seconds.
         // Resolver-managed provider files are pushed on demand when the user
         // actually opens or edits a file, so background sync only needs the
-        // local cache here.
+        // local cache here. No frame carries these bytes, so the delivery
+        // ledger keeps the file undelivered: tsserver reads it itself, and no
+        // query binds coordinates to it until `open_file` or `update_file`
+        // puts its bytes on the wire.
         let file = Self::normalize_path(path);
         let content = content.to_string();
         let contents_cache = Arc::clone(&self.contents);
@@ -2980,7 +3416,7 @@ impl TypeProvider for TsserverTypeProvider {
                         &contents_cache,
                         &content_generations,
                         &file,
-                        content.into(),
+                        Arc::from(content),
                     )
                     .await;
                     crate::type_runtime_trace_event!(
@@ -3044,7 +3480,7 @@ impl TypeProvider for TsserverTypeProvider {
                             );
                             // Use updateOpen with textChanges spanning the old content
                             transport
-                                .request(
+                                .request_delivering(
                                     "updateOpen",
                                     serde_json::json!({
                                         "changedFiles": [{
@@ -3056,6 +3492,10 @@ impl TypeProvider for TsserverTypeProvider {
                                             }]
                                         }]
                                     }),
+                                    vec![SurfaceEffect::deliver(
+                                        file.clone(),
+                                        Arc::from(content.as_str()),
+                                    )],
                                 )
                                 .await?;
                             crate::type_runtime_trace_event!(
@@ -3070,7 +3510,7 @@ impl TypeProvider for TsserverTypeProvider {
                             // is only set when content was sent) — close and reopen
                             tracing::warn!("tsserver update_file: no cached content for open file {file}, closing and reopening");
                             transport
-                                .request(
+                                .request_delivering(
                                     "updateOpen",
                                     serde_json::json!({
                                         "closedFiles": [&file],
@@ -3084,6 +3524,10 @@ impl TypeProvider for TsserverTypeProvider {
                                             "projectRootPath": project_root,
                                         }]
                                     }),
+                                    vec![SurfaceEffect::deliver(
+                                        file.clone(),
+                                        Arc::from(content.as_str()),
+                                    )],
                                 )
                                 .await?;
                             crate::type_runtime_trace_event!(
@@ -3103,7 +3547,7 @@ impl TypeProvider for TsserverTypeProvider {
                             content.len()
                         );
                         transport
-                            .request(
+                            .request_delivering(
                                 "updateOpen",
                                 serde_json::json!({
                                     "openFiles": [{
@@ -3116,6 +3560,10 @@ impl TypeProvider for TsserverTypeProvider {
                                         "projectRootPath": project_root,
                                     }]
                                 }),
+                                vec![SurfaceEffect::deliver(
+                                    file.clone(),
+                                    Arc::from(content.as_str()),
+                                )],
                             )
                             .await?;
                         crate::type_runtime_trace_event!(
@@ -3177,6 +3625,11 @@ impl TypeProvider for TsserverTypeProvider {
                                 .await?;
                         }
                         forget_content(&contents_cache, &content_generations, source).await;
+                        // The plugin stops serving the carrier's bytes once its
+                        // registration is gone.
+                        transport
+                            .ledger
+                            .record_out_of_band([SurfaceEffect::withdraw(source.clone())]);
                         schedule_carrier_refresh(
                             Arc::clone(&transport),
                             Arc::clone(&active_sources),
@@ -3187,6 +3640,11 @@ impl TypeProvider for TsserverTypeProvider {
                         );
                     }
                     forget_content(&contents_cache, &content_generations, &file).await;
+                    // Loaded-only bytes leave with the cache entry; an open
+                    // buffer leaves with its close frame below.
+                    transport
+                        .ledger
+                        .record_out_of_band([SurfaceEffect::withdraw(file.clone())]);
                     let was_open = opened_files.lock().await.remove(&file).is_some();
                     // Retract the carrier→project routing for a closed companion so
                     // it no longer injects `projectFileName` (a closed companion is
@@ -3201,7 +3659,11 @@ impl TypeProvider for TsserverTypeProvider {
                     // would read as a broken write that restarts the engine.
                     if carrier_source.is_none() && was_open {
                         transport
-                            .request("updateOpen", serde_json::json!({ "closedFiles": [file] }))
+                            .request_delivering(
+                                "updateOpen",
+                                serde_json::json!({ "closedFiles": [file] }),
+                                vec![SurfaceEffect::withdraw(file.clone())],
+                            )
                             .await?;
                     }
                     crate::type_runtime_trace_event!(
@@ -3304,6 +3766,7 @@ impl TypeProvider for TsserverTypeProvider {
             let _metadata_changed = cache_carrier_metadata(
                 CarrierMetadataCaches {
                     contents: &contents_cache,
+                    ledger: &transport.ledger,
                     generations: &content_generations,
                     projects: &carrier_projects,
                     sources: &carrier_sources,
@@ -3551,6 +4014,7 @@ impl TypeProvider for TsserverTypeProvider {
             let metadata_changed = cache_carrier_metadata(
                 CarrierMetadataCaches {
                     contents: &contents_cache,
+                    ledger: &transport.ledger,
                     generations: &content_generations,
                     projects: &carrier_projects,
                     sources: &carrier_sources,
@@ -3593,41 +4057,47 @@ impl TypeProvider for TsserverTypeProvider {
 
     fn get_completions(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         offset: u32,
         trigger_character: Option<&str>,
     ) -> ProviderFuture<'_, CompletionResult> {
-        let file = Self::normalize_path(path);
+        let file = Self::normalize_path(query.path());
+        let query = query.clone();
         let query_file = self.query_file_for(&file);
         let trigger = trigger_character.map(|s| s.to_string());
         let transport = Arc::clone(&self.transport);
-        let contents_cache = Arc::clone(&self.contents);
         let project_file_name = self.project_file_name_for(&query_file);
         Box::pin(async move {
-            let (line, col) = {
-                let cache = contents_cache.lock().await;
-                match cache.get(&file) {
-                    Some(c) => byte_offset_to_tsserver_pos(c, offset),
-                    None => (1, offset + 1),
-                }
+            let Some((bound, result)) = transport
+                .request_query("completionInfo", &query, &file, |requested| {
+                    let (line, col) = byte_offset_to_tsserver_pos(requested, offset);
+                    let mut args = inject_project_file_name(
+                        serde_json::json!({
+                            "file": query_file,
+                            "line": line,
+                            "offset": col,
+                            "includeExternalModuleExports": true,
+                            "includeInsertTextCompletions": true,
+                        }),
+                        &project_file_name,
+                    );
+                    if let Some(t) = trigger {
+                        args["triggerCharacter"] = serde_json::Value::String(t);
+                    }
+                    Some(args)
+                })
+                .await?
+            else {
+                return Ok(CompletionResult {
+                    items: Vec::new(),
+                    is_incomplete: false,
+                });
             };
 
-            let mut args = inject_project_file_name(
-                serde_json::json!({
-                    "file": query_file,
-                    "line": line,
-                    "offset": col,
-                    "includeExternalModuleExports": true,
-                    "includeInsertTextCompletions": true,
-                }),
-                &project_file_name,
-            );
-
-            if let Some(ref t) = trigger {
-                args["triggerCharacter"] = serde_json::Value::String(t.clone());
-            }
-
-            let result = transport.request("completionInfo", args).await?;
+            // The list names no range, but the engine evaluated the bytes the
+            // request position was converted against: it settles like any
+            // positional answer.
+            transport.ledger.settle(&bound, [])?;
 
             let is_incomplete = result
                 .get("isMemberCompletion")
@@ -3652,32 +4122,28 @@ impl TypeProvider for TsserverTypeProvider {
         })
     }
 
-    fn get_hover(&self, path: &str, offset: u32) -> ProviderFuture<'_, Option<HoverInfo>> {
-        let file = Self::normalize_path(path);
+    fn get_hover(
+        &self,
+        query: &ProviderQuery,
+        offset: u32,
+    ) -> ProviderFuture<'_, Option<HoverInfo>> {
+        let file = Self::normalize_path(query.path());
+        let query = query.clone();
         let query_file = self.query_file_for(&file);
         let transport = Arc::clone(&self.transport);
-        let contents_cache = Arc::clone(&self.contents);
         let project_file_name = self.project_file_name_for(&query_file);
         let active_sources = Arc::clone(&self.active_carrier_sources);
         let carrier_refresh = Arc::clone(&self.carrier_refresh);
         let carrier_refresh_generation = &self.carrier_store_refresh_generation;
         let witness = self.provider_wire_witness();
         Box::pin(async move {
-            let (line, col, cache_hit) = {
-                let cache = contents_cache.lock().await;
-                match cache.get(&file) {
-                    Some(c) => {
-                        let (line, col) = byte_offset_to_tsserver_pos(c, offset);
-                        (line, col, true)
-                    }
-                    None => (1, offset + 1, false),
-                }
-            };
             crate::type_runtime_trace_scope_async!(
                 "tsserver_get_hover",
                 format!(
-                    "file={} offset={} line={} col={} content_cache_hit={}",
-                    file, offset, line, col, cache_hit,
+                    "file={} offset={} delivered={}",
+                    file,
+                    offset,
+                    transport.ledger.holds(&file),
                 ),
                 async {
                     // COLD-build recovery (mirrors `get_diagnostics`): a hover on a
@@ -3690,17 +4156,17 @@ impl TypeProvider for TsserverTypeProvider {
                     let mut recovery_attempts = 0_u8;
                     let result = loop {
                         let r = transport
-                            .request(
-                                "quickinfo",
-                                inject_project_file_name(
+                            .request_query("quickinfo", &query, &file, |requested| {
+                                let (line, col) = byte_offset_to_tsserver_pos(requested, offset);
+                                Some(inject_project_file_name(
                                     serde_json::json!({
                                         "file": query_file,
                                         "line": line,
                                         "offset": col,
                                     }),
                                     &project_file_name,
-                                ),
-                            )
+                                ))
+                            })
                             .await;
                         match r {
                             Err(e)
@@ -3723,7 +4189,16 @@ impl TypeProvider for TsserverTypeProvider {
                     };
 
                     match result {
-                        Ok(body) => {
+                        Ok(None) => {
+                            // No request representable in the delivered bytes:
+                            // nothing was sent, never a fabricated position.
+                            crate::type_runtime_trace_event!(
+                                "tsserver_get_hover_result",
+                                format!("file={} no_coordinate_surface=true", file),
+                            );
+                            Ok(None)
+                        }
+                        Ok(Some((bound, body))) => {
                             let display = body
                                 .get("displayString")
                                 .and_then(|v| v.as_str())
@@ -3737,9 +4212,10 @@ impl TypeProvider for TsserverTypeProvider {
                                 .and_then(|v| v.as_str())
                                 .unwrap_or_default();
 
+                            transport.ledger.settle(&bound, [])?;
                             if display.is_empty() {
                                 tracing::debug!(
-                                    "tsserver quickinfo: empty displayString for {file} at {line}:{col}"
+                                    "tsserver quickinfo: empty displayString for {file} at offset {offset}"
                                 );
                                 crate::type_runtime_trace_event!(
                                     "tsserver_get_hover_result",
@@ -3761,30 +4237,14 @@ impl TypeProvider for TsserverTypeProvider {
                                 ),
                             );
 
-                            // The quickinfo body's `start`/`end` positions map
-                            // onto generated-file byte offsets through the
-                            // synced content snapshot; without one there is no
-                            // valid conversion, so the range fails closed to
-                            // `None` (never a fabricated offset).
-                            let (range_start, range_end) = {
-                                let cache = contents_cache.lock().await;
-                                match cache.get(&file) {
-                                    Some(content) => {
-                                        let index = SourceIndex::new_utf16(content);
-                                        (
-                                            quickinfo_wire_pos_to_byte_offset(
-                                                &index,
-                                                body.get("start"),
-                                            ),
-                                            quickinfo_wire_pos_to_byte_offset(
-                                                &index,
-                                                body.get("end"),
-                                            ),
-                                        )
-                                    }
-                                    None => (None, None),
-                                }
-                            };
+                            // The quickinfo body's `start`/`end` positions are
+                            // lines and columns in the bytes the request was
+                            // converted against; the query retains exactly those.
+                            let index = SourceIndex::new_utf16(bound.requested());
+                            let range_start =
+                                quickinfo_wire_pos_to_byte_offset(&index, body.get("start"));
+                            let range_end =
+                                quickinfo_wire_pos_to_byte_offset(&index, body.get("end"));
 
                             Ok(Some(HoverInfo {
                                 contents,
@@ -3809,7 +4269,7 @@ impl TypeProvider for TsserverTypeProvider {
                             // position" (hover silently stops serving).
                             if tsserver_error_is_no_content(&e) {
                                 tracing::debug!(
-                                    "tsserver quickinfo: no content for {file} at {line}:{col}"
+                                    "tsserver quickinfo: no content for {file} at offset {offset}"
                                 );
                                 crate::type_runtime_trace_event!(
                                     "tsserver_get_hover_result",
@@ -3834,46 +4294,31 @@ impl TypeProvider for TsserverTypeProvider {
 
     fn get_completion_details<'a>(
         &'a self,
-        path: &'a str,
+        query: &'a ProviderQuery,
         offset: u32,
         items: &'a [Completion],
     ) -> ProviderFuture<'a, Vec<Completion>> {
-        let file = Self::normalize_path(path);
+        let file = Self::normalize_path(query.path());
         let query_file = self.query_file_for(&file);
         let transport = Arc::clone(&self.transport);
-        let contents_cache = Arc::clone(&self.contents);
         let project_file_name = self.project_file_name_for(&query_file);
         Box::pin(async move {
             if items.is_empty() {
                 return Ok(Vec::new());
             }
 
-            let (line, col) = {
-                let cache = contents_cache.lock().await;
-                match cache.get(&file) {
-                    Some(c) => byte_offset_to_tsserver_pos(c, offset),
-                    None => (1, offset + 1),
-                }
-            };
             crate::type_runtime_trace_scope_async!(
                 "tsserver_get_completion_details",
-                format!(
-                    "file={} offset={} line={} col={} item_count={}",
-                    file,
-                    offset,
-                    line,
-                    col,
-                    items.len(),
-                ),
+                format!("file={} offset={} item_count={}", file, offset, items.len(),),
                 async {
                     let entry_names: Vec<_> = items
                         .iter()
                         .map(build_completion_entry_details_request)
                         .collect();
                     let result = transport
-                        .request(
-                            "completionEntryDetails",
-                            inject_project_file_name(
+                        .request_query("completionEntryDetails", query, &file, |requested| {
+                            let (line, col) = byte_offset_to_tsserver_pos(requested, offset);
+                            Some(inject_project_file_name(
                                 serde_json::json!({
                                     "file": query_file,
                                     "line": line,
@@ -3881,12 +4326,24 @@ impl TypeProvider for TsserverTypeProvider {
                                     "entryNames": entry_names,
                                 }),
                                 &project_file_name,
-                            ),
-                        )
+                            ))
+                        })
                         .await;
 
                     match result {
-                        Ok(body) => {
+                        // No position to place the request at: the items pass
+                        // through un-enriched, exactly as on an engine error.
+                        Ok(None) => Ok(items.to_vec()),
+                        Ok(Some((bound, body))) => {
+                            // Details are evaluated at the request position:
+                            // a moved file leaves the items un-enriched.
+                            if let Err(conflict) = transport.ledger.settle(&bound, []) {
+                                crate::type_runtime_trace_event!(
+                                    "tsserver_get_completion_details_result",
+                                    format!("file={} conflict={}", file, conflict),
+                                );
+                                return Ok(items.to_vec());
+                            }
                             let detail_map: HashMap<String, &serde_json::Value> = body
                                 .as_array()
                                 .into_iter()
@@ -3933,13 +4390,14 @@ impl TypeProvider for TsserverTypeProvider {
 
     fn resolve_completion(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         data: CompletionResolveData,
     ) -> ProviderFuture<'_, Option<CompletionResolveResult>> {
-        let file = Self::normalize_path(path);
+        let file = Self::normalize_path(query.path());
+        let query = query.clone();
         let query_file = self.query_file_for(&file);
         let transport = Arc::clone(&self.transport);
-        let contents_cache = Arc::clone(&self.contents);
+        let carrier_companions = Arc::clone(&self.carrier_companions);
         let project_file_name = self.project_file_name_for(&query_file);
         Box::pin(async move {
             // tsserver resolves through `completionEntryDetails`. A non-tsserver
@@ -3957,20 +4415,12 @@ impl TypeProvider for TsserverTypeProvider {
             // Re-issue `completionEntryDetails` at the SAME completion-site
             // position the entry came from; tsserver keys the entry's auto-import
             // `codeActions` on (position, name, source/data).
-            let (line, col) = {
-                let cache = contents_cache.lock().await;
-                match cache.get(&file) {
-                    Some(c) => byte_offset_to_tsserver_pos(c, offset),
-                    None => (1, offset + 1),
-                }
-            };
-
             let entry = build_entry_names_entry(&name, source.as_deref(), data.as_ref());
 
-            let result = transport
-                .request(
-                    "completionEntryDetails",
-                    inject_project_file_name(
+            let Some((bound, result)) = transport
+                .request_query("completionEntryDetails", &query, &file, |requested| {
+                    let (line, col) = byte_offset_to_tsserver_pos(requested, offset);
+                    Some(inject_project_file_name(
                         serde_json::json!({
                             "file": query_file,
                             "line": line,
@@ -3978,23 +4428,28 @@ impl TypeProvider for TsserverTypeProvider {
                             "entryNames": [entry],
                         }),
                         &project_file_name,
-                    ),
-                )
-                .await?;
-
-            let Some(detail) = result.as_array().and_then(|arr| arr.first()) else {
+                    ))
+                })
+                .await?
+            else {
                 return Ok(None);
             };
-            // The entry's auto-import `codeActions` parse into `additionalTextEdits`,
-            // so this is an edit-producing response: snapshot ONLY the files those
-            // code actions target, taken FRESH after the await — never a whole-map
-            // clone of the contents cache.
+
+            let Some(detail) = result.as_array().and_then(|arr| arr.first()) else {
+                transport.ledger.settle(&bound, [])?;
+                return Ok(None);
+            };
+            // The entry's auto-import `codeActions` parse into `additionalTextEdits`:
+            // each edit decodes against its target's bytes as the query's request
+            // frame met them — only the files those code actions target.
             let target_paths =
                 crate::contents_snapshot::tsserver_completion_entry_details_target_paths(detail);
-            let cache_snapshot = {
-                let guard = contents_cache.lock().await;
-                crate::contents_snapshot::targeted_contents_snapshot(&guard, &target_paths)
-            };
+            let cache_snapshot = bound.targets(&target_paths, |path| {
+                remap_carrier_response_path(path, &carrier_companions, true)
+            })?;
+            transport
+                .ledger
+                .settle(&bound, target_paths.iter().map(String::as_str))?;
             Ok(completion_entry_details_to_resolve_result(
                 detail,
                 // Managed carriers are queried under their authored source
@@ -4014,7 +4469,6 @@ impl TypeProvider for TsserverTypeProvider {
         let file = Self::normalize_path(path);
         let query_file = self.query_file_for(&file);
         let transport = Arc::clone(&self.transport);
-        let contents_cache = Arc::clone(&self.contents);
         let carrier_companions = Arc::clone(&self.carrier_companions);
         let normalize_response_paths = self.normalize_response_paths_to_companions;
         let active_sources = Arc::clone(&self.active_carrier_sources);
@@ -4031,7 +4485,6 @@ impl TypeProvider for TsserverTypeProvider {
                 file,
                 diagnostic_file,
                 transport,
-                contents_cache,
                 carrier_companions,
                 normalize_response_paths,
                 active_sources,
@@ -4043,41 +4496,50 @@ impl TypeProvider for TsserverTypeProvider {
         )
     }
 
-    fn get_definition(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
-        let file = Self::normalize_path(path);
+    fn get_definition(
+        &self,
+        query: &ProviderQuery,
+        offset: u32,
+    ) -> ProviderFuture<'_, Vec<TypeLocation>> {
+        let file = Self::normalize_path(query.path());
+        let query = query.clone();
         let query_file = self.query_file_for(&file);
         let transport = Arc::clone(&self.transport);
-        let contents_cache = Arc::clone(&self.contents);
         let carrier_companions = Arc::clone(&self.carrier_companions);
         let normalize_response_paths = self.normalize_response_paths_to_companions;
         let project_file_name = self.project_file_name_for(&query_file);
         Box::pin(async move {
-            let (line, col) = {
-                let cache = contents_cache.lock().await;
-                match cache.get(&file) {
-                    Some(c) => byte_offset_to_tsserver_pos(c, offset),
-                    None => (1, offset + 1),
-                }
-            };
-
-            let result = transport
-                .request(
-                    "definition",
-                    inject_project_file_name(
+            let Some((bound, result)) = transport
+                .request_query("definition", &query, &file, |requested| {
+                    let (line, col) = byte_offset_to_tsserver_pos(requested, offset);
+                    Some(inject_project_file_name(
                         serde_json::json!({
                             "file": query_file,
                             "line": line,
                             "offset": col,
                         }),
                         &project_file_name,
-                    ),
-                )
-                .await?;
+                    ))
+                })
+                .await?
+            else {
+                return Ok(Vec::new());
+            };
 
+            // Each location decodes against its own file's bytes as this
+            // query's request frame met them.
             let mut locs: Vec<TypeLocation> = {
-                let cache = contents_cache.lock().await;
-                result
-                    .as_array()
+                let locations = result.as_array();
+                let target_paths = locations
+                    .map(|arr| crate::contents_snapshot::tsserver_location_target_paths(arr))
+                    .unwrap_or_default();
+                let cache = bound.navigation_targets(&target_paths, |path| {
+                    remap_carrier_response_path(path, &carrier_companions, true)
+                })?;
+                transport
+                    .ledger
+                    .settle(&bound, cache.keys().map(String::as_str))?;
+                locations
                     .map(|arr| parse_tsserver_locations(arr, &cache))
                     .unwrap_or_default()
             };
@@ -4095,43 +4557,48 @@ impl TypeProvider for TsserverTypeProvider {
 
     fn get_type_definition(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         offset: u32,
     ) -> ProviderFuture<'_, Vec<TypeLocation>> {
-        let file = Self::normalize_path(path);
+        let file = Self::normalize_path(query.path());
+        let query = query.clone();
         let query_file = self.query_file_for(&file);
         let transport = Arc::clone(&self.transport);
-        let contents_cache = Arc::clone(&self.contents);
         let carrier_companions = Arc::clone(&self.carrier_companions);
         let normalize_response_paths = self.normalize_response_paths_to_companions;
         let project_file_name = self.project_file_name_for(&query_file);
         Box::pin(async move {
-            let (line, col) = {
-                let cache = contents_cache.lock().await;
-                match cache.get(&file) {
-                    Some(c) => byte_offset_to_tsserver_pos(c, offset),
-                    None => (1, offset + 1),
-                }
-            };
-
-            let result = transport
-                .request(
-                    "typeDefinition",
-                    inject_project_file_name(
+            let Some((bound, result)) = transport
+                .request_query("typeDefinition", &query, &file, |requested| {
+                    let (line, col) = byte_offset_to_tsserver_pos(requested, offset);
+                    Some(inject_project_file_name(
                         serde_json::json!({
                             "file": query_file,
                             "line": line,
                             "offset": col,
                         }),
                         &project_file_name,
-                    ),
-                )
-                .await?;
+                    ))
+                })
+                .await?
+            else {
+                return Ok(Vec::new());
+            };
 
+            // Each location decodes against its own file's bytes as this
+            // query's request frame met them.
             let mut locs: Vec<TypeLocation> = {
-                let cache = contents_cache.lock().await;
-                result
-                    .as_array()
+                let locations = result.as_array();
+                let target_paths = locations
+                    .map(|arr| crate::contents_snapshot::tsserver_location_target_paths(arr))
+                    .unwrap_or_default();
+                let cache = bound.navigation_targets(&target_paths, |path| {
+                    remap_carrier_response_path(path, &carrier_companions, true)
+                })?;
+                transport
+                    .ledger
+                    .settle(&bound, cache.keys().map(String::as_str))?;
+                locations
                     .map(|arr| parse_tsserver_locations(arr, &cache))
                     .unwrap_or_default()
             };
@@ -4147,42 +4614,50 @@ impl TypeProvider for TsserverTypeProvider {
         })
     }
 
-    fn get_references(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
-        let file = Self::normalize_path(path);
+    fn get_references(
+        &self,
+        query: &ProviderQuery,
+        offset: u32,
+    ) -> ProviderFuture<'_, Vec<TypeLocation>> {
+        let file = Self::normalize_path(query.path());
+        let query = query.clone();
         let query_file = self.query_file_for(&file);
         let transport = Arc::clone(&self.transport);
-        let contents_cache = Arc::clone(&self.contents);
         let carrier_companions = Arc::clone(&self.carrier_companions);
         let normalize_response_paths = self.normalize_response_paths_to_companions;
         let project_file_name = self.project_file_name_for(&query_file);
         Box::pin(async move {
-            let (line, col) = {
-                let cache = contents_cache.lock().await;
-                match cache.get(&file) {
-                    Some(c) => byte_offset_to_tsserver_pos(c, offset),
-                    None => (1, offset + 1),
-                }
-            };
-
-            let result = transport
-                .request(
-                    "references",
-                    inject_project_file_name(
+            let Some((bound, result)) = transport
+                .request_query("references", &query, &file, |requested| {
+                    let (line, col) = byte_offset_to_tsserver_pos(requested, offset);
+                    Some(inject_project_file_name(
                         serde_json::json!({
                             "file": query_file,
                             "line": line,
                             "offset": col,
                         }),
                         &project_file_name,
-                    ),
-                )
-                .await?;
+                    ))
+                })
+                .await?
+            else {
+                return Ok(Vec::new());
+            };
 
+            // Each location decodes against its own file's bytes as this
+            // query's request frame met them.
             let mut locs: Vec<TypeLocation> = {
-                let cache = contents_cache.lock().await;
-                result
-                    .get("refs")
-                    .and_then(|v| v.as_array())
+                let locations = result.get("refs").and_then(|v| v.as_array());
+                let target_paths = locations
+                    .map(|arr| crate::contents_snapshot::tsserver_location_target_paths(arr))
+                    .unwrap_or_default();
+                let cache = bound.navigation_targets(&target_paths, |path| {
+                    remap_carrier_response_path(path, &carrier_companions, true)
+                })?;
+                transport
+                    .ledger
+                    .settle(&bound, cache.keys().map(String::as_str))?;
+                locations
                     .map(|arr| parse_tsserver_locations(arr, &cache))
                     .unwrap_or_default()
             };
@@ -4200,29 +4675,21 @@ impl TypeProvider for TsserverTypeProvider {
 
     fn get_rename_locations(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         offset: u32,
     ) -> ProviderFuture<'_, Vec<RenameLocation>> {
-        let file = Self::normalize_path(path);
+        let file = Self::normalize_path(query.path());
+        let query = query.clone();
         let query_file = self.query_file_for(&file);
         let transport = Arc::clone(&self.transport);
-        let contents_cache = Arc::clone(&self.contents);
         let carrier_companions = Arc::clone(&self.carrier_companions);
         let normalize_response_paths = self.normalize_response_paths_to_companions;
         let project_file_name = self.project_file_name_for(&query_file);
         Box::pin(async move {
-            let (line, col) = {
-                let cache = contents_cache.lock().await;
-                match cache.get(&file) {
-                    Some(c) => byte_offset_to_tsserver_pos(c, offset),
-                    None => (1, offset + 1),
-                }
-            };
-
-            let result = transport
-                .request(
-                    "rename",
-                    inject_project_file_name(
+            let Some((bound, result)) = transport
+                .request_query("rename", &query, &file, |requested| {
+                    let (line, col) = byte_offset_to_tsserver_pos(requested, offset);
+                    Some(inject_project_file_name(
                         serde_json::json!({
                             "file": query_file,
                             "line": line,
@@ -4231,23 +4698,25 @@ impl TypeProvider for TsserverTypeProvider {
                             "findInStrings": false,
                         }),
                         &project_file_name,
-                    ),
-                )
-                .await?;
-
-            // Snapshot ONLY this response's target files, then RELEASE the async mutex BEFORE
-            // parsing: the per-target parse runs a blocking `std::fs::read_to_string` disk fallback,
-            // and a multi-file rename could stall the provider if that disk I/O ran under the lock.
-            // Scanning the response keeps the snapshot bounded by the files it touches and current
-            // as of this response, not the whole cache.
-            let target_paths = crate::contents_snapshot::tsserver_rename_target_paths(&result);
-            let cache_snapshot = {
-                let guard = contents_cache.lock().await;
-                crate::contents_snapshot::targeted_contents_snapshot(&guard, &target_paths)
+                    ))
+                })
+                .await?
+            else {
+                return Ok(Vec::new());
             };
+
+            // Each span decodes against its target file's bytes as this query's
+            // request frame met them — only the files the response touches; a
+            // target the engine was never handed is a typed conflict.
+            let target_paths = crate::contents_snapshot::tsserver_rename_target_paths(&result);
+            let cache_snapshot = bound.targets(&target_paths, |path| {
+                remap_carrier_response_path(path, &carrier_companions, true)
+            })?;
+            transport
+                .ledger
+                .settle(&bound, target_paths.iter().map(String::as_str))?;
             let mut locs: Vec<RenameLocation> = {
-                // Bind a `Copy` `&HashMap` for the per-target closures; the lock is already dropped,
-                // so the disk fallback inside the parser runs unlocked.
+                // Bind a `Copy` `&HashMap` for the per-target closures.
                 let cache: &HashMap<String, Arc<str>> = &cache_snapshot;
                 result
                     .get("locs")
@@ -4286,39 +4755,34 @@ impl TypeProvider for TsserverTypeProvider {
 
     fn get_signature_help(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         offset: u32,
     ) -> ProviderFuture<'_, Option<SignatureHelp>> {
-        let file = Self::normalize_path(path);
+        let file = Self::normalize_path(query.path());
+        let query = query.clone();
         let query_file = self.query_file_for(&file);
         let transport = Arc::clone(&self.transport);
-        let contents_cache = Arc::clone(&self.contents);
         let project_file_name = self.project_file_name_for(&query_file);
         Box::pin(async move {
-            let (line, col) = {
-                let cache = contents_cache.lock().await;
-                match cache.get(&file) {
-                    Some(c) => byte_offset_to_tsserver_pos(c, offset),
-                    None => (1, offset + 1),
-                }
-            };
-
             let result = transport
-                .request(
-                    "signatureHelp",
-                    inject_project_file_name(
+                .request_query("signatureHelp", &query, &file, |requested| {
+                    let (line, col) = byte_offset_to_tsserver_pos(requested, offset);
+                    Some(inject_project_file_name(
                         serde_json::json!({
                             "file": query_file,
                             "line": line,
                             "offset": col,
                         }),
                         &project_file_name,
-                    ),
-                )
+                    ))
+                })
                 .await;
 
             match result {
-                Ok(body) => {
+                Ok(None) => Ok(None),
+                Ok(Some((bound, body))) => {
+                    // The signature is evaluated at the request position.
+                    transport.ledger.settle(&bound, [])?;
                     let items = body.get("items").and_then(|v| v.as_array());
                     let Some(items) = items else {
                         return Ok(None);
@@ -4437,6 +4901,8 @@ impl TypeProvider for TsserverTypeProvider {
                         active_parameter: active_param,
                     }))
                 }
+                // A conflict is the requester's to re-bind, never "no help".
+                Err(error) if error.query_conflict => Err(error),
                 Err(_) => Ok(None),
             }
         })
@@ -4444,15 +4910,15 @@ impl TypeProvider for TsserverTypeProvider {
 
     fn get_code_actions(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         start_offset: u32,
         end_offset: u32,
         diagnostics: &[ProviderDiagnosticContext],
     ) -> ProviderFuture<'_, Vec<TypeCodeAction>> {
-        let file = Self::normalize_path(path);
+        let file = Self::normalize_path(query.path());
+        let query = query.clone();
         let query_file = self.query_file_for(&file);
         let transport = Arc::clone(&self.transport);
-        let contents_cache = Arc::clone(&self.contents);
         let carrier_companions = Arc::clone(&self.carrier_companions);
         let normalize_response_paths = self.normalize_response_paths_to_companions;
         let project_file_name = self.project_file_name_for(&query_file);
@@ -4464,22 +4930,11 @@ impl TypeProvider for TsserverTypeProvider {
             if error_codes.is_empty() {
                 return Ok(vec![]);
             }
-            let (sl, sc, el, ec) = {
-                let cache = contents_cache.lock().await;
-                match cache.get(&file) {
-                    Some(c) => {
-                        let (sl, sc) = byte_offset_to_tsserver_pos(c, start_offset);
-                        let (el, ec) = byte_offset_to_tsserver_pos(c, end_offset);
-                        (sl, sc, el, ec)
-                    }
-                    None => (1, start_offset + 1, 1, end_offset + 1),
-                }
-            };
-
             let result = transport
-                .request(
-                    "getCodeFixes",
-                    inject_project_file_name(
+                .request_query("getCodeFixes", &query, &file, |requested| {
+                    let (sl, sc) = byte_offset_to_tsserver_pos(requested, start_offset);
+                    let (el, ec) = byte_offset_to_tsserver_pos(requested, end_offset);
+                    Some(inject_project_file_name(
                         serde_json::json!({
                             "file": query_file,
                             "startLine": sl,
@@ -4489,29 +4944,30 @@ impl TypeProvider for TsserverTypeProvider {
                             "errorCodes": error_codes,
                         }),
                         &project_file_name,
-                    ),
-                )
+                    ))
+                })
                 .await;
 
-            let raw_fixes = match result {
-                Ok(body) => body.as_array().cloned().unwrap_or_default(),
-                Err(_) => return Ok(vec![]),
+            let (bound, raw_fixes) = match result {
+                Ok(Some((bound, body))) => (bound, body.as_array().cloned().unwrap_or_default()),
+                Err(error) if error.query_conflict => return Err(error),
+                Ok(None) | Err(_) => return Ok(vec![]),
             };
 
-            // Snapshot ONLY the files these fixes target, then RELEASE the async mutex BEFORE
-            // parsing: each edit's parse runs a blocking `std::fs::read_to_string` disk fallback,
-            // and a fix-all touching many files could stall the provider if that disk I/O ran under
-            // the lock. Scanning the responses keeps the snapshot bounded by the touched files.
+            // Each fix edit decodes against its target file's bytes as this
+            // query's request frame met them — only the files the fixes touch.
             let mut target_paths: HashSet<String> = HashSet::new();
             for fix in &raw_fixes {
                 target_paths.extend(crate::contents_snapshot::tsserver_code_action_target_paths(
                     fix,
                 ));
             }
-            let cache_snapshot = {
-                let guard = contents_cache.lock().await;
-                crate::contents_snapshot::targeted_contents_snapshot(&guard, &target_paths)
-            };
+            let cache_snapshot = bound.targets(&target_paths, |path| {
+                remap_carrier_response_path(path, &carrier_companions, true)
+            })?;
+            transport
+                .ledger
+                .settle(&bound, target_paths.iter().map(String::as_str))?;
 
             // Single-fix actions first, then their combined "fix all" companions —
             // a stable order independent of provider response ordering.
@@ -4539,25 +4995,26 @@ impl TypeProvider for TsserverTypeProvider {
                     .get("fixAllDescription")
                     .and_then(|v| v.as_str())
                     .map(str::to_string);
+                // The combined fix names no position, but its edits are lines and
+                // columns in the bytes the engine held when it answered — so it is
+                // bound at its own frame's position like any positional query.
                 let combined_result = transport
-                    .request(
-                        "getCombinedCodeFix",
-                        inject_project_file_name(
+                    .request_query("getCombinedCodeFix", &query, &file, |_| {
+                        Some(inject_project_file_name(
                             combined_code_fix_args(&query_file, fix_id),
                             &project_file_name,
-                        ),
-                    )
+                        ))
+                    })
                     .await;
-                if let Ok(body) = combined_result {
-                    // Snapshot ONLY this combined response's target files, taken FRESH (the request
-                    // may have synced new files), and RELEASE the lock before parsing — the parse
-                    // runs a blocking disk fallback per edit.
+                if let Ok(Some((bound, body))) = combined_result {
                     let target_paths =
                         crate::contents_snapshot::tsserver_combined_code_fix_target_paths(&body);
-                    let cache = {
-                        let guard = contents_cache.lock().await;
-                        crate::contents_snapshot::targeted_contents_snapshot(&guard, &target_paths)
-                    };
+                    let cache = bound.targets(&target_paths, |path| {
+                        remap_carrier_response_path(path, &carrier_companions, true)
+                    })?;
+                    transport
+                        .ledger
+                        .settle(&bound, target_paths.iter().map(String::as_str))?;
                     if let Some(action) =
                         parse_tsserver_combined_code_fix(&body, fix_all_title.as_deref(), &cache)
                     {
@@ -4580,21 +5037,13 @@ impl TypeProvider for TsserverTypeProvider {
         })
     }
 
-    fn get_semantic_tokens(&self, path: &str) -> ProviderFuture<'_, Vec<SemanticToken>> {
-        let file = Self::normalize_path(path);
+    fn get_semantic_tokens(&self, query: &ProviderQuery) -> ProviderFuture<'_, Vec<SemanticToken>> {
+        let file = Self::normalize_path(query.path());
+        let query = query.clone();
         let query_file = self.query_file_for(&file);
         let transport = Arc::clone(&self.transport);
-        let contents_cache = Arc::clone(&self.contents);
         let project_file_name = self.project_file_name_for(&query_file);
         Box::pin(async move {
-            let content = {
-                let cache = contents_cache.lock().await;
-                cache.get(&file).cloned()
-            };
-            let Some(content) = content else {
-                // No cached content — nothing to get tokens for
-                return Ok(vec![]);
-            };
             // `EncodedSemanticClassificationsRequestArgs` takes NUMERIC
             // `start`/`length` — UTF-16 code-unit offsets — NOT the
             // line/offset objects most tsserver commands use. tsserver
@@ -4602,25 +5051,30 @@ impl TypeProvider for TsserverTypeProvider {
             // ZERO spans (live-verified on TS 5.4/5.8/6.0), so the wrong
             // shape reads as an engine with no classifications rather than
             // an error.
-            let utf16_length = content.encode_utf16().count() as u64;
-
             let result = transport
-                .request_background(
+                .request_background_query(
                     "encodedSemanticClassifications-full",
-                    inject_project_file_name(
-                        serde_json::json!({
-                            "file": query_file,
-                            "start": 0,
-                            "length": utf16_length,
-                            "format": "2020",
-                        }),
-                        &project_file_name,
-                    ),
+                    &query,
+                    &file,
+                    |requested| {
+                        Some(inject_project_file_name(
+                            serde_json::json!({
+                                "file": query_file,
+                                "start": 0,
+                                "length": requested.encode_utf16().count() as u64,
+                                "format": "2020",
+                            }),
+                            &project_file_name,
+                        ))
+                    },
                 )
                 .await;
 
             match result {
-                Ok(body) => {
+                // No bytes to classify: nothing was sent.
+                Ok(None) => Ok(vec![]),
+                Ok(Some((bound, body))) => {
+                    let content = bound.requested();
                     let spans = body
                         .get("spans")
                         .and_then(|v| v.as_array())
@@ -4634,11 +5088,12 @@ impl TypeProvider for TsserverTypeProvider {
                     // (unmappable classifications drop their span), and
                     // converts the engine's UTF-16 span offsets to the byte
                     // offsets the SemanticToken contract requires.
-                    Ok(crate::semantic_tokens::map_classified_spans_2020(
-                        &spans,
-                        Some(&content),
-                    ))
+                    let tokens =
+                        crate::semantic_tokens::map_classified_spans_2020(&spans, Some(content));
+                    transport.ledger.settle(&bound, [])?;
+                    Ok(tokens)
                 }
+                Err(error) if error.query_conflict => Err(error),
                 Err(_) => Ok(vec![]),
             }
         })
@@ -4646,27 +5101,19 @@ impl TypeProvider for TsserverTypeProvider {
 
     fn get_document_highlights(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         offset: u32,
     ) -> ProviderFuture<'_, Vec<TypeDocumentHighlight>> {
-        let file = Self::normalize_path(path);
+        let file = Self::normalize_path(query.path());
+        let query = query.clone();
         let query_file = self.query_file_for(&file);
         let transport = Arc::clone(&self.transport);
-        let contents_cache = Arc::clone(&self.contents);
         let project_file_name = self.project_file_name_for(&query_file);
         Box::pin(async move {
-            let (line, col) = {
-                let cache = contents_cache.lock().await;
-                match cache.get(&file) {
-                    Some(c) => byte_offset_to_tsserver_pos(c, offset),
-                    None => (1, offset + 1),
-                }
-            };
-
             let result = transport
-                .request(
-                    "documentHighlights",
-                    inject_project_file_name(
+                .request_query("documentHighlights", &query, &file, |requested| {
+                    let (line, col) = byte_offset_to_tsserver_pos(requested, offset);
+                    Some(inject_project_file_name(
                         serde_json::json!({
                             "file": query_file,
                             "line": line,
@@ -4674,57 +5121,45 @@ impl TypeProvider for TsserverTypeProvider {
                             "filesToSearch": [query_file],
                         }),
                         &project_file_name,
-                    ),
-                )
+                    ))
+                })
                 .await;
 
             match result {
-                Ok(body) => {
+                Ok(None) => Ok(vec![]),
+                Ok(Some((bound, body))) => {
+                    // Every span names a line and column in the bytes the
+                    // request was converted against; `filesToSearch` names only
+                    // the requested file, so a span in any other file is not
+                    // part of the answer.
+                    let content = bound.requested();
+                    let index = SourceIndex::new_utf16(content);
                     let highlights = body
                         .as_array()
                         .into_iter()
-                        .flat_map(|groups| {
-                            groups.iter().flat_map(|group| {
-                                group
-                                    .get("highlightSpans")
-                                    .and_then(|v| v.as_array())
-                                    .into_iter()
-                                    .flat_map(|spans| {
-                                        spans.iter().filter_map(|span| {
-                                            let start = span.get("start")?;
-                                            let end = span.get("end")?;
-                                            let sl = start.get("line")?.as_u64()? as u32;
-                                            let so = start.get("offset")?.as_u64()? as u32;
-                                            let el = end.get("line")?.as_u64()? as u32;
-                                            let eo = end.get("offset")?.as_u64()? as u32;
-                                            let kind = span
-                                                .get("kind")
-                                                .and_then(|v| v.as_str())
-                                                .unwrap_or("none");
-                                            let hl_kind = match kind {
-                                                "writtenReference" => {
-                                                    TypeDocumentHighlightKind::Write
-                                                }
-                                                _ => TypeDocumentHighlightKind::Read,
-                                            };
-                                            // Convert 1-based to packed 0-based
-                                            let s = ((sl.saturating_sub(1)) << 16)
-                                                | ((so.saturating_sub(1)) & 0xFFFF);
-                                            let e = ((el.saturating_sub(1)) << 16)
-                                                | ((eo.saturating_sub(1)) & 0xFFFF);
-                                            Some(TypeDocumentHighlight {
-                                                start: s,
-                                                end: e,
-                                                kind: hl_kind,
-                                            })
-                                        })
-                                    })
-                            })
+                        .flatten()
+                        .filter(|group| {
+                            group
+                                .get("file")
+                                .and_then(|v| v.as_str())
+                                .map(verter_span::path::canonicalize_path)
+                                .is_none_or(|group_file| {
+                                    group_file == file || group_file == query_file
+                                })
                         })
+                        .flat_map(|group| {
+                            group
+                                .get("highlightSpans")
+                                .and_then(|v| v.as_array())
+                                .into_iter()
+                                .flatten()
+                        })
+                        .filter_map(|span| parse_tsserver_highlight_span(span, &index))
                         .collect();
-
+                    transport.ledger.settle(&bound, [])?;
                     Ok(highlights)
                 }
+                Err(error) if error.query_conflict => Err(error),
                 Err(_) => Ok(vec![]),
             }
         })
@@ -4732,55 +5167,38 @@ impl TypeProvider for TsserverTypeProvider {
 
     fn get_inlay_hints(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         start_offset: u32,
         end_offset: u32,
     ) -> ProviderFuture<'_, Vec<InlayHint>> {
-        let file = Self::normalize_path(path);
+        let file = Self::normalize_path(query.path());
+        let query = query.clone();
         let query_file = self.query_file_for(&file);
         let transport = Arc::clone(&self.transport);
-        let contents_cache = Arc::clone(&self.contents);
         let project_file_name = self.project_file_name_for(&query_file);
         Box::pin(async move {
-            let (start, length, content_snapshot) = {
-                let cache = contents_cache.lock().await;
-                match cache.get(&file) {
-                    Some(c) => {
-                        let Some(start) = byte_offset_to_tsserver_absolute_offset(c, start_offset)
-                        else {
-                            return Ok(vec![]);
-                        };
-                        let Some(end) = byte_offset_to_tsserver_absolute_offset(c, end_offset)
-                        else {
-                            return Ok(vec![]);
-                        };
-                        let Some(length) = end.checked_sub(start) else {
-                            return Ok(vec![]);
-                        };
-                        (start, length, Some(Arc::clone(c)))
-                    }
-                    None => return Ok(vec![]),
-                }
-            };
-
             let result = transport
-                .request_background(
-                    "provideInlayHints",
-                    inject_project_file_name(
+                .request_background_query("provideInlayHints", &query, &file, |requested| {
+                    // A range not representable in these bytes asks nothing.
+                    let start = byte_offset_to_tsserver_absolute_offset(requested, start_offset)?;
+                    let end = byte_offset_to_tsserver_absolute_offset(requested, end_offset)?;
+                    let length = end.checked_sub(start)?;
+                    Some(inject_project_file_name(
                         serde_json::json!({
                             "file": query_file,
                             "start": start,
                             "length": length,
                         }),
                         &project_file_name,
-                    ),
-                )
+                    ))
+                })
                 .await;
 
-            // One index for the whole hint batch.
-            let index = content_snapshot.as_deref().map(SourceIndex::new_utf16);
             match result {
-                Ok(body) => {
+                Ok(Some((bound, body))) => {
+                    // One index for the whole hint batch, over the bytes the
+                    // request range was converted against.
+                    let index = Some(SourceIndex::new_utf16(bound.requested()));
                     let hints = body
                         .as_array()
                         .map(|arr| {
@@ -4789,10 +5207,12 @@ impl TypeProvider for TsserverTypeProvider {
                                 .collect()
                         })
                         .unwrap_or_default();
+                    transport.ledger.settle(&bound, [])?;
 
                     Ok(hints)
                 }
-                Err(_) => Ok(vec![]),
+                Err(error) if error.query_conflict => Err(error),
+                Ok(None) | Err(_) => Ok(vec![]),
             }
         })
     }
@@ -4818,7 +5238,7 @@ impl TypeProvider for TsserverTypeProvider {
     }
 
     fn child_pid(&self) -> Option<u32> {
-        self.child.id()
+        self.child.as_ref().and_then(Child::id)
     }
 
     fn update_workspace_folders(
@@ -5101,7 +5521,11 @@ async fn resync_apply(
                     continue;
                 }
                 transport
-                    .command_no_response("close", serde_json::json!({ "file": entry.file }))
+                    .command_delivering(
+                        "close",
+                        serde_json::json!({ "file": entry.file }),
+                        vec![SurfaceEffect::withdraw(entry.file.clone())],
+                    )
                     .await?;
                 let project_root = {
                     let roots = project_roots.read();
@@ -5109,7 +5533,7 @@ async fn resync_apply(
                         .to_string()
                 };
                 transport
-                    .command_no_response(
+                    .command_delivering(
                         "open",
                         serde_json::json!({
                             "file": entry.file,
@@ -5117,6 +5541,10 @@ async fn resync_apply(
                             "scriptKindName": kind_name,
                             "projectRootPath": project_root,
                         }),
+                        vec![SurfaceEffect::deliver(
+                            entry.file.clone(),
+                            Arc::clone(&content),
+                        )],
                     )
                     .await?;
             }
@@ -5429,18 +5857,40 @@ fn tsserver_completion_documentation(detail: &serde_json::Value) -> Option<Strin
     Some(combined)
 }
 
-/// A response target's content: `contents_cache` first, then a disk read on a miss (a
-/// cross-file target the session never opened).
-fn cached_or_disk<'a>(
-    target: &str,
-    contents_cache: &'a HashMap<String, Arc<str>>,
-) -> Option<std::borrow::Cow<'a, str>> {
-    match contents_cache.get(target) {
-        Some(content) => Some(std::borrow::Cow::Borrowed(content.as_ref())),
-        None => std::fs::read_to_string(target)
-            .ok()
-            .map(std::borrow::Cow::Owned),
+/// One tsserver highlight span, converted through the requested file's index.
+/// An out-of-range position or an inverted span drops; nothing is packed.
+pub fn parse_tsserver_highlight_span(
+    span: &serde_json::Value,
+    index: &SourceIndex<'_>,
+) -> Option<TypeDocumentHighlight> {
+    let start = span.get("start")?;
+    let end = span.get("end")?;
+    let sl = u32::try_from(start.get("line")?.as_u64()?).ok()?;
+    let so = u32::try_from(start.get("offset")?.as_u64()?).ok()?;
+    let el = u32::try_from(end.get("line")?.as_u64()?).ok()?;
+    let eo = u32::try_from(end.get("offset")?.as_u64()?).ok()?;
+    let start = tsserver_pos_to_byte_offset_checked(index, sl, so)?;
+    let end = tsserver_pos_to_byte_offset_checked(index, el, eo)?;
+    if start > end {
+        return None;
     }
+    let kind = match span.get("kind").and_then(|v| v.as_str()) {
+        Some("writtenReference") => TypeDocumentHighlightKind::Write,
+        _ => TypeDocumentHighlightKind::Read,
+    };
+    Some(TypeDocumentHighlight { start, end, kind })
+}
+
+/// A response target's content, exactly as the caller resolved it for this
+/// answer. A target the caller resolved no bytes for has none: its locations
+/// cannot be decoded, and nothing is read after the answer arrived.
+fn retained_content<'a>(
+    target: &str,
+    contents: &'a HashMap<String, Arc<str>>,
+) -> Option<std::borrow::Cow<'a, str>> {
+    contents
+        .get(target)
+        .map(|content| std::borrow::Cow::Borrowed(content.as_ref()))
 }
 
 /// Parse a tsserver location batch (definition / references responses).
@@ -5448,10 +5898,10 @@ fn cached_or_disk<'a>(
 /// tsserver locations have: `{ file, start: {line, offset}, end: {line, offset} }`
 /// where line and offset are 1-based, and offset counts UTF-16 code units.
 ///
-/// Each location converts against ITS OWN file's content — `contents_cache` first, then a disk
-/// read on a miss — and each distinct file resolves and indexes once for the whole batch. With
-/// content, positions become proper byte offsets; otherwise they fall back to packed 0-based
-/// `(line << 16) | col` format. Results keep the response order.
+/// Each location converts against ITS OWN file's content as the caller resolved it for this
+/// answer, and each distinct file indexes once for the whole batch. A location whose file has no
+/// resolved content is dropped — never packed into a fabricated offset. Results keep the response
+/// order.
 pub fn parse_tsserver_locations(
     locs: &[serde_json::Value],
     contents_cache: &HashMap<String, Arc<str>>,
@@ -5463,13 +5913,13 @@ pub fn parse_tsserver_locations(
                 loc.get("file").and_then(|v| v.as_str()).unwrap_or_default(),
             ))
         },
-        |file| cached_or_disk(file, contents_cache),
+        |file| retained_content(file, contents_cache),
         parse_tsserver_location,
     )
 }
 
 /// One tsserver location in `file`, converted through that file's batch index (`None` when the
-/// file has no content: the packed fallback).
+/// file has no content: the location drops).
 fn parse_tsserver_location(
     loc: &serde_json::Value,
     file: &str,
@@ -5482,18 +5932,11 @@ fn parse_tsserver_location(
     let el = end.get("line")?.as_u64()? as u32;
     let eo = end.get("offset")?.as_u64()? as u32;
 
-    let (s, e) = if let Some(idx) = index {
-        (
-            tsserver_pos_to_byte_offset_indexed(idx, sl, so),
-            tsserver_pos_to_byte_offset_indexed(idx, el, eo),
-        )
-    } else {
-        // Fallback: store packed 0-based positions
-        (
-            ((sl.saturating_sub(1)) << 16) | ((so.saturating_sub(1)) & 0xFFFF),
-            ((el.saturating_sub(1)) << 16) | ((eo.saturating_sub(1)) & 0xFFFF),
-        )
-    };
+    let idx = index?;
+    let (s, e) = (
+        tsserver_pos_to_byte_offset_indexed(idx, sl, so),
+        tsserver_pos_to_byte_offset_indexed(idx, el, eo),
+    );
 
     Some(TypeLocation {
         path: file.to_string(),
@@ -5529,7 +5972,7 @@ pub fn parse_tsserver_rename_spans(
     }
     with_target_index(
         file,
-        |file| cached_or_disk(file, contents_cache),
+        |file| retained_content(file, contents_cache),
         |index| {
             let Some(index) = index else {
                 return Vec::new();
@@ -5612,7 +6055,7 @@ fn parse_tsserver_file_code_edits(
                 .unwrap_or_default(),
         );
         // One index per target file, shared by every edit landing in it.
-        let content = cached_or_disk(&file, contents_cache);
+        let content = retained_content(&file, contents_cache);
         let index = content.as_deref().map(SourceIndex::new_utf16);
         if let Some(text_changes) = change.get("textChanges").and_then(|v| v.as_array()) {
             for tc in text_changes {
@@ -5878,3 +6321,7 @@ pub fn format_quickinfo_hover(kind: &str, display: &str, docs: &str) -> String {
 #[cfg(test)]
 #[path = "ipc_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "query_coordinates_tests.rs"]
+mod query_coordinates_tests;

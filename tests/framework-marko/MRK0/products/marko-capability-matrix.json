@@ -1,0 +1,907 @@
+{
+  "id": "marko-capability-matrix.v1",
+  "schema": 1,
+  "contractNode": "MRK0",
+  "family": "marko",
+  "profiles": [
+    {
+      "id": "marko-6-tags@6.4.3",
+      "release": "marko@6.4.3",
+      "status": "admitted"
+    },
+    {
+      "id": "marko-5-class",
+      "status": "excluded",
+      "reason": "XR03"
+    },
+    {
+      "id": "marko-6-next",
+      "status": "excluded",
+      "reason": "XR02"
+    }
+  ],
+  "hosts": [
+    {
+      "id": "tsgo",
+      "meaning": "TS-region answers from tsgo over the MRK6 companion: TsgoCompositeProvider, shared tsgo first, then managed tsgo",
+      "rulingOrder": 1
+    },
+    {
+      "id": "verter-lsp",
+      "meaning": "lsp-enhancement: Verter LSP carrier-only operations tsgo cannot answer",
+      "rulingOrder": 2
+    },
+    {
+      "id": "verter-kernel",
+      "meaning": "versioned facts contributed through the shared kernel's typed interfaces (TypeInfo, IDX, LSO4, LSO8, EMB)",
+      "rulingOrder": null
+    },
+    {
+      "id": "lint-host",
+      "meaning": "the LNT/LRA lint host; rule populations belong to the lint.marko packs (LMK1-LMK3)",
+      "rulingOrder": null
+    },
+    {
+      "id": "format-host",
+      "meaning": "the FMK/FMT formatter host",
+      "rulingOrder": null
+    },
+    {
+      "id": "ts-plugin",
+      "meaning": "@verter/typescript-plugin carrier-generic compatibility only; never a feature host",
+      "rulingOrder": null
+    },
+    {
+      "id": "editor-client",
+      "meaning": "client TextMate grammar and language configuration; never product evidence",
+      "rulingOrder": null
+    }
+  ],
+  "cellLaw": [
+    "Every cell names exactly one producer node and one receiving acceptance id of that producer, or is a truthful exclusion with its reason.",
+    "No two cells claim the same (operation, host, profile).",
+    "A tsgo-hosted cell is answered by tsgo only; a Verter-computed answer to a TS-region operation is a duplicate.",
+    "No cell is a build, bundler or runtime cell; those are exclusions.",
+    "No cell cites @marko/language-tools, @marko/type-check, @marko/compiler, an installed parser or syntax highlighting as product evidence.",
+    "Every cell records tsgoOperations and tsgoLimitation explicitly: an empty list and null mean the cell needs no tsgo operation and has no known tsgo limitation, never 'not recorded'. On a cell not hosted by tsgo, tsgoOperations lists the checker queries its producer consumes as type-authority input; tsgo does not answer that cell, and cellLaw[2] governs only tsgo-hosted cells.",
+    "Every included cell has a ratified receiving acceptance that requires proof of its operation. A null receivingAcceptance or pendingReceiver is invalid, and a cell never borrows an acceptance id that does not prove the operation. Ratifying the receiver does not qualify the feature: full-matrix promotion (MRK10-AC1) still requires an MRK9 pass or ratified exclusion for every cell."
+  ],
+  "parserDecisions": [
+    {
+      "sublanguage": "Marko markup, HTML mode",
+      "par0Row": "CL13",
+      "decision": "NewParser",
+      "decisionKind": "DK4",
+      "home": "H04 crates/verter_marko_syntax",
+      "owner": "MRK1",
+      "hwc1Tokenizer": "neither reused nor forked"
+    },
+    {
+      "sublanguage": "Marko markup, concise mode",
+      "par0Row": "CL13",
+      "decision": "NewParser (same frontend, per-line mode state)",
+      "decisionKind": "DK4",
+      "home": "H04 crates/verter_marko_syntax",
+      "owner": "MRK1",
+      "hwc1Tokenizer": "neither reused nor forked"
+    },
+    {
+      "sublanguage": "JS/TS in attribute values and arguments, placeholders, tag parameters, tag variables, statements, <script> bodies, method-shorthand attributes",
+      "par0Row": "CL01",
+      "decision": "Reuse (OXC)",
+      "decisionKind": "DK1",
+      "home": "G01",
+      "owner": "retained (UAI0)"
+    },
+    {
+      "sublanguage": "style {} and <style> CSS",
+      "par0Row": "CL04",
+      "decision": "Reuse (verter_css_syntax)",
+      "decisionKind": "DK1",
+      "home": "verter_css_syntax",
+      "owner": "retained (UAI0)"
+    },
+    {
+      "sublanguage": "marko.json taglib configuration",
+      "par0Row": "CL29",
+      "decision": "Reuse (JSON owner), read as data",
+      "decisionKind": "DK1",
+      "home": "CL29 owner",
+      "owner": "CL29 owner"
+    }
+  ],
+  "cells": [
+    {
+      "id": "C01",
+      "operation": "carrier parse, HTML and concise modes, lossless CST",
+      "host": "verter-kernel",
+      "profile": "marko-6-tags@6.4.3",
+      "producer": "MRK1",
+      "receivingAcceptance": "MRK1-AC1",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C02",
+      "operation": "carrier parse recovery with authored coordinates",
+      "host": "verter-kernel",
+      "profile": "marko-6-tags@6.4.3",
+      "producer": "MRK1",
+      "receivingAcceptance": "MRK1-AC2",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C03",
+      "operation": "Marko 5 Class API construct rejected as typed SyntaxReject",
+      "host": "verter-kernel",
+      "profile": "marko-6-tags@6.4.3",
+      "producer": "MRK1",
+      "receivingAcceptance": "MRK1-AC4",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C04",
+      "operation": "incremental carrier parse equals fresh; cancelled parse publishes nothing",
+      "host": "verter-kernel",
+      "profile": "marko-6-tags@6.4.3",
+      "producer": "MRK1",
+      "receivingAcceptance": "MRK1-AC5",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C05",
+      "operation": "FRAMEWORK_TAG_MARKO registration and tag disposition",
+      "host": "verter-kernel",
+      "profile": "marko-6-tags@6.4.3",
+      "producer": "MRK1",
+      "receivingAcceptance": "MRK1-AC6",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C06",
+      "operation": "embedded region attachment with exact forward and reverse maps",
+      "host": "verter-kernel",
+      "profile": "marko-6-tags@6.4.3",
+      "producer": "MRK1M",
+      "receivingAcceptance": "MRK1M-AC1",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C07",
+      "operation": "region identity across nested and malformed edits",
+      "host": "verter-kernel",
+      "profile": "marko-6-tags@6.4.3",
+      "producer": "MRK1M",
+      "receivingAcceptance": "MRK1M-AC2",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C08",
+      "operation": "region roles: server, client, static, unescaped $!{}",
+      "host": "verter-kernel",
+      "profile": "marko-6-tags@6.4.3",
+      "producer": "MRK1M",
+      "receivingAcceptance": "MRK1M-AC3",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C09",
+      "operation": "per-region invalidation",
+      "host": "verter-kernel",
+      "profile": "marko-6-tags@6.4.3",
+      "producer": "MRK1M",
+      "receivingAcceptance": "MRK1M-AC4",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C10",
+      "operation": "activation gating through FWA1 only",
+      "host": "verter-kernel",
+      "profile": "marko-6-tags@6.4.3",
+      "producer": "MRK1M",
+      "receivingAcceptance": "MRK1M-AC5",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C11",
+      "operation": "carrier syntax diagnostics",
+      "host": "verter-lsp",
+      "profile": "marko-6-tags@6.4.3",
+      "producer": "MRK1S",
+      "receivingAcceptance": "MRK1S-AC1",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C12",
+      "operation": "document symbols for HTML and concise structure",
+      "host": "verter-lsp",
+      "profile": "marko-6-tags@6.4.3",
+      "producer": "MRK1S",
+      "receivingAcceptance": "MRK1S-AC2",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C13",
+      "operation": "folding and selection ranges",
+      "host": "verter-lsp",
+      "profile": "marko-6-tags@6.4.3",
+      "producer": "MRK1S",
+      "receivingAcceptance": "MRK1S-AC3",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C14",
+      "operation": "carrier semantic tokens (none inside TS/JS regions)",
+      "host": "verter-lsp",
+      "profile": "marko-6-tags@6.4.3",
+      "producer": "MRK1S",
+      "receivingAcceptance": "MRK1S-AC4",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C15",
+      "operation": "carrier features gated, incremental, one parse per content hash",
+      "host": "verter-lsp",
+      "profile": "marko-6-tags@6.4.3",
+      "producer": "MRK1S",
+      "receivingAcceptance": "MRK1S-AC5",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C16",
+      "operation": "custom-tag discovery binding (tags/ directories, taglibs)",
+      "host": "verter-kernel",
+      "profile": "marko-6-tags@6.4.3",
+      "producer": "MRK2",
+      "receivingAcceptance": "MRK2-AC1",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C17",
+      "operation": "explicit imports and tag variables shadow discovery",
+      "host": "verter-kernel",
+      "profile": "marko-6-tags@6.4.3",
+      "producer": "MRK2",
+      "receivingAcceptance": "MRK2-AC2",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C18",
+      "operation": "attribute-tag scope binding",
+      "host": "verter-kernel",
+      "profile": "marko-6-tags@6.4.3",
+      "producer": "MRK2",
+      "receivingAcceptance": "MRK2-AC3",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C19",
+      "operation": "atomic IDX0 contribution",
+      "host": "verter-kernel",
+      "profile": "marko-6-tags@6.4.3",
+      "producer": "MRK2",
+      "receivingAcceptance": "MRK2-AC4",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C20",
+      "operation": "props facet from Input (native)",
+      "host": "verter-kernel",
+      "profile": "marko-6-tags@6.4.3",
+      "producer": "MRK3",
+      "receivingAcceptance": "MRK3-AC1",
+      "tsgoOperations": [
+        "type at position",
+        "symbol at position"
+      ],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C21",
+      "operation": "imported Input resolves through the checker; unresolved is Unavailable",
+      "host": "verter-kernel",
+      "profile": "marko-6-tags@6.4.3",
+      "producer": "MRK3",
+      "receivingAcceptance": "MRK3-AC2",
+      "tsgoOperations": [
+        "type at position",
+        "symbol at position"
+      ],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C22",
+      "operation": "derived events, slots and expose with derived(<rule>) provenance",
+      "host": "verter-kernel",
+      "profile": "marko-6-tags@6.4.3",
+      "producer": "MRK3",
+      "receivingAcceptance": "MRK3-AC3",
+      "tsgoOperations": [
+        "type at position"
+      ],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C23",
+      "operation": "options and model facets report UNSUPPORTED",
+      "host": "verter-kernel",
+      "profile": "marko-6-tags@6.4.3",
+      "producer": "MRK3",
+      "receivingAcceptance": "MRK3-AC4",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C24",
+      "operation": "reactive graph: sources, derivations, handler writes",
+      "host": "verter-kernel",
+      "profile": "marko-6-tags@6.4.3",
+      "producer": "MRK4",
+      "receivingAcceptance": "MRK4-AC1",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C25",
+      "operation": "computed dynamic tags and opaque script calls stay unknown",
+      "host": "verter-kernel",
+      "profile": "marko-6-tags@6.4.3",
+      "producer": "MRK4",
+      "receivingAcceptance": "MRK4-AC2",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C26",
+      "operation": "realm facts (server import, client script, static)",
+      "host": "verter-kernel",
+      "profile": "marko-6-tags@6.4.3",
+      "producer": "MRK4",
+      "receivingAcceptance": "MRK4-AC3",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C27",
+      "operation": "static async boundaries (<await>, <@placeholder>)",
+      "host": "verter-kernel",
+      "profile": "marko-6-tags@6.4.3",
+      "producer": "MRK4",
+      "receivingAcceptance": "MRK4-AC4",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C28",
+      "operation": "TS-region hover, definition, references and completion, answered once",
+      "host": "tsgo",
+      "profile": "marko-6-tags@6.4.3",
+      "producer": "MRK5",
+      "receivingAcceptance": "MRK5-AC1",
+      "receivingProof": {
+        "status": "obligation-only",
+        "operations": ["textDocument/hover", "textDocument/definition", "textDocument/references", "textDocument/completion"],
+        "test": "cargo nextest run -p verter_lsp -E 'test(/marko_tsgo_navigation/)'",
+        "controls": "At fixture positions with known results in statements, attributes, placeholders, parameters and tag variables, each mapped tsgo answer appears exactly once. Missing completion and a planted Verter-computed completion each fail; generated-only spans remain suppressed."
+      },
+      "tsgoOperations": [
+        "textDocument/hover",
+        "textDocument/definition",
+        "textDocument/references",
+        "textDocument/completion"
+      ],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C29",
+      "operation": "custom-tag definition and references over the projected invocation",
+      "host": "tsgo",
+      "profile": "marko-6-tags@6.4.3",
+      "producer": "MRK5",
+      "receivingAcceptance": "MRK5-AC2",
+      "receivingProof": {
+        "status": "obligation-only",
+        "operations": ["textDocument/definition", "textDocument/references"],
+        "test": "cargo nextest run -p verter_lsp -E 'test(/marko_tsgo_references/)'",
+        "controls": "Definition on the discovered <card> invocation maps through ProviderPositionMapper to the canonical tags/card.marko selected by MRK2. References retain open/close tags, the marko.json entry and explicit imports. Other-scope tags and a tag variable named card never bind to that discovered tag; legitimate tag-variable navigation still reaches its own declaration. Missing definition and a planted wrong-scope target each fail."
+      },
+      "tsgoOperations": [
+        "textDocument/definition",
+        "textDocument/references"
+      ],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C30",
+      "operation": "native HTML tag/attribute and attribute-tag name completion",
+      "host": "verter-lsp",
+      "profile": "marko-6-tags@6.4.3",
+      "producer": "MRK5",
+      "receivingAcceptance": "MRK5-AC3",
+      "receivingProof": {
+        "status": "obligation-only",
+        "operations": ["native-tag-completion", "native-attribute-completion", "attribute-tag-completion"],
+        "test": "cargo nextest run -p verter_lsp -E 'test(/marko_carrier_features/)'",
+        "controls": "Native tag and native HTML attribute completion work on native markup; <@ inside <card> lists MRK3 attribute-tag slots. Native carrier completion is absent inside placeholders while tsgo completion remains available. Missing native attributes and planted carrier-completion leakage into a placeholder each fail."
+      },
+      "tsgoOperations": [],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C56",
+      "operation": "custom-tag name completion from MRK2 discovery",
+      "host": "verter-lsp",
+      "profile": "marko-6-tags@6.4.3",
+      "producer": "MRK5",
+      "receivingAcceptance": "MRK5-AC6",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C31",
+      "operation": "partial navigation results on broken source",
+      "host": "verter-lsp",
+      "profile": "marko-6-tags@6.4.3",
+      "producer": "MRK5",
+      "receivingAcceptance": "MRK5-AC4",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C32",
+      "operation": "auto-close in HTML mode",
+      "host": "verter-lsp",
+      "profile": "marko-6-tags@6.4.3",
+      "producer": "MRK5",
+      "receivingAcceptance": "MRK5-AC6",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C33",
+      "operation": "carrier-only rename of attribute-tag names (LSO8 edit plan)",
+      "host": "verter-kernel",
+      "profile": "marko-6-tags@6.4.3",
+      "producer": "MRK5R",
+      "receivingAcceptance": "MRK5R-AC1",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C34",
+      "operation": "TS-symbol rename through tsgo leaves unrelated text untouched",
+      "host": "tsgo",
+      "profile": "marko-6-tags@6.4.3",
+      "producer": "MRK5R",
+      "receivingAcceptance": "MRK5R-AC2",
+      "tsgoOperations": [
+        "textDocument/rename"
+      ],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C35",
+      "operation": "rename touching a generated-only range refuses whole",
+      "host": "tsgo",
+      "profile": "marko-6-tags@6.4.3",
+      "producer": "MRK5R",
+      "receivingAcceptance": "MRK5R-AC3",
+      "tsgoOperations": [
+        "textDocument/rename"
+      ],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C36",
+      "operation": "rename of core tags, native tags and attributes refuses with a reason",
+      "host": "verter-kernel",
+      "profile": "marko-6-tags@6.4.3",
+      "producer": "MRK5R",
+      "receivingAcceptance": "MRK5R-AC4",
+      "receivingProof": {
+        "status": "obligation-only",
+        "operations": ["core-tag-rename-refusal", "native-tag-rename-refusal", "native-attribute-rename-refusal"],
+        "test": "cargo nextest run -p verter_session -E 'test(/framework_corpus_marko::rename/)'",
+        "controls": "Renaming <let>, <for>, a native <div>, or the native attribute id in <div id=\"x\"> each returns a typed refusal with a reason and zero edits, never an empty or partial edit. A TS-symbol rename at a sibling position in the same fixture still succeeds. A planted authored edit to a native attribute (id renamed to data-id) and a planted empty edit each fail."
+      },
+      "tsgoOperations": [],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C37",
+      "operation": "rename steps down where LSPX11 ownership resolves away from Verter",
+      "host": "verter-lsp",
+      "profile": "marko-6-tags@6.4.3",
+      "producer": "MRK5R",
+      "receivingAcceptance": "MRK5R-AC5",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C38",
+      "operation": "TS-region hover and diagnostics over the companion at authored ranges",
+      "host": "tsgo",
+      "profile": "marko-6-tags@6.4.3",
+      "producer": "MRK6",
+      "receivingAcceptance": "MRK6-AC1",
+      "tsgoOperations": [
+        "textDocument/hover",
+        "diagnostics"
+      ],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C39",
+      "operation": "generated-only projection ranges suppressed",
+      "host": "tsgo",
+      "profile": "marko-6-tags@6.4.3",
+      "producer": "MRK6",
+      "receivingAcceptance": "MRK6-AC2",
+      "tsgoOperations": [
+        "textDocument/hover",
+        "textDocument/definition"
+      ],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C40",
+      "operation": "tag invocation type errors and .ts importer surface (Input, <return>)",
+      "host": "tsgo",
+      "profile": "marko-6-tags@6.4.3",
+      "producer": "MRK6",
+      "receivingAcceptance": "MRK6-AC3",
+      "tsgoOperations": [
+        "diagnostics",
+        "type at position"
+      ],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C41",
+      "operation": "generated client-manifest and virtual-file-naming rows fresh",
+      "host": "verter-kernel",
+      "profile": "marko-6-tags@6.4.3",
+      "producer": "MRK6",
+      "receivingAcceptance": "MRK6-AC4",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C42",
+      "operation": "companion re-injection incremental through carrierDidOpenSynced",
+      "host": "tsgo",
+      "profile": "marko-6-tags@6.4.3",
+      "producer": "MRK6",
+      "receivingAcceptance": "MRK6-AC5",
+      "tsgoOperations": [
+        "carrierDidOpenSynced"
+      ],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C43",
+      "operation": "carrier-store publication serves the TS plugin, no Marko code in it",
+      "host": "ts-plugin",
+      "profile": "marko-6-tags@6.4.3",
+      "producer": "MRK6",
+      "receivingAcceptance": "MRK6-AC6",
+      "tsgoOperations": [],
+      "tsgoLimitation": null,
+      "note": "compatibility only; not a feature host"
+    },
+    {
+      "id": "C44",
+      "operation": "style selector links from style {} / <style> to static classes",
+      "host": "verter-kernel",
+      "profile": "marko-6-tags@6.4.3",
+      "producer": "MRK7",
+      "receivingAcceptance": "MRK7-AC1",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C45",
+      "operation": "dynamic class members conditional or unknown",
+      "host": "verter-kernel",
+      "profile": "marko-6-tags@6.4.3",
+      "producer": "MRK7",
+      "receivingAcceptance": "MRK7-AC2",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C46",
+      "operation": "accessibility roots: dynamic unknown, guarded pairs",
+      "host": "verter-kernel",
+      "profile": "marko-6-tags@6.4.3",
+      "producer": "MRK7",
+      "receivingAcceptance": "MRK7-AC3",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C47",
+      "operation": "no attribute fallthrough invented",
+      "host": "verter-kernel",
+      "profile": "marko-6-tags@6.4.3",
+      "producer": "MRK7",
+      "receivingAcceptance": "MRK7-AC4",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C48",
+      "operation": "lint host: zero work when inactive",
+      "host": "lint-host",
+      "profile": "marko-6-tags@6.4.3",
+      "producer": "MRK8",
+      "receivingAcceptance": "MRK8-AC1",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C49",
+      "operation": "lint suppression comments in both modes",
+      "host": "lint-host",
+      "profile": "marko-6-tags@6.4.3",
+      "producer": "MRK8",
+      "receivingAcceptance": "MRK8-AC2",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C50",
+      "operation": "safe lint fixes over MRK5R plans only",
+      "host": "lint-host",
+      "profile": "marko-6-tags@6.4.3",
+      "producer": "MRK8",
+      "receivingAcceptance": "MRK8-AC3",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C51",
+      "operation": "formatting idempotent and meaning-preserving",
+      "host": "format-host",
+      "profile": "marko-6-tags@6.4.3",
+      "producer": "MRK8F",
+      "receivingAcceptance": "MRK8F-AC1",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C52",
+      "operation": "formatting leaves recovery islands byte-identical",
+      "host": "format-host",
+      "profile": "marko-6-tags@6.4.3",
+      "producer": "MRK8F",
+      "receivingAcceptance": "MRK8F-AC2",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C53",
+      "operation": "formatting delegates TS and CSS, no second printer",
+      "host": "format-host",
+      "profile": "marko-6-tags@6.4.3",
+      "producer": "MRK8F",
+      "receivingAcceptance": "MRK8F-AC3",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C54",
+      "operation": "opaque content (-- blocks, $!{}, <pre>) preserved",
+      "host": "format-host",
+      "profile": "marko-6-tags@6.4.3",
+      "producer": "MRK8F",
+      "receivingAcceptance": "MRK8F-AC4",
+      "tsgoOperations": [],
+      "tsgoLimitation": null
+    },
+    {
+      "id": "C55",
+      "operation": "TextMate grammar and language configuration",
+      "host": "editor-client",
+      "profile": "marko-6-tags@6.4.3",
+      "producer": "MRK1G",
+      "receivingAcceptance": "MRK1G-AC1",
+      "tsgoOperations": [],
+      "tsgoLimitation": null,
+      "supportClaim": "none",
+      "note": "syntax highlighting is never product evidence (MRK1G-AC6)"
+    }
+  ],
+  "exclusions": [
+    {
+      "id": "X01",
+      "operation": "consuming official @marko/compiler or bundler build output",
+      "host": "build",
+      "reason": "ruling 4: official compiler and bundler output is not consumed; no BND consumption",
+      "reportedBy": "MRK10-AC3"
+    },
+    {
+      "id": "X02",
+      "operation": "streaming output and client entry points",
+      "host": "build",
+      "reason": "ruling 4: not consumed; runtime-shaped output belongs to the runtime trains",
+      "reportedBy": "MRK10-AC3"
+    },
+    {
+      "id": "X03",
+      "operation": "DBG, TST or WPF source-map promise over Marko output",
+      "host": "build",
+      "reason": "ruling 4: no map is promised; MRK6 is the TS-host projection only",
+      "reportedBy": "MRK10-AC3"
+    },
+    {
+      "id": "X04",
+      "operation": "rendering, hydration, resumability or executing Marko components",
+      "host": "runtime",
+      "reason": "framework-common: no runtime in verticals; such facts are static classifications or unknown",
+      "reportedBy": "MRK10-AC3"
+    },
+    {
+      "id": "X05",
+      "operation": "every operation under the Marko 5 Class API profile",
+      "host": "all",
+      "profile": "marko-5-class",
+      "reason": "XR03: excluded profile; Class API constructs are a typed SyntaxReject (C03)",
+      "reportedBy": "MRK10-AC3"
+    },
+    {
+      "id": "X06",
+      "operation": "every operation under a next 6.x profile",
+      "host": "all",
+      "profile": "marko-6-next",
+      "reason": "XR02: not ratified; admitted only by a new exact release manifest",
+      "reportedBy": "MRK10-AC3"
+    },
+    {
+      "id": "X07",
+      "operation": "forwarding TS-region features to tsserver",
+      "host": "tsserver",
+      "reason": "ruling 1: nothing is forwarded to tsserver; the TS plugin keeps carrier-generic compatibility only (C43)",
+      "reportedBy": "MRK10-AC3"
+    }
+  ],
+  "facets": [
+    {
+      "facet": "props",
+      "wireSurfaceKind": "FRAMEWORK_SURFACE_KIND_PROPS",
+      "inSupportedSurfaces": true,
+      "source": "Input",
+      "provenance": "native",
+      "producer": "MRK3",
+      "receivingAcceptance": "MRK3-AC1"
+    },
+    {
+      "facet": "events",
+      "wireSurfaceKind": "FRAMEWORK_SURFACE_KIND_EMITS",
+      "inSupportedSurfaces": true,
+      "source": "function-typed on* inputs",
+      "provenance": "derived(callback-input)",
+      "producer": "MRK3",
+      "receivingAcceptance": "MRK3-AC3"
+    },
+    {
+      "facet": "slots",
+      "wireSurfaceKind": "FRAMEWORK_SURFACE_KIND_SLOTS",
+      "inSupportedSurfaces": true,
+      "source": "content plus attribute tags <@x>",
+      "provenance": "derived(attribute-tag)",
+      "producer": "MRK3",
+      "receivingAcceptance": "MRK3-AC3"
+    },
+    {
+      "facet": "expose",
+      "wireSurfaceKind": "FRAMEWORK_SURFACE_KIND_EXPOSE",
+      "inSupportedSurfaces": true,
+      "source": "the <return> value; Approximate inside a conditional",
+      "provenance": "derived(return-tag)",
+      "producer": "MRK3",
+      "receivingAcceptance": "MRK3-AC3"
+    },
+    {
+      "facet": "options",
+      "wireSurfaceKind": "FRAMEWORK_SURFACE_KIND_OPTIONS",
+      "inSupportedSurfaces": false,
+      "source": null,
+      "provenance": "UNSUPPORTED",
+      "producer": "MRK3",
+      "receivingAcceptance": "MRK3-AC4"
+    },
+    {
+      "facet": "model",
+      "wireSurfaceKind": "FRAMEWORK_SURFACE_KIND_MODEL",
+      "inSupportedSurfaces": false,
+      "source": null,
+      "provenance": "UNSUPPORTED",
+      "producer": "MRK3",
+      "receivingAcceptance": "MRK3-AC4"
+    }
+  ],
+  "facetWireMapping": {
+    "wireEnum": "verter.v1.FrameworkSurfaceKind (TIF1)",
+    "descriptorColumn": "FrameworkAdapterDescriptor.supported_surfaces",
+    "supportedSurfaces": ["FRAMEWORK_SURFACE_KIND_PROPS", "FRAMEWORK_SURFACE_KIND_EMITS", "FRAMEWORK_SURFACE_KIND_SLOTS", "FRAMEWORK_SURFACE_KIND_EXPOSE"],
+    "excludedSurfaces": ["FRAMEWORK_SURFACE_KIND_OPTIONS", "FRAMEWORK_SURFACE_KIND_MODEL"],
+    "rules": [
+      "The Marko events facet maps to the existing FRAMEWORK_SURFACE_KIND_EMITS; no Marko-specific wire kind is added.",
+      "options, model and any FrameworkSurfaceKind with no Marko facet are absent from supported_surfaces, so the executor fills them structurally as UNSUPPORTED, never as a supported-empty kind.",
+      "Every record produced for a mapped kind carries the facet provenance above.",
+      "Sequence: MRK1 registers the descriptor with FRAMEWORK_TAG_MARKO = 12 and an empty supported_surfaces, so every kind is UNSUPPORTED (MRK1-AC6, M-D03); MRK3 fills supported_surfaces with exactly supportedSurfaces (MRK3-AC1, MRK3-AC3) and keeps excludedSurfaces UNSUPPORTED (MRK3-AC4) without another wire change."
+    ]
+  },
+  "displacedRoutes": {
+    "closedBy": "MRK10-AC4",
+    "rule": "MRK10 closes each route by its deletion or rejection with every listed owner's acceptance; this list and the Displaced routes table in docs/arch/framework-marko.md are the same inventory.",
+    "routes": [
+      {
+        "id": "M-D01",
+        "route": "A .marko file has no language row and falls through to unclassified handling",
+        "disposition": "replace with a gated LanguageRow behind the FWA1 capability bit",
+        "owners": [{ "owner": "MRK1", "acceptance": "MRK1-AC6" }, { "owner": "MRK1M", "acceptance": "MRK1M-AC5" }]
+      },
+      {
+        "id": "M-D02",
+        "route": "CarrierGrammarConfig is a closed Vue/Svelte enum",
+        "disposition": "add the Marko grammar configuration through REG0's family module",
+        "owners": [{ "owner": "MRK1", "acceptance": "MRK1-AC1" }]
+      },
+      {
+        "id": "M-D03",
+        "route": "FrameworkTag and tag_disposition have no Marko value or arm",
+        "disposition": "add MARKO = 12, Registered with every surface kind UNSUPPORTED until MRK3",
+        "owners": [{ "owner": "MRK1", "acceptance": "MRK1-AC6" }, { "owner": "MRK3", "acceptance": "MRK3-AC4" }]
+      },
+      {
+        "id": "M-D04",
+        "route": "Framework release admission by string prefix (VID0 V-D05) is the existing version-admission route",
+        "disposition": "never copied for Marko; activation reads the FWA1 record",
+        "owners": [{ "owner": "FWA1", "acceptance": "FWA1-AC1" }, { "owner": "MRK1M", "acceptance": "MRK1M-AC5" }]
+      },
+      {
+        "id": "M-D05",
+        "route": "The client manifest and virtual-file-naming mirrors have no Marko row",
+        "disposition": "render the rows from the descriptor",
+        "owners": [{ "owner": "MRK6", "acceptance": "MRK6-AC4" }]
+      },
+      {
+        "id": "M-D06",
+        "route": "The VS Code extension contributes no .marko language or grammar",
+        "disposition": "contribute through REG0's generated fragment",
+        "owners": [{ "owner": "MRK1G", "acceptance": "MRK1G-AC4" }]
+      },
+      {
+        "id": "M-D07",
+        "route": "The TS plugin's carrier routing is carrier-generic",
+        "disposition": "keep it generic; no Marko-specific code",
+        "owners": [{ "owner": "MRK6", "acceptance": "MRK6-AC6" }]
+      }
+    ]
+  },
+  "qualification": {
+    "coverage": "MRK9-AC1",
+    "oracleAgreement": "MRK9-AC2",
+    "promotion": "MRK10-AC1"
+  }
+}

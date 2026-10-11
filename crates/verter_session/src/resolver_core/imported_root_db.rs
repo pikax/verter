@@ -255,15 +255,6 @@ impl ImportedRootDb {
         self.singleflight.clear();
     }
 
-    /// R20 instrumentation: `signature_overflow_count` on the
-    /// backing `ValidatedFactCache`. A non-zero value means a
-    /// producer flattened transitive facts where it should have
-    /// folded a downstream materialiser's `semantic_hash`.
-    #[must_use]
-    pub fn signature_overflow_count(&self) -> u64 {
-        self.roots.signature_overflow_count()
-    }
-
     /// R20 instrumentation: `admission_refused_count` on the
     /// backing `ValidatedFactCache`. Producers that admit via the
     /// loose `insert_arc` path keep this counter at 0; only strict-

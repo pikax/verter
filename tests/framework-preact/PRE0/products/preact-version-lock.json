@@ -1,0 +1,59 @@
+{
+  "schema": 1,
+  "contractNode": "PRE0",
+  "family": "preact",
+  "kind": "lock",
+  "id": "preact-version-lock.v1",
+  "releases": [
+    {
+      "id": "preact-10",
+      "package": "preact",
+      "registry": "npm",
+      "admittedMajor": 10,
+      "referencePin": "10.29.8",
+      "source": "https://registry.npmjs.org/preact/10.29.8",
+      "tarball": "https://registry.npmjs.org/preact/-/preact-10.29.8.tgz",
+      "integrity": "sha512-ej2aVZ+vZ8WO7tvlQWRM9N63A0KzF9q4mWJfDUHgYaIofWY9hu74QdnQrjoPMmZi2/nZ5gN0bJCQF49xQqx09Q==",
+      "license": "MIT"
+    },
+    {
+      "id": "preact-11",
+      "package": "preact",
+      "registry": "npm",
+      "admittedMajor": 11,
+      "referencePin": "11.0.1",
+      "source": "https://registry.npmjs.org/preact/11.0.1",
+      "tarball": "https://registry.npmjs.org/preact/-/preact-11.0.1.tgz",
+      "integrity": "sha512-TNNwEq++jYNHy747LziCjPRVgEwnLSOIOAw/oYcjI3Tdnubx2EXtt76I0an8PATvUWtx/DX1kFIg1eFN+O/fkw==",
+      "license": "MIT"
+    }
+  ],
+  "profiles": ["preact-native", "preact-compat"],
+  "optionalPackages": [
+    {
+      "package": "@preact/signals",
+      "registry": "npm",
+      "referencePin": "2.11.3",
+      "admittedMajor": 2,
+      "optional": true,
+      "source": "https://registry.npmjs.org/@preact%2fsignals/2.11.3",
+      "tarball": "https://registry.npmjs.org/@preact/signals/-/signals-2.11.3.tgz",
+      "integrity": "sha512-mttwFM98G/JiriTgMwU+UWygL6sfVmYEiNcPSKkUnv4PxPpZhmP2ugGC4qi360+ZIHyQ8NY05bfJT3b4RUIGlw==",
+      "license": "MIT",
+      "requiredBy": null,
+      "activationOwner": "FWA1",
+      "peerRequirement": ">= 10.25.0 || >=11.0.0-0",
+      "peerRule": "The actual installed Preact release must satisfy the published peer requirement as well as this stable-release admission policy."
+    }
+  ],
+  "pinRule": "Reference pins are exact published stable versions; ranges, dist-tags, prereleases, canary, nightly, legacy majors and diverged copies are rejected. Existing repository dependency pins are unchanged.",
+  "admissionRule": "FWA1 admits the resolved installed stable version within majors 10 or 11 as its own exact release. The referencePin is the evidence pin, not a range or a replacement for the installed release. Each package contribution manifest selects exactly one Preact release; native and compat are profile identities, not independent installations. Signals has its own separately versioned optional contribution.",
+  "excluded": [
+    "preact majors <= 9",
+    "preact majors >= 12",
+    "all prereleases including Preact 11 beta/rc",
+    "canary",
+    "nightly",
+    "@preact/signals-react as a Preact activation source"
+  ]
+}

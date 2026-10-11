@@ -134,8 +134,8 @@ thread_local! {
     /// Thread-local so a single synchronous warm-validation call on the
     /// calling thread can snapshot it — immune to parallel-test
     /// contamination of any process-global table AND to source line
-    /// shifts. A miss on the cheap predicates (no slot for the profile,
-    /// overflowed carrier, or hash mismatch) never reaches `acquire_view`,
+    /// shifts. A miss on the cheap predicates (no slot for the profile
+    /// or a hash mismatch) never reaches `acquire_view`,
     /// so this counter stays flat; an eager read before the cheap checks
     /// would bump it once even on such a miss.
     pub(crate) static COMPILE_WARM_VALIDATION_VIEW_READS: std::cell::Cell<u64> = const {

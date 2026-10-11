@@ -45,7 +45,13 @@ async fn completions_with_content_retry(
     path: &str,
     offset: u32,
 ) -> Result<CompletionResult, TypeProviderError> {
-    let mut last = provider.get_completions(path, offset, Some(".")).await;
+    let mut last = provider
+        .get_completions(
+            &verter_lsp::type_provider::traits::ProviderQuery::at_engine_surface(path),
+            offset,
+            Some("."),
+        )
+        .await;
     for delay_ms in [150u64, 300, 600, 1000] {
         let needs_retry = matches!(
             last,
@@ -55,7 +61,13 @@ async fn completions_with_content_retry(
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-        last = provider.get_completions(path, offset, Some(".")).await;
+        last = provider
+            .get_completions(
+                &verter_lsp::type_provider::traits::ProviderQuery::at_engine_surface(path),
+                offset,
+                Some("."),
+            )
+            .await;
     }
     last
 }
@@ -334,6 +346,7 @@ const outerLabel = 'outer'
         // No plugin loaded here; pass the verter_lsp-internal default.
         false,
         None,
+        None,
     )
     .await
     .expect("tsserver should spawn");
@@ -359,7 +372,12 @@ const outerLabel = 'outer'
     let member_offset = local_offset + "slotItem.".len() as u32;
 
     let hover = provider
-        .get_hover(&parent_ide_path_str, local_offset)
+        .get_hover(
+            &verter_lsp::type_provider::traits::ProviderQuery::at_engine_surface(
+                &parent_ide_path_str,
+            ),
+            local_offset,
+        )
         .await
         .expect("hover request should succeed")
         .expect("slot hover should exist");
@@ -517,6 +535,7 @@ const outerLabel = 'outer'
         None,
         // No plugin loaded here; pass the verter_lsp-internal default.
         false,
+        None,
         None,
     )
     .await
@@ -679,6 +698,7 @@ const outerLabel = 'outer'
         // verter_lsp-internal backend default (response mapping unused here).
         false,
         None,
+        None,
     )
     .await
     .expect("tsserver should spawn");
@@ -790,6 +810,7 @@ async fn test_e2e_tsserver_vfor_member_access_from_fixture_generated_vue_output(
         // No plugin loaded here; pass the verter_lsp-internal default.
         false,
         None,
+        None,
     )
     .await
     .expect("tsserver should spawn");
@@ -876,6 +897,7 @@ async fn test_e2e_tsserver_semantic_tokens_map_to_verter_legend() {
         None,
         false,
         None,
+        None,
     )
     .await
     .expect("tsserver should spawn");
@@ -890,7 +912,9 @@ async fn test_e2e_tsserver_semantic_tokens_map_to_verter_legend() {
     // classification stream is non-empty (same robustness as the completion
     // retries above).
     let mut tokens = provider
-        .get_semantic_tokens(&ts_path_str)
+        .get_semantic_tokens(
+            &verter_lsp::type_provider::traits::ProviderQuery::at_engine_surface(&ts_path_str),
+        )
         .await
         .unwrap_or_default();
     for delay_ms in [200u64, 400, 800, 1600, 3200] {
@@ -899,7 +923,9 @@ async fn test_e2e_tsserver_semantic_tokens_map_to_verter_legend() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
         tokens = provider
-            .get_semantic_tokens(&ts_path_str)
+            .get_semantic_tokens(
+                &verter_lsp::type_provider::traits::ProviderQuery::at_engine_surface(&ts_path_str),
+            )
             .await
             .unwrap_or_default();
     }

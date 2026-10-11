@@ -4187,6 +4187,7 @@ version = "0.0.1-beta.6"
 dependencies = [
  "blake3",
  "futures-util",
+ "imbl",
  "parking_lot",
  "serde",
  "serde_json",

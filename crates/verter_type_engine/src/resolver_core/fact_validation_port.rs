@@ -38,14 +38,12 @@ pub trait FactValidation {
         crate::fact_signature_helpers::StructuralCarrierReadSet,
         crate::cache_runtime::NonAdmissionReason,
     >;
-    fn record_signature_overflow(&self);
     /// The fact-tracer forcing this port's host has armed: whether every
-    /// freshly-installed tracer notes one non-cacheable read, and how many
-    /// synthetic observations it fans in. Inert by default; a host that owns
-    /// engine test knobs reports them.
+    /// freshly-installed tracer notes one non-cacheable read. Inert by
+    /// default; a host that owns engine test knobs reports it.
     #[cfg(any(test, feature = "test-support"))]
-    fn tracer_forcing(&self) -> (bool, usize) {
-        (false, 0)
+    fn tracer_forcing(&self) -> bool {
+        false
     }
 
     // -------- Component-meta-tier bridges --------------------------

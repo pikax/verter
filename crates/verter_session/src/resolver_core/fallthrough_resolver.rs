@@ -176,8 +176,15 @@ impl FallthroughNodeResult {
                     * size_of::<String>()
             }
         };
+        // The result's own facts, and the cache's sealed copy of them: whole
+        // while they fit one evidence page, otherwise at most one page's
+        // width of top-level entries over pages the cache claims itself.
+        let stored_facts = self
+            .facts
+            .len()
+            .min(verter_session_query::facts::fact_read_set::FACT_PAGE_WIDTH);
         size_of::<Self>()
-            + 2 * self.facts.len() * size_of::<FactVersionRef>()
+            + (self.facts.len() + stored_facts) * size_of::<FactVersionRef>()
             + self.diagnostics.len() * size_of::<ResolverDiagnostic>()
             + value
             + key.canonical().len()
@@ -488,22 +495,23 @@ impl FallthroughResolverState {
     /// Admit one candidate under `key`, charged and bounded (see the type
     /// docs). A refused charge serves the result uncached.
     fn keep(&self, key: FallthroughNodeKey, result: FallthroughNodeResult) {
-        let Some(charge) = self
-            .retention_account
-            .get()
-            .reserve(
-                verter_session_query::retention::ChargeClass::Retained,
-                result.retained_bytes(&key),
-            )
-            .admitted()
-        else {
+        let Some(charge) = verter_session_query::facts::receipt::reserve_retained_with_evidence(
+            self.retention_account.get(),
+            result.retained_bytes(&key),
+            &[&result.facts],
+        )
+        .admitted() else {
             return;
         };
         let mut evicted = Vec::new();
         {
             let mut residency = self.residency.lock();
             let facts = result.facts.clone();
-            self.cache.insert(key.clone(), result, facts);
+            // A refused evidence claim admits nothing: the result is served
+            // uncached and its charge drops here.
+            if !self.cache.insert(key.clone(), result, facts) {
+                return;
+            }
             let seq = residency.next_seq;
             residency.next_seq += 1;
             match residency.kept.get_mut(&key) {
@@ -566,8 +574,7 @@ impl FallthroughResolverState {
     /// 2. **non-cacheable compute** (`admission.non_cacheable()`) — the compute
     ///    consumed a FENCED (ReturnOnly, `store_published == false`) serve, a
     ///    broken decl-body lease, an unrootable import route, or an
-    ///    unobservable contributor source env; or its observation set
-    ///    overflowed the fact-signature cap. Those reasons are CONTENT-NEUTRAL:
+    ///    unobservable contributor source env. Those reasons are CONTENT-NEUTRAL:
     ///    the artifacts stay published and content-current, so an admitted
     ///    entry would root on the LIVE hashes and revalidate on every warm read
     ///    FOREVER — nothing downstream can reject it. The value is still SERVED

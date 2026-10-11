@@ -84,8 +84,8 @@ fn cold_compute_observes_each_dep() {
             assert_eq!(names, vec!["/a.ts", "/b.ts", "/c.ts"]);
         }
         FactReadSetFinalise::NonCacheable(_) => panic!("fixture unexpectedly non-cacheable"),
-        FactReadSetFinalise::Overflow | FactReadSetFinalise::MutationUnstable => {
-            panic!("3 facts should not overflow")
+        FactReadSetFinalise::MutationUnstable => {
+            panic!("no domain moves in this fixture")
         }
     }
 }
@@ -154,28 +154,23 @@ fn observe_borrowed_signature_appends() {
             assert_eq!(names, vec!["/x.ts", "/y.ts", "/z.ts"]);
         }
         FactReadSetFinalise::NonCacheable(_) => panic!("fixture unexpectedly non-cacheable"),
-        FactReadSetFinalise::Overflow | FactReadSetFinalise::MutationUnstable => {
-            panic!("3 facts should not overflow")
+        FactReadSetFinalise::MutationUnstable => {
+            panic!("no domain moves in this fixture")
         }
     }
 }
 
 // ── Test 4 ─────────────────────────────────────────────────────────────
 //
-// `FactReadSet::finalise` enforces `FACT_SIGNATURE_CAP`. A tracer
-// that observes more than `FACT_SIGNATURE_CAP` distinct facts must
-// return `FactReadSetFinalise::Overflow` instead of an admitted
-// signature. Overflow is NOT a panic — the caller refuses
-// admission and emits a structured audit event (event wiring is
-// separate from this substrate).
+// `FactReadSet::finalise` never refuses a wide observation set: a tracer
+// that observes more distinct facts than one evidence page seals EVERY one
+// of them into a paged signature.
 
 #[test]
-fn signature_cap_overflow_returns_overflow() {
+fn a_wide_observation_set_seals_every_fact() {
     let host = make_host();
 
-    // FACT_SIGNATURE_CAP = 1024; we observe 1025 distinct facts.
-    // 1025 > 1024 → overflow.
-    const N_OVERFLOW: usize = 1025;
+    const N_WIDE: usize = verter_session_query::facts::fact_read_set::FACT_PAGE_WIDTH + 1;
 
     let ((), set) = host.with_fact_tracer(
         verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
@@ -183,7 +178,7 @@ fn signature_cap_overflow_returns_overflow() {
             let cell = host
                 .current_fact_tracer()
                 .expect("tracer must be active inside scope");
-            for i in 0..N_OVERFLOW {
+            for i in 0..N_WIDE {
                 // Use the index as part of the canonical to guarantee
                 // each fact is distinct (so dedup does not collapse them).
                 let canonical = format!("/m_{i}.ts");
@@ -194,17 +189,20 @@ fn signature_cap_overflow_returns_overflow() {
 
     assert_eq!(
         set.len(),
-        N_OVERFLOW,
-        "tracer must accumulate every observation even beyond the cap"
+        N_WIDE,
+        "tracer must accumulate every observation"
     );
     match set.finalise() {
-        FactReadSetFinalise::Ok(_) => {
-            panic!("{N_OVERFLOW} distinct facts must overflow")
+        FactReadSetFinalise::Ok(facts) => {
+            let signature = verter_session_query::facts::fact_cache::ReadSetSignature::new(facts);
+            assert_eq!(
+                signature.entry_count(),
+                N_WIDE,
+                "every distinct fact survives into the paged signature"
+            );
         }
         FactReadSetFinalise::NonCacheable(_) => panic!("fixture unexpectedly non-cacheable"),
-        FactReadSetFinalise::Overflow | FactReadSetFinalise::MutationUnstable => {
-            // Expected outcome: overflow sentinel.
-        }
+        FactReadSetFinalise::MutationUnstable => panic!("no domain moves in this fixture"),
     }
 }
 
@@ -263,8 +261,8 @@ fn finalise_sorts_and_dedups() {
             assert_eq!(names, vec!["/aaa.ts", "/bbb.ts"]);
         }
         FactReadSetFinalise::NonCacheable(_) => panic!("fixture unexpectedly non-cacheable"),
-        FactReadSetFinalise::Overflow | FactReadSetFinalise::MutationUnstable => {
-            panic!("2 unique facts must not overflow")
+        FactReadSetFinalise::MutationUnstable => {
+            panic!("no domain moves in this fixture")
         }
     }
 }
@@ -325,8 +323,8 @@ fn nested_with_fact_tracer_scopes_capture_via_fan_out() {
             );
         }
         FactReadSetFinalise::NonCacheable(_) => panic!("fixture unexpectedly non-cacheable"),
-        FactReadSetFinalise::Overflow | FactReadSetFinalise::MutationUnstable => {
-            panic!("inner set should not overflow")
+        FactReadSetFinalise::MutationUnstable => {
+            panic!("no domain moves in this fixture")
         }
     }
 
@@ -349,8 +347,8 @@ fn nested_with_fact_tracer_scopes_capture_via_fan_out() {
             );
         }
         FactReadSetFinalise::NonCacheable(_) => panic!("fixture unexpectedly non-cacheable"),
-        FactReadSetFinalise::Overflow | FactReadSetFinalise::MutationUnstable => {
-            panic!("outer set should not overflow")
+        FactReadSetFinalise::MutationUnstable => {
+            panic!("no domain moves in this fixture")
         }
     }
 
@@ -390,8 +388,8 @@ fn empty_tracer_is_empty_and_records_change_state() {
     match inner.finalise() {
         FactReadSetFinalise::Ok(arc) => assert_eq!(arc.len(), 1),
         FactReadSetFinalise::NonCacheable(_) => panic!("fixture unexpectedly non-cacheable"),
-        FactReadSetFinalise::Overflow | FactReadSetFinalise::MutationUnstable => {
-            panic!("1 fact must not overflow")
+        FactReadSetFinalise::MutationUnstable => {
+            panic!("no domain moves in this fixture")
         }
     }
 }

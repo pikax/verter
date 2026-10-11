@@ -17,30 +17,14 @@
 //! `strictNullChecks` × `noImplicitAny` setting; the four settings agree
 //! except where a table says otherwise.
 
-use super::checker_probe_lane_tests::{degradation_in, mismatches_in, ProbeProject};
+use super::checker_probe_lane_tests::{return_failures_in_one_host, ProbeProject};
 
 /// Every `(function, checker print of its return)` pair of `source` whose
-/// live return does not match in `project`, or is not complete.
+/// live return does not match in `project`, or is not complete: the
+/// module is checked once per project, every function read from that one
+/// host, as the checker checks the file.
 fn failures_in(project: ProbeProject<'_>, source: &str, rows: &[(&str, &str)]) -> Vec<String> {
-    let probes: Vec<(String, &str)> = rows
-        .iter()
-        .map(|(name, checker)| (format!("ReturnType<typeof {name}>"), *checker))
-        .collect();
-    let probe_rows: Vec<(&str, &str)> = probes
-        .iter()
-        .map(|(probe, checker)| (probe.as_str(), *checker))
-        .collect();
-    let mut failures = mismatches_in(project, source, &probe_rows);
-    for (name, _) in rows {
-        match degradation_in(project, source, name) {
-            Ok(None) => {}
-            Ok(Some(degradation)) => {
-                failures.push(format!("`{name}` is degraded: {degradation:?}"));
-            }
-            Err(()) => failures.push(format!("`{name}` produced no value")),
-        }
-    }
-    failures
+    return_failures_in_one_host(project, source, rows)
 }
 
 fn assert_rows(project: ProbeProject<'_>, source: &str, rows: &[(&str, &str)]) {

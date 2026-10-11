@@ -214,8 +214,8 @@ fn dead_file_fact_reads<R>(host: &VerterHost, f: impl FnOnce() -> R) -> (R, usiz
         FactReadSetFinalise::NonCacheable(reason) => {
             panic!("matrix tracer unexpectedly non-cacheable: {reason:?}")
         }
-        FactReadSetFinalise::Overflow | FactReadSetFinalise::MutationUnstable => {
-            panic!("matrix tracer overflowed on a tiny fixture")
+        FactReadSetFinalise::MutationUnstable => {
+            panic!("matrix tracer was mutation-unstable on a tiny fixture")
         }
     };
     let dead = facts

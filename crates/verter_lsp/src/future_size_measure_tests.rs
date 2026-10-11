@@ -571,19 +571,29 @@ async fn measure_handler_future_sizes() {
     // Provider hop (already boxed at the trait boundary) — independent of server.
     {
         let tp: Arc<dyn TypeProvider> = Arc::new(MockTypeProvider::new());
-        let fut = tp.get_definition("synthetic.tsx", 0);
+        let fut = tp.get_definition(
+            &crate::type_provider::traits::ProviderQuery::at_engine_surface("synthetic.tsx"),
+            0,
+        );
         report(
             "TypeProvider::get_definition (ProviderFuture)",
             size_of_val(&fut),
         );
         drop(fut);
-        let fut = tp.get_hover("synthetic.tsx", 0);
+        let fut = tp.get_hover(
+            &crate::type_provider::traits::ProviderQuery::at_engine_surface("synthetic.tsx"),
+            0,
+        );
         report(
             "TypeProvider::get_hover (ProviderFuture)",
             size_of_val(&fut),
         );
         drop(fut);
-        let fut = tp.get_completions("synthetic.tsx", 0, None);
+        let fut = tp.get_completions(
+            &crate::type_provider::traits::ProviderQuery::at_engine_surface("synthetic.tsx"),
+            0,
+            None,
+        );
         report(
             "TypeProvider::get_completions (ProviderFuture)",
             size_of_val(&fut),

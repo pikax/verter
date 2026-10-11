@@ -147,12 +147,50 @@ describe("known product-gap manifest", () => {
       "vue.public-surface.consumer-source-documents-negative": issue,
       "vue.public-surface.no-secret-internal-on-component-hover": issue,
     });
-    expect(KNOWN_PRODUCT_GAP_CANARY_ROUTE_KEYS).toEqual(["vue-parity@shared-tsgo"]);
     for (const fixture of PARITY_FIXTURES) {
       for (const provider of TYPE_PROVIDER_ROUTES) {
         if (fixture === "vue-parity" && provider === "shared-tsgo") continue;
-        expect(knownProductGapCanariesForRoute(fixture, provider)).toEqual({});
+        expect(
+          Object.values(knownProductGapCanariesForRoute(fixture, provider)).filter(
+            (row) => row.issue === issue,
+          ),
+        ).toEqual([]);
       }
+    }
+  });
+
+  it("runs undelivered-library definitions as canaries on the Verter-owned provider routes", () => {
+    const owned = ["vue-parity", "svelte-parity"].flatMap((fixture) =>
+      ["tsgo", "tsserver"].map((provider) => `${fixture}@${provider}`),
+    );
+    expect(KNOWN_PRODUCT_GAP_CANARY_ROUTE_KEYS).toEqual(
+      [...owned, "vue-parity@shared-tsgo"].sort(),
+    );
+    const empty = (fw: string, file: string): string =>
+      `PRODUCT_GAP ISSUE-x id: ${fw} TS DOM event definition failed: ` +
+      `Error: definition src/${file}.${fw}#clientX not ready within 12000ms`;
+    for (const route of owned) {
+      const [fixture, provider] = route.split("@") as [string, string];
+      const fw = fixture === "vue-parity" ? "vue" : "svelte";
+      const canaries = knownProductGapCanariesForRoute(fixture, provider);
+      expect(
+        Object.fromEntries(Object.entries(canaries).map(([id, row]) => [id, row.issue])),
+      ).toEqual({
+        "shared.js-jsdoc.dom-event.member-definition": "ISSUE-js-dom-event-jsdoc",
+        "shared.ts.dom-event.member-definition": "ISSUE-ts-dom-event-definition",
+      });
+      const ts = canaries["shared.ts.dom-event.member-definition"]!.failure;
+      expect(ts.test(empty(fw, "ts/DomEventHandler"))).toBe(true);
+      expect(ts.test(empty(fw, "js/JSDocEventHandler"))).toBe(true);
+      // A definition that answered somewhere other than the library is a
+      // regression, not the tolerated empty fail-closed answer.
+      expect(
+        ts.test(
+          `PRODUCT_GAP ISSUE-x id: ${fw} TS DOM event definition failed: ` +
+            "AssertionError: clientX definition did not reach lib.dom.d.ts",
+        ),
+      ).toBe(false);
+      expect(ts.test(empty(fw, "ts/DomEventHandlerInvalid"))).toBe(false);
     }
   });
 });

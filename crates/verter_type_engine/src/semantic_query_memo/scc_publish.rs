@@ -535,7 +535,7 @@ impl SemanticGraphStore {
         verter_session_query::retention::RetentionCharge,
         verter_session_query::retention::RetentionRefusal,
     > {
-        use verter_session_query::retention::{ChargeClass, RetentionAdmission};
+        use verter_session_query::retention::RetentionAdmission;
         let account = self.retention_account();
         // Each member's receipt is charged once, for as long as it lives.
         for entry in members {
@@ -555,7 +555,15 @@ impl SemanticGraphStore {
             .iter()
             .map(|entry| entry.unique_retained_footprint_bytes())
             .sum();
-        match account.reserve(ChargeClass::Retained, bytes) {
+        // A shared carrier's evidence pages were claimed with the root; a
+        // page only a member's carrier holds is claimed here.
+        let carriers: Vec<&[verter_session_query::facts::fact_cache::FactVersionRef]> = members
+            .iter()
+            .map(|entry| &*entry.read_set_signature.facts)
+            .collect();
+        match verter_session_query::facts::receipt::reserve_retained_with_evidence(
+            account, bytes, &carriers,
+        ) {
             RetentionAdmission::Admitted(charge) => Ok(charge),
             RetentionAdmission::Refused(refusal) => {
                 crate::cache_runtime::admission::propagate_non_admission(

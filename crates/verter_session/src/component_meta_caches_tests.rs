@@ -187,9 +187,8 @@ fn component_meta_owner_scope_refuses_only_the_final_publication_then_heals() {
     // not claim this named one-shot and therefore remain ordinarily
     // cacheable; the test discriminates the request-level refusal rail from
     // any inner cache's independent admission policy.
-    verter_type_engine::engine_test_knobs::arm_fact_tracer_overflow_once(
+    verter_type_engine::engine_test_knobs::arm_fact_tracer_refusal_once(
         verter_type_engine::engine_test_knobs::TracerScope::ComponentMetaRequest,
-        verter_session_query::facts::fact_read_set::FACT_SIGNATURE_CAP + 1,
     );
     let first = run_component_meta_request(
         &request_host,
@@ -223,7 +222,7 @@ fn component_meta_owner_scope_refuses_only_the_final_publication_then_heals() {
             .component_meta
             .candidate_signatures_for_key(&key)
             .is_empty(),
-        "the owner-scoped overflow must block the final resolved-meta publication"
+        "the owner-scoped refusal must block the final resolved-meta publication"
     );
 
     // The one-shot is consumed. A second request must cold-compute and
@@ -1308,7 +1307,7 @@ fn non_cacheable_read_inside_the_compute_closure_refuses_shape_admission() {
 
 /// REFUSAL IS CACHE-ONLY, AND IT COSTS NO SECOND COMPUTE.
 ///
-/// A declaration the cache cannot ROOT (an overflowed signature, an
+/// A declaration the cache cannot ROOT (a non-cacheable read, an
 /// unobservable keyed content version, a request-partial resolution) is still a
 /// declaration the caller asked for and the producer already resolved. The
 /// funnel must refuse the WRITE and hand the value back through `ReturnOnly`.

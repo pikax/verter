@@ -81,8 +81,7 @@ pub(crate) struct TestForceKnobs {
     #[cfg(test)]
     pub(crate) force_indexed_ready_serve_fence_for_tests: std::sync::atomic::AtomicBool,
     /// Force the owner import-route witness to take its typed refusal arm.
-    /// Decision facts make the former over-cap fixture impractically large;
-    /// the workspace Decision-DAG contract tests cover the upstream
+    /// The workspace Decision-DAG contract tests cover the upstream
     /// `ResolutionPublication::Refused` producers, while this seam isolates
     /// the session-side `UnrootableRoute` propagation and reuse carrier.
     #[cfg(test)]

@@ -5,7 +5,7 @@
 use super::quarantine::hash_extra;
 use super::*;
 use crate::protocol::*;
-use crate::traits::ProviderFuture;
+use crate::traits::{ProviderFuture, ProviderQuery};
 
 fn receipt_disposition(receipt: &AppliedReceipt) -> crate::traits::FileLoadDisposition {
     receipt.disposition
@@ -313,11 +313,12 @@ where
 
     fn get_completions(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         offset: u32,
         trigger_character: Option<&str>,
     ) -> ProviderFuture<'_, CompletionResult> {
-        let path_owned = path.to_string();
+        let path = query.path();
+        let query = query.clone();
         let trigger_owned = trigger_character.map(|s| s.to_string());
         let fp = QueryFingerprint::new(
             "completions",
@@ -332,9 +333,9 @@ where
                     items: Vec::new(),
                     is_incomplete: false,
                 },
-                move |provider| async move {
+                move |provider, stamp| async move {
                     provider
-                        .get_completions(&path_owned, offset, trigger_owned.as_deref())
+                        .get_completions(&stamp.admit(&query), offset, trigger_owned.as_deref())
                         .await
                 },
             )
@@ -344,11 +345,12 @@ where
 
     fn get_completion_details<'a>(
         &'a self,
-        path: &'a str,
+        query: &'a ProviderQuery,
         offset: u32,
         items: &'a [Completion],
     ) -> ProviderFuture<'a, Vec<Completion>> {
-        let path_owned = path.to_string();
+        let path = query.path();
+        let query = query.clone();
         let items = items.to_vec();
         // The fail-closed answer for a quarantined detail request is the
         // un-enriched list itself (mirrors the engine-less shape).
@@ -369,9 +371,9 @@ where
             self.run_guarded(
                 fp,
                 move || passthrough,
-                move |provider| async move {
+                move |provider, stamp| async move {
                     provider
-                        .get_completion_details(&path_owned, offset, &items)
+                        .get_completion_details(&stamp.admit(&query), offset, &items)
                         .await
                 },
             )
@@ -379,14 +381,21 @@ where
         })
     }
 
-    fn get_hover(&self, path: &str, offset: u32) -> ProviderFuture<'_, Option<HoverInfo>> {
-        let path_owned = path.to_string();
+    fn get_hover(
+        &self,
+        query: &ProviderQuery,
+        offset: u32,
+    ) -> ProviderFuture<'_, Option<HoverInfo>> {
+        let path = query.path();
+        let query = query.clone();
         let fp = QueryFingerprint::new("hover", path, u64::from(offset), 0);
         Box::pin(async move {
             self.run_guarded(
                 fp,
                 || None,
-                move |provider| async move { provider.get_hover(&path_owned, offset).await },
+                move |provider, stamp| async move {
+                    provider.get_hover(&stamp.admit(&query), offset).await
+                },
             )
             .await
         })
@@ -403,18 +412,23 @@ where
                         "diagnostics quarantined after repeated provider crashes",
                     ))
                 },
-                move |provider| async move { provider.get_diagnostics(&path_owned).await },
+                move |provider, _| async move { provider.get_diagnostics(&path_owned).await },
             )
             .await
         })
     }
 
-    fn get_definition(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
-        let path_owned = path.to_string();
+    fn get_definition(
+        &self,
+        query: &ProviderQuery,
+        offset: u32,
+    ) -> ProviderFuture<'_, Vec<TypeLocation>> {
+        let path = query.path();
+        let query = query.clone();
         let fp = QueryFingerprint::new("definition", path, u64::from(offset), 0);
         Box::pin(async move {
-            self.run_guarded(fp, Vec::new, move |provider| async move {
-                provider.get_definition(&path_owned, offset).await
+            self.run_guarded(fp, Vec::new, move |provider, stamp| async move {
+                provider.get_definition(&stamp.admit(&query), offset).await
             })
             .await
         })
@@ -422,25 +436,33 @@ where
 
     fn get_type_definition(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         offset: u32,
     ) -> ProviderFuture<'_, Vec<TypeLocation>> {
-        let path_owned = path.to_string();
+        let path = query.path();
+        let query = query.clone();
         let fp = QueryFingerprint::new("type_definition", path, u64::from(offset), 0);
         Box::pin(async move {
-            self.run_guarded(fp, Vec::new, move |provider| async move {
-                provider.get_type_definition(&path_owned, offset).await
+            self.run_guarded(fp, Vec::new, move |provider, stamp| async move {
+                provider
+                    .get_type_definition(&stamp.admit(&query), offset)
+                    .await
             })
             .await
         })
     }
 
-    fn get_references(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
-        let path_owned = path.to_string();
+    fn get_references(
+        &self,
+        query: &ProviderQuery,
+        offset: u32,
+    ) -> ProviderFuture<'_, Vec<TypeLocation>> {
+        let path = query.path();
+        let query = query.clone();
         let fp = QueryFingerprint::new("references", path, u64::from(offset), 0);
         Box::pin(async move {
-            self.run_guarded(fp, Vec::new, move |provider| async move {
-                provider.get_references(&path_owned, offset).await
+            self.run_guarded(fp, Vec::new, move |provider, stamp| async move {
+                provider.get_references(&stamp.admit(&query), offset).await
             })
             .await
         })
@@ -448,14 +470,17 @@ where
 
     fn get_rename_locations(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         offset: u32,
     ) -> ProviderFuture<'_, Vec<RenameLocation>> {
-        let path_owned = path.to_string();
+        let path = query.path();
+        let query = query.clone();
         let fp = QueryFingerprint::new("rename_locations", path, u64::from(offset), 0);
         Box::pin(async move {
-            self.run_guarded(fp, Vec::new, move |provider| async move {
-                provider.get_rename_locations(&path_owned, offset).await
+            self.run_guarded(fp, Vec::new, move |provider, stamp| async move {
+                provider
+                    .get_rename_locations(&stamp.admit(&query), offset)
+                    .await
             })
             .await
         })
@@ -463,27 +488,35 @@ where
 
     fn get_signature_help(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         offset: u32,
     ) -> ProviderFuture<'_, Option<SignatureHelp>> {
-        let path_owned = path.to_string();
+        let path = query.path();
+        let query = query.clone();
         let fp = QueryFingerprint::new("signature_help", path, u64::from(offset), 0);
         Box::pin(async move {
-            self.run_guarded(fp, || None, move |provider| async move {
-                provider.get_signature_help(&path_owned, offset).await
-            })
+            self.run_guarded(
+                fp,
+                || None,
+                move |provider, stamp| async move {
+                    provider
+                        .get_signature_help(&stamp.admit(&query), offset)
+                        .await
+                },
+            )
             .await
         })
     }
 
     fn get_code_actions(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         start_offset: u32,
         end_offset: u32,
         diagnostics: &[ProviderDiagnosticContext],
     ) -> ProviderFuture<'_, Vec<TypeCodeAction>> {
-        let path_owned = path.to_string();
+        let path = query.path();
+        let query = query.clone();
         let diagnostics = diagnostics.to_vec();
         let fp = QueryFingerprint::new(
             "code_actions",
@@ -492,21 +525,22 @@ where
             0,
         );
         Box::pin(async move {
-            self.run_guarded(fp, Vec::new, move |provider| async move {
+            self.run_guarded(fp, Vec::new, move |provider, stamp| async move {
                 provider
-                    .get_code_actions(&path_owned, start_offset, end_offset, &diagnostics)
+                    .get_code_actions(&stamp.admit(&query), start_offset, end_offset, &diagnostics)
                     .await
             })
             .await
         })
     }
 
-    fn get_semantic_tokens(&self, path: &str) -> ProviderFuture<'_, Vec<SemanticToken>> {
-        let path_owned = path.to_string();
+    fn get_semantic_tokens(&self, query: &ProviderQuery) -> ProviderFuture<'_, Vec<SemanticToken>> {
+        let path = query.path();
+        let query = query.clone();
         let fp = QueryFingerprint::new("semantic_tokens", path, 0, 0);
         Box::pin(async move {
-            self.run_guarded(fp, Vec::new, move |provider| async move {
-                provider.get_semantic_tokens(&path_owned).await
+            self.run_guarded(fp, Vec::new, move |provider, stamp| async move {
+                provider.get_semantic_tokens(&stamp.admit(&query)).await
             })
             .await
         })
@@ -514,14 +548,17 @@ where
 
     fn get_document_highlights(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         offset: u32,
     ) -> ProviderFuture<'_, Vec<TypeDocumentHighlight>> {
-        let path_owned = path.to_string();
+        let path = query.path();
+        let query = query.clone();
         let fp = QueryFingerprint::new("document_highlights", path, u64::from(offset), 0);
         Box::pin(async move {
-            self.run_guarded(fp, Vec::new, move |provider| async move {
-                provider.get_document_highlights(&path_owned, offset).await
+            self.run_guarded(fp, Vec::new, move |provider, stamp| async move {
+                provider
+                    .get_document_highlights(&stamp.admit(&query), offset)
+                    .await
             })
             .await
         })
@@ -529,11 +566,12 @@ where
 
     fn get_inlay_hints(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         start_offset: u32,
         end_offset: u32,
     ) -> ProviderFuture<'_, Vec<InlayHint>> {
-        let path_owned = path.to_string();
+        let path = query.path();
+        let query = query.clone();
         let fp = QueryFingerprint::new(
             "inlay_hints",
             path,
@@ -541,9 +579,9 @@ where
             0,
         );
         Box::pin(async move {
-            self.run_guarded(fp, Vec::new, move |provider| async move {
+            self.run_guarded(fp, Vec::new, move |provider, stamp| async move {
                 provider
-                    .get_inlay_hints(&path_owned, start_offset, end_offset)
+                    .get_inlay_hints(&stamp.admit(&query), start_offset, end_offset)
                     .await
             })
             .await
@@ -552,10 +590,11 @@ where
 
     fn resolve_completion(
         &self,
-        path: &str,
+        query: &ProviderQuery,
         data: CompletionResolveData,
     ) -> ProviderFuture<'_, Option<CompletionResolveResult>> {
-        let path_owned = path.to_string();
+        let path = query.path();
+        let query = query.clone();
         let fp = QueryFingerprint::new(
             "resolve_completion",
             path,
@@ -566,7 +605,11 @@ where
             self.run_guarded(
                 fp,
                 || None,
-                move |provider| async move { provider.resolve_completion(&path_owned, data).await },
+                move |provider, stamp| async move {
+                    provider
+                        .resolve_completion(&stamp.admit(&query), data)
+                        .await
+                },
             )
             .await
         })
@@ -680,7 +723,7 @@ where
         let path_owned = path.to_string();
         let fp = QueryFingerprint::new("diagnostics", path, 0, 0);
         Box::pin(async move {
-            self.run_guarded_with_fallback(fp, || Err(TypeProviderError::new("diagnostics quarantined after repeated provider crashes")), move |provider| async move {
+            self.run_guarded_with_fallback(fp, || Err(TypeProviderError::new("diagnostics quarantined after repeated provider crashes")), move |provider, _| async move {
                 provider.get_diagnostics_background(&path_owned).await
             })
             .await
@@ -704,7 +747,7 @@ where
                         "diagnostics quarantined after repeated provider crashes",
                     ))
                 },
-                move |provider| async move {
+                move |provider, _| async move {
                     provider
                         .get_diagnostics_in_project(&path_owned, &configured_project)
                         .await

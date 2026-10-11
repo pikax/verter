@@ -15,6 +15,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { matchPathFilters } from "../../../scripts/ci-impact.mjs";
 import { loadProducts as loadArh2Products, validate as validateArh2 } from "../ARH2/verify.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -330,11 +331,7 @@ export function validate(products, manifest = loadManifest()) {
   ) {
     err(errors, "ARH7-ratification", "ci-lane-missing", "architecture-health job");
   }
-  const start = ci.indexOf("\n            arch:\n");
-  const rest = start === -1 ? "" : ci.slice(start + 1);
-  const next = rest.search(/\n            [a-z_]+:\n/);
-  const block = next === -1 ? rest : rest.slice(0, next);
-  if (!block.includes("packages/vue-vscode/**")) {
+  if (!matchPathFilters(["packages/vue-vscode/src/extension.ts"]).hits.arch) {
     err(
       errors,
       "ARH7-ratification",

@@ -1,0 +1,187 @@
+{
+  "schema": 1,
+  "kind": "StimulusVocabulary",
+  "profile": "stimulus-3.2.2",
+  "sources": {
+    "tokenizer": "https://raw.githubusercontent.com/hotwired/stimulus/v3.2.2/src/mutation-observers/token_list_observer.ts",
+    "descriptors": "https://raw.githubusercontent.com/hotwired/stimulus/v3.2.2/src/core/action_descriptor.ts",
+    "events": "https://raw.githubusercontent.com/hotwired/stimulus/v3.2.2/src/core/action.ts",
+    "parameters": "https://raw.githubusercontent.com/hotwired/stimulus/v3.2.2/src/core/action.ts",
+    "actionEvent": "https://raw.githubusercontent.com/hotwired/stimulus/v3.2.2/src/core/binding.ts",
+    "keys": "https://raw.githubusercontent.com/hotwired/stimulus/v3.2.2/src/core/schema.ts",
+    "values": "https://raw.githubusercontent.com/hotwired/stimulus/v3.2.2/src/core/value_properties.ts",
+    "targets": "https://raw.githubusercontent.com/hotwired/stimulus/v3.2.2/src/core/target_properties.ts",
+    "classes": "https://raw.githubusercontent.com/hotwired/stimulus/v3.2.2/src/core/class_properties.ts",
+    "outlets": "https://raw.githubusercontent.com/hotwired/stimulus/v3.2.2/src/core/outlet_properties.ts",
+    "reference": "https://stimulus.hotwired.dev/reference/actions"
+  },
+  "descriptor": {
+    "grammar": "[event[.keyFilter][@window|@document]->]identifier#method[:[!]option]*",
+    "listSeparator": "ECMAScript whitespace and line terminators: trim, split on /\\s+/, discard empty tokens; retain order and source spans. Includes U+00A0 and U+000B, not only HTML ASCII whitespace.",
+    "compoundKeys": "alt, ctrl, meta and shift joined with + to a key filter; pinned codec also admits the modifier+event form",
+    "keyboardEvents": ["keydown", "keyup", "keypress"],
+    "dottedNonKeyboardEvents": "Keep the dot suffix in the event name, not a keyboard filter.",
+    "eventTargets": ["element (default)", "window", "document"],
+    "shorthand": "Event omission is valid only when the element has a pinned default event.",
+    "malformed": "Typed error parts preserve exact source spans; never drop a malformed token.",
+    "customizations": "Statically registered custom schema keys/options are conditional facts; computed customizations stay unknown. Never execute them."
+  },
+  "options": {
+    "listener": ["capture", "once", "passive"],
+    "filters": ["stop", "prevent", "self"],
+    "negation": "! sets the option value to false; not limited to !passive"
+  },
+  "keyFilters": {
+    "enter": "Enter",
+    "tab": "Tab",
+    "esc": "Escape",
+    "space": " ",
+    "up": "ArrowUp",
+    "down": "ArrowDown",
+    "left": "ArrowLeft",
+    "right": "ArrowRight",
+    "home": "Home",
+    "end": "End",
+    "page_up": "PageUp",
+    "page_down": "PageDown",
+    "alphabet": "a through z map to themselves",
+    "digits": "0 through 9 map to themselves",
+    "modifiers": ["alt", "ctrl", "meta", "shift"]
+  },
+  "defaultEvents": [
+    {
+      "element": "a",
+      "event": "click"
+    },
+    {
+      "element": "button",
+      "event": "click"
+    },
+    {
+      "element": "details",
+      "event": "toggle"
+    },
+    {
+      "element": "form",
+      "event": "submit"
+    },
+    {
+      "element": "input",
+      "when": "type is submit",
+      "event": "click"
+    },
+    {
+      "element": "input",
+      "when": "type is not submit",
+      "event": "input"
+    },
+    {
+      "element": "select",
+      "event": "change"
+    },
+    {
+      "element": "textarea",
+      "event": "input"
+    }
+  ],
+  "valueTypes": [
+    {
+      "constructor": "Array",
+      "type": "array",
+      "default": [],
+      "decode": "JSON array only; reject another JSON kind"
+    },
+    {
+      "constructor": "Boolean",
+      "type": "boolean",
+      "default": false,
+      "decode": "false only for 0 or case-insensitive false; every other string is true"
+    },
+    {
+      "constructor": "Number",
+      "type": "number",
+      "default": 0,
+      "decode": "Remove underscores, then ECMAScript Number conversion; NaN is a non-coercible static fact, not a thrown decoder error"
+    },
+    {
+      "constructor": "Object",
+      "type": "object",
+      "default": {},
+      "decode": "JSON non-null object, excluding arrays"
+    },
+    {
+      "constructor": "String",
+      "type": "string",
+      "default": "",
+      "decode": "Identity"
+    }
+  ],
+  "attributeFamilies": [
+    {
+      "name": "data-controller",
+      "value": "ordered controller identifier tokens"
+    },
+    {
+      "name": "data-action",
+      "value": "ordered action descriptors"
+    },
+    {
+      "name": "data-{identifier}-target",
+      "value": "target name tokens",
+      "binding": "nearest same-identifier controller scope"
+    },
+    {
+      "name": "data-{identifier}-{name}-value",
+      "value": "literal value decoded against static values"
+    },
+    {
+      "name": "data-{identifier}-{name}-class",
+      "value": "CSS class tokens; conditional usage, not a definite selector match"
+    },
+    {
+      "name": "data-{identifier}-{outletIdentifier}-outlet",
+      "value": "CSS selector delegated to shared selector parser"
+    },
+    {
+      "name": "data-{identifier}-{name}-param",
+      "value": "JSON typecast when valid, otherwise string; params come from attributes on the element carrying the action's data-action descriptor, matched to its controller identifier, with camelized parameter names"
+    },
+    {
+      "name": "data-target",
+      "value": "legacy identifier.name tokens accepted by pinned defaultSchema",
+      "disposition": "compatibility fact inside the admitted release; never activates a legacy framework profile"
+    }
+  ],
+  "declarations": [
+    "static targets",
+    "static values (constructor, literal default or type/default object; see valueDeclarationForms)",
+    "static classes",
+    "static outlets",
+    "application.register with symbol-proven binding",
+    "loader convention backed by resolved registration facts"
+  ],
+  "valueDeclarationForms": {
+    "constructor": "Symbol-proven Array, Boolean, Number, Object or String; type and built-in default come from valueTypes. Example: count: Number gives number with default 0.",
+    "literalDefault": "Boolean, number, string, array or plain object literal; infer its valueTypes kind and retain the literal as its custom default. Examples: count: 0, enabled: false, label: 'hello', items: [], options: {}. An object with type/default fields follows the pinned configuration-object rules first.",
+    "typeDefaultObject": "Configuration object with type, default or both. Example: count: { type: Number, default: 0 }. Type checking treats null and undefined as absent (isSomething); when both type and default are non-null and non-undefined, their kinds must match. A present type with a null or undefined default still determines the kind. Default selection instead uses property presence (hasProperty): an explicit default property retains its value, including null or undefined; only an absent default property with a recognized type uses the built-in default. Thus count: { type: Number, default: null } is accepted as number with custom default null, whereas count: { type: Number } uses 0. A non-null, non-undefined default without a type infers the kind from the default.",
+    "staticBoundary": "Use shared symbol and literal facts only. Computed expressions, calls, spreads or unresolved constructor/configuration bindings retain unknown type/default parts; never execute them. All admitted forms contribute the same generated value member names through TypeInfo."
+  },
+  "generatedMembers": {
+    "targets": ["nameTarget", "nameTargets", "hasNameTarget"],
+    "values": ["nameValue", "hasNameValue"],
+    "classes": ["nameClass", "nameClasses", "hasNameClass"],
+    "outlets": [
+      "nameOutlet",
+      "nameOutlets",
+      "nameOutletElement",
+      "nameOutletElements",
+      "hasNameOutlet"
+    ]
+  },
+  "boundaries": [
+    "No Stimulus parser: descriptor codecs over HWC2 facts",
+    "No template parser: ERBH1 holes stay unknown",
+    "Generated members are TypeInfo facts; never inject declarations into tsgo",
+    "this.dispatch contributes DOM-event facts, never a component events facet"
+  ]
+}

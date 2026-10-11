@@ -17,7 +17,14 @@ async fn hover_until_some(
     offset: u32,
 ) -> Option<verter_type_runtime::protocol::HoverInfo> {
     for attempt in 0..8 {
-        if let Ok(Some(info)) = session.provider().get_hover(provider_path, offset).await {
+        if let Ok(Some(info)) = session
+            .provider()
+            .get_hover(
+                &crate::type_provider::traits::ProviderQuery::at_engine_surface(provider_path),
+                offset,
+            )
+            .await
+        {
             return Some(info);
         }
         if attempt < 7 {

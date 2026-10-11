@@ -151,6 +151,108 @@ interface ManagedCarrierCoordinatePatch {
  */
 const managedCarrierCoordinatePatches = new WeakMap<object, ManagedCarrierCoordinatePatch>();
 
+/**
+ * The coordinate sources sampled so far in the CURRENT tsserver command, by
+ * store-reader identity and canonical source path; an `undefined` sample (no
+ * ready companion, unreadable blob) is memoized for the command as well.
+ */
+type ManagedCarrierCoordinateMemo = WeakMap<
+  object,
+  Map<string, ManagedCarrierCoordinateSource | undefined>
+>;
+
+/** One Session's command in progress: its memo and the nesting depth of the boundary. */
+interface CommandMemoContext {
+  memo: ManagedCarrierCoordinateMemo | undefined;
+  depth: number;
+}
+
+/** Per-Session command contexts; a Session absent here has the boundary uninstalled. */
+const commandMemoContexts = new WeakMap<object, CommandMemoContext>();
+
+/** The memo of the Session whose command is executing right now, if any. */
+let activeCommandMemo: ManagedCarrierCoordinateMemo | undefined;
+
+/**
+ * Run `work` inside `session`'s command boundary: the OUTERMOST call for that
+ * Session creates its memo and discards it in `finally`, nested calls of the
+ * same Session share it, and a command of ANOTHER Session entered re-entrantly
+ * switches to that Session's own memo and restores the outer one afterwards.
+ */
+function runWithCommandMemo<T>(session: object, work: () => T): T {
+  let context = commandMemoContexts.get(session);
+  if (context === undefined) {
+    context = { memo: undefined, depth: 0 };
+    commandMemoContexts.set(session, context);
+  }
+  const previous = activeCommandMemo;
+  if (context.depth === 0) context.memo = new WeakMap();
+  context.depth += 1;
+  activeCommandMemo = context.memo;
+  try {
+    return work();
+  } finally {
+    context.depth -= 1;
+    if (context.depth === 0) context.memo = undefined;
+    activeCommandMemo = previous;
+  }
+}
+
+/**
+ * The Session methods inside which tsserver converts positions synchronously:
+ * every request runs in `executeCommand` (reached by `onMessage`, which needs no
+ * wrapper of its own), and every background error check — the timer-driven
+ * `syntaxDiag`/`semanticDiag`/`suggestionDiag`/`regionSemanticDiag` events —
+ * formats its diagnostics inside `sendDiagnosticsEvent`.
+ */
+const COMMAND_BOUNDARY_METHODS = ["executeCommand", "sendDiagnosticsEvent"] as const;
+
+/**
+ * Install, once per tsserver `Session`, the boundary the coordinate memo lives
+ * in. Outside a command or diagnostics event — any other timer-driven host
+ * callback, a project refresh — nothing is memoized and every conversion
+ * samples the store exactly as it always did.
+ */
+function installCommandBoundary(session: unknown): void {
+  if (typeof session !== "object" || session === null || commandMemoContexts.has(session)) {
+    return;
+  }
+  const candidate = session as Record<string, unknown>;
+  if (typeof candidate.executeCommand !== "function") return;
+  commandMemoContexts.set(session, { memo: undefined, depth: 0 });
+  for (const method of COMMAND_BOUNDARY_METHODS) {
+    const original = candidate[method];
+    if (typeof original !== "function") continue;
+    candidate[method] = function (this: unknown, ...args: unknown[]) {
+      return runWithCommandMemo(session, () => original.apply(this, args));
+    };
+  }
+}
+
+/**
+ * `sample` is a project's coordinate-source callback — the store head, the
+ * ready entry and the companion blob, read exactly as before. Inside a command
+ * its result is sampled once per `(store, source)` and served to every later
+ * conversion of that command; outside a command it is called every time.
+ */
+function memoizedCoordinateSource(
+  store: DiskCarrierStoreReader,
+  fileName: string,
+  sample: () => ManagedCarrierCoordinateSource | undefined,
+): ManagedCarrierCoordinateSource | undefined {
+  if (activeCommandMemo === undefined) return sample();
+  let perStore = activeCommandMemo.get(store);
+  if (perStore === undefined) {
+    perStore = new Map();
+    activeCommandMemo.set(store, perStore);
+  }
+  const key = store.canonicalPath(fileName);
+  if (perStore.has(key)) return perStore.get(key);
+  const sampled = sample();
+  perStore.set(key, sampled);
+  return sampled;
+}
+
 function lineStartsFor(text: string): readonly number[] {
   const starts = [0];
   for (let index = 0; index < text.length; index += 1) {
@@ -450,6 +552,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
     };
     let activeSourceKeys = new Set(activeCarrierSources(effectiveConfig).map(activeKey));
     const projectKey = info.project.getProjectName();
+    installCommandBoundary(info.session);
     processBoundProjects.add(projectKey);
     processCurrentConfig = effectiveConfig;
     writeEditorTsserverAttestation(processCurrentConfig, processBoundProjects);
@@ -951,14 +1054,21 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       ) {
         return;
       }
-      patchManagedCarrierCoordinates(scriptInfo, projectKey, () => {
-        if (editorOwnsMembership || info.project.isClosed()) return undefined;
-        const ready = store.readyFileForSource(fileName);
-        const text = ready === undefined ? undefined : carrierContent(fileName);
-        return ready === undefined || text === undefined
-          ? undefined
-          : { version: `${ready.version}:${ready.content_hash}`, text };
-      });
+      // One tsserver command converts a position per diagnostic/location end
+      // (and the request's own positions); the source is sampled once per
+      // command for this project's store and served to every conversion in it.
+      // The whole callback — liveness and serving-mode checks included — is the
+      // memoized result, so one command sees one answer for this source.
+      patchManagedCarrierCoordinates(scriptInfo, projectKey, () =>
+        memoizedCoordinateSource(store, fileName, () => {
+          if (editorOwnsMembership || info.project.isClosed()) return undefined;
+          const ready = store.readyFileForSource(fileName);
+          const text = ready === undefined ? undefined : carrierContent(fileName);
+          return ready === undefined || text === undefined
+            ? undefined
+            : { version: `${ready.version}:${ready.content_hash}`, text };
+        }),
+      );
     };
 
     const synchronizeManagedCarrierScriptInfo = (

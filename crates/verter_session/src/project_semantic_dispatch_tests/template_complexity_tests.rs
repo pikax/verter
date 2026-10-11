@@ -57,7 +57,8 @@ fn four_digit_spans_distribute_and_five_reach_the_limit() {
 }
 
 /// Two spans at the limit: 369 × 271 = 99,999 distributes and 400 × 250 =
-/// 100,000 does not.
+/// 100,000 does not. The rows are read from one host: the 99,999
+/// concatenations are built once, and the relation reads them again.
 ///
 /// Measured: `IsAny<`${A}-${B}`>` is `"not-any"` and `"a0-b0" extends
 /// `${A}-${B}` ? 1 : 2` is `1` at 369 × 271; `IsAny<`${C}-${F}`>` and `"x"
@@ -71,7 +72,7 @@ fn two_spans_meet_the_limit_at_one_hundred_thousand() {
         string_union("C", "c", 400),
         string_union("F", "f", 250),
     );
-    let failures = mismatches(
+    let failures = mismatches_in_one_host(
         &source,
         &[
             ("IsAny<`${A}-${B}`>", "\"not-any\""),

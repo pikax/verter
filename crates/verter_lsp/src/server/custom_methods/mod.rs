@@ -733,7 +733,10 @@ impl VerterLanguageServer {
             };
 
             // Query TSGO for the type at this position
-            if let Ok(Some(hover)) = tp.get_hover(&ctx.tsx_path, tsx_offset).await {
+            if let Ok(Some(hover)) = tp
+                .get_hover(&ctx.snapshot.provider_query(), tsx_offset)
+                .await
+            {
                 // Post-await validation: a hover produced against a surface that
                 // no longer matches must be DROPPED (fail closed) — the binding
                 // reports `null` rather than a type read off a superseded surface.

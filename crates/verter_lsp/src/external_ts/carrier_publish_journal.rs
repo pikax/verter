@@ -207,6 +207,13 @@ impl ProjectState {
         self.provider_refs.get(provider_uri).copied().unwrap_or(0)
     }
 
+    /// Every owned source with its rows, in owned order.
+    pub(crate) fn owned_groups(&self) -> impl Iterator<Item = (&str, &[OwnedSource])> {
+        self.owned
+            .values()
+            .map(|(source, rows)| (source.as_str(), rows.as_slice()))
+    }
+
     /// Every provider URI an owned row names.
     pub(crate) fn owned_providers(&self) -> impl Iterator<Item = &str> {
         self.provider_refs.keys().map(String::as_str)

@@ -1,0 +1,94 @@
+{
+  "schema": 1,
+  "contractNode": "PRE0",
+  "family": "preact",
+  "kind": "lock",
+  "id": "preact-activation.v1",
+  "owner": "FWA1",
+  "acceptance": "FWA1-AC2",
+  "activationRecord": "FrameworkActivation",
+  "releaseTable": "preact-version-lock.json",
+  "profiles": [
+    {
+      "id": "preact-native",
+      "mode": "native",
+      "framework": "preact",
+      "adapter": "preact",
+      "source": "PM-resolved preact package role",
+      "aliases": [],
+      "releases": ["preact-10", "preact-11"]
+    },
+    {
+      "id": "preact-compat",
+      "mode": "compat",
+      "framework": "preact",
+      "adapter": "preact",
+      "source": "PM-resolved react/react-dom roles whose canonical target is preact/compat",
+      "aliases": [
+        {
+          "role": "react",
+          "target": "preact/compat"
+        },
+        {
+          "role": "react-dom",
+          "target": "preact/compat"
+        }
+      ],
+      "releases": ["preact-10", "preact-11"],
+      "forbiddenFramework": "react"
+    }
+  ],
+  "priority": [
+    "frameworks.preact = off",
+    "validate resolved installed release",
+    "file pragma narrows framework/profile",
+    "PM-resolved package role and alias provenance"
+  ],
+  "pragma": {
+    "text": "@jsxImportSource preact",
+    "effect": "narrows this file to preact-native, including inside a React package, only with an admitted resolved Preact release",
+    "activationBySpelling": false,
+    "receivingAcceptance": "PRE1-AC2"
+  },
+  "switches": {
+    "off": "off; zero vertical work",
+    "auto": "PM-resolved package and file evidence only; otherwise inactive",
+    "on": "requires an admitted exact release; without a manifest use explicit release provenance; never bypass version admission"
+  },
+  "unsupportedVersion": {
+    "state": "unsupported-version",
+    "coerced": false,
+    "verticalWork": 0
+  },
+  "optionalSignals": {
+    "package": "@preact/signals",
+    "authority": "FWA1",
+    "releaseTable": "preact-version-lock.json#/optionalPackages",
+    "absent": "no signal binding or semantic facts",
+    "unsupported": "no signal facts; report the separately unsupported package",
+    "present": "facts only for admitted resolved signals and a compatible admitted Preact release"
+  },
+  "neverActivateFrom": [
+    ".tsx or .jsx extension alone",
+    "identifier spelling",
+    "unresolved import text",
+    "CDN script",
+    "executed config",
+    "generated or Vue/Svelte virtual carriers"
+  ],
+  "routing": {
+    "compatActivatesReact": false,
+    "contributorsPerFile": 1,
+    "inactiveWork": 0,
+    "aliasEdit": "invalidate affected package/file identities only; fresh equals incremental",
+    "consumers": [
+      "PRE1-AC2",
+      "PRE1-AC3",
+      "PRE1-AC4",
+      "PRE2-AC2",
+      "PRE2-AC3",
+      "PRE2-AC4",
+      "PRE5-AC3"
+    ]
+  }
+}

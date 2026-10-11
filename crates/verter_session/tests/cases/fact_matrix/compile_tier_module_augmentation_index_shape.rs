@@ -34,7 +34,7 @@ fn compile_tier_signature_carries_module_augmentation_index_shape() {
         ),
         "compile_tier matrix slice: `CompileSlot` MUST carry \
          `fact_dep_signature: ReadSetSignature` (the carrier that wraps \
-         `Arc<[FactVersionRef]>` + the overflow flag). A regression that \
+         `Arc<[FactVersionRef]>`). A regression that \
          drops the typed carrier would bypass per-domain fact validation."
     );
 

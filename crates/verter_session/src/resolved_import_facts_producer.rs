@@ -297,7 +297,7 @@ impl VerterHost {
         //    a pair no candidate retains, silently dropping a fresh
         //    resolution state.
         //
-        //    A refused admission (empty or over-cap signature) leaves
+        //    A refused admission (an empty signature) leaves
         //    the store untouched and reports no admission, so the
         //    provenance counters below never claim unretained work.
         if db.holds_candidate_matching(&key, &facts, payload.as_ref()) {

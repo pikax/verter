@@ -21,6 +21,8 @@ required-features = ["test-fake-engine"]
 
 [dependencies]
 futures-util = "0.3.32"
+# The persistent map behind each query's O(1) delivered-surface snapshot.
+imbl = "7.0.1"
 verter_debug_assert = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

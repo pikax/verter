@@ -31,7 +31,7 @@
 //! | `both_flight_arms_replay_the_producer_footprint` | The follower — which returns from the flight terminal having run NO closure — records the producer's facts in its own tracer, as does the leader. |
 //! | `warm_producer_run_still_roots_the_transitively_reached_file` | A producer re-run over memos an earlier run of the same owner populated still seals the transitive footprint. |
 //! | `second_owner_over_fully_warm_memos_roots_the_transitive_file` | A producer that NEVER computed the shared memos itself — pure warm reads — still seals them. |
-//! | `factless_footprints_refuse_rooting_instead_of_replaying_nothing` | All FOUR factless footprints (`Overflowed`, `MutationUnstable`, `Unobserved`, `RootedNonCacheable([])`) taint instead of replaying an empty set. |
+//! | `factless_footprints_refuse_rooting_instead_of_replaying_nothing` | All THREE factless footprints (`MutationUnstable`, `Unobserved`, `RootedNonCacheable([])`) taint instead of replaying an empty set. |
 //! | `cancelled_producer_handoff_refuses_the_consumer_rooting` | The `Unobserved` arm on the real path: a cancelled handoff refuses the CONSUMER's tracer, with an uncancelled control that does not. |
 //! | `non_cacheable_footprint_replays_facts_and_the_refusal` | The `NonCacheable` arm bubbles its facts AND its refusal. |
 //! | `rooted_footprint_replays_facts_without_refusing` | A publishable footprint replays its facts and leaves the consumer able to root. |
@@ -50,8 +50,9 @@
 //! - **R1 — drop the publishable replay.** `Self::Rooted(facts) =>
 //!   observe_fan_out_borrowed(facts)` becomes a no-op. This is the original bug.
 //!   Caught: 6 fail.
-//! - **R2 — overflow replays nothing.** Split the factless arm so
-//!   `Self::Overflowed => {}`. Caught: 1 fails, naming `["Overflowed"]`.
+//! - **R2 — instability replays nothing.** Split the factless arm so
+//!   `Self::MutationUnstable => {}`. Caught: 1 fails, naming
+//!   `["MutationUnstable"]`.
 //! - **R3 — empty non-cacheable replays nothing.** Insert a guarded arm
 //!   `Self::RootedNonCacheable(facts) if facts.is_empty() => {}` above the real
 //!   one. Caught: 1 fails, naming `["RootedNonCacheable(empty)"]`. Reachable in
@@ -361,15 +362,14 @@ fn both_flight_arms_replay_the_producer_footprint() {
 ///
 /// Replaying a factless footprint as an empty observation set silently
 /// reproduces the stale-serve bug — the consumer roots on nothing and validates
-/// forever. Four distinct footprints reach `replay()` with no facts, and all
-/// four must taint:
+/// forever. Three distinct footprints reach `replay()` with no facts, and all
+/// three must taint:
 ///
-/// - `Overflowed` — finalisation exceeded the cap, so the facts were dropped.
 /// - `MutationUnstable` — the producer's aggregate basis moved mid-compute.
 /// - `Unobserved` — no traced compute ran at all.
 /// - `RootedNonCacheable([])` — a refusal raised before anything was observed.
 ///   This one is easy to miss because the arm *looks* covered by the populated
-///   `NonCacheable` test; guarding `Overflowed` alone leaves it open.
+///   `NonCacheable` test; guarding `MutationUnstable` alone leaves it open.
 ///
 /// The whole set is asserted from ONE verdict so a regression that drops the
 /// taint names every arm it broke rather than short-circuiting on the first.
@@ -378,15 +378,9 @@ fn factless_footprints_refuse_rooting_instead_of_replaying_nothing() {
     let host = make_host();
     let empty_non_cacheable =
         MacroFactFootprint::from_finalise(FactReadSetFinalise::NonCacheable(Arc::from(Vec::new())));
-    let overflowed = MacroFactFootprint::from_finalise(FactReadSetFinalise::Overflow);
     let mutation_unstable =
         MacroFactFootprint::from_finalise(FactReadSetFinalise::MutationUnstable);
 
-    assert!(
-        matches!(overflowed.1, MacroFactFootprint::Overflowed),
-        "overflow must keep its own typed arm: {:?}",
-        overflowed.1
-    );
     assert!(
         matches!(mutation_unstable.1, MacroFactFootprint::MutationUnstable),
         "mutation instability must keep its own typed arm: {:?}",
@@ -402,7 +396,6 @@ fn factless_footprints_refuse_rooting_instead_of_replaying_nothing() {
     );
 
     let cases = [
-        ("Overflowed", overflowed.1, overflowed.0),
         ("MutationUnstable", mutation_unstable.1, mutation_unstable.0),
         (
             "RootedNonCacheable(empty)",

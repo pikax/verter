@@ -1618,18 +1618,14 @@ fn relation_memo_fences_on_transitive_imported_fact_edit() {
     );
 }
 
-/// OVERFLOW non-admission: a relation whose traced read-set overflows
-/// (`FactReadSetFinalise::Overflow`) is RETURNED to the caller but NOT
-/// admitted to the relation memo.
+/// Non-cacheable non-admission: a relation whose cold compute consumed a
+/// non-cacheable read is RETURNED to the caller but NOT admitted to the
+/// relation memo.
 ///
-/// DISCRIMINATES the `Overflow => return (result, fence)` early-return in
-/// `build_relate`: a mutation that admitted regardless of overflow (e.g.
-/// dropped the `Overflow` arm and always published) would
-/// grow `relation_memo_count()` and FAIL the count assertion. The
-/// `relation_force_overflow_observations` test knob forces the overflow
-/// without a pathological multi-file fixture.
+/// DISCRIMINATING: a mutation that admitted regardless of the tracer's
+/// verdict would grow `relation_memo_count()` and FAIL the count assertion.
 #[test]
-fn relation_memo_overflow_returns_result_without_admission() {
+fn relation_memo_non_cacheable_read_returns_result_without_admission() {
     let host = host_for_relation_tests();
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = host.project_type_store().semantic_graph();
@@ -1638,36 +1634,35 @@ fn relation_memo_overflow_returns_result_without_admission() {
     // `Assignable` (identity) — the value is returned to the caller.
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
 
-    // Arm the overflow knob: observe CAP+1 synthetic facts during the cold
-    // compute so the read-set finalises `Overflow`. The RAII guard zeroes the
-    // knob on drop (panic-safe) so the forced state never leaks past the test.
-    let _overflow_guard = crate::for_tests::relation_force_overflow_observations_for_tests(
-        &host,
-        verter_session_query::facts::fact_read_set::FACT_SIGNATURE_CAP + 1,
-    );
-
+    host.test_force
+        .engine
+        .force_fact_tracer_non_cacheable_read
+        .store(true, std::sync::atomic::Ordering::Relaxed);
     let before = graph.relation_memo_count();
     let result = dispatch.execute_relate_pair_as_result_for_tests(string, string);
     let after = graph.relation_memo_count();
+    host.test_force
+        .engine
+        .force_fact_tracer_non_cacheable_read
+        .store(false, std::sync::atomic::Ordering::Relaxed);
 
     // The judgement is still computed and returned to the caller.
     assert!(
         matches!(result, RelationResult::Assignable { .. }),
-        "overflow must still RETURN the computed judgement to the caller; got {result:?}"
+        "a refused relation must still RETURN the computed judgement; got {result:?}"
     );
-    // But it is REFUSED memo admission — the dependency fence cannot be
-    // represented under overflow.
+    // But it is REFUSED memo admission.
     assert_eq!(
         after, before,
-        "OVERFLOW: an overflowed read-set must NOT admit a relation-memo entry \
-         (count must not grow); a mutation that admitted regardless would FAIL here"
+        "a relation whose compute consumed a non-cacheable read must NOT admit a \
+         relation-memo entry (count must not grow)"
     );
     assert!(
         graph
             .get_relation_payload(&host, &dispatch.relate_key_for(string, string))
             .map(|served| served.value)
             .is_none(),
-        "OVERFLOW: no warm entry may be reachable for the overflowed relation"
+        "no warm entry may be reachable for the refused relation"
     );
 }
 
@@ -2004,62 +1999,20 @@ fn relation_memo_lives_in_the_family_memo() {
 /// - lines that start with `//` or `/*` (retirement-documentation
 ///   comments are not live references).
 fn count_def_in_crates(needle: &str) -> usize {
-    let workspace_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|p| p.parent())
-        .expect("workspace parent")
-        .to_path_buf();
-    let crates_dir = workspace_root.join("crates");
-    let self_file = "project_semantic_dispatch_invariants_tests.rs";
     let mut count = 0usize;
-    fn walk(dir: &std::path::Path, needle: &str, self_file: &str, count: &mut usize) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let p = entry.path();
-            if p.is_dir() {
-                let name = entry.file_name();
-                if matches!(
-                    name.to_string_lossy().as_ref(),
-                    "target" | "node_modules" | ".git"
-                ) {
-                    continue;
-                }
-                walk(&p, needle, self_file, count);
-            } else if p.extension().is_some_and(|e| e == "rs") {
-                let filename = p.file_name().unwrap_or_default().to_string_lossy();
-                if filename == self_file {
-                    continue;
-                }
-                // Skip test files — regression fixtures may legitimately
-                // name retired identifiers for characterisation.
-                // Production code is the sole enforcement surface for
-                // single-authority cardinality.
-                if filename == "tests.rs" || filename.ends_with("_tests.rs") {
-                    continue;
-                }
-                // Skip integration-test files (anything under a `tests/`
-                // directory): a guard's assertion / self-test fixtures may name
-                // a definition needle (`fn lower_type_expr_structural(`) as a
-                // string literal, which is not a production definition.
-                let p_str = p.to_string_lossy().replace('\\', "/");
-                if p_str.contains("/tests/") {
-                    continue;
-                }
-                if let Ok(content) = std::fs::read_to_string(&p) {
-                    for line in content.lines() {
-                        let trimmed = line.trim_start();
-                        if trimmed.starts_with("//") || trimmed.starts_with("/*") {
-                            continue;
-                        }
-                        *count += line.matches(needle).count();
-                    }
-                }
-            }
+    for (p, lines) in production_code_lines() {
+        // Skip integration-test files (anything under a `tests/`
+        // directory): a guard's assertion / self-test fixtures may name
+        // a definition needle (`fn lower_type_expr_structural(`) as a
+        // string literal, which is not a production definition.
+        let p_str = p.to_string_lossy().replace('\\', "/");
+        if p_str.contains("/tests/") {
+            continue;
+        }
+        for (_, line) in lines {
+            count += line.matches(needle).count();
         }
     }
-    walk(&crates_dir, needle, self_file, &mut count);
     count
 }
 
@@ -2426,7 +2379,51 @@ fn contains_variant_decl(src: &str, variant_name: &str) -> bool {
 // `*_tests.rs`, and lines that begin with `//` (documentation /
 // retirement-note comments in the sibling files are fine).
 
-fn retired_symbol_hits_in_production(symbols: &[&str]) -> Vec<String> {
+/// Every production Rust source under `crates/` (test files excluded),
+/// read once per process: each scanner below searches the same corpus, so
+/// the tree is walked and read once, not once per scanner.
+fn production_sources() -> &'static [(std::path::PathBuf, String)] {
+    &production_corpus().0
+}
+
+/// Every `(line number, line)` of [`production_sources`] that is not a
+/// comment line, per file, in the files' order: the lines a scanner
+/// searches for a live reference, filtered once per process.
+fn production_code_lines() -> &'static [(std::path::PathBuf, Vec<(usize, String)>)] {
+    &production_corpus().1
+}
+
+#[allow(clippy::type_complexity)]
+fn production_corpus() -> &'static (
+    Vec<(std::path::PathBuf, String)>,
+    Vec<(std::path::PathBuf, Vec<(usize, String)>)>,
+) {
+    static CORPUS: std::sync::OnceLock<(
+        Vec<(std::path::PathBuf, String)>,
+        Vec<(std::path::PathBuf, Vec<(usize, String)>)>,
+    )> = std::sync::OnceLock::new();
+    CORPUS.get_or_init(|| {
+        let sources = read_production_sources();
+        let code_lines = sources
+            .iter()
+            .map(|(p, content)| {
+                let lines: Vec<(usize, String)> = content
+                    .lines()
+                    .enumerate()
+                    .filter(|(_, line)| {
+                        let trimmed = line.trim_start();
+                        !(trimmed.starts_with("//") || trimmed.starts_with("/*"))
+                    })
+                    .map(|(i, line)| (i + 1, line.to_owned()))
+                    .collect();
+                (p.clone(), lines)
+            })
+            .collect();
+        (sources, code_lines)
+    })
+}
+
+fn read_production_sources() -> Vec<(std::path::PathBuf, String)> {
     let workspace_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(|p| p.parent())
@@ -2434,8 +2431,12 @@ fn retired_symbol_hits_in_production(symbols: &[&str]) -> Vec<String> {
         .to_path_buf();
     let crates_dir = workspace_root.join("crates");
     let self_file = "project_semantic_dispatch_invariants_tests.rs";
-    let mut hits: Vec<String> = Vec::new();
-    fn walk(dir: &std::path::Path, symbols: &[&str], self_file: &str, hits: &mut Vec<String>) {
+    let mut sources = Vec::new();
+    fn walk(
+        dir: &std::path::Path,
+        self_file: &str,
+        sources: &mut Vec<(std::path::PathBuf, String)>,
+    ) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
         };
@@ -2449,7 +2450,7 @@ fn retired_symbol_hits_in_production(symbols: &[&str]) -> Vec<String> {
                 ) {
                     continue;
                 }
-                walk(&p, symbols, self_file, hits);
+                walk(&p, self_file, sources);
             } else if p.extension().is_some_and(|e| e == "rs") {
                 let fname = p.file_name().unwrap_or_default().to_string_lossy();
                 if fname == self_file {
@@ -2461,21 +2462,31 @@ fn retired_symbol_hits_in_production(symbols: &[&str]) -> Vec<String> {
                 let Ok(content) = std::fs::read_to_string(&p) else {
                     continue;
                 };
-                for (i, line) in content.lines().enumerate() {
-                    let trimmed = line.trim_start();
-                    if trimmed.starts_with("//") || trimmed.starts_with("/*") {
-                        continue;
-                    }
-                    for sym in symbols {
-                        if line.contains(sym) {
-                            hits.push(format!("{}:{}: retired `{}`", p.display(), i + 1, sym));
-                        }
-                    }
+                sources.push((p, content));
+            }
+        }
+    }
+    walk(&crates_dir, self_file, &mut sources);
+    sources.sort_by(|a, b| a.0.cmp(&b.0));
+    sources
+}
+
+fn retired_symbol_hits_in_production(symbols: &[&str]) -> Vec<String> {
+    let mut hits: Vec<String> = Vec::new();
+    for (p, lines) in production_code_lines() {
+        for (line_number, line) in lines {
+            for sym in symbols {
+                if line.contains(sym) {
+                    hits.push(format!(
+                        "{}:{}: retired `{}`",
+                        p.display(),
+                        line_number,
+                        sym
+                    ));
                 }
             }
         }
     }
-    walk(&crates_dir, symbols, self_file, &mut hits);
     hits
 }
 
@@ -2609,70 +2620,28 @@ fn no_deprecated_attributes_on_retired_symbols() {
         "ParserArenaAdapter",
         "ParserArenaBridgeHost",
     ];
-    let workspace_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|p| p.parent())
-        .expect("workspace parent")
-        .to_path_buf();
-    let crates_dir = workspace_root.join("crates");
-    let self_file = "project_semantic_dispatch_invariants_tests.rs";
     let mut violations: Vec<String> = Vec::new();
-    fn walk(
-        dir: &std::path::Path,
-        retired: &[&str],
-        self_file: &str,
-        violations: &mut Vec<String>,
-    ) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let p = entry.path();
-            if p.is_dir() {
-                let name = entry.file_name();
-                if matches!(
-                    name.to_string_lossy().as_ref(),
-                    "target" | "node_modules" | ".git"
-                ) {
-                    continue;
-                }
-                walk(&p, retired, self_file, violations);
-            } else if p.extension().is_some_and(|e| e == "rs") {
-                let fname = p.file_name().unwrap_or_default().to_string_lossy();
-                if fname == self_file {
-                    continue;
-                }
-                // Skip tests.rs files — test fixtures may reference
-                // retired symbols for characterization.
-                if fname == "tests.rs" || fname.ends_with("_tests.rs") {
-                    continue;
-                }
-                let Ok(content) = std::fs::read_to_string(&p) else {
-                    continue;
-                };
-                let lines: Vec<&str> = content.lines().collect();
-                for (i, line) in lines.iter().enumerate() {
-                    if !line.contains("#[deprecated") {
-                        continue;
-                    }
-                    // Scan the next few lines for a retired symbol mention.
-                    let window_end = (i + 4).min(lines.len());
-                    let window = lines[i..window_end].join("\n");
-                    for sym in retired {
-                        if window.contains(sym) {
-                            violations.push(format!(
-                                "{}:{}: #[deprecated] names retired symbol `{}`",
-                                p.display(),
-                                i + 1,
-                                sym
-                            ));
-                        }
-                    }
+    for (p, content) in production_sources() {
+        let lines: Vec<&str> = content.lines().collect();
+        for (i, line) in lines.iter().enumerate() {
+            if !line.contains("#[deprecated") {
+                continue;
+            }
+            // Scan the next few lines for a retired symbol mention.
+            let window_end = (i + 4).min(lines.len());
+            let window = lines[i..window_end].join("\n");
+            for sym in retired {
+                if window.contains(sym) {
+                    violations.push(format!(
+                        "{}:{}: #[deprecated] names retired symbol `{}`",
+                        p.display(),
+                        i + 1,
+                        sym
+                    ));
                 }
             }
         }
     }
-    walk(&crates_dir, &retired, self_file, &mut violations);
     assert!(
         violations.is_empty(),
         "#[deprecated] attributes on retired symbols:\n{}",

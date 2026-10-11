@@ -5181,8 +5181,8 @@ impl PartialReason {
 /// result caches admit ONLY a `Complete` result; a `Partial` is refused
 /// warm admission so a subsequent identical request re-runs the cold
 /// compute (the no-poison invariant). It is DISTINCT from `cache_suppress`
-/// (benign non-cacheability — a torn self-root, a tracer-signature
-/// overflow, a `ReturnOnly` cross-owner-reuse admission): a
+/// (benign non-cacheability — a torn self-root, a fenced serve, a
+/// `ReturnOnly` cross-owner-reuse admission): a
 /// `cache_suppress` COMPLETE result still warms the component-meta result;
 /// only a `Partial` is refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
@@ -5271,7 +5271,7 @@ pub struct CacheRead<T> {
     /// entry must not be admitted/shared — either because the build hit a
     /// fatal `QueryError` / pathological-input cap, OR because a perfectly
     /// VALID complete result is merely not memo-publishable (a torn /
-    /// unrootable self-root, a tracer-signature overflow, a `ReturnOnly`
+    /// unrootable self-root, a fenced serve, a `ReturnOnly`
     /// cross-owner-reuse admission). Aggregates via OR through nested
     /// queries. The memo refuses insertion when this is true; the value
     /// still flows back to the caller. This is NOT the partial-result
@@ -5607,8 +5607,6 @@ pub enum QueryError {
     Cancelled,
     /// The completion fence exhausted its retry budget (default: 3).
     UnstableState { attempts: u8 },
-    /// The selected force exceeded the bounded dependency signature.
-    SignatureOverflow,
     /// A store-local operand was presented to a different graph.
     ForeignSemanticOperand,
     /// A store-local operand or authored environment is no longer current.
@@ -5760,7 +5758,6 @@ impl QueryError {
             | QueryError::BudgetExceeded(_)
             | QueryError::Cancelled
             | QueryError::UnstableState { .. }
-            | QueryError::SignatureOverflow
             | QueryError::ForeignSemanticOperand
             | QueryError::StaleSemanticOperand
             | QueryError::IncompleteSemanticOperand { .. }
@@ -5839,7 +5836,6 @@ impl PartialEq for QueryError {
             (Self::BudgetExceeded(_), Self::BudgetExceeded(_)) => true,
             (Self::Cancelled, Self::Cancelled) => true,
             (Self::UnstableState { attempts: a }, Self::UnstableState { attempts: b }) => a == b,
-            (Self::SignatureOverflow, Self::SignatureOverflow) => true,
             (Self::ForeignSemanticOperand, Self::ForeignSemanticOperand) => true,
             (Self::StaleSemanticOperand, Self::StaleSemanticOperand) => true,
             (
@@ -5931,7 +5927,6 @@ impl QueryError {
             Self::Cancelled => 14,
             Self::OpenSurface => 15,
             Self::UnmodeledPosition => 16,
-            Self::SignatureOverflow => 17,
             Self::ForeignSemanticOperand => 18,
             Self::StaleSemanticOperand => 19,
             Self::IncompleteSemanticOperand { .. } => 20,
@@ -5982,7 +5977,6 @@ impl std::hash::Hash for QueryError {
             Self::Miss
             | Self::BudgetExceeded(_)
             | Self::Cancelled
-            | Self::SignatureOverflow
             | Self::ForeignSemanticOperand
             | Self::StaleSemanticOperand
             | Self::RaiseAliasCycle
@@ -10891,7 +10885,6 @@ mod tests {
             ),
             QueryError::Cancelled,
             QueryError::UnstableState { attempts: 1 },
-            QueryError::SignatureOverflow,
             QueryError::ForeignSemanticOperand,
             QueryError::StaleSemanticOperand,
             QueryError::IncompleteSemanticOperand {

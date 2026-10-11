@@ -734,13 +734,15 @@ fn every_refused_lease_of_a_compile_serves_no_module() {
 
 /// Every refusal here is the injected fault: the forcing is what makes each
 /// of the compile's leases reserve, so the enumeration is the same on a
-/// thread of any stack.
+/// thread of any stack, and the component's expressions nest only as deep
+/// as keeps its size its own (the faults are scoped to this thread, not to
+/// a size).
 fn every_refused_lease_of_a_compile_serves_no_module_here() {
     use verter_parser::oxc_parse::faults::{
         fail_reservations_here_after, reservations_here_of, ANY_SIZE,
     };
     let _forcing = forcing_here(&[Reservation::Lease]);
-    let component = deep_runes_component(179);
+    let component = deep_runes_component(29);
     let id = "/src/Leased.svelte";
     let host_with_component = || {
         let host = VerterHost::new_standalone(HostConfig::default());

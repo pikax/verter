@@ -1,0 +1,87 @@
+{
+  "schema": "ProbeManifest",
+  "version": 1,
+  "node": "STN0",
+  "kind": "lock",
+  "family": "stencil",
+  "products": [
+    "products/stencil-version-lock.json",
+    "products/stencil-capability-matrix.json",
+    "products/stencil-activation.json",
+    "products/stencil-host-table.json"
+  ],
+  "mandatoryCases": ["STN0-AC1", "STN0-AC2", "STN0-AC3"],
+  "cases": [
+    {
+      "id": "STN0-AC1",
+      "disposition": "reject",
+      "twins": [
+        "clean-products",
+        "legacy-major-pin",
+        "floating-pin",
+        "latest-pin",
+        "canary-pin",
+        "nightly-pin",
+        "missing-source",
+        "diverged-pin",
+        "unratified-next-major"
+      ]
+    },
+    {
+      "id": "STN0-AC2",
+      "disposition": "reject",
+      "twins": [
+        "clean-products",
+        "unowned-cell",
+        "missing-acceptance",
+        "duplicate-cell",
+        "fabricated-cell",
+        "build-cell",
+        "output-target-build-cell",
+        "runtime-cell",
+        "cem-wrong-owner",
+        "cem-stencil-semantics",
+        "partial-cem-complete",
+        "unsupported-facet-empty"
+      ]
+    },
+    {
+      "id": "STN0-AC3",
+      "disposition": "reject",
+      "twins": [
+        "clean-products",
+        "ts-plugin-host",
+        "tsgo-passthrough",
+        "missing-host-cell",
+        "unknown-profile",
+        "missing-tsgo-operation",
+        "missing-limitation",
+        "parsed-typeToString",
+        "wrong-wire-tag",
+        "open-canonical-tag",
+        "extension-only-activation",
+        "local-decorator-activation",
+        "other-framework-activation",
+        "forced-legacy-activation",
+        "inactive-work",
+        "rename-followup",
+        "rename-generated-edit",
+        "rename-collision",
+        "rename-attribute-override"
+      ]
+    }
+  ],
+  "validator": {
+    "present": false,
+    "owner": "STN1",
+    "acceptance": "STN1-ACV",
+    "files": [
+      "tests/framework-stencil/STN0/contract.ts",
+      "tests/framework-stencil/STN0/stencil-lock.spec.ts"
+    ],
+    "command": "node --test tests/framework-stencil/STN0/stencil-lock.spec.ts",
+    "discovery": "REG0 scripts/run-framework-locks.mjs; no root test:scripts edit"
+  },
+  "runtimeCorrectness": false,
+  "notes": "Contract data only. No implemented capability, executed planted case or framework support is claimed."
+}

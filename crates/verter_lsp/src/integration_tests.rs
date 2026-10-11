@@ -3515,7 +3515,7 @@ fn verter_types_stub_covers_tsx_imports() {
 /// 1. Open Vue SFC → get verter-only hover
 /// 2. Get TSX + position mapper from registry
 /// 3. Map Vue position → TSX offset (validated)
-/// 4. Query type_provider.get_hover() at that offset
+/// 4. Query type_provider.get_hover(&crate::type_provider::traits::ProviderQuery::at_engine_surface(&)) at that offset
 /// 5. merge_hover() combines verter + TSGO results
 ///
 /// If type_provider is None (the bug we're preventing), step 4-5 are skipped
@@ -3610,7 +3610,13 @@ const count = 42
         }),
     );
 
-    let type_hover = mock.get_hover(&tsx_path, tsx_offset).await.unwrap();
+    let type_hover = mock
+        .get_hover(
+            &crate::type_provider::traits::ProviderQuery::at_engine_surface(&tsx_path),
+            tsx_offset,
+        )
+        .await
+        .unwrap();
     assert!(type_hover.is_some(), "mock must return configured hover");
 
     // Step 5: merge — the exact same call as server.rs:1743
@@ -4937,7 +4943,13 @@ const msg = "hello"
         gate_a.await;
 
         // Use mock type provider (would deadlock if guards were still held).
-        let result = mock_a.get_completions("test", 0, None).await;
+        let result = mock_a
+            .get_completions(
+                &crate::type_provider::traits::ProviderQuery::at_engine_surface("test"),
+                0,
+                None,
+            )
+            .await;
         assert!(result.is_ok(), "mock completion should succeed");
         comp_flag.store(true, Ordering::SeqCst);
     });
@@ -5533,7 +5545,13 @@ async fn integration_hover_slot_merge_preserves_verter_info() {
         }),
     );
 
-    let type_hover = mock.get_hover(&tsx_path, tsx_offset).await.unwrap();
+    let type_hover = mock
+        .get_hover(
+            &crate::type_provider::traits::ProviderQuery::at_engine_surface(&tsx_path),
+            tsx_offset,
+        )
+        .await
+        .unwrap();
 
     let merged = merge::merge_hover(
         verter_hover,

@@ -293,3 +293,26 @@ pub(crate) fn record_return_only() {
         }
     });
 }
+
+thread_local! {
+    static EXTRA_RESOLUTION_WITNESS: std::cell::RefCell<Option<verter_session_query::facts::fact_cache::ReadSetSignature>> = const { std::cell::RefCell::new(None) };
+}
+
+pub(crate) fn extra_resolution_witness(
+) -> Option<verter_session_query::facts::fact_cache::ReadSetSignature> {
+    EXTRA_RESOLUTION_WITNESS.with(|cell| cell.borrow().clone())
+}
+
+pub(crate) fn with_extra_resolution_witness<T>(
+    witness: verter_session_query::facts::fact_cache::ReadSetSignature,
+    run: impl FnOnce() -> T,
+) -> T {
+    struct Restore(Option<verter_session_query::facts::fact_cache::ReadSetSignature>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            EXTRA_RESOLUTION_WITNESS.with(|cell| *cell.borrow_mut() = self.0.take());
+        }
+    }
+    let _restore = Restore(EXTRA_RESOLUTION_WITNESS.with(|cell| cell.replace(Some(witness))));
+    run()
+}

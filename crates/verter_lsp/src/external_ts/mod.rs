@@ -21,8 +21,8 @@ pub mod tsserver_backend;
 
 pub use carrier_publish_store::{
     carrier_store_dir_for, default_carrier_store_dir_string, default_carrier_store_host_version,
-    CarrierPublishStore, Manifest, ManifestRole, ManifestScriptKind, OwnedSource, ProjectEntry,
-    PublishBatch, ReadyFile,
+    CarrierPublishStore, CarrierStorePublications, Manifest, ManifestRole, ManifestScriptKind,
+    OwnedSource, ProjectEntry, PublishBatch, ReadyFile,
 };
 
 #[cfg(test)]

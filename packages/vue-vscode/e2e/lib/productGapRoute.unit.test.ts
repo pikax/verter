@@ -27,7 +27,10 @@ describe("product-gap route selection", () => {
         "ide.complete.import-path-carrier"
       ]?.issue,
     ).toBe("ISSUE-shared-tsgo-plain-ts-consumer");
-    expect(productGapCanariesForFixtureRoute("vue-parity", "tsgo")).toEqual({});
+    expect(
+      productGapCanariesForFixtureRoute("vue-parity", "tsgo")["ide.complete.import-path-carrier"],
+    ).toBeUndefined();
+    expect(productGapCanariesForFixtureRoute("vue-parity", "extension")).toEqual({});
     expect(productGapCanariesForFixtureRoute("vue-contract", "shared-tsgo")).toEqual({});
     expect(productGapCanariesForFixtureRoute("single-project", "shared-tsgo")).toEqual({});
     expect(productGapCanariesForFixtureRoute("vue-parity", undefined)).toEqual({});

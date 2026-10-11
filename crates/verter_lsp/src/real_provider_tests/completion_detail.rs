@@ -25,7 +25,11 @@ async fn member_completions_until_nonempty(
     for attempt in 0..8 {
         if let Ok(result) = session
             .provider()
-            .get_completions(provider_path, offset, Some("."))
+            .get_completions(
+                &crate::type_provider::traits::ProviderQuery::at_engine_surface(provider_path),
+                offset,
+                Some("."),
+            )
             .await
         {
             if !result.items.is_empty() {
@@ -94,7 +98,7 @@ export const out = obj.;
 
         let detailed = session
             .provider()
-            .get_completion_details(&path, offset, &items)
+            .get_completion_details(&crate::type_provider::traits::ProviderQuery::at_engine_surface(&path), offset, &items)
             .await
             .expect("get_completion_details should succeed");
 
@@ -348,7 +352,7 @@ real_provider_test!(
         'outer: for attempt in 0..8 {
             let Ok(result) = session
                 .provider()
-                .get_completions(&use_path, offset, None)
+                .get_completions(&crate::type_provider::traits::ProviderQuery::at_engine_surface(&use_path), offset, None)
                 .await
             else {
                 if attempt < 7 {
@@ -364,7 +368,7 @@ real_provider_test!(
                     continue;
                 };
                 if let Ok(Some(resolved)) =
-                    session.provider().resolve_completion(&use_path, data).await
+                    session.provider().resolve_completion(&crate::type_provider::traits::ProviderQuery::at_engine_surface(&use_path), data).await
                 {
                     // Capture only the edit that IS the import of our symbol — both
                     // `import` and the symbol name. A looser `||` could latch onto a
@@ -464,7 +468,7 @@ real_provider_test!(
         let mut saw_local_candidate = false;
         let mut checked_resolved_edits = false;
         for attempt in 0..6 {
-            let Ok(result) = session.provider().get_completions(&path, offset, None).await else {
+            let Ok(result) = session.provider().get_completions(&crate::type_provider::traits::ProviderQuery::at_engine_surface(&path), offset, None).await else {
                 if attempt < 5 {
                     tokio::time::sleep(std::time::Duration::from_millis(400)).await;
                 }
@@ -476,7 +480,7 @@ real_provider_test!(
                 let Some(data) = item.data.clone() else {
                     continue;
                 };
-                if let Ok(Some(resolved)) = session.provider().resolve_completion(&path, data).await {
+                if let Ok(Some(resolved)) = session.provider().resolve_completion(&crate::type_provider::traits::ProviderQuery::at_engine_surface(&path), data).await {
                     checked_resolved_edits = true;
                     for edit in &resolved.additional_text_edits {
                         // Reject ANY import-looking edit, not just a `import … from …`

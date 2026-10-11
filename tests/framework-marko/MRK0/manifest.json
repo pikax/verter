@@ -1,0 +1,48 @@
+{
+  "node": "MRK0",
+  "kind": "constitution",
+  "family": "marko",
+  "products": {
+    "versionLock": "tests/framework-marko/MRK0/products/marko-version-lock.json",
+    "capabilityMatrix": "tests/framework-marko/MRK0/products/marko-capability-matrix.json",
+    "activationPolicy": "tests/framework-marko/MRK0/products/marko-activation-policy.json",
+    "cases": "tests/framework-marko/MRK0/cases.md",
+    "doc": "docs/arch/framework-marko.md"
+  },
+  "readers": ["REG0", "FWA1", "FCH1", "MRK1G", "MRK9", "MRK10", "LMK1"],
+  "cases": [
+    {
+      "id": "MRK0-AC1",
+      "disposition": "reject",
+      "twins": ["clean products", "floating-range", "latest-tag", "next-tag", "implied-patch", "unpublished-version", "oracle-diverged-release", "marko-5-pin", "prerelease-pin", "two-releases-one-manifest", "missing-official-source", "oracle-floating"]
+    },
+    {
+      "id": "MRK0-AC2",
+      "disposition": "reject",
+      "twins": ["clean products", "unowned-cell", "duplicate-owner", "unknown-receiving-acceptance", "bnd-build-cell", "runtime-cell", "fabricated-feature", "exclusion-without-reason", "borrowed-acceptance", "completion-receiver-omitted", "definition-receiver-omitted", "native-attribute-receiver-omitted", "attribute-refusal-receiver-omitted", "pending-without-proof", "tsgo-fields-unrecorded", "tsgo-limitation-unrecorded", "pending-cell-promoted", "unqualified-cell-promoted"]
+    },
+    {
+      "id": "MRK0-AC3",
+      "disposition": "reject",
+      "twins": ["clean products", "extension-only-activation", "second-activation-source", "declared-range-activation", "verter-computed-ts-answer", "tsserver-forwarding", "compiler-parser-authority", "lk6-activation"]
+    },
+    {
+      "id": "MRK0-AC4",
+      "disposition": "reject",
+      "twins": ["clean products", "language-tools-evidence", "type-check-evidence", "compiler-evidence", "installed-parser-evidence", "syntax-highlighting-evidence"]
+    },
+    {
+      "id": "MRK0-AC5",
+      "disposition": "reject",
+      "twins": ["clean products", "open-canonical-tag", "reused-baseline-value", "class-a-collision", "other-family-value", "missing-tag"]
+    }
+  ],
+  "validator": {
+    "owner": "MRK1G",
+    "acceptance": "MRK1G-ACV",
+    "files": ["tests/framework-marko/MRK0/contract.ts", "tests/framework-marko/MRK0/marko-lock.spec.ts"],
+    "test": "node --test tests/framework-marko/MRK0/marko-lock.spec.ts",
+    "discoveredBy": "scripts/run-framework-locks.mjs (REG0-AC6)",
+    "status": "not landed: MRK0 is docs-only; the products are reviewed data until MRK1G lands the validator"
+  }
+}

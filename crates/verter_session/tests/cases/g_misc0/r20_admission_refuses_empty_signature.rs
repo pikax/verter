@@ -55,8 +55,6 @@ const PRODUCTION_CACHE_KINDS: &[&str] = &[
 ///
 /// - The `entries` map remains empty for that key.
 /// - `admission_refused_count()` advances by exactly one per kind.
-/// - `signature_overflow_count()` does NOT advance (empty-signature
-///   refusal is a separate refusal category from over-cap).
 ///
 /// Discriminating signal: a substrate regression that caused
 /// `insert_arc_with_kind` to silently admit an empty signature for
@@ -88,15 +86,6 @@ fn empty_signature_refused_per_production_cache_kind() {
             "cache kind `{kind}`: admission_refused_count must advance by exactly 1 \
              after one empty-signature refusal; got {}",
             cache.admission_refused_count()
-        );
-
-        // Assertion 3: no overflow counter advancement.
-        assert_eq!(
-            cache.signature_overflow_count(),
-            0,
-            "cache kind `{kind}`: empty-signature refusal must NOT advance \
-             signature_overflow_count (different refusal category); got {}",
-            cache.signature_overflow_count()
         );
     }
 }
@@ -135,13 +124,6 @@ fn non_empty_signature_admits_normally_per_production_cache_kind() {
             "cache kind `{kind}`: non-empty-signature admission must NOT advance \
              admission_refused_count; got {}",
             cache.admission_refused_count()
-        );
-        assert_eq!(
-            cache.signature_overflow_count(),
-            0,
-            "cache kind `{kind}`: non-empty under-cap signature must NOT advance \
-             signature_overflow_count; got {}",
-            cache.signature_overflow_count()
         );
     }
 }

@@ -4,6 +4,7 @@ import fs from "node:fs";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { matchPathFilters } from "../../../scripts/ci-impact.mjs";
 import { loadProducts as loadArh1Products } from "../ARH1/verify.mjs";
 import {
   deriveCallFormPopulation,
@@ -275,19 +276,12 @@ test("ARH4-ratification dirty twins: manifest and product identity drift are rej
 });
 
 test("ARH4 CI: the architecture-health filter selects the API reference the delivery check reads", () => {
-  const ci = fs.readFileSync(new URL("../../../.github/workflows/ci.yml", import.meta.url), "utf8");
-  const start = ci.indexOf("\n            arch:\n");
-  assert.notEqual(start, -1, "ci.yml must declare the arch filter");
-  const rest = ci.slice(start + 1);
-  const next = rest.search(/\n            [a-z_]+:\n/);
-  const block = next === -1 ? rest : rest.slice(0, next);
-  const paths = [...block.matchAll(/- '([^']+)'/g)].map((m) => m[1]);
-  for (const need of [
-    "tests/architecture-health/**",
-    "crates/**",
+  for (const input of [
+    "tests/architecture-health/ARH4/verify.mjs",
+    "crates/verter_session/src/lib.rs",
     "docs/audit-footprint/api-reference.md",
   ]) {
-    assert.ok(paths.includes(need), `arch filter omits ${need}: ${paths.join(", ")}`);
+    assert.equal(matchPathFilters([input]).hits.arch, true, `arch filter omits ${input}`);
   }
 });
 

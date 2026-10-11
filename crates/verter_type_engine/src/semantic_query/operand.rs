@@ -74,7 +74,6 @@ pub enum SemanticOperandMintError {
     /// wrong store/generation.
     UnboundSubstitution,
     ForeignNode,
-    SignatureOverflow,
 }
 
 impl std::fmt::Display for SemanticOperandMintError {

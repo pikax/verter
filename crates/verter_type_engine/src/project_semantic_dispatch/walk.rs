@@ -134,8 +134,6 @@ pub fn probe_walk_typeof_resolved<C: crate::resolver_core::ResolverCapabilities>
 /// human-readable messages without re-walking the graph.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ShallowDiagnostic {
-    /// The force/read dependency carrier exceeded its bounded signature.
-    SignatureOverflow,
     /// The connected root demand exhausted its projection/evaluation work
     /// envelope while identities were still changing. This is operational
     /// partiality, not a semantic cycle or an unresolved-reference carrier.
@@ -211,6 +209,30 @@ pub enum ShallowDiagnostic {
         /// The operation-specific gap the pending root surfaces.
         gap: verter_session_query::flow::policy::FlowGap,
     },
+    /// TS2859: one relation check recorded as many structured comparisons
+    /// as its allowance holds and was refused. The relation recovers as
+    /// false, a resource partial of the operation budget; this names the
+    /// check's two subjects — the source and target the checker's message
+    /// prints. An operation's refusal travels with every read composed
+    /// over it ([`Self::is_operation_refusal`]).
+    RelationTooComplex {
+        /// The check's source.
+        source: SemanticNodeId,
+        /// The check's target.
+        target: SemanticNodeId,
+    },
+}
+
+impl ShallowDiagnostic {
+    /// Whether this records an operation's own refusal at its allowance:
+    /// a diagnostic the checker reports wherever the refused operation's
+    /// recovery is consumed, so it rides out of the read that refused it
+    /// into every enclosing build, warm and cold alike. Every other
+    /// diagnostic describes only the read that emitted it.
+    #[must_use]
+    pub fn is_operation_refusal(&self) -> bool {
+        matches!(self, Self::RelationTooComplex { .. })
+    }
 }
 
 /// Build output threaded through `build_project_path` so the dispatch
@@ -326,8 +348,8 @@ pub struct QueryBuildOutput<T = SemanticNodeId> {
     /// (`semantic_graph_read_set_signature` → `None`) still carries a
     /// NON-ADMITTED carrier holding its traced cross-file dep facts so
     /// the cooperative-admission winner can broadcast them to joiners.
-    /// Only a tracer-overflow build (no bounded fact list) leaves this
-    /// `None`. Whatever carrier is present, `warm_publish_one` / the
+    /// Only a mutation-unstable build (no fact list it can root) leaves
+    /// this `None`. Whatever carrier is present, `warm_publish_one` / the
     /// in-flight joiner state / prefix-backfill publish or broadcast it
     /// verbatim — they NEVER reconstruct facts from the legacy fence.
     ///
