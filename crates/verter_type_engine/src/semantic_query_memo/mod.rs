@@ -686,6 +686,10 @@ pub struct SemanticGraphStore {
     /// [`Self::set_produce_hook_for_tests`].
     #[cfg(any(test, feature = "test-support"))]
     pub(super) produce_hook: parking_lot::Mutex<Option<test_support::ProduceHookForTests>>,
+    /// Per-store, scoped forcing of the exhausted subscriber delivery boundary.
+    #[cfg(any(test, feature = "test-support"))]
+    exhausted_join_abort:
+        parking_lot::Mutex<Option<(SemanticQueryKey, test_support::ExhaustedJoinAbortForTests)>>,
 }
 
 /// Exact memo candidate admitted by one cold-winner publication.
