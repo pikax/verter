@@ -240,6 +240,12 @@ struct QueryRequest {
     targets: Option<Arc<dyn IntendedTargets>>,
 }
 
+#[derive(Default)]
+struct QueryEvidence {
+    targets: parking_lot::Mutex<HashMap<String, Arc<str>>>,
+    validity: parking_lot::Mutex<Vec<Arc<dyn Fn() -> bool + Send + Sync>>>,
+}
+
 /// The capability one provider query carries from its requester through the
 /// hub and router to the adapter that dispatches it. Cloning shares the
 /// requester's intent; the admission is per clone, so a hub stamps its own
@@ -249,6 +255,7 @@ struct QueryRequest {
 pub struct ProviderQuery {
     request: Arc<QueryRequest>,
     admission: QueryAdmission,
+    evidence: Arc<QueryEvidence>,
 }
 
 impl std::fmt::Debug for ProviderQuery {
@@ -296,17 +303,83 @@ impl ProviderQuery {
                 targets,
             }),
             admission: QueryAdmission::default(),
+            evidence: Arc::new(QueryEvidence::default()),
         }
     }
 
     /// This query, mapping foreign locations through `targets`.
     #[must_use]
     pub fn with_targets(self, targets: Arc<dyn IntendedTargets>) -> Self {
-        Self::new(
+        let mut query = Self::new(
             self.request.path.clone(),
             self.request.intended.clone(),
             Some(targets),
-        )
+        );
+        query.evidence = self.evidence;
+        query.admission = self.admission;
+        query
+    }
+
+    /// Retain a serving authority's validity check until the requester settles
+    /// the contribution. The check must not own the query or its requester.
+    pub fn retain_validity(&self, current: Arc<dyn Fn() -> bool + Send + Sync>) {
+        self.evidence.validity.lock().push(current);
+    }
+
+    /// Whether every authority that evaluated this contribution still serves.
+    #[must_use]
+    pub fn result_is_current(&self) -> bool {
+        self.evidence
+            .validity
+            .lock()
+            .iter()
+            .all(|current| current())
+    }
+
+    /// Discard an attempt the serving boundary refused. It contributes no
+    /// coordinates or validity checks to a later retry or native fallback.
+    pub fn discard_result(&self) {
+        self.evidence.validity.lock().clear();
+        self.evidence.targets.lock().clear();
+    }
+
+    /// A child evaluation with the same request intent and fresh result
+    /// evidence. Routing boundaries can abandon it without touching already
+    /// accepted contributions on the caller.
+    #[must_use]
+    pub fn isolated_attempt(&self) -> Self {
+        Self {
+            request: Arc::clone(&self.request),
+            admission: self.admission.clone(),
+            evidence: Arc::new(QueryEvidence::default()),
+        }
+    }
+
+    /// Publish a successfully accepted child evaluation to its caller.
+    /// Refused attempts must never be published.
+    pub fn accept_result_from(&self, attempt: &Self) {
+        if Arc::ptr_eq(&self.evidence, &attempt.evidence) {
+            return;
+        }
+        let validity = attempt.evidence.validity.lock().clone();
+        let targets = attempt.evidence.targets.lock().clone();
+        self.evidence.validity.lock().extend(validity);
+        self.evidence.targets.lock().extend(targets);
+    }
+
+    /// Retained bytes used by the adapter to decode a real target's offsets.
+    #[must_use]
+    pub fn decoded_target(&self, path: &str) -> Option<Arc<str>> {
+        if self.evidence.validity.lock().is_empty() {
+            return None;
+        }
+        self.evidence
+            .targets
+            .lock()
+            .iter()
+            .find_map(|(known, bytes)| {
+                verter_span::path::fs_paths_equal(known, path).then(|| Arc::clone(bytes))
+            })
     }
 
     /// The file the request names.
@@ -374,7 +447,7 @@ impl ProviderQuery {
         path: &str,
         held: Option<&Arc<str>>,
     ) -> Result<(), ProviderQueryConflict> {
-        match self
+        let result = match self
             .request
             .targets
             .as_ref()
@@ -384,7 +457,16 @@ impl ProviderQuery {
                 ProviderQueryConflict::new(path, ConflictKind::IntendedSurface),
             ),
             _ => Ok(()),
+        };
+        if result.is_ok() {
+            if let Some(bytes) = held {
+                self.evidence
+                    .targets
+                    .lock()
+                    .insert(path.to_string(), Arc::clone(bytes));
+            }
         }
+        result
     }
 }
 
@@ -529,6 +611,7 @@ struct RequestedBytes {
 /// A query prepared for dispatch: the evidence gathered before its frame is
 /// placed, outside every lock.
 pub struct PreparedQuery {
+    requester: ProviderQuery,
     query: ProviderQuery,
     path: String,
     /// The local stamp of the out-of-band request entry the publisher attested.
@@ -549,7 +632,7 @@ static NEXT_LEDGER: AtomicU64 = AtomicU64::new(1);
 /// receives them. Owned by that incarnation's transport and dropped with it, so
 /// a replacement engine starts from an empty surface its replay refills.
 pub struct DeliveryLedger {
-    state: parking_lot::Mutex<LedgerState>,
+    state: Arc<parking_lot::Mutex<LedgerState>>,
     /// Distinct per ledger, so a binding names the engine incarnation it was
     /// dispatched to.
     incarnation: u64,
@@ -578,10 +661,10 @@ impl DeliveryLedger {
             .as_ref()
             .and_then(|publications| publications.position());
         Self {
-            state: parking_lot::Mutex::new(LedgerState {
+            state: Arc::new(parking_lot::Mutex::new(LedgerState {
                 adopted,
                 ..LedgerState::default()
-            }),
+            })),
             incarnation: NEXT_LEDGER.fetch_add(1, Ordering::Relaxed),
             publications,
         }
@@ -698,7 +781,8 @@ impl DeliveryLedger {
             }
         }
         Ok(PreparedQuery {
-            query: query.clone(),
+            requester: query.clone(),
+            query: query.isolated_attempt(),
             path: path.to_string(),
             attested,
         })
@@ -721,6 +805,7 @@ impl DeliveryLedger {
         put_on_wire: impl FnOnce(&str) -> Result<R, E>,
     ) -> Result<(BoundQuery, R), DispatchRefusal<E>> {
         let PreparedQuery {
+            requester,
             query,
             path,
             attested,
@@ -757,6 +842,7 @@ impl DeliveryLedger {
         Ok((
             BoundQuery {
                 engine: self.incarnation,
+                requester,
                 query,
                 path,
                 requested,
@@ -783,12 +869,16 @@ impl DeliveryLedger {
         bound: &BoundQuery,
         decoded: impl IntoIterator<Item = &'a str>,
     ) -> Result<(), ProviderQueryConflict> {
+        if bound.engine != self.incarnation {
+            return Err(ProviderQueryConflict::new(&bound.path, ConflictKind::Moved));
+        }
+        let decoded: Vec<&str> = decoded.into_iter().collect();
         let mut out_of_band: Vec<(&str, u64, &Arc<str>)> = Vec::new();
         if bound.requested.order == DeliveryOrder::OutOfBand {
             out_of_band.push((&bound.path, bound.requested.stamp, &bound.requested.bytes));
         }
         let mut seen = HashSet::new();
-        for path in decoded {
+        for &path in &decoded {
             if path == bound.path || !seen.insert(path) {
                 continue;
             }
@@ -799,6 +889,7 @@ impl DeliveryLedger {
             }
         }
         if out_of_band.is_empty() {
+            self.retain_completed(bound, &decoded);
             return Ok(());
         }
         {
@@ -810,6 +901,7 @@ impl DeliveryLedger {
             }
         }
         let Some(publications) = &self.publications else {
+            self.retain_completed(bound, &decoded);
             return Ok(());
         };
         for (path, _, bytes) in out_of_band {
@@ -820,7 +912,55 @@ impl DeliveryLedger {
                 return Err(ProviderQueryConflict::new(path, ConflictKind::Publication));
             }
         }
+        self.retain_completed(bound, &decoded);
         Ok(())
+    }
+
+    fn retain_completed(&self, bound: &BoundQuery, decoded: &[&str]) {
+        let mut retained = vec![(
+            bound.path.clone(),
+            DeliveredBytes {
+                bytes: Arc::clone(&bound.requested.bytes),
+                stamp: bound.requested.stamp,
+                order: bound.requested.order,
+                in_flight: false,
+            },
+        )];
+        for path in decoded {
+            if let Some(entry) = bound.surface.get(*path) {
+                retained.push(((*path).to_string(), entry.clone()));
+            }
+        }
+        let state = Arc::downgrade(&self.state);
+        let publications = self.publications.clone();
+        let adopted = bound.adopted.clone();
+        bound.query.retain_validity(Arc::new(move || {
+            let Some(state) = state.upgrade() else {
+                return false;
+            };
+            {
+                let state = state.lock();
+                if !retained.iter().all(|(path, at)| {
+                    state.files.get(path).is_some_and(|now| {
+                        !now.in_flight
+                            && now.order == at.order
+                            && same_bytes(&now.bytes, &at.bytes)
+                            && (at.order == DeliveryOrder::Wire || now.stamp == at.stamp)
+                    })
+                }) {
+                    return false;
+                }
+            }
+            retained.iter().all(|(path, at)| {
+                at.order == DeliveryOrder::Wire
+                    || publications.as_ref().is_none_or(|publisher| {
+                        publisher
+                            .attest(path, &at.bytes)
+                            .adopted_at(adopted.as_ref())
+                    })
+            })
+        }));
+        bound.requester.accept_result_from(&bound.query);
     }
 }
 
@@ -831,6 +971,7 @@ impl DeliveryLedger {
 pub struct BoundQuery {
     /// The delivery ledger — one per engine incarnation — it was bound on.
     engine: u64,
+    requester: ProviderQuery,
     query: ProviderQuery,
     path: String,
     requested: RequestedBytes,

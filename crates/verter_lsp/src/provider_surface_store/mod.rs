@@ -1554,11 +1554,13 @@ impl ProviderSurfaceSnapshot {
     /// offset it answers is one this surface's map can carry back.
     #[must_use]
     pub fn provider_query(&self) -> verter_type_runtime::provider_query::ProviderQuery {
-        verter_type_runtime::provider_query::ProviderQuery::intending(
+        let query = verter_type_runtime::provider_query::ProviderQuery::intending(
             &*self.stamp.provider_path,
             self.delivered_surface_id(),
             Arc::clone(&self.provider_content),
-        )
+        );
+        crate::documents::ForegroundRequest::bracket_query(&query);
+        query
     }
 }
 

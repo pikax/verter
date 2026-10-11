@@ -838,8 +838,10 @@ impl VerterLanguageServer {
             .into_result()
     }
 
-    /// [`Self::answer_repaired_foreground`] for an edit-bearing route: the
-    /// settled answer's edits are bound to the revisions the request captured
+    /// [`Self::answer_repaired_foreground`] for an edit-bearing route. Absent
+    /// creates are recorded before settlement, so a path that appears after
+    /// the edit is computed settles `ContentModified`. The settled answer's
+    /// edits are then bound to the revisions the request captured
     /// ([`crate::documents::ForegroundRequest::bind_edits`]). An edit to an open
     /// document the request never captured answers `ContentModified`.
     pub(super) fn answer_repaired_edit_foreground<'a, T, F>(
@@ -861,6 +863,9 @@ impl VerterLanguageServer {
                     compute.await
                 })
                 .await?;
+            if let Some(response) = response.as_ref() {
+                request.record_absent_creates(&self.documents, response);
+            }
             let mut response = self
                 .settle_foreground(&request, response)
                 .await

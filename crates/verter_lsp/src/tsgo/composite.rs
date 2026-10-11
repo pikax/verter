@@ -293,13 +293,26 @@ enum FeatureProviderSelection<P: SharedAttach> {
 }
 
 impl<P: SharedAttach> FeatureProviderSelection<P> {
-    async fn invoke<R, F, Fut>(self, invoke: F) -> Result<R, TypeProviderError>
+    async fn invoke<R, F, Fut>(
+        self,
+        query: &ProviderQuery,
+        invoke: F,
+    ) -> Result<R, TypeProviderError>
     where
-        F: Fn(Arc<dyn TypeProvider>) -> Fut,
+        F: Fn(Arc<dyn TypeProvider>, ProviderQuery) -> Fut,
         Fut: Future<Output = Result<R, TypeProviderError>>,
     {
+        let accepted = |attempt: &ProviderQuery, result: Result<R, TypeProviderError>| {
+            if result.is_ok() {
+                query.accept_result_from(attempt);
+            }
+            result
+        };
         match self {
-            Self::Managed(provider) => invoke(provider).await,
+            Self::Managed(provider) => {
+                let attempt = query.isolated_attempt();
+                accepted(&attempt, invoke(provider, attempt.clone()).await)
+            }
             Self::Shared {
                 hub,
                 managed,
@@ -318,10 +331,12 @@ impl<P: SharedAttach> FeatureProviderSelection<P> {
                     .is_synced()
                     || !still_serving()
                 {
-                    return invoke(managed).await;
+                    let attempt = query.isolated_attempt();
+                    return accepted(&attempt, invoke(managed, attempt.clone()).await);
                 }
                 let hub_handle: Arc<dyn TypeProvider> = hub.clone();
-                let shared_result = invoke(hub_handle).await;
+                let shared_attempt = query.isolated_attempt();
+                let shared_result = invoke(hub_handle, shared_attempt.clone()).await;
                 // A settled answer the captured epoch still owns is returned
                 // as-is (an engine error propagates exactly as before); any
                 // replacement or content desync converts success OR error
@@ -332,9 +347,10 @@ impl<P: SharedAttach> FeatureProviderSelection<P> {
                         .overlay_sync_state(&provider_path, transport_epoch)
                         .is_synced()
                 {
-                    shared_result
+                    accepted(&shared_attempt, shared_result)
                 } else {
-                    invoke(managed).await
+                    let attempt = query.isolated_attempt();
+                    accepted(&attempt, invoke(managed, attempt.clone()).await)
                 }
             }
         }
@@ -2086,8 +2102,7 @@ impl TypeProvider for TsgoCompositeProvider {
                 .await
             {
                 selection
-                    .invoke(|provider| {
-                        let query = query.clone();
+                    .invoke(&query, |provider, query| {
                         let trigger_character = trigger_character.clone();
                         async move {
                             provider
@@ -2121,8 +2136,7 @@ impl TypeProvider for TsgoCompositeProvider {
                 .await
             {
                 selection
-                    .invoke(|provider| {
-                        let query = query.clone();
+                    .invoke(&query, |provider, query| {
                         let items = items.clone();
                         async move {
                             provider
@@ -2152,8 +2166,7 @@ impl TypeProvider for TsgoCompositeProvider {
                 .await
             {
                 selection
-                    .invoke(|provider| {
-                        let query = query.clone();
+                    .invoke(&query, |provider, query| {
                         let data = data.clone();
                         async move { provider.resolve_completion(&query, data).await }
                     })
@@ -2176,9 +2189,8 @@ impl TypeProvider for TsgoCompositeProvider {
         Box::pin(async move {
             if let Some(selection) = self.feature_provider(ProviderFeature::Hover, &path).await {
                 selection
-                    .invoke(|provider| {
-                        let query = query.clone();
-                        async move { provider.get_hover(&query, offset).await }
+                    .invoke(&query, |provider, query| async move {
+                        provider.get_hover(&query, offset).await
                     })
                     .await
             } else {
@@ -2202,9 +2214,8 @@ impl TypeProvider for TsgoCompositeProvider {
                 .await
             {
                 selection
-                    .invoke(|provider| {
-                        let query = query.clone();
-                        async move { provider.get_definition(&query, offset).await }
+                    .invoke(&query, |provider, query| async move {
+                        provider.get_definition(&query, offset).await
                     })
                     .await
             } else {
@@ -2229,9 +2240,8 @@ impl TypeProvider for TsgoCompositeProvider {
                 .await
             {
                 selection
-                    .invoke(|provider| {
-                        let query = query.clone();
-                        async move { provider.get_type_definition(&query, offset).await }
+                    .invoke(&query, |provider, query| async move {
+                        provider.get_type_definition(&query, offset).await
                     })
                     .await
             } else {
@@ -2255,9 +2265,8 @@ impl TypeProvider for TsgoCompositeProvider {
                 .await
             {
                 selection
-                    .invoke(|provider| {
-                        let query = query.clone();
-                        async move { provider.get_references(&query, offset).await }
+                    .invoke(&query, |provider, query| async move {
+                        provider.get_references(&query, offset).await
                     })
                     .await
             } else {
@@ -2283,9 +2292,8 @@ impl TypeProvider for TsgoCompositeProvider {
                 .await
             {
                 selection
-                    .invoke(|provider| {
-                        let query = query.clone();
-                        async move { provider.get_rename_locations(&query, offset).await }
+                    .invoke(&query, |provider, query| async move {
+                        provider.get_rename_locations(&query, offset).await
                     })
                     .await
             } else {
@@ -2308,9 +2316,8 @@ impl TypeProvider for TsgoCompositeProvider {
                 .await
             {
                 selection
-                    .invoke(|provider| {
-                        let query = query.clone();
-                        async move { provider.get_signature_help(&query, offset).await }
+                    .invoke(&query, |provider, query| async move {
+                        provider.get_signature_help(&query, offset).await
                     })
                     .await
             } else {
@@ -2340,8 +2347,7 @@ impl TypeProvider for TsgoCompositeProvider {
                 .await
             {
                 selection
-                    .invoke(|provider| {
-                        let query = query.clone();
+                    .invoke(&query, |provider, query| {
                         let diagnostics = diagnostics.clone();
                         async move {
                             provider
@@ -2367,9 +2373,8 @@ impl TypeProvider for TsgoCompositeProvider {
                 .await
             {
                 selection
-                    .invoke(|provider| {
-                        let query = query.clone();
-                        async move { provider.get_semantic_tokens(&query).await }
+                    .invoke(&query, |provider, query| async move {
+                        provider.get_semantic_tokens(&query).await
                     })
                     .await
             } else {
@@ -2393,9 +2398,8 @@ impl TypeProvider for TsgoCompositeProvider {
                 .await
             {
                 selection
-                    .invoke(|provider| {
-                        let query = query.clone();
-                        async move { provider.get_document_highlights(&query, offset).await }
+                    .invoke(&query, |provider, query| async move {
+                        provider.get_document_highlights(&query, offset).await
                     })
                     .await
             } else {
@@ -2420,13 +2424,10 @@ impl TypeProvider for TsgoCompositeProvider {
                 .await
             {
                 selection
-                    .invoke(|provider| {
-                        let query = query.clone();
-                        async move {
-                            provider
-                                .get_inlay_hints(&query, start_offset, end_offset)
-                                .await
-                        }
+                    .invoke(&query, |provider, query| async move {
+                        provider
+                            .get_inlay_hints(&query, start_offset, end_offset)
+                            .await
                     })
                     .await
             } else {

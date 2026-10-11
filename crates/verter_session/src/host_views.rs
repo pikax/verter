@@ -22,7 +22,36 @@ use crate::VerterHost;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct CommittedSourceContent(verter_session_query::analysis::types::Hash16);
 
+impl CommittedSourceContent {
+    /// Content evidence from the exact source root used to validate assembly,
+    /// without sampling a later live source record.
+    pub fn at_source_root(
+        root: &verter_scheduler::source_root::SchedulerSourceRoot,
+        canonical_id: &str,
+    ) -> Option<Self> {
+        root.lookup(canonical_id).whole_hash().map(Self)
+    }
+}
+
 impl VerterHost {
+    /// Validate retained native producer facts against one current store view,
+    /// refusing an authority replacement during validation.
+    pub fn native_facts_are_current(
+        &self,
+        facts: &[verter_session_query::facts::fact_cache::FactVersionRef],
+    ) -> bool {
+        use verter_session_query::facts::store_view::StoreView as _;
+        if facts.is_empty() {
+            return true;
+        }
+        let Some(view) = self.resolver_store_view_read().current() else {
+            return false;
+        };
+        let before = view.view().validation_token();
+        view.view().validates_fact_signature(facts)
+            && !before.externally_superseded_by(&self.current_validation_token())
+    }
+
     /// Get the scheduler instance.
     pub fn scheduler(&self) -> &Arc<verter_scheduler::scheduler::Scheduler> {
         &self.scheduler

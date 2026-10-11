@@ -105,9 +105,11 @@ pub type BarrelResolver<'a> = &'a dyn Fn(&str, u32, u32) -> Option<Location>;
 /// Reader for a definition/type-definition target's OWN source, routed through the host's
 /// workspace (VFS) layer instead of direct disk I/O.
 ///
-/// [`super::resolve_external_target_range`] converts the provider's byte offsets to line:col by
-/// reading the same source those offsets index; the read goes through this closure so the
-/// merge layer never touches `std::fs` directly — the workspace/VFS is the single source-read
+/// [`super::resolve_external_target_range`] converts provider offsets using the
+/// validated authored source and the foreground request's retained rewrite evidence,
+/// when present. A standalone reader returns the source those offsets index.
+/// The read goes through this closure so the merge layer never touches `std::fs`
+/// directly — the workspace/VFS is the single source-read
 /// authority (host cache → snapshot → disk, an open editor's overlay winning over stale disk
 /// content). Returns `None` when the file cannot be read, and the caller then fails closed.
 pub type ExternalSourceReader<'a> = &'a dyn Fn(&str) -> Option<Arc<str>>;

@@ -189,6 +189,7 @@ impl DeliveryLedger {
 /// the local cache — is read by the service itself, so a query on it, or an
 /// answer locating anything in it, is a typed conflict.
 struct ReceiptBinding {
+    requester: ProviderQuery,
     query: ProviderQuery,
     file: String,
     receipts: HashMap<String, (u64, Arc<str>)>,
@@ -198,7 +199,7 @@ impl ReceiptBinding {
     /// Bind `query` on `file` to the receipts held now; the bytes its request
     /// position converts against.
     fn bind(
-        ledger: &parking_lot::Mutex<DeliveryLedger>,
+        ledger: &Arc<parking_lot::Mutex<DeliveryLedger>>,
         query: &ProviderQuery,
         file: &str,
     ) -> Result<(Self, Arc<str>), ProviderQueryConflict> {
@@ -210,7 +211,8 @@ impl ReceiptBinding {
         query.check_intended(file, Some(&requested))?;
         Ok((
             Self {
-                query: query.clone(),
+                requester: query.clone(),
+                query: query.isolated_attempt(),
                 file: file.to_string(),
                 receipts,
             },
@@ -224,7 +226,7 @@ impl ReceiptBinding {
     /// exactly that surface.
     fn settle(
         &self,
-        ledger: &parking_lot::Mutex<DeliveryLedger>,
+        ledger: &Arc<parking_lot::Mutex<DeliveryLedger>>,
         targets: impl IntoIterator<Item = String>,
     ) -> Result<HashMap<String, Arc<str>>, ProviderQueryConflict> {
         self.settle_targets(ledger, targets, false)
@@ -236,7 +238,7 @@ impl ReceiptBinding {
     /// answer is refused when none of its targets was delivered.
     fn settle_navigation(
         &self,
-        ledger: &parking_lot::Mutex<DeliveryLedger>,
+        ledger: &Arc<parking_lot::Mutex<DeliveryLedger>>,
         targets: impl IntoIterator<Item = String>,
     ) -> Result<HashMap<String, Arc<str>>, ProviderQueryConflict> {
         self.settle_targets(ledger, targets, true)
@@ -244,7 +246,7 @@ impl ReceiptBinding {
 
     fn settle_targets(
         &self,
-        ledger: &parking_lot::Mutex<DeliveryLedger>,
+        ledger: &Arc<parking_lot::Mutex<DeliveryLedger>>,
         targets: impl IntoIterator<Item = String>,
         omit_undelivered: bool,
     ) -> Result<HashMap<String, Arc<str>>, ProviderQueryConflict> {
@@ -268,9 +270,7 @@ impl ReceiptBinding {
                 undelivered.get_or_insert(conflict);
                 continue;
             };
-            if path != self.file {
-                self.query.check_intended_target(&path, Some(bytes))?;
-            }
+            self.query.check_intended_target(&path, Some(bytes))?;
             decoded.insert(path, Arc::clone(bytes));
             any_target_decoded |= is_target;
         }
@@ -279,6 +279,7 @@ impl ReceiptBinding {
                 return Err(conflict);
             }
         }
+        let authority = Arc::downgrade(ledger);
         let ledger = ledger.lock();
         for path in decoded.keys() {
             let (newest, bytes) = &self.receipts[path];
@@ -286,6 +287,20 @@ impl ReceiptBinding {
                 return Err(ProviderQueryConflict::new(path, ConflictKind::Moved));
             }
         }
+        let retained: Vec<_> = decoded
+            .keys()
+            .map(|path| (path.clone(), self.receipts[path].clone()))
+            .collect();
+        drop(ledger);
+        self.query.retain_validity(Arc::new(move || {
+            authority.upgrade().is_some_and(|ledger| {
+                let ledger = ledger.lock();
+                retained
+                    .iter()
+                    .all(|(path, (newest, bytes))| ledger.unchanged(path, *newest, bytes))
+            })
+        }));
+        self.requester.accept_result_from(&self.query);
         Ok(decoded)
     }
 }

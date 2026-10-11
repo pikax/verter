@@ -1207,6 +1207,50 @@ async fn a_respawned_provider_is_announced_structurally() {
     );
 }
 
+#[tokio::test]
+async fn completed_query_evidence_rejects_same_byte_replay_by_a_replacement_engine() {
+    let harness = make_harness(MockProvider::new("tsgo"), MockProvider::new("tsgo")).await;
+    let path = "/ws/a.ts";
+    let bytes = "const a = 1;";
+    harness
+        .provider
+        .open_file(path, bytes)
+        .await
+        .expect("initial delivery");
+    let query = crate::provider_query::ProviderQuery::at_engine_surface(path);
+    let answer = harness
+        .provider
+        .get_hover(&query, 6)
+        .await
+        .expect("completed hub result");
+    assert!(
+        answer.is_none(),
+        "the fixture completes an empty successful query"
+    );
+    assert!(query.result_is_current());
+    harness.crash_current_generation();
+    harness.spawn_gate.add_permits(1);
+    await_down(&harness.provider).await;
+    harness.notifier.await_started(2).await;
+    harness
+        .provider
+        .open_file(path, bytes)
+        .await
+        .expect("identical replay");
+    assert!(
+        !query.result_is_current(),
+        "the old completed result cannot settle after replacement"
+    );
+    let fresh = crate::provider_query::ProviderQuery::at_engine_surface(path);
+    assert!(harness
+        .provider
+        .get_hover(&fresh, 6)
+        .await
+        .expect("fresh query")
+        .is_none());
+    assert!(fresh.result_is_current());
+}
+
 /// A [`ProviderNotifier`] that records every user-facing notification so tests
 /// can assert what the user was (and was NOT) told.
 #[derive(Default)]

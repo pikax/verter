@@ -13,6 +13,66 @@ use super::movement::{edited_app, shifted_app, Handles};
 use super::{reference_answer, Fixture, Outcome, Route, APP, BARRIERS};
 use crate::provider_surface_store::SurfaceDelivery;
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_completed_answer_from_a_retired_engine_refuses_identical_replay() {
+    for barrier in [RequestBarrier::ProviderDecode, RequestBarrier::Settlement] {
+        let fixture = Fixture::new().await;
+        let route = Route::Hover;
+        let armed = route.arm(&fixture).await;
+        let handles = Handles::of(&fixture);
+        fixture.barriers.clear();
+        fixture.provider.clear_calls();
+        fixture.barriers.arm(
+            barrier,
+            Arc::new(move |_| {
+                let surface = handles.current_surface();
+                handles.provider.replace_engine();
+                handles.provider.accept_unrecorded_delivery(
+                    &surface.stamp.provider_path,
+                    &surface.provider_content,
+                );
+                assert!(matches!(
+                    handles.surface_delivery(),
+                    SurfaceDelivery::Delivered
+                ));
+                Box::pin(async {})
+            }),
+        );
+        let outcome = route.ask(&fixture, &armed).await;
+        assert_eq!(outcome, Outcome::ContentModified, "{barrier:?}");
+        assert_eq!(fixture.dispatches(route), 1);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_retired_attempt_does_not_poison_a_fresh_retry() {
+    let fixture = Fixture::new().await;
+    let route = Route::Hover;
+    let armed = route.arm(&fixture).await;
+    let handles = Handles::of(&fixture);
+    fixture.barriers.clear();
+    fixture.provider.clear_calls();
+    fixture.barriers.arm(
+        RequestBarrier::ProviderDispatch,
+        Arc::new(move |arrival| {
+            if arrival == 0 {
+                let surface = handles.current_surface();
+                handles.provider.replace_engine();
+                handles.provider.accept_unrecorded_delivery(
+                    &surface.stamp.provider_path,
+                    &surface.provider_content,
+                );
+            }
+            Box::pin(async {})
+        }),
+    );
+    assert!(matches!(
+        route.ask(&fixture, &armed).await,
+        Outcome::Answered(_)
+    ));
+    assert_eq!(fixture.dispatches(route), 2);
+}
+
 /// One way a request's inputs change underneath it.
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Control {

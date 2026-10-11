@@ -945,10 +945,21 @@ pub(in crate::host_manage) struct HostRuntimeValueResolver<'a> {
 
 pub(in crate::host_manage) struct HostExportGraphResolver<'a> {
     pub(in crate::host_manage) host: &'a VerterHost,
+    pub(in crate::host_manage) observed:
+        Option<&'a std::cell::RefCell<std::collections::HashSet<String>>>,
+}
+
+impl HostExportGraphResolver<'_> {
+    fn observe(&self, canonical_id: &str) {
+        if let Some(observed) = self.observed {
+            observed.borrow_mut().insert(canonical_id.to_string());
+        }
+    }
 }
 
 impl ExportGraphResolver for HostExportGraphResolver<'_> {
     fn export_surface(&self, canonical_id: &str) -> Option<ExportSurface> {
+        self.observe(canonical_id);
         let (file_language, _, export_signatures) =
             self.host.load_export_graph_analysis(canonical_id)?;
         Some(ExportSurface {
@@ -962,6 +973,7 @@ impl ExportGraphResolver for HostExportGraphResolver<'_> {
         canonical_id: &str,
         binding_name: &str,
     ) -> Option<verter_span::Span> {
+        self.observe(canonical_id);
         let (file_language, script_analysis, export_signatures) =
             self.host.load_export_graph_analysis(canonical_id)?;
         self.host
@@ -980,6 +992,7 @@ impl ExportGraphResolver for HostExportGraphResolver<'_> {
         source: &str,
         _sig: &verter_session_query::analysis::types::ExportSignature,
     ) -> Option<String> {
+        self.observe(canonical_id);
         // The shallow reexport surface names AUTHORED specifiers only,
         // so there is no artifact-baked target to prefer here: the
         // specifier resolves through the loaded-dependency authority
