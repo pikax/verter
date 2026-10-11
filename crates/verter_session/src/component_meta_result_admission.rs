@@ -7,7 +7,7 @@
 //! traces against exactly the request the dispatch serves, in the original
 //! order.
 
-#[cfg(any(test, feature = "semantic-observe"))]
+#[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -27,7 +27,7 @@ use verter_type_engine::resolver_core::ResolverCapabilities;
 pub(crate) struct ComponentMetaResultRead<'a, 'c, P, C: ResolverCapabilities> {
     db: &'a ComponentMetaResultDb<P>,
     dispatch: &'a ProjectSemanticDispatch<'c, C>,
-    #[cfg(any(test, feature = "semantic-observe"))]
+    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
     observations: &'a MetaProvenance,
 }
 
@@ -37,12 +37,12 @@ impl<'a, 'c, P: Send + Sync, C: ResolverCapabilities> ComponentMetaResultRead<'a
         db: &'a ComponentMetaResultDb<P>,
         observations: &'a MetaProvenance,
     ) -> Self {
-        #[cfg(not(any(test, feature = "semantic-observe")))]
+        #[cfg(not(any(test, feature = "test-support", feature = "semantic-observe")))]
         let _ = observations;
         Self {
             db,
             dispatch,
-            #[cfg(any(test, feature = "semantic-observe"))]
+            #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
             observations,
         }
     }
@@ -52,7 +52,7 @@ impl<'a, 'c, P: Send + Sync, C: ResolverCapabilities> ComponentMetaResultRead<'a
         key: &ComponentMetaResultKey,
         owner_whole_hash: Hash16,
     ) -> Option<Arc<ComponentMetaResultEntry<P>>> {
-        #[cfg(any(test, feature = "semantic-observe"))]
+        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
         let bump_miss = |observations: &MetaProvenance| {
             observations
                 .component_meta_result_cache_misses
@@ -75,19 +75,19 @@ impl<'a, 'c, P: Send + Sync, C: ResolverCapabilities> ComponentMetaResultRead<'a
             {
                 Some(candidate) => candidate,
                 None => {
-                    #[cfg(any(test, feature = "semantic-observe"))]
+                    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
                     bump_miss(self.observations);
                     return None;
                 }
             };
-        #[cfg(any(test, feature = "semantic-observe"))]
+        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
         if let Some(ctx) = verter_type_engine::request_context::current_request_context() {
             ctx.cache_counters
                 .component_meta
                 .hits
                 .fetch_add(1, Ordering::Relaxed);
         }
-        #[cfg(any(test, feature = "semantic-observe"))]
+        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
         self.observations
             .component_meta_result_cache_hits
             .fetch_add(1, Ordering::Relaxed);
@@ -98,13 +98,13 @@ impl<'a, 'c, P: Send + Sync, C: ResolverCapabilities> ComponentMetaResultRead<'a
 /// Count a component-meta result miss the caller decided before reaching the
 /// store (no current view to validate against).
 pub(crate) fn record_component_meta_result_miss(observations: &MetaProvenance) {
-    #[cfg(not(any(test, feature = "semantic-observe")))]
+    #[cfg(not(any(test, feature = "test-support", feature = "semantic-observe")))]
     let _ = observations;
-    #[cfg(any(test, feature = "semantic-observe"))]
+    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
     observations
         .component_meta_result_cache_misses
         .fetch_add(1, Ordering::Relaxed);
-    #[cfg(any(test, feature = "semantic-observe"))]
+    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
     if let Some(ctx) = verter_type_engine::request_context::current_request_context() {
         ctx.cache_counters
             .component_meta
