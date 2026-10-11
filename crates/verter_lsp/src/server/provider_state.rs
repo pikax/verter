@@ -135,11 +135,12 @@ impl VerterLanguageServer {
     /// or a drifted foreign open document
     /// drops the location. Closed imported carriers use their captured
     /// source/map generation and remain navigable.
-    /// The bytes a navigation or edit answer decodes provider offsets in the
-    /// non-carrier file `path` through: the query's retained decode bytes,
-    /// checked against the captured open revision or closed workspace source
+    /// The authored source a navigation or edit answer addresses in the
+    /// non-carrier file `path`, checked against the query's retained decode
+    /// bytes and the captured open revision or closed workspace source
     /// ([`crate::documents::ForegroundRequest::target_source`]). Native callers
     /// with no provider decode read the workspace and capture that evidence.
+    /// Provider ranges decode through the retained rewrite map when needed.
     pub(super) fn target_source(&self, path: &str) -> Option<std::sync::Arc<str>> {
         crate::documents::ForegroundRequest::target_source(&self.documents, path, || {
             self.documents.host().workspace_read().read_file(path)

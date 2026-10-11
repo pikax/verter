@@ -374,6 +374,14 @@ delivered bytes and settles the request file plus every surviving target; any ot
 failed settlement refuses the whole answer, and a non-empty answer whose targets are ALL
 Undelivered returns the conflict (the LSP serves its native result). A genuinely empty answer stays
 an empty success. Rename and code actions keep whole-answer refusal — a partial edit is unsafe.
+For an open real target, retained provider bytes must equal its captured editor source, or
+match a recorded self-file projection whose authored source equals that revision. Equal newline
+counts carry no applicability evidence. `ForegroundRequest` retains the accepted projection
+and its delivery bracket; the shared external-target range decoder maps through that projection
+in UTF-16 and re-emits in the negotiated encoding. Source readers return authored bytes so
+declaration-text validation uses the same space as those mapped ranges. An unproven target is omitted from navigation;
+for edits it marks the whole request incoherent (`ContentModified`). Positions inside rewritten
+specifier text have no authored correlation and follow the same refusal policy.
 Bytes an engine reads out of band carry no wire position. On
 tsserver the carrier store the plugin reads is their publisher (`CarrierStorePublications`, every
 writer's commits, installed at spawn): each ready row carries a non-reusable publication epoch
