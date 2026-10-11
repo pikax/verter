@@ -58,24 +58,33 @@ pub(crate) fn derived_node_bytes(payload_bytes: usize) -> usize {
 /// Work-unit cap for one connected semantic demand: the operational
 /// backstop, sized from the checker's relation-complexity envelope
 /// ([`checker_policy::RELATION_COMPARISONS`] structured comparisons at
-/// [`RELATION_UNITS_PER_COMPARISON`] units each). Work units do not bound
+/// [`RELATION_UNITS_PER_COMPARISON`] reducer units plus one cold query-entry
+/// unit each). The reducer mapping alone excludes the enclosing dispatch
+/// entries and would stop the reversed-object conditional construction
+/// before its comparison allowance. This maps that construction's footprint,
+/// not every arbitrary projection surrounding a relation.
+/// Work units do not bound
 /// memory; the construction-byte rail
-/// ([`MAX_CONNECTED_CONSTRUCTION_BYTES`]) does, and on a relation it binds
-/// first: at [`RELATION_PAIR_BYTES`] per comparison it stops a relation
-/// near 262,000 comparisons as typed incompleteness, until the per-pair
-/// footprint shrinks.
+/// ([`MAX_CONNECTED_CONSTRUCTION_BYTES`]) does. Both operational rails
+/// include the checker's full relation envelope, so neither substitutes an
+/// unevaluated conditional for the checker's answer.
 ///
 /// [`checker_policy::RELATION_COMPARISONS`]: crate::semantic_query::checker_policy::RELATION_COMPARISONS
 pub const MAX_CONNECTED_PROJECTION_WORK: usize =
     crate::semantic_query::checker_policy::RELATION_COMPARISONS as usize
-        * RELATION_UNITS_PER_COMPARISON;
+        * (RELATION_UNITS_PER_COMPARISON + 1);
 /// Nested query-boundary cap for one connected semantic demand.
 pub const MAX_CONNECTED_QUERY_DEPTH: u16 = 24;
 /// Construction-byte allowance for one connected semantic demand: the bytes
 /// it reserves before it builds, never refunded within the demand, so the
-/// allowance bounds what the demand holds at its peak. Provisional: sized
-/// with the per-unit footprint in the combined performance phase.
-pub(super) const MAX_CONNECTED_CONSTRUCTION_BYTES: usize = 512 << 20;
+/// allowance bounds what the demand holds at its peak. The comparison mapping
+/// covers the full checker relation envelope, with the non-relation allowance
+/// left for operand construction and the consuming projection. This is logical
+/// construction accounting, not an allocation or a retained-memory quota.
+pub(super) const MAX_CONNECTED_CONSTRUCTION_BYTES: usize =
+    (crate::semantic_query::checker_policy::RELATION_COMPARISONS as usize)
+        .saturating_mul(RELATION_PAIR_BYTES)
+        .saturating_add(512 << 20);
 
 /// What one connected demand has charged so far: its work units and its
 /// construction bytes.

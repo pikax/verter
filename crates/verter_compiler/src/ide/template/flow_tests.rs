@@ -224,7 +224,9 @@ fn production_series(
                 + w.outer_refs
                 + w.snapshots
                 + w.component_branches
-                + w.component_functions,
+                + w.component_functions
+                + w.scope_links
+                + w.callback_discovery,
         ));
         snapshots.push((n, w.snapshots + w.outer_refs));
     }

@@ -98,6 +98,7 @@ pub(super) fn emit_comp_functions_to_string(
     let mut root_comp_entries: Vec<(u32, String, Option<String>)> = Vec::new();
     let mut all_comp_offsets: Vec<u32> = Vec::new();
     let mut flow = ComponentFlow::default();
+    let mut scopes = CompScopes::default();
 
     walk_children_for_comp(
         buf,
@@ -113,7 +114,8 @@ pub(super) fn emit_comp_functions_to_string(
             .unwrap_or(&[]),
         None,
         &mut flow,
-        &[],
+        &mut scopes,
+        None,
         &mut root_comp_entries,
         &mut all_comp_offsets,
         emit_root_comps,
@@ -304,7 +306,7 @@ pub(super) fn emit_get_root_component_to_string(
 /// `<Comp ref="x" />` inside `<MyComp v-slot="{ Comp }">`), the Comp function
 /// must reconstruct the type through the parent's instantiated slot type rather
 /// than referencing the tag name directly (which isn't in scope at the top level).
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 enum CompScope {
     /// v-slot on a component: bindings come from the parent's slot props.
     VSlot {
@@ -326,6 +328,40 @@ enum CompScope {
         /// The alias list as authored (`item`, `item, index`, `{ a }, i`).
         params_expr: String,
     },
+}
+
+/// Each lexical scope is owned once; sibling walks share its ancestry.
+#[derive(Default)]
+struct CompScopes {
+    nodes: Vec<CompScopeLink>,
+}
+
+type CompScopeId = Option<usize>;
+
+struct CompScopeLink {
+    parent: CompScopeId,
+    depth: usize,
+    scope: CompScope,
+}
+
+impl CompScopes {
+    fn depth(&self, id: CompScopeId) -> usize {
+        id.map_or(0, |id| {
+            crate::ide::template::flow::record(|work| work.scope_links += 1);
+            self.nodes[id].depth
+        })
+    }
+
+    fn push(&mut self, parent: CompScopeId, scope: CompScope) -> CompScopeId {
+        crate::ide::template::flow::record(|work| work.scope_links += 1);
+        let id = self.nodes.len();
+        self.nodes.push(CompScopeLink {
+            parent,
+            depth: self.depth(parent) + 1,
+            scope,
+        });
+        Some(id)
+    }
 }
 
 /// Extract binding names from a v-slot scope expression.
@@ -382,9 +418,15 @@ fn extract_vfor_binding_names(params: &str) -> Vec<String> {
 
 /// Check if a tag name is introduced by any scope in the chain.
 /// Returns the innermost scope that introduces this binding.
-fn find_scope_for_tag<'a>(tag_name: &str, comp_scopes: &'a [CompScope]) -> Option<&'a CompScope> {
-    // Walk from innermost (last) to outermost (first)
-    for scope in comp_scopes.iter().rev() {
+fn find_scope_for_tag<'a>(
+    tag_name: &str,
+    scopes: &'a CompScopes,
+    mut id: CompScopeId,
+) -> Option<&'a CompScope> {
+    while let Some(index) = id {
+        crate::ide::template::flow::record(|work| work.scope_links += 1);
+        let link = &scopes.nodes[index];
+        let scope = &link.scope;
         let names = match scope {
             CompScope::VSlot { binding_names, .. } => binding_names,
             CompScope::VFor { binding_names, .. } => binding_names,
@@ -392,6 +434,7 @@ fn find_scope_for_tag<'a>(tag_name: &str, comp_scopes: &'a [CompScope]) -> Optio
         if names.iter().any(|n| n == tag_name) {
             return Some(scope);
         }
+        id = link.parent;
     }
     None
 }
@@ -517,23 +560,37 @@ impl ComponentFlow {
     fn open_chain(
         &mut self,
         parent: Option<FlowRegionRef>,
-        scopes: &[CompScope],
+        scopes: &CompScopes,
+        scope: CompScopeId,
         prop_names: &rustc_hash::FxHashSet<&str>,
     ) -> usize {
         let chain = self.chains.len();
         let inherited = parent.map_or(0, |parent| self.chains[parent.chain].scope_len);
-        let scope_decls = scopes
-            .iter()
-            .enumerate()
-            .skip(inherited)
-            .map(|(index, scope)| scope_declaration(index, scope, prop_names))
+        let mut pending = Vec::new();
+        let mut cursor = scope;
+        while let Some(id) = cursor {
+            crate::ide::template::flow::record(|work| work.scope_links += 1);
+            let link = &scopes.nodes[id];
+            if link.depth <= inherited {
+                break;
+            }
+            pending.push(id);
+            cursor = link.parent;
+        }
+        let scope_decls = pending
+            .into_iter()
+            .rev()
+            .map(|id| {
+                let link = &scopes.nodes[id];
+                scope_declaration(link.depth - 1, &link.scope, prop_names)
+            })
             .collect();
         self.chains.push(FlowChain {
             parent,
             branches: Vec::new(),
             live: false,
             scope_decls,
-            scope_len: scopes.len(),
+            scope_len: scopes.depth(scope),
         });
         if let Some(parent) = parent {
             self.chains[parent.chain].branches[parent.branch]
@@ -717,7 +774,8 @@ fn walk_children_for_comp(
     chains: &[ConditionalChain],
     region: Option<FlowRegionRef>,
     flow: &mut ComponentFlow,
-    comp_scopes: &[CompScope],
+    scopes: &mut CompScopes,
+    comp_scopes: CompScopeId,
     root_comp_entries: &mut Vec<(u32, String, Option<String>)>,
     all_comp_offsets: &mut Vec<u32>,
     emit_root_comps: bool,
@@ -743,7 +801,8 @@ fn walk_children_for_comp(
                     let flow_chain = match continued {
                         Some(flow_chain) => flow_chain,
                         None => {
-                            let flow_chain = flow.open_chain(region, comp_scopes, prop_names);
+                            let flow_chain =
+                                flow.open_chain(region, scopes, comp_scopes, prop_names);
                             if let Some(chain) = authored {
                                 opened.insert(chain, flow_chain);
                             }
@@ -771,7 +830,7 @@ fn walk_children_for_comp(
             };
 
             // Build comp scope chain for v-slot and v-for
-            let mut new_comp_scopes = comp_scopes.to_vec();
+            let mut new_comp_scopes = comp_scopes;
 
             // If this element is a component with v-slot, it needs a Comp function
             // (even without ref) so that child scope-aware Comp functions can reference it.
@@ -798,12 +857,15 @@ fn walk_children_for_comp(
                     } else {
                         vec![]
                     };
-                    new_comp_scopes.push(CompScope::VSlot {
-                        parent_comp_offset: el.tag_open.start,
-                        slot_name,
-                        params_expr,
-                        binding_names,
-                    });
+                    new_comp_scopes = scopes.push(
+                        new_comp_scopes,
+                        CompScope::VSlot {
+                            parent_comp_offset: el.tag_open.start,
+                            slot_name,
+                            params_expr,
+                            binding_names,
+                        },
+                    );
                 }
             }
 
@@ -828,11 +890,14 @@ fn walk_children_for_comp(
                             .and_then(|p| p.strip_suffix(')'))
                             .unwrap_or(params);
                         let binding_names = extract_vfor_binding_names(params);
-                        new_comp_scopes.push(CompScope::VFor {
-                            iterable_expr: iterable.to_string(),
-                            binding_names,
-                            params_expr: params.to_string(),
-                        });
+                        new_comp_scopes = scopes.push(
+                            new_comp_scopes,
+                            CompScope::VFor {
+                                iterable_expr: iterable.to_string(),
+                                binding_names,
+                                params_expr: params.to_string(),
+                            },
+                        );
                     }
                 }
             }
@@ -856,7 +921,8 @@ fn walk_children_for_comp(
                     offset,
                     region,
                     flow,
-                    &new_comp_scopes,
+                    scopes,
+                    new_comp_scopes,
                     is_jsx,
                     &props_lit,
                 );
@@ -909,28 +975,29 @@ fn walk_children_for_comp(
                             let parent_node = &ast.nodes[parent_id.0];
                             if let AstNodeKind::Element(parent_el) = &parent_node.kind {
                                 if matches!(parent_el.tag_type, TagType::Component) {
-                                    let mut scopes_with_named = new_comp_scopes.clone();
-                                    scopes_with_named.push(CompScope::VSlot {
-                                        parent_comp_offset: parent_el.tag_open.start,
-                                        slot_name,
-                                        params_expr,
-                                        binding_names,
-                                    });
-                                    scopes_with_named
+                                    scopes.push(
+                                        new_comp_scopes,
+                                        CompScope::VSlot {
+                                            parent_comp_offset: parent_el.tag_open.start,
+                                            slot_name,
+                                            params_expr,
+                                            binding_names,
+                                        },
+                                    )
                                 } else {
-                                    new_comp_scopes.clone()
+                                    new_comp_scopes
                                 }
                             } else {
-                                new_comp_scopes.clone()
+                                new_comp_scopes
                             }
                         } else {
-                            new_comp_scopes.clone()
+                            new_comp_scopes
                         }
                     } else {
-                        new_comp_scopes.clone()
+                        new_comp_scopes
                     }
                 } else {
-                    new_comp_scopes.clone()
+                    new_comp_scopes
                 };
 
                 walk_children_for_comp(
@@ -943,7 +1010,8 @@ fn walk_children_for_comp(
                     &content.v_if_chains,
                     region,
                     flow,
-                    &child_comp_scopes,
+                    scopes,
+                    child_comp_scopes,
                     root_comp_entries,
                     all_comp_offsets,
                     false,
@@ -1356,7 +1424,8 @@ fn emit_comp_function_for_element(
     offset: u32,
     region: Option<FlowRegionRef>,
     flow: &mut ComponentFlow,
-    comp_scopes: &[CompScope],
+    scopes: &CompScopes,
+    comp_scopes: CompScopeId,
     is_jsx: bool,
     props_literal: &str,
 ) {
@@ -1433,7 +1502,7 @@ fn emit_comp_function_for_element(
         TagType::Component => {
             // The statements that bind the tag and props before the component
             // is instantiated, and the instantiated tag and props.
-            let (bindings, tag, props) = match find_scope_for_tag(tag_name, comp_scopes) {
+            let (bindings, tag, props) = match find_scope_for_tag(tag_name, scopes, comp_scopes) {
                 // Reconstruct the type through the parent's instantiated slot
                 // type. The parent Comp function instantiates the parent
                 // component with its actual props, so TypeScript infers generics
