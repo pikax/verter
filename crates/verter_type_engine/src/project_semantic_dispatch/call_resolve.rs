@@ -62,6 +62,7 @@ enum AliasExpansion {
 fn error_leaves_expansion_unknown(error: &QueryError) -> bool {
     match error {
         QueryError::BudgetExceeded(_)
+        | QueryError::ExecutionAborted(_)
         | QueryError::Cancelled
         | QueryError::UnstableState { .. }
         | QueryError::ForeignSemanticOperand
@@ -2822,7 +2823,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             self.abandon_session(session_id);
                             return CandidateVerdict::Degraded(ResolveCallFailure::Budget);
                         }
-                        crate::semantic_query::FlowReturnStep::NoValue(_) => {
+                        crate::semantic_query::FlowReturnStep::Aborted(_)
+                        | crate::semantic_query::FlowReturnStep::NoValue(_) => {
                             self.abandon_session(session_id);
                             return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);
                         }

@@ -283,6 +283,119 @@ pub(crate) struct RequestEffects {
     pub(crate) paid: usize,
 }
 
+/// Connected charges of one component-meta compute. A root resets the
+/// demand counters; it does not reset an open span, so the compute keeps
+/// the sum across every root it entered. The copy admission stores is taken
+/// when the span ends. This stack is not that copy.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ComponentMetaSpan {
+    pub(crate) work: usize,
+    pub(crate) bytes: usize,
+    pub(crate) trip: PartialReasonSet,
+    pub(crate) schedule_cuts: u64,
+    pub(crate) certificates: u64,
+}
+
+thread_local! {
+    static COMPONENT_META_SPANS: RefCell<Vec<ComponentMetaSpan>> = const { RefCell::new(Vec::new()) };
+    static COMPONENT_META_SPAN_OPEN: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Opens one component-meta span on this thread. Nested computes each keep
+/// their own frame, and a charge is recorded on every frame still open.
+pub(crate) struct ComponentMetaSpanGuard {
+    armed: bool,
+}
+
+impl ComponentMetaSpanGuard {
+    pub(crate) fn enter() -> Self {
+        COMPONENT_META_SPANS.with(|spans| spans.borrow_mut().push(ComponentMetaSpan::default()));
+        COMPONENT_META_SPAN_OPEN.with(|open| open.set(true));
+        Self { armed: true }
+    }
+
+    pub(crate) fn finish(mut self) -> ComponentMetaSpan {
+        self.armed = false;
+        pop_component_meta_span()
+    }
+}
+
+impl Drop for ComponentMetaSpanGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = pop_component_meta_span();
+        }
+    }
+}
+
+fn pop_component_meta_span() -> ComponentMetaSpan {
+    let span = COMPONENT_META_SPANS.with(|spans| spans.borrow_mut().pop().unwrap_or_default());
+    let empty = COMPONENT_META_SPANS.with(|spans| spans.borrow().is_empty());
+    if empty {
+        COMPONENT_META_SPAN_OPEN.with(|open| open.set(false));
+    }
+    span
+}
+
+fn span_open() -> bool {
+    COMPONENT_META_SPAN_OPEN.with(Cell::get)
+}
+
+fn remember_work(n: usize) {
+    if n == 0 || !span_open() {
+        return;
+    }
+    COMPONENT_META_SPANS.with(|spans| {
+        for span in spans.borrow_mut().iter_mut() {
+            span.work = span.work.saturating_add(n);
+        }
+    });
+}
+
+fn remember_bytes(n: usize) {
+    if n == 0 || !span_open() {
+        return;
+    }
+    COMPONENT_META_SPANS.with(|spans| {
+        for span in spans.borrow_mut().iter_mut() {
+            span.bytes = span.bytes.saturating_add(n);
+        }
+    });
+}
+
+fn remember_trip(reason: PartialReasonSet) {
+    if reason.is_empty() || !span_open() {
+        return;
+    }
+    COMPONENT_META_SPANS.with(|spans| {
+        for span in spans.borrow_mut().iter_mut() {
+            span.trip = span.trip.union(reason);
+        }
+    });
+}
+
+fn remember_schedule_cut() {
+    if !span_open() {
+        return;
+    }
+    COMPONENT_META_SPANS.with(|spans| {
+        for span in spans.borrow_mut().iter_mut() {
+            span.schedule_cuts = span.schedule_cuts.saturating_add(1);
+        }
+    });
+}
+
+fn remember_certificate() {
+    if !span_open() {
+        return;
+    }
+    COMPONENT_META_SPANS.with(|spans| {
+        for span in spans.borrow_mut().iter_mut() {
+            span.certificates = span.certificates.saturating_add(1);
+        }
+    });
+}
+
 impl std::fmt::Debug for ConnectedDemandLedger<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ConnectedDemandLedger")
@@ -387,17 +500,14 @@ impl<'a> ConnectedDemandLedger<'a> {
             self.active.set(true);
         }
         if self.cancellation.is_cancelled() {
-            self.tripped
-                .set(self.tripped.get().union(PartialReasonSet::CANCELLED));
+            self.record_trip(PartialReasonSet::CANCELLED);
         }
         let mut entered_query_depth = false;
         let tripped = self.tripped.get();
         let trip = if !tripped.is_empty() {
             Some(tripped)
         } else if query_boundary && self.query_depth.get() >= self.query_depth_limit.get() {
-            let tripped = tripped.union(PartialReasonSet::CONNECTED_QUERY_DEPTH_LIMIT);
-            self.tripped.set(tripped);
-            Some(tripped)
+            Some(self.record_trip(PartialReasonSet::CONNECTED_QUERY_DEPTH_LIMIT))
         } else {
             if query_boundary {
                 self.query_depth.set(self.query_depth.get() + 1);
@@ -461,11 +571,10 @@ impl<'a> ConnectedDemandLedger<'a> {
         }
         let work_used = self.work_used.get();
         if work_used >= self.work_limit.get() {
-            let tripped = tripped.union(PartialReasonSet::PROJECTION_WORK_LIMIT);
-            self.tripped.set(tripped);
-            return Err(tripped);
+            return Err(self.record_trip(PartialReasonSet::PROJECTION_WORK_LIMIT));
         }
         self.work_used.set(work_used + 1);
+        remember_work(1);
         self.accrue(1, 0);
         Ok(())
     }
@@ -537,6 +646,7 @@ impl<'a> ConnectedDemandLedger<'a> {
         let work_used = self.work_used.get();
         verter_debug_assert!(work_used.saturating_add(consumed) <= self.work_limit.get());
         self.work_used.set(work_used + consumed);
+        remember_work(consumed);
         self.accrue(consumed, 0);
     }
 
@@ -560,6 +670,7 @@ impl<'a> ConnectedDemandLedger<'a> {
         match used.checked_add(bytes) {
             Some(total) if total <= self.bytes_limit.get() => {
                 self.bytes_used.set(total);
+                remember_bytes(bytes);
                 self.accrue(0, bytes);
                 Ok(())
             }
@@ -650,7 +761,17 @@ impl<'a> ConnectedDemandLedger<'a> {
         );
         let tripped = self.tripped.get().union(reason);
         self.tripped.set(tripped);
+        remember_trip(reason);
         tripped
+    }
+
+    /// A producer proved an exact same-path recurrence. A same-path bit
+    /// without this note is not a certificate. Recorded on an open
+    /// component-meta span only: outside one, admission has no compute to
+    /// attribute it to.
+    pub(crate) fn note_divergence_certificate(&self) {
+        let _ = self;
+        remember_certificate();
     }
 }
 
@@ -728,6 +849,7 @@ impl ConnectedDemandLedger<'_> {
         if self.active.get() {
             self.schedule_cut.set(true);
         }
+        remember_schedule_cut();
     }
 
     /// Whether another task's schedule has cut this demand's evaluation:
@@ -985,10 +1107,13 @@ impl ConnectedDemandLedger<'_> {
                 newly_paid,
             );
         }
-        self.work_used
-            .set(self.work_used.get() + total.work as usize);
+        let replayed_work = total.work as usize;
+        let replayed_bytes = total.bytes as usize;
+        self.work_used.set(self.work_used.get() + replayed_work);
         self.bytes_used
-            .set(self.bytes_used.get().saturating_add(total.bytes as usize));
+            .set(self.bytes_used.get().saturating_add(replayed_bytes));
+        remember_work(replayed_work);
+        remember_bytes(replayed_bytes);
         self.paid.borrow_mut().extend(unpaid);
         // Within `comparison_room`, so within `u32`.
         Ok(u32::try_from(total.comparisons).unwrap_or(u32::MAX))
@@ -1122,6 +1247,8 @@ impl ConnectedDemandLedger<'_> {
             .set(self.work_used.get().saturating_add(work));
         self.bytes_used
             .set(self.bytes_used.get().saturating_add(bytes));
+        remember_work(work);
+        remember_bytes(bytes);
         self.record_trip(trip);
     }
 
@@ -1188,4 +1315,78 @@ impl Drop for ConnectedDemandGuard<'_> {
             self.ledger.active.set(false);
         }
     }
+}
+
+/// An active connected-demand root for a component-meta test. Dropping the
+/// token ends the root.
+#[cfg(any(test, feature = "test-support"))]
+pub struct ComponentMetaDemandRoot<'a> {
+    ledger: &'a ConnectedDemandLedger<'a>,
+    _guard: ConnectedDemandGuard<'a>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl ComponentMetaDemandRoot<'_> {
+    /// Charge this root. Panics when the demand refuses the work or the bytes.
+    pub fn charge(&self, work: usize, bytes: usize, trip: PartialReasonSet) {
+        if work > 0 {
+            self.ledger
+                .charge_units(work)
+                .unwrap_or_else(|refused| panic!("test work charge refused: {refused:?}"));
+        }
+        if bytes > 0 {
+            self.ledger
+                .reserve_bytes(bytes)
+                .unwrap_or_else(|refused| panic!("test byte reserve refused: {refused:?}"));
+        }
+        if !trip.is_empty() {
+            self.ledger.record_trip(trip);
+        }
+    }
+
+    /// One more work unit on this root.
+    pub fn try_charge(&self) -> Result<(), PartialReasonSet> {
+        self.ledger.charge()
+    }
+
+    /// Work, construction bytes, and the sticky trip charged on this root.
+    pub fn charges(&self) -> (usize, usize, PartialReasonSet) {
+        (
+            self.ledger.work_used.get(),
+            self.ledger.bytes_used.get(),
+            self.ledger.tripped.get(),
+        )
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl ConnectedDemandLedger<'_> {
+    /// Enter a root and run `body` inside it.
+    pub fn with_root_for_test<R>(
+        &self,
+        query_boundary: bool,
+        body: impl FnOnce(&ComponentMetaDemandRoot<'_>) -> R,
+    ) -> R {
+        let (guard, trip) = self.enter(query_boundary);
+        assert!(
+            trip.is_none(),
+            "component-meta test root tripped on entry: {trip:?}"
+        );
+        body(&ComponentMetaDemandRoot {
+            ledger: self,
+            _guard: guard,
+        })
+    }
+}
+
+/// Note a real divergence certificate on the open component-meta span.
+#[cfg(any(test, feature = "test-support"))]
+pub fn note_component_meta_divergence_for_test() {
+    remember_certificate();
+}
+
+/// Note a schedule cut on the open component-meta span.
+#[cfg(any(test, feature = "test-support"))]
+pub fn note_component_meta_schedule_cut_for_test() {
+    remember_schedule_cut();
 }

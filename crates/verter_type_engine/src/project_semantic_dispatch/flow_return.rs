@@ -46,9 +46,7 @@ use super::flow_return_callee::{
 use super::flow_return_products::{
     FlowBindingLayer, FlowFrameProducts as FlowProductStore, FlowWriteObservation,
 };
-use super::flow_solve::{
-    FlowPartialReason, FlowSolveOutcome, NoValueFlowResult, PartialFlowResult,
-};
+use super::flow_solve::{FlowPartialReason, FlowSolveOutcome, NoValueFlowResult};
 use super::walk::QueryBuildOutput;
 use super::ProjectSemanticDispatch;
 use crate::semantic_query::{
@@ -82,6 +80,8 @@ pub(super) struct DistributedIntersection {
 /// composition.
 #[derive(Debug)]
 pub enum FunctionReturnNode {
+    /// Invalid execution evidence; no value may contribute to composition.
+    Aborted(crate::semantic_query::ExecutionAbort),
     /// A DECLARED return lowered through the memoized locator rail.
     Declared(crate::semantic_query::HotTypeRef),
     /// A body-derived return: the admitted whole-function result (the
@@ -213,7 +213,7 @@ pub(super) fn plan_refusal_reason_class(refusal: Option<FlowPlanRefusal>) -> Par
 /// [`FlowReturnDegradation`] names. A single typed reason rather than a
 /// set, so the fact a degraded success establishes
 /// ([`super::flow_return_fact`]) is non-empty by construction.
-pub(super) fn degradation_reason(degradation: FlowReturnDegradation) -> PartialReason {
+pub(crate) fn degradation_reason(degradation: FlowReturnDegradation) -> PartialReason {
     match degradation {
         FlowReturnDegradation::FlowGap(_) => PartialReason::FlowReturnUnverified,
         FlowReturnDegradation::UnmodeledPosition
@@ -372,6 +372,8 @@ pub mod flow_admission_fault_injection {
         /// modelling evidence that did not originate from
         /// `evaluate_flow_return`.
         pub foreign_evaluation_evidence: AtomicBool,
+        /// One-shot rendezvous before rejecting foreign evaluation evidence.
+        pub foreign_evaluation_gate: std::sync::Mutex<Option<std::sync::Arc<std::sync::Barrier>>>,
 
         /// When armed, `finalize_flow_demand` sees evaluation evidence
         /// whose provenance carries the carrier's OWN store/generation/
@@ -1899,6 +1901,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         FunctionReturnNode::Declared(node) => Some(node.node()),
                         FunctionReturnNode::Flow(result) => Some(result.return_type()),
                         FunctionReturnNode::DeclaredMiss
+                        | FunctionReturnNode::Aborted(_)
                         | FunctionReturnNode::NoValue(_)
                         | FunctionReturnNode::Absent => None,
                     },
@@ -1916,7 +1919,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             FunctionReturnNode::Declared(node) => Some(node.node()),
                             FunctionReturnNode::Flow(result) => Some(result.return_type()),
                             FunctionReturnNode::DeclaredMiss
-                            | FunctionReturnNode::NoValue(_)
+                            | FunctionReturnNode::Aborted(_) | FunctionReturnNode::NoValue(_)
                             | FunctionReturnNode::Absent => None,
                         })
                     }
@@ -1975,7 +1978,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 self.graph()
                     .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any)),
             ),
-            FlowReturnStep::NoValue(_) => {
+            FlowReturnStep::Aborted(_) | FlowReturnStep::NoValue(_) => {
                 crate::request_context::mark_request_result_partial();
                 None
             }
@@ -2012,6 +2015,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // the universal read funnel propagates them into this
                 // enclosing composition when the read returns.
                 match self.execute_flow_return(self.flow_return_key_for(identity)) {
+                    FlowReturnStep::Aborted(abort) => FunctionReturnNode::Aborted(abort),
                     FlowReturnStep::Complete(result) => FunctionReturnNode::Flow(result),
                     FlowReturnStep::NoValue(failure) => FunctionReturnNode::NoValue(failure),
                     // A hold surfacing at a consumer is a demand reentering
@@ -2254,7 +2258,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return None;
         }
         match read.adopt(self) {
-            FlowReturnStep::Complete(result) => {
+            Ok(FlowReturnStep::Complete(result)) => {
                 // `ReturnType<…>` is a signature UTILITY, not a call: it
                 // has no call site to be argument-free at, so every free
                 // clause parameter instantiates at its BASE constraint and
@@ -2280,7 +2284,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 self.instantiate_callee_clause_at_base_constraints(&identity, result.return_type())
             }
             // A consumed read always carries a value.
-            FlowReturnStep::NoValue(_) | FlowReturnStep::Hold(_) => None,
+            Ok(
+                FlowReturnStep::Aborted(_) | FlowReturnStep::NoValue(_) | FlowReturnStep::Hold(_),
+            )
+            | Err(_) => None,
         }
     }
 
@@ -2383,6 +2390,33 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ///    nested flow evaluation computes INLINE on the transaction (its
     ///    publish is batched at its SCC's close and drained by the root).
     pub fn execute_flow_return(&self, key: FlowReturnKey) -> FlowReturnStep {
+        use crate::semantic_query::ExecutionAbort;
+        let _validity = crate::request_context::ExecutionValidityScope::enter();
+        let _quality = crate::request_context::ColdComputeCompletenessScope::enter();
+        if self.snapshot.flags().is_cancelled() {
+            crate::request_context::observe_execution_abort(ExecutionAbort::Cancelled);
+        }
+        if let Some(abort) = crate::request_context::current_execution_abort() {
+            return FlowReturnStep::Aborted(abort);
+        }
+        let step = self.execute_flow_return_validated(key);
+        if self.snapshot.flags().is_cancelled() {
+            crate::request_context::observe_execution_abort(ExecutionAbort::Cancelled);
+        }
+        match crate::request_context::current_execution_abort() {
+            Some(abort) => FlowReturnStep::Aborted(abort),
+            None => match step {
+                FlowReturnStep::Complete(result) => {
+                    FlowReturnStep::Complete(result.with_observed_completeness(
+                        crate::request_context::current_cold_compute_completeness(),
+                    ))
+                }
+                other => other,
+            },
+        }
+    }
+
+    fn execute_flow_return_validated(&self, key: FlowReturnKey) -> FlowReturnStep {
         // Per-request dispatch-mask trace, mirroring the cold-build choke
         // point: an INLINE flow evaluation (under an open relation or flow
         // frame) never funnels through `execute_via_cold_build_helper`, so
@@ -2568,6 +2602,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     fn execute_flow_return_root(&self, key: FlowReturnKey) -> FlowReturnStep {
         let read = self.execute_flow_return_cold_build(SemanticQueryKey::FlowReturn(Box::new(key)));
         match read.value {
+            QueryResult::Error(ref error)
+                if crate::semantic_query::ExecutionAbort::from_query_error(error).is_some() =>
+            {
+                let abort = crate::semantic_query::ExecutionAbort::from_query_error(error).unwrap();
+                crate::request_context::observe_execution_abort(abort);
+                FlowReturnStep::Aborted(abort)
+            }
             QueryResult::Value(SemanticQueryValue::FlowReturn(result)) => {
                 FlowReturnStep::Complete((*result).clone())
             }
@@ -2890,6 +2931,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // publish time.
                 output.satisfied_projection = materialized;
                 match verdict {
+                    Some(FlowSolveOutcome::Aborted(abort)) => {
+                        output.result = QueryResult::Error(QueryError::ExecutionAborted(abort));
+                        output.cache_suppress = true;
+                        output.mark_partial();
+                    }
                     Some(FlowSolveOutcome::Complete(proof)) => {
                         output.flow_completion = Some(proof);
                     }
@@ -4218,6 +4264,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .foreign_evaluation_evidence
             .load(std::sync::atomic::Ordering::Relaxed)
         {
+            let gate = self
+                .binding
+                .observers
+                .flow
+                .foreign_evaluation_gate
+                .lock()
+                .expect("evaluation gate")
+                .take();
+            if let Some(gate) = gate {
+                gate.wait();
+                gate.wait();
+            }
             super::dispatch_txn::flow_obligation_state::FlowEvaluationProvenance::new(
                 u64::MAX,
                 u64::MAX,
@@ -4266,11 +4324,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let plan = &carrier.plan;
         let basis = plan.basis().clone();
         let partial = |reason: FlowPartialReason| {
-            Some(FlowSolveOutcome::Partial(PartialFlowResult {
-                basis,
-                reason,
-                value: result.clone(),
-            }))
+            Some(super::flow_solve::flow_refusal_outcome(
+                basis, reason, result,
+            ))
         };
         // Provenance triangulation: the evaluation's evidence token must
         // BE the installed demand carrier's own token (the demand-unique
@@ -4863,6 +4919,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     // The VALUE channel: the inline root's own evaluated
                     // value joins the closed-member overrides the shared
                     // return equation reads (proven or not)...
+                    match &verdict {
+                        Some(FlowSolveOutcome::Aborted(abort)) => {
+                            self.abort_inline_flight(inline_flight.as_ref());
+                            return FlowFramePop::Provisional(FlowReturnStep::Aborted(*abort));
+                        }
+                        Some(FlowSolveOutcome::NoValue(no_value)) => {
+                            self.abort_inline_flight(inline_flight.as_ref());
+                            self.fold_cache_read_rails(true, true, NO_VALUE_REASON_CLASS);
+                            return FlowFramePop::Provisional(FlowReturnStep::NoValue(
+                                no_value.failure,
+                            ));
+                        }
+                        _ => {}
+                    }
                     self.dispatch_txn
                         .borrow_mut()
                         .flow
@@ -4913,7 +4983,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 // machinery root's twin arm takes — a
                                 // milder class on one of two twins is a
                                 // fail-closed asymmetry, not a saving.
-                                Some(FlowSolveOutcome::NoValue(_)) => NO_VALUE_REASON_CLASS,
+                                Some(FlowSolveOutcome::Aborted(_))
+                                | Some(FlowSolveOutcome::NoValue(_)) => NO_VALUE_REASON_CLASS,
                                 // Handled by the arm above.
                                 Some(FlowSolveOutcome::Complete(_)) => unreachable!(),
                             };
@@ -6199,6 +6270,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .load(std::sync::atomic::Ordering::Relaxed)
         {
             executed_walk.aborted = true;
+            executed_walk.local_aborted = true;
         }
         // The evaluation's execution witness: what THIS run actually did —
         // the walk-ledger-gated executed selection, the frame identity to
@@ -6217,6 +6289,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             None
         } else {
             frame_product_evidence
+        };
+        let contributors = if executed_walk.local_aborted && contributors.is_ok() {
+            Err(FlowReturnFailure::Unresolved)
+        } else {
+            contributors
         };
         let witness = FlowExecutionWitness {
             executed_selection: executed_walk.completed_selection(planned.selection()),
@@ -10698,6 +10775,9 @@ struct ExecutedSliceWalk {
     statements_executed: u32,
     /// An abortive exit truncated the walk.
     aborted: bool,
+    /// This value's own walk was truncated. A nested function's refused proof
+    /// can instead be represented by a positional unresolved return marker.
+    local_aborted: bool,
 }
 
 impl ExecutedSliceWalk {
@@ -22105,7 +22185,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                             self.executed_walk.regions_completed =
                                 self.executed_walk.regions_completed.saturating_add(1);
                         }
-                        Err(_) => self.executed_walk.aborted = true,
+                        Err(_) => {
+                            self.executed_walk.aborted = true;
+                            self.executed_walk.local_aborted = true;
+                        }
                     }
                     let finished = run.frames.pop().expect("the region evaluated");
                     let Some(enclosing) = run.frames.last_mut() else {
@@ -26544,7 +26627,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                             // Re-raising it here is what made one helper's
                             // unmodelled control surface delete the whole
                             // caller's surface.
-                            FlowReturnStep::NoValue(_) => Positional::Unmodeled,
+                            FlowReturnStep::Aborted(_) | FlowReturnStep::NoValue(_) => {
+                                Positional::Unmodeled
+                            }
                         }
                     }
                     source => match self
@@ -26569,6 +26654,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         super::flow_return::FunctionReturnNode::DeclaredMiss
                         | super::flow_return::FunctionReturnNode::Absent => Positional::Unmodeled,
                         super::flow_return::FunctionReturnNode::Flow(_)
+                        | super::flow_return::FunctionReturnNode::Aborted(_)
                         | super::flow_return::FunctionReturnNode::NoValue(_) => {
                             unreachable!("a Declared/Absent source never reaches the flow rail")
                         }
@@ -26712,7 +26798,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     FlowReturnStep::Complete(_) => {
                         unreachable!("a same-slot recursive edge is always a hold in flight")
                     }
-                    FlowReturnStep::NoValue(_) => Positional::Unmodeled,
+                    FlowReturnStep::Aborted(_) | FlowReturnStep::NoValue(_) => {
+                        Positional::Unmodeled
+                    }
                 }
             }
             verter_session_query::flow::slice::SliceCall::OnHeritage {

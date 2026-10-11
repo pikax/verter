@@ -94,6 +94,54 @@ impl<T> QueryBuildOutput<T> {
     }
 }
 
+impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispatch<'_, C> {
+    /// Read the fact demanded by `key`, including its own availability.
+    ///
+    /// The read's status travels with its value on cold, warm and joined
+    /// paths. An unrelated enclosing observation cannot change this fact.
+    /// Dependency evidence still follows the shared read boundary.
+    pub fn execute_fact(
+        &self,
+        key: SemanticQueryKey,
+    ) -> Result<FactResult<crate::semantic_query::SemanticQueryValue>, ExecutionAbort> {
+        self.record_dispatch_intent_counters(&key);
+        let read = self.execute_via_cold_build_helper(key.clone());
+        let observed = if read.result_is_partial {
+            ResultCompleteness::partial(read.partial_reason_classes())
+        } else {
+            ResultCompleteness::Complete
+        };
+        if let Some(abort) = ExecutionAbort::observed_in(observed) {
+            return Err(abort);
+        }
+        match read.value {
+            QueryResult::Value(crate::semantic_query::SemanticQueryValue::BroadRuntime(value)) => {
+                Ok(value
+                    .into_fact()
+                    .map(crate::semantic_query::SemanticQueryValue::BroadRuntime))
+            }
+            QueryResult::Value(value) => projection_fact(&key, Some(value), observed),
+            QueryResult::Recursive(_) => {
+                let own = NonEmptyReasons::of(PartialReason::SamePathRecursion);
+                let causes = NonEmptyReasons::new(observed.reasons())
+                    .map_or(own, |observed| own.union(observed));
+                Ok(FactResult::unavailable(causes))
+            }
+            QueryResult::Error(error) => {
+                let own = NonEmptyReasons::from_query_error(&error);
+                let causes = NonEmptyReasons::new(observed.reasons())
+                    .map_or(own, |observed| own.union(observed));
+                if let Some(abort) =
+                    ExecutionAbort::observed_in(ResultCompleteness::partial(causes.get()))
+                {
+                    return Err(abort);
+                }
+                Ok(FactResult::unavailable(causes))
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 #[path = "projection_fact_tests.rs"]
 mod projection_fact_tests;

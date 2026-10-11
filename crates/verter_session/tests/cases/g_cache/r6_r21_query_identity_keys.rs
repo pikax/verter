@@ -181,7 +181,7 @@ fn key_shape_predicate_discriminates() {
 /// never a key field.
 #[test]
 fn component_meta_result_key_carries_split_env_and_no_content_hash() {
-    let source = read_file("crates/verter_session/src/component_meta_result_db.rs");
+    let source = read_file("crates/verter_type_engine/src/component_meta_result_db.rs");
     let body = extract_brace_block(&source, "pub struct ComponentMetaResultKey {").expect(
         "R6/R21 GUARD: could not locate `pub struct ComponentMetaResultKey` body in \
          component_meta_result_db.rs",

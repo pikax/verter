@@ -219,6 +219,20 @@ pub const fn classify_query_error(err: &QueryError) -> QueryErrorClass {
             QueryErrorDisposition::Partial,
             ClosedLiteralDomainUnresolvedReason::BudgetExceeded,
         ),
+        QueryError::ExecutionAborted(abort) => (
+            QueryErrorDisposition::Partial,
+            match abort {
+                crate::semantic_query::ExecutionAbort::Cancelled => {
+                    ClosedLiteralDomainUnresolvedReason::Cancelled
+                }
+                crate::semantic_query::ExecutionAbort::Superseded => {
+                    ClosedLiteralDomainUnresolvedReason::RevisionMismatch
+                }
+                crate::semantic_query::ExecutionAbort::Shutdown => {
+                    ClosedLiteralDomainUnresolvedReason::Fault
+                }
+            },
+        ),
         QueryError::Cancelled => (
             QueryErrorDisposition::Partial,
             ClosedLiteralDomainUnresolvedReason::Cancelled,

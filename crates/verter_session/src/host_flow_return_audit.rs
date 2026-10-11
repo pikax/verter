@@ -55,10 +55,13 @@ use verter_type_engine::semantic_query::{
 
 /// Typed `Err` arm of the flow-return [`AuditedResult`] carrier —
 /// genuine NO-VALUE outcomes only. A degraded-but-usable result is NOT
-/// an error: it rides the `Ok` arm as a [`FlowReturnResult`] with
+/// an error: it rides the `Ok` arm as a [`FlowReturnResult`] whose
+/// [`FlowReturnResult::fact`] states Complete or Approximate, with
 /// `degradation: Some(_)` (the split result/carrier contract).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FlowReturnError {
+    /// Evaluated evidence was superseded, torn, or the execution shut down.
+    Aborted(verter_type_engine::semantic_query::ExecutionAbort),
     /// The evaluation produced no value — the typed
     /// [`FlowReturnFailure`] class (missing function, unsupported
     /// control surface, torn state, empty recursive cycle, unmodeled
@@ -139,6 +142,14 @@ impl VerterHost {
             #[cfg(feature = "test-support")]
             verter_type_engine::cancel_trace::mark("evaluated");
             match step {
+                verter_type_engine::semantic_query::FlowReturnStep::Aborted(abort) => {
+                    Err(match abort {
+                        verter_type_engine::semantic_query::ExecutionAbort::Cancelled => {
+                            FlowReturnError::Cancelled
+                        }
+                        other => FlowReturnError::Aborted(other),
+                    })
+                }
                 verter_type_engine::semantic_query::FlowReturnStep::Complete(result) => {
                     Ok(Arc::new(if partial {
                         result.with_partial_interior()
@@ -385,11 +396,20 @@ fn observed_partiality(
     match outcome {
         Ok(result) => result
             .degradation()
-            .map(|reason| FlowPartialityTag::Degraded(degradation_tag(reason))),
+            .map(|reason| FlowPartialityTag::Degraded(degradation_tag(reason)))
+            .or_else(|| {
+                matches!(
+                    result.fact(),
+                    verter_type_engine::semantic_query::FactResult::Approximate { .. }
+                )
+                .then_some(FlowPartialityTag::Degraded(
+                    FlowDegradationTag::PartialInterior,
+                ))
+            }),
         Err(FlowReturnError::Failure(failure)) => {
             Some(FlowPartialityTag::NoValue(failure_tag(*failure)))
         }
-        Err(FlowReturnError::UnstableState { .. }) => {
+        Err(FlowReturnError::Aborted(_)) | Err(FlowReturnError::UnstableState { .. }) => {
             Some(FlowPartialityTag::NoValue(FlowFailureTag::UnstableState))
         }
         Err(FlowReturnError::Cancelled) => {

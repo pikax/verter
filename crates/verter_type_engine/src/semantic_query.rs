@@ -89,7 +89,9 @@ pub use intersection_input::{
 pub mod fact_result;
 #[cfg(test)]
 mod fact_result_tests;
-pub use fact_result::{ExecutionAbort, FactResult, FactStatus, MemberDomain};
+pub use fact_result::{
+    root_narrowing_fact, summarize, ExecutionAbort, FactResult, FactStatus, MemberDomain,
+};
 pub mod outcome;
 pub mod stable_key;
 #[cfg(test)]
@@ -1980,6 +1982,8 @@ pub enum FlowReturnUnsupported {
 /// the obligation runtime's caller-return shape, never a cache value.
 #[derive(Debug, Clone)]
 pub enum FlowReturnStep {
+    /// Execution evidence is invalid. No evaluated value may escape.
+    Aborted(ExecutionAbort),
     /// Complete evaluation: the admitted result.
     #[allow(dead_code)] // the caller-return payload; consumed by the sealed helper
     Complete(FlowReturnResult),
@@ -5594,6 +5598,8 @@ pub struct SemanticGraphStats {
 /// semantic node in the result.
 #[derive(Debug, Clone)]
 pub enum QueryError {
+    /// Execution validity refused delivery, independently of semantic quality.
+    ExecutionAborted(ExecutionAbort),
     /// No cache entry and no cold build succeeded.
     Miss,
     /// A declaration resolved to `= intrinsic` but the active TS SDK advertises
@@ -5756,6 +5762,7 @@ impl QueryError {
             QueryError::Miss
             | QueryError::UnsupportedIntrinsic { .. }
             | QueryError::BudgetExceeded(_)
+            | QueryError::ExecutionAborted(_)
             | QueryError::Cancelled
             | QueryError::UnstableState { .. }
             | QueryError::ForeignSemanticOperand
@@ -5829,6 +5836,7 @@ impl QueryError {
 impl PartialEq for QueryError {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
+            (Self::ExecutionAborted(a), Self::ExecutionAborted(b)) => a == b,
             (Self::Miss, Self::Miss) => true,
             (Self::UnsupportedIntrinsic { name: a }, Self::UnsupportedIntrinsic { name: b }) => {
                 a == b
@@ -5910,6 +5918,7 @@ impl QueryError {
     /// are stable (never renumbered): a new variant takes the next free tag.
     fn tag(&self) -> u8 {
         match self {
+            Self::ExecutionAborted(_) => 23,
             Self::Miss => 0,
             Self::UnsupportedIntrinsic { .. } => 1,
             Self::BudgetExceeded(_) => 2,
@@ -5942,6 +5951,7 @@ impl std::hash::Hash for QueryError {
         // hashes tag-only because its payload is an opaque carrier.
         self.tag().hash(state);
         match self {
+            Self::ExecutionAborted(abort) => abort.hash(state),
             Self::UnsupportedIntrinsic { name } => {
                 name.hash(state);
             }
@@ -6034,6 +6044,28 @@ pub enum QueryResult<T> {
     Value(T),
     Recursive(SemanticNodeId),
     Error(QueryError),
+}
+
+/// Apply an execution abort without renaming a typed cancellation.
+///
+/// [`QueryError::Cancelled`] is the query protocol's cancellation. Replacing
+/// it with [`QueryError::ExecutionAborted`] changes the result callers match.
+/// Every other result yields to the abort, so a superseded or shut-down
+/// evaluation cannot be delivered as a value.
+pub(crate) fn result_under_execution_abort<T>(
+    result: QueryResult<T>,
+    abort: ExecutionAbort,
+) -> QueryResult<T> {
+    if matches!(
+        (&result, abort),
+        (
+            QueryResult::Error(QueryError::Cancelled),
+            ExecutionAbort::Cancelled
+        )
+    ) {
+        return result;
+    }
+    QueryResult::Error(QueryError::ExecutionAborted(abort))
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -6221,6 +6253,7 @@ impl BroadRuntimeKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BroadRuntimeClassification {
     kinds: Arc<[BroadRuntimeKind]>,
+    status: FactStatus,
 }
 
 impl BroadRuntimeClassification {
@@ -6237,6 +6270,25 @@ impl BroadRuntimeClassification {
         }
         Self {
             kinds: Arc::from(ordered.into_boxed_slice()),
+            status: FactStatus::Complete,
+        }
+    }
+
+    /// A classifier that could not determine its demanded member's kinds.
+    pub(crate) fn unavailable(causes: surface_resolution::NonEmptyReasons) -> Self {
+        Self {
+            kinds: Arc::from([BroadRuntimeKind::Unknown]),
+            status: FactStatus::Unavailable(causes),
+        }
+    }
+
+    /// The producer's member-local guarantee, independent of an ancestor's
+    /// non-admission. Unknown can itself be an exact classification.
+    pub fn into_fact(self) -> FactResult<Self> {
+        match self.status {
+            FactStatus::Complete => FactResult::complete(self),
+            FactStatus::Approximate(causes) => FactResult::approximate(self, causes),
+            FactStatus::Unavailable(causes) => FactResult::unavailable(causes),
         }
     }
 
@@ -10871,6 +10923,7 @@ mod tests {
         // ADD NEW VARIANTS HERE when extending `QueryError` (the sibling
         // classification fixture in `raise_sentinel.rs` carries the same nudge).
         let variants: Vec<QueryError> = vec![
+            QueryError::ExecutionAborted(ExecutionAbort::Cancelled),
             QueryError::Miss,
             QueryError::UnsupportedIntrinsic {
                 name: Arc::from("I"),

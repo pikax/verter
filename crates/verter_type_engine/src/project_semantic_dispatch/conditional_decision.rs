@@ -666,7 +666,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let read = self.execute_read(key);
         let mut output = super::walk::QueryBuildOutput::from((read.value, read.dep_signature));
         output.cache_suppress = read.cache_suppress;
-        output.set_partial(read.result_is_partial);
+        output.fold_partial(read.result_is_partial);
         output.add_partial_reasons(read.partial_reasons);
         output
     }

@@ -40,6 +40,7 @@ pub(in crate::project_semantic_dispatch) fn query_error_is_unmaterialized_sentin
         | QueryError::BudgetExceeded(_)
         | QueryError::StaleSemanticOperand
         | QueryError::IncompleteSemanticOperand { .. }
+        | QueryError::ExecutionAborted(_)
         | QueryError::Cancelled
         | QueryError::UnstableState { .. }
         | QueryError::AliasCycle { .. }
@@ -97,6 +98,7 @@ pub(in crate::project_semantic_dispatch) fn query_error_is_object_surface_sentin
         | QueryError::ForeignSemanticOperand
         | QueryError::StaleSemanticOperand
         | QueryError::IncompleteSemanticOperand { .. }
+        | QueryError::ExecutionAborted(_)
         | QueryError::Cancelled
         | QueryError::UnstableState { .. }
         | QueryError::AliasCycle { .. }
@@ -134,6 +136,7 @@ pub(in crate::project_semantic_dispatch) fn query_error_is_semantic_miss_sentine
         | QueryError::ForeignSemanticOperand
         | QueryError::StaleSemanticOperand
         | QueryError::IncompleteSemanticOperand { .. }
+        | QueryError::ExecutionAborted(_)
         | QueryError::Cancelled
         | QueryError::UnstableState { .. }
         | QueryError::AliasCycle { .. }
@@ -370,7 +373,7 @@ mod tests {
     use crate::semantic_query::compat_spelling::{
         semantic_query_error_raw, SEMANTIC_MISS, SEMANTIC_OBJECT_SURFACE,
     };
-    use crate::semantic_query::SemanticQueryValueTag;
+    use crate::semantic_query::{ExecutionAbort, SemanticQueryValueTag};
     use verter_session_query::inputs::budget::{BudgetDomain, BudgetExceededFailure};
 
     /// Every `QueryError` variant, so the classification pins cannot silently
@@ -380,6 +383,7 @@ mod tests {
     /// sibling hash-tag fixture in `semantic_query.rs` carries the same nudge).
     fn all_query_error_variants() -> Vec<QueryError> {
         vec![
+            QueryError::ExecutionAborted(ExecutionAbort::Cancelled),
             QueryError::Miss,
             QueryError::Cancelled,
             QueryError::UnsupportedIntrinsic {
@@ -463,6 +467,7 @@ mod tests {
                     | QueryError::BudgetExceeded(_)
                     | QueryError::StaleSemanticOperand
                     | QueryError::IncompleteSemanticOperand { .. }
+                    | QueryError::ExecutionAborted(_)
                     | QueryError::Cancelled
                     | QueryError::UnstableState { .. }
                     | QueryError::AliasCycle { .. }

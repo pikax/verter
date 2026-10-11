@@ -541,6 +541,10 @@ pub static VERTER_SESSION_PUB_SURFACE_SNAPSHOT: &[&str] = &[
         "pub mod component_meta_audit",
         // verter_napi::meta
         "pub mod component_meta_host",
+        // Session facade delivery. `get_component_meta` and the host batch
+        // return this type so a caller can tell a complete fact from a
+        // retained refusal without reaching into the module.
+        "pub use component_meta_delivery::ComponentMetaDelivery",
         // host_audit_runtime — owns the AuditRecordsStore + AuditConfig
         // snapshot + active-request registry. Public so integration
         // tests can call `host.host_audit_runtime().snapshot()` and

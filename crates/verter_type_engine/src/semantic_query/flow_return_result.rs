@@ -55,6 +55,8 @@ use verter_session_query::{flow::completion::NormalCompletion, transports_comple
 /// their own mode.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FlowReturnResult {
+    /// Quality of the reads supporting this independently valid evaluation.
+    observed_completeness: super::ResultCompleteness,
     /// The whole-function return type (widened join of every contributor).
     ///
     /// PRIVATE for the same reason as [`Self::degradation`]: the
@@ -219,6 +221,7 @@ impl FlowReturnResult {
                 .then_some(FlowReturnDegradation::UnresolvedValue)
         });
         Self {
+            observed_completeness: super::ResultCompleteness::Complete,
             return_type,
             can_fall_through,
             degradation,
@@ -226,6 +229,37 @@ impl FlowReturnResult {
             facet: FunctionKindFacet::None,
             checker_diagnostics: std::sync::Arc::from([]),
         }
+    }
+
+    /// Explicit producer availability. An approximation retains the evaluated
+    /// return, including unresolved positions and explanatory causes.
+    pub fn fact(&self) -> super::FactResult<&Self> {
+        if matches!(
+            self.observed_completeness,
+            super::ResultCompleteness::Complete
+        ) && self.degradation.is_none()
+        {
+            return super::FactResult::complete(self);
+        }
+        let mut causes = self.observed_completeness.reasons();
+        if let Some(degradation) = self.degradation {
+            causes = causes.union(
+                crate::project_semantic_dispatch::flow_return::degradation_reason(degradation)
+                    .bit(),
+            );
+        }
+        let causes = super::surface_resolution::NonEmptyReasons::new(causes).unwrap_or_else(|| {
+            super::surface_resolution::NonEmptyReasons::of(super::PartialReason::SemanticQueryFault)
+        });
+        super::FactResult::approximate(self, causes)
+    }
+
+    pub(crate) fn with_observed_completeness(
+        mut self,
+        observed: super::ResultCompleteness,
+    ) -> Self {
+        self.observed_completeness = self.observed_completeness.merge(observed);
+        self
     }
 
     /// The diagnostics riding with the value (see the field).
@@ -349,6 +383,7 @@ impl FlowReturnResult {
             &self.fresh_literal_arms,
         );
         Self {
+            observed_completeness: self.observed_completeness,
             facet: self.facet,
             checker_diagnostics: std::sync::Arc::clone(&self.checker_diagnostics),
             ..rebuilt

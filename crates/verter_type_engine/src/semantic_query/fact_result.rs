@@ -216,6 +216,40 @@ impl<T> FactResult<T> {
     }
 }
 
+impl FactResult<()> {
+    /// This demand's result from the reasons that are its own inputs.
+    ///
+    /// An empty input set is a complete answer. Callers pass only the
+    /// reasons this demand reads; reasons that belong to another demand
+    /// are omitted by the caller and are not stripped here.
+    #[must_use = "the demand fact is the answer for this lane"]
+    pub fn from_demand_inputs(inputs: PartialReasonSet) -> Self {
+        match NonEmptyReasons::new(inputs) {
+            Some(causes) => Self::unavailable(causes),
+            None => Self::complete(()),
+        }
+    }
+}
+
+/// A root-narrowing or exhaustive negative claim.
+///
+/// Exact only when the domain is exact and every value or effect fact the
+/// inference requires is complete. A presence-only or unavailable input
+/// refuses the claim; it does not borrow a sibling's status.
+#[must_use = "the narrowing fact is the claim; a refused input is not a sibling status"]
+pub fn root_narrowing_fact(domain: &FactStatus, required: &[FactStatus]) -> FactResult<()> {
+    if domain.is_complete() && required.iter().all(|status| status.is_complete()) {
+        return FactResult::complete(());
+    }
+    let mut inputs = PartialReasonSet::empty();
+    for status in std::iter::once(domain).chain(required) {
+        if let FactStatus::Approximate(causes) | FactStatus::Unavailable(causes) = status {
+            inputs = inputs.union(causes.get());
+        }
+    }
+    FactResult::from_demand_inputs(inputs)
+}
+
 impl FactStatus {
     /// Whether the fact is exact.
     #[must_use]
@@ -288,7 +322,7 @@ pub enum MemberDomain<T> {
 /// Not a fact status: an aborted computation's partial work is discarded,
 /// and whoever demanded it retries or gives up. It never reaches a cache or
 /// an output as an approximation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ExecutionAbort {
     /// The request was cancelled.
     Cancelled,
@@ -300,6 +334,26 @@ pub enum ExecutionAbort {
 }
 
 impl ExecutionAbort {
+    /// Explanatory compatibility class; never an execution-validity proof.
+    pub fn reason_class(self) -> PartialReasonSet {
+        match self {
+            Self::Cancelled => PartialReasonSet::CANCELLED,
+            Self::Superseded => PartialReasonSet::SUPERSEDED_GENERATION,
+            Self::Shutdown => PartialReasonSet::SEMANTIC_QUERY_FAULT,
+        }
+    }
+    /// Execution failures carried by the query protocol. Compatibility causes
+    /// do not participate: a proof refusal can explain an independently valid value.
+    pub fn from_query_error(error: &super::QueryError) -> Option<Self> {
+        match error {
+            super::QueryError::ExecutionAborted(abort) => Some(*abort),
+            super::QueryError::Cancelled => Some(Self::Cancelled),
+            super::QueryError::UnstableState { .. }
+            | super::QueryError::StaleSemanticOperand
+            | super::QueryError::ForeignSemanticOperand => Some(Self::Superseded),
+            _ => None,
+        }
+    }
     /// Whether the view the computation read was superseded (a newer view
     /// answers the same request), as opposed to the request being cancelled
     /// or the host shutting down.
@@ -312,9 +366,8 @@ impl ExecutionAbort {
     /// completeness: a cancelled read, or a read of a superseded or torn
     /// view. Such a computation publishes nothing.
     ///
-    /// A bridge: cancellation and supersession still travel through the
-    /// accumulator as reason classes until they get their own channel, and
-    /// this is the one place that reads them back as an abort.
+    /// Legacy non-flow projection bridge. Flow validity uses its originating
+    /// typed disposition and never classifies execution from this summary.
     #[must_use]
     pub fn observed_in(completeness: ResultCompleteness) -> Option<Self> {
         let reasons = completeness.reasons();

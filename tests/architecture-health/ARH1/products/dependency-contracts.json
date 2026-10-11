@@ -45,7 +45,7 @@
         "id": "ARH3",
         "kind": "node"
       },
-      "obligation": "the semantic_query narrowing lands together with the recorded migration notes: the 299 consumer files on the bulk row move to the test-support re-export surface or a retained session-facing surface in the same change, and the 11 retained assoc items stay pub for the ffi/napi/wasm production consumers and the verter_session files that import only retained types; no unrecorded consumer may appear between ratification and the narrowing."
+      "obligation": "the semantic_query narrowing lands together with the recorded migration notes: the 302 consumer files on the bulk row move to the test-support re-export surface or a retained session-facing surface in the same change, and the 11 retained assoc items stay pub for the ffi/napi/wasm production consumers and the verter_session files that import only retained types; no unrecorded consumer may appear between ratification and the narrowing."
     },
     {
       "producer": {
@@ -927,7 +927,7 @@
               "mode": "sole"
             }
           ],
-          "note": "sole owner of the flow-return compute frame and the admission budget outcome; the once-per-content-version FunctionFlowGraph and FlowSliceIR stay owned by the verter_semantic flow substrate (flow_graph.rs/flow_ir.rs)"
+          "note": "sole owner of the flow-return compute frame and the admission budget outcome; the once-per-content-version FunctionFlowGraph and FlowSliceIR stay owned by the verter_semantic flow substrate (flow_graph.rs/flow_ir.rs). FlowReturnStep and FunctionReturnNode carry typed execution aborts to consumers; the request_context validity scope cannot discard an abort with an optional proof observation. FlowReturnResult::fact exposes independent producer availability through semantic_query. These interfaces reuse the recorded request_context, semantic_query and semantic_query_memo import directions."
         },
         {
           "module": "crates/verter_type_engine/src/project_semantic_dispatch/flow_products.rs",
@@ -1186,6 +1186,7 @@
           "crates/verter_session/src/component_meta_cached_result.rs",
           "crates/verter_session/src/component_meta_caches_tests.rs",
           "crates/verter_session/src/component_meta_canonical_reuse_tests.rs",
+          "crates/verter_session/src/component_meta_delivery.rs",
           "crates/verter_session/src/component_meta_flow_return_admission_tests.rs",
           "crates/verter_session/src/component_meta_host.rs",
           "crates/verter_session/src/component_meta_host_tests.rs",
@@ -1196,6 +1197,7 @@
           "crates/verter_session/src/component_meta_pick_omit_tests.rs",
           "crates/verter_session/src/component_meta_publication_demand_tests.rs",
           "crates/verter_session/src/component_meta_repo_first_pass_diagnosis_tests.rs",
+          "crates/verter_session/src/component_meta_result_db.rs",
           "crates/verter_session/src/component_meta_resolution_policy/core.rs",
           "crates/verter_session/src/component_meta_resolution_policy/cycle_guard.rs",
           "crates/verter_session/src/component_meta_resolution_policy/mod.rs",
@@ -1538,7 +1540,7 @@
           "crates/verter_wasm/src/lib.rs",
           "crates/verter_wasm/src/typeinfo.rs"
         ],
-        "ownerCratePopulation": "semantic_query lives in verter_type_engine, so every file outside the engine's src tree that names it through verter_type_engine paths is a cross-crate importer; the importers array is the complete cross-crate population (357 files: the verter_session sources, benches, examples and integration tests, plus the bench/ffi/napi/wasm/source-policy-gate files) and the verifier enforces it exactly in both directions; population re-derivation is ARH2's recorded obligation",
+        "ownerCratePopulation": "semantic_query lives in verter_type_engine, so every file outside the engine's src tree that names it through verter_type_engine paths is a cross-crate importer; the importers array is the complete cross-crate population (359 files: the verter_session sources, benches, examples and integration tests, plus the bench/ffi/napi/wasm/source-policy-gate files) and the verifier enforces it exactly in both directions; population re-derivation is ARH2's recorded obligation",
         "internalNote": [
           "locator_identity",
           "project_semantic_dispatch",
@@ -1608,6 +1610,7 @@
               "crates/verter_session/src/component_meta_audit/mod.rs",
               "crates/verter_session/src/component_meta_cache_discipline_tests.rs",
               "crates/verter_session/src/component_meta_caches_tests.rs",
+              "crates/verter_session/src/component_meta_delivery.rs",
               "crates/verter_session/src/component_meta_flow_return_admission_tests.rs",
               "crates/verter_session/src/component_meta_host.rs",
               "crates/verter_session/src/component_meta_indexed_access_early_out_tests.rs",
@@ -1616,6 +1619,7 @@
               "crates/verter_session/src/component_meta_pick_omit_tests.rs",
               "crates/verter_session/src/component_meta_publication_demand_tests.rs",
               "crates/verter_session/src/component_meta_repo_first_pass_diagnosis_tests.rs",
+              "crates/verter_session/src/component_meta_result_db.rs",
               "crates/verter_session/src/component_meta_resolution_policy/core.rs",
               "crates/verter_session/src/component_meta_resolution_policy/cycle_guard.rs",
               "crates/verter_session/src/component_meta_resolution_policy/mod.rs",
@@ -1674,6 +1678,7 @@
               "crates/verter_session/src/meta_resolve/projectors/published_reducer.rs",
               "crates/verter_session/src/meta_resolve/projectors/published_source.rs",
               "crates/verter_session/src/meta_resolve/projectors/slots.rs",
+              "crates/verter_session/src/meta_resolve/resolved_state.rs",
               "crates/verter_session/src/meta_resolve/scoring.rs",
               "crates/verter_session/src/meta_resolve/slot_binding_graph.rs",
               "crates/verter_session/src/meta_resolve/slot_binding_graph_carrier_tests.rs",
@@ -1903,7 +1908,7 @@
               "crates/verter_session/tests/cases/typeinfo_ignored_test_manifest.rs",
               "crates/verter_type_engine/tests/allocation_cases/flow_literal_provenance.rs"
             ],
-            "note": "the cross-crate population outside verter_session imports only the retained ten types; retaining a type alone does not retain its methods, so PartialReasonSet::{empty,is_empty,iter,PROPAGATED,SEMANTIC_QUERY_FAULT}, ResultCompleteness::partial and ScopeId::file stay pub for the ffi/napi/wasm production consumers, and PartialReasonSet::{contains,CONNECTED_MEMORY_LIMIT,UNDECIDED_CONDITIONAL} and ResultCompleteness::is_partial stay pub for the verter_session files that import only retained types; the 299 recorded consumer files each import at least one narrowed name (the verter_session sources reach the engine across the crate boundary, and its integration tests, benches and examples compile as separate crates); the test files migrate to the existing for_tests test-support surface pattern in the same change as the narrowing, and the verter_session production sources need a retained session-facing surface rather than pub(crate)"
+            "note": "the cross-crate population outside verter_session imports only the retained ten types; retaining a type alone does not retain its methods, so PartialReasonSet::{empty,is_empty,iter,PROPAGATED,SEMANTIC_QUERY_FAULT}, ResultCompleteness::partial and ScopeId::file stay pub for the ffi/napi/wasm production consumers, and PartialReasonSet::{contains,CONNECTED_MEMORY_LIMIT,UNDECIDED_CONDITIONAL} and ResultCompleteness::is_partial stay pub for the verter_session files that import only retained types; the 302 recorded consumer files each import at least one narrowed name (the verter_session sources reach the engine across the crate boundary, and its integration tests, benches and examples compile as separate crates); the test files migrate to the existing for_tests test-support surface pattern in the same change as the narrowing, and the verter_session production sources need a retained session-facing surface rather than pub(crate)"
           }
         ],
         "rationale": "one authority (semantic_query.rs) with the cross-crate surface cut to exactly the imported envelope types and their used assoc items; the inline pub mods stay pub inside the module",
