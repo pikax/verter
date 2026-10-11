@@ -37,6 +37,11 @@ pub mod dispatch_profile;
 pub mod process_stats;
 pub mod session;
 
+#[cfg(test)]
+mod observation_tests;
+#[cfg(test)]
+mod session_tests;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -538,11 +543,56 @@ fn observe(bytes: Result<&[u8], String>) -> Observation {
             }
         }
     };
-    let decoded = serde_json::from_slice::<serde_json::Value>(bytes)
+    // The JSON decoder can grow its stack, but TypeExpr's conversion and
+    // both trees' destructors recurse independently of serde. Reserve stack
+    // proportional to structural depth for the entire observation lifetime,
+    // including malformed-input cleanup. Strings do not contribute depth.
+    let mut depth = 0usize;
+    let mut max_depth = 0usize;
+    let mut quoted = false;
+    let mut escaped = false;
+    for &byte in bytes {
+        if quoted {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                quoted = false;
+            }
+        } else {
+            match byte {
+                b'"' => quoted = true,
+                b'{' | b'[' => {
+                    depth += 1;
+                    max_depth = max_depth.max(depth);
+                }
+                b'}' | b']' => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+        }
+    }
+    let Some(stack_bytes) = max_depth
+        .checked_mul(32 * 1024)
+        .and_then(|n| n.checked_add(512 * 1024))
+    else {
+        return Observation {
+            error: Some("decode the answer: stack size overflow".into()),
+            ..Observation::empty()
+        };
+    };
+    stacker::grow(stack_bytes, || observe_on_stack(bytes))
+}
+
+fn observe_on_stack(bytes: &[u8]) -> Observation {
+    let mut decoder = serde_json::Deserializer::from_slice(bytes);
+    decoder.disable_recursion_limit();
+    let decoded = serde_json::Value::deserialize(serde_stacker::Deserializer::new(&mut decoder))
         .map_err(|err| err.to_string())
         .and_then(|value| {
-            let expr =
-                serde_json::from_value::<TypeExpr>(value.clone()).map_err(|err| err.to_string())?;
+            decoder.end().map_err(|err| err.to_string())?;
+            let expr = verter_type_expr::type_expr_from_json(&value)
+                .ok_or_else(|| "invalid TypeExpr".to_string())?;
             Ok((value, expr))
         });
     let (wire, expr) = match decoded {
