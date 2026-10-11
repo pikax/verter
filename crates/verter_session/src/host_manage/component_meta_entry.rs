@@ -114,13 +114,13 @@ fn run_warm_output_pre_evidence_hook() {
 /// silently drops every extract-phase partiality source (the pre-choke
 /// macro-DTO read, the fallthrough cold compute) and publishes a wire payload
 /// as complete that this same compute refused to warm.
-pub(super) struct ComponentMetaColdResult {
+pub(crate) struct ComponentMetaColdResult {
     /// The resolved state the analysis was extracted from.
-    pub(super) resolved: crate::meta_resolve::ResolvedComponentMetaState,
+    pub(crate) resolved: crate::meta_resolve::ResolvedComponentMetaState,
     /// The projected analysis.
-    pub(super) analysis: verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
+    pub(crate) analysis: verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
     /// The merged resolve + extract completeness.
-    pub(super) completeness: crate::meta_resolve::PublishedCompleteness,
+    pub(crate) completeness: crate::meta_resolve::PublishedCompleteness,
     /// The admitted final result, when the cold publish produced one — the
     /// basis for this build's output publication evidence.
     pub(super) admitted: Option<
@@ -139,7 +139,7 @@ pub(super) struct ComponentMetaColdResult {
 /// [`crate::resolver_store::StoreViewRead`] arm, so neither can describe
 /// a different snapshot than the one the cold compute ran under.
 #[derive(Debug, Clone, Copy)]
-pub(super) struct ColdSeedFence {
+pub(crate) struct ColdSeedFence {
     /// The validation token of the exact view the cold compute used.
     token: crate::resolver_store::StoreViewValidationToken,
     /// Whether the manager proved that view current. A non-current
@@ -151,7 +151,7 @@ impl ColdSeedFence {
     /// Assemble a fence from a token + currentness pair that provably came
     /// from ONE store-view read (entries derive the pair from a shared
     /// [`crate::resolver_store::BatchFixedView`] capture).
-    pub(super) fn new(
+    pub(crate) fn new(
         token: crate::resolver_store::StoreViewValidationToken,
         current: bool,
     ) -> Self {
@@ -305,9 +305,16 @@ impl VerterHost {
         let started = component_meta_debug_enabled().then(Instant::now);
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
 
-        // Try the final-result cache before installing a request
-        // view. A warm hit with a valid dep-signature returns with zero
-        // resolver work.
+        // The request exists before the probe. A retained refusal replays
+        // its request spend only when a request is at its entry state, and
+        // the per-request cache counters attribute the hit or miss to that
+        // request. Installing after the probe dropped both.
+        let _ctx_guard = self.install_request_budget_context_if_none(
+            self.next_request_id(),
+            canonical.as_str(),
+            false,
+        );
+
         if let Some(warm) = self.try_component_meta_cache_hit(canonical.as_str()) {
             if let Some(started) = started {
                 component_meta_debug(format!(
@@ -318,12 +325,6 @@ impl VerterHost {
             }
             return Ok(Some(warm));
         }
-
-        let _ctx_guard = self.install_request_budget_context_if_none(
-            self.next_request_id(),
-            canonical.as_str(),
-            false,
-        );
 
         // Cold build through the SHARED pinned cold body
         // (`component_meta_via_view_cold`) with a base `HostViewRef` view
@@ -920,7 +921,7 @@ impl VerterHost {
     /// here would open its own store view and could pair a fresh-view
     /// analysis with the capture-bound extraction/materialization context
     /// (the torn-result race).
-    fn component_meta_via_view_cold(
+    pub(crate) fn component_meta_via_view_cold(
         &self,
         canonical: &str,
         view: &dyn crate::session_view::SessionView,
@@ -982,6 +983,7 @@ impl VerterHost {
                     );
                 };
                 let final_completeness = resolved.completeness.merge(*extract_completeness);
+                let admission = dispatch.component_meta_admission_proof(&refusal_query);
                 self.component_meta_publish_decision_with_view(
                     canonical,
                     view,
@@ -991,6 +993,7 @@ impl VerterHost {
                     seed_fence,
                     final_completeness,
                     &refusal_query,
+                    admission,
                 )
             },
         );
@@ -1012,6 +1015,14 @@ impl VerterHost {
         {
             return Err(abort);
         }
+        // The caller-visible resolution carries the same merged status the
+        // refusal ledger sealed. Leaving the resolve-only completeness here
+        // made a replay report the extract's reasons and the first delivery
+        // report a narrower set.
+        let mut resolved = resolved;
+        let merged = completeness.get();
+        resolved.completeness = merged;
+        resolved.synthesis_should_suppress = merged.is_partial();
         Ok(Some(ComponentMetaColdResult {
             resolved,
             analysis: meta,
@@ -1065,9 +1076,10 @@ impl VerterHost {
         let mut query = dispatch.component_meta_refusal_query(canonical);
         if verter_type_engine::request_context::current_request_context().is_none() {
             let cap = self.config.projection_op_budget;
-            query.profile = if cap == 0 { 2000 } else { cap as u64 };
+            query.profile.request_operations = if cap == 0 { 2000 } else { cap };
             query.entry_allowance = 0;
             query.context = 0;
+            query.entered_isolated = true;
         }
         query
     }
@@ -1442,6 +1454,7 @@ impl VerterHost {
         seed_fence: &ColdSeedFence,
         final_completeness: verter_type_engine::semantic_query::ResultCompleteness,
         refusal_query: &crate::component_meta_result_db::ComponentMetaRefusalQuery,
+        admission: crate::component_meta_result_db::FinalComponentAdmissionProof,
     ) -> crate::component_meta_result_db::ComponentMetaPublishDecision<
         crate::component_meta_cached_result::CachedComponentMetaResult,
     > {
@@ -1452,13 +1465,14 @@ impl VerterHost {
         let refusal_class = if final_completeness.is_partial() {
             match crate::component_meta_result_db::classify_final_component_retention(
                 final_completeness,
-                refusal_query.entry_allowance == 0,
+                admission,
             ) {
                 crate::component_meta_result_db::FinalComponentRetention::Retain(class) => {
                     Some(class)
                 }
                 crate::component_meta_result_db::FinalComponentRetention::Complete
                 | crate::component_meta_result_db::FinalComponentRetention::NotAdmitted => {
+                    #[cfg(feature = "semantic-observe")]
                     tracing::debug!(
                         target: "verter::audit::record",
                         file = %canonical,
@@ -1547,6 +1561,7 @@ impl VerterHost {
         seed_fence: &ColdSeedFence,
         final_completeness: verter_type_engine::semantic_query::ResultCompleteness,
         refusal_query: &crate::component_meta_result_db::ComponentMetaRefusalQuery,
+        admission: crate::component_meta_result_db::FinalComponentAdmissionProof,
     ) -> crate::component_meta_result_db::ComponentMetaPublishDecision<
         crate::component_meta_cached_result::CachedComponentMetaResult,
     > {
@@ -1556,13 +1571,14 @@ impl VerterHost {
         let refusal_class = if final_completeness.is_partial() {
             match crate::component_meta_result_db::classify_final_component_retention(
                 final_completeness,
-                refusal_query.entry_allowance == 0,
+                admission,
             ) {
                 crate::component_meta_result_db::FinalComponentRetention::Retain(class) => {
                     Some(class)
                 }
                 crate::component_meta_result_db::FinalComponentRetention::Complete
                 | crate::component_meta_result_db::FinalComponentRetention::NotAdmitted => {
+                    #[cfg(feature = "semantic-observe")]
                     tracing::debug!(
                         target: "verter::audit::record",
                         file = %canonical,

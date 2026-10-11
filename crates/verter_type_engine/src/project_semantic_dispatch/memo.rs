@@ -10,6 +10,7 @@ use crate::fact_signature_helpers::ReadSetSignatureExt as _;
 use crate::resolver_core::fact_validation_port::{FactValidation, LiveFactValidation};
 use crate::resolver_core::resolver_context::{RequestFlags, RequestSnapshot};
 use dashmap::DashMap;
+use std::cell::RefCell;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
@@ -17,6 +18,34 @@ use std::sync::{
 use verter_session_query::declarations::metadata::ResolvedTypeDeclaration;
 use verter_session_query::facts::fact_cache::FactVersionRef;
 use verter_session_query::facts::fact_cache::ReadSetSignature;
+
+/// Accounting of the traced component-meta compute on this thread. The
+/// admission that follows the compute reads it; the next compute replaces it.
+struct ComponentMetaComputeAccounting {
+    effects: crate::component_meta_result_db::ComponentMetaRefusalEffects,
+    /// The compute's request spend is its own: the paid prefix held, or
+    /// there was no request to interleave with.
+    spent_alone: bool,
+}
+
+thread_local! {
+    static COMPONENT_META_ACCOUNTING: RefCell<ComponentMetaComputeAccounting> = RefCell::new(
+        ComponentMetaComputeAccounting {
+            effects: crate::component_meta_result_db::ComponentMetaRefusalEffects::default(),
+            spent_alone: false,
+        },
+    );
+}
+
+fn component_meta_accounting() -> ComponentMetaComputeAccounting {
+    COMPONENT_META_ACCOUNTING.with(|slot| {
+        let slot = slot.borrow();
+        ComponentMetaComputeAccounting {
+            effects: slot.effects.clone(),
+            spent_alone: slot.spent_alone,
+        }
+    })
+}
 
 /// Finalized evidence of one traced component computation. Only the engine
 /// can mint it; admission consumes it under its publication fence.
@@ -1327,31 +1356,85 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispat
 
     /// Axes of the demand that is asking to reuse a final-component refusal.
     ///
-    /// With a request context installed, the profile is the host cap (a zero
-    /// cap is the legacy 2000) and the allowance and context are the paid
-    /// set at entry. Without one, the profile is `0` and the session fills
-    /// the host cap before lookup: a stored fresh refusal used that cap,
-    /// not profile `0`.
+    /// The profile is every allowance the connected demand answers to,
+    /// including the request operation cap. `entry_allowance` is the
+    /// projection operations already spent, and `context` is the paid-set
+    /// digest. `entered_isolated` is true only for a fresh request: no
+    /// operations spent and an empty paid set. Without a request, the
+    /// operation cap is left at 0 so the session can fill the host cap;
+    /// the other profile axes still come from this demand's ledger.
     #[must_use]
     pub fn component_meta_refusal_query(
         &self,
         root: &str,
     ) -> crate::component_meta_result_db::ComponentMetaRefusalQuery {
-        if let Some(ctx) = crate::request_context::current_request_context() {
-            let entry = ctx.projection_budget.entry_state();
+        let request = crate::request_context::current_request_budget();
+        let profile = self.connected_demand().profile_spec(request.as_deref());
+        if let Some(budget) = request.as_deref() {
+            let entry = budget.entry_state();
             return crate::component_meta_result_db::ComponentMetaRefusalQuery {
                 root: Arc::from(root),
-                profile: ctx.projection_budget.effective_projection_op_budget() as u64,
-                entry_allowance: entry.paid_len() as u64,
+                profile,
+                entry_allowance: entry.operations() as u64,
                 context: entry.paid_digest(),
+                entered_isolated: entry.operations() == 0 && entry.paid_len() == 0,
             };
         }
         crate::component_meta_result_db::ComponentMetaRefusalQuery {
             root: Arc::from(root),
-            profile: 0,
+            profile,
             entry_allowance: 0,
             context: 0,
+            entered_isolated: true,
         }
+    }
+
+    /// Admission proof for the compute that just ran on this thread.
+    ///
+    /// The divergence certificate stays unset: a same-path recursion bit
+    /// is not, by itself, a certificate. A schedule cut and a spend that
+    /// was not this compute's alone both refuse isolated-root retention.
+    #[must_use]
+    pub fn component_meta_admission_proof(
+        &self,
+        query: &crate::component_meta_result_db::ComponentMetaRefusalQuery,
+    ) -> crate::component_meta_result_db::FinalComponentAdmissionProof {
+        let schedule_cut = self.connected_demand().was_schedule_cut();
+        let spent_alone = component_meta_accounting().spent_alone;
+        crate::component_meta_result_db::FinalComponentAdmissionProof {
+            divergence_certificate: false,
+            schedule_cut,
+            entered_isolated: query.entered_isolated && spent_alone && !schedule_cut,
+        }
+    }
+
+    /// Apply a sealed refusal's charges to this demand. Misses, changing
+    /// nothing, when a recorded request spend does not enter the request
+    /// that is asking.
+    fn replay_component_meta_refusal_effects(
+        &self,
+        effects: &crate::component_meta_result_db::ComponentMetaRefusalEffects,
+    ) -> bool {
+        let request = crate::request_context::current_request_budget();
+        match (request.as_deref(), effects.request.as_ref()) {
+            (Some(request), Some(spent)) => {
+                if !request.apply_refusal(spent) {
+                    return false;
+                }
+            }
+            (None, Some(_)) => return false,
+            (None, None) | (Some(_), None) => {}
+        }
+        if effects.work > 0 || effects.bytes > 0 || !effects.trip.is_empty() {
+            // The connected ledger only exists inside a demand. A terminal
+            // delivery (session replay on a fresh dispatch) has none; the
+            // request spend above is the charge that outlives this dispatch.
+            let demand = self.connected_demand();
+            if demand.is_active() {
+                demand.apply_refusal(effects.work, effects.bytes, effects.trip);
+            }
+        }
+        true
     }
 
     /// Read a retained refusal. A stale signature or generation misses and
@@ -1366,10 +1449,13 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispat
         if self.snapshot.flags().is_cancelled() || !db.is_current_schema() {
             return None;
         }
-        let retained = db.refusal_for(key, owner_whole_hash, query)?;
+        let (retained, effects) = db.refusal_for(key, owner_whole_hash, query)?;
         if retained.validated_at_generation != self.current_project_generation()
             || !self.validates_fact_signature(&retained.read_set_signature.facts)
         {
+            return None;
+        }
+        if !self.replay_component_meta_refusal_effects(&effects) {
             return None;
         }
         retained.read_set_signature.bubble(self.ctx);
@@ -1379,7 +1465,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispat
     /// Retain an eligible refusal under the same publication fence as a
     /// successful candidate. A complete status is not retained, and the
     /// success map is not written.
-    pub fn admit_component_meta_refusal<P: verter_session_query::retention::RetainedFootprint>(
+    pub fn admit_component_meta_refusal<
+        P: verter_session_query::retention::RetainedFootprint + Clone,
+    >(
         &self,
         db: &crate::component_meta_result_db::ComponentMetaResultDb<P>,
         key: crate::component_meta_result_db::ComponentMetaResultKey,
@@ -1437,6 +1525,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispat
             recovery,
             ReadSetSignature::new(facts),
             generation,
+            component_meta_accounting().effects,
         )
     }
 
@@ -1449,6 +1538,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispat
     ) -> (R, ComponentMetaTrace) {
         let generation = self.current_project_generation();
         let external_fingerprint = self.ctx.publication_input_fingerprint();
+        let request = crate::request_context::current_request_budget();
+        let entry_snapshot = request.as_ref().map(|budget| budget.capture_entry());
+        let (work_at_entry, bytes_at_entry) = self.connected_demand().charged();
+        let trip_at_entry = self.connected_demand().active_trip().unwrap_or_default();
         let (value, finalise) = self.traced_compute(|| {
             if let Some(hash) = self.ctx.authoritative_current_content_hash(owner_canonical) {
                 crate::resolver_core::resolver_context::observe_fan_out(
@@ -1459,6 +1552,24 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispat
                 );
             }
             compute()
+        });
+        let request_spent = match (request.as_ref(), entry_snapshot.as_ref()) {
+            (Some(budget), Some(snapshot)) => budget.observed_spend_since(snapshot),
+            _ => None,
+        };
+        let spent_alone = request_spent.is_some() || entry_snapshot.is_none();
+        let (work_now, bytes_now) = self.connected_demand().charged();
+        let trip_now = self.connected_demand().active_trip().unwrap_or_default();
+        COMPONENT_META_ACCOUNTING.with(|slot| {
+            *slot.borrow_mut() = ComponentMetaComputeAccounting {
+                effects: crate::component_meta_result_db::ComponentMetaRefusalEffects {
+                    request: request_spent,
+                    work: work_now.saturating_sub(work_at_entry),
+                    bytes: bytes_now.saturating_sub(bytes_at_entry),
+                    trip: trip_now.without(trip_at_entry),
+                },
+                spent_alone,
+            };
         });
         let trace = match finalise {
             verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(facts)

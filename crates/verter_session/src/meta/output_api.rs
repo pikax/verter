@@ -257,25 +257,14 @@ impl MetaSession {
             return Ok(Some(payload));
         }
 
-        // (2) Cold resolve pinned to the fixed view (FENCED promotion).
-        let Some((mut resolved, admission)) = ({
-            let (executor_view, captured_fp) = fixed.executor_fixed_view();
-            host.resolve_component_meta_with_view_and_fixed_admission(
-                canonical.as_str(),
-                verter_type_engine::semantic_query::ProjectionMode::Expanded,
-                view,
-                Some((executor_view, captured_fp, fixed.current_view().is_some())),
-            )
-        }) else {
-            return Ok(None);
-        };
-
-        // (3) Extraction context seeded from the SHARED batch cold-seed —
-        // no fresh per-item store-view read. Keep the session view attached:
-        // macro DTO extraction can replay an exact imported declaration whose
-        // canonical exists only in the overlay. The cold-seed carries the
-        // capture's currentness, so a non-current seed fails nested warm
-        // probes closed.
+        // (2) The traced cold body. It resolves, extracts, and admits an
+        // eligible refusal, so the first session caller seals the ledger
+        // the analysis entry would have sealed.
+        let validated_at_generation = host.project_type_store.current_project_generation();
+        let seed_fence = crate::host_manage::component_meta_entry::ColdSeedFence::new(
+            fixed.captured_validation_token(),
+            fixed.is_current(),
+        );
         let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
         let session_ctx = crate::resolver_core::SessionResolverContext::from_cold_seed(
             host,
@@ -286,31 +275,23 @@ impl MetaSession {
         let ctx: &dyn crate::resolver_core::HostRequestContext = &session_ctx;
         let dispatch =
             &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
-        let crate::host_manage::ComponentMetaExtractOutcome {
-            analysis,
-            fallthrough_fact_versions,
-            completeness: extract_completeness,
-        } = crate::host_manage::extract_component_meta_from_resolved_with_facts(
-            host,
-            canonical.as_str(),
-            &resolved,
-            ctx,
-            dispatch,
-        );
-        host.merge_extraction_facts_into_admitted_resolved_meta(
-            canonical.as_str(),
-            verter_type_engine::semantic_query::ProjectionMode::Expanded,
-            view.fingerprint(),
-            &mut resolved,
-            fallthrough_fact_versions.as_deref(),
-            admission.as_ref(),
-        );
-        // ONE merged admission signal: the resolve-phase completeness merged
-        // with the whole-extract scope (macro-DTO read + fallthrough compute).
-        let final_completeness = crate::meta_resolve::PublishedCompleteness::merged(
-            resolved.completeness,
-            extract_completeness,
-        );
+        let Some(cold) = host
+            .component_meta_via_view_cold(
+                canonical.as_str(),
+                view,
+                fixed,
+                ctx,
+                dispatch,
+                &seed_fence,
+                validated_at_generation,
+            )
+            .map_err(MetaError::Aborted)?
+        else {
+            return Ok(None);
+        };
+        let resolved = cold.resolved;
+        let analysis = cold.analysis;
+        let final_completeness = cold.completeness;
         #[cfg(test)]
         if let Some(map) = PAYLOAD_ITEM_COMPLETENESS_PROBE.lock().unwrap().as_mut() {
             map.insert(
@@ -390,7 +371,7 @@ impl MetaSession {
         // promotable (current + not externally superseded since capture).
         // Otherwise return the payload but do NOT warm the cache with a
         // result computed against a now-stale snapshot.
-        let mut facts = fallthrough_fact_versions.unwrap_or_else(|| resolved.fact_versions.clone());
+        let mut facts = resolved.fact_versions.clone();
         // Output-materialization dependencies join the ENCODED-payload
         // validation rail: an edit to any file the materialization observed
         // misses the warm payload read. A refused output read set refuses

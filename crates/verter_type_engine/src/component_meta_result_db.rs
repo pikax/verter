@@ -49,6 +49,8 @@ use verter_session_query::facts::fact_cache::ReadSetSignature;
 use verter_session_query::retention::RetentionCharge;
 
 use crate::bounded_query_retention::BoundedCandidateMap;
+use crate::project_semantic_dispatch::cost_receipt::BudgetProfileSpec;
+use crate::request_budget::RequestSpent;
 use crate::semantic_query::{FactStatus, PartialReason, PartialReasonSet, ResultCompleteness};
 
 /// How many final-component refusals the ledger keeps. The oldest is dropped
@@ -182,22 +184,34 @@ pub enum ComponentMetaRefusalClass {
 /// class. Certified divergence ignores profile. Every class keeps the entry
 /// allowance of the demand that sealed it: a different allowance is a
 /// different refusal. An isolated-root refusal also keeps profile.
+///
+/// `profile` is the full budget profile (work, bytes, depth, tail,
+/// request operations, relation comparisons, cost-model revision).
+/// `entry_allowance` is the projection operations already spent when the
+/// demand entered, not the paid-set size and not the operations still
+/// remaining. Remaining allowance is that pair: the cap lives in
+/// `profile.request_operations`, the spent count lives here.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ComponentMetaRefusalIdentity {
     pub class: ComponentMetaRefusalClass,
-    pub profile: u64,
+    pub profile: BudgetProfileSpec,
     pub root: Arc<str>,
     pub entry_allowance: u64,
     pub context: u64,
 }
 
 /// The axes of the demand asking to reuse a refusal.
+///
+/// `entered_isolated` is the entry shape (no operations spent and an
+/// empty paid set). It is not part of the identity. Depth isolation also
+/// requires the compute's own admission proof.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ComponentMetaRefusalQuery {
     pub root: Arc<str>,
-    pub profile: u64,
+    pub profile: BudgetProfileSpec,
     pub entry_allowance: u64,
     pub context: u64,
+    pub entered_isolated: bool,
 }
 
 impl ComponentMetaRefusalQuery {
@@ -224,7 +238,7 @@ pub fn refusal_identity_for(
     match class {
         ComponentMetaRefusalClass::CertifiedDivergence => ComponentMetaRefusalIdentity {
             class,
-            profile: 0,
+            profile: BudgetProfileSpec::ignored(),
             root: Arc::clone(&query.root),
             entry_allowance: query.entry_allowance,
             context: query.context,
@@ -252,27 +266,94 @@ pub enum FinalComponentRetention {
     NotAdmitted,
 }
 
-/// Classify `completeness` for the final component store.
+/// Proof that a final-component outcome is one of the retained classes.
 ///
-/// `entered_isolated` is true when this demand entered with an empty paid
-/// set. A depth refusal under an enclosing paid set is not an isolated-root
-/// ledger entry and is not retained.
+/// A same-path recursion bit is not a divergence certificate: the graph
+/// also records a cross-task wait cycle under that bit. Certified
+/// divergence requires `divergence_certificate`. A schedule cut is the
+/// wait cycle's accounting signal and admits nothing. `entered_isolated`
+/// is true only when the demand entered alone and its own spend was the
+/// request's spend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FinalComponentAdmissionProof {
+    pub divergence_certificate: bool,
+    pub schedule_cut: bool,
+    pub entered_isolated: bool,
+}
+
+impl FinalComponentAdmissionProof {
+    /// Depth may be an isolated root. No divergence certificate.
+    #[must_use]
+    pub const fn isolated(entered_isolated: bool) -> Self {
+        Self {
+            divergence_certificate: false,
+            schedule_cut: false,
+            entered_isolated,
+        }
+    }
+
+    /// A producer certificate with no schedule cut.
+    #[must_use]
+    pub const fn certified() -> Self {
+        Self {
+            divergence_certificate: true,
+            schedule_cut: false,
+            entered_isolated: false,
+        }
+    }
+}
+
+/// What a refused final-component compute did to the demand that ran it.
+/// Stored beside the refusal, not in its identity. A replay applies this
+/// before it delivers the recovery, and misses when the request is not at
+/// the entered state.
+#[derive(Debug, Clone)]
+pub(crate) struct ComponentMetaRefusalEffects {
+    pub(crate) request: Option<RequestSpent>,
+    pub(crate) work: usize,
+    pub(crate) bytes: usize,
+    pub(crate) trip: PartialReasonSet,
+}
+
+impl Default for ComponentMetaRefusalEffects {
+    fn default() -> Self {
+        Self {
+            request: None,
+            work: 0,
+            bytes: 0,
+            trip: PartialReasonSet::empty(),
+        }
+    }
+}
+
+/// Classify `completeness` for the final component store.
 ///
 /// [`PartialReason::Propagated`] is the boolean-bridge marker: a child
 /// partiality folded without a class of its own. It is not a second cause.
 /// A sole eligible class stays that class when the marker is also present.
 /// A set that contains only the marker stays unadmitted, and any real other
 /// reason (a missing input, an abort, a flow-return cause) still vetoes.
+///
+/// [`PartialReason::ConnectedMemoryLimit`] is context-dependent: it is not
+/// an operation-profile reason, and it vetoes retention even when a real
+/// operation reason is also present. [`PartialReason::SamePathRecursion`]
+/// is certified divergence only when `proof.divergence_certificate` is set
+/// and no schedule cut, operation, depth, or other reason is present.
+/// Without that certificate the recursion bit vetoes, including when it is
+/// the wait-cycle the graph records under the same bit.
 #[must_use]
 pub fn classify_final_component_retention(
     completeness: ResultCompleteness,
-    entered_isolated: bool,
+    proof: FinalComponentAdmissionProof,
 ) -> FinalComponentRetention {
     if !completeness.is_partial() {
         return FinalComponentRetention::Complete;
     }
+    if proof.schedule_cut {
+        return FinalComponentRetention::NotAdmitted;
+    }
     let mut operation = false;
-    let mut divergence = false;
+    let mut recursion = false;
     let mut depth = false;
     let mut other = false;
     for reason in completeness.reasons().iter() {
@@ -280,10 +361,10 @@ pub fn classify_final_component_retention(
             PartialReason::BudgetExceeded
             | PartialReason::OperationBudget
             | PartialReason::ProjectionWorkLimit
-            | PartialReason::ConnectedMemoryLimit
             | PartialReason::DeferredEvaluationLimit
             | PartialReason::StructuralFactDemandLimit => operation = true,
-            PartialReason::SamePathRecursion => divergence = true,
+            PartialReason::ConnectedMemoryLimit => other = true,
+            PartialReason::SamePathRecursion => recursion = true,
             PartialReason::ConnectedQueryDepthLimit => depth = true,
             // Spread marker only. See the function doc.
             PartialReason::Propagated => {}
@@ -300,16 +381,16 @@ pub fn classify_final_component_retention(
             | PartialReason::UndecidedConditional => other = true,
         }
     }
-    if other || (!operation && !divergence && !depth) {
-        return FinalComponentRetention::NotAdmitted;
-    }
-    if divergence && !operation && !depth {
+    if proof.divergence_certificate && !other && !operation && !depth {
         return FinalComponentRetention::Retain(ComponentMetaRefusalClass::CertifiedDivergence);
     }
-    if depth && entered_isolated && !divergence {
+    if other || recursion || (!operation && !depth) {
+        return FinalComponentRetention::NotAdmitted;
+    }
+    if depth && proof.entered_isolated && !operation {
         return FinalComponentRetention::Retain(ComponentMetaRefusalClass::IsolatedRoot);
     }
-    if operation && !divergence && !depth {
+    if operation && !depth {
         return FinalComponentRetention::Retain(ComponentMetaRefusalClass::OperationProfile);
     }
     FinalComponentRetention::NotAdmitted
@@ -324,15 +405,71 @@ pub fn final_component_refusal_status(reasons: PartialReasonSet) -> Option<FactS
 
 type RefusalSlot = (ComponentMetaResultKey, Hash16, ComponentMetaRefusalIdentity);
 
-struct SealedComponentMetaRefusal<P> {
-    status: FactStatus,
-    completeness: ResultCompleteness,
-    recovery: Arc<P>,
-    read_set_signature: ReadSetSignature,
-    validated_at_generation: u64,
+/// Recovery, signature, and the one retention charge. Every handle a
+/// caller extracts shares this allocation, so dropping the ledger entry
+/// does not release the bytes while a recovery or a signature is still
+/// held.
+#[derive(Debug)]
+struct SharedRefusal<P> {
+    recovery: P,
+    signature: ReadSetSignature,
     /// Drop releases the retention charge. The field is never read.
     #[allow(dead_code)]
     retention: Option<RetentionCharge>,
+}
+
+/// A recovery handle. Dereferences to the refused payload. Cloning keeps
+/// the retention charge alive.
+#[derive(Debug)]
+pub struct Charged<P> {
+    shared: Arc<SharedRefusal<P>>,
+}
+
+impl<P> Clone for Charged<P> {
+    fn clone(&self) -> Self {
+        Self {
+            shared: Arc::clone(&self.shared),
+        }
+    }
+}
+
+impl<P> std::ops::Deref for Charged<P> {
+    type Target = P;
+
+    fn deref(&self) -> &P {
+        &self.shared.recovery
+    }
+}
+
+/// A signature handle over the same allocation as [`Charged`]. Cloning
+/// keeps the retention charge alive. Dereferences to the read-set signature.
+#[derive(Debug)]
+pub struct ChargedSignature<P> {
+    shared: Arc<SharedRefusal<P>>,
+}
+
+impl<P> Clone for ChargedSignature<P> {
+    fn clone(&self) -> Self {
+        Self {
+            shared: Arc::clone(&self.shared),
+        }
+    }
+}
+
+impl<P> std::ops::Deref for ChargedSignature<P> {
+    type Target = ReadSetSignature;
+
+    fn deref(&self) -> &ReadSetSignature {
+        &self.shared.signature
+    }
+}
+
+struct SealedComponentMetaRefusal<P> {
+    status: FactStatus,
+    completeness: ResultCompleteness,
+    shared: Arc<SharedRefusal<P>>,
+    effects: ComponentMetaRefusalEffects,
+    validated_at_generation: u64,
 }
 
 struct ComponentMetaRefusalLedger<P> {
@@ -356,8 +493,8 @@ pub struct ComponentMetaRetainedRefusal<P> {
     pub identity: ComponentMetaRefusalIdentity,
     pub status: FactStatus,
     pub completeness: ResultCompleteness,
-    pub recovery: Arc<P>,
-    pub read_set_signature: ReadSetSignature,
+    pub recovery: Charged<P>,
+    pub read_set_signature: ChargedSignature<P>,
     pub validated_at_generation: u64,
 }
 
@@ -705,9 +842,10 @@ impl<P> ComponentMetaResultDb<P> {
         recovery: Arc<P>,
         read_set_signature: ReadSetSignature,
         validated_at_generation: u64,
+        effects: ComponentMetaRefusalEffects,
     ) -> Option<ComponentMetaRetainedRefusal<P>>
     where
-        P: verter_session_query::retention::RetainedFootprint,
+        P: verter_session_query::retention::RetainedFootprint + Clone,
     {
         if status.is_complete() {
             return None;
@@ -719,12 +857,17 @@ impl<P> ComponentMetaResultDb<P> {
                 profile: identity.profile,
                 entry_allowance: identity.entry_allowance,
                 context: identity.context,
+                entered_isolated: false,
             },
         );
-        let bytes = verter_session_query::retention::RetainedFootprint::retained_footprint_bytes(
-            recovery.as_ref(),
-        ) + read_set_signature.facts.len() * footprint::FACT_BYTES
-            + verter_session_query::retention::ENTRY_OVERHEAD_BYTES;
+        let recovery = match Arc::try_unwrap(recovery) {
+            Ok(value) => value,
+            Err(shared) => (*shared).clone(),
+        };
+        let bytes =
+            verter_session_query::retention::RetainedFootprint::retained_footprint_bytes(&recovery)
+                + read_set_signature.facts.len() * footprint::FACT_BYTES
+                + verter_session_query::retention::ENTRY_OVERHEAD_BYTES;
         let charge = match verter_session_query::facts::receipt::reserve_retained_with_evidence(
             self.retention_account(),
             bytes,
@@ -738,12 +881,21 @@ impl<P> ComponentMetaResultDb<P> {
                 return None;
             }
         };
+        let shared = Arc::new(SharedRefusal {
+            recovery,
+            signature: read_set_signature,
+            retention: Some(charge),
+        });
         let retained = ComponentMetaRetainedRefusal {
             identity: identity.clone(),
             status,
             completeness,
-            recovery: Arc::clone(&recovery),
-            read_set_signature: read_set_signature.clone(),
+            recovery: Charged {
+                shared: Arc::clone(&shared),
+            },
+            read_set_signature: ChargedSignature {
+                shared: Arc::clone(&shared),
+            },
             validated_at_generation,
         };
         let slot = (key, owner_whole_hash, identity);
@@ -763,10 +915,9 @@ impl<P> ComponentMetaResultDb<P> {
             SealedComponentMetaRefusal {
                 status,
                 completeness,
-                recovery,
-                read_set_signature,
+                shared,
+                effects,
                 validated_at_generation,
-                retention: Some(charge),
             },
         );
         ledger.order.push_back(slot);
@@ -781,21 +932,28 @@ impl<P> ComponentMetaResultDb<P> {
         key: &ComponentMetaResultKey,
         owner_whole_hash: Hash16,
         query: &ComponentMetaRefusalQuery,
-    ) -> Option<ComponentMetaRetainedRefusal<P>> {
+    ) -> Option<(ComponentMetaRetainedRefusal<P>, ComponentMetaRefusalEffects)> {
         let ledger = self.lock_refusals();
         for identity in query.reusable_identities() {
             let slot = (key.clone(), owner_whole_hash, identity.clone());
             let Some(sealed) = ledger.entries.get(&slot) else {
                 continue;
             };
-            return Some(ComponentMetaRetainedRefusal {
-                identity,
-                status: sealed.status,
-                completeness: sealed.completeness,
-                recovery: Arc::clone(&sealed.recovery),
-                read_set_signature: sealed.read_set_signature.clone(),
-                validated_at_generation: sealed.validated_at_generation,
-            });
+            return Some((
+                ComponentMetaRetainedRefusal {
+                    identity,
+                    status: sealed.status,
+                    completeness: sealed.completeness,
+                    recovery: Charged {
+                        shared: Arc::clone(&sealed.shared),
+                    },
+                    read_set_signature: ChargedSignature {
+                        shared: Arc::clone(&sealed.shared),
+                    },
+                    validated_at_generation: sealed.validated_at_generation,
+                },
+                sealed.effects.clone(),
+            ));
         }
         None
     }
@@ -977,7 +1135,9 @@ mod refusal_ledger_tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::project_semantic_dispatch::cost_receipt::BudgetProfileSpec;
     use crate::semantic_query::{PartialReasonSet, ResultCompleteness};
+    use verter_session_query::retention::{RetentionLimits, SemanticRetentionAccount};
 
     fn key(owner: &str) -> ComponentMetaResultKey {
         ComponentMetaResultKey {
@@ -991,12 +1151,20 @@ mod refusal_ledger_tests {
         }
     }
 
+    fn spec(request_operations: u64) -> BudgetProfileSpec {
+        BudgetProfileSpec {
+            request_operations: request_operations as usize,
+            ..BudgetProfileSpec::ignored()
+        }
+    }
+
     fn query(root: &str, profile: u64, allowance: u64, context: u64) -> ComponentMetaRefusalQuery {
         ComponentMetaRefusalQuery {
             root: Arc::from(root),
-            profile,
+            profile: spec(profile),
             entry_allowance: allowance,
             context,
+            entered_isolated: allowance == 0 && context == 0,
         }
     }
 
@@ -1004,14 +1172,17 @@ mod refusal_ledger_tests {
     fn retention_classes_follow_the_reason_set() {
         let budget = ResultCompleteness::partial(PartialReasonSet::BUDGET_EXCEEDED);
         assert_eq!(
-            classify_final_component_retention(budget, true),
+            classify_final_component_retention(
+                budget,
+                FinalComponentAdmissionProof::isolated(true)
+            ),
             FinalComponentRetention::Retain(ComponentMetaRefusalClass::OperationProfile)
         );
         let mixed = ResultCompleteness::partial(
             PartialReasonSet::BUDGET_EXCEEDED.union(PartialReasonSet::MISSING_DEPENDENCY),
         );
         assert_eq!(
-            classify_final_component_retention(mixed, true),
+            classify_final_component_retention(mixed, FinalComponentAdmissionProof::isolated(true)),
             FinalComponentRetention::NotAdmitted
         );
         // The boolean bridge rides along with the named work-limit class.
@@ -1020,13 +1191,16 @@ mod refusal_ledger_tests {
             PartialReasonSet::PROJECTION_WORK_LIMIT.union(PartialReasonSet::PROPAGATED),
         );
         assert_eq!(
-            classify_final_component_retention(bridged, true),
+            classify_final_component_retention(
+                bridged,
+                FinalComponentAdmissionProof::isolated(true)
+            ),
             FinalComponentRetention::Retain(ComponentMetaRefusalClass::OperationProfile)
         );
         assert_eq!(
             classify_final_component_retention(
                 ResultCompleteness::partial(PartialReasonSet::PROPAGATED),
-                true
+                FinalComponentAdmissionProof::isolated(true)
             ),
             FinalComponentRetention::NotAdmitted
         );
@@ -1036,21 +1210,79 @@ mod refusal_ledger_tests {
                 .union(PartialReasonSet::PROPAGATED),
         );
         assert_eq!(
-            classify_final_component_retention(bridged_missing, true),
+            classify_final_component_retention(
+                bridged_missing,
+                FinalComponentAdmissionProof::isolated(true)
+            ),
             FinalComponentRetention::NotAdmitted
         );
         let depth = ResultCompleteness::partial(PartialReasonSet::CONNECTED_QUERY_DEPTH_LIMIT);
         assert_eq!(
-            classify_final_component_retention(depth, false),
+            classify_final_component_retention(
+                depth,
+                FinalComponentAdmissionProof::isolated(false)
+            ),
             FinalComponentRetention::NotAdmitted
         );
         assert_eq!(
-            classify_final_component_retention(depth, true),
+            classify_final_component_retention(depth, FinalComponentAdmissionProof::isolated(true)),
             FinalComponentRetention::Retain(ComponentMetaRefusalClass::IsolatedRoot)
         );
         assert_eq!(
-            classify_final_component_retention(ResultCompleteness::Complete, true),
+            classify_final_component_retention(
+                ResultCompleteness::Complete,
+                FinalComponentAdmissionProof::isolated(true)
+            ),
             FinalComponentRetention::Complete
+        );
+        let recursion = ResultCompleteness::partial(PartialReasonSet::SAME_PATH_RECURSION);
+        assert_eq!(
+            classify_final_component_retention(
+                recursion,
+                FinalComponentAdmissionProof::isolated(true)
+            ),
+            FinalComponentRetention::NotAdmitted,
+            "a recursion bit without a certificate is not certified divergence"
+        );
+        assert_eq!(
+            classify_final_component_retention(
+                recursion,
+                FinalComponentAdmissionProof::certified()
+            ),
+            FinalComponentRetention::Retain(ComponentMetaRefusalClass::CertifiedDivergence)
+        );
+        let mut cut = FinalComponentAdmissionProof::certified();
+        cut.schedule_cut = true;
+        assert_eq!(
+            classify_final_component_retention(recursion, cut),
+            FinalComponentRetention::NotAdmitted,
+            "a schedule cut is not a certified divergence"
+        );
+        let mut operation_cut = FinalComponentAdmissionProof::isolated(true);
+        operation_cut.schedule_cut = true;
+        assert_eq!(
+            classify_final_component_retention(budget, operation_cut),
+            FinalComponentRetention::NotAdmitted,
+            "a schedule cut is not an operation-profile refusal"
+        );
+        let memory = ResultCompleteness::partial(PartialReasonSet::CONNECTED_MEMORY_LIMIT);
+        assert_eq!(
+            classify_final_component_retention(
+                memory,
+                FinalComponentAdmissionProof::isolated(true)
+            ),
+            FinalComponentRetention::NotAdmitted
+        );
+        let memory_and_budget = ResultCompleteness::partial(
+            PartialReasonSet::CONNECTED_MEMORY_LIMIT.union(PartialReasonSet::BUDGET_EXCEEDED),
+        );
+        assert_eq!(
+            classify_final_component_retention(
+                memory_and_budget,
+                FinalComponentAdmissionProof::isolated(true)
+            ),
+            FinalComponentRetention::NotAdmitted,
+            "a memory limit vetoes a mixed operation reason"
         );
     }
 
@@ -1074,6 +1306,7 @@ mod refusal_ledger_tests {
                     Arc::new(index as u32),
                     verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
                     0,
+                    ComponentMetaRefusalEffects::default(),
                 )
                 .is_some());
         }
@@ -1096,5 +1329,51 @@ mod refusal_ledger_tests {
                 &query(&format!("root-{}", super::REFUSAL_LEDGER_CAP), 4, 0, 0)
             )
             .is_none());
+    }
+
+    #[test]
+    fn a_held_recovery_keeps_the_retention_charge_after_invalidation() {
+        let account = SemanticRetentionAccount::new(RetentionLimits {
+            aggregate_ceiling_bytes: 10_000_000,
+            active_ceiling_bytes: 10_000_000,
+            max_entry_bytes: 10_000_000,
+            pin_threshold_bytes: 10_000_000,
+        });
+        let db: ComponentMetaResultDb<u32> =
+            ComponentMetaResultDb::with_account_for_test(Arc::clone(&account));
+        let status = final_component_refusal_status(PartialReasonSet::OPERATION_BUDGET).unwrap();
+        let retained = db
+            .seal_refusal(
+                key("/w/charged.vue"),
+                [1u8; 16],
+                refusal_identity_for(
+                    ComponentMetaRefusalClass::OperationProfile,
+                    &query("root", 4, 0, 0),
+                ),
+                status,
+                ResultCompleteness::partial(PartialReasonSet::OPERATION_BUDGET),
+                Arc::new(7u32),
+                verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
+                0,
+                ComponentMetaRefusalEffects::default(),
+            )
+            .expect("the refusal is retained");
+        let charged = account.snapshot().retained_bytes;
+        assert!(charged > 0, "sealing reserves retained bytes");
+        let recovery = retained.recovery.clone();
+        let signature = retained.read_set_signature.clone();
+        drop(retained);
+        db.invalidate_all();
+        assert_eq!(
+            account.snapshot().retained_bytes,
+            charged,
+            "the ledger drop does not release bytes a handle still holds"
+        );
+        assert_eq!(*recovery, 7);
+        assert!(signature.facts.is_empty());
+        drop(signature);
+        assert_eq!(account.snapshot().retained_bytes, charged);
+        drop(recovery);
+        assert_eq!(account.snapshot().retained_bytes, 0);
     }
 }

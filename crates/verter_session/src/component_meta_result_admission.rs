@@ -140,7 +140,9 @@ pub(crate) struct ComponentMetaResultPublish<'a, 'c, P, C: ResolverCapabilities>
     dispatch: &'a ProjectSemanticDispatch<'c, C>,
 }
 
-impl<'a, 'c, P: Send + Sync, C: ResolverCapabilities> ComponentMetaResultPublish<'a, 'c, P, C> {
+impl<'a, 'c, P: Send + Sync + Clone, C: ResolverCapabilities>
+    ComponentMetaResultPublish<'a, 'c, P, C>
+{
     pub(crate) fn new(
         dispatch: &'a ProjectSemanticDispatch<'c, C>,
         db: &'a ComponentMetaResultDb<P>,

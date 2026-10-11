@@ -7,7 +7,7 @@ pub use verter_type_engine::component_meta_result_db::{
     refusal_identity_for, ComponentMetaOptionsFingerprint, ComponentMetaRefusalClass,
     ComponentMetaRefusalIdentity, ComponentMetaRefusalQuery, ComponentMetaResultDb,
     ComponentMetaResultEntry, ComponentMetaResultKey, ComponentMetaRetainedRefusal,
-    FinalComponentRetention,
+    FinalComponentAdmissionProof, FinalComponentRetention,
 };
 use verter_type_engine::semantic_query::{FactStatus, ResultCompleteness};
 
@@ -621,11 +621,15 @@ mod tests {
         };
         let _low = install(4, 1);
         let query = dispatch.component_meta_refusal_query(canonical);
-        assert_eq!(query.profile, 4);
+        assert_eq!(query.profile.request_operations, 4);
         assert_eq!(query.entry_allowance, 0);
+        assert!(query.entered_isolated);
 
         let budget_partial = ResultCompleteness::partial(PartialReasonSet::BUDGET_EXCEEDED);
-        let operation = match classify_final_component_retention(budget_partial, true) {
+        let operation = match classify_final_component_retention(
+            budget_partial,
+            FinalComponentAdmissionProof::isolated(true),
+        ) {
             FinalComponentRetention::Retain(class) => class,
             other => panic!("pure budget refusal must be retained, got {other:?}"),
         };
@@ -714,9 +718,22 @@ mod tests {
         );
 
         let divergence = ResultCompleteness::partial(PartialReasonSet::SAME_PATH_RECURSION);
-        let certified = match classify_final_component_retention(divergence, true) {
+        assert!(
+            matches!(
+                classify_final_component_retention(
+                    divergence,
+                    FinalComponentAdmissionProof::isolated(true)
+                ),
+                FinalComponentRetention::NotAdmitted
+            ),
+            "a recursion bit without a certificate is not retained"
+        );
+        let certified = match classify_final_component_retention(
+            divergence,
+            FinalComponentAdmissionProof::certified(),
+        ) {
             FinalComponentRetention::Retain(class) => class,
-            other => panic!("sole recursion must be certified, got {other:?}"),
+            other => panic!("a certified recurrence must be retained, got {other:?}"),
         };
         let certified_key = mk_result_key(canonical, [2u8; 16]);
         publish.compute_and_admit(
@@ -759,12 +776,18 @@ mod tests {
         );
 
         let depth = ResultCompleteness::partial(PartialReasonSet::CONNECTED_QUERY_DEPTH_LIMIT);
-        let isolated = match classify_final_component_retention(depth, true) {
+        let isolated = match classify_final_component_retention(
+            depth,
+            FinalComponentAdmissionProof::isolated(true),
+        ) {
             FinalComponentRetention::Retain(class) => class,
             other => panic!("isolated depth must be retained, got {other:?}"),
         };
         assert!(matches!(
-            classify_final_component_retention(depth, false),
+            classify_final_component_retention(
+                depth,
+                FinalComponentAdmissionProof::isolated(false)
+            ),
             FinalComponentRetention::NotAdmitted
         ));
         let isolated_key = mk_result_key(canonical, [3u8; 16]);
@@ -844,7 +867,10 @@ mod tests {
 
         let missing = ResultCompleteness::partial(PartialReasonSet::MISSING_DEPENDENCY);
         assert!(matches!(
-            classify_final_component_retention(missing, true),
+            classify_final_component_retention(
+                missing,
+                FinalComponentAdmissionProof::isolated(true)
+            ),
             FinalComponentRetention::NotAdmitted
         ));
         let missing_key = mk_result_key(canonical, [4u8; 16]);
@@ -895,7 +921,7 @@ mod tests {
         assert!(matches!(
             classify_final_component_retention(
                 ResultCompleteness::partial(PartialReasonSet::CANCELLED),
-                true
+                FinalComponentAdmissionProof::isolated(true)
             ),
             FinalComponentRetention::NotAdmitted
         ));
@@ -926,6 +952,168 @@ mod tests {
         assert!(dispatch
             .read_component_meta_result(&db, &sibling, owner_hash)
             .is_some());
+    }
+
+    #[test]
+    fn refusal_identity_keeps_spent_ops_and_replay_charges_them() {
+        use verter_type_engine::project_semantic_dispatch::connected_demand::WorkBudgetForTests;
+        use verter_type_engine::request_context::{
+            current_request_budget, current_request_context, RequestContext, RequestContextGuard,
+        };
+        use verter_type_engine::semantic_query::{PartialReasonSet, ResultCompleteness};
+
+        let host = crate::VerterHost::new_standalone(crate::types::HostConfig::default());
+        let canonical = "/w/spent-ops.vue";
+        let _ = host
+            .upsert(crate::UpsertRequest {
+                canonical_id: Some(canonical.into()),
+                input_id: canonical.into(),
+                source: Arc::from(
+                    "<script setup lang=\"ts\">defineProps<{ x: string }>()</script>",
+                ),
+                file_language: crate::FileLanguage::vue(),
+                aliases: Vec::new(),
+            })
+            .unwrap();
+        let owner_hash = host.ensure_indexed_ready(canonical).unwrap().whole_hash;
+        let owner_fact = verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+            canonical_id: canonical.to_string(),
+            hash: owner_hash,
+        };
+        let key = mk_result_key(canonical, [7u8; 16]);
+        let db: ComponentMetaResultDb<u32> = ComponentMetaResultDb::new();
+        let dispatch =
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+        let publish =
+            crate::component_meta_result_admission::ComponentMetaResultPublish::new(&dispatch, &db);
+        let read = crate::component_meta_result_admission::ComponentMetaResultRead::new(
+            &dispatch,
+            &db,
+            host.provenance().as_ref(),
+        );
+        let generation = dispatch.current_project_generation();
+        let install = |budget: usize, id: u64| {
+            RequestContextGuard::install(RequestContext::with_kind_timing_and_projection_budget(
+                id,
+                Arc::from(canonical),
+                verter_audit::RequestKind::ComponentMeta,
+                false,
+                false,
+                None,
+                budget,
+            ))
+        };
+
+        let _fresh = install(8, 1);
+        let entered = dispatch.component_meta_refusal_query(canonical);
+        assert_eq!(entered.entry_allowance, 0);
+        assert_eq!(entered.profile.request_operations, 8);
+        current_request_context()
+            .expect("the request is installed")
+            .projection_budget
+            .check_projection_op_count();
+        let spent_query = dispatch.component_meta_refusal_query(canonical);
+        assert_eq!(spent_query.entry_allowance, 1);
+        assert_eq!(spent_query.profile, entered.profile);
+        assert_ne!(
+            refusal_identity_for(ComponentMetaRefusalClass::OperationProfile, &entered),
+            refusal_identity_for(ComponentMetaRefusalClass::OperationProfile, &spent_query),
+            "spent operations are part of the refusal identity the query derives"
+        );
+        drop(_fresh);
+
+        let _cold = install(20, 2);
+        let query = dispatch.component_meta_refusal_query(canonical);
+        let budget_partial = ResultCompleteness::partial(PartialReasonSet::BUDGET_EXCEEDED);
+        let operation = match classify_final_component_retention(
+            budget_partial,
+            FinalComponentAdmissionProof::isolated(true),
+        ) {
+            FinalComponentRetention::Retain(class) => class,
+            other => panic!("budget refusal must be retained, got {other:?}"),
+        };
+        publish.compute_and_admit(
+            canonical,
+            "charge",
+            || {
+                let budget = current_request_budget().expect("request");
+                budget.check_projection_op_count();
+                budget.check_projection_op_count();
+                verter_type_engine::resolver_core::resolver_context::observe_fan_out(
+                    owner_fact.clone(),
+                );
+                7u32
+            },
+            |_| {
+                ComponentMetaPublishDecision::retain_refusal(
+                    key.clone(),
+                    owner_hash,
+                    refusal_identity_for(operation, &query),
+                    final_component_refusal_status(budget_partial.reasons()).unwrap(),
+                    budget_partial,
+                    Arc::new(7u32),
+                    generation,
+                )
+            },
+        );
+        assert_eq!(
+            current_request_budget()
+                .expect("request")
+                .projection_ops_executed_count(),
+            2
+        );
+        drop(_cold);
+
+        let _replay = install(20, 3);
+        assert_eq!(
+            current_request_budget()
+                .expect("fresh request")
+                .projection_ops_executed_count(),
+            0
+        );
+        let replayed = read
+            .replay_refusal(&key, owner_hash, &query)
+            .expect("an equal fresh request replays");
+        assert_eq!(*replayed.recovery, 7);
+        assert_eq!(
+            current_request_budget()
+                .expect("fresh request")
+                .projection_ops_executed_count(),
+            2,
+            "replay charges the operations the refused compute spent"
+        );
+        assert!(
+            read.replay_refusal(&key, owner_hash, &query).is_none(),
+            "the same request is no longer at the entered state"
+        );
+        drop(_replay);
+
+        let _low_work = WorkBudgetForTests::install(3);
+        let low_dispatch =
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+        let _low_request = install(20, 4);
+        let low_query = low_dispatch.component_meta_refusal_query(canonical);
+        assert_eq!(low_query.profile.work, 3);
+        drop(_low_request);
+        drop(_low_work);
+        let _high_work = WorkBudgetForTests::install(9);
+        let high_dispatch =
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+        let _high_request = install(20, 5);
+        let high_query = high_dispatch.component_meta_refusal_query(canonical);
+        assert_eq!(high_query.profile.work, 9);
+        assert_ne!(low_query.profile, high_query.profile);
+        let high_read = crate::component_meta_result_admission::ComponentMetaResultRead::new(
+            &high_dispatch,
+            &db,
+            host.provenance().as_ref(),
+        );
+        assert!(
+            high_read
+                .replay_refusal(&key, owner_hash, &high_query)
+                .is_none(),
+            "a different connected-work allowance does not reuse the refusal"
+        );
     }
 
     #[test]
@@ -1127,6 +1315,176 @@ mod tests {
                 .len(),
             0,
             "the refusal is not a successful candidate"
+        );
+        crate::host_manage::component_meta_entry::COLD_BODY_PRE_RESOLVE_HOOK
+            .with(|slot| *slot.borrow_mut() = None);
+    }
+
+    fn budget_refusal_host(canonical: &str) -> crate::component_meta_host::ComponentMetaHost {
+        let host = crate::component_meta_host::ComponentMetaHost::new_standalone(
+            crate::types::HostConfig {
+                projection_op_budget: 1,
+                ..crate::types::HostConfig::default()
+            },
+        );
+        let _ = host
+            .host()
+            .upsert(crate::UpsertRequest {
+                canonical_id: Some(canonical.into()),
+                input_id: canonical.into(),
+                source: std::sync::Arc::from(
+                    "<script setup lang=\"ts\">defineProps<{ x: string }>()</script>",
+                ),
+                file_language: crate::FileLanguage::vue(),
+                aliases: Vec::new(),
+            })
+            .unwrap();
+        host
+    }
+
+    #[test]
+    fn session_resolution_first_caller_seals_operation_refusal() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let host = budget_refusal_host("/w/budget-refusal-resolution-first.vue");
+        let canonical = "/w/budget-refusal-resolution-first.vue";
+        let session = host.open_session_batch().expect("session");
+        let ran = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&ran);
+        crate::host_manage::component_meta_entry::COLD_BODY_PRE_RESOLVE_HOOK.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || flag.store(true, Ordering::SeqCst)));
+        });
+        let misses_before = host
+            .host()
+            .provenance()
+            .resolver_node_cache_misses
+            .load(Ordering::Relaxed);
+        let (_analysis, resolution) = session
+            .get_component_meta_with_resolution(canonical)
+            .expect("first resolution")
+            .expect("the refusal still has a recovery");
+        assert!(
+            ran.load(Ordering::SeqCst),
+            "the first session resolution enters the producer"
+        );
+        assert!(!resolution.fact_status().is_complete());
+        assert!(resolution.synthesis_should_suppress);
+        assert_eq!(
+            host.host()
+                .project_type_store()
+                .component_meta_results()
+                .len(),
+            0
+        );
+        let misses_after = host
+            .host()
+            .provenance()
+            .resolver_node_cache_misses
+            .load(Ordering::Relaxed);
+        assert!(misses_after > misses_before);
+
+        let ran_again = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&ran_again);
+        crate::host_manage::component_meta_entry::COLD_BODY_PRE_RESOLVE_HOOK.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || flag.store(true, Ordering::SeqCst)));
+        });
+        let (_analysis, again) = session
+            .get_component_meta_with_resolution(canonical)
+            .expect("replayed resolution")
+            .expect("the refusal still has a recovery");
+        assert!(
+            !ran_again.load(Ordering::SeqCst),
+            "the repeat must not enter the producer"
+        );
+        assert_eq!(again.fact_status(), resolution.fact_status());
+        assert!(again.synthesis_should_suppress);
+        assert_eq!(
+            host.host()
+                .provenance()
+                .resolver_node_cache_misses
+                .load(Ordering::Relaxed),
+            misses_after
+        );
+        assert_eq!(
+            host.host()
+                .project_type_store()
+                .component_meta_results()
+                .len(),
+            0
+        );
+        crate::host_manage::component_meta_entry::COLD_BODY_PRE_RESOLVE_HOOK
+            .with(|slot| *slot.borrow_mut() = None);
+    }
+
+    #[test]
+    fn session_payload_first_caller_seals_operation_refusal() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let host = budget_refusal_host("/w/budget-refusal-payload-first.vue");
+        let canonical = "/w/budget-refusal-payload-first.vue";
+        let session = host.open_session_batch().expect("session");
+        let ran = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&ran);
+        crate::host_manage::component_meta_entry::COLD_BODY_PRE_RESOLVE_HOOK.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || flag.store(true, Ordering::SeqCst)));
+        });
+        let misses_before = host
+            .host()
+            .provenance()
+            .resolver_node_cache_misses
+            .load(Ordering::Relaxed);
+        let payload = session
+            .get_component_meta_payload(canonical, |_| vec![7])
+            .expect("first payload")
+            .expect("the refusal still has a recovery");
+        assert_eq!(payload, vec![7]);
+        assert!(
+            ran.load(Ordering::SeqCst),
+            "the first session payload enters the producer"
+        );
+        assert_eq!(
+            host.host()
+                .project_type_store()
+                .component_meta_results()
+                .len(),
+            0
+        );
+        let misses_after = host
+            .host()
+            .provenance()
+            .resolver_node_cache_misses
+            .load(Ordering::Relaxed);
+        assert!(misses_after > misses_before);
+
+        let ran_again = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&ran_again);
+        crate::host_manage::component_meta_entry::COLD_BODY_PRE_RESOLVE_HOOK.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || flag.store(true, Ordering::SeqCst)));
+        });
+        let again = session
+            .get_component_meta_payload(canonical, |_| vec![9])
+            .expect("replayed payload")
+            .expect("the refusal still has a recovery");
+        assert_eq!(again, vec![9]);
+        assert!(
+            !ran_again.load(Ordering::SeqCst),
+            "the repeat must not enter the producer"
+        );
+        assert_eq!(
+            host.host()
+                .provenance()
+                .resolver_node_cache_misses
+                .load(Ordering::Relaxed),
+            misses_after
+        );
+        assert_eq!(
+            host.host()
+                .project_type_store()
+                .component_meta_results()
+                .len(),
+            0
         );
         crate::host_manage::component_meta_entry::COLD_BODY_PRE_RESOLVE_HOOK
             .with(|slot| *slot.borrow_mut() = None);

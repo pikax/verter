@@ -4,8 +4,8 @@
 //! Sibling half of the parent module `impl VerterHost` orchestrator.
 
 use super::runtime::{
-    authored_emit_anchor, authored_emit_order, macro_projection_faulted, partial_failure,
-    resolution_failure, row_derivation_fact, MacroProjectionLane,
+    authored_emit_anchor, authored_emit_order, failure_from_local, observe_local,
+    resolution_failure, row_derivation_fact,
 };
 use super::*;
 use verter_type_engine::semantic_query::FactStatus;
@@ -37,9 +37,10 @@ pub(super) fn render_tsc_node(
 ) -> Result<TscSpliceText, ProjectionFailure> {
     counters.tsc_materializations += 1;
     let node = nameable_render_node(dispatch, node, owner_canonical);
-    let rendered = crate::typeinfo::raise::render_node_display_with_ctx(dispatch, node);
-    if macro_projection_faulted(MacroProjectionLane::Tsc) {
-        return Err(partial_failure());
+    let (rendered, local) =
+        observe_local(|| crate::typeinfo::raise::render_node_display_with_ctx(dispatch, node));
+    if local.is_partial() {
+        return Err(failure_from_local(local));
     }
     let rendered = rendered.ok_or(ProjectionFailure::Unsupported(
         UnsupportedReason::SemanticConstruct,
@@ -96,9 +97,13 @@ pub(super) fn render_tsc_testing_node(
 ) -> Result<(TscSpliceText, Option<TscDeclarationFailureReason>), ProjectionFailure> {
     counters.tsc_materializations += 1;
     let node = nameable_render_node(dispatch, node, owner_canonical);
-    let rendered = crate::typeinfo::raise::render_node_display_with_ctx(dispatch, node);
-    if macro_projection_faulted(MacroProjectionLane::Tsc) {
-        return Err(partial_failure());
+    let (rendered, local) =
+        observe_local(|| crate::typeinfo::raise::render_node_display_with_ctx(dispatch, node));
+    if local.is_partial() {
+        return Ok((
+            TscSpliceText::new("unknown"),
+            Some(testing_degradation(local.reasons())),
+        ));
     }
     let rendered = rendered.ok_or(ProjectionFailure::Unsupported(
         UnsupportedReason::SemanticConstruct,
@@ -108,6 +113,29 @@ pub(super) fn render_tsc_testing_node(
         return Ok((TscSpliceText::new("unknown"), Some(reason)));
     }
     Ok((TscSpliceText::new(rendered.text), None))
+}
+
+fn testing_degradation(
+    reasons: verter_type_engine::semantic_query::PartialReasonSet,
+) -> TscDeclarationFailureReason {
+    use verter_type_engine::semantic_query::PartialReasonSet;
+    if reasons.contains(PartialReasonSet::CONNECTED_QUERY_DEPTH_LIMIT) {
+        TscDeclarationFailureReason::SemanticInferenceUnavailable(
+            TscSemanticInferenceUnavailableReason::DepthBudgetExceeded,
+        )
+    } else if reasons.contains(PartialReasonSet::BUDGET_EXCEEDED)
+        || reasons.contains(PartialReasonSet::OPERATION_BUDGET)
+        || reasons.contains(PartialReasonSet::PROJECTION_WORK_LIMIT)
+        || reasons.contains(PartialReasonSet::CONNECTED_MEMORY_LIMIT)
+        || reasons.contains(PartialReasonSet::DEFERRED_EVALUATION_LIMIT)
+        || reasons.contains(PartialReasonSet::STRUCTURAL_FACT_DEMAND_LIMIT)
+    {
+        TscDeclarationFailureReason::SemanticInferenceUnavailable(
+            TscSemanticInferenceUnavailableReason::WorkBudgetExceeded,
+        )
+    } else {
+        TscDeclarationFailureReason::Unsupported(UnsupportedReason::SemanticConstruct)
+    }
 }
 
 pub(super) fn tsc_scope_requirements(
@@ -1021,7 +1049,7 @@ fn collect_local_declaration_closure(
             .lowering
             .type_dependencies(inventory.shallow_state, declaration_owner, name)
     else {
-        return Err(resolution_failure(MacroProjectionLane::Tsc));
+        return Err(resolution_failure());
     };
     if !deps.unroutable_declaration_dependencies.is_empty() || deps.has_unroutable_value_position {
         return Err(ProjectionFailure::Unsupported(
@@ -1297,12 +1325,18 @@ pub(super) fn tsc_emit_rows(
         let Some(signature) = callable.signature(context) else {
             continue;
         };
-        let parameters = render_function_parameters(
+        let parameters = match render_function_parameters(
             dispatch,
             owner_canonical,
             &signature.raw_params()[1..],
             counters,
-        )?;
+        ) {
+            Ok(parameters) => parameters,
+            Err(failure) => {
+                row_facts.push(super::projection_failure_fact(&failure));
+                continue;
+            }
+        };
         for name in names {
             if push_tsc_emit(
                 &mut rows,
@@ -1324,7 +1358,14 @@ pub(super) fn tsc_emit_rows(
             continue;
         };
         let parameters =
-            render_emit_payload_parameters(dispatch, owner_canonical, member.value, counters)?;
+            match render_emit_payload_parameters(dispatch, owner_canonical, member.value, counters)
+            {
+                Ok(parameters) => parameters,
+                Err(failure) => {
+                    row_facts.push(super::projection_failure_fact(&failure));
+                    continue;
+                }
+            };
         if push_tsc_emit(
             &mut rows,
             name.as_ref(),
@@ -1346,10 +1387,6 @@ pub(super) fn tsc_emit_rows(
         }
     }
     rows.sort_by_key(|row| authored_emit_order(row.anchor));
-
-    if macro_projection_faulted(MacroProjectionLane::Tsc) {
-        return Err(partial_failure());
-    }
     published.extend(row_facts);
     Ok(rows)
 }
@@ -1381,15 +1418,10 @@ fn render_emit_payload_parameters(
     use verter_type_engine::semantic_query::SemanticNodeData;
 
     let context = ProjectionReductionContext::published(ProjectionMode::Navigate);
-    let Some(node) = dispatch
-        .normalize_node_for_structural_fact_demand(node, context)
-        .into_complete_node()
-    else {
-        return Err(if macro_projection_faulted(MacroProjectionLane::Tsc) {
-            partial_failure()
-        } else {
-            resolution_failure(MacroProjectionLane::Tsc)
-        });
+    let (normalized, local) =
+        observe_local(|| dispatch.normalize_node_for_structural_fact_demand(node, context));
+    let Some(node) = normalized.into_complete_node() else {
+        return Err(failure_from_local(local));
     };
     match verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), node)
         .as_deref()

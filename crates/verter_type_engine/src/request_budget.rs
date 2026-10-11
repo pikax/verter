@@ -146,6 +146,22 @@ impl RequestEntryState {
     pub(crate) fn paid_digest(&self) -> u64 {
         self.paid_digest
     }
+
+    /// Projection operations already spent when the demand entered.
+    #[must_use]
+    pub(crate) fn operations(&self) -> usize {
+        self.operations
+    }
+}
+
+/// The request state a component-meta compute entered at, including the
+/// paid-set order. A later observation accepts a spend only when that
+/// order is still the prefix: an insertion ahead of it means the spend
+/// is not this compute's.
+#[derive(Clone)]
+pub(crate) struct RequestEntrySnapshot {
+    state: RequestEntryState,
+    paid: Box<[CostIdentity]>,
 }
 
 /// What one evaluation did to a request it ran in alone: the state it
@@ -225,6 +241,47 @@ impl RequestBudget {
         }
         paid.extend(unpaid);
         true
+    }
+
+    /// The request's state and paid-set order, for a compute that will
+    /// later ask what it spent.
+    pub(crate) fn capture_entry(&self) -> RequestEntrySnapshot {
+        let paid = self.operations_paid.lock();
+        RequestEntrySnapshot {
+            state: RequestEntryState {
+                operations: self.projection_ops_executed.load(Ordering::Relaxed),
+                paid_len: paid.set.len(),
+                paid_digest: paid.digest,
+            },
+            paid: paid.order.clone().into_boxed_slice(),
+        }
+    }
+
+    /// What changed since `snapshot` when the paid-set order still begins
+    /// with the order captured there. Direct projection-op checks count:
+    /// this is the counter delta, not only effects a connected demand
+    /// recorded. `None` when that prefix was replaced or the counter
+    /// moved backwards.
+    pub(crate) fn observed_spend_since(
+        &self,
+        snapshot: &RequestEntrySnapshot,
+    ) -> Option<RequestSpent> {
+        let paid = self.operations_paid.lock();
+        if paid.order.len() < snapshot.paid.len()
+            || paid.order[..snapshot.paid.len()] != snapshot.paid[..]
+        {
+            return None;
+        }
+        let now = self.projection_ops_executed.load(Ordering::Relaxed);
+        let operations = now.checked_sub(snapshot.state.operations)?;
+        Some(RequestSpent {
+            entry: snapshot.state.clone(),
+            entry_paid: snapshot.paid.clone(),
+            operations,
+            paid: paid.order[snapshot.paid.len()..]
+                .to_vec()
+                .into_boxed_slice(),
+        })
     }
 
     /// The request's state now, as a demand entering it would see it.
@@ -512,5 +569,33 @@ mod tests {
             paid: Box::from([]),
         }));
         assert_eq!(raced.projection_ops_executed_count(), 1);
+    }
+
+    #[test]
+    fn observed_spend_counts_direct_checks_and_rejects_a_replaced_prefix() {
+        let budget = RequestBudget::new(100);
+        let snapshot = budget.capture_entry();
+        assert!(!budget.check_projection_op_count());
+        budget.mark_operations_paid(std::iter::once(identity("own")));
+        let spent = budget
+            .observed_spend_since(&snapshot)
+            .expect("an append leaves the captured prefix in place");
+        assert_eq!(spent.operations, 1);
+        assert_eq!(spent.paid.len(), 1);
+        let fresh = RequestBudget::new(100);
+        assert!(fresh.apply_refusal(&spent));
+        assert_eq!(fresh.projection_ops_executed_count(), 1);
+        assert!(fresh.operations_paid().contains(&identity("own")));
+
+        let replaced = RequestBudget::new(100);
+        replaced.mark_operations_paid(std::iter::once(identity("real")));
+        let foreign = super::RequestEntrySnapshot {
+            state: replaced.entry_state(),
+            paid: Box::from([identity("other")]),
+        };
+        assert!(
+            replaced.observed_spend_since(&foreign).is_none(),
+            "a paid prefix that is not the captured order is not this compute's spend"
+        );
     }
 }

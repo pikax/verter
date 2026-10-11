@@ -939,10 +939,14 @@ impl VerterHost {
                         &tsc_scope_inventory,
                         &mut state.counters,
                     );
-                    published.push(lane_fact_status(MacroProjectionLane::Tsc));
                     publish_expose_row_facts(&mut published, &outcome);
                     let macro_completeness =
                         verter_type_engine::request_context::current_cold_compute_completeness();
+                    publish_demand_fact(
+                        &mut published,
+                        tsc_outcome_fact(&outcome),
+                        macro_completeness,
+                    );
                     macro_scope.discard();
                     verter_type_engine::request_context::fold_result_completeness(
                         macro_completeness,
@@ -987,16 +991,18 @@ impl VerterHost {
             let macro_scope =
                 verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
             let mut diagnostics = Vec::new();
-            let payload = resolve_macro_payload(
-                &dispatch,
-                &owner,
-                owner_canonical,
-                payload_index,
-                mac,
-                mac.kind,
-                expansion_kind(mac.kind),
-                &mut diagnostics,
-            );
+            let (payload, payload_local) = observe_local(|| {
+                resolve_macro_payload(
+                    &dispatch,
+                    &owner,
+                    owner_canonical,
+                    payload_index,
+                    mac,
+                    mac.kind,
+                    expansion_kind(mac.kind),
+                    &mut diagnostics,
+                )
+            });
             if payload.is_none() {
                 state.dependency_failures.extend(
                     demand_row
@@ -1011,41 +1017,24 @@ impl VerterHost {
                         }),
                 );
             }
-            // PER-LANE payload failure, over the PER-LANE contained class
-            // set: the runtime lane derives its output from the value, so
-            // a producer that yielded no surface faults it while the TSC
-            // lane's authored splice rides on. The two lanes also differ
-            // on an ABSENT payload — the TSC lane splices the authored
-            // declaration and reports a resolution failure, while the
-            // runtime lane has nothing to derive a `props` option object
-            // from. They are computed separately and never merged.
-            let runtime_lane = MacroProjectionLane::runtime(demand.wants_runtime_constructors());
-            let tsc_payload_failure = if macro_projection_faulted(MacroProjectionLane::Tsc) {
-                Some(partial_failure())
-            } else if payload.is_none() {
-                Some(resolution_failure(MacroProjectionLane::Tsc))
-            } else {
-                None
-            };
-            let runtime_payload_failure = if macro_projection_faulted(runtime_lane) {
-                Some(partial_failure())
-            } else if payload.is_none() {
-                Some(resolution_failure(runtime_lane))
+            // The payload lookup's own observation. An absent payload is a
+            // semantic miss or that lookup's partiality — never a filter of
+            // the parent scope. Runtime has no option object to derive.
+            // `defineProps` still preserves the authored type argument.
+            let payload_failure = if payload.is_none() {
+                Some(failure_from_local(payload_local))
             } else {
                 None
             };
 
             if demand.wants_runtime() {
                 let mut walker_diagnostics = Vec::new();
-                let outcome = if let Some(failure) = runtime_payload_failure {
-                    // Decided on the macro scope. A fresh nested scope would
-                    // not see that refusal and would publish Complete.
-                    published.push(lane_fact_status(runtime_lane));
+                let runtime_scope =
+                    verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
+                let outcome = if let Some(failure) = payload_failure {
                     failure.runtime()
                 } else {
-                    let _runtime_scope =
-                        verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
-                    let outcome = match payload {
+                    match payload {
                         Some(payload) => match mac.kind {
                             AnalyzedMacroKind::DefineProps => {
                                 match dispatch
@@ -1103,11 +1092,17 @@ impl VerterHost {
                             _ => unreachable!("codegen macro filter is exhaustive"),
                         },
                         None => unreachable!("payload failure covers an absent payload"),
-                    };
-                    published.push(lane_fact_status(runtime_lane));
-                    publish_runtime_row_facts(&mut published, &outcome);
-                    outcome
+                    }
                 };
+                let runtime_observed =
+                    verter_type_engine::request_context::current_cold_compute_completeness();
+                drop(runtime_scope);
+                publish_demand_fact(
+                    &mut published,
+                    runtime_outcome_fact(&outcome),
+                    runtime_observed,
+                );
+                publish_runtime_row_facts(&mut published, &outcome);
                 record_unresolved_surface_arms(
                     &mut state.dependency_failures,
                     payload_index,
@@ -1123,13 +1118,25 @@ impl VerterHost {
 
             if demand.wants_tsc() {
                 let mut walker_diagnostics = Vec::new();
-                let outcome = if let Some(failure) = tsc_payload_failure {
-                    published.push(lane_fact_status(MacroProjectionLane::Tsc));
+                let tsc_scope =
+                    verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
+                let outcome = if mac.kind == AnalyzedMacroKind::DefineProps && payload.is_none() {
+                    if let Some(failure) = payload_failure {
+                        published.push(projection_failure_fact(&failure));
+                    }
+                    match tsc_scope_requirements(
+                        mac,
+                        &tsc_scope_inventory,
+                        &dispatch,
+                        owner_canonical,
+                    ) {
+                        Ok(scope) => authored_props_splice(payload_index, scope),
+                        Err(failure) => failure.tsc(),
+                    }
+                } else if let Some(failure) = payload_failure {
                     failure.tsc()
                 } else {
-                    let _tsc_scope =
-                        verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
-                    let outcome = match payload {
+                    match payload {
                         Some(payload) => self.project_tsc_macro(
                             ctx,
                             &dispatch,
@@ -1145,10 +1152,12 @@ impl VerterHost {
                             &mut published,
                         ),
                         None => unreachable!("payload failure covers an absent payload"),
-                    };
-                    published.push(lane_fact_status(MacroProjectionLane::Tsc));
-                    outcome
+                    }
                 };
+                let tsc_observed =
+                    verter_type_engine::request_context::current_cold_compute_completeness();
+                drop(tsc_scope);
+                publish_demand_fact(&mut published, tsc_outcome_fact(&outcome), tsc_observed);
                 record_unresolved_surface_arms(
                     &mut state.dependency_failures,
                     payload_index,
@@ -1209,12 +1218,24 @@ impl VerterHost {
                     ),
                     Some(&mut *walker_diagnostics),
                 );
-                if macro_projection_faulted(MacroProjectionLane::Tsc) {
-                    return partial_failure().tsc();
-                }
                 let surface = match discharge_codegen_surface(surface) {
                     Ok(surface) => surface,
-                    Err(failure) => return failure.tsc(),
+                    Err(ProjectionFailure::Invalid(reason)) => {
+                        return ProjectionFailure::Invalid(reason).tsc();
+                    }
+                    Err(failure) => {
+                        published.push(projection_failure_fact(&failure));
+                        let scope = match tsc_scope_requirements(
+                            mac,
+                            scope_inventory,
+                            dispatch,
+                            owner_canonical,
+                        ) {
+                            Ok(scope) => scope,
+                            Err(scope_failure) => return scope_failure.tsc(),
+                        };
+                        return authored_props_splice(payload_index, scope);
+                    }
                 };
 
                 let mut testing_rows = Vec::new();
@@ -1245,7 +1266,10 @@ impl VerterHost {
                             counters,
                         ) {
                             Ok(rendered) => rendered,
-                            Err(failure) => return failure.tsc(),
+                            Err(failure) => {
+                                row_facts.push(projection_failure_fact(&failure));
+                                continue;
+                            }
                         }
                     };
                     row_facts.push(row_derivation_fact().status());
@@ -1289,9 +1313,6 @@ impl VerterHost {
                     ),
                     Some(&mut *walker_diagnostics),
                 );
-                if macro_projection_faulted(MacroProjectionLane::Tsc) {
-                    return partial_failure().tsc();
-                }
                 let surface = match discharge_codegen_surface(surface) {
                     Ok(surface) => surface,
                     Err(failure) => return failure.tsc(),
@@ -1540,7 +1561,6 @@ impl VerterHost {
         >,
     ) -> MacroRuntimeOutcome {
         let _ = analysis;
-        let lane = MacroProjectionLane::runtime(classify_constructors);
         if probe_definitely_non_object_root(dispatch, payload) {
             return ProjectionFailure::Invalid(MacroInvalidReason::NonObjectRoot).runtime();
         }
@@ -1556,9 +1576,6 @@ impl VerterHost {
             ),
             Some(walker_diagnostics),
         );
-        if macro_projection_faulted(lane) {
-            return partial_failure().runtime();
-        }
         let surface = match discharge_codegen_surface(surface) {
             Ok(surface) => surface,
             Err(failure) => return failure.runtime(),
@@ -1682,7 +1699,6 @@ impl VerterHost {
             verter_type_engine::project_semantic_dispatch::walk::ShallowDiagnostic,
         >,
     ) -> MacroRuntimeOutcome {
-        let lane = MacroProjectionLane::runtime(renders_runtime_options);
         if probe_definitely_non_object_root(dispatch, payload) {
             return ProjectionFailure::Invalid(MacroInvalidReason::NonObjectRoot).runtime();
         }
@@ -1699,9 +1715,6 @@ impl VerterHost {
             runtime_context,
             Some(walker_diagnostics),
         );
-        if macro_projection_faulted(lane) {
-            return partial_failure().runtime();
-        }
         let surface = match discharge_codegen_surface(surface) {
             Ok(surface) => surface,
             Err(failure) => return failure.runtime(),
@@ -1766,9 +1779,6 @@ impl VerterHost {
             Ok(projection) => projection.emits().to_vec(),
             Err(_) => return partial_failure().runtime(),
         };
-        if macro_projection_faulted(lane) {
-            return partial_failure().runtime();
-        }
         // The `props` twin of this refusal, for the same reason and with
         // the same scope: a ROOT-position degradation leaves no member set,
         // and `emits: []` for a component that declares emits sends every
@@ -1847,10 +1857,9 @@ fn discharge_codegen_surface(
             Ok(surface.into_inner())
         }
         SurfaceResolution::NoSurface(_) => {
-            let domain = demand_fact(
-                verter_type_engine::request_context::current_cold_compute_completeness(),
-            )
-            .status();
+            // A complete negative is already the producer's proof. The
+            // narrowing claim reads that proof, not the ambient reason set.
+            let domain = FactStatus::Complete;
             if root_narrowing_fact(&domain, &[]).exact().is_some() {
                 Err(ProjectionFailure::Invalid(
                     MacroInvalidReason::NonObjectRoot,
@@ -1972,15 +1981,120 @@ fn publish_expose_row_facts(published: &mut Vec<FactStatus>, outcome: &MacroTscO
     }
 }
 
-/// Record the lane fact of each demand this produce was asked for, from
-/// the completeness active on this thread.
+/// A refused semantic plan publishes one unavailable fact per demanded lane.
+/// The refusal is the plan failure, not the ambient reason set.
 fn publish_demanded_lane_facts(published: &mut Vec<FactStatus>, demand: VueMacroCodegenDemand) {
+    let refused = unavailable_fact(PartialReason::SemanticQueryFault);
     if demand.wants_tsc() {
-        published.push(lane_fact_status(MacroProjectionLane::Tsc));
+        published.push(refused);
     }
     if demand.wants_runtime() {
-        published.push(lane_fact_status(MacroProjectionLane::runtime(
-            demand.wants_runtime_constructors(),
-        )));
+        published.push(refused);
+    }
+}
+
+fn authored_props_splice(payload_index: usize, scope: TscScopeRequirements) -> MacroTscOutcome {
+    MacroTscOutcome::Complete(MacroTscProjection::Props(TscPropsProjection {
+        public: TscPublicPropsProjection::AuthoredArgument {
+            anchor: MacroAnchor::MacroArgument {
+                macro_index: macro_index(payload_index),
+            },
+        },
+        testing_rows: Vec::new(),
+        scope,
+    }))
+}
+
+/// Publish the producer's outcome. When that outcome is exact, also publish
+/// request-integrity reasons this demand itself observed. Flow-return and
+/// undecided-conditional reasons stay on the surface arm that recorded them
+/// and are not subtracted to mint the outcome.
+fn publish_demand_fact(
+    published: &mut Vec<FactStatus>,
+    fact: FactStatus,
+    observed: ResultCompleteness,
+) {
+    let exact = fact.is_complete();
+    published.push(fact);
+    if exact {
+        if let Some(integrity) = integrity_fact(observed) {
+            published.push(integrity);
+        }
+    }
+}
+
+fn integrity_fact(observed: ResultCompleteness) -> Option<FactStatus> {
+    use verter_type_engine::semantic_query::surface_resolution::NonEmptyReasons;
+    let mut combined: Option<NonEmptyReasons> = None;
+    for reason in observed.reasons().iter() {
+        if matches!(
+            reason,
+            PartialReason::FlowReturnUninferred
+                | PartialReason::FlowReturnUnverified
+                | PartialReason::FlowReturnNoSurface
+                | PartialReason::UndecidedConditional
+        ) {
+            continue;
+        }
+        let next = NonEmptyReasons::of(reason);
+        combined = Some(match combined {
+            None => next,
+            Some(prev) => prev.union(next),
+        });
+    }
+    combined.map(FactStatus::Unavailable)
+}
+
+fn projection_failure_fact(failure: &ProjectionFailure) -> FactStatus {
+    match failure {
+        ProjectionFailure::Invalid(_) => FactStatus::Complete,
+        ProjectionFailure::Partial(reason) => unavailable_fact(match reason {
+            MacroPartialReason::BudgetExceeded => PartialReason::BudgetExceeded,
+            MacroPartialReason::Recursion => PartialReason::SamePathRecursion,
+            MacroPartialReason::IncompleteTraversal => PartialReason::SemanticQueryFault,
+        }),
+        ProjectionFailure::Unresolved(UnresolvedReason::MissingDependency) => {
+            unavailable_fact(PartialReason::MissingDependency)
+        }
+        ProjectionFailure::Unresolved(_) => {
+            unavailable_fact(PartialReason::MissingSemanticNodeData)
+        }
+        ProjectionFailure::Unsupported(_) => unavailable_fact(PartialReason::SemanticQueryFault),
+    }
+}
+
+fn tsc_outcome_fact(outcome: &MacroTscOutcome) -> FactStatus {
+    match outcome {
+        MacroTscOutcome::Complete(_) | MacroTscOutcome::Invalid(_) => FactStatus::Complete,
+        MacroTscOutcome::Partial(failure) => unavailable_fact(match failure.reason {
+            MacroPartialReason::BudgetExceeded => PartialReason::BudgetExceeded,
+            MacroPartialReason::Recursion => PartialReason::SamePathRecursion,
+            MacroPartialReason::IncompleteTraversal => PartialReason::SemanticQueryFault,
+        }),
+        MacroTscOutcome::Unresolved(failure) => match failure.reason {
+            UnresolvedReason::MissingDependency => {
+                unavailable_fact(PartialReason::MissingDependency)
+            }
+            _ => unavailable_fact(PartialReason::MissingSemanticNodeData),
+        },
+        MacroTscOutcome::Unsupported(_) => unavailable_fact(PartialReason::SemanticQueryFault),
+    }
+}
+
+fn runtime_outcome_fact(outcome: &MacroRuntimeOutcome) -> FactStatus {
+    match outcome {
+        MacroRuntimeOutcome::Complete(_) | MacroRuntimeOutcome::Invalid(_) => FactStatus::Complete,
+        MacroRuntimeOutcome::Partial(failure) => unavailable_fact(match failure.reason {
+            MacroPartialReason::BudgetExceeded => PartialReason::BudgetExceeded,
+            MacroPartialReason::Recursion => PartialReason::SamePathRecursion,
+            MacroPartialReason::IncompleteTraversal => PartialReason::SemanticQueryFault,
+        }),
+        MacroRuntimeOutcome::Unresolved(failure) => match failure.reason {
+            UnresolvedReason::MissingDependency => {
+                unavailable_fact(PartialReason::MissingDependency)
+            }
+            _ => unavailable_fact(PartialReason::MissingSemanticNodeData),
+        },
+        MacroRuntimeOutcome::Unsupported(_) => unavailable_fact(PartialReason::SemanticQueryFault),
     }
 }

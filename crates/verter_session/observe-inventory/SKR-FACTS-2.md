@@ -27,7 +27,7 @@
 | Captured publication fingerprint and request-port forwarding | Reject stale and unproven request bases; normalize immutable session overlays and exclude additive loading from external supersession | REQUIRED | Request view | `resolver_core/request_store_view` and `resolver_core/request_bound` | always |
 | `classify_runtime` fact match | Per-member runtime constructors and typed degradation | REQUIRED | One member classification | `typeinfo/vue_macro_codegen/runtime` | always |
 | `demand_fact` per macro projection lane | Each codegen demand publishes its own fact; a value-local reason is an input only of the demand that reads it | REQUIRED | One demand | `typeinfo/vue_macro_codegen/runtime` | always |
-| Final component cache hit/miss hooks, facade observation handle and refusal traces | none; request audit and cache history | OPTIONAL | Instrumented request/store lifetime | `component_meta_result_admission` | cfg(feature = "semantic-observe") |
+| Final component cache hit/miss hooks, facade observation handle, admitted-refusal traces, and the non-eligible refusal traces on both publish decisions | none; request audit and cache history | OPTIONAL | Instrumented request/store lifetime | `component_meta_result_admission` and `host_manage/component_meta_entry` | cfg(feature = "semantic-observe") |
 
 Unit-test and test-support builds retain observation seams needed by behavioral assertions.
 Default production builds omit the optional fields and event updates; their

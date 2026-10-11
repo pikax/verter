@@ -343,6 +343,7 @@ impl VerterHost {
                     );
                 };
                 let final_completeness = resolved.completeness.merge(*extract_completeness);
+                let admission = dispatch.component_meta_admission_proof(&refusal_query);
                 self.component_meta_publish_decision(
                     canonical.as_str(),
                     resolved,
@@ -351,6 +352,7 @@ impl VerterHost {
                     seed_fence,
                     final_completeness,
                     &refusal_query,
+                    admission,
                 )
             },
         );
@@ -381,6 +383,10 @@ impl VerterHost {
         {
             return Err(abort);
         }
+        let mut resolved = resolved;
+        let merged = completeness.get();
+        resolved.completeness = merged;
+        resolved.synthesis_should_suppress = merged.is_partial();
         Ok(Some(super::component_meta_entry::ComponentMetaColdResult {
             completeness,
             resolved,
@@ -671,24 +677,11 @@ impl VerterHost {
                 return Ok(Some((cached.analysis.clone(), resolution)));
             }
         }
-        let resolved = {
-            let (executor_view, executor_fp) = fixed.executor_fixed_view();
-            self.resolve_component_meta_with_view_and_fixed_admission(
-                canonical.as_str(),
-                verter_type_engine::semantic_query::ProjectionMode::Expanded,
-                view,
-                Some((executor_view, executor_fp, fixed.is_current())),
-            )
-        };
-        let Some((mut resolved, admission)) = resolved else {
-            return Ok(None);
-        };
-        resolved.request_id = self.next_request_id();
-        // Keep the session view attached while extracting: policy,
-        // fallthrough, and macro-DTO replay all bind to this request context.
-        // It seeds from the SAME capture's cold-seed, so a non-current capture
-        // fails nested warm-cache probes closed rather than validating against
-        // a stale snapshot.
+        let validated_at_generation = self.project_type_store.current_project_generation();
+        let seed_fence = super::component_meta_entry::ColdSeedFence::new(
+            fixed.captured_validation_token(),
+            fixed.is_current(),
+        );
         let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
         let session_ctx = crate::resolver_core::SessionResolverContext::from_cold_seed(
             self,
@@ -700,31 +693,21 @@ impl VerterHost {
         let dispatch = &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(
             host_ctx_ref,
         );
-        // This view path does NOT publish to `ComponentMetaResultDb`, so the
-        // extract completeness carrier is discarded here.
-        let extract = extract_component_meta_from_resolved(
-            self,
+        let Some(cold) = self.component_meta_via_view_cold(
             canonical.as_str(),
-            &resolved,
-            true,
+            view,
+            &fixed,
             host_ctx_ref,
             dispatch,
-        );
-        // An aborted computation publishes nothing.
-        if let Some(abort) = verter_type_engine::semantic_query::ExecutionAbort::observed_in(
-            resolved.completeness.merge(extract.completeness),
-        ) {
-            return Err(abort);
-        }
-        self.merge_extraction_facts_into_admitted_resolved_meta(
-            canonical.as_str(),
-            verter_type_engine::semantic_query::ProjectionMode::Expanded,
-            view.fingerprint(),
-            &mut resolved,
-            extract.fallthrough_fact_versions.as_deref(),
-            admission.as_ref(),
-        );
-        Ok(Some((extract.analysis, resolved)))
+            &seed_fence,
+            validated_at_generation,
+        )?
+        else {
+            return Ok(None);
+        };
+        let mut resolved = cold.resolved;
+        resolved.request_id = self.next_request_id();
+        Ok(Some((cold.analysis, resolved)))
     }
 
     /// Cache-hit path. Returns `Some((analysis, resolution))` on a
