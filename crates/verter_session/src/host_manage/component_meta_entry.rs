@@ -1015,11 +1015,12 @@ impl VerterHost {
         // The caller-visible resolution carries the same merged status the
         // refusal ledger sealed. Leaving the resolve-only completeness here
         // made a replay report the extract's reasons and the first delivery
-        // report a narrower set.
+        // report a narrower set. `synthesis_should_suppress` stays the
+        // resolve-phase flag: a fallthrough trip that lands only in the
+        // extract must not flip it, or a clean no-macro resolve looks like
+        // a synthesis failure.
         let mut resolved = resolved;
-        let merged = completeness.get();
-        resolved.completeness = merged;
-        resolved.synthesis_should_suppress = merged.is_partial();
+        resolved.completeness = completeness.get();
         Ok(Some(ComponentMetaColdResult {
             resolved,
             analysis: meta,

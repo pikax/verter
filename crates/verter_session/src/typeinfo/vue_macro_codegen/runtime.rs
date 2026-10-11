@@ -596,7 +596,7 @@ pub(super) fn row_derivation_fact() -> FactResult<()> {
     FactResult::complete(())
 }
 
-/// Whether a DEGRADED flow return was observed while deriving this
+/// Whether a DEGRADED-SUCCESS flow return was observed while deriving this
 /// surface — the precondition for the runtime lane's empty-surface
 /// refusal.
 ///
@@ -606,13 +606,30 @@ pub(super) fn row_derivation_fact() -> FactResult<()> {
 /// there is no member set at all and publishing one declares a props-less
 /// component for a component that declares props.
 ///
-/// Scoped to the two DEGRADED-SUCCESS classes. A complete negative surface
-/// is discharged as its own resolution arm and never reaches here.
+/// Scoped to the two DEGRADED-SUCCESS classes. [`flow_return_no_surface_observed`]
+/// is the other side of that split: a producer that yielded no member set
+/// at all refuses even when a sibling arm made the assembled surface
+/// non-empty. A complete negative surface is discharged as its own
+/// resolution arm and never reaches here.
 pub(super) fn flow_return_degradation_observed() -> bool {
     let reasons =
         verter_type_engine::request_context::current_cold_compute_completeness().reasons();
     reasons.contains(PartialReasonSet::FLOW_RETURN_UNINFERRED)
         || reasons.contains(PartialReasonSet::FLOW_RETURN_UNVERIFIED)
+}
+
+/// Whether a producer this derivation asked for yielded no member set.
+///
+/// Distinct from [`flow_return_degradation_observed`]: that pair leaves a
+/// surface whose member set is complete, so the runtime lane refuses only
+/// when the assembled option object is empty. This class has no structure
+/// to address a member of. One authored intersection arm or one `interface
+/// … extends` heritage clause makes the assembled surface non-empty, and
+/// an emptiness check then publishes the sibling arm alone.
+pub(super) fn flow_return_no_surface_observed() -> bool {
+    verter_type_engine::request_context::current_cold_compute_completeness()
+        .reasons()
+        .contains(PartialReasonSet::FLOW_RETURN_NO_SURFACE)
 }
 
 pub(super) fn expansion_kind(kind: AnalyzedMacroKind) -> MacroExpansionKind {

@@ -296,6 +296,14 @@ impl MetaSession {
             let output = output_result?;
             let payload = encode_fn(output);
             host.provenance().payload_encodes.fetch_add(1, Relaxed);
+            // The cold path records this beside the encode. A replay that
+            // returns here never reaches that insert, so a batch probe of
+            // a retained partial sees no row for the canonical.
+            #[cfg(test)]
+            if let Some(map) = PAYLOAD_ITEM_COMPLETENESS_PROBE.lock().unwrap().as_mut() {
+                let partial = completeness.get().is_partial();
+                map.insert(canonical.to_string(), (partial, partial));
+            }
             return Ok(Some(payload));
         }
 

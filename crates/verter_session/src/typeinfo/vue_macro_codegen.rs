@@ -1672,8 +1672,9 @@ impl VerterHost {
 
         // A ROOT-position degradation leaves NO member set. The class is
         // the same one an interior position records — only the derived
-        // surface tells them apart, which is why this is a structural check
-        // on the surface and not a reason-class subtraction.
+        // surface tells them apart, which is why the degraded-success
+        // refusal is a structural check on an empty surface and not a
+        // reason-class subtraction.
         //
         // An empty surface is a legitimate answer for `defineProps<{}>()`
         // and only for it; under an observed flow-return degradation the
@@ -1683,13 +1684,22 @@ impl VerterHost {
         // attribute silently falls through to `$attrs`. Refusing is loud,
         // and the TSX lane still type-checks the file.
         //
+        // `FLOW_RETURN_NO_SURFACE` is per contribution, not per surface. A
+        // sibling arm (an intersection operand or a heritage clause) makes
+        // the assembled object non-empty, and the emptiness check would
+        // then publish that sibling alone. The runtime lane refuses
+        // whenever that class was observed, empty or not.
+        //
         // Scoped to the demand that RENDERS the option object. A names-only
         // (TSX / IDE) compile reads the public binding names and renders no
         // `props` option at all, and its generated TSX splices the AUTHORED
         // macro call for the external checker — so refusing there would
         // delete the whole file's type-check surface to prevent an option
         // object that demand never emits.
-        if classify_constructors && props.is_empty() && flow_return_degradation_observed() {
+        if classify_constructors
+            && (flow_return_no_surface_observed()
+                || (props.is_empty() && flow_return_degradation_observed()))
+        {
             return partial_failure().runtime();
         }
 
@@ -1797,11 +1807,16 @@ impl VerterHost {
         // The `props` twin of this refusal, for the same reason and with
         // the same scope: a ROOT-position degradation leaves no member set,
         // and `emits: []` for a component that declares emits sends every
-        // listener silently through to `$attrs`. `renders_runtime_options`
-        // keeps a names-only (TSX / IDE) compile out of it — that demand
-        // emits no `emits` option and its TSX splices the authored macro
-        // call for the external checker.
-        if renders_runtime_options && emits.is_empty() && flow_return_degradation_observed() {
+        // listener silently through to `$attrs`. A no-surface producer
+        // composed with a sibling event refuses even when that sibling
+        // makes the array non-empty. `renders_runtime_options` keeps a
+        // names-only (TSX / IDE) compile out of it — that demand emits no
+        // `emits` option and its TSX splices the authored macro call for
+        // the external checker.
+        if renders_runtime_options
+            && (flow_return_no_surface_observed()
+                || (emits.is_empty() && flow_return_degradation_observed()))
+        {
             return partial_failure().runtime();
         }
         MacroRuntimeOutcome::Complete(MacroRuntimeShape::Emits(emits))

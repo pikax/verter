@@ -383,10 +383,11 @@ impl VerterHost {
         {
             return Err(abort);
         }
+        // Merged status rides on `completeness`. The bool stays the
+        // resolve-phase projection: extract-only fallthrough partiality
+        // must not make a clean resolve report `synthesis_should_suppress`.
         let mut resolved = resolved;
-        let merged = completeness.get();
-        resolved.completeness = merged;
-        resolved.synthesis_should_suppress = merged.is_partial();
+        resolved.completeness = completeness.get();
         Ok(Some(super::component_meta_entry::ComponentMetaColdResult {
             completeness,
             resolved,
