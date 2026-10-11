@@ -57,6 +57,31 @@ Direct owner imports take the `OwnerImportSurfaceDb` path via `resolve_owner_dir
 
 ## Native Vs Compat (CRITICAL)
 
+Runtime constructor consumers read `ProjectSemanticDispatch::execute_fact`.
+The broad-runtime producer carries its own member classification guarantee:
+an exact sibling remains exact when an ancestor's value failed, while a
+classifier that could not finish exposes an unavailable fact. Unknown runtime
+kinds can themselves be exact (for example an authored `unknown` type).
+The consumer branches on the typed fact and preserves its failure causes;
+unrelated enclosing completeness does not authorize or veto the member.
+
+Final-component storage is engine-owned and generic; the session facade owns
+native payload policy. Its read validates the request generation and dependency
+signature, then replays that signature into every enclosing tracer. A rejected
+candidate contributes no dependencies. Its publish consumes engine-produced
+tracer evidence, checks exact owner coverage, and checks its generation and
+external-input publication fence.
+Fresh cold dependencies can be absent from the request-entry snapshot; this
+does not turn cold publication into a warm lookup. All retained dependencies
+remain in the signature after the narrow owner-route filter and validate on read.
+Neither the facade nor another consumer has a production raw DB/map accessor.
+
+The [receiving fact contract](references/fact-consumer-contract.md) specifies
+the independent demands, typed reuse cases, dependency adoption, and proof
+required of TypeInfo-first component views, native diagnostic families,
+authored language-service operations, and generated semantic slices. It is
+an adoption contract, not retention authority for an arbitrary partial artifact.
+
 The official/native component-meta payload is the semantic authority. `@verter/component-meta/compat` is a projection layer for `vue-component-meta` interoperability, not a second semantic pipeline.
 
 Guards: `no_napi_direct_verter_compiler_emitters`
@@ -254,7 +279,7 @@ Component-meta completeness is part of the public API surface.
 - Without this field an empty-because-degraded payload is byte-identical to an empty-because-nothing-is-declared payload — the worst direction of wrongness, because the consumer cannot tell "nothing is declared" from "we failed to find what is declared". Neither the `props` lane nor `componentPublicContract` discriminates the two on its own.
 - **An UNRESOLVABLE macro type-argument root is one of those producers, and records its own partiality.** `resolve_vue_macro_surface_with_ctx` drops the surface when the root resolves to a carrier rather than a projectable surface (`BareRef` / `ImportType` / `RawFallback` / `Opaque`, or no node data) — an authored `defineProps<P>()` whose `P` comes from a module that does not exist, or from a module that does not export that name. The drop folds the typed reason into the producer's cold-compute completeness scope FIRST (`unresolved_macro_root_partiality`: `MISSING_DEPENDENCY` for a preserved authored reference, the `QueryError`'s own class for an opaque carrier, `MISSING_SEMANTIC_NODE_DATA` for an absent node), so the empty `MacroSurfaceDtos` bundle it produces is returned PARTIAL, is refused `FrameworkSurfaceStore` admission, and reaches the payload as `Partial` + `degraded` instead of a wrong-complete silence. A component that authored no macro type at all never enters this path and stays `Complete` / `exact` / warm-capable.
 - A partial result may NEVER pair with `componentPublicContract.exactness: "exact"`. The aggregate exactness is computed once, in `verter_session::framework::public_contract`, from the per-member degradation list AND the result completeness: a partial result is always `degraded`, because the members the projector could not see are exactly the ones the result is missing.
-- The completeness field reports admission; it does not change it. A partial result is still refused warm admission to `ComponentMetaResultDb`, so an identical follow-up request recomputes rather than replaying the partial as complete.
+- The completeness field reports admission; it does not change it. A complete fact is the only successful `ComponentMetaResultDb` candidate. An eligible retained refusal — certified divergence, the same operation profile, or an isolated-root ledger refusal — repeats with its original status and recovery and is not a successful value, so an identical follow-up replays it instead of recomputing. Any other approximation, a missing input, and an execution abort are not retained: an identical follow-up recomputes, and a missing input can heal.
 - Adding a wire field to the component-meta payload bumps `COMPONENT_META_SCHEMA_VERSION` in lockstep with the TS decoder gate (`GRAPH_FORMAT_VERSION`, exact equality), so a decoder that trusts the completeness position can never accept a payload old enough to omit it.
 
 ## JSDoc & Default-Value Publication

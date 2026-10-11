@@ -1,0 +1,16 @@
+error[E0624]: method `candidate` is private
+ --> tests/cases/compile-fail/final_component_store_raw_read.rs:4:16
+  |
+4 |       let _ = db.candidate(key, [0; 16]);
+  |                  ^^^^^^^^^ private method
+  |
+ ::: $WORKSPACE/crates/verter_type_engine/src/component_meta_result_db.rs
+  |
+  | /     pub(crate) fn candidate(
+  | |         &self,
+  | |         key: &ComponentMetaResultKey,
+  | |         owner_whole_hash: Hash16,
+... |
+  | |         >,
+  | |     > {
+  | |_____- private method defined here

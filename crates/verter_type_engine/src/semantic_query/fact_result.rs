@@ -216,6 +216,40 @@ impl<T> FactResult<T> {
     }
 }
 
+impl FactResult<()> {
+    /// This demand's result from the reasons that are its own inputs.
+    ///
+    /// An empty input set is a complete answer. Callers pass only the
+    /// reasons this demand reads; reasons that belong to another demand
+    /// are omitted by the caller and are not stripped here.
+    #[must_use = "the demand fact is the answer for this lane"]
+    pub fn from_demand_inputs(inputs: PartialReasonSet) -> Self {
+        match NonEmptyReasons::new(inputs) {
+            Some(causes) => Self::unavailable(causes),
+            None => Self::complete(()),
+        }
+    }
+}
+
+/// A root-narrowing or exhaustive negative claim.
+///
+/// Exact only when the domain is exact and every value or effect fact the
+/// inference requires is complete. A presence-only or unavailable input
+/// refuses the claim; it does not borrow a sibling's status.
+#[must_use = "the narrowing fact is the claim; a refused input is not a sibling status"]
+pub fn root_narrowing_fact(domain: &FactStatus, required: &[FactStatus]) -> FactResult<()> {
+    if domain.is_complete() && required.iter().all(|status| status.is_complete()) {
+        return FactResult::complete(());
+    }
+    let mut inputs = PartialReasonSet::empty();
+    for status in std::iter::once(domain).chain(required) {
+        if let FactStatus::Approximate(causes) | FactStatus::Unavailable(causes) = status {
+            inputs = inputs.union(causes.get());
+        }
+    }
+    FactResult::from_demand_inputs(inputs)
+}
+
 impl FactStatus {
     /// Whether the fact is exact.
     #[must_use]

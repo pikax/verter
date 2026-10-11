@@ -17,6 +17,53 @@ use std::sync::{
 use verter_session_query::declarations::metadata::ResolvedTypeDeclaration;
 use verter_session_query::facts::fact_cache::FactVersionRef;
 use verter_session_query::facts::fact_cache::ReadSetSignature;
+
+/// Finalized evidence of one traced component computation. Only the engine
+/// can mint it; admission consumes it under its publication fence.
+///
+/// The refusal charges, the isolation flag and the divergence certificate
+/// are this compute's. A later compute does not replace them.
+pub struct ComponentMetaEvidence {
+    facts: Arc<[FactVersionRef]>,
+    generation: u64,
+    external_fingerprint: u64,
+    effects: crate::component_meta_result_db::ComponentMetaRefusalEffects,
+    /// The compute's request spend is its own: the paid prefix and the
+    /// operation counter moved only by what this thread recorded, or there
+    /// was no request to interleave with.
+    spent_alone: bool,
+    /// A producer proved an exact same-path recurrence during this compute.
+    /// A same-path reason bit is not this flag.
+    divergence_certificate: bool,
+    /// A schedule cut was noted during this compute.
+    schedule_cut: bool,
+}
+
+impl ComponentMetaEvidence {
+    /// Admission proof for this compute. The certificate, the schedule cut
+    /// and the isolation flag are the ones recorded on this evidence.
+    #[must_use]
+    pub fn admission_proof(
+        &self,
+        query: &crate::component_meta_result_db::ComponentMetaRefusalQuery,
+    ) -> crate::component_meta_result_db::FinalComponentAdmissionProof {
+        crate::component_meta_result_db::FinalComponentAdmissionProof {
+            divergence_certificate: self.divergence_certificate,
+            schedule_cut: self.schedule_cut,
+            entered_isolated: query.entered_isolated && self.spent_alone && !self.schedule_cut,
+            request_spend_owned: self.spent_alone,
+        }
+    }
+}
+
+/// Tracer finalization for a component result. A refused trace cannot mint
+/// publication evidence.
+pub enum ComponentMetaTrace {
+    /// A stable, completely observed computation.
+    Observed(ComponentMetaEvidence),
+    /// A computation whose evidence cannot support retention.
+    ReturnOnly(NonAdmissionReason),
+}
 /// Selected output storage; there are no raw-resource accessors.
 pub(crate) struct SingleEntryAttachment<'a, K: Eq + std::hash::Hash + Clone, V> {
     entries: &'a DashMap<K, Arc<CacheEntry<V>>>,
@@ -1244,6 +1291,317 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispat
     #[must_use]
     pub fn validates_fact_signature(&self, facts: &[FactVersionRef]) -> bool {
         self.ctx.validates_fact_signature(facts)
+    }
+
+    /// Read a final component candidate against this request's generation
+    /// and exact dependency evidence. Passive storage exposes no raw read.
+    pub fn read_component_meta_result<P>(
+        &self,
+        db: &crate::component_meta_result_db::ComponentMetaResultDb<P>,
+        key: &crate::component_meta_result_db::ComponentMetaResultKey,
+        owner_whole_hash: verter_session_query::analysis::types::Hash16,
+    ) -> Option<Arc<crate::component_meta_result_db::ComponentMetaResultEntry<P>>> {
+        if self.snapshot.flags().is_cancelled() || !db.is_current_schema() {
+            return None;
+        }
+        let candidate = db.candidate(key, owner_whole_hash)?;
+        if candidate.value.validated_at_generation != self.current_project_generation()
+            || !self.validates_fact_signature(&candidate.value.read_set_signature.facts)
+        {
+            return None;
+        }
+        candidate.value.read_set_signature.bubble(self.ctx);
+        Some(Arc::new(candidate.value.clone()))
+    }
+
+    /// Whether this compute may still be stored: the request is live, the
+    /// schema and generation match, and the owner's whole-hash fact is the
+    /// one this evidence recorded.
+    fn component_meta_fence_holds<P>(
+        &self,
+        db: &crate::component_meta_result_db::ComponentMetaResultDb<P>,
+        key: &crate::component_meta_result_db::ComponentMetaResultKey,
+        owner_whole_hash: verter_session_query::analysis::types::Hash16,
+        evidence: &ComponentMetaEvidence,
+        generation: u64,
+    ) -> bool {
+        !self.snapshot.flags().is_cancelled()
+            && db.is_current_schema()
+            && generation == evidence.generation
+            && generation == self.current_project_generation()
+            && evidence.external_fingerprint == self.ctx.current_external_supersession_fingerprint()
+            && self
+                .ctx
+                .authoritative_current_content_hash(&key.owner_canonical)
+                == Some(owner_whole_hash)
+            && evidence.facts.iter().any(|fact| {
+                matches!(
+                    fact,
+                    FactVersionRef::FileWholeHash { canonical_id, hash }
+                        if canonical_id.as_str() == key.owner_canonical.as_ref()
+                            && *hash == owner_whole_hash
+                )
+            })
+    }
+
+    /// Signature stored with a candidate or a refusal. The owner's route
+    /// fact is not part of it: both admission paths drop the same fact.
+    fn retained_signature(evidence: &ComponentMetaEvidence, owner: &str) -> ReadSetSignature {
+        let facts = evidence
+            .facts
+            .iter()
+            .filter(|fact| {
+                !matches!(
+                    fact,
+                    FactVersionRef::DerivedFactHash {
+                        canonical_id,
+                        kind: verter_session_query::facts::fact_cache::DerivedFactKind::Route,
+                        ..
+                    } if canonical_id.as_str() == owner
+                )
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+            .into();
+        ReadSetSignature::new(facts)
+    }
+
+    /// Admit a traced final result only while its complete external-input
+    /// publication fence still holds. Warm reads validate its precise facts.
+    pub fn admit_component_meta_result<P: verter_session_query::retention::RetainedFootprint>(
+        &self,
+        db: &crate::component_meta_result_db::ComponentMetaResultDb<P>,
+        key: crate::component_meta_result_db::ComponentMetaResultKey,
+        owner_whole_hash: verter_session_query::analysis::types::Hash16,
+        evidence: ComponentMetaEvidence,
+        payload: Arc<P>,
+        generation: u64,
+    ) -> Option<Arc<crate::component_meta_result_db::ComponentMetaResultEntry<P>>> {
+        if !self.component_meta_fence_holds(db, &key, owner_whole_hash, &evidence, generation) {
+            return None;
+        }
+        let entry = Arc::new(crate::component_meta_result_db::ComponentMetaResultEntry {
+            payload,
+            read_set_signature: Self::retained_signature(&evidence, key.owner_canonical.as_ref()),
+            validated_at_generation: generation,
+        });
+        // A cold trace can observe a freshly completed dependency that the
+        // request-entry snapshot could not yet validate. Its sound tracer
+        // evidence and unchanged publication fence authorize storage; every
+        // later read still validates the complete retained signature.
+        db.publish_core(key, owner_whole_hash, entry.as_ref().clone())
+            .then_some(entry)
+    }
+
+    /// Axes of the demand that is asking to reuse a final-component refusal.
+    ///
+    /// The profile is every allowance the connected demand answers to,
+    /// including the request operation cap. `entry_allowance` is the
+    /// projection operations already spent, and `context` is the paid-set
+    /// digest. `entered_isolated` is true only for a fresh request: no
+    /// operations spent and an empty paid set. Without a request, the
+    /// operation cap is left at 0 so the session can fill the host cap;
+    /// the other profile axes still come from this demand's ledger.
+    #[must_use]
+    pub fn component_meta_refusal_query(
+        &self,
+        root: &str,
+    ) -> crate::component_meta_result_db::ComponentMetaRefusalQuery {
+        let request = crate::request_context::current_request_budget();
+        let profile = self.connected_demand().profile_spec(request.as_deref());
+        if let Some(budget) = request.as_deref() {
+            let entry = budget.entry_state();
+            return crate::component_meta_result_db::ComponentMetaRefusalQuery {
+                root: Arc::from(root),
+                profile,
+                entry_allowance: entry.operations() as u64,
+                context: entry.paid_digest(),
+                entered_isolated: entry.operations() == 0 && entry.paid_len() == 0,
+            };
+        }
+        crate::component_meta_result_db::ComponentMetaRefusalQuery {
+            root: Arc::from(root),
+            profile,
+            entry_allowance: 0,
+            context: 0,
+            entered_isolated: true,
+        }
+    }
+
+    /// Admission proof for the compute `evidence` finalised.
+    ///
+    /// A same-path recursion bit is not, by itself, a certificate. A
+    /// schedule cut and a spend that was not this compute's alone both
+    /// refuse isolated-root retention. The current demand root is not
+    /// consulted: two outstanding computes keep their own proofs.
+    #[must_use]
+    pub fn component_meta_admission_proof(
+        &self,
+        query: &crate::component_meta_result_db::ComponentMetaRefusalQuery,
+        evidence: &ComponentMetaEvidence,
+    ) -> crate::component_meta_result_db::FinalComponentAdmissionProof {
+        let _ = self.current_project_generation();
+        evidence.admission_proof(query)
+    }
+
+    /// Apply a sealed refusal's charges to this demand. Misses, changing
+    /// nothing, when a recorded request spend does not enter the request
+    /// that is asking.
+    fn replay_component_meta_refusal_effects(
+        &self,
+        effects: &crate::component_meta_result_db::ComponentMetaRefusalEffects,
+    ) -> bool {
+        let request = crate::request_context::current_request_budget();
+        match (request.as_deref(), effects.request.as_ref()) {
+            (Some(request), Some(spent)) => {
+                if !request.apply_refusal(spent) {
+                    return false;
+                }
+            }
+            (None, Some(_)) => return false,
+            (None, None) | (Some(_), None) => {}
+        }
+        if effects.work > 0 || effects.bytes > 0 || !effects.trip.is_empty() {
+            // The connected ledger only exists inside a demand. A terminal
+            // delivery (session replay on a fresh dispatch) has none; the
+            // request spend above is the charge that outlives this dispatch.
+            let demand = self.connected_demand();
+            if demand.is_active() {
+                demand.apply_refusal(effects.work, effects.bytes, effects.trip);
+            }
+        }
+        true
+    }
+
+    /// Read a retained refusal. A stale signature or generation misses and
+    /// leaves the entry in place. A hit adopts the refusal's dependencies.
+    pub fn read_component_meta_refusal<P>(
+        &self,
+        db: &crate::component_meta_result_db::ComponentMetaResultDb<P>,
+        key: &crate::component_meta_result_db::ComponentMetaResultKey,
+        owner_whole_hash: verter_session_query::analysis::types::Hash16,
+        query: &crate::component_meta_result_db::ComponentMetaRefusalQuery,
+    ) -> Option<crate::component_meta_result_db::ComponentMetaRetainedRefusal<P>> {
+        if self.snapshot.flags().is_cancelled() || !db.is_current_schema() {
+            return None;
+        }
+        let (retained, effects) = db.refusal_for(key, owner_whole_hash, query)?;
+        if retained.validated_at_generation != self.current_project_generation()
+            || !self.validates_fact_signature(&retained.read_set_signature.facts)
+        {
+            return None;
+        }
+        if !self.replay_component_meta_refusal_effects(&effects) {
+            return None;
+        }
+        retained.read_set_signature.bubble(self.ctx);
+        Some(retained)
+    }
+
+    /// Retain an eligible refusal under the same publication fence as a
+    /// successful candidate. A complete status is not retained, and the
+    /// success map is not written.
+    pub fn admit_component_meta_refusal<
+        P: verter_session_query::retention::RetainedFootprint + Clone,
+    >(
+        &self,
+        db: &crate::component_meta_result_db::ComponentMetaResultDb<P>,
+        key: crate::component_meta_result_db::ComponentMetaResultKey,
+        owner_whole_hash: verter_session_query::analysis::types::Hash16,
+        evidence: ComponentMetaEvidence,
+        identity: crate::component_meta_result_db::ComponentMetaRefusalIdentity,
+        status: crate::semantic_query::FactStatus,
+        completeness: crate::semantic_query::ResultCompleteness,
+        recovery: Arc<P>,
+        generation: u64,
+    ) -> Option<crate::component_meta_result_db::ComponentMetaRetainedRefusal<P>> {
+        if status.is_complete()
+            || !self.component_meta_fence_holds(db, &key, owner_whole_hash, &evidence, generation)
+        {
+            return None;
+        }
+        db.seal_refusal(
+            key.clone(),
+            owner_whole_hash,
+            identity,
+            status,
+            completeness,
+            recovery,
+            Self::retained_signature(&evidence, key.owner_canonical.as_ref()),
+            generation,
+            evidence.effects,
+        )
+    }
+
+    /// Compute with an engine-owned tracer and seal the evidence for final
+    /// component publication. Callers can choose a payload, never its facts.
+    pub fn traced_component_meta_compute<R>(
+        &self,
+        owner_canonical: &str,
+        compute: impl FnOnce() -> R,
+    ) -> (R, ComponentMetaTrace) {
+        let generation = self.current_project_generation();
+        let external_fingerprint = self.ctx.publication_input_fingerprint();
+        let request = crate::request_context::current_request_budget();
+        let entry_snapshot = request.as_ref().map(|budget| budget.capture_entry());
+        let spend = crate::request_budget::ThreadSpendGuard::enter();
+        let span = super::connected_demand::ComponentMetaSpanGuard::enter();
+        let (value, finalise) = self.traced_compute(|| {
+            if let Some(hash) = self.ctx.authoritative_current_content_hash(owner_canonical) {
+                crate::resolver_core::resolver_context::observe_fan_out(
+                    FactVersionRef::FileWholeHash {
+                        canonical_id: owner_canonical.to_owned(),
+                        hash,
+                    },
+                );
+            }
+            compute()
+        });
+        let (operations, paid) = spend.finish();
+        let span = span.finish();
+        let (request_spent, spent_alone) = match (request.as_ref(), entry_snapshot.as_ref()) {
+            (Some(budget), Some(snapshot)) => {
+                let (spent, alone) = budget.owned_spend(snapshot, operations, &paid);
+                (Some(spent), alone)
+            }
+            _ => (None, true),
+        };
+        let effects = crate::component_meta_result_db::ComponentMetaRefusalEffects {
+            request: request_spent,
+            work: span.work,
+            bytes: span.bytes,
+            trip: span.trip,
+        };
+        let divergence_certificate = span.certificates > 0;
+        let schedule_cut = span.schedule_cuts > 0;
+        let trace = match finalise {
+            verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(facts)
+                if external_fingerprint.is_some_and(|captured| {
+                    captured == self.ctx.current_external_supersession_fingerprint()
+                }) =>
+            {
+                ComponentMetaTrace::Observed(ComponentMetaEvidence {
+                    facts,
+                    generation,
+                    external_fingerprint: external_fingerprint
+                        .expect("checked captured fingerprint"),
+                    effects,
+                    spent_alone,
+                    divergence_certificate,
+                    schedule_cut,
+                })
+            }
+            verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(_) => {
+                ComponentMetaTrace::ReturnOnly(NonAdmissionReason::GenerationSuperseded)
+            }
+            verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_) => {
+                ComponentMetaTrace::ReturnOnly(NonAdmissionReason::UnresolvedProvenance)
+            }
+            verter_session_query::facts::fact_read_set::FactReadSetFinalise::MutationUnstable => {
+                ComponentMetaTrace::ReturnOnly(NonAdmissionReason::MutationUnstable)
+            }
+        };
+        (value, trace)
     }
 
     /// Run `compute` under a fresh fact tracer seeded from the request's live

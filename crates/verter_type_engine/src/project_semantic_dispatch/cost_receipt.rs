@@ -562,6 +562,24 @@ pub struct BudgetProfileSpec {
     pub cost_model_revision: u32,
 }
 
+impl BudgetProfileSpec {
+    /// The profile a certified divergence stores. Certified divergence
+    /// ignores allowances, so this is not a budget a demand could have.
+    #[must_use]
+    pub const fn ignored() -> Self {
+        Self {
+            work: 0,
+            bytes: 0,
+            query_depth: 0,
+            instantiation_depth: 0,
+            tail_steps: 0,
+            request_operations: 0,
+            relation_comparisons: 0,
+            cost_model_revision: 0,
+        }
+    }
+}
+
 /// An interned [`BudgetProfileSpec`]: one identity per spec for as long as
 /// anything holds it. The interner keeps only weak references, and a
 /// profile's last holder removes its entry, so the interner holds exactly

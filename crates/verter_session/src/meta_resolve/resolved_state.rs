@@ -98,29 +98,34 @@ pub struct ResolvedComponentMetaState {
     /// Typed per-result completeness — `Complete` when this resolved state is
     /// the full surface, `Partial` (with its reason set) when a budget
     /// exhaustion / fatal `QueryError` / partial macro surface produced a
-    /// structurally-incomplete result during the cold compute. This is the
-    /// AUTHORITATIVE partial-result signal; [`Self::synthesis_should_suppress`]
-    /// is a compatibility projection derived from
-    /// `completeness.is_partial()` (do not duplicate the truth — set
-    /// `completeness`, read `synthesis_should_suppress`). A `Partial` result
-    /// is RETURNED to the caller but is refused warm admission to the
-    /// `ComponentMetaResultDb` / resolved-meta caches (the no-poison
-    /// invariant).
+    /// structurally-incomplete result during the cold compute. After
+    /// extraction this is the resolve completeness merged with the extract
+    /// scope, so a fallthrough trip is visible here even when synthesis
+    /// itself completed. A `Partial` result is RETURNED to the caller but
+    /// is refused warm admission to the `ComponentMetaResultDb` /
+    /// resolved-meta caches (the no-poison invariant).
     pub completeness: verter_type_engine::semantic_query::ResultCompleteness,
     /// `true` when graph-native slot-binding synthesis observed a fatal
     /// `QueryError` (`BudgetExceeded`, `UnstableState`, walker
-    /// `cache_suppress`) during the cold compute. Gates
-    /// `ComponentMetaResultDb` publication so partially-populated
-    /// results never warm the shared final-result cache.
+    /// `cache_suppress`) during the resolve. Gates the synthesis story the
+    /// caller reads.
     ///
-    /// COMPATIBILITY PROJECTION of [`Self::completeness`]: equals
-    /// `completeness.is_partial()`. Kept as a bool field so the many existing
-    /// consumers read it directly; the typed `completeness` is the single
-    /// source of truth.
+    /// This is the resolve-phase projection, not a second copy of
+    /// [`Self::completeness`] after extraction. A fallthrough trip that
+    /// lands only in the extract makes `completeness` partial and leaves
+    /// this flag false: the resolve itself completed. A resolve that is
+    /// already partial sets both.
     pub synthesis_should_suppress: bool,
 }
 
 impl ResolvedComponentMetaState {
+    /// Fact status of this resolution. A retained refusal is not complete.
+    #[must_use]
+    pub fn fact_status(&self) -> verter_type_engine::semantic_query::FactStatus {
+        crate::component_meta_result_db::final_component_refusal_status(self.completeness.reasons())
+            .unwrap_or(verter_type_engine::semantic_query::FactStatus::Complete)
+    }
+
     /// Merge facts observed by the extraction/fallthrough phase into this
     /// call-owned state. Existing resolve facts retain their order; new facts
     /// append in producer order with deterministic equality-based dedup.
