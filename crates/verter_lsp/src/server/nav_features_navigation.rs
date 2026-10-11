@@ -37,37 +37,6 @@ use super::rename_prepare::{
 use super::server_utils::location_from_span;
 use super::VerterLanguageServer;
 
-/// Read an export's declaration span (re-export chains followed) together with
-/// the source that span indexes, both at ONE committed content of the declaring
-/// file, recording that content as the foreground request's dependency evidence.
-fn export_span_and_source(
-    server: &VerterLanguageServer,
-    canonical_id: &str,
-    binding_name: &str,
-) -> Option<(String, u32, u32, std::sync::Arc<str>)> {
-    let host = server.documents.host();
-    let lookup = || {
-        host.get_export_span_follow_reexports(canonical_id, binding_name)
-            .or_else(|| {
-                let (s, e) = host.get_export_span(canonical_id, binding_name)?;
-                Some((canonical_id.to_string(), s, e))
-            })
-    };
-    let (declaring_id, _, _) = lookup()?;
-    server.read_child_at_one_revision(&declaring_id, || {
-        let (resolved_id, start, end) = lookup()?;
-        if resolved_id != declaring_id {
-            return None;
-        }
-        let source = crate::documents::ForegroundRequest::host_target_source(
-            &server.documents,
-            &resolved_id,
-            host.get_source(&resolved_id)?,
-        )?;
-        Some((resolved_id, start, end, source))
-    })
-}
-
 /// Resolve a named export's declaration `Location` in a REAL source file through
 /// the host's export tables (re-export chains followed). Fail-closed `None` when
 /// the export, source, or position conversion is unavailable.
@@ -77,7 +46,7 @@ fn host_export_location(
     binding_name: &str,
 ) -> Option<Location> {
     let (resolved_id, start, end, source) =
-        export_span_and_source(server, canonical_id, binding_name)?;
+        server.native_export_span_and_source(canonical_id, binding_name)?;
     let encoding = server.position_encoding.read().clone();
     let li = LineIndex::new(&source, encoding);
     let range = Range {
@@ -375,7 +344,7 @@ async fn handle_goto_definition_attempt(
         let encoding = server.position_encoding.read().clone();
         let resolve_export = |target_canonical_id: &str, binding_name: &str| -> Option<Location> {
             let (resolved_id, start, end, target_source) =
-                export_span_and_source(server, target_canonical_id, binding_name)?;
+                server.native_export_span_and_source(target_canonical_id, binding_name)?;
             let target_li = LineIndex::new(&target_source, encoding.clone());
             let start_pos = target_li.offset_to_position(start)?;
             let end_pos = target_li.offset_to_position(end)?;

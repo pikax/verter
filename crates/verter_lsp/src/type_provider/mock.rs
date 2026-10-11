@@ -476,6 +476,7 @@ mod inner {
 
         fn barriered<'a, T: Send + 'a>(
             &self,
+            query: &ProviderQuery,
             answer: ProviderFuture<'a, T>,
         ) -> ProviderFuture<'a, T> {
             let barriers = self.request_barriers.lock().unwrap().clone();
@@ -485,6 +486,7 @@ mod inner {
             // replaced before it settled is refused.
             let incarnation = Arc::clone(&self.incarnation);
             let selected_by = incarnation.load(std::sync::atomic::Ordering::SeqCst);
+            let query = query.clone();
             Box::pin(async move {
                 if let Some(barriers) = &barriers {
                     barriers.reach(RequestBarrier::ProviderDispatch).await;
@@ -511,6 +513,14 @@ mod inner {
                         "the engine incarnation that evaluated this query was retired".to_string(),
                     ))
                 };
+                if result.is_ok() {
+                    let authority = Arc::clone(&incarnation);
+                    query.retain_validity(Arc::new(move || {
+                        authority.load(std::sync::atomic::Ordering::SeqCst) == selected_by
+                    }));
+                } else {
+                    query.discard_result();
+                }
                 if let Some(barriers) = &barriers {
                     barriers.reach(RequestBarrier::ProviderDecode).await;
                 }
@@ -523,11 +533,19 @@ mod inner {
         fn barriered_targets<'a, T: Send + 'a>(
             &self,
             held: Vec<(String, Option<Arc<str>>)>,
+            query: &ProviderQuery,
             answer: ProviderFuture<'a, T>,
         ) -> ProviderFuture<'a, T> {
-            let answer = self.barriered(answer);
+            let answer = self.barriered(query, answer);
             let state = Arc::clone(&self.state);
-            Box::pin(async move { settle_targets(&state, &held, answer.await) })
+            let query = query.clone();
+            Box::pin(async move {
+                let result = settle_targets(&state, &held, answer.await);
+                if result.is_err() {
+                    query.discard_result();
+                }
+                result
+            })
         }
 
         fn note_recorded(&self) {
@@ -1707,21 +1725,24 @@ mod inner {
             if let Some(callback) = on_query {
                 callback();
             }
-            self.barriered(Box::pin(async move {
-                if let Some((arrived, release)) = block {
-                    arrived.notify_one();
-                    release.notified().await;
-                }
-                if fail {
-                    return Err(TypeProviderError::new(
-                        "scripted transient completion failure".to_string(),
-                    ));
-                }
-                Ok(CompletionResult {
-                    items,
-                    is_incomplete: false,
-                })
-            }))
+            self.barriered(
+                query,
+                Box::pin(async move {
+                    if let Some((arrived, release)) = block {
+                        arrived.notify_one();
+                        release.notified().await;
+                    }
+                    if fail {
+                        return Err(TypeProviderError::new(
+                            "scripted transient completion failure".to_string(),
+                        ));
+                    }
+                    Ok(CompletionResult {
+                        items,
+                        is_incomplete: false,
+                    })
+                }),
+            )
         }
 
         fn get_hover(
@@ -1766,14 +1787,17 @@ mod inner {
             if let Some(callback) = on_query {
                 callback();
             }
-            self.barriered(Box::pin(async move {
-                if fail {
-                    return Err(TypeProviderError::new(
-                        "scripted transient hover failure".to_string(),
-                    ));
-                }
-                Ok(result)
-            }))
+            self.barriered(
+                query,
+                Box::pin(async move {
+                    if fail {
+                        return Err(TypeProviderError::new(
+                            "scripted transient hover failure".to_string(),
+                        ));
+                    }
+                    Ok(result)
+                }),
+            )
         }
 
         fn get_diagnostics(&self, path: &str) -> ProviderFuture<'_, Vec<TypeDiagnostic>> {
@@ -1870,6 +1894,7 @@ mod inner {
             }
             self.barriered_targets(
                 held,
+                query,
                 Box::pin(async move {
                     if fail {
                         return Err(TypeProviderError::new(
@@ -1912,6 +1937,7 @@ mod inner {
             drop(state);
             self.barriered_targets(
                 held,
+                query,
                 Box::pin(async move {
                     if fail {
                         return Err(TypeProviderError::new(
@@ -1959,7 +1985,7 @@ mod inner {
             if let Some(callback) = on_query {
                 callback();
             }
-            self.barriered_targets(held, Box::pin(async move { result }))
+            self.barriered_targets(held, query, Box::pin(async move { result }))
         }
 
         fn get_rename_locations(
@@ -1996,6 +2022,7 @@ mod inner {
             };
             self.barriered_targets(
                 held,
+                query,
                 Box::pin(async move {
                     if let Some((arrived, release)) = block {
                         arrived.notify_one();
@@ -2042,7 +2069,7 @@ mod inner {
             if let Some(callback) = on_query {
                 callback();
             }
-            self.barriered(Box::pin(async move { Ok(result) }))
+            self.barriered(query, Box::pin(async move { Ok(result) }))
         }
 
         fn get_code_actions(
@@ -2076,7 +2103,7 @@ mod inner {
             let checked = state.check_targets(query, edit_targets());
             let result = checked.map(|()| result);
             drop(state);
-            self.barriered_targets(held, Box::pin(async move { result }))
+            self.barriered_targets(held, query, Box::pin(async move { result }))
         }
 
         fn get_semantic_tokens(
@@ -2095,7 +2122,7 @@ mod inner {
                 .find(|(p, _)| p == path)
                 .map(|(_, tokens)| tokens.clone())
                 .unwrap_or_default();
-            self.barriered(Box::pin(async move { Ok(result) }))
+            self.barriered(query, Box::pin(async move { Ok(result) }))
         }
 
         fn get_document_highlights(
@@ -2116,7 +2143,7 @@ mod inner {
                 .find(|(p, o, _)| p == path && *o == offset)
                 .map(|(_, _, hl)| hl.clone())
                 .unwrap_or_default();
-            self.barriered(Box::pin(async move { Ok(result) }))
+            self.barriered(query, Box::pin(async move { Ok(result) }))
         }
 
         fn get_inlay_hints(
@@ -2139,7 +2166,7 @@ mod inner {
                 .find(|(p, so, eo, _)| p == path && *so == start_offset && *eo == end_offset)
                 .map(|(_, _, _, hints)| hints.clone())
                 .unwrap_or_default();
-            self.barriered(Box::pin(async move { Ok(result) }))
+            self.barriered(query, Box::pin(async move { Ok(result) }))
         }
 
         fn resolve_completion(
@@ -2159,7 +2186,7 @@ mod inner {
                 .iter()
                 .find(|(p, candidate, _)| p == path && *candidate == data)
                 .and_then(|(_, _, resolved)| resolved.clone());
-            self.barriered(Box::pin(async move { Ok(result) }))
+            self.barriered(query, Box::pin(async move { Ok(result) }))
         }
 
         fn configure_paths(

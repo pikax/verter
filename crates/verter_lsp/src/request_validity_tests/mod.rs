@@ -40,6 +40,9 @@ use crate::type_provider::merge;
 use crate::type_provider::mock::{MockCall, MockTypeProvider};
 use crate::type_provider::protocol as wire;
 
+// Fixture disk writes in this module are behind the workspace index.
+// `*_tests.rs` is skipped by the hermeticity production-source walk.
+#[path = "applicability_tests.rs"]
 mod applicability;
 mod controls;
 mod liveness;

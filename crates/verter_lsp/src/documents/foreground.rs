@@ -33,6 +33,7 @@ use crate::features::action_utils::{
 use crate::provider_surface_store::ProviderSurfaceSnapshot;
 use verter_session::framework::api_projector::ComponentApiProjectionWitness;
 use verter_session::CommittedSourceContent;
+use verter_session_query::facts::fact_cache::FactVersionRef;
 
 /// Every foreground LSP route whose answer is settled against a request
 /// snapshot.
@@ -70,8 +71,9 @@ pub(crate) enum ResponseClass {
     Navigation,
     /// Edits a client applies. Every open document an edit was computed
     /// against is captured like a navigation target and validated at
-    /// settlement; the delivered edit names each captured version
-    /// ([`ForegroundRequest::bind_edits`]).
+    /// settlement; a newly created path is recorded before that settlement
+    /// ([`ForegroundRequest::record_absent_creates`]) and the delivered edit
+    /// names each captured version ([`ForegroundRequest::bind_edits`]).
     Edit,
 }
 
@@ -164,13 +166,17 @@ pub(crate) struct ForegroundRequest {
     /// both settle, and a surface that moves after its decode supersedes the
     /// answer built from it.
     decoded_surfaces: parking_lot::Mutex<Vec<Arc<ProviderSurfaceSnapshot>>>,
+    queries: parking_lot::Mutex<Vec<verter_type_runtime::provider_query::ProviderQuery>>,
+    closed_targets: parking_lot::Mutex<Vec<(String, ClosedTargetProof)>>,
+    absent_targets: parking_lot::Mutex<Vec<String>>,
     /// The committed content hash of every imported source a native
     /// contribution of this request was read from — the explicit dependency
     /// evidence that ties native child-contract enrichment to one basis with the
     /// provider answer it is delivered beside. Two reads of one source with
     /// different content cannot both settle; an eviction and identical reload
     /// of the source, which re-commits the same bytes, keeps the evidence.
-    dependencies: parking_lot::Mutex<Vec<(Box<str>, CommittedSourceContent)>>,
+    dependencies: parking_lot::Mutex<Vec<(Box<str>, Option<CommittedSourceContent>)>>,
+    native_facts: parking_lot::Mutex<Vec<FactVersionRef>>,
     /// The producer witness of every published child contract a native
     /// contribution of this request was read from. The witness carries the
     /// contract's complete read sets, so a change to anything the contract
@@ -208,7 +214,11 @@ impl ForegroundRequest {
             document: documents.snapshot_identity(uri),
             authority: documents.host().capture_authority_view(),
             decoded_surfaces: parking_lot::Mutex::new(Vec::new()),
+            queries: parking_lot::Mutex::new(Vec::new()),
+            closed_targets: parking_lot::Mutex::new(Vec::new()),
+            absent_targets: parking_lot::Mutex::new(Vec::new()),
             dependencies: parking_lot::Mutex::new(Vec::new()),
+            native_facts: parking_lot::Mutex::new(Vec::new()),
             contract_publications: parking_lot::Mutex::new(Vec::new()),
             targets: parking_lot::Mutex::new(Vec::new()),
             target_incoherent: AtomicBool::new(false),
@@ -243,10 +253,24 @@ impl ForegroundRequest {
         });
     }
 
+    /// Keep the runtime's evaluated-query evidence through final settlement.
+    pub(crate) fn bracket_query(query: &verter_type_runtime::provider_query::ProviderQuery) {
+        let _ = ACTIVE_REQUEST.try_with(|request| request.queries.lock().push(query.clone()));
+    }
+
     /// Record that the current task's foreground request read a native
     /// contribution from the imported source `canonical_id` committed with
     /// content `content`. A no-op outside a foreground request.
     pub(crate) fn bracket_dependency(canonical_id: &str, content: CommittedSourceContent) {
+        Self::bracket_source_state(canonical_id, Some(content));
+    }
+
+    /// Record either captured content or an unavailable dependency observed
+    /// while selecting an export from multiple re-export branches.
+    pub(crate) fn bracket_source_state(
+        canonical_id: &str,
+        content: Option<CommittedSourceContent>,
+    ) {
         let _ = ACTIVE_REQUEST.try_with(|request| {
             let mut dependencies = request.dependencies.lock();
             if !dependencies
@@ -256,6 +280,13 @@ impl ForegroundRequest {
                 dependencies.push((Box::from(canonical_id), content));
             }
         });
+    }
+
+    /// Retain the producer's native semantic read set, including inherited
+    /// component dependencies not read as source directly by this request.
+    pub(crate) fn bracket_native_facts(facts: &[FactVersionRef]) {
+        let _ =
+            ACTIVE_REQUEST.try_with(|request| request.native_facts.lock().extend_from_slice(facts));
     }
 
     /// Record that the current task's foreground request read an imported
@@ -286,17 +317,51 @@ impl ForegroundRequest {
     /// to the open revision's bytes, and that revision joins the request's
     /// captured targets: the first capture of a document is the one every later
     /// decode of it in this request reads and the one settlement validates.
-    /// Anything else — a closed file, an informational route, work outside a
-    /// foreground request — is read through `read`.
+    /// A provider may retain a same-line rewrite of that open file. Offsets
+    /// into that rewrite round-trip to the provider's line/col, which still
+    /// addresses the client's document, so the decode uses the retained bytes.
+    /// A rewrite that moves line breaks is dropped and does not refuse the
+    /// rest of the answer. Anything else — a closed file, an informational
+    /// route, work outside a foreground request — is read through `read`.
     pub(crate) fn target_source(
         documents: &DocumentRegistry,
         path: &str,
         read: impl FnOnce() -> Option<Arc<str>>,
     ) -> Option<Arc<str>> {
-        match Self::capture_target(documents, path) {
-            Some(Some(identity)) => Some(Arc::clone(&identity.source)),
-            Some(None) | None => read(),
+        let retained = ACTIVE_REQUEST
+            .try_with(|request| {
+                request
+                    .queries
+                    .lock()
+                    .iter()
+                    .find_map(|query| query.decoded_target(path))
+            })
+            .ok()
+            .flatten();
+        if let Some(Some(identity)) = Self::capture_target(documents, path) {
+            match retained {
+                None => return Some(identity.source),
+                Some(bytes) if bytes.as_ref() == identity.source.as_ref() => {
+                    return Some(identity.source);
+                }
+                // The engine indexed a same-line rewrite of this open file
+                // (import paths rewritten to carriers). Offsets round-trip to
+                // the provider's line/col only through those bytes, and that
+                // line/col still addresses the client's document.
+                Some(bytes) if same_newline_layout(bytes.as_ref(), identity.source.as_ref()) => {
+                    return Some(bytes);
+                }
+                Some(_) => return None,
+            }
         }
+        let source = retained.or_else(read)?;
+        Self::host_target_source(documents, path, source, ClosedTargetAuthority::Workspace)
+    }
+
+    /// Pin an open document at `path` without recording a closed target.
+    /// A closed path is the caller's to prove after its read is accepted.
+    pub(crate) fn pin_open_target(documents: &DocumentRegistry, path: &str) {
+        let _ = Self::capture_target(documents, path);
     }
 
     /// [`Self::target_source`] for positions the host's semantic tables
@@ -304,17 +369,41 @@ impl ForegroundRequest {
     /// holding other bytes, the positions cannot address the client's
     /// document: the request is marked incoherent (it settles
     /// `ContentModified`) and nothing decodes.
+    ///
+    /// `authority` chooses the closed-target proof. Provider-decoded bytes
+    /// stay on the workspace read. Host-committed bytes stay on the
+    /// scheduler content hash, so a commit the workspace cannot read is
+    /// still the bytes the span indexes.
     pub(crate) fn host_target_source(
         documents: &DocumentRegistry,
         path: &str,
         host_source: Arc<str>,
+        authority: ClosedTargetAuthority,
     ) -> Option<Arc<str>> {
         match Self::capture_target(documents, path) {
             Some(Some(identity)) if *identity.source != *host_source => {
                 Self::mark_target_incoherent();
                 None
             }
-            Some(_) | None => Some(host_source),
+            Some(Some(identity)) => Some(identity.source),
+            Some(None) => {
+                let incoming = closed_target_proof(documents, path, &host_source, authority);
+                let _ = ACTIVE_REQUEST.try_with(|request| {
+                    let mut targets = request.closed_targets.lock();
+                    if let Some((_, known)) = targets
+                        .iter()
+                        .find(|(known, _)| same_document_path(known, path))
+                    {
+                        if !closed_proofs_agree(documents, path, known, &host_source, &incoming) {
+                            request.target_incoherent.store(true, Ordering::Release);
+                        }
+                    } else if let Some(proof) = incoming {
+                        targets.push((path.to_string(), proof));
+                    }
+                });
+                Some(host_source)
+            }
+            None => Some(host_source),
         }
     }
 
@@ -385,6 +474,24 @@ impl ForegroundRequest {
         Some(Some(identity))
     }
 
+    /// Record every `ResourceOp::Create` in `response` whose path is not open
+    /// and not readable. [`Self::settle`] checks those paths are still absent,
+    /// so this runs after the edit is computed and before settlement. A path
+    /// that already exists is left unrecorded; [`Self::bind_edits`] refuses it.
+    pub(crate) fn record_absent_creates<T: EditBearing>(
+        &self,
+        documents: &DocumentRegistry,
+        response: &T,
+    ) {
+        response.visit_edits(&mut |edit| {
+            for uri in created_uris(edit) {
+                if self.created_path_is_absent(documents, uri) {
+                    self.note_absent_create(uri);
+                }
+            }
+        });
+    }
+
     /// Bind every edit in `response` to the revisions this request captured,
     /// in the client's negotiated shape. An edit reaching a target open in the
     /// client whose revision the request never captured could address bytes
@@ -396,10 +503,31 @@ impl ForegroundRequest {
         documents: &DocumentRegistry,
         response: &mut T,
     ) -> Result<(), EditRefusal> {
-        let mut revision_of = |target: &Uri| self.edit_target_revision(documents, target);
         response.bind_each_edit(&mut |edit| {
+            for uri in created_uris(edit) {
+                if !self.created_path_is_absent(documents, uri) {
+                    return Err(EditRefusal::UnboundTarget(uri.clone()));
+                }
+                self.note_absent_create(uri);
+            }
+            let mut revision_of = |target: &Uri| self.edit_target_revision(documents, target);
             bind_workspace_edit(edit, self.edit_support, &mut revision_of)
         })
+    }
+
+    fn created_path_is_absent(&self, documents: &DocumentRegistry, uri: &Uri) -> bool {
+        let path = uri_to_canonical_id(uri);
+        documents.open_uri_for_fs_path(&path).is_none()
+            && documents.host().workspace_read().read_file(&path).is_none()
+    }
+
+    fn note_absent_create(&self, uri: &Uri) {
+        let path = uri_to_canonical_id(uri);
+        let mut absent = self.absent_targets.lock();
+        if absent.iter().any(|known| same_document_path(known, &path)) {
+            return;
+        }
+        absent.push(path);
     }
 
     fn edit_target_revision(
@@ -424,8 +552,20 @@ impl ForegroundRequest {
             || documents.open_uri_for_fs_path(&target_path).is_some()
         {
             EditTargetRevision::Uncaptured
-        } else {
+        } else if self
+            .closed_targets
+            .lock()
+            .iter()
+            .any(|(path, _)| same_document_path(path, &target_path))
+            || self
+                .absent_targets
+                .lock()
+                .iter()
+                .any(|path| same_document_path(path, &target_path))
+        {
             EditTargetRevision::Closed
+        } else {
+            EditTargetRevision::Uncaptured
         }
     }
 
@@ -475,7 +615,13 @@ impl ForegroundRequest {
             .lock()
             .iter()
             .all(|surface| surfaces.captured_surface_is_current(surface));
-        if !surfaces_are_current {
+        if !surfaces_are_current
+            || !self
+                .queries
+                .lock()
+                .iter()
+                .all(|query| query.result_is_current())
+        {
             return Some(Superseded::ProviderSurface);
         }
         let targets_are_current = !self.target_incoherent.load(Ordering::Acquire)
@@ -484,6 +630,15 @@ impl ForegroundRequest {
                 .lock()
                 .iter()
                 .all(|(uri, identity)| documents.snapshot_identity_is_current(uri, identity));
+        let targets_are_current = targets_are_current
+            && self.closed_targets.lock().iter().all(|(path, proof)| {
+                documents.open_uri_for_fs_path(path).is_none()
+                    && closed_proof_is_current(documents, path, proof)
+            })
+            && self.absent_targets.lock().iter().all(|path| {
+                documents.open_uri_for_fs_path(path).is_none()
+                    && documents.host().workspace_read().read_file(path).is_none()
+            });
         if !targets_are_current {
             return Some(Superseded::Target);
         }
@@ -494,7 +649,7 @@ impl ForegroundRequest {
                 .lock()
                 .iter()
                 .all(|(canonical_id, revision)| {
-                    host.registered_source_whole_hash(canonical_id) == Some(*revision)
+                    host.registered_source_whole_hash(canonical_id) == *revision
                 });
         let dependencies_are_current = dependencies_are_current
             && self
@@ -502,8 +657,111 @@ impl ForegroundRequest {
                 .lock()
                 .iter()
                 .all(|witness| witness.is_current(&host));
+        let dependencies_are_current =
+            dependencies_are_current && host.native_facts_are_current(&self.native_facts.lock());
         (!dependencies_are_current).then_some(Superseded::Dependency)
     }
+}
+
+/// Proof that `host_source` is the closed content `authority` names, or
+/// `None` when that store does not currently hold those bytes.
+fn closed_target_proof(
+    documents: &DocumentRegistry,
+    path: &str,
+    host_source: &Arc<str>,
+    authority: ClosedTargetAuthority,
+) -> Option<ClosedTargetProof> {
+    let host = documents.host();
+    match authority {
+        ClosedTargetAuthority::Workspace => {
+            if host.workspace_read().read_file(path).as_deref() != Some(&**host_source) {
+                ForegroundRequest::mark_target_incoherent();
+                return None;
+            }
+            Some(ClosedTargetProof::Workspace(Arc::clone(host_source)))
+        }
+        ClosedTargetAuthority::HostCommit => {
+            let Some(hash) = host.registered_source_whole_hash(path) else {
+                ForegroundRequest::mark_target_incoherent();
+                return None;
+            };
+            if host.get_source(path).as_deref() != Some(&**host_source) {
+                ForegroundRequest::mark_target_incoherent();
+                return None;
+            }
+            Some(ClosedTargetProof::Committed(hash))
+        }
+    }
+}
+
+/// Whether `known` and a new observation of `host_source` are one content.
+fn closed_proofs_agree(
+    documents: &DocumentRegistry,
+    path: &str,
+    known: &ClosedTargetProof,
+    host_source: &Arc<str>,
+    incoming: &Option<ClosedTargetProof>,
+) -> bool {
+    let Some(incoming) = incoming else {
+        return false;
+    };
+    match (known, incoming) {
+        (ClosedTargetProof::Workspace(known), ClosedTargetProof::Workspace(_)) => {
+            **known == **host_source
+        }
+        (ClosedTargetProof::Committed(known), ClosedTargetProof::Committed(hash)) => known == hash,
+        (ClosedTargetProof::Workspace(known), ClosedTargetProof::Committed(_)) => {
+            **known == **host_source
+        }
+        (ClosedTargetProof::Committed(known), ClosedTargetProof::Workspace(_)) => {
+            documents.host().registered_source_whole_hash(path) == Some(*known)
+                && documents.host().get_source(path).as_deref() == Some(&**host_source)
+        }
+    }
+}
+
+fn closed_proof_is_current(
+    documents: &DocumentRegistry,
+    path: &str,
+    proof: &ClosedTargetProof,
+) -> bool {
+    let host = documents.host();
+    match proof {
+        ClosedTargetProof::Workspace(source) => {
+            host.workspace_read().read_file(path).as_deref() == Some(&**source)
+        }
+        ClosedTargetProof::Committed(hash) => {
+            host.registered_source_whole_hash(path) == Some(*hash)
+        }
+    }
+}
+
+/// Which store a closed target's bytes were decoded against.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ClosedTargetAuthority {
+    /// Provider or caller bytes. Settlement re-reads the workspace file.
+    Workspace,
+    /// Scheduler-committed bytes. Settlement re-reads the content hash.
+    /// A host commit can be absent from the workspace (an alias, a negative
+    /// directory index) and still be the bytes the span indexes.
+    HostCommit,
+}
+
+/// Retained evidence for one closed target.
+#[derive(Clone, Debug)]
+enum ClosedTargetProof {
+    Workspace(Arc<str>),
+    Committed(CommittedSourceContent),
+}
+
+/// Whether `left` and `right` break lines in the same places.
+///
+/// A same-line rewrite (a longer import specifier, nothing else) keeps the
+/// provider's line/col valid in the client's document. A rewrite that adds
+/// or removes a line does not.
+fn same_newline_layout(left: &str, right: &str) -> bool {
+    left.bytes().filter(|byte| *byte == b'\n').count()
+        == right.bytes().filter(|byte| *byte == b'\n').count()
 }
 
 /// Whether two canonical ids name one document.
@@ -521,6 +779,27 @@ pub(crate) trait EditBearing {
         &mut self,
         bind: &mut dyn FnMut(&mut WorkspaceEdit) -> Result<(), EditRefusal>,
     ) -> Result<(), EditRefusal>;
+
+    /// Visit every `WorkspaceEdit` the answer delivers, without binding it.
+    fn visit_edits(&self, visit: &mut dyn FnMut(&WorkspaceEdit));
+}
+
+/// `ResourceOp::Create` targets in `edit`, in delivery order.
+fn created_uris(edit: &WorkspaceEdit) -> Vec<&Uri> {
+    let Some(tower_lsp_server::ls_types::DocumentChanges::Operations(operations)) =
+        &edit.document_changes
+    else {
+        return Vec::new();
+    };
+    operations
+        .iter()
+        .filter_map(|operation| match operation {
+            tower_lsp_server::ls_types::DocumentChangeOperation::Op(
+                tower_lsp_server::ls_types::ResourceOp::Create(create),
+            ) => Some(&create.uri),
+            _ => None,
+        })
+        .collect()
 }
 
 impl EditBearing for WorkspaceEdit {
@@ -529,6 +808,10 @@ impl EditBearing for WorkspaceEdit {
         bind: &mut dyn FnMut(&mut WorkspaceEdit) -> Result<(), EditRefusal>,
     ) -> Result<(), EditRefusal> {
         bind(self)
+    }
+
+    fn visit_edits(&self, visit: &mut dyn FnMut(&WorkspaceEdit)) {
+        visit(self);
     }
 }
 
@@ -549,76 +832,19 @@ impl EditBearing for Vec<CodeActionOrCommand> {
         });
         Ok(())
     }
+
+    fn visit_edits(&self, visit: &mut dyn FnMut(&WorkspaceEdit)) {
+        for action in self {
+            if let CodeActionOrCommand::CodeAction(CodeAction {
+                edit: Some(edit), ..
+            }) = action
+            {
+                visit(edit);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use tower_lsp_server::ls_types::Command;
-
-    fn action(title: &str, target: &str) -> CodeActionOrCommand {
-        let uri: Uri = target.parse().expect("uri");
-        CodeActionOrCommand::CodeAction(CodeAction {
-            title: title.to_string(),
-            edit: Some(crate::features::action_utils::make_insert_edit(
-                &uri,
-                Default::default(),
-                "x".to_string(),
-            )),
-            ..Default::default()
-        })
-    }
-
-    /// An action whose edit cannot be bound is withdrawn whole; every other
-    /// action — and a command, which carries no edit — is still offered.
-    #[test]
-    fn an_unbindable_code_action_is_withdrawn_alone() {
-        let unbound: Uri = "file:///Unbound.vue".parse().expect("uri");
-        let mut actions = vec![
-            action("bound", "file:///Bound.vue"),
-            action("unbound", unbound.as_str()),
-            CodeActionOrCommand::Command(Command {
-                title: "command".to_string(),
-                command: "verter.command".to_string(),
-                arguments: None,
-            }),
-        ];
-
-        let refused = actions.bind_each_edit(&mut |edit| {
-            let Some(tower_lsp_server::ls_types::DocumentChanges::Edits(edits)) =
-                &edit.document_changes
-            else {
-                return Ok(());
-            };
-            if edits.iter().any(|edit| edit.text_document.uri == unbound) {
-                Err(EditRefusal::UnboundTarget(unbound.clone()))
-            } else {
-                Ok(())
-            }
-        });
-
-        assert_eq!(refused, Ok(()));
-        let titles: Vec<&str> = actions
-            .iter()
-            .map(|action| match action {
-                CodeActionOrCommand::CodeAction(action) => action.title.as_str(),
-                CodeActionOrCommand::Command(command) => command.title.as_str(),
-            })
-            .collect();
-        assert_eq!(titles, vec!["bound", "command"]);
-    }
-
-    /// A rename is one edit: an unbindable target refuses the whole answer.
-    #[test]
-    fn an_unbindable_rename_refuses_the_answer() {
-        let unbound: Uri = "file:///Unbound.vue".parse().expect("uri");
-        let mut edit = crate::features::action_utils::make_insert_edit(
-            &unbound,
-            Default::default(),
-            "x".to_string(),
-        );
-        let refused =
-            edit.bind_each_edit(&mut |_| Err(EditRefusal::UnboundTarget(unbound.clone())));
-        assert_eq!(refused, Err(EditRefusal::UnboundTarget(unbound)));
-    }
-}
+#[path = "foreground_tests.rs"]
+mod tests;

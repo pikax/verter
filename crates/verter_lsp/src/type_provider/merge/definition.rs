@@ -20,14 +20,14 @@ use super::position::{
 };
 
 /// Resolve a definition/type-definition target's byte-offset range to an LSP `Range` by
-/// reading the target's own source through the host workspace (VFS) and converting through
+/// reading the target's retained decode source and converting through
 /// [`LineIndex`].
 ///
 /// The definition/type-definition providers produce `start`/`end` as REAL byte offsets into
-/// the target file. `read_source` hands back that same source — routed through
-/// `verter_workspace::WorkspaceRead::read_file` (host cache → snapshot → disk), so a cold
-/// target is read and cached once and an open editor buffer's overlay wins over stale disk
-/// content — and the offsets convert to line:col in the client-negotiated encoding. It is only
+/// the target file. `read_source` hands back the bytes the adapter decoded through,
+/// retained by the foreground query. Mapping validates their applicability to the
+/// open revision or closed workspace target without replacing those bytes, and
+/// converts to line:col in the client-negotiated encoding. It is only
 /// called when the emitted URI is the very file those offsets index (path normalization was a
 /// no-op), so the offsets are valid.
 ///
@@ -39,9 +39,8 @@ use super::position::{
 /// Callers MUST then drop the location — never substitute `Range::default()`, which silently
 /// sends the editor to line 0 of the wrong place.
 ///
-/// This resolves an external definition/type-definition range from the target's own on-disk
-/// source: the provider already read this file to compute the offsets, and this re-reads it
-/// (through the VFS) to convert those byte offsets back to a line:col `Range`. The resolver
+/// This resolves an external definition/type-definition range from the target's
+/// retained source, never a live reread used to interpret old offsets. The resolver
 /// covers definition/type-definition only, where the offsets are guaranteed to index the
 /// target's own source.
 pub(crate) fn resolve_external_target_range(

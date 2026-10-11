@@ -2214,6 +2214,41 @@ async fn a_location_decodes_through_the_receipt_the_query_was_sent_under() {
 }
 
 #[tokio::test]
+async fn completed_extension_coordinates_retain_target_bytes_and_receipt_validity() {
+    let transport = HeldTsQueryTransport::default();
+    let provider = Arc::new(ExtensionTypeProvider::with_transport(
+        transport.clone(),
+        "/ws",
+    ));
+    let (origin, target) = ("/ws/src/main.ts", "/ws/src/b.ts");
+    open_acknowledged(&provider, &transport, target, TARGET_A).await;
+    open_acknowledged(&provider, &transport, origin, "beta;\n").await;
+    let query = crate::type_provider::traits::ProviderQuery::at_engine_surface(origin);
+    let defining = {
+        let provider = Arc::clone(&provider);
+        let query = query.clone();
+        tokio::spawn(async move { provider.get_definition(&query, 1).await })
+    };
+    let held = transport.next_arrival().await;
+    held.answer(json!([{
+        "file": target, "start": {"line": 2, "offset": 7}, "end": {"line": 2, "offset": 11}
+    }]));
+    let answer = defining
+        .await
+        .expect("query task")
+        .expect("completed definition");
+    assert_eq!(answer.len(), 1);
+    assert_eq!(query.decoded_target(target).as_deref(), Some(TARGET_A));
+    assert!(query.result_is_current());
+    open_acknowledged(&provider, &transport, target, TARGET_B).await;
+    assert!(
+        !query.result_is_current(),
+        "replaced receipt supersedes the completed answer"
+    );
+    assert_eq!(query.decoded_target(target).as_deref(), Some(TARGET_A));
+}
+
+#[tokio::test]
 async fn a_delivery_issued_under_an_answer_is_a_typed_conflict() {
     let transport = HeldTsQueryTransport::default();
     let provider = Arc::new(ExtensionTypeProvider::with_transport(

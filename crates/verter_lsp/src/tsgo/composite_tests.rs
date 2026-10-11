@@ -1214,17 +1214,10 @@ async fn feature_invocation_revalidates_epoch_after_selection() {
         transport_epoch: serving.epoch,
     };
     let hover = selection
-        .invoke(|provider| {
-            let path = path.to_string();
-            async move {
-                provider
-                    .get_hover(
-                        &crate::type_provider::traits::ProviderQuery::at_engine_surface(&path),
-                        0,
-                    )
-                    .await
-            }
-        })
+        .invoke(
+            &ProviderQuery::at_engine_surface(path),
+            |provider, query| async move { provider.get_hover(&query, 0).await },
+        )
         .await
         .expect("epoch mismatch activates managed fallback");
 
@@ -1244,6 +1237,111 @@ async fn feature_invocation_revalidates_epoch_after_selection() {
     );
 }
 
+#[tokio::test]
+async fn discarded_completed_shared_result_does_not_poison_managed_evidence() {
+    let source = "d:/ws/src/Foo.vue";
+    let path = "d:/ws/src/Foo.vue.tsx";
+    let (overlay, _ws, attach, backend) = recording_overlay_over(
+        &[(source, "<template></template>")],
+        fixture_snapshot(r#"{ "include": ["src"] }"#),
+    )
+    .await;
+    let core = overlay.inner.hub.overlay_state();
+    core.record_content_at_priority(
+        path,
+        "export const value = 1;",
+        OverlayPriority::Interactive,
+    );
+    let serving = serve_recording(&overlay).await;
+    // Sync the carrier through the REAL write gate (a hub-issued admission).
+    let permit = overlay
+        .generated_unit_write_permit(core, path)
+        .expect("the carrier's generated units are admitted");
+    overlay
+        .inner
+        .hub
+        .synchronize(
+            serving.epoch,
+            overlay.sweep_generation(),
+            |candidate, _| candidate == path,
+            |_| {
+                Some(
+                    verter_type_runtime::provider_hub::overlay::GeneratedUnitWritePermit::admitted(
+                        permit.admission().unwrap().clone(),
+                    ),
+                )
+            },
+        )
+        .await
+        .unwrap();
+    assert!(core.sync_state_for_epoch(path, serving.epoch).is_synced());
+
+    let managed = Arc::new(RecordingAttach::new());
+    let query = crate::type_provider::traits::ProviderQuery::at_engine_surface(path);
+    let prior_live = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let managed_live = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let prior = Arc::clone(&prior_live);
+    query.retain_validity(Arc::new(move || {
+        prior.load(std::sync::atomic::Ordering::SeqCst)
+    }));
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let selection = FeatureProviderSelection::Shared {
+        hub: Arc::clone(&overlay.inner.hub),
+        managed: Arc::clone(&managed) as Arc<dyn TypeProvider>,
+        core: Arc::clone(&overlay.inner),
+        provider_path: path.to_string(),
+        transport_epoch: serving.epoch,
+    };
+    let answer = selection
+        .invoke(&query, |provider, query| {
+            let backend = Arc::clone(&backend);
+            let hub = Arc::clone(&overlay.inner.hub);
+            let calls = Arc::clone(&calls);
+            let managed_live = Arc::clone(&managed_live);
+            async move {
+                let index = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let result = provider.get_hover(&query, 0).await?;
+                if index == 0 {
+                    query
+                        .check_intended_target("/ws/shared.ts", Some(&Arc::from("shared")))
+                        .expect("shared bytes");
+                    backend.retire_serving(&hub).await;
+                } else {
+                    query
+                        .check_intended_target("/ws/managed.ts", Some(&Arc::from("managed")))
+                        .expect("managed bytes");
+                    query.retain_validity(Arc::new(move || {
+                        managed_live.load(std::sync::atomic::Ordering::SeqCst)
+                    }));
+                }
+                Ok(result)
+            }
+        })
+        .await
+        .expect("managed fallback");
+    assert!(answer.is_none());
+    assert_eq!(attach.count("hover:"), 1);
+    assert_eq!(managed.count("hover:"), 1);
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert!(query.result_is_current());
+    assert!(query.decoded_target("/ws/shared.ts").is_none());
+    assert_eq!(
+        query.decoded_target("/ws/managed.ts").as_deref(),
+        Some("managed")
+    );
+    prior_live.store(false, std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        !query.result_is_current(),
+        "fallback preserves prior accepted evidence"
+    );
+    prior_live.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(query.result_is_current());
+    managed_live.store(false, std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        !query.result_is_current(),
+        "accepted managed evidence survives the selector"
+    );
+}
 /// Revalidate again after the shared await: the incarnation can be retired WHILE an
 /// epoch-A request is in flight. Its stale answer is discarded by the hub's epoch
 /// settlement and managed serves the admitted carrier instead.
@@ -1300,17 +1398,10 @@ async fn feature_invocation_discards_stale_error_after_inflight_reconnect() {
             transport_epoch: serving.epoch,
         };
         selection
-            .invoke(|provider| {
-                let path = path.to_string();
-                async move {
-                    provider
-                        .get_hover(
-                            &crate::type_provider::traits::ProviderQuery::at_engine_surface(&path),
-                            0,
-                        )
-                        .await
-                }
-            })
+            .invoke(
+                &ProviderQuery::at_engine_surface(path),
+                |provider, query| async move { provider.get_hover(&query, 0).await },
+            )
             .await
     });
     // The shared hover is in flight (the attach reached it) ...

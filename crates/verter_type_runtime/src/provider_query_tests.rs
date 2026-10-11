@@ -4,6 +4,32 @@ fn bytes(text: &str) -> Arc<str> {
     Arc::from(text)
 }
 
+#[test]
+fn completed_delivery_evidence_keeps_targets_and_rejects_a_retired_ledger() {
+    let query = at_engine("/ws/a.ts");
+    let ledger = DeliveryLedger::default();
+    ledger.record_wire(SurfaceEffect::deliver("/ws/a.ts", bytes("a")));
+    ledger.record_wire(SurfaceEffect::deliver("/ws/b.ts", bytes("b")));
+    let bound = bind(&ledger, &query).expect("bind");
+    bound.target("/ws/b.ts", "/ws/b.ts").expect("decode target");
+    ledger.settle(&bound, ["/ws/b.ts"]).expect("complete");
+    assert_eq!(query.decoded_target("/ws/b.ts").as_deref(), Some("b"));
+    ledger.record_wire(SurfaceEffect::deliver("/ws/a.ts", bytes("a")));
+    assert!(
+        query.result_is_current(),
+        "identical delivery within the same engine stays live"
+    );
+    drop(ledger);
+    let replacement = DeliveryLedger::default();
+    replacement.record_wire(SurfaceEffect::deliver("/ws/a.ts", bytes("a")));
+    replacement.record_wire(SurfaceEffect::deliver("/ws/b.ts", bytes("b")));
+    assert!(
+        !query.result_is_current(),
+        "identical bytes do not resurrect a retired binding"
+    );
+    assert!(replacement.settle(&bound, ["/ws/b.ts"]).is_err());
+}
+
 const ID_A: DeliveredSurfaceId = DeliveredSurfaceId {
     generation: 1,
     content_epoch: 1,

@@ -274,6 +274,15 @@ pub(crate) struct AppliedReceipt {
 pub(crate) struct QueryStamp {
     incarnation: ProviderEpoch,
     project: Option<Arc<str>>,
+    current: Arc<dyn Fn() -> bool + Send + Sync>,
+    queries: Arc<
+        parking_lot::Mutex<
+            Vec<(
+                crate::provider_query::ProviderQuery,
+                crate::provider_query::ProviderQuery,
+            )>,
+        >,
+    >,
 }
 
 impl QueryStamp {
@@ -282,7 +291,8 @@ impl QueryStamp {
         &self,
         query: &crate::provider_query::ProviderQuery,
     ) -> crate::provider_query::ProviderQuery {
-        let admitted = query.admitted_to(self.incarnation);
+        let admitted = query.isolated_attempt().admitted_to(self.incarnation);
+        self.queries.lock().push((query.clone(), admitted.clone()));
         match &self.project {
             Some(project) => admitted.admitted_into(Arc::clone(project)),
             None => admitted,
@@ -940,7 +950,19 @@ where
             project: admission
                 .as_ref()
                 .map(|admission| Arc::from(admission.witness.project())),
+            current: {
+                let shared = Arc::downgrade(&self.state.shared);
+                let epoch = serving.epoch;
+                Arc::new(move || {
+                    shared
+                        .upgrade()
+                        .is_some_and(|shared| shared.serving_epoch() == Some(epoch))
+                })
+            },
+            queries: Arc::new(parking_lot::Mutex::new(Vec::new())),
         };
+        let queries = Arc::clone(&stamp.queries);
+        let current = Arc::clone(&stamp.current);
         let result = run(serving.provider, stamp).await;
         // Settle FIRST, and only a settlement the serving epoch accepted counts
         // as a success: an answer the epoch discarded proves nothing about the
@@ -952,6 +974,14 @@ where
             }
             Ok(value)
         });
+        for (caller, query) in queries.lock().iter() {
+            if settled.is_ok() {
+                query.retain_validity(Arc::clone(&current));
+                caller.accept_result_from(query);
+            } else {
+                query.discard_result();
+            }
+        }
         // A coordinate conflict is the engine answering (or the query being
         // refused before it reached the engine) over bytes the requester did
         // not intend: evidence neither that the request harms the engine nor
