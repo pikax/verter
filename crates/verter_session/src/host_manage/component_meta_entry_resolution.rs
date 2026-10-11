@@ -648,6 +648,29 @@ impl VerterHost {
         // second unrelated store view and pair a fresh-view analysis with
         // this capture's extraction context (the torn-result race).
         let fixed = self.capture_batch_fixed_view(view);
+        // Same-demand refusal replay. The host analysis entry seals the
+        // ledger; this session consumer must repeat that refusal with its
+        // status before resolve, or the semantic producer runs again.
+        if let Some(retained) =
+            self.replay_component_meta_refusal_with_view(canonical.as_str(), view, &fixed)
+        {
+            let status_completeness = retained.completeness;
+            let cached = retained.recovery;
+            if let Some(snapshot) = reload_component_meta_template_snapshot(
+                self,
+                &cached.canonical_id,
+                cached.whole_hash,
+            ) {
+                let mut resolution = cached
+                    .resolution_template
+                    .rehydrate(snapshot, self.next_request_id());
+                // The retained refusal's status rides on the resolution.
+                // Rehydrate must not present the recovery as a complete hit.
+                resolution.completeness = status_completeness;
+                resolution.synthesis_should_suppress = status_completeness.is_partial();
+                return Ok(Some((cached.analysis.clone(), resolution)));
+            }
+        }
         let resolved = {
             let (executor_view, executor_fp) = fixed.executor_fixed_view();
             self.resolve_component_meta_with_view_and_fixed_admission(

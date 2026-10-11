@@ -1041,4 +1041,94 @@ mod tests {
         crate::host_manage::component_meta_entry::COLD_BODY_PRE_RESOLVE_HOOK
             .with(|slot| *slot.borrow_mut() = None);
     }
+
+    #[test]
+    fn session_resolution_and_payload_replay_retained_operation_refusal() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let host = crate::component_meta_host::ComponentMetaHost::new_standalone(
+            crate::types::HostConfig {
+                projection_op_budget: 1,
+                ..crate::types::HostConfig::default()
+            },
+        );
+        let canonical = "/w/budget-refusal-session.vue";
+        let _ = host
+            .host()
+            .upsert(crate::UpsertRequest {
+                canonical_id: Some(canonical.into()),
+                input_id: canonical.into(),
+                source: Arc::from(
+                    "<script setup lang=\"ts\">defineProps<{ x: string }>()</script>",
+                ),
+                file_language: crate::FileLanguage::vue(),
+                aliases: Vec::new(),
+            })
+            .unwrap();
+
+        let first = host
+            .host()
+            .get_component_meta(canonical)
+            .expect("the refused demand still returns the recovery");
+        assert!(
+            !first.is_complete(),
+            "projection budget 1 is an operation-profile refusal, got {:?}",
+            first.status()
+        );
+
+        let ran = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&ran);
+        crate::host_manage::component_meta_entry::COLD_BODY_PRE_RESOLVE_HOOK.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || flag.store(true, Ordering::SeqCst)));
+        });
+        let misses_before = host
+            .host()
+            .provenance()
+            .resolver_node_cache_misses
+            .load(Ordering::Relaxed);
+
+        let session = host.open_session_batch().expect("session");
+        let (_analysis, resolution) = session
+            .get_component_meta_with_resolution(canonical)
+            .expect("session resolution replays the retained refusal")
+            .expect("the refusal still has a recovery");
+        assert!(
+            !resolution.fact_status().is_complete(),
+            "session resolution replay is the refusal, not a successful hit: {:?}",
+            resolution.fact_status()
+        );
+        assert!(
+            resolution.synthesis_should_suppress,
+            "a refusal replay must not present the recovery as cacheable"
+        );
+
+        let payload = session
+            .get_component_meta_payload(canonical, |_| vec![7])
+            .expect("session payload replays the retained refusal")
+            .expect("the refusal still has a recovery payload");
+        assert_eq!(payload, vec![7]);
+        assert_eq!(
+            host.host()
+                .provenance()
+                .resolver_node_cache_misses
+                .load(Ordering::Relaxed),
+            misses_before,
+            "session resolution and payload must not run the semantic producer"
+        );
+        assert!(
+            !ran.load(Ordering::SeqCst),
+            "session consumers must not enter the cold body"
+        );
+        assert_eq!(
+            host.host()
+                .project_type_store()
+                .component_meta_results()
+                .len(),
+            0,
+            "the refusal is not a successful candidate"
+        );
+        crate::host_manage::component_meta_entry::COLD_BODY_PRE_RESOLVE_HOOK
+            .with(|slot| *slot.borrow_mut() = None);
+    }
 }

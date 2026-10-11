@@ -211,6 +211,52 @@ impl MetaSession {
             host.config.audit_timing_capture && host.config.audit_enabled,
         );
 
+        // Same-demand refusal replay. A refusal sealed by the host analysis
+        // entry is this payload's answer: encode the recovery and do not
+        // resolve, and do not admit the bytes as a successful payload.
+        if let Some(retained) =
+            host.replay_component_meta_refusal_with_view(canonical.as_str(), view, fixed)
+        {
+            let overlay =
+                std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+            let session_ctx = crate::resolver_core::SessionResolverContext::from_cold_seed(
+                host,
+                view,
+                fixed.cold_seed(),
+                overlay,
+            );
+            let ctx: &dyn crate::resolver_core::HostRequestContext = &session_ctx;
+            let dispatch =
+                &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+            let analysis = retained.recovery.analysis.clone();
+            let signature = retained.read_set_signature.clone();
+            let seed = crate::meta_resolve::output::ComponentMetaResolutionSeed::from_template(
+                &retained.recovery.resolution_template,
+            );
+            let completeness = crate::meta_resolve::PublishedCompleteness::from_retained_refusal(
+                retained.completeness,
+            );
+            let (output_result, _output_read_set) =
+                verter_type_engine::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx)
+                    .with_fact_tracer(|| {
+                        verter_type_engine::fact_signature_helpers::observe_fact_signature(
+                            &signature.facts,
+                        );
+                        crate::meta_resolve::projectors::build_component_meta_output(
+                            ctx,
+                            dispatch,
+                            canonical.as_str(),
+                            analysis,
+                            Some(seed),
+                            completeness,
+                        )
+                    });
+            let output = output_result?;
+            let payload = encode_fn(output);
+            host.provenance().payload_encodes.fetch_add(1, Relaxed);
+            return Ok(Some(payload));
+        }
+
         // (2) Cold resolve pinned to the fixed view (FENCED promotion).
         let Some((mut resolved, admission)) = ({
             let (executor_view, captured_fp) = fixed.executor_fixed_view();
