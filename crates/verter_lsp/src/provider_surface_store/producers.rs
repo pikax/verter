@@ -123,6 +123,7 @@ pub fn foreign_ide_context_from_captured(
         documents,
         &snapshot.source_canonical,
         Arc::clone(&snapshot.carrier_source),
+        crate::documents::ClosedTargetAuthority::Workspace,
     )?;
     crate::documents::ForegroundRequest::bracket_decoded_surface(snapshot);
     Some(context)
@@ -313,6 +314,7 @@ pub fn classify_captured_api_surface(
                             documents,
                             &snapshot.source_canonical,
                             Arc::clone(&snapshot.carrier_source),
+                            crate::documents::ClosedTargetAuthority::Workspace,
                         )
                         .is_none()
                         {

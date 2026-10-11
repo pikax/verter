@@ -8,7 +8,9 @@ pub(crate) use analysis::SemanticReady;
 pub(crate) use analysis::SEMANTIC_ANALYSIS_QUIET_WINDOW;
 pub(crate) use diagnostics::BackgroundPublication;
 pub(crate) use diagnostics::DiagnosticsRefresh;
-pub(crate) use foreground::{EditBearing, ForegroundRequest, ForegroundRoute, Settled};
+pub(crate) use foreground::{
+    ClosedTargetAuthority, EditBearing, ForegroundRequest, ForegroundRoute, Settled,
+};
 pub use guarded_host::{HostRef, SharedHost};
 pub mod carrier_structure;
 pub mod line_index;

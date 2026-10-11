@@ -1124,18 +1124,34 @@ pub(crate) fn resolved_fallthrough_attr_names(
     host: &verter_session::VerterHost,
     canonical_id: &str,
 ) -> std::collections::HashSet<String> {
+    let (names, fact_versions) = resolved_fallthrough_attrs(host, canonical_id);
+    crate::documents::ForegroundRequest::bracket_native_facts(&fact_versions);
+    names
+}
+
+/// Inherited attribute names and the fact versions that produced them,
+/// without recording those versions on the foreground request. A caller
+/// inside a retried read records the versions only after the attempt is
+/// accepted.
+pub(crate) fn resolved_fallthrough_attrs(
+    host: &verter_session::VerterHost,
+    canonical_id: &str,
+) -> (
+    std::collections::HashSet<String>,
+    Vec<verter_session_query::facts::fact_cache::FactVersionRef>,
+) {
     use verter_session_query::analysis::component_meta::MemberProvenance;
 
     let Some(resolution) = host.resolve_fallthrough_surface(canonical_id) else {
-        return std::collections::HashSet::new();
+        return (std::collections::HashSet::new(), Vec::new());
     };
-    crate::documents::ForegroundRequest::bracket_native_facts(&resolution.fact_versions);
-    resolution
+    let names = resolution
         .accepted_props
         .iter()
         .filter(|prop| matches!(prop.provenance, MemberProvenance::Inherited { .. }))
         .map(|prop| prop.name.clone())
-        .collect()
+        .collect();
+    (names, resolution.fact_versions)
 }
 
 /// Resolve a component's canonical id + analysis snapshot from an import source.

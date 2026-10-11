@@ -255,34 +255,40 @@ impl VerterLanguageServer {
         canonical_id: &str,
         binding_name: &str,
     ) -> Option<(String, u32, u32, std::sync::Arc<str>)> {
-        let _ = crate::documents::ForegroundRequest::target_source(
-            &self.documents,
-            canonical_id,
-            || self.documents.host().get_source(canonical_id),
-        );
-        self.read_child_at_one_revision(canonical_id, || {
-            let capture = match self
+        crate::documents::ForegroundRequest::pin_open_target(&self.documents, canonical_id);
+        // A rejected attempt must not leave its content, closed target or
+        // unsettled bit on the request: the retry reads the content the
+        // child settled on, and only that attempt is evidence.
+        let mut unsettled = false;
+        let capture = self.read_child_at_one_revision(canonical_id, || {
+            unsettled = false;
+            match self
                 .documents
                 .host()
                 .capture_export_span(canonical_id, binding_name)
             {
-                verter_session::NativeExportRead::Captured(capture) => capture,
-                verter_session::NativeExportRead::Unavailable => return None,
+                verter_session::NativeExportRead::Captured(capture) => Some(capture),
+                verter_session::NativeExportRead::Unavailable => None,
                 verter_session::NativeExportRead::ContentModified => {
-                    crate::documents::ForegroundRequest::mark_dependency_unsettled();
-                    return None;
+                    unsettled = true;
+                    None
                 }
-            };
-            for (id, content) in &capture.dependencies {
-                crate::documents::ForegroundRequest::bracket_source_state(id, *content);
             }
-            let source = crate::documents::ForegroundRequest::host_target_source(
-                &self.documents,
-                &capture.canonical_id,
-                capture.source,
-            )?;
-            Some((capture.canonical_id, capture.start, capture.end, source))
-        })
+        });
+        if unsettled {
+            crate::documents::ForegroundRequest::mark_dependency_unsettled();
+        }
+        let capture = capture?;
+        for (id, content) in &capture.dependencies {
+            crate::documents::ForegroundRequest::bracket_source_state(id, *content);
+        }
+        let source = crate::documents::ForegroundRequest::host_target_source(
+            &self.documents,
+            &capture.canonical_id,
+            capture.source,
+            crate::documents::ClosedTargetAuthority::HostCommit,
+        )?;
+        Some((capture.canonical_id, capture.start, capture.end, source))
     }
 
     fn resolved_component_document(
@@ -296,13 +302,15 @@ impl VerterLanguageServer {
                     .host()
                     .get_analysis(child_canonical_id)
                     .or_else(|| self.ensure_component_ready(child_canonical_id))?;
-                let source = crate::documents::ForegroundRequest::host_target_source(
-                    &self.documents,
-                    child_canonical_id,
-                    self.documents.host().get_source(child_canonical_id)?,
-                )?;
+                let source = self.documents.host().get_source(child_canonical_id)?;
                 Some((analysis, source))
             })?;
+        let child_source = crate::documents::ForegroundRequest::host_target_source(
+            &self.documents,
+            child_canonical_id,
+            child_source,
+            crate::documents::ClosedTargetAuthority::HostCommit,
+        )?;
         let child_line_index = LineIndex::new(&child_source, self.documents.encoding());
         let child_uri = crate::uri::path_to_file_uri(child_canonical_id)?;
 
@@ -967,18 +975,15 @@ impl VerterLanguageServer {
         let host = &self.documents.host();
 
         let resolve_location = |loc: Location| -> Location {
-            self.read_child_at_one_revision(&uri_to_canonical_id(&loc.uri), || {
+            let mut observed_source: Option<std::sync::Arc<str>> = None;
+            let resolved = self.read_child_at_one_revision(&uri_to_canonical_id(&loc.uri), || {
+                observed_source = None;
                 let canonical = uri_to_canonical_id(&loc.uri);
                 // Check if this file has re-export signatures at the target position
                 if let Some(analysis) = host.get_analysis(&canonical) {
                     // Find which export signature the target position falls within
-                    if let Some(source) = host.get_source(&canonical).and_then(|source| {
-                        crate::documents::ForegroundRequest::host_target_source(
-                            &self.documents,
-                            &canonical,
-                            source,
-                        )
-                    }) {
+                    if let Some(source) = host.get_source(&canonical) {
+                        observed_source = Some(std::sync::Arc::clone(&source));
                         let target_li = LineIndex::new(&source, encoding.clone());
                         if let Some(offset) = target_li.position_to_offset(&loc.range.start) {
                             for sig in analysis.export_signatures.iter() {
@@ -1011,8 +1016,16 @@ impl VerterLanguageServer {
                     }
                 }
                 Some(loc.clone())
-            })
-            .unwrap_or(loc)
+            });
+            if let Some(source) = observed_source {
+                let _ = crate::documents::ForegroundRequest::host_target_source(
+                    &self.documents,
+                    &uri_to_canonical_id(&loc.uri),
+                    source,
+                    crate::documents::ClosedTargetAuthority::HostCommit,
+                );
+            }
+            resolved.unwrap_or(loc)
         };
 
         Some(match response {
@@ -1206,8 +1219,8 @@ impl VerterLanguageServer {
             component_name,
         )?;
 
-        let (analysis, child_structure, inherited_attrs) =
-            self.read_child_at_one_revision(&child_canonical_id, || {
+        let (analysis, child_structure, inherited_attrs, fact_versions) = self
+            .read_child_at_one_revision(&child_canonical_id, || {
                 let analysis = self
                     .documents
                     .host()
@@ -1217,16 +1230,19 @@ impl VerterLanguageServer {
                     .documents
                     .host()
                     .registered_file_structure_snapshot(&child_canonical_id)?;
-                let inherited_attrs = super::server_utils::resolved_fallthrough_attr_names(
-                    &self.documents.host(),
-                    &child_canonical_id,
-                );
-                Some((analysis, structure, inherited_attrs))
+                let (inherited_attrs, fact_versions) =
+                    super::server_utils::resolved_fallthrough_attrs(
+                        &self.documents.host(),
+                        &child_canonical_id,
+                    );
+                Some((analysis, structure, inherited_attrs, fact_versions))
             })?;
+        crate::documents::ForegroundRequest::bracket_native_facts(&fact_versions);
         let child_source = crate::documents::ForegroundRequest::host_target_source(
             &self.documents,
             &child_canonical_id,
             std::sync::Arc::clone(child_structure.source().source_arc()),
+            crate::documents::ClosedTargetAuthority::HostCommit,
         )?;
         let child_uri = crate::uri::path_to_file_uri(&child_canonical_id)?;
         let blocks = project_carrier_blocks(&child_structure);

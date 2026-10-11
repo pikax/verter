@@ -167,7 +167,7 @@ pub(crate) struct ForegroundRequest {
     /// answer built from it.
     decoded_surfaces: parking_lot::Mutex<Vec<Arc<ProviderSurfaceSnapshot>>>,
     queries: parking_lot::Mutex<Vec<verter_type_runtime::provider_query::ProviderQuery>>,
-    closed_targets: parking_lot::Mutex<Vec<(String, Arc<str>)>>,
+    closed_targets: parking_lot::Mutex<Vec<(String, ClosedTargetProof)>>,
     absent_targets: parking_lot::Mutex<Vec<String>>,
     /// The committed content hash of every imported source a native
     /// contribution of this request was read from — the explicit dependency
@@ -317,8 +317,12 @@ impl ForegroundRequest {
     /// to the open revision's bytes, and that revision joins the request's
     /// captured targets: the first capture of a document is the one every later
     /// decode of it in this request reads and the one settlement validates.
-    /// Anything else — a closed file, an informational route, work outside a
-    /// foreground request — is read through `read`.
+    /// A provider may retain a same-line rewrite of that open file. Offsets
+    /// into that rewrite round-trip to the provider's line/col, which still
+    /// addresses the client's document, so the decode uses the retained bytes.
+    /// A rewrite that moves line breaks is dropped and does not refuse the
+    /// rest of the answer. Anything else — a closed file, an informational
+    /// route, work outside a foreground request — is read through `read`.
     pub(crate) fn target_source(
         documents: &DocumentRegistry,
         path: &str,
@@ -334,13 +338,30 @@ impl ForegroundRequest {
             })
             .ok()
             .flatten();
-        if retained.is_none() {
-            if let Some(Some(identity)) = Self::capture_target(documents, path) {
-                return Some(identity.source);
+        if let Some(Some(identity)) = Self::capture_target(documents, path) {
+            match retained {
+                None => return Some(identity.source),
+                Some(bytes) if bytes.as_ref() == identity.source.as_ref() => {
+                    return Some(identity.source);
+                }
+                // The engine indexed a same-line rewrite of this open file
+                // (import paths rewritten to carriers). Offsets round-trip to
+                // the provider's line/col only through those bytes, and that
+                // line/col still addresses the client's document.
+                Some(bytes) if same_newline_layout(bytes.as_ref(), identity.source.as_ref()) => {
+                    return Some(bytes);
+                }
+                Some(_) => return None,
             }
         }
         let source = retained.or_else(read)?;
-        Self::host_target_source(documents, path, source)
+        Self::host_target_source(documents, path, source, ClosedTargetAuthority::Workspace)
+    }
+
+    /// Pin an open document at `path` without recording a closed target.
+    /// A closed path is the caller's to prove after its read is accepted.
+    pub(crate) fn pin_open_target(documents: &DocumentRegistry, path: &str) {
+        let _ = Self::capture_target(documents, path);
     }
 
     /// [`Self::target_source`] for positions the host's semantic tables
@@ -348,10 +369,16 @@ impl ForegroundRequest {
     /// holding other bytes, the positions cannot address the client's
     /// document: the request is marked incoherent (it settles
     /// `ContentModified`) and nothing decodes.
+    ///
+    /// `authority` chooses the closed-target proof. Provider-decoded bytes
+    /// stay on the workspace read. Host-committed bytes stay on the
+    /// scheduler content hash, so a commit the workspace cannot read is
+    /// still the bytes the span indexes.
     pub(crate) fn host_target_source(
         documents: &DocumentRegistry,
         path: &str,
         host_source: Arc<str>,
+        authority: ClosedTargetAuthority,
     ) -> Option<Arc<str>> {
         match Self::capture_target(documents, path) {
             Some(Some(identity)) if *identity.source != *host_source => {
@@ -360,22 +387,18 @@ impl ForegroundRequest {
             }
             Some(Some(identity)) => Some(identity.source),
             Some(None) => {
+                let incoming = closed_target_proof(documents, path, &host_source, authority);
                 let _ = ACTIVE_REQUEST.try_with(|request| {
                     let mut targets = request.closed_targets.lock();
                     if let Some((_, known)) = targets
                         .iter()
                         .find(|(known, _)| same_document_path(known, path))
                     {
-                        if **known != *host_source {
+                        if !closed_proofs_agree(documents, path, known, &host_source, &incoming) {
                             request.target_incoherent.store(true, Ordering::Release);
                         }
-                    } else {
-                        targets.push((path.to_string(), Arc::clone(&host_source)));
-                    }
-                    if documents.host().workspace_read().read_file(path).as_deref()
-                        != Some(&*host_source)
-                    {
-                        request.target_incoherent.store(true, Ordering::Release);
+                    } else if let Some(proof) = incoming {
+                        targets.push((path.to_string(), proof));
                     }
                 });
                 Some(host_source)
@@ -608,10 +631,9 @@ impl ForegroundRequest {
                 .iter()
                 .all(|(uri, identity)| documents.snapshot_identity_is_current(uri, identity));
         let targets_are_current = targets_are_current
-            && self.closed_targets.lock().iter().all(|(path, source)| {
+            && self.closed_targets.lock().iter().all(|(path, proof)| {
                 documents.open_uri_for_fs_path(path).is_none()
-                    && documents.host().workspace_read().read_file(path).as_deref()
-                        == Some(&**source)
+                    && closed_proof_is_current(documents, path, proof)
             })
             && self.absent_targets.lock().iter().all(|path| {
                 documents.open_uri_for_fs_path(path).is_none()
@@ -639,6 +661,107 @@ impl ForegroundRequest {
             dependencies_are_current && host.native_facts_are_current(&self.native_facts.lock());
         (!dependencies_are_current).then_some(Superseded::Dependency)
     }
+}
+
+/// Proof that `host_source` is the closed content `authority` names, or
+/// `None` when that store does not currently hold those bytes.
+fn closed_target_proof(
+    documents: &DocumentRegistry,
+    path: &str,
+    host_source: &Arc<str>,
+    authority: ClosedTargetAuthority,
+) -> Option<ClosedTargetProof> {
+    let host = documents.host();
+    match authority {
+        ClosedTargetAuthority::Workspace => {
+            if host.workspace_read().read_file(path).as_deref() != Some(&**host_source) {
+                ForegroundRequest::mark_target_incoherent();
+                return None;
+            }
+            Some(ClosedTargetProof::Workspace(Arc::clone(host_source)))
+        }
+        ClosedTargetAuthority::HostCommit => {
+            let Some(hash) = host.registered_source_whole_hash(path) else {
+                ForegroundRequest::mark_target_incoherent();
+                return None;
+            };
+            if host.get_source(path).as_deref() != Some(&**host_source) {
+                ForegroundRequest::mark_target_incoherent();
+                return None;
+            }
+            Some(ClosedTargetProof::Committed(hash))
+        }
+    }
+}
+
+/// Whether `known` and a new observation of `host_source` are one content.
+fn closed_proofs_agree(
+    documents: &DocumentRegistry,
+    path: &str,
+    known: &ClosedTargetProof,
+    host_source: &Arc<str>,
+    incoming: &Option<ClosedTargetProof>,
+) -> bool {
+    let Some(incoming) = incoming else {
+        return false;
+    };
+    match (known, incoming) {
+        (ClosedTargetProof::Workspace(known), ClosedTargetProof::Workspace(_)) => {
+            **known == **host_source
+        }
+        (ClosedTargetProof::Committed(known), ClosedTargetProof::Committed(hash)) => known == hash,
+        (ClosedTargetProof::Workspace(known), ClosedTargetProof::Committed(_)) => {
+            **known == **host_source
+        }
+        (ClosedTargetProof::Committed(known), ClosedTargetProof::Workspace(_)) => {
+            documents.host().registered_source_whole_hash(path) == Some(*known)
+                && documents.host().get_source(path).as_deref() == Some(&**host_source)
+        }
+    }
+}
+
+fn closed_proof_is_current(
+    documents: &DocumentRegistry,
+    path: &str,
+    proof: &ClosedTargetProof,
+) -> bool {
+    let host = documents.host();
+    match proof {
+        ClosedTargetProof::Workspace(source) => {
+            host.workspace_read().read_file(path).as_deref() == Some(&**source)
+        }
+        ClosedTargetProof::Committed(hash) => {
+            host.registered_source_whole_hash(path) == Some(*hash)
+        }
+    }
+}
+
+/// Which store a closed target's bytes were decoded against.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ClosedTargetAuthority {
+    /// Provider or caller bytes. Settlement re-reads the workspace file.
+    Workspace,
+    /// Scheduler-committed bytes. Settlement re-reads the content hash.
+    /// A host commit can be absent from the workspace (an alias, a negative
+    /// directory index) and still be the bytes the span indexes.
+    HostCommit,
+}
+
+/// Retained evidence for one closed target.
+#[derive(Clone, Debug)]
+enum ClosedTargetProof {
+    Workspace(Arc<str>),
+    Committed(CommittedSourceContent),
+}
+
+/// Whether `left` and `right` break lines in the same places.
+///
+/// A same-line rewrite (a longer import specifier, nothing else) keeps the
+/// provider's line/col valid in the client's document. A rewrite that adds
+/// or removes a line does not.
+fn same_newline_layout(left: &str, right: &str) -> bool {
+    left.bytes().filter(|byte| *byte == b'\n').count()
+        == right.bytes().filter(|byte| *byte == b'\n').count()
 }
 
 /// Whether two canonical ids name one document.
@@ -1095,6 +1218,119 @@ mod tests {
                 Settled::ContentModified
             ),
             "a created path that appears on disk after it is recorded and before settlement is content-modified"
+        );
+    }
+
+    /// A closed target decoded from a scheduler commit is not a workspace
+    /// file. An alias resolves for `get_source` and the content hash, and
+    /// `read_file` of that alias is absent. Host-commit evidence still
+    /// settles, and a later commit of other bytes does not. The same absent
+    /// alias recorded as workspace bytes does not settle.
+    #[tokio::test]
+    async fn a_host_committed_alias_settles_without_a_workspace_file() {
+        let (temp, documents) = workspace();
+        let source_path = temp.path().join("Source.ts");
+        std::fs::write(&source_path, "export const value = 1\n").expect("source");
+        let child_path = temp.path().join("Child.ts");
+        let child_text: Arc<str> = Arc::from("export const child = 1\n");
+        std::fs::write(&child_path, child_text.as_ref()).expect("child");
+        let source = file_uri(&source_path);
+        let child_id = crate::test_utils::canonical_test_path(&child_path);
+        let alias = "virtual-child";
+        open_script(&documents, &source, 1);
+        let _ = documents
+            .host()
+            .upsert(verter_session::UpsertRequest {
+                canonical_id: Some(child_id.clone()),
+                input_id: child_id.clone(),
+                source: Arc::clone(&child_text),
+                file_language: verter_session::FileLanguage::script_ts(),
+                aliases: vec![alias.to_string()],
+            })
+            .expect("commit the child");
+        assert!(
+            documents.host().workspace_read().read_file(alias).is_none(),
+            "the alias is not a workspace file"
+        );
+        assert_eq!(
+            documents.host().get_source(alias).as_deref(),
+            Some(child_text.as_ref())
+        );
+        assert!(documents
+            .host()
+            .registered_source_whole_hash(alias)
+            .is_some());
+
+        let request = ForegroundRequest::admit(
+            &documents,
+            ForegroundRoute::Definition,
+            &source,
+            WorkspaceEditSupport::VersionedDocumentChanges,
+        );
+        let recorded = Arc::clone(&request);
+        recorded
+            .compute(async {
+                let source = ForegroundRequest::host_target_source(
+                    &documents,
+                    alias,
+                    Arc::clone(&child_text),
+                    ClosedTargetAuthority::HostCommit,
+                );
+                assert_eq!(source.as_deref(), Some(child_text.as_ref()));
+                assert!(!request.target_incoherent.load(Ordering::Acquire));
+            })
+            .await;
+        assert!(
+            matches!(request.settle(&documents, Some(())), Settled::Answer(_)),
+            "a host commit absent from the workspace still settles"
+        );
+
+        let edited: Arc<str> = Arc::from("export const child = 2\n");
+        let _ = documents
+            .host()
+            .upsert(verter_session::UpsertRequest {
+                canonical_id: Some(child_id.clone()),
+                input_id: child_id,
+                source: edited,
+                file_language: verter_session::FileLanguage::script_ts(),
+                aliases: vec![alias.to_string()],
+            })
+            .expect("commit other bytes");
+        assert!(
+            request.authority.is_current(&documents.host()),
+            "a content commit must not replace project authority"
+        );
+        assert!(
+            matches!(
+                request.settle(&documents, Some(())),
+                Settled::ContentModified
+            ),
+            "other committed bytes supersede the recorded hash"
+        );
+
+        let workspace_request = ForegroundRequest::admit(
+            &documents,
+            ForegroundRoute::Definition,
+            &source,
+            WorkspaceEditSupport::VersionedDocumentChanges,
+        );
+        let recorded = Arc::clone(&workspace_request);
+        recorded
+            .compute(async {
+                let _ = ForegroundRequest::host_target_source(
+                    &documents,
+                    alias,
+                    documents.host().get_source(alias).expect("alias source"),
+                    ClosedTargetAuthority::Workspace,
+                );
+            })
+            .await;
+        assert!(
+            matches!(
+                workspace_request.settle(&documents, Some(())),
+                Settled::ContentModified
+            ),
+            "provider bytes for a path the workspace cannot read do not settle"
         );
     }
 }

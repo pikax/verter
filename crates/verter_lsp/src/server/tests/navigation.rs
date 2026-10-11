@@ -966,6 +966,68 @@ async fn native_import_definition_refuses_source_aba_during_assembly() {
     );
 }
 
+/// The first child read can observe content that the retry then replaces.
+/// Only the accepted attempt is evidence: a still-valid export in the
+/// content the retry settled on is delivered, rather than refused because
+/// the rejected attempt recorded its own bytes and dependency hash.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_import_definition_keeps_the_accepted_retry_after_one_rejected_read() {
+    let util_source = "export const helper = 1\n";
+    let edited_util = "// moved\nexport const helper = 1\n";
+    let app_source = "<script setup lang=\"ts\">\nimport { helper } from './util'\nconsole.log(helper)\n</script>\n";
+    let (_temp, service, drain_handle, _provider, workspace_id) = make_definition_test_server(&[
+        ("src/util.ts", "typescript", util_source),
+        ("src/App.vue", "vue", app_source),
+    ])
+    .await;
+    let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+    let util_uri = workspace_uri(&workspace_id, "src/util.ts");
+    let server = service.inner();
+    server.documents.did_close(&util_uri);
+    let position = find_document_position(server, &app_uri, "helper }", 1);
+
+    let edits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    {
+        let server_handle = server.clone();
+        let util_uri = util_uri.clone();
+        let edits = Arc::clone(&edits);
+        server.set_child_read_hook_for_test(Some(Box::new(move || {
+            if edits.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                let _ = server_handle
+                    .documents
+                    .host()
+                    .upsert(verter_session::UpsertRequest {
+                        canonical_id: None,
+                        input_id: crate::documents::uri_to_canonical_id(&util_uri),
+                        source: Arc::from(edited_util),
+                        file_language: verter_session::FileLanguage::script_ts(),
+                        aliases: Vec::new(),
+                    })
+                    .expect("commit the replacement once");
+            }
+        })));
+    }
+    let raced = server
+        .goto_definition(goto_definition_params(&app_uri, position))
+        .await;
+    server.set_child_read_hook_for_test(None);
+    drain_handle.abort();
+    drop(service);
+    assert!(
+        edits.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+        "the rejected read commits the replacement"
+    );
+    let raced = definition_locations(
+        raced
+            .unwrap_or_else(|error| panic!("the accepted retry is delivered: {error:?}"))
+            .unwrap_or_else(|| panic!("the accepted retry resolves the import")),
+    );
+    assert!(
+        raced.iter().any(|location| location.uri == util_uri),
+        "the definition follows the content the retry settled on: {raced:?}"
+    );
+}
+
 #[tokio::test]
 async fn goto_definition_component_event_name_reaches_child_listener_prop() {
     let child_source = "<script setup lang=\"ts\">\ndefineProps<{\n  label: string\n  onAlert?: (payload: string) => void\n}>()\n</script>\n";
