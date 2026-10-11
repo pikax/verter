@@ -1,0 +1,22 @@
+[
+  {
+    "glob": "tests/framework-ember-glimmer/GLM0/manifest.json",
+    "reason": "Reviewed Ember/Glimmer contract data; no ci.yml lane reads these bytes yet. Executable specs and future products stay outside these entries."
+  },
+  {
+    "glob": "tests/framework-ember-glimmer/GLM0/cases.md",
+    "reason": "Reviewed Ember/Glimmer contract data; no ci.yml lane reads these bytes yet. Executable specs and future products stay outside these entries."
+  },
+  {
+    "glob": "tests/framework-ember-glimmer/GLM0/products/glimmer-version-lock.json",
+    "reason": "Reviewed Ember/Glimmer contract data; no ci.yml lane reads these bytes yet. Executable specs and future products stay outside these entries."
+  },
+  {
+    "glob": "tests/framework-ember-glimmer/GLM0/products/glimmer-capability-matrix.json",
+    "reason": "Reviewed Ember/Glimmer contract data; no ci.yml lane reads these bytes yet. Executable specs and future products stay outside these entries."
+  },
+  {
+    "glob": "tests/framework-ember-glimmer/GLM0/products/glimmer-activation-policy.json",
+    "reason": "Reviewed Ember/Glimmer contract data; no ci.yml lane reads these bytes yet. Executable specs and future products stay outside these entries."
+  }
+]
