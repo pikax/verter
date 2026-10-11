@@ -526,6 +526,8 @@ pub(crate) struct NodeArenaCore {
     /// `Default::default()`.
     #[cfg(any(test, feature = "test-support"))]
     counted: bool,
+    #[cfg(test)]
+    race_hook: parking_lot::Mutex<Option<ArenaRaceHook>>,
     /// The ONE payload every released slot resolves to through [`Self::get`]
     /// — an `Opaque(Miss)` node ("this value's resolution answered
     /// nothing"), never in the dedup index. Mirrors the
@@ -533,6 +535,18 @@ pub(crate) struct NodeArenaCore {
     /// consumer still holding a released id reads an unresolved value.
     released_placeholder: Arc<SemanticNodeData>,
 }
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ArenaRaceEvent {
+    BeforeDedupLookup,
+    BeforeDedupRetain,
+    BeforeRootRelease { blocked: bool },
+    AfterRootRelease,
+}
+
+#[cfg(test)]
+type ArenaRaceHook = Arc<dyn Fn(ArenaRaceEvent) + Send + Sync>;
 
 impl Default for NodeArena {
     fn default() -> Self {
@@ -542,6 +556,8 @@ impl Default for NodeArena {
                 shards: std::array::from_fn(|_| parking_lot::Mutex::new(ShardIndex::default())),
                 #[cfg(any(test, feature = "test-support"))]
                 counted: false,
+                #[cfg(test)]
+                race_hook: Default::default(),
                 released_placeholder: Arc::new(SemanticNodeData::Opaque(
                     crate::semantic_query::QueryError::Miss,
                 )),
@@ -559,6 +575,13 @@ impl std::ops::Deref for NodeArena {
 }
 
 impl NodeArenaCore {
+    #[cfg(test)]
+    fn race_event(&self, event: ArenaRaceEvent) {
+        let hook = self.race_hook.lock().clone();
+        if let Some(hook) = hook {
+            hook(event);
+        }
+    }
     pub(super) fn ownership_counts(&self) -> super::observability::NodeOwnershipCounts {
         let inner = self.inner.read();
         let mut counts = super::observability::NodeOwnershipCounts::default();
@@ -625,6 +648,10 @@ impl NodeArenaCore {
     pub(super) fn release_roots(&self, ids: &[SemanticNodeId]) {
         let mut pending = ids.to_vec();
         let mut retired = Vec::new();
+        #[cfg(test)]
+        self.race_event(ArenaRaceEvent::BeforeRootRelease {
+            blocked: self.inner.try_write().is_none(),
+        });
         let mut inner = self.inner.write();
         while let Some(id) = pending.pop() {
             let Some(chunk) = inner.chunks.get_mut(&(id.0 >> CHUNK_BITS)) else {
@@ -650,6 +677,8 @@ impl NodeArenaCore {
             retired.push((id, fingerprint));
         }
         drop(inner);
+        #[cfg(test)]
+        self.race_event(ArenaRaceEvent::AfterRootRelease);
         // Intern always confirms slot liveness under `inner` after a weak
         // upgrade. Removing the index after the tombstone cannot resurrect it.
         for (id, fingerprint) in retired {
@@ -754,12 +783,16 @@ impl NodeArena {
                 .map(|t| t.elapsed())
                 .unwrap_or(std::time::Duration::ZERO);
             crate::request_observers::record_node_arena_lock_acquisition(lock_wait);
+            #[cfg(test)]
+            self.race_event(ArenaRaceEvent::BeforeDedupLookup);
             let mut inner = self.inner.write();
             let hit = shard
                 .lookup(fingerprint, &data, &scope, |id| {
                     matches!(inner.slot(id), Slot::Live(..))
                 })
                 .inspect(|id| {
+                    #[cfg(test)]
+                    self.race_event(ArenaRaceEvent::BeforeDedupRetain);
                     inner.chunks.get_mut(&(id.0 >> CHUNK_BITS)).unwrap().owners
                         [(id.0 & CHUNK_MASK) as usize] += 1;
                 });
@@ -1280,6 +1313,91 @@ mod counted_tests {
 
     #[test]
     fn counted_dedup_races_with_last_release_without_resurrection() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        const WAIT: Duration = Duration::from_secs(30);
+        for upgrade_wins in [true, false] {
+            let arena = NodeArena::counted_for_tests();
+            let data = SemanticNodeData::Literal(LiteralValue::String("rendezvous".into()));
+            let original = arena.intern_owned(data.clone(), NodeScopeId::Global);
+            let original_id = original.id();
+            // A surviving payload Arc must not make a tombstoned weak candidate
+            // eligible for dedup. Only the arena root count owns the slot.
+            let payload = arena.get(original_id).unwrap();
+            let (parked_tx, parked_rx) = mpsc::channel();
+            let (resume_tx, resume_rx) = mpsc::channel();
+            let resume_rx = parking_lot::Mutex::new(resume_rx);
+            let (release_started_tx, release_started_rx) = mpsc::channel();
+            let (released_tx, released_rx) = mpsc::channel();
+            let parked = AtomicBool::new(false);
+            let release_started = AtomicBool::new(false);
+            let released = AtomicBool::new(false);
+            let park_at = if upgrade_wins {
+                ArenaRaceEvent::BeforeDedupRetain
+            } else {
+                ArenaRaceEvent::BeforeDedupLookup
+            };
+            *arena.race_hook.lock() = Some(Arc::new(move |event| {
+                if event == park_at && !parked.swap(true, Ordering::SeqCst) {
+                    parked_tx.send(()).unwrap();
+                    resume_rx.lock().recv_timeout(WAIT).unwrap();
+                }
+                match event {
+                    ArenaRaceEvent::BeforeRootRelease { blocked }
+                        if !release_started.swap(true, Ordering::SeqCst) =>
+                    {
+                        release_started_tx.send(blocked).unwrap();
+                    }
+                    ArenaRaceEvent::AfterRootRelease if !released.swap(true, Ordering::SeqCst) => {
+                        released_tx.send(()).unwrap();
+                    }
+                    _ => {}
+                }
+            }));
+            let root = std::thread::scope(|threads| {
+                // Disconnect the parked worker on assertion failure before
+                // thread::scope joins it during unwinding.
+                let resume = resume_tx;
+                let lookup = threads.spawn(|| arena.intern_owned(data, NodeScopeId::Global));
+                parked_rx.recv_timeout(WAIT).unwrap();
+                let release = threads.spawn(move || drop(original));
+                assert_eq!(
+                    release_started_rx.recv_timeout(WAIT).unwrap(),
+                    upgrade_wins,
+                    "live-slot validation and root acquisition must exclude final release"
+                );
+                if !upgrade_wins {
+                    // The release drops the arena lock before retiring the
+                    // weak index. Lookup still holds that shard, so it sees
+                    // the candidate after its slot has been tombstoned.
+                    released_rx.recv_timeout(WAIT).unwrap();
+                    assert!(!arena.is_live(original_id));
+                }
+                resume.send(()).unwrap();
+                let root = lookup.join().unwrap();
+                release.join().unwrap();
+                root
+            });
+            *arena.race_hook.lock() = None;
+            assert_eq!(root.id() == original_id, upgrade_wins);
+            assert!(arena.is_live(root.id()));
+            assert_eq!(arena.owner_count(root.id()), 1);
+            assert_eq!(arena.live_len(), 1);
+            drop(root);
+            assert_eq!(arena.live_len(), 0);
+            assert!(arena.inner.read().chunks.is_empty());
+            assert!(arena
+                .shards
+                .iter()
+                .all(|shard| shard.lock().index.is_empty()));
+            drop(payload);
+        }
+    }
+
+    #[test]
+    fn counted_concurrent_intern_and_drop_drains_all_slots() {
         let arena = Arc::new(NodeArena::counted_for_tests());
         std::thread::scope(|scope| {
             for _ in 0..4 {

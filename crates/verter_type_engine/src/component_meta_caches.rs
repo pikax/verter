@@ -1075,9 +1075,7 @@ impl ShapeCacheKey {
                 scope,
                 node: MemberShapeNodeSubject::from_surface_member(authority, member),
             },
-            roots: crate::semantic_query_memo::node_roots::IdentityNodeRoots::scoped(
-                [member.value],
-            ),
+            roots: authority.root_nodes([member.value]),
             demand: ShapeDemand::whole_subject_with_context(terminal_context),
         }
     }

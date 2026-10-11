@@ -40,6 +40,11 @@ impl CountedOwnershipHarness {
     pub fn live_nodes(&self) -> usize {
         self.graph.node_count()
     }
+
+    #[cfg(test)]
+    pub(crate) fn into_graph(self) -> SemanticGraphStore {
+        self.graph
+    }
 }
 
 #[cfg(test)]

@@ -115,6 +115,25 @@ pub struct OutputAuthority {
 pub(crate) struct EngineIdentity(Weak<SemanticGraphStore>);
 
 impl EngineIdentity {
+    pub(super) fn root_nodes(
+        &self,
+        ids: impl IntoIterator<Item = SemanticNodeId>,
+    ) -> crate::semantic_query_memo::node_roots::IdentityNodeRoots {
+        let Some(graph) = self.0.upgrade() else {
+            // Unbound fixtures have only their explicit construction scope.
+            return crate::semantic_query_memo::node_roots::IdentityNodeRoots::scoped(ids);
+        };
+        crate::semantic_query_memo::node_roots::IdentityNodeRoots(
+            graph
+                .root_existing_nodes(
+                    ids.into_iter()
+                        .filter(|node| node.0 < crate::semantic_query_memo::UNALLOCATABLE_ID_FLOOR)
+                        .collect(),
+                )
+                .expect("output holder operands belong to its issuing engine"),
+        )
+    }
+
     /// The identity of the engine `dispatch` reads.
     pub(super) fn of<C: crate::resolver_core::ResolverCapabilities>(
         dispatch: &ProjectSemanticDispatch<'_, C>,
@@ -132,6 +151,13 @@ impl EngineIdentity {
 }
 
 impl OutputAuthority {
+    pub(crate) fn root_nodes(
+        &self,
+        ids: impl IntoIterator<Item = SemanticNodeId>,
+    ) -> crate::semantic_query_memo::node_roots::IdentityNodeRoots {
+        self.engine.root_nodes(ids)
+    }
+
     /// Assert that `dispatch` reads the engine this authority was minted for.
     /// One pointer comparison; no allocation.
     #[inline]
@@ -199,5 +225,91 @@ impl OutputAuthority {
     ) -> MaterializedOutputTypeExpr {
         self.bind(dispatch);
         dispatch.raise_and_reduce_with_context(node, context)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::project_semantic_dispatch::output_materialization::wrap_output_type_expr;
+    use crate::semantic_query::{
+        LiteralValue, ProjectionMode, QueryResult, SemanticNodeData, SemanticQueryValue,
+        SurfaceMember,
+    };
+    use crate::semantic_query_memo::ownership_harness::CountedOwnershipHarness;
+
+    #[test]
+    fn counted_shape_holders_acquire_after_nested_scope_returns() {
+        for drop_output_first in [false, true] {
+            let graph = Arc::new(CountedOwnershipHarness::new().into_graph());
+            let authority = OutputAuthority {
+                engine: EngineIdentity(Arc::downgrade(&graph)),
+            };
+            let (node, delivery) = {
+                let _scope = graph.enter_node_root_scope();
+                let node = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+                    "retained member".into(),
+                )));
+                let delivery = graph
+                    .lease_delivery(&QueryResult::Value(SemanticQueryValue::TypeNode(node)), &[])
+                    .unwrap();
+                (node, delivery)
+            };
+            assert_eq!(
+                crate::semantic_query_memo::node_roots::NodeRootScope::current_arena_identity(),
+                None
+            );
+            let output = MaterializedOutputTypeExpr::from_parts(
+                Some(node),
+                wrap_output_type_expr(
+                    &authority,
+                    verter_type_expr::TypeExpr::string_literal("retained member"),
+                ),
+                Arc::from([]),
+                false,
+            );
+            let member = SurfaceMember {
+                key: verter_type_expr::AuthoredPropertyKey::string("member"),
+                value: node,
+                optional: false,
+                readonly: false,
+                method_kind: None,
+                has_implementation_body: false,
+                visibility: verter_type_expr::MemberVisibility::Public,
+                spans: Default::default(),
+                declaration_origin: None,
+                declared_in_macro_type_arg: Default::default(),
+                merge_role: Default::default(),
+                excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+            };
+            let key = crate::component_meta_caches::ShapeCacheKey::surface_member_value_whole_with_context(
+                &authority,
+                Arc::from("/member.vue"),
+                &member,
+                ProjectionReductionContext::published(ProjectionMode::Shallow),
+            );
+            drop(delivery);
+            assert!(
+                graph.node_is_live(node),
+                "holders assembled outside the scope own the returned node"
+            );
+            assert_eq!(graph.node_ownership_counts().roots, 2);
+            if drop_output_first {
+                drop(output);
+                assert!(
+                    graph.node_is_live(node),
+                    "the shape key owns its subject independently"
+                );
+                drop(key);
+            } else {
+                drop(key);
+                assert!(
+                    graph.node_is_live(node),
+                    "the output owns its metadata node independently"
+                );
+                drop(output);
+            }
+            assert_eq!(graph.node_ownership_counts().live_nodes, 0);
+        }
     }
 }

@@ -691,6 +691,7 @@ impl Subscription<'_> {
             drop(state);
             store.retire_inflight(prepared, &inflight, attempt.independent);
             return Joined::Read(CacheRead {
+                lease: Default::default(),
                 value: QueryResult::Error(QueryError::ExecutionAborted(
                     crate::semantic_query::ExecutionAbort::Superseded,
                 )),

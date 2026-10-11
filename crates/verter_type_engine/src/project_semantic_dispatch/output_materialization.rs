@@ -109,6 +109,13 @@ mod carrier {
         }
 
         impl OutputPayload {
+            pub(super) fn root_nodes(
+                &self,
+                node: Option<super::SemanticNodeId>,
+            ) -> crate::semantic_query_memo::node_roots::IdentityNodeRoots {
+                self.engine.root_nodes(node)
+            }
+
             /// Seal a [`MaterializedTypeExpr`] (tree + sidecar) into the
             /// vault. `pub(super)` — only the parent `carrier` module's
             /// carrier constructors reach it.
@@ -296,7 +303,7 @@ mod carrier {
             let result_is_partial = result_is_partial || type_expr.0.has_degradation();
             Self {
                 node_id,
-                roots: crate::semantic_query_memo::node_roots::IdentityNodeRoots::scoped(node_id),
+                roots: type_expr.0.root_nodes(node_id),
                 type_expr,
                 dep_signature,
                 result_is_partial,

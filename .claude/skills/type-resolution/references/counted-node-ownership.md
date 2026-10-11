@@ -70,6 +70,19 @@ raising. Shape-cache keys and output values, macro products and their host
 mirrors, and the session scratch cache retain operands as well. Cache hits keep
 their roots in the active construction scope before exposing a raw node.
 
+Terminal shape/output assembly can occur after nested dispatch construction
+scopes have returned. Materialized output values acquire roots from their
+sealed payload's issuing engine identity; member shape keys acquire from the
+output authority's engine. Neither uses the ambient scope to select an arena.
+Unbound test carriers still require an explicit fixture construction scope.
+
+The dedup/final-release regression uses per-arena test rendezvous: acquisition
+wins with the arena lock held from live-slot validation through root reservation;
+release wins with a tombstoned slot still present in the weak index and an
+external payload Arc still alive. Both returned roots remain live and their
+final drops drain the slots and index. Rendezvous hooks compile only under
+`cfg(test)`.
+
 Signature epochs retain graph-token roots through an arena attachment that is
 weak on the store side. `SignatureEpochLease` pins its exact epoch and supplies
 a read view after epoch replacement. `SignatureVersion` travels on signature
