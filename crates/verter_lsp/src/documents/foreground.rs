@@ -734,4 +734,203 @@ mod tests {
             edit.bind_each_edit(&mut |_| Err(EditRefusal::UnboundTarget(unbound.clone())));
         assert_eq!(refused, Err(EditRefusal::UnboundTarget(unbound)));
     }
+
+    use tower_lsp_server::ls_types::{
+        CreateFile, CreateFileOptions, DocumentChangeOperation, DocumentChanges, OneOf,
+        OptionalVersionedTextDocumentIdentifier, Position, Range, ResourceOp, TextDocumentEdit,
+        TextDocumentItem, TextEdit,
+    };
+
+    fn workspace() -> (tempfile::TempDir, DocumentRegistry) {
+        let temp = tempfile::tempdir().expect("temp workspace");
+        let workspace = Arc::new(verter_workspace::FilesystemWorkspace::new(
+            verter_workspace::FilesystemOptions::default(),
+        ));
+        let host = Arc::new(verter_session::VerterHost::new(
+            verter_session::HostConfig::default(),
+            workspace,
+        ));
+        (temp, super::super::DocumentRegistry::new(host))
+    }
+
+    fn file_uri(path: &std::path::Path) -> Uri {
+        let canonical = crate::test_utils::canonical_test_path(path);
+        crate::uri::path_to_file_uri(&canonical).expect("file uri")
+    }
+
+    fn open_script(documents: &super::super::DocumentRegistry, uri: &Uri, version: i32) {
+        let _ = documents.did_open(&TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "typescript".to_string(),
+            version,
+            text: "export const value = 1\n".to_string(),
+        });
+    }
+
+    /// A creation the way extract builds one: `ignore_if_exists` is set, and
+    /// the new file is both created and written.
+    fn creation(source: &Uri, created: &Uri) -> WorkspaceEdit {
+        WorkspaceEdit {
+            document_changes: Some(DocumentChanges::Operations(vec![
+                DocumentChangeOperation::Op(ResourceOp::Create(CreateFile {
+                    uri: created.clone(),
+                    options: Some(CreateFileOptions {
+                        overwrite: Some(false),
+                        ignore_if_exists: Some(true),
+                    }),
+                    annotation_id: None,
+                })),
+                DocumentChangeOperation::Edit(TextDocumentEdit {
+                    text_document: OptionalVersionedTextDocumentIdentifier {
+                        uri: created.clone(),
+                        version: Some(99),
+                    },
+                    edits: vec![OneOf::Left(TextEdit {
+                        range: Range::default(),
+                        new_text: "<template><div/></template>\n".to_string(),
+                    })],
+                }),
+                DocumentChangeOperation::Edit(TextDocumentEdit {
+                    text_document: OptionalVersionedTextDocumentIdentifier {
+                        uri: source.clone(),
+                        version: None,
+                    },
+                    edits: vec![OneOf::Left(TextEdit {
+                        range: Range {
+                            start: Position::new(0, 0),
+                            end: Position::new(0, 0),
+                        },
+                        new_text: "import Created from './Created.vue'\n".to_string(),
+                    })],
+                }),
+            ])),
+            ..Default::default()
+        }
+    }
+
+    fn edit_version(edit: &WorkspaceEdit, uri: &Uri) -> Option<i32> {
+        let Some(DocumentChanges::Operations(operations)) = &edit.document_changes else {
+            panic!("expected operations, got {edit:?}");
+        };
+        for operation in operations {
+            if let DocumentChangeOperation::Edit(document_edit) = operation {
+                if document_edit.text_document.uri == *uri {
+                    return document_edit.text_document.version;
+                }
+            }
+        }
+        panic!("text edit for {}", uri.as_str());
+    }
+
+    fn action_creating(title: &str, source: &Uri, created: &Uri) -> CodeActionOrCommand {
+        CodeActionOrCommand::CodeAction(CodeAction {
+            title: title.to_string(),
+            edit: Some(creation(source, created)),
+            ..Default::default()
+        })
+    }
+
+    /// An absent create is delivered with a null version. A create whose path
+    /// is already on disk or already open is withdrawn, `ignore_if_exists`
+    /// included. A path that appears after mapping settles `ContentModified`
+    /// while project authority is unchanged.
+    #[test]
+    fn a_created_path_is_delivered_only_while_it_stays_absent() {
+        let (temp, documents) = workspace();
+        let source_path = temp.path().join("Source.ts");
+        std::fs::write(&source_path, "export const value = 1\n").expect("source");
+        let absent_path = temp.path().join("Absent.vue");
+        let existing_path = temp.path().join("Existing.vue");
+        std::fs::write(&existing_path, "<template><div/></template>\n").expect("existing");
+        let open_path = temp.path().join("Open.vue");
+
+        let source = file_uri(&source_path);
+        let absent = file_uri(&absent_path);
+        let existing = file_uri(&existing_path);
+        let open = file_uri(&open_path);
+        let absent_id = super::super::uri_to_canonical_id(&absent);
+        let existing_id = super::super::uri_to_canonical_id(&existing);
+        assert!(
+            documents
+                .host()
+                .workspace_read()
+                .read_file(&absent_id)
+                .is_none(),
+            "precondition: the created path is not on disk"
+        );
+        assert!(
+            documents
+                .host()
+                .workspace_read()
+                .read_file(&existing_id)
+                .is_some(),
+            "precondition: the existing path is readable"
+        );
+
+        open_script(&documents, &source, 4);
+        open_script(&documents, &open, 3);
+        let request = ForegroundRequest::admit(
+            &documents,
+            ForegroundRoute::CodeAction,
+            &source,
+            WorkspaceEditSupport::VersionedDocumentChanges,
+        );
+
+        let mut refused = creation(&source, &existing);
+        assert_eq!(
+            request.bind_edits(&documents, &mut refused),
+            Err(EditRefusal::UnboundTarget(existing.clone())),
+            "a create of a file that already exists refuses the edit"
+        );
+        let mut open_edit = creation(&source, &open);
+        assert_eq!(
+            request.bind_edits(&documents, &mut open_edit),
+            Err(EditRefusal::UnboundTarget(open.clone())),
+            "a create of a file the client already has open refuses the edit"
+        );
+
+        let mut actions = vec![
+            action_creating("extract absent", &source, &absent),
+            action_creating("extract existing", &source, &existing),
+            action_creating("extract open", &source, &open),
+        ];
+        assert_eq!(request.bind_edits(&documents, &mut actions), Ok(()));
+        assert_eq!(actions.len(), 1, "only the absent create is still offered");
+        let CodeActionOrCommand::CodeAction(delivered) = &actions[0] else {
+            panic!("expected a code action");
+        };
+        assert_eq!(delivered.title, "extract absent");
+        let edit = delivered.edit.as_ref().expect("edit");
+        assert_eq!(
+            edit_version(edit, &absent),
+            None,
+            "the created file is delivered with a null version"
+        );
+        assert_eq!(
+            edit_version(edit, &source),
+            Some(4),
+            "the open source keeps the version captured at admission"
+        );
+        assert!(
+            matches!(request.settle(&documents, Some(())), Settled::Answer(_)),
+            "an absent create still settles while the path is absent"
+        );
+        assert!(
+            request.authority.is_current(&documents.host()),
+            "precondition: authority is unchanged before the path appears"
+        );
+
+        documents.appear_open_for_test(&absent, "<template><div/></template>\n");
+        assert!(
+            request.authority.is_current(&documents.host()),
+            "the appearance must not replace project authority"
+        );
+        assert!(
+            matches!(
+                request.settle(&documents, Some(())),
+                Settled::ContentModified
+            ),
+            "a created path that appears before settlement is content-modified"
+        );
+    }
 }
