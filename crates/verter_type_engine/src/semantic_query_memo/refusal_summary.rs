@@ -169,7 +169,7 @@ impl SemanticGraphStore {
             return None;
         }
         let refusal_key = (
-            PreparedKeyHandle::prepare(key.clone()),
+            self.prepare_rooted_key(key.clone()),
             BudgetProfile::intern(*profile),
         );
         let summary = self
@@ -229,7 +229,7 @@ impl SemanticGraphStore {
                 return false;
             }
         }
-        let key = (PreparedKeyHandle::prepare(key), profile);
+        let key = (self.prepare_rooted_key(key), profile);
         let flags = ctx.request_flags();
         let evicted = {
             let mut summaries = self.refusal_summaries.table.lock();

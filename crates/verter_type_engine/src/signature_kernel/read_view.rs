@@ -55,6 +55,23 @@ pub struct SemanticReadView {
 }
 
 impl SemanticReadView {
+    pub(crate) fn lease(&self) -> super::lifetime::SignatureEpochLease {
+        super::lifetime::SignatureEpochLease::from_epoch(Arc::clone(&self.inner))
+    }
+    pub(super) fn from_epoch(inner: Arc<EpochInner>) -> Self {
+        use std::sync::atomic::Ordering::Relaxed;
+        inner.live_readers.fetch_add(1, Relaxed);
+        inner.store_live_readers.fetch_add(1, Relaxed);
+        Self { inner }
+    }
+
+    pub fn applied_result(
+        &self,
+        id: super::records::AppliedResultId,
+    ) -> Result<&super::records::AppliedResult, ReadError> {
+        check_epoch(self.inner.epoch, id.epoch()).map_err(ReadError::from)?;
+        self.inner.results.get(id.index()).ok_or(ReadError::Missing)
+    }
     #[must_use]
     pub fn pin(store: &SignatureStore) -> Self {
         Self { inner: store.pin() }

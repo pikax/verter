@@ -48,6 +48,7 @@ use crate::semantic_query::{
 };
 
 pub mod arena;
+pub mod delivery_lease;
 pub mod derivation;
 pub mod family;
 mod family_intern;
@@ -58,9 +59,14 @@ pub mod inflight;
 pub(crate) mod intern_table;
 pub mod interner;
 pub(crate) mod member_index;
+pub mod node_data_lease;
+pub mod node_roots;
 pub(crate) mod nodes;
+#[cfg(any(test, feature = "test-support"))]
+pub mod ownership_harness;
 pub use nodes::AliasChainEnd;
 mod observability;
+pub use observability::NodeOwnershipCounts;
 mod origin_edges;
 pub mod prepared;
 pub mod refusal_summary;
@@ -172,6 +178,7 @@ fn narrow_cache_read(
     read: CacheRead<QueryResult<SemanticQueryValue>>,
 ) -> CacheRead<QueryResult<SemanticNodeId>> {
     CacheRead {
+        lease: read.lease,
         value: narrow_value_result(read.value),
         dep_signature: read.dep_signature,
         walker_diagnostics: read.walker_diagnostics,
@@ -185,6 +192,7 @@ fn narrow_cache_read(
 pub(crate) fn cancelled_cache_read() -> CacheRead<QueryResult<SemanticQueryValue>> {
     crate::request_context::mark_request_result_cancelled();
     CacheRead {
+        lease: Default::default(),
         value: QueryResult::Error(QueryError::Cancelled),
         dep_signature: empty_signature(),
         walker_diagnostics: Arc::from([]),
@@ -647,8 +655,10 @@ pub struct SemanticGraphStore {
     // sidecar deque) so a long-running workspace cannot grow either
     // memo without bound; see `hash_cons_memos.rs` for the
     // eviction contract.
-    pub(super) substitute_memo:
-        DashMap<(SemanticNodeId, SemanticNodeId, SemanticNodeId), SemanticNodeId>,
+    pub(super) substitute_memo: DashMap<
+        (SemanticNodeId, SemanticNodeId, SemanticNodeId),
+        (SemanticNodeId, node_roots::NodeRootSet),
+    >,
     pub(super) substitute_memo_fifo: parking_lot::Mutex<
         std::collections::VecDeque<(SemanticNodeId, SemanticNodeId, SemanticNodeId)>,
     >,
@@ -660,6 +670,7 @@ pub struct SemanticGraphStore {
         (
             SemanticNodeId,
             std::sync::Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
+            delivery_lease::SemanticDeliveryLease,
         ),
     >,
     pub(super) evaluate_deferred_memo_fifo: parking_lot::Mutex<
@@ -827,6 +838,7 @@ impl SemanticGraphStore {
     /// The store's epoch-safe signature records.
     #[must_use]
     pub fn signature_store(&self) -> &crate::signature_kernel::SignatureStore {
+        self.signatures.bind_graph(&self.arena.core);
         &self.signatures
     }
 
@@ -845,9 +857,7 @@ impl SemanticGraphStore {
     ) -> T {
         use tasks::SemanticProducers as _;
         let execution = self.enter_execution();
-        let _open = execution
-            .task()
-            .open_producer(PreparedKeyHandle::prepare(key));
+        let _open = execution.task().open_producer(self.prepare_rooted_key(key));
         body()
     }
 
@@ -1775,6 +1785,7 @@ impl SemanticGraphStore {
                 entry.read_set_signature.bubble_via_tls();
                 let dep_signature = Arc::clone(&entry.dispatch_dep_signature);
                 CacheRead {
+                    lease: entry.lease,
                     value: entry.result,
                     dep_signature,
                     walker_diagnostics: entry.walker_diagnostics,
@@ -1933,6 +1944,7 @@ impl SemanticGraphStore {
             }
             let dep_signature = Arc::clone(&entry.dispatch_dep_signature);
             CacheRead {
+                lease: entry.lease,
                 value: entry.result,
                 dep_signature,
                 walker_diagnostics: entry.walker_diagnostics,
@@ -2082,6 +2094,7 @@ impl SemanticGraphStore {
             None => entry.read_set_signature.bubble_via_tls(),
         }
         let hit = CacheRead {
+            lease: entry.lease,
             value: entry.result,
             dep_signature: Arc::clone(&entry.dispatch_dep_signature),
             walker_diagnostics: entry.walker_diagnostics,
@@ -2277,6 +2290,10 @@ impl SemanticGraphStore {
         let validated_at_generation = flags.current_project_generation();
         let admission_seq = self.alloc_candidate_admission_seq();
         let mut entry = MemoEntry {
+            lease: match self.lease_candidate(family, result, walker_diagnostics) {
+                Ok(lease) => lease,
+                Err(_) => return WarmPublishOutcome::Skipped,
+            },
             result: result.clone(),
             read_set_signature: read_set_signature.clone(),
             dispatch_dep_signature: Arc::clone(&dispatch_dep_signature),
@@ -2474,7 +2491,7 @@ impl SemanticGraphStore {
         // Prepare the backfill key's token once — the same
         // family/slot/path/point projection the by-key helpers ran
         // separately, plus the hash the in-flight probe needs.
-        let prepared = PreparedKeyHandle::prepare(key);
+        let prepared = self.prepare_rooted_key(key);
         let family = prepared.family();
         let slot = prepared.slot();
         let requested_path = prepared.requested_path();
@@ -2520,6 +2537,7 @@ impl SemanticGraphStore {
         let validated_at_generation = flags.current_project_generation();
         let admission_seq = self.alloc_candidate_admission_seq();
         let mut entry = MemoEntry {
+            lease: Default::default(),
             result: match result {
                 QueryResult::Value(node) => QueryResult::Value(SemanticQueryValue::TypeNode(node)),
                 QueryResult::Recursive(node) => QueryResult::Recursive(node),
@@ -2534,6 +2552,10 @@ impl SemanticGraphStore {
             validated_at_generation,
             admission_seq,
             cost_receipt,
+        };
+        entry.lease = match self.lease_candidate(family, &entry.result, &entry.walker_diagnostics) {
+            Ok(lease) => lease,
+            Err(_) => return false,
         };
         // A narrower sibling slot is a fresh candidate with its own
         // carriers, so it is charged like any other publish. Under

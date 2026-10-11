@@ -273,6 +273,7 @@ pub(crate) use crate::semantic_query_memo::SemanticOperandEvidence;
 
 #[derive(Debug, Clone)]
 pub struct AuthoredSemanticOperand {
+    _roots: crate::semantic_query_memo::node_roots::IdentityNodeRoots,
     locator: AuthoredBodyLocator,
     lexical_scope: OperandLexicalScope,
     binder: OperandBinderIdentity,
@@ -316,6 +317,9 @@ impl AuthoredSemanticOperand {
     ) -> Self {
         Self {
             lexical_scope: OperandLexicalScope::for_locator(&locator),
+            _roots: crate::semantic_query_memo::node_roots::IdentityNodeRoots::scoped(
+                substitution.iter().copied(),
+            ),
             binder: OperandBinderIdentity::for_locator(&locator),
             locator,
             substitution,
@@ -368,6 +372,7 @@ impl AuthoredSemanticOperand {
 #[derive(Debug, Clone)]
 enum SemanticOperandKind {
     Node {
+        lease: crate::semantic_query_memo::delivery_lease::SemanticDeliveryLease,
         store_identity: u64,
         generation: u64,
         node: SemanticNodeId,
@@ -383,6 +388,15 @@ pub struct SemanticOperand {
 }
 
 impl SemanticOperand {
+    pub(crate) fn with_lease(
+        mut self,
+        owned: crate::semantic_query_memo::delivery_lease::SemanticDeliveryLease,
+    ) -> Self {
+        if let SemanticOperandKind::Node { lease, .. } = &mut self.kind {
+            *lease = owned;
+        }
+        self
+    }
     /// Token-gated construction of the runtime-node arm: the forcing
     /// authority seals a published node to its store and generation.
     pub(crate) fn node(
@@ -394,6 +408,10 @@ impl SemanticOperand {
     ) -> Self {
         Self {
             kind: SemanticOperandKind::Node {
+                lease:
+                    crate::semantic_query_memo::delivery_lease::SemanticDeliveryLease::from_roots(
+                        crate::semantic_query_memo::node_roots::NodeRootScope::root_current([node]),
+                    ),
                 store_identity,
                 generation,
                 node,
@@ -468,6 +486,7 @@ impl SemanticOperand {
                 generation,
                 node,
                 evidence,
+                ..
             } => SemanticOperandParts::Node {
                 store_identity: *store_identity,
                 generation: *generation,
@@ -556,6 +575,7 @@ impl Hash for SemanticOperand {
 /// (and its evidence) to feed `mint_node_semantic_operand`.
 #[derive(Debug, Clone)]
 pub struct ForcedSemanticOperand {
+    lease: crate::semantic_query_memo::delivery_lease::SemanticDeliveryLease,
     store_identity: u64,
     generation: u64,
     node: SemanticNodeId,
@@ -563,6 +583,18 @@ pub struct ForcedSemanticOperand {
 }
 
 impl ForcedSemanticOperand {
+    pub(crate) fn with_lease(
+        mut self,
+        lease: crate::semantic_query_memo::delivery_lease::SemanticDeliveryLease,
+    ) -> Self {
+        self.lease = lease;
+        self
+    }
+    pub(crate) fn lease(
+        &self,
+    ) -> &crate::semantic_query_memo::delivery_lease::SemanticDeliveryLease {
+        &self.lease
+    }
     /// Token-gated construction: the forcing boundary's force read is the
     /// only producer.
     pub(crate) fn minted(
@@ -577,6 +609,7 @@ impl ForcedSemanticOperand {
             generation,
             node,
             evidence,
+            lease: Default::default(),
         }
     }
 

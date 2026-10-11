@@ -242,6 +242,7 @@ pub struct ProducerLease<'s> {
 /// A settled producer: its result, ready for the retention decision and the
 /// delivery to subscribers.
 pub struct SettledProducer<'s> {
+    lease: super::delivery_lease::SemanticDeliveryLease,
     store: &'s SemanticGraphStore,
     prepared: PreparedKeyHandle,
     inflight: Arc<FlightCell>,
@@ -281,8 +282,15 @@ impl SemanticGraphStore {
     }
 
     /// The recursion carrier for `recursion`, with `sentinel` as its value.
-    pub(crate) fn recursion_read(recursion: Recursion, sentinel: SemanticNodeId) -> ValueRead {
+    pub(crate) fn recursion_read(
+        &self,
+        recursion: Recursion,
+        sentinel: SemanticNodeId,
+    ) -> ValueRead {
         CacheRead {
+            lease: self
+                .lease_delivery(&QueryResult::Recursive(sentinel), &[])
+                .expect("recursion sentinel is live"),
             value: QueryResult::Recursive(sentinel),
             dep_signature: empty_signature(),
             walker_diagnostics: Arc::from([]),
@@ -390,7 +398,7 @@ impl SemanticGraphStore {
         // producer registration, the panic guard and the publish. See the
         // `prepared` module for the equality contract (token equality ⟺
         // key equality).
-        let prepared = PreparedKeyHandle::prepare(key);
+        let prepared = self.prepare_rooted_key(key);
 
         // Warm lookup. One lock acquisition snapshots the slot; the
         // candidate's carrier is validated strictly (self-roots through
@@ -443,7 +451,7 @@ impl SemanticGraphStore {
             return Err(cancelled_cache_read());
         }
         Ok(ClaimAttempt {
-            prepared: PreparedKeyHandle::prepare(key),
+            prepared: self.prepare_rooted_key(key),
             independent: true,
             miss_recorded: false,
             retries: 0,
@@ -684,6 +692,7 @@ impl Subscription<'_> {
             .clone()
             .unwrap_or_else(|| Arc::from([]));
         let cost_receipt = state.cost_receipt.clone();
+        let delivery_lease = state.lease.clone();
         // Release the flight lock before any tracer fan-out.
         drop(state);
 
@@ -759,6 +768,7 @@ impl Subscription<'_> {
                 .fetch_add(1, Ordering::Relaxed);
         }
         Joined::Read(CacheRead {
+            lease: delivery_lease,
             value: result,
             dep_signature,
             walker_diagnostics,
@@ -941,6 +951,9 @@ impl<'s> ProducerLease<'s> {
             other => other,
         };
         Ok(SettledProducer {
+            lease: store
+                .lease_delivery(&result, &walker_diagnostics)
+                .expect("settled output owns live operands"),
             store,
             prepared,
             inflight,
@@ -1126,6 +1139,7 @@ impl SettledProducer<'_> {
             result_is_partial,
             partial_reasons,
             cost_receipt,
+            lease,
             ..
         } = self;
         if let Some(slot) = capture.evidence() {
@@ -1147,6 +1161,7 @@ impl SettledProducer<'_> {
         let flight_aborted = {
             let mut state = inflight.state.lock();
             if !state.aborted {
+                state.lease = lease.clone();
                 state.completed = Some(result.clone());
                 state.dep_signature = Some(dep_signature.clone());
                 // Subscribers bubble the same carrier this producer bubbled
@@ -1179,6 +1194,7 @@ impl SettledProducer<'_> {
             };
             store.retire_inflight(&prepared, &inflight, independent);
             return CacheRead {
+                lease,
                 value,
                 dep_signature,
                 walker_diagnostics,
@@ -1197,6 +1213,7 @@ impl SettledProducer<'_> {
         store.retire_inflight(&prepared, &inflight, independent);
 
         CacheRead {
+            lease,
             value: result,
             dep_signature,
             walker_diagnostics,
@@ -1226,6 +1243,7 @@ impl SemanticGraphStore {
         O: Into<crate::project_semantic_dispatch::walk::QueryBuildOutput<SemanticNodeId>>,
         R: FnOnce() -> SemanticNodeId,
     {
+        let _node_scope = self.enter_node_root_scope();
         super::narrow_cache_read(self.execute_cooperative_value(
             ctx,
             key,
@@ -1302,6 +1320,7 @@ impl SemanticGraphStore {
         O: Into<BuildOutput>,
         R: FnOnce() -> SemanticNodeId,
     {
+        let _node_scope = self.enter_node_root_scope();
         // Test-support entry: capture the request snapshot's flag handles
         // once here, so the claim/settle/admit protocol below reads plain
         // fields exactly as the production dispatch path does.
@@ -1311,7 +1330,7 @@ impl SemanticGraphStore {
             None
         }) {
             Acquired::Read(read) | Acquired::Served(read) => read,
-            Acquired::Recursive(recursion) => Self::recursion_read(recursion, recursion_sentinel()),
+            Acquired::Recursive(recursion) => self.recursion_read(recursion, recursion_sentinel()),
             Acquired::Produce(lease) => {
                 let receipt = lease.fixture_receipt();
                 match lease.settle(ctx, flags, build().into(), Some(receipt)) {

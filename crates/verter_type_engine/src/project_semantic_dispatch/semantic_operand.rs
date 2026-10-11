@@ -184,7 +184,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             forced.node(),
             evidence,
             SemanticOperandAuthority::mint_for_forcing_boundary(),
-        ))
+        )
+        .with_lease(forced.lease().clone()))
     }
 
     /// Seal an exact authored locator and authority-issued node operands used
@@ -196,6 +197,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         locator: AuthoredBodyLocator,
         substitution: Arc<[SemanticOperand]>,
     ) -> Result<SemanticOperand, SemanticOperandMintError> {
+        let _scope = self.graph().enter_node_root_scope();
         let anchor = authored_anchor(&locator);
         self.verify_authored_anchor(&locator, anchor)?;
         let binder = OperandBinderIdentity::for_locator(&locator);
@@ -1109,6 +1111,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         operand: &SemanticOperand,
         request: SemanticOperandForceRequest,
     ) -> QueryResult<ForcedSemanticOperand> {
+        let _scope = self.graph().enter_node_root_scope();
         if let Err(error) = self.reject_if_cancelled() {
             return QueryResult::Error(error);
         }
@@ -1277,13 +1280,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // drop the original producer's roots. Unioning here makes
                 // the force's OWN observable output path-independent.
                 let evidence = union_operand_evidence(&projection_evidence, evidence);
-                QueryResult::Value(ForcedSemanticOperand::minted(
-                    self.graph().operand_store_identity(),
-                    self.snapshot.current_project_generation(),
-                    node,
-                    evidence,
-                    SemanticOperandAuthority::mint_for_forcing_boundary(),
-                ))
+                QueryResult::Value(
+                    ForcedSemanticOperand::minted(
+                        self.graph().operand_store_identity(),
+                        self.snapshot.current_project_generation(),
+                        node,
+                        evidence,
+                        SemanticOperandAuthority::mint_for_forcing_boundary(),
+                    )
+                    .with_lease(read.lease),
+                )
             }
         }
     }

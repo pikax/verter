@@ -24,11 +24,10 @@
 //! so a fingerprint collision can never alias two distinct nodes — it only
 //! lengthens a bucket scan.
 //!
-//! **Single payload allocation.** On an intern-miss the payload is boxed
-//! into one `Arc` that is shared by refcount between the arena's slot
-//! storage (`ArenaInner`, addressed by `id.0`) and the dedup bucket. The index
-//! holds an `Arc` handle, never a deep clone of the payload — so the graph
-//! carries exactly one copy of each node's body.
+//! **Single payload allocation.** The arena slot owns the payload Arc.
+//! Dedup candidates hold Weak handles and verify slot liveness while
+//! acquiring a root under the arena lock. The index never keeps a graph
+//! node alive after its last owner releases it in the controlled harness.
 //!
 //! **HashDoS-safe fingerprint.** Node payloads embed workspace-derived
 //! names (file paths, type names). A seedless hash would let an attacker
@@ -39,14 +38,12 @@
 //! cross a process / serialization boundary (they key only the in-memory,
 //! per-generation dedup index), so a per-process random seed is correct.
 //!
-//! **Sharded dedup index.** The dedup index lives on
-//! `[Mutex<ShardIndex>; NUM_SHARDS]` rather than inside `ArenaInner`.
-//! The fingerprint's low bits route to a specific shard; intern-hits
-//! (the steady-state hot path) take only that shard's Mutex — so `K`
-//! threads interning payloads that route to distinct shards proceed
-//! in parallel. Intern-misses acquire the shard Mutex, then briefly
-//! acquire `inner.write()` to allocate the next sequential id and
-//! push the node. Ids are handed out sequentially (`a.0 + 1 == b.0`) and
+//! **Sharded dedup index.** Fingerprints route to one of
+//! `[Mutex<ShardIndex>; NUM_SHARDS]`. A hit holds that shard and the arena
+//! write lock while checking the candidate's live slot and acquiring its
+//! root. A miss takes locks in the same order to allocate and retain its
+//! children. Last release drops the arena lock before retiring weak shard
+//! entries, so no inverse lock order is introduced. Ids are sequential and
 //! address the chunked storage described under **Storage**.
 //!
 //! **Acyclic by contract.** A payload names children the arena already
@@ -95,7 +92,7 @@
 use std::collections::hash_map::RandomState;
 use std::collections::HashMap;
 use std::hash::{BuildHasher, Hash, Hasher};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, Weak};
 
 use smallvec::SmallVec;
 
@@ -128,14 +125,17 @@ fn names_forward_child(data: &SemanticNodeData, id: SemanticNodeId) -> bool {
 /// costs its size, not its size squared.
 #[cfg(any(test, feature = "test-support"))]
 fn assert_retained_walk_is_complete(data: &SemanticNodeData) {
+    let mut retained = SmallVec::<[u64; 16]>::new();
+    data.for_each_retained_child(|child| retained.push(child.0));
+    assert_retained_multiset(data, retained);
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn assert_retained_multiset(data: &SemanticNodeData, mut retained: SmallVec<[u64; 16]>) {
     const MARK: &str = "SemanticNodeId(";
     let printed = format!("{data:?}");
-    if !printed.contains(MARK) {
-        return;
-    }
-    let mut retained: SmallVec<[u64; 16]> = SmallVec::new();
-    data.for_each_retained_child(|child| retained.push(child.0));
     retained.sort_unstable();
+    let mut expected: SmallVec<[u64; 16]> = SmallVec::new();
     let mut rest = printed.as_str();
     while let Some(at) = rest.find(MARK) {
         rest = &rest[at + MARK.len()..];
@@ -143,12 +143,25 @@ fn assert_retained_walk_is_complete(data: &SemanticNodeData) {
         let Ok(held) = rest[..digits].parse::<u64>() else {
             continue;
         };
-        assert!(
-            held >= UNALLOCATABLE_ID_FLOOR || retained.binary_search(&held).is_ok(),
-            "a {:?} payload holds node {held}, which for_each_retained_child never visits",
-            data.node_tag()
-        );
+        if held < UNALLOCATABLE_ID_FLOOR {
+            expected.push(held);
+        }
     }
+    // This carrier predates typed node ids and prints its retained child as
+    // a bare ordinal. Read the field directly, independently of the visitor.
+    if let SemanticNodeData::SyntheticBinding { value_node, .. } = data {
+        if *value_node < UNALLOCATABLE_ID_FLOOR {
+            expected.push(*value_node);
+        }
+    }
+    retained.retain(|held| *held < UNALLOCATABLE_ID_FLOOR);
+    expected.sort_unstable();
+    assert_eq!(
+        retained,
+        expected,
+        "retained operand multiset for {:?}",
+        data.node_tag()
+    );
 }
 
 pub const NUM_SHARDS: usize = 16;
@@ -158,7 +171,7 @@ pub(super) const SHARD_MASK: u64 = (NUM_SHARDS as u64) - 1;
 /// allocation stored in [`ArenaInner::nodes`]), its origin scope, and the
 /// interned id. The payload and scope are retained so the bucket scan can
 /// content-`Eq` a query against candidates without touching `inner`.
-type NodeCandidate = (Arc<SemanticNodeData>, NodeScopeId, SemanticNodeId);
+type NodeCandidate = (Weak<SemanticNodeData>, NodeScopeId, SemanticNodeId);
 
 /// Per-shard dedup index. Keyed by the structural fingerprint of
 /// `(payload, scope)`; each bucket holds the candidate nodes whose
@@ -185,10 +198,16 @@ impl ShardIndex {
         fingerprint: u64,
         data: &SemanticNodeData,
         scope: &NodeScopeId,
+        mut is_live: impl FnMut(SemanticNodeId) -> bool,
     ) -> Option<SemanticNodeId> {
         let bucket = self.index.get(&fingerprint)?;
         bucket.iter().find_map(|(cand_data, cand_scope, cand_id)| {
-            (cand_scope == scope && cand_data.as_ref() == data).then_some(*cand_id)
+            (cand_scope == scope
+                && is_live(*cand_id)
+                && cand_data
+                    .upgrade()
+                    .is_some_and(|value| value.as_ref() == data))
+            .then_some(*cand_id)
         })
     }
 }
@@ -205,6 +224,8 @@ const CHUNK_MASK: u64 = (CHUNK_LEN as u64) - 1;
 struct Chunk {
     nodes: Box<[Option<Arc<SemanticNodeData>>]>,
     scopes: Box<[Option<NodeScopeId>]>,
+    owners: Box<[usize]>,
+    permanent: Box<[bool]>,
     /// Slots of this chunk still holding a payload; the chunk is dropped
     /// when it reaches zero.
     live: usize,
@@ -215,6 +236,8 @@ impl Chunk {
         Self {
             nodes: (0..CHUNK_LEN).map(|_| None).collect(),
             scopes: (0..CHUNK_LEN).map(|_| None).collect(),
+            owners: vec![0; CHUNK_LEN].into_boxed_slice(),
+            permanent: vec![false; CHUNK_LEN].into_boxed_slice(),
             live: 0,
         }
     }
@@ -287,6 +310,8 @@ impl ArenaInner {
             return false;
         }
         chunk.scopes[index] = None;
+        chunk.owners[index] = 0;
+        chunk.permanent[index] = false;
         chunk.live -= 1;
         self.live -= 1;
         if chunk.live == 0 {
@@ -482,6 +507,11 @@ pub fn shard_index_for(data: &SemanticNodeData, scope: &NodeScopeId) -> usize {
 }
 
 pub(crate) struct NodeArena {
+    pub(super) core: Arc<NodeArenaCore>,
+    pub(super) provenance: Option<Arc<crate::engine_provenance::EngineProvenance>>,
+}
+
+pub(crate) struct NodeArenaCore {
     /// Global dense storage for node data + sidecar. `RwLock` so readers
     /// (`get`, `scope`) are concurrent and writers (intern-miss) briefly
     /// serialize to push a fresh slot.
@@ -494,7 +524,8 @@ pub(crate) struct NodeArena {
     /// wait time so downstream passes have evidence-grade contention
     /// data. `None` for test-default arenas constructed via
     /// `Default::default()`.
-    pub(super) provenance: Option<Arc<crate::engine_provenance::EngineProvenance>>,
+    #[cfg(any(test, feature = "test-support"))]
+    counted: bool,
     /// The ONE payload every released slot resolves to through [`Self::get`]
     /// — an `Opaque(Miss)` node ("this value's resolution answered
     /// nothing"), never in the dedup index. Mirrors the
@@ -506,12 +537,129 @@ pub(crate) struct NodeArena {
 impl Default for NodeArena {
     fn default() -> Self {
         Self {
-            inner: parking_lot::RwLock::new(ArenaInner::default()),
-            shards: std::array::from_fn(|_| parking_lot::Mutex::new(ShardIndex::default())),
+            core: Arc::new(NodeArenaCore {
+                inner: parking_lot::RwLock::new(ArenaInner::default()),
+                shards: std::array::from_fn(|_| parking_lot::Mutex::new(ShardIndex::default())),
+                #[cfg(any(test, feature = "test-support"))]
+                counted: false,
+                released_placeholder: Arc::new(SemanticNodeData::Opaque(
+                    crate::semantic_query::QueryError::Miss,
+                )),
+            }),
             provenance: None,
-            released_placeholder: Arc::new(SemanticNodeData::Opaque(
-                crate::semantic_query::QueryError::Miss,
-            )),
+        }
+    }
+}
+
+impl std::ops::Deref for NodeArena {
+    type Target = NodeArenaCore;
+    fn deref(&self) -> &Self::Target {
+        &self.core
+    }
+}
+
+impl NodeArenaCore {
+    pub(super) fn ownership_counts(&self) -> super::observability::NodeOwnershipCounts {
+        let inner = self.inner.read();
+        let mut counts = super::observability::NodeOwnershipCounts::default();
+        let mut owners = 0;
+        for chunk in inner.chunks.values() {
+            for (index, data) in chunk.nodes.iter().enumerate() {
+                let Some(data) = data else {
+                    continue;
+                };
+                counts.live_nodes += 1;
+                owners += chunk.owners[index];
+                counts.permanent_nodes += usize::from(chunk.permanent[index]);
+                data.for_each_retained_child(|child| {
+                    if child.0 < UNALLOCATABLE_ID_FLOOR
+                        && matches!(inner.slot(child), Slot::Live(..))
+                    {
+                        counts.internal_edges += 1;
+                    }
+                });
+            }
+        }
+        counts.roots = owners
+            .checked_sub(counts.internal_edges)
+            .expect("every live edge is counted");
+        counts
+    }
+    pub(crate) fn is_live(&self, id: SemanticNodeId) -> bool {
+        matches!(self.inner.read().slot(id), Slot::Live(..))
+    }
+    pub(crate) fn counted(&self) -> bool {
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            self.counted
+        }
+        #[cfg(not(any(test, feature = "test-support")))]
+        {
+            false
+        }
+    }
+
+    pub(super) fn retain(
+        &self,
+        ids: &[SemanticNodeId],
+    ) -> Result<(), crate::semantic_query::QueryError> {
+        let mut inner = self.inner.write();
+        for id in ids {
+            match inner.slot(*id) {
+                Slot::Live(..) => {}
+                Slot::Released => {
+                    return Err(crate::semantic_query::QueryError::StaleSemanticOperand)
+                }
+                Slot::Unallocated => {
+                    return Err(crate::semantic_query::QueryError::ForeignSemanticOperand)
+                }
+            }
+        }
+        for id in ids {
+            inner.chunks.get_mut(&(id.0 >> CHUNK_BITS)).unwrap().owners
+                [(id.0 & CHUNK_MASK) as usize] += 1;
+        }
+        Ok(())
+    }
+
+    pub(super) fn release_roots(&self, ids: &[SemanticNodeId]) {
+        let mut pending = ids.to_vec();
+        let mut retired = Vec::new();
+        let mut inner = self.inner.write();
+        while let Some(id) = pending.pop() {
+            let Some(chunk) = inner.chunks.get_mut(&(id.0 >> CHUNK_BITS)) else {
+                continue;
+            };
+            let index = (id.0 & CHUNK_MASK) as usize;
+            if chunk.nodes[index].is_none() {
+                continue;
+            }
+            assert!(chunk.owners[index] > 0, "live root released twice");
+            chunk.owners[index] -= 1;
+            if chunk.owners[index] != 0 || chunk.permanent[index] || !self.counted() {
+                continue;
+            }
+            let data = chunk.nodes[index].as_ref().unwrap();
+            data.for_each_retained_child(|child| {
+                if child.0 < UNALLOCATABLE_ID_FLOOR {
+                    pending.push(child);
+                }
+            });
+            let fingerprint = structural_fingerprint(data, chunk.scopes[index].as_ref().unwrap());
+            inner.release(id);
+            retired.push((id, fingerprint));
+        }
+        drop(inner);
+        // Intern always confirms slot liveness under `inner` after a weak
+        // upgrade. Removing the index after the tombstone cannot resurrect it.
+        for (id, fingerprint) in retired {
+            let mut shard = self.shards[(fingerprint & SHARD_MASK) as usize].lock();
+            if let Some(bucket) = shard.index.get_mut(&fingerprint) {
+                bucket.retain(|(_, _, candidate)| *candidate != id);
+                if bucket.is_empty() {
+                    shard.index.remove(&fingerprint);
+                }
+            }
         }
     }
 }
@@ -521,7 +669,7 @@ impl NodeArena {
     /// purely structural nodes use this path — most existing interning
     /// sites fall into this bucket.
     pub(super) fn push(&self, data: SemanticNodeData) -> SemanticNodeId {
-        self.push_impl(data, NodeScopeId::Global)
+        self.push_with_scope(data, NodeScopeId::Global)
     }
 
     /// Intern `data` and record `scope` in the origin sidecar. Called by
@@ -532,7 +680,10 @@ impl NodeArena {
         data: SemanticNodeData,
         scope: NodeScopeId,
     ) -> SemanticNodeId {
-        self.push_impl(data, scope)
+        let root = self.intern_owned(data, scope);
+        let id = root.id();
+        super::node_roots::NodeRootScope::capture(root);
+        id
     }
 
     fn push_impl(&self, mut data: SemanticNodeData, scope: NodeScopeId) -> SemanticNodeId {
@@ -569,6 +720,18 @@ impl NodeArena {
         scope: NodeScopeId,
         fingerprint: u64,
     ) -> SemanticNodeId {
+        match self.try_intern_with_fingerprint(data, scope.clone(), fingerprint) {
+            Ok(id) => id,
+            Err(error) => self.push_impl(SemanticNodeData::Opaque(error), scope),
+        }
+    }
+
+    fn try_intern_with_fingerprint(
+        &self,
+        data: SemanticNodeData,
+        scope: NodeScopeId,
+        fingerprint: u64,
+    ) -> Result<SemanticNodeId, crate::semantic_query::QueryError> {
         // Capture the variant bucket before moving `data` so the
         // contention instrumentation can bucket per-variant pushes.
         let discriminant = data.node_tag().bucket_index();
@@ -591,7 +754,17 @@ impl NodeArena {
                 .map(|t| t.elapsed())
                 .unwrap_or(std::time::Duration::ZERO);
             crate::request_observers::record_node_arena_lock_acquisition(lock_wait);
-            if let Some(existing) = shard.lookup(fingerprint, &data, &scope) {
+            let mut inner = self.inner.write();
+            let hit = shard
+                .lookup(fingerprint, &data, &scope, |id| {
+                    matches!(inner.slot(id), Slot::Live(..))
+                })
+                .inspect(|id| {
+                    inner.chunks.get_mut(&(id.0 >> CHUNK_BITS)).unwrap().owners
+                        [(id.0 & CHUNK_MASK) as usize] += 1;
+                });
+            drop(inner);
+            if let Some(existing) = hit {
                 (existing, false, 0u64)
             } else {
                 drop(shard);
@@ -610,12 +783,19 @@ impl NodeArena {
                     .map(|t| t.elapsed())
                     .unwrap_or(std::time::Duration::ZERO);
                 crate::request_observers::record_node_arena_lock_acquisition(lock_wait);
-                if let Some(existing) = shard.lookup(fingerprint, &data, &scope) {
+                let mut inner = self.inner.write();
+                if let Some(existing) = shard.lookup(fingerprint, &data, &scope, |id| {
+                    matches!(inner.slot(id), Slot::Live(..))
+                }) {
                     // Another thread beat us to it.
+                    inner
+                        .chunks
+                        .get_mut(&(existing.0 >> CHUNK_BITS))
+                        .unwrap()
+                        .owners[(existing.0 & CHUNK_MASK) as usize] += 1;
                     (existing, false, 0u64)
                 } else {
                     let write_start = Instant::now();
-                    let mut inner = self.inner.write();
                     let wait = write_start.elapsed().as_nanos() as u64;
                     // The id this payload would take. Ids are monotonic and
                     // never reused (storage is chunked, not a vector), so the
@@ -623,27 +803,44 @@ impl NodeArena {
                     // acyclicity rule reads; a released child sits below it
                     // and is no forward reference.
                     let id = SemanticNodeId(inner.next_id);
+                    let mut children = SmallVec::<[SemanticNodeId; 16]>::new();
+                    data.for_each_retained_child(|child| {
+                        if child.0 < UNALLOCATABLE_ID_FLOOR {
+                            children.push(child);
+                        }
+                    });
                     if names_forward_child(&data, id) {
-                        drop(inner);
-                        drop(shard);
-                        return self.push_impl(
-                            SemanticNodeData::Opaque(
-                                crate::semantic_query::QueryError::ForeignSemanticOperand,
-                            ),
-                            scope,
-                        );
+                        return Err(crate::semantic_query::QueryError::ForeignSemanticOperand);
+                    }
+                    if children
+                        .iter()
+                        .any(|child| !matches!(inner.slot(*child), Slot::Live(..)))
+                    {
+                        return Err(crate::semantic_query::QueryError::StaleSemanticOperand);
                     }
                     // ONE payload allocation, shared by refcount between the
                     // arena's slot storage and the dedup bucket — the payload
                     // is never deep-cloned into the index.
                     let payload = Arc::new(data);
+                    for child in children {
+                        inner
+                            .chunks
+                            .get_mut(&(child.0 >> CHUNK_BITS))
+                            .unwrap()
+                            .owners[(child.0 & CHUNK_MASK) as usize] += 1;
+                    }
                     let id = inner.allocate(Arc::clone(&payload), scope.clone());
+                    let chunk = inner.chunks.get_mut(&(id.0 >> CHUNK_BITS)).unwrap();
+                    let index = (id.0 & CHUNK_MASK) as usize;
+                    chunk.owners[index] = 1;
+                    chunk.permanent[index] = scope == NodeScopeId::Global
+                        && matches!(&*payload, SemanticNodeData::Primitive(_));
                     drop(inner);
-                    shard
-                        .index
-                        .entry(fingerprint)
-                        .or_default()
-                        .push((payload, scope, id));
+                    shard.index.entry(fingerprint).or_default().push((
+                        Arc::downgrade(&payload),
+                        scope,
+                        id,
+                    ));
                     (id, true, wait)
                 }
             }
@@ -661,7 +858,51 @@ impl NodeArena {
             prov.node_arena_pushes_per_discriminant[discriminant].fetch_add(1, Relaxed);
         }
 
-        id
+        Ok(id)
+    }
+
+    pub(super) fn try_intern_owned(
+        &self,
+        mut data: SemanticNodeData,
+        scope: NodeScopeId,
+    ) -> Result<super::node_roots::NodeRoot, crate::semantic_query::QueryError> {
+        if let SemanticNodeData::Literal(crate::semantic_query::LiteralValue::Number(n)) = &mut data
+        {
+            if *n == 0.0 {
+                *n = 0.0;
+            }
+        }
+        let fingerprint = structural_fingerprint(&data, &scope);
+        let id = self.try_intern_with_fingerprint(data, scope, fingerprint)?;
+        Ok(super::node_roots::NodeRoot::adopt(
+            Arc::clone(&self.core),
+            id,
+        ))
+    }
+
+    pub(super) fn intern_owned(
+        &self,
+        data: SemanticNodeData,
+        scope: NodeScopeId,
+    ) -> super::node_roots::NodeRoot {
+        let id = self.push_impl(data, scope);
+        super::node_roots::NodeRoot::adopt(Arc::clone(&self.core), id)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) fn counted_for_tests() -> Self {
+        let mut arena = Self::default();
+        Arc::get_mut(&mut arena.core).unwrap().counted = true;
+        arena
+    }
+
+    #[cfg(test)]
+    pub(super) fn owner_count(&self, id: SemanticNodeId) -> usize {
+        self.inner
+            .read()
+            .chunks
+            .get(&(id.0 >> CHUNK_BITS))
+            .map_or(0, |chunk| chunk.owners[(id.0 & CHUNK_MASK) as usize])
     }
 
     /// Read the payload for `id`. `None` for an id this arena never handed
@@ -742,6 +983,10 @@ impl NodeArena {
     /// close is a user-driven, rare event, so the O(nodes) scan is paid
     /// there rather than as a per-intern reverse index.
     pub(super) fn release_canonical(&self, canonical_id: &str, below: u64) -> Vec<SemanticNodeId> {
+        assert!(
+            !self.counted(),
+            "counted destruction cannot coexist with legacy sweeps"
+        );
         let mut released: Vec<(SemanticNodeId, u64)> = Vec::new();
         {
             let inner = self.inner.read();
@@ -840,8 +1085,21 @@ impl NodeArena {
         let mut inner = self.inner.write();
         let mut ids: Vec<SemanticNodeId> = Vec::with_capacity(released.len());
         for (id, _) in released {
+            let mut children = SmallVec::<[SemanticNodeId; 16]>::new();
+            if let Slot::Live(data, _) = inner.slot(id) {
+                data.for_each_retained_child(|child| children.push(child));
+            }
             if inner.release(id) {
                 ids.push(id);
+                for child in children {
+                    if let Some(chunk) = inner.chunks.get_mut(&(child.0 >> CHUNK_BITS)) {
+                        let index = (child.0 & CHUNK_MASK) as usize;
+                        if chunk.nodes[index].is_some() {
+                            assert!(chunk.owners[index] > 0, "retained edge released twice");
+                            chunk.owners[index] -= 1;
+                        }
+                    }
+                }
             }
         }
         ids
@@ -907,12 +1165,172 @@ impl NodeArena {
             for bucket in shard.index.values() {
                 for (cand_arc, _scope, cand_id) in bucket.iter() {
                     if *cand_id == id {
-                        return Arc::ptr_eq(cand_arc, &arena_arc);
+                        return cand_arc
+                            .upgrade()
+                            .is_some_and(|candidate| Arc::ptr_eq(&candidate, &arena_arc));
                     }
                 }
             }
         }
         false
+    }
+}
+
+#[cfg(test)]
+mod counted_tests {
+    use super::*;
+    use crate::semantic_query::LiteralValue;
+
+    #[test]
+    fn multiset_guard_distinguishes_planted_omission_and_duplicate() {
+        let data = SemanticNodeData::TemplateLiteral {
+            quasis: Arc::from([Arc::from(""), Arc::from(""), Arc::from("")]),
+            expressions: Arc::from([SemanticNodeId(3), SemanticNodeId(3)]),
+        };
+        assert_retained_walk_is_complete(&data);
+        for planted in [smallvec::smallvec![3], smallvec::smallvec![3, 3, 3]] {
+            assert!(std::panic::catch_unwind(|| assert_retained_multiset(&data, planted)).is_err());
+        }
+    }
+
+    #[test]
+    fn counted_only_global_primitive_vocabulary_is_permanent() {
+        use crate::semantic_query::PrimitiveKind::*;
+        let arena = NodeArena::counted_for_tests();
+        for kind in [
+            String, Number, Boolean, Symbol, BigInt, Any, Unknown, Void, Never, Null, Undefined,
+            Object,
+        ] {
+            drop(arena.intern_owned(SemanticNodeData::Primitive(kind), NodeScopeId::Global));
+        }
+        assert_eq!(arena.ownership_counts().permanent_nodes, 12);
+        assert_eq!(arena.ownership_counts().roots, 0);
+        drop(arena.intern_owned(
+            SemanticNodeData::Opaque(crate::semantic_query::QueryError::Miss),
+            NodeScopeId::Global,
+        ));
+        assert_eq!(arena.live_len(), 12);
+    }
+
+    #[test]
+    fn counted_stale_child_is_refused_before_allocating_parent() {
+        let arena = NodeArena::counted_for_tests();
+        let root = arena.intern_owned(
+            SemanticNodeData::Literal(LiteralValue::String("stale".into())),
+            NodeScopeId::Global,
+        );
+        let id = root.id();
+        drop(root);
+        assert!(matches!(
+            arena.try_intern_owned(SemanticNodeData::Alias(id), NodeScopeId::Global),
+            Err(crate::semantic_query::QueryError::StaleSemanticOperand)
+        ));
+        assert_eq!(arena.live_len(), 0);
+    }
+
+    #[test]
+    fn counted_last_root_releases_repeated_internal_edges() {
+        let arena = NodeArena::counted_for_tests();
+        let child = arena.intern_owned(
+            SemanticNodeData::Literal(LiteralValue::String("child".into())),
+            NodeScopeId::Global,
+        );
+        let parent = arena.intern_owned(
+            SemanticNodeData::TemplateLiteral {
+                quasis: Arc::from([Arc::from(""), Arc::from(""), Arc::from("")]),
+                expressions: Arc::from([child.id(), child.id()]),
+            },
+            NodeScopeId::Global,
+        );
+        let child_id = child.id();
+        assert_eq!(arena.owner_count(child_id), 3);
+        drop(child);
+        assert!(arena.is_live(child_id));
+        drop(parent);
+        assert!(!arena.is_live(child_id));
+        assert_eq!(arena.live_len(), 0);
+    }
+
+    #[test]
+    fn counted_deep_dag_teardown_uses_a_worklist() {
+        std::thread::Builder::new()
+            .stack_size(1024 * 1024)
+            .spawn(|| {
+                let arena = NodeArena::counted_for_tests();
+                let mut root = arena.intern_owned(
+                    SemanticNodeData::Literal(LiteralValue::String("leaf".into())),
+                    NodeScopeId::Global,
+                );
+                for _ in 0..20_000 {
+                    root =
+                        arena.intern_owned(SemanticNodeData::Alias(root.id()), NodeScopeId::Global);
+                }
+                assert_eq!(arena.live_len(), 20_001);
+                drop(root);
+                assert_eq!(arena.live_len(), 0);
+                assert!(arena
+                    .shards
+                    .iter()
+                    .all(|shard| shard.lock().index.is_empty()));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn counted_dedup_races_with_last_release_without_resurrection() {
+        let arena = Arc::new(NodeArena::counted_for_tests());
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                scope.spawn(|| {
+                    for _ in 0..2000 {
+                        let root = arena.intern_owned(
+                            SemanticNodeData::Literal(LiteralValue::String("racing".into())),
+                            NodeScopeId::Global,
+                        );
+                        assert!(arena.is_live(root.id()));
+                        let second = arena
+                            .intern_owned(SemanticNodeData::Alias(root.id()), NodeScopeId::Global);
+                        drop(root);
+                        assert!(arena.is_live(second.id()));
+                        drop(second);
+                    }
+                });
+            }
+        });
+        assert_eq!(arena.live_len(), 0);
+        assert!(arena
+            .shards
+            .iter()
+            .all(|shard| shard.lock().index.is_empty()));
+    }
+
+    #[test]
+    fn production_constructor_keeps_sweeps_authoritative_and_old_drops_safe() {
+        let arena = NodeArena::default();
+        assert!(!arena.counted());
+        let root = arena.intern_owned(
+            SemanticNodeData::Literal(LiteralValue::String("closed".into())),
+            NodeScopeId::File {
+                canonical_id: Arc::from("/closed.ts"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                whole_hash: [7; 16],
+                local_scope: None,
+            },
+        );
+        assert_eq!(
+            arena.release_canonical("/closed.ts", u64::MAX),
+            vec![root.id()]
+        );
+        drop(root);
+        assert_eq!(arena.live_len(), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "counted destruction cannot coexist with legacy sweeps")]
+    fn planted_counted_activation_with_legacy_sweep_is_rejected() {
+        NodeArena::counted_for_tests().release_canonical("/closed.ts", u64::MAX);
     }
 }
 

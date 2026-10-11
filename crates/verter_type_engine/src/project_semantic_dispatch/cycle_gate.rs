@@ -128,6 +128,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             crate::semantic_query::PartialReasonSet::empty()
         });
         CacheRead {
+            lease: read.lease,
             value,
             dep_signature: read.dep_signature,
             walker_diagnostics: read.walker_diagnostics,

@@ -81,10 +81,16 @@ impl SemanticGraphStore {
         parameter_node: SemanticNodeId,
         arg: SemanticNodeId,
     ) -> Option<SemanticNodeId> {
-        let hit = self
-            .substitute_memo
-            .get(&(value_expr, parameter_node, arg))
-            .map(|entry| *entry.value());
+        let hit =
+            self.substitute_memo
+                .get(&(value_expr, parameter_node, arg))
+                .map(|entry| {
+                    let (result, roots) = entry.value();
+                    super::node_roots::NodeRootScope::capture(
+                        super::node_roots::NodeRoot::from_roots(*result, roots.clone()),
+                    );
+                    *result
+                });
         if hit.is_some() {
             self.stats
                 .substitute_memo_hits
@@ -117,7 +123,12 @@ impl SemanticGraphStore {
                 // published. No FIFO bookkeeping required.
             }
             Entry::Vacant(slot) => {
-                slot.insert(result);
+                let Ok(roots) =
+                    self.root_existing_nodes(vec![value_expr, parameter_node, arg, result])
+                else {
+                    return;
+                };
+                slot.insert((result, roots));
                 let mut fifo = self.substitute_memo_fifo.lock();
                 fifo.push_back(key);
                 while fifo.len() > HASH_CONS_MEMO_RETENTION_CAP {
@@ -153,11 +164,12 @@ impl SemanticGraphStore {
             .evaluate_deferred_memo
             .get(&(node, context))
             .map(|entry| {
-                let (read, receipt) = entry.value();
+                let (read, receipt, lease) = entry.value();
                 // A deferred evaluation is a pure function of interned
                 // nodes: it records no dependency facts, and only complete
                 // evaluations enter the memo.
                 crate::semantic_query::CacheRead {
+                    lease: lease.clone(),
                     value: *read,
                     dep_signature: super::empty_signature(),
                     walker_diagnostics: std::sync::Arc::from([]),
@@ -205,7 +217,14 @@ impl SemanticGraphStore {
                 // published. No FIFO bookkeeping required.
             }
             Entry::Vacant(slot) => {
-                slot.insert((result, receipt));
+                let Ok(roots) = self.root_existing_nodes(vec![node, result]) else {
+                    return;
+                };
+                slot.insert((
+                    result,
+                    receipt,
+                    super::delivery_lease::SemanticDeliveryLease::from_roots(roots),
+                ));
                 let mut fifo = self.evaluate_deferred_memo_fifo.lock();
                 fifo.push_back(key);
                 while fifo.len() > HASH_CONS_MEMO_RETENTION_CAP {

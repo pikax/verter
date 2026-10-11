@@ -193,6 +193,138 @@ fn pending_flow_members(
         .collect()
 }
 
+#[test]
+fn counted_component_candidates_and_subscribers_own_flow_operands() {
+    use super::producer::{Claim, Joined, ReadCapture};
+    use verter_type_engine::resolver_core::fact_validation_port::FactValidation;
+    use verter_type_engine::semantic_query::LiteralValue;
+    use verter_type_engine::semantic_query_memo::ownership_harness::CountedOwnershipHarness;
+    for subscribe in [false, true] {
+        let host = crate::VerterHost::new_standalone(crate::HostConfig::default());
+        let canonical = "/ws/scc-flow.ts";
+        let _ = host
+            .upsert(crate::UpsertRequest {
+                canonical_id: Some(canonical.into()),
+                input_id: canonical.into(),
+                source: Arc::from("export function sccFlowMember0() { return 0; }"),
+                file_language: crate::LanguageRegistry::global()
+                    .classify_static(canonical)
+                    .static_resolution(),
+                aliases: Vec::new(),
+            })
+            .unwrap();
+        let hash = host.ensure_indexed_ready(canonical).unwrap().whole_hash;
+        let carrier = verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from([
+            verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+                canonical_id: canonical.into(),
+                hash,
+            },
+        ]));
+        let self_roots = Arc::from([Arc::<str>::from(canonical)]);
+        let harness = CountedOwnershipHarness::new();
+        let task = harness.run(|store| store.task_registry_for_tests().register_task());
+        let (key_node, return_node, subscriber) = harness.run(|store| {
+            let root_key = distinct_keys(store, 1).remove(0);
+            let witness = seed_root(store, &root_key);
+            let key_node = store.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+                "flow key operand".into(),
+            )));
+            let return_node = store.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+                "flow returned operand".into(),
+            )));
+            let mut flow_key = distinct_flow_keys(1).remove(0);
+            flow_key.normalized_type_args = Arc::from([key_node]);
+            let flight = store.begin_inline_flow_return_flight(&flow_key).unwrap();
+            let subscriber = if subscribe {
+                let mut capture = ReadCapture::default();
+                let mut attempt = store
+                    .begin_query_claim(
+                        &host,
+                        host.request_flags(),
+                        SemanticQueryKey::FlowReturn(Box::new(flow_key.clone())),
+                        &mut capture,
+                    )
+                    .unwrap();
+                let Claim::Subscribed(subscription) = store.claim_query(
+                    &host,
+                    host.request_flags(),
+                    &mut attempt,
+                    &task,
+                    &mut capture,
+                ) else {
+                    panic!("follower subscribes to the staged component member");
+                };
+                Some((subscription, attempt))
+            } else {
+                None
+            };
+            let value = FlowReturnResult::new(
+                store,
+                return_node,
+                verter_session_query::flow::completion::NormalCompletion::minted_for_fixture(false),
+                None,
+            );
+            let member = PendingFlowReturnMember {
+                key: flow_key.clone(),
+                result: flow_proof_for_member(&flow_key, value),
+                materialized: flow_whole_return_projection(),
+                flight,
+            };
+            assert!(store.publish_scc_members_fenced_for_tests(
+                None::<
+                    &dyn verter_type_engine::resolver_core::ResolverContext<
+                        crate::resolver_core::HostCapabilities,
+                    >,
+                >,
+                &witness,
+                &carrier,
+                &self_roots,
+                0,
+                Vec::new(),
+                vec![member],
+                Vec::new()
+            ));
+            (key_node, return_node, subscriber)
+        });
+        harness.run(|store| {
+            assert!(
+                store.node_is_live(key_node),
+                "the published family owns its nonempty key without a flight"
+            );
+            assert!(store.node_is_live(return_node));
+            store.invalidate_all();
+        });
+        if let Some((subscription, mut attempt)) = subscriber {
+            harness.run(|store| {
+                assert!(
+                    store.node_is_live(return_node),
+                    "the completed flight owns its payload after cache eviction"
+                )
+            });
+            let Joined::Read(read) = subscription.wait(
+                &host,
+                host.request_flags(),
+                &mut attempt,
+                &mut ReadCapture::default(),
+            ) else {
+                panic!("the completed subscriber receives its owned delivery");
+            };
+            drop(attempt);
+            harness.run(|store| {
+                assert!(
+                    store.node_is_live(return_node),
+                    "the subscriber's read owns its payload"
+                )
+            });
+            drop(read);
+        }
+        harness.run(|store| {
+            assert!(!store.node_is_live(key_node));
+            assert!(!store.node_is_live(return_node));
+        });
+    }
+}
+
 /// Run one batch of `members` (in the given order) plus `flow_members`
 /// flow-return members against a store whose global family budget is
 /// `cap`, and report `(published, resident)`.

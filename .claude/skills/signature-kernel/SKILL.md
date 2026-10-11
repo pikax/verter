@@ -299,3 +299,14 @@ change; never weaken the test.
 `/type-cache-architecture` (key composition, candidate substrate, retention
 account), `/component-meta` (publication surface), `/audit-infrastructure`
 (`ReduceUnion` / `ReduceIntersection` work sites and origin-graph kinds).
+
+### Delivered signature versions
+
+`SignatureEpochLease` owns an exact epoch and can open a read view after store
+epoch replacement. Signature set/result values carry `SignatureVersion`; their
+internal delivery envelope retains that attachment rather than reacquiring the
+current epoch. Each epoch retains the graph nodes its type tokens name through
+root sets; the store's graph attachment is weak. Legacy canonical node release
+retires corresponding dormant token roots. This does not activate counted graph
+node destruction in production or change substitution/inference semantics.
+See the [ownership reference](../type-resolution/references/counted-node-ownership.md).

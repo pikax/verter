@@ -1381,3 +1381,53 @@ pub fn note_component_meta_divergence_for_test() {
 pub fn note_component_meta_schedule_cut_for_test() {
     remember_schedule_cut();
 }
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+    use crate::semantic_query::{LiteralValue, SemanticNodeData, SemanticQueryKey};
+    use crate::semantic_query_memo::ownership_harness::CountedOwnershipHarness;
+
+    #[test]
+    fn counted_failed_prefix_receipt_retains_its_materialized_operand() {
+        let harness = CountedOwnershipHarness::new();
+        let receipt = harness.run(|graph| {
+            let flags = crate::resolver_core::resolver_context::RequestFlags::new(
+                crate::resolver_core::resolver_context::ProjectGenerationClock::new(Arc::new(
+                    std::sync::atomic::AtomicU64::new(0),
+                )),
+            );
+            let ledger = ConnectedDemandLedger::new(DemandCancellation::from_flags(&flags));
+            ledger.set_limits_for_tests(1, 8);
+            let (guard, trip) = ledger.enter(false);
+            assert!(trip.is_none());
+            ledger.open_cost_scope(CostIdentity::new(Arc::<[u8]>::from([1])));
+            let prefixes = ledger.record_prefixes(1).unwrap();
+            ledger.charge().unwrap();
+            let node = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+                "materialized prefix".into(),
+            )));
+            let identity = graph
+                .prepare_rooted_key(SemanticQueryKey::ClassifyTruthinessDomain { subject: node });
+            let receipt = prefixes
+                .seal_prefix(CostIdentity::of_producer(identity.as_task_producer()), None)
+                .unwrap();
+            assert_eq!(receipt.exclusive().work, 1);
+            assert!(ledger
+                .charge()
+                .unwrap_err()
+                .contains(PartialReasonSet::PROJECTION_WORK_LIMIT));
+            drop(prefixes);
+            ledger.abandon_cost_scope();
+            drop(guard);
+            receipt
+        });
+        assert_eq!(
+            harness.live_nodes(),
+            1,
+            "only the failed evaluation's returned prefix receipt remains"
+        );
+        drop(receipt);
+        assert_eq!(harness.live_nodes(), 0);
+    }
+}

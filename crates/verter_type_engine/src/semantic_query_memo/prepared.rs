@@ -54,6 +54,8 @@ pub(super) fn hash_key(key: &SemanticQueryKey) -> u64 {
 /// field is a pure function of `key`; see the module docs for the
 /// equality contract.
 struct PreparedQueryIdentity {
+    _signature: Option<crate::signature_kernel::SignatureEpochLease>,
+    _roots: super::node_roots::NodeRootSet,
     key: SemanticQueryKey,
     family: FamilyKey,
     slot: ModeSlot,
@@ -85,6 +87,8 @@ impl PreparedKeyHandle {
         };
         let cached_hash = hash_key(&key);
         Self(Arc::new(PreparedQueryIdentity {
+            _signature: None,
+            _roots: Default::default(),
             key,
             family,
             slot,
@@ -112,6 +116,31 @@ impl PreparedKeyHandle {
 
     pub fn requested_point(&self) -> &MaterializedPoint {
         &self.0.requested_point
+    }
+}
+
+impl super::SemanticGraphStore {
+    pub(crate) fn prepare_rooted_key(&self, key: SemanticQueryKey) -> PreparedKeyHandle {
+        let _scope = self.enter_node_root_scope();
+        let signature = match &key {
+            SemanticQueryKey::ReadSignatureResult(key) => self
+                .signature_store()
+                .lease_epoch(key.descriptor.epoch())
+                .ok(),
+            _ => None,
+        };
+        let mut prepared = PreparedKeyHandle::prepare(key);
+        let mut nodes = Vec::new();
+        prepared.family().for_each_node_id(|node| {
+            if node.0 < super::UNALLOCATABLE_ID_FLOOR {
+                nodes.push(node);
+            }
+        });
+        Arc::get_mut(&mut prepared.0).unwrap()._roots = self
+            .root_existing_nodes(nodes)
+            .expect("a prepared key has live counted operands");
+        Arc::get_mut(&mut prepared.0).unwrap()._signature = signature;
+        prepared
     }
 }
 

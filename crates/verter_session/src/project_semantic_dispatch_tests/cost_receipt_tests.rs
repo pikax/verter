@@ -1763,6 +1763,7 @@ fn the_refusal_table_keeps_the_newest_and_refuses_torn_evaluations() {
         })
     };
     let refusal = || CacheRead {
+        lease: Default::default(),
         value: QueryResult::<SemanticQueryValue>::Error(
             verter_type_engine::semantic_query::QueryError::Miss,
         ),
