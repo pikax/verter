@@ -3166,6 +3166,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if carrier_prelude.is_partial() {
             cache_read.result_is_partial = true;
             cache_read.cache_suppress = true;
+            cache_read.partial_reasons = cache_read
+                .partial_reasons
+                .union(carrier_prelude.partial_reasons());
             crate::request_context::fold_result_completeness(
                 crate::semantic_query::ResultCompleteness::partial(
                     carrier_prelude.partial_reasons(),
@@ -3966,6 +3969,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 Acquired::Recursive(recursion) => {
                     if recursion == crate::semantic_query_memo::Recursion::WaitCycle {
                         self.connected_demand.note_schedule_cut();
+                    } else {
+                        self.connected_demand.note_divergence_certificate();
                     }
                     SemanticGraphStore::recursion_read(
                         recursion,

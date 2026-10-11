@@ -6,6 +6,8 @@
 //! worker propagation uses the same request-context TLS bridge as audit
 //! and cache counters.
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -101,8 +103,9 @@ impl PaidOperations {
     pub(crate) fn insert(&mut self, identity: CostIdentity) -> bool {
         let hash = identity.hash_value();
         if self.set.insert(identity.clone()) {
-            self.order.push(identity);
+            self.order.push(identity.clone());
             self.digest = self.digest.wrapping_add(spread(hash));
+            attribute_paid(&identity);
             true
         } else {
             false
@@ -134,6 +137,36 @@ pub struct RequestEntryState {
     paid_digest: u64,
 }
 
+impl RequestEntryState {
+    /// How many computations were already paid when the demand entered.
+    #[must_use]
+    pub(crate) fn paid_len(&self) -> usize {
+        self.paid_len
+    }
+
+    /// Order-independent digest of the paid set at entry.
+    #[must_use]
+    pub(crate) fn paid_digest(&self) -> u64 {
+        self.paid_digest
+    }
+
+    /// Projection operations already spent when the demand entered.
+    #[must_use]
+    pub(crate) fn operations(&self) -> usize {
+        self.operations
+    }
+}
+
+/// The request state a component-meta compute entered at, including the
+/// paid-set order. A later observation accepts a spend only when that
+/// order is still the prefix: an insertion ahead of it means the spend
+/// is not this compute's.
+#[derive(Clone)]
+pub(crate) struct RequestEntrySnapshot {
+    state: RequestEntryState,
+    paid: Box<[CostIdentity]>,
+}
+
 /// What one evaluation did to a request it ran in alone: the state it
 /// entered the request at, and its own effects from there — the operations
 /// it spent and the computations it paid.
@@ -153,6 +186,91 @@ impl RequestSpent {
     pub(crate) fn identities(&self) -> usize {
         self.entry_paid.len() + self.paid.len()
     }
+
+    /// A spend that names these identities and nothing else. Retention tests
+    /// use it to vary the stored prefix without a live request.
+    #[cfg(test)]
+    pub(crate) fn from_identities_for_test(
+        entry_paid: Vec<CostIdentity>,
+        paid: Vec<CostIdentity>,
+    ) -> Self {
+        Self {
+            entry: RequestEntryState {
+                operations: 0,
+                paid_len: entry_paid.len(),
+                paid_digest: 0,
+            },
+            entry_paid: entry_paid.into_boxed_slice(),
+            operations: 0,
+            paid: paid.into_boxed_slice(),
+        }
+    }
+}
+
+/// Operations and paid identities recorded on this thread while a
+/// component-meta compute owns the stack. Admission reads the copy taken
+/// at the end of that compute, not this stack.
+#[derive(Default)]
+struct ThreadSpendLog {
+    operations: usize,
+    paid: Vec<CostIdentity>,
+}
+
+thread_local! {
+    static THREAD_SPEND_LOGS: RefCell<Vec<Rc<RefCell<ThreadSpendLog>>>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+/// Pushes a spend log for the current thread. Nested computes each keep
+/// their own log, and a spend is recorded on every log still on the stack
+/// so an outer compute includes the inner one's request effects.
+pub(crate) struct ThreadSpendGuard {
+    log: Rc<RefCell<ThreadSpendLog>>,
+}
+
+impl ThreadSpendGuard {
+    pub(crate) fn enter() -> Self {
+        let log = Rc::new(RefCell::new(ThreadSpendLog::default()));
+        THREAD_SPEND_LOGS.with(|logs| logs.borrow_mut().push(Rc::clone(&log)));
+        Self { log }
+    }
+
+    pub(crate) fn finish(self) -> (usize, Vec<CostIdentity>) {
+        let out = {
+            let log = self.log.borrow();
+            (log.operations, log.paid.clone())
+        };
+        drop(self);
+        out
+    }
+}
+
+impl Drop for ThreadSpendGuard {
+    fn drop(&mut self) {
+        THREAD_SPEND_LOGS.with(|logs| {
+            logs.borrow_mut().retain(|log| !Rc::ptr_eq(log, &self.log));
+        });
+    }
+}
+
+fn attribute_operations(n: usize) {
+    if n == 0 {
+        return;
+    }
+    THREAD_SPEND_LOGS.with(|logs| {
+        for log in logs.borrow().iter() {
+            let mut slot = log.borrow_mut();
+            slot.operations = slot.operations.saturating_add(n);
+        }
+    });
+}
+
+fn attribute_paid(identity: &CostIdentity) {
+    THREAD_SPEND_LOGS.with(|logs| {
+        for log in logs.borrow().iter() {
+            log.borrow_mut().paid.push(identity.clone());
+        }
+    });
 }
 
 impl RequestBudget {
@@ -210,7 +328,51 @@ impl RequestBudget {
             }
         }
         paid.extend(unpaid);
+        attribute_operations(operations);
         true
+    }
+
+    /// The request's state and paid-set order, for a compute that will
+    /// later ask what it spent.
+    pub(crate) fn capture_entry(&self) -> RequestEntrySnapshot {
+        let paid = self.operations_paid.lock();
+        RequestEntrySnapshot {
+            state: RequestEntryState {
+                operations: self.projection_ops_executed.load(Ordering::Relaxed),
+                paid_len: paid.set.len(),
+                paid_digest: paid.digest,
+            },
+            paid: paid.order.clone().into_boxed_slice(),
+        }
+    }
+
+    /// What changed since `snapshot` when the paid-set order still begins
+    /// with the order captured there. Direct projection-op checks count:
+    /// this is the counter delta, not only effects a connected demand
+    /// recorded. `None` when that prefix was replaced or the counter
+    /// moved backwards. Component-meta admission does not use it: a counter
+    /// delta includes sibling spends.
+    #[cfg(test)]
+    pub(crate) fn observed_spend_since(
+        &self,
+        snapshot: &RequestEntrySnapshot,
+    ) -> Option<RequestSpent> {
+        let paid = self.operations_paid.lock();
+        if paid.order.len() < snapshot.paid.len()
+            || paid.order[..snapshot.paid.len()] != snapshot.paid[..]
+        {
+            return None;
+        }
+        let now = self.projection_ops_executed.load(Ordering::Relaxed);
+        let operations = now.checked_sub(snapshot.state.operations)?;
+        Some(RequestSpent {
+            entry: snapshot.state.clone(),
+            entry_paid: snapshot.paid.clone(),
+            operations,
+            paid: paid.order[snapshot.paid.len()..]
+                .to_vec()
+                .into_boxed_slice(),
+        })
     }
 
     /// The request's state now, as a demand entering it would see it.
@@ -279,6 +441,7 @@ impl RequestBudget {
             return false;
         }
         paid.extend(spent.paid.iter().cloned());
+        attribute_operations(spent.operations);
         true
     }
 
@@ -291,7 +454,9 @@ impl RequestBudget {
         let before = self
             .projection_ops_executed
             .fetch_max(tripped, Ordering::Relaxed);
-        tripped.saturating_sub(before)
+        let spent = tripped.saturating_sub(before);
+        attribute_operations(spent);
+        spent
     }
 
     /// Increment the projection-op counter and return `true` when the
@@ -301,7 +466,36 @@ impl RequestBudget {
             .projection_ops_executed
             .fetch_add(1, Ordering::Relaxed)
             .saturating_add(1);
+        attribute_operations(1);
         current > self.effective_projection_op_budget()
+    }
+
+    /// This thread's recorded spend since `snapshot`, and whether that spend
+    /// is the request's whole change. A sibling's operations or paid
+    /// identities make the second flag false; the spend is still only what
+    /// this thread recorded.
+    pub(crate) fn owned_spend(
+        &self,
+        snapshot: &RequestEntrySnapshot,
+        operations: usize,
+        paid: &[CostIdentity],
+    ) -> (RequestSpent, bool) {
+        let effects = crate::project_semantic_dispatch::connected_demand::RequestEffects {
+            operations,
+            paid: paid.len(),
+        };
+        if let Some(spent) = self.spent_alone_since(snapshot.state.clone(), effects) {
+            return (spent, true);
+        }
+        (
+            RequestSpent {
+                entry: snapshot.state.clone(),
+                entry_paid: snapshot.paid.clone(),
+                operations,
+                paid: paid.to_vec().into_boxed_slice(),
+            },
+            false,
+        )
     }
 
     /// Return the configured cap after applying the legacy default.
@@ -498,5 +692,33 @@ mod tests {
             paid: Box::from([]),
         }));
         assert_eq!(raced.projection_ops_executed_count(), 1);
+    }
+
+    #[test]
+    fn observed_spend_counts_direct_checks_and_rejects_a_replaced_prefix() {
+        let budget = RequestBudget::new(100);
+        let snapshot = budget.capture_entry();
+        assert!(!budget.check_projection_op_count());
+        budget.mark_operations_paid(std::iter::once(identity("own")));
+        let spent = budget
+            .observed_spend_since(&snapshot)
+            .expect("an append leaves the captured prefix in place");
+        assert_eq!(spent.operations, 1);
+        assert_eq!(spent.paid.len(), 1);
+        let fresh = RequestBudget::new(100);
+        assert!(fresh.apply_refusal(&spent));
+        assert_eq!(fresh.projection_ops_executed_count(), 1);
+        assert!(fresh.operations_paid().contains(&identity("own")));
+
+        let replaced = RequestBudget::new(100);
+        replaced.mark_operations_paid(std::iter::once(identity("real")));
+        let foreign = super::RequestEntrySnapshot {
+            state: replaced.entry_state(),
+            paid: Box::from([identity("other")]),
+        };
+        assert!(
+            replaced.observed_spend_since(&foreign).is_none(),
+            "a paid prefix that is not the captured order is not this compute's spend"
+        );
     }
 }

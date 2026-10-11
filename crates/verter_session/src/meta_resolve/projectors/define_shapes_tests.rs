@@ -320,7 +320,8 @@ defineEmits<{ save: [id: number] }>()
     let host = project.host();
     let analysis = host
         .get_component_meta("/App.vue")
-        .expect("component must resolve");
+        .expect("component must resolve")
+        .into_analysis();
     assert_eq!(analysis.events.len(), 1, "fixture declares exactly 1 event");
 
     // Sanity: the UNTAMPERED analysis materializes cleanly — the typed

@@ -194,6 +194,24 @@ impl VerterHost {
             fixed.captured_validation_token(),
             fixed.is_current(),
         );
+        if let Some(retained) =
+            self.replay_component_meta_refusal_with_view(canonical.as_str(), &view, &fixed)
+        {
+            let status_completeness = retained.completeness;
+            let cached = retained.recovery;
+            if let Some(snapshot) = reload_component_meta_template_snapshot(
+                self,
+                &cached.canonical_id,
+                cached.whole_hash,
+            ) {
+                let mut resolution = cached.resolution_template.rehydrate(snapshot, request_id);
+                // The retained refusal's status rides on the resolution.
+                // Rehydrate must not present the recovery as a complete hit.
+                resolution.completeness = status_completeness;
+                resolution.synthesis_should_suppress = status_completeness.is_partial();
+                return Ok(Some((cached.analysis.clone(), resolution)));
+            }
+        }
         let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
         let host_ctx = crate::resolver_core::HostResolverContext::from_cold_seed(
             self,
@@ -261,6 +279,7 @@ impl VerterHost {
             dispatch,
             self.project_type_store().component_meta_results(),
         );
+        let refusal_query = dispatch.component_meta_refusal_query(canonical.as_str());
         let maybe_resolved_analysis = results.compute_and_admit(
             canonical.as_str(),
             "with-resolution path",
@@ -318,12 +337,13 @@ impl VerterHost {
                 );
                 Some((extract.analysis, resolved, extract.completeness))
             },
-            |computed| {
+            |computed, evidence| {
                 let Some((analysis, resolved, extract_completeness)) = computed else {
                     return crate::component_meta_result_db::ComponentMetaPublishDecision::no_value(
                     );
                 };
                 let final_completeness = resolved.completeness.merge(*extract_completeness);
+                let admission = dispatch.component_meta_admission_proof(&refusal_query, evidence);
                 self.component_meta_publish_decision(
                     canonical.as_str(),
                     resolved,
@@ -331,6 +351,8 @@ impl VerterHost {
                     validated_at_generation,
                     seed_fence,
                     final_completeness,
+                    &refusal_query,
+                    admission,
                 )
             },
         );
@@ -361,6 +383,11 @@ impl VerterHost {
         {
             return Err(abort);
         }
+        // Merged status rides on `completeness`. The bool stays the
+        // resolve-phase projection: extract-only fallthrough partiality
+        // must not make a clean resolve report `synthesis_should_suppress`.
+        let mut resolved = resolved;
+        resolved.completeness = completeness.get();
         Ok(Some(super::component_meta_entry::ComponentMetaColdResult {
             completeness,
             resolved,
@@ -465,6 +492,47 @@ impl VerterHost {
             crate::component_meta_result_admission::record_component_meta_result_miss(
                 self.provenance(),
             );
+        }
+
+        if let Some(retained) =
+            self.replay_component_meta_refusal_with_view(canonical.as_str(), &view, &fixed)
+        {
+            let overlay =
+                std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+            let host_ctx = crate::resolver_core::HostResolverContext::from_cold_seed(
+                self,
+                fixed.cold_seed(),
+                overlay,
+            );
+            let ctx: &dyn crate::resolver_core::HostRequestContext = &host_ctx;
+            let dispatch =
+                &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+            let analysis = retained.recovery.analysis.clone();
+            let signature = retained.read_set_signature.clone();
+            let seed = crate::meta_resolve::output::ComponentMetaResolutionSeed::from_template(
+                &retained.recovery.resolution_template,
+            );
+            let completeness = crate::meta_resolve::PublishedCompleteness::from_retained_refusal(
+                retained.completeness,
+            );
+            let (output, _output_read_set) =
+                verter_type_engine::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx)
+                    .with_fact_tracer(|| {
+                        verter_type_engine::fact_signature_helpers::observe_fact_signature(
+                            &signature.facts,
+                        );
+                        crate::meta_resolve::projectors::build_component_meta_output(
+                            ctx,
+                            dispatch,
+                            canonical.as_str(),
+                            analysis,
+                            Some(seed),
+                            completeness,
+                        )
+                    });
+            return output
+                .map(|output| (Some(output), request_id))
+                .map_err(|err| (err.into(), request_id));
         }
 
         // Cold: seed + fence from the SAME capture, shared audited cold body
@@ -587,24 +655,34 @@ impl VerterHost {
         // second unrelated store view and pair a fresh-view analysis with
         // this capture's extraction context (the torn-result race).
         let fixed = self.capture_batch_fixed_view(view);
-        let resolved = {
-            let (executor_view, executor_fp) = fixed.executor_fixed_view();
-            self.resolve_component_meta_with_view_and_fixed_admission(
-                canonical.as_str(),
-                verter_type_engine::semantic_query::ProjectionMode::Expanded,
-                view,
-                Some((executor_view, executor_fp, fixed.is_current())),
-            )
-        };
-        let Some((mut resolved, admission)) = resolved else {
-            return Ok(None);
-        };
-        resolved.request_id = self.next_request_id();
-        // Keep the session view attached while extracting: policy,
-        // fallthrough, and macro-DTO replay all bind to this request context.
-        // It seeds from the SAME capture's cold-seed, so a non-current capture
-        // fails nested warm-cache probes closed rather than validating against
-        // a stale snapshot.
+        // Same-demand refusal replay. The host analysis entry seals the
+        // ledger; this session consumer must repeat that refusal with its
+        // status before resolve, or the semantic producer runs again.
+        if let Some(retained) =
+            self.replay_component_meta_refusal_with_view(canonical.as_str(), view, &fixed)
+        {
+            let status_completeness = retained.completeness;
+            let cached = retained.recovery;
+            if let Some(snapshot) = reload_component_meta_template_snapshot(
+                self,
+                &cached.canonical_id,
+                cached.whole_hash,
+            ) {
+                let mut resolution = cached
+                    .resolution_template
+                    .rehydrate(snapshot, self.next_request_id());
+                // The retained refusal's status rides on the resolution.
+                // Rehydrate must not present the recovery as a complete hit.
+                resolution.completeness = status_completeness;
+                resolution.synthesis_should_suppress = status_completeness.is_partial();
+                return Ok(Some((cached.analysis.clone(), resolution)));
+            }
+        }
+        let validated_at_generation = self.project_type_store.current_project_generation();
+        let seed_fence = super::component_meta_entry::ColdSeedFence::new(
+            fixed.captured_validation_token(),
+            fixed.is_current(),
+        );
         let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
         let session_ctx = crate::resolver_core::SessionResolverContext::from_cold_seed(
             self,
@@ -616,31 +694,21 @@ impl VerterHost {
         let dispatch = &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(
             host_ctx_ref,
         );
-        // This view path does NOT publish to `ComponentMetaResultDb`, so the
-        // extract completeness carrier is discarded here.
-        let extract = extract_component_meta_from_resolved(
-            self,
+        let Some(cold) = self.component_meta_via_view_cold(
             canonical.as_str(),
-            &resolved,
-            true,
+            view,
+            &fixed,
             host_ctx_ref,
             dispatch,
-        );
-        // An aborted computation publishes nothing.
-        if let Some(abort) = verter_type_engine::semantic_query::ExecutionAbort::observed_in(
-            resolved.completeness.merge(extract.completeness),
-        ) {
-            return Err(abort);
-        }
-        self.merge_extraction_facts_into_admitted_resolved_meta(
-            canonical.as_str(),
-            verter_type_engine::semantic_query::ProjectionMode::Expanded,
-            view.fingerprint(),
-            &mut resolved,
-            extract.fallthrough_fact_versions.as_deref(),
-            admission.as_ref(),
-        );
-        Ok(Some((extract.analysis, resolved)))
+            &seed_fence,
+            validated_at_generation,
+        )?
+        else {
+            return Ok(None);
+        };
+        let mut resolved = cold.resolved;
+        resolved.request_id = self.next_request_id();
+        Ok(Some((cold.analysis, resolved)))
     }
 
     /// Cache-hit path. Returns `Some((analysis, resolution))` on a
@@ -861,7 +929,7 @@ impl VerterHost {
 }
 
 /// Select the exact currently authoritative artifact at the warm template reload boundary.
-fn reload_component_meta_template_snapshot(
+pub(crate) fn reload_component_meta_template_snapshot(
     host: &crate::VerterHost,
     canonical_id: &str,
     whole_hash: verter_session_query::analysis::types::Hash16,

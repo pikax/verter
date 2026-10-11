@@ -917,6 +917,114 @@ defineModel<string>('selected')
 }
 
 #[test]
+fn authored_splice_and_exact_sibling_survive_a_refused_member() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let inferred = format!(
+        "(true ? [{}] : 0) satisfies unknown",
+        vec!["0"; 5_000].join(", ")
+    );
+    upsert(
+        &host,
+        "/src/RefusedMember.vue",
+        &format!(
+            r#"<script setup lang="ts">
+class Payload {{ method() {{ return {inferred} }} }}
+defineProps<{{ good: string; payload: Payload }}>()
+</script>"#
+        ),
+    );
+    upsert(
+        &host,
+        "/src/Narrowing.vue",
+        r#"<script setup lang="ts">defineProps<string>()</script>"#,
+    );
+
+    // bounded-loop: cold delivery, then the warm repeat of the same demand.
+    for pass in ["cold", "warm"] {
+        let output = produce(
+            &host,
+            "/src/RefusedMember.vue",
+            VueMacroCodegenDemand::RuntimeAndTsc,
+        );
+        let props = props_projection(&output);
+        assert!(
+            matches!(
+                props.public,
+                verter_macro_dto::TscPublicPropsProjection::AuthoredArgument { .. }
+            ),
+            "{pass}: the authored type argument stays a splice: {props:?}"
+        );
+        let good = props
+            .testing_rows
+            .iter()
+            .find(|row| row.name == "good")
+            .expect("exact sibling row");
+        assert_eq!(good.type_text.as_str(), "string");
+        assert!(
+            good.degraded.is_none(),
+            "{pass}: the exact sibling is not the refusal"
+        );
+        let payload = props
+            .scope
+            .dependency_declarations
+            .iter()
+            .find(|dependency| dependency.name == "Payload")
+            .expect("refused member declaration");
+        assert_eq!(
+            payload.declaration_failure,
+            Some(TscDeclarationFailureReason::SemanticInferenceUnavailable(
+                TscSemanticInferenceUnavailableReason::WorkBudgetExceeded,
+            ))
+        );
+        assert!(
+            output
+                .completeness
+                .reasons()
+                .contains(verter_type_engine::semantic_query::PartialReasonSet::BUDGET_EXCEEDED),
+            "{pass}: the refused member's budget stays in the summary, got {:?}",
+            output.completeness.reasons()
+        );
+
+        let runtime = output.runtime.expect("runtime bundle");
+        let MacroRuntimeOutcome::Complete(MacroRuntimeShape::Props(runtime_props)) =
+            &runtime.entries[0].outcome
+        else {
+            panic!("{pass}: an exact sibling keeps the runtime surface: {runtime:?}");
+        };
+        let good_runtime = runtime_props
+            .props
+            .iter()
+            .find(|prop| prop.name == "good")
+            .expect("runtime sibling");
+        assert_eq!(constructors(good_runtime), [RuntimeConstructor::String]);
+    }
+
+    let narrowing = produce(
+        &host,
+        "/src/Narrowing.vue",
+        VueMacroCodegenDemand::RuntimeAndTsc,
+    );
+    let runtime = narrowing.runtime.expect("narrowing runtime");
+    assert!(
+        matches!(
+            runtime.entries[0].outcome,
+            MacroRuntimeOutcome::Invalid(ref failure)
+                if failure.reason == MacroInvalidReason::NonObjectRoot
+        ),
+        "runtime narrowing of a primitive root stays refused: {runtime:?}"
+    );
+    let tsc = narrowing.tsc.expect("narrowing tsc");
+    assert!(
+        matches!(
+            tsc.entries[0].outcome,
+            MacroTscOutcome::Invalid(ref failure)
+                if failure.reason == MacroInvalidReason::NonObjectRoot
+        ),
+        "tsc narrowing of a primitive root stays refused: {tsc:?}"
+    );
+}
+
+#[test]
 fn producer_origin_hash_tracks_each_exact_snapshot_across_aba_edits() {
     let host = VerterHost::new_standalone(HostConfig::default());
     const FILE: &str = "/src/Revision.vue";

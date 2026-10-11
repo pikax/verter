@@ -7001,7 +7001,7 @@ fn memo_admission_or_gate_refuses_benign_cache_suppress() {
             let mut out: QueryBuildOutput = (QueryResult::Value(id), empty_signature()).into();
             // Benign non-cacheable COMPLETE result — invariant holds.
             out.cache_suppress = true;
-            out.set_partial(false);
+            out.fold_partial(false);
             out
         },
     );

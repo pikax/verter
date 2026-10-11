@@ -45,10 +45,10 @@ use verter_type_engine::project_semantic_dispatch::callable_view::CallableNodeVi
 use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
 use verter_type_engine::resolver_core::ResolverContext;
 use verter_type_engine::semantic_query::{
-    BroadRuntimeKind, ExecutionAbort, PartialReasonSet, PathSegment, ProjectionMode,
-    ProjectionReductionContext, QueryResult, ResolveDeclKey, ResultCompleteness, ScopeId,
-    SemanticNodeData, SemanticQueryApi, SemanticQueryKey, SemanticQueryValue,
-    SurfaceProvenanceContext, ValueRootKey,
+    root_narrowing_fact, summarize, BroadRuntimeKind, ExecutionAbort, FactStatus, PartialReason,
+    PartialReasonSet, PathSegment, ProjectionMode, ProjectionReductionContext, QueryResult,
+    ResolveDeclKey, ResultCompleteness, ScopeId, SemanticNodeData, SemanticQueryApi,
+    SemanticQueryKey, SemanticQueryValue, SurfaceProvenanceContext, ValueRootKey,
 };
 
 mod runtime;
@@ -518,6 +518,10 @@ struct ProducerState {
     tsc_entries: Vec<MacroTscEntry>,
     dependency_failures: Vec<VueMacroDependencyFailure>,
     counters: VueMacroCodegenCounters,
+    /// Facts the demands that actually ran published. The file summary is
+    /// derived from these and never from a reason subtracted off the
+    /// ambient scope.
+    published: Vec<FactStatus>,
     completeness: ResultCompleteness,
 }
 
@@ -800,6 +804,18 @@ impl VerterHost {
         Ok(output)
     }
 
+    /// Published-fact summary, plus an abort the active compute scope
+    /// observed. Any other ambient reason stays out of the summary.
+    fn completeness_of_published(published: &[FactStatus]) -> ResultCompleteness {
+        let summary = summarize(published.iter());
+        let observed = verter_type_engine::request_context::current_cold_compute_completeness();
+        if ExecutionAbort::observed_in(observed).is_some() {
+            summary.merge(observed)
+        } else {
+            summary
+        }
+    }
+
     fn compute_vue_macro_codegen_output(
         &self,
         ctx: &(dyn ResolverContext<crate::resolver_core::HostCapabilities> + Sync),
@@ -822,30 +838,13 @@ impl VerterHost {
                 let _completeness_scope =
                     verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
                 let mut state = self.produce_vue_macro_codegen_inner(ctx, owner_canonical, demand);
-                // The producer's OWN completeness, with the CONTAINED
-                // classes subtracted: a body-derived return this substrate
-                // could not infer does not make the emitted TSX an
-                // incomplete surface (the declarations ride verbatim and
-                // the external checker types them), so it must not report
-                // the file-level result partial either. Every other reason
-                // class survives — including the declaration-local budget
-                // classification the class-member inference records
-                // precisely on its own rail.
-                //
-                // The FILE-level aggregate contains everything the two
-                // lanes contain BETWEEN them: a lane that refused recorded
-                // the refusal IN its entry, so the artifact is a faithful,
-                // deterministic record of it and warming that record is
-                // correct. The per-lane sets are what the two projections
-                // read, and they differ — see `MacroProjectionLane`.
-                let observed =
-                    verter_type_engine::request_context::current_cold_compute_completeness();
-                let residual = macro_projection_residual(observed, MacroProjectionLane::File);
-                state.completeness = if residual.is_empty() {
-                    verter_type_engine::semantic_query::ResultCompleteness::Complete
-                } else {
-                    verter_type_engine::semantic_query::ResultCompleteness::Partial(residual)
-                };
+                // The artifact summary is the statuses of the facts this
+                // produce actually published. It does not authorize a fact,
+                // and it is not a filter over the ambient reason bag. An
+                // abort is not one of those facts, but it still refuses the
+                // bundle: the producer maps it onto a fault row, and
+                // `ExecutionAbort::observed_in` only reads the abort class.
+                state.completeness = Self::completeness_of_published(&state.published);
                 state
             },
         );
@@ -887,6 +886,7 @@ impl VerterHost {
                 producer_invocations: 1,
                 ..VueMacroCodegenCounters::default()
             },
+            published: Vec::new(),
             completeness: ResultCompleteness::Complete,
         };
 
@@ -921,8 +921,12 @@ impl VerterHost {
             // The analysis is staged above, so a refusal here is a
             // producer bug; fail closed to the empty (refusal-carrying)
             // state rather than guessing an inventory of our own.
-            Err(_) => return state,
+            Err(_) => {
+                publish_demanded_lane_facts(&mut state.published, demand);
+                return state;
+            }
         };
+        let mut published = std::mem::take(&mut state.published);
         for demand_row in semantic_input.demands() {
             let payload_index = demand_row.macro_index();
             let Some(mac) = macros.get(payload_index) else {
@@ -950,8 +954,14 @@ impl VerterHost {
                         &tsc_scope_inventory,
                         &mut state.counters,
                     );
+                    publish_expose_row_facts(&mut published, &outcome);
                     let macro_completeness =
                         verter_type_engine::request_context::current_cold_compute_completeness();
+                    publish_demand_fact(
+                        &mut published,
+                        tsc_outcome_fact(&outcome),
+                        macro_completeness,
+                    );
                     macro_scope.discard();
                     verter_type_engine::request_context::fold_result_completeness(
                         macro_completeness,
@@ -996,16 +1006,18 @@ impl VerterHost {
             let macro_scope =
                 verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
             let mut diagnostics = Vec::new();
-            let payload = resolve_macro_payload(
-                &dispatch,
-                &owner,
-                owner_canonical,
-                payload_index,
-                mac,
-                mac.kind,
-                expansion_kind(mac.kind),
-                &mut diagnostics,
-            );
+            let (payload, payload_local) = observe_local(|| {
+                resolve_macro_payload(
+                    &dispatch,
+                    &owner,
+                    owner_canonical,
+                    payload_index,
+                    mac,
+                    mac.kind,
+                    expansion_kind(mac.kind),
+                    &mut diagnostics,
+                )
+            });
             if payload.is_none() {
                 state.dependency_failures.extend(
                     demand_row
@@ -1020,38 +1032,25 @@ impl VerterHost {
                         }),
                 );
             }
-            // PER-LANE payload failure, over the PER-LANE contained class
-            // set: the runtime lane derives its output from the value, so
-            // a producer that yielded no surface faults it while the TSC
-            // lane's authored splice rides on. The two lanes also differ
-            // on an ABSENT payload — the TSC lane splices the authored
-            // declaration and reports a resolution failure, while the
-            // runtime lane has nothing to derive a `props` option object
-            // from. They are computed separately and never merged.
-            let runtime_lane = MacroProjectionLane::runtime(demand.wants_runtime_constructors());
-            let tsc_payload_failure = if macro_projection_faulted(MacroProjectionLane::Tsc) {
-                Some(partial_failure())
-            } else if payload.is_none() {
-                Some(resolution_failure(MacroProjectionLane::Tsc))
-            } else {
-                None
-            };
-            let runtime_payload_failure = if macro_projection_faulted(runtime_lane) {
-                Some(partial_failure())
-            } else if payload.is_none() {
-                Some(resolution_failure(runtime_lane))
+            // The payload lookup's own observation. An absent payload is a
+            // semantic miss or that lookup's partiality — never a filter of
+            // the parent scope. Runtime has no option object to derive.
+            // `defineProps` still preserves the authored type argument.
+            let payload_failure = if payload.is_none() {
+                Some(failure_from_local(payload_local))
             } else {
                 None
             };
 
             if demand.wants_runtime() {
                 let mut walker_diagnostics = Vec::new();
-                let outcome = {
-                    let _runtime_scope =
-                        verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
-                    match (runtime_payload_failure, payload) {
-                        (Some(failure), _) => failure.runtime(),
-                        (None, Some(payload)) => match mac.kind {
+                let runtime_scope =
+                    verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
+                let outcome = if let Some(failure) = payload_failure {
+                    failure.runtime()
+                } else {
+                    match payload {
+                        Some(payload) => match mac.kind {
                             AnalyzedMacroKind::DefineProps => {
                                 match dispatch
                                     .broad_runtime_subject_for_macro(&owner, payload_index)
@@ -1107,9 +1106,18 @@ impl VerterHost {
                             }
                             _ => unreachable!("codegen macro filter is exhaustive"),
                         },
-                        (None, None) => unreachable!("payload failure covers an absent payload"),
+                        None => unreachable!("payload failure covers an absent payload"),
                     }
                 };
+                let runtime_observed =
+                    verter_type_engine::request_context::current_cold_compute_completeness();
+                drop(runtime_scope);
+                publish_demand_fact(
+                    &mut published,
+                    runtime_outcome_fact(&outcome),
+                    runtime_observed,
+                );
+                publish_runtime_row_facts(&mut published, &outcome);
                 record_unresolved_surface_arms(
                     &mut state.dependency_failures,
                     payload_index,
@@ -1125,12 +1133,26 @@ impl VerterHost {
 
             if demand.wants_tsc() {
                 let mut walker_diagnostics = Vec::new();
-                let outcome = {
-                    let _tsc_scope =
-                        verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
-                    match (tsc_payload_failure, payload) {
-                        (Some(failure), _) => failure.tsc(),
-                        (None, Some(payload)) => self.project_tsc_macro(
+                let tsc_scope =
+                    verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
+                let outcome = if mac.kind == AnalyzedMacroKind::DefineProps && payload.is_none() {
+                    if let Some(failure) = payload_failure {
+                        published.push(projection_failure_fact(&failure));
+                    }
+                    match tsc_scope_requirements(
+                        mac,
+                        &tsc_scope_inventory,
+                        &dispatch,
+                        owner_canonical,
+                    ) {
+                        Ok(scope) => authored_props_splice(payload_index, scope),
+                        Err(failure) => failure.tsc(),
+                    }
+                } else if let Some(failure) = payload_failure {
+                    failure.tsc()
+                } else {
+                    match payload {
+                        Some(payload) => self.project_tsc_macro(
                             ctx,
                             &dispatch,
                             &mut attempt,
@@ -1142,10 +1164,15 @@ impl VerterHost {
                             &tsc_scope_inventory,
                             &mut state.counters,
                             &mut walker_diagnostics,
+                            &mut published,
                         ),
-                        (None, None) => unreachable!("payload failure covers an absent payload"),
+                        None => unreachable!("payload failure covers an absent payload"),
                     }
                 };
+                let tsc_observed =
+                    verter_type_engine::request_context::current_cold_compute_completeness();
+                drop(tsc_scope);
+                publish_demand_fact(&mut published, tsc_outcome_fact(&outcome), tsc_observed);
                 record_unresolved_surface_arms(
                     &mut state.dependency_failures,
                     payload_index,
@@ -1167,6 +1194,7 @@ impl VerterHost {
 
         state.dependency_failures.sort();
         state.dependency_failures.dedup();
+        state.published = published;
         state
     }
 
@@ -1186,6 +1214,7 @@ impl VerterHost {
         walker_diagnostics: &mut Vec<
             verter_type_engine::project_semantic_dispatch::walk::ShallowDiagnostic,
         >,
+        published: &mut Vec<FactStatus>,
     ) -> MacroTscOutcome {
         match mac.kind {
             AnalyzedMacroKind::DefineProps => {
@@ -1204,14 +1233,28 @@ impl VerterHost {
                     ),
                     Some(&mut *walker_diagnostics),
                 );
-                if macro_projection_faulted(MacroProjectionLane::Tsc) {
-                    return partial_failure().tsc();
-                }
-                let Some(surface) = authored_fallback_surface(surface) else {
-                    return ProjectionFailure::Invalid(MacroInvalidReason::NonObjectRoot).tsc();
+                let surface = match discharge_codegen_surface(surface) {
+                    Ok(surface) => surface,
+                    Err(ProjectionFailure::Invalid(reason)) => {
+                        return ProjectionFailure::Invalid(reason).tsc();
+                    }
+                    Err(failure) => {
+                        published.push(projection_failure_fact(&failure));
+                        let scope = match tsc_scope_requirements(
+                            mac,
+                            scope_inventory,
+                            dispatch,
+                            owner_canonical,
+                        ) {
+                            Ok(scope) => scope,
+                            Err(scope_failure) => return scope_failure.tsc(),
+                        };
+                        return authored_props_splice(payload_index, scope);
+                    }
                 };
 
                 let mut testing_rows = Vec::new();
+                let mut row_facts = Vec::new();
                 for member in surface
                     .members
                     .iter()
@@ -1238,9 +1281,13 @@ impl VerterHost {
                             counters,
                         ) {
                             Ok(rendered) => rendered,
-                            Err(failure) => return failure.tsc(),
+                            Err(failure) => {
+                                row_facts.push(projection_failure_fact(&failure));
+                                continue;
+                            }
                         }
                     };
+                    row_facts.push(row_derivation_fact().status());
                     testing_rows.push(TscPropRow {
                         name: member_name.to_string(),
                         optional: member.optional,
@@ -1254,6 +1301,7 @@ impl VerterHost {
                         Ok(scope) => scope,
                         Err(failure) => return failure.tsc(),
                     };
+                published.extend(row_facts);
                 MacroTscOutcome::Complete(MacroTscProjection::Props(TscPropsProjection {
                     public: TscPublicPropsProjection::AuthoredArgument {
                         anchor: MacroAnchor::MacroArgument {
@@ -1280,11 +1328,9 @@ impl VerterHost {
                     ),
                     Some(&mut *walker_diagnostics),
                 );
-                if macro_projection_faulted(MacroProjectionLane::Tsc) {
-                    return partial_failure().tsc();
-                }
-                let Some(surface) = authored_fallback_surface(surface) else {
-                    return ProjectionFailure::Invalid(MacroInvalidReason::NonObjectRoot).tsc();
+                let surface = match discharge_codegen_surface(surface) {
+                    Ok(surface) => surface,
+                    Err(failure) => return failure.tsc(),
                 };
                 if emits_surface_has_invalid_member(
                     dispatch,
@@ -1301,6 +1347,7 @@ impl VerterHost {
                     payload_index,
                     effective_index,
                     counters,
+                    published,
                 ) {
                     Ok(events) => events,
                     Err(failure) => return failure.tsc(),
@@ -1348,6 +1395,9 @@ impl VerterHost {
                         Ok(scope) => scope,
                         Err(failure) => return failure.tsc(),
                     };
+                // The synthesized model row is its own demand. Emitting it is
+                // that demand's fact; it is not the ambient TSC lane status.
+                published.push(row_derivation_fact().status());
                 MacroTscOutcome::Complete(MacroTscProjection::Model(TscModelProjection {
                     name,
                     optional,
@@ -1526,7 +1576,6 @@ impl VerterHost {
         >,
     ) -> MacroRuntimeOutcome {
         let _ = analysis;
-        let lane = MacroProjectionLane::runtime(classify_constructors);
         if probe_definitely_non_object_root(dispatch, payload) {
             return ProjectionFailure::Invalid(MacroInvalidReason::NonObjectRoot).runtime();
         }
@@ -1542,12 +1591,16 @@ impl VerterHost {
             ),
             Some(walker_diagnostics),
         );
-        if macro_projection_faulted(lane) {
-            return partial_failure().runtime();
-        }
-        let Some(surface) = authored_fallback_surface(surface) else {
-            return ProjectionFailure::Invalid(MacroInvalidReason::NonObjectRoot).runtime();
+        let surface = match discharge_codegen_surface(surface) {
+            Ok(surface) => surface,
+            Err(failure) => return failure.runtime(),
         };
+        // The root contribution's no-surface bit, sampled before member-value
+        // classification. That later work shares this cold scope and records
+        // the same class when ONE member's type has no surface. The member
+        // degrades; the authored siblings still publish. Reading the bit
+        // again after classification deletes that member set.
+        let root_contribution_has_no_member_set = flow_return_no_surface_observed();
 
         // Row identity, ordering, optionality, anchors, the member-tier
         // dependency names and the `withDefaults` association are the
@@ -1625,8 +1678,9 @@ impl VerterHost {
 
         // A ROOT-position degradation leaves NO member set. The class is
         // the same one an interior position records — only the derived
-        // surface tells them apart, which is why this is a structural check
-        // on the surface and not a reason-class subtraction.
+        // surface tells them apart, which is why the degraded-success
+        // refusal is a structural check on an empty surface and not a
+        // reason-class subtraction.
         //
         // An empty surface is a legitimate answer for `defineProps<{}>()`
         // and only for it; under an observed flow-return degradation the
@@ -1636,13 +1690,23 @@ impl VerterHost {
         // attribute silently falls through to `$attrs`. Refusing is loud,
         // and the TSX lane still type-checks the file.
         //
+        // `FLOW_RETURN_NO_SURFACE` on the root contribution is per
+        // contribution, not per surface. A sibling arm (an intersection
+        // operand or a heritage clause) makes the assembled object
+        // non-empty, and the emptiness check would then publish that
+        // sibling alone. The lane refuses that sampled root bit, empty or
+        // not. A bit recorded while typing a member value is not this bit.
+        //
         // Scoped to the demand that RENDERS the option object. A names-only
         // (TSX / IDE) compile reads the public binding names and renders no
         // `props` option at all, and its generated TSX splices the AUTHORED
         // macro call for the external checker — so refusing there would
         // delete the whole file's type-check surface to prevent an option
         // object that demand never emits.
-        if classify_constructors && props.is_empty() && flow_return_degradation_observed() {
+        if classify_constructors
+            && (root_contribution_has_no_member_set
+                || (props.is_empty() && flow_return_degradation_observed()))
+        {
             return partial_failure().runtime();
         }
 
@@ -1667,7 +1731,6 @@ impl VerterHost {
             verter_type_engine::project_semantic_dispatch::walk::ShallowDiagnostic,
         >,
     ) -> MacroRuntimeOutcome {
-        let lane = MacroProjectionLane::runtime(renders_runtime_options);
         if probe_definitely_non_object_root(dispatch, payload) {
             return ProjectionFailure::Invalid(MacroInvalidReason::NonObjectRoot).runtime();
         }
@@ -1684,12 +1747,14 @@ impl VerterHost {
             runtime_context,
             Some(walker_diagnostics),
         );
-        if macro_projection_faulted(lane) {
-            return partial_failure().runtime();
-        }
-        let Some(surface) = authored_fallback_surface(surface) else {
-            return ProjectionFailure::Invalid(MacroInvalidReason::NonObjectRoot).runtime();
+        let surface = match discharge_codegen_surface(surface) {
+            Ok(surface) => surface,
+            Err(failure) => return failure.runtime(),
         };
+        // Same cut as props: the root contribution's no-surface bit, before
+        // event-name and payload typing. A member-value position that has
+        // no surface must not delete the authored event names.
+        let root_contribution_has_no_member_set = flow_return_no_surface_observed();
         if emits_surface_has_invalid_member(dispatch, &surface, runtime_context) {
             return ProjectionFailure::Invalid(MacroInvalidReason::InvalidEmitsShape).runtime();
         }
@@ -1750,17 +1815,20 @@ impl VerterHost {
             Ok(projection) => projection.emits().to_vec(),
             Err(_) => return partial_failure().runtime(),
         };
-        if macro_projection_faulted(lane) {
-            return partial_failure().runtime();
-        }
         // The `props` twin of this refusal, for the same reason and with
         // the same scope: a ROOT-position degradation leaves no member set,
         // and `emits: []` for a component that declares emits sends every
-        // listener silently through to `$attrs`. `renders_runtime_options`
-        // keeps a names-only (TSX / IDE) compile out of it — that demand
-        // emits no `emits` option and its TSX splices the authored macro
-        // call for the external checker.
-        if renders_runtime_options && emits.is_empty() && flow_return_degradation_observed() {
+        // listener silently through to `$attrs`. A no-surface producer
+        // composed with a sibling event refuses even when that sibling
+        // makes the array non-empty. The bit is the root contribution
+        // sampled above, not a later member-value observation.
+        // `renders_runtime_options` keeps a names-only (TSX / IDE) compile
+        // out of it — that demand emits no `emits` option and its TSX
+        // splices the authored macro call for the external checker.
+        if renders_runtime_options
+            && (root_contribution_has_no_member_set
+                || (emits.is_empty() && flow_return_degradation_observed()))
+        {
             return partial_failure().runtime();
         }
         MacroRuntimeOutcome::Complete(MacroRuntimeShape::Emits(emits))
@@ -1783,7 +1851,9 @@ impl VerterHost {
                     constructors: classification.constructors,
                     skip_check: classification.skip_check,
                 },
-                Err(failure) => return failure.runtime(),
+                Err(failure) => {
+                    RuntimePropType::Degraded(MacroFailure::new(failure.member(), None))
+                }
             }
         } else {
             RuntimePropType::Unclassified
@@ -1814,30 +1884,318 @@ impl VerterHost {
 
 /// Discharge a shallow-surface resolution for the CODEGEN lanes.
 ///
-/// The macro codegen projections splice the AUTHORED type argument (TSC lane)
-/// or degrade through their own typed `ProjectionFailure` rails — they do not
-/// publish resolved-surface metadata, so an incomplete resolution here keeps
-/// its authored fallback instead of a completeness record: the usable subset
-/// (a partial terminal read's positive members) still projects, and a
-/// surface-less failure routes to the lane's `NonObjectRoot` failure exactly
-/// as a genuinely non-object root does.
-fn authored_fallback_surface(
+/// A usable positive subset still projects. An incomplete resolution with
+/// no subset is not a non-object root: its reasons are recorded and the
+/// lane refuses. A complete negative (`NoSurface`) is `NonObjectRoot` only
+/// when the root-narrowing fact is exact.
+fn discharge_codegen_surface(
     resolution: verter_type_engine::semantic_query::surface_resolution::SurfaceResolution<
         crate::typeinfo::surface::TypeInfoSurface,
     >,
-) -> Option<crate::typeinfo::surface::TypeInfoSurface> {
+) -> Result<crate::typeinfo::surface::TypeInfoSurface, ProjectionFailure> {
+    use verter_type_engine::semantic_query::surface_resolution::SurfaceResolution;
     match resolution {
-        verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::Resolved(
-            surface,
-        )
-        | verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::OpenPresence(
-            surface,
-        ) => Some(surface.into_inner()),
-        verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::NoSurface(_) => {
-            None
+        SurfaceResolution::Resolved(surface) | SurfaceResolution::OpenPresence(surface) => {
+            Ok(surface.into_inner())
         }
-        verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::Incomplete(
-            incomplete,
-        ) => incomplete.into_authored_fallback(),
+        SurfaceResolution::NoSurface(_) => {
+            // A complete negative is already the producer's proof. The
+            // narrowing claim reads that proof, not the ambient reason set.
+            let domain = FactStatus::Complete;
+            if root_narrowing_fact(&domain, &[]).exact().is_some() {
+                Err(ProjectionFailure::Invalid(
+                    MacroInvalidReason::NonObjectRoot,
+                ))
+            } else {
+                Err(partial_failure())
+            }
+        }
+        SurfaceResolution::Incomplete(incomplete) => {
+            let reasons = incomplete.reasons();
+            match incomplete.into_authored_fallback() {
+                Some(surface) => Ok(surface),
+                None => {
+                    verter_type_engine::request_context::fold_result_completeness(
+                        ResultCompleteness::partial(reasons),
+                    );
+                    Err(partial_failure())
+                }
+            }
+        }
+    }
+}
+
+/// Member-value and synthesized-row facts of a runtime outcome.
+///
+/// An unclassified row was not demanded. A resolved row and a synthesized
+/// emit are their own complete facts. A degraded row is refused on its own
+/// and does not borrow a sibling row's status.
+fn publish_runtime_row_facts(published: &mut Vec<FactStatus>, outcome: &MacroRuntimeOutcome) {
+    let MacroRuntimeOutcome::Complete(shape) = outcome else {
+        return;
+    };
+    match shape {
+        MacroRuntimeShape::Props(props) => {
+            for prop in &props.props {
+                if let Some(status) = runtime_value_fact(&prop.type_shape) {
+                    published.push(status);
+                }
+            }
+        }
+        MacroRuntimeShape::Emits(events) => {
+            published.extend(
+                std::iter::repeat_with(|| row_derivation_fact().status()).take(events.len()),
+            );
+        }
+        MacroRuntimeShape::Model(model) => {
+            if let Some(status) = runtime_value_fact(&model.prop.type_shape) {
+                published.push(status);
+            }
+            published.push(row_derivation_fact().status());
+            if let Some(status) = runtime_value_fact(&model.modifiers_prop.type_shape) {
+                published.push(status);
+            }
+        }
+    }
+}
+
+fn runtime_value_fact(shape: &RuntimePropType) -> Option<FactStatus> {
+    match shape {
+        RuntimePropType::Unclassified => None,
+        RuntimePropType::Resolved { .. } => Some(row_derivation_fact().status()),
+        RuntimePropType::Degraded(failure) => Some(unavailable_fact(member_reason(failure.reason))),
+    }
+}
+
+/// The member-value fact's own cause. A budget stays a budget and a missing
+/// input stays a missing input; neither is rewritten as a generic fault.
+fn member_reason(reason: verter_macro_dto::MacroMemberReason) -> PartialReason {
+    use verter_macro_dto::{MacroMemberReason, MacroPartialReason, UnresolvedReason};
+    match reason {
+        MacroMemberReason::Partial(MacroPartialReason::BudgetExceeded) => {
+            PartialReason::BudgetExceeded
+        }
+        MacroMemberReason::Partial(MacroPartialReason::Recursion) => {
+            PartialReason::SamePathRecursion
+        }
+        MacroMemberReason::Partial(MacroPartialReason::IncompleteTraversal) => {
+            PartialReason::SemanticQueryFault
+        }
+        MacroMemberReason::Unresolved(UnresolvedReason::MissingDependency) => {
+            PartialReason::MissingDependency
+        }
+        MacroMemberReason::Unresolved(_) => PartialReason::MissingSemanticNodeData,
+        MacroMemberReason::Unsupported(_) => PartialReason::SemanticQueryFault,
+    }
+}
+
+fn unavailable_fact(reason: PartialReason) -> FactStatus {
+    FactStatus::Unavailable(
+        verter_type_engine::semantic_query::surface_resolution::NonEmptyReasons::of(reason),
+    )
+}
+
+fn expose_reason(reason: verter_macro_dto::TscDeclarationFailureReason) -> PartialReason {
+    use verter_macro_dto::{TscDeclarationFailureReason, UnresolvedReason};
+    match reason {
+        TscDeclarationFailureReason::SemanticInferenceUnavailable(_) => {
+            PartialReason::BudgetExceeded
+        }
+        TscDeclarationFailureReason::Unresolved(UnresolvedReason::MissingDependency) => {
+            PartialReason::MissingDependency
+        }
+        TscDeclarationFailureReason::Unresolved(_) => PartialReason::MissingSemanticNodeData,
+        TscDeclarationFailureReason::Unsupported(_) => PartialReason::SemanticQueryFault,
+    }
+}
+
+/// One fact per expose member. An unavailable member is refused on its own.
+fn publish_expose_row_facts(published: &mut Vec<FactStatus>, outcome: &MacroTscOutcome) {
+    let MacroTscOutcome::Complete(MacroTscProjection::Expose(expose)) = outcome else {
+        return;
+    };
+    for member in &expose.members {
+        let status = match &member.member_type {
+            TscExposeMemberType::Resolved(_) => row_derivation_fact().status(),
+            TscExposeMemberType::Unavailable(reason) => unavailable_fact(expose_reason(*reason)),
+        };
+        published.push(status);
+    }
+}
+
+/// A refused semantic plan publishes one unavailable fact per demanded lane.
+/// The refusal is the plan failure, not the ambient reason set.
+fn publish_demanded_lane_facts(published: &mut Vec<FactStatus>, demand: VueMacroCodegenDemand) {
+    let refused = unavailable_fact(PartialReason::SemanticQueryFault);
+    if demand.wants_tsc() {
+        published.push(refused);
+    }
+    if demand.wants_runtime() {
+        published.push(refused);
+    }
+}
+
+fn authored_props_splice(payload_index: usize, scope: TscScopeRequirements) -> MacroTscOutcome {
+    MacroTscOutcome::Complete(MacroTscProjection::Props(TscPropsProjection {
+        public: TscPublicPropsProjection::AuthoredArgument {
+            anchor: MacroAnchor::MacroArgument {
+                macro_index: macro_index(payload_index),
+            },
+        },
+        testing_rows: Vec::new(),
+        scope,
+    }))
+}
+
+/// Publish the producer's outcome. When that outcome is exact, also publish
+/// request-integrity reasons this demand itself observed. Flow-return and
+/// undecided-conditional reasons stay on the surface arm that recorded them
+/// and are not subtracted to mint the outcome.
+fn publish_demand_fact(
+    published: &mut Vec<FactStatus>,
+    fact: FactStatus,
+    observed: ResultCompleteness,
+) {
+    let exact = fact.is_complete();
+    published.push(fact);
+    if exact {
+        if let Some(integrity) = integrity_fact(observed) {
+            published.push(integrity);
+        }
+    }
+}
+
+fn integrity_fact(observed: ResultCompleteness) -> Option<FactStatus> {
+    use verter_type_engine::semantic_query::surface_resolution::NonEmptyReasons;
+    let mut combined: Option<NonEmptyReasons> = None;
+    for reason in observed.reasons().iter() {
+        if matches!(
+            reason,
+            PartialReason::FlowReturnUninferred
+                | PartialReason::FlowReturnUnverified
+                | PartialReason::FlowReturnNoSurface
+                | PartialReason::UndecidedConditional
+        ) {
+            continue;
+        }
+        let next = NonEmptyReasons::of(reason);
+        combined = Some(match combined {
+            None => next,
+            Some(prev) => prev.union(next),
+        });
+    }
+    combined.map(FactStatus::Unavailable)
+}
+
+fn projection_failure_fact(failure: &ProjectionFailure) -> FactStatus {
+    match failure {
+        ProjectionFailure::Invalid(_) => FactStatus::Complete,
+        ProjectionFailure::Partial(reason) => unavailable_fact(match reason {
+            MacroPartialReason::BudgetExceeded => PartialReason::BudgetExceeded,
+            MacroPartialReason::Recursion => PartialReason::SamePathRecursion,
+            MacroPartialReason::IncompleteTraversal => PartialReason::SemanticQueryFault,
+        }),
+        ProjectionFailure::Unresolved(UnresolvedReason::MissingDependency) => {
+            unavailable_fact(PartialReason::MissingDependency)
+        }
+        ProjectionFailure::Unresolved(_) => {
+            unavailable_fact(PartialReason::MissingSemanticNodeData)
+        }
+        ProjectionFailure::Unsupported(_) => unavailable_fact(PartialReason::SemanticQueryFault),
+    }
+}
+
+fn tsc_outcome_fact(outcome: &MacroTscOutcome) -> FactStatus {
+    match outcome {
+        MacroTscOutcome::Complete(_) | MacroTscOutcome::Invalid(_) => FactStatus::Complete,
+        MacroTscOutcome::Partial(failure) => unavailable_fact(match failure.reason {
+            MacroPartialReason::BudgetExceeded => PartialReason::BudgetExceeded,
+            MacroPartialReason::Recursion => PartialReason::SamePathRecursion,
+            MacroPartialReason::IncompleteTraversal => PartialReason::SemanticQueryFault,
+        }),
+        MacroTscOutcome::Unresolved(failure) => match failure.reason {
+            UnresolvedReason::MissingDependency => {
+                unavailable_fact(PartialReason::MissingDependency)
+            }
+            _ => unavailable_fact(PartialReason::MissingSemanticNodeData),
+        },
+        MacroTscOutcome::Unsupported(_) => unavailable_fact(PartialReason::SemanticQueryFault),
+    }
+}
+
+fn runtime_outcome_fact(outcome: &MacroRuntimeOutcome) -> FactStatus {
+    match outcome {
+        MacroRuntimeOutcome::Complete(_) | MacroRuntimeOutcome::Invalid(_) => FactStatus::Complete,
+        MacroRuntimeOutcome::Partial(failure) => unavailable_fact(match failure.reason {
+            MacroPartialReason::BudgetExceeded => PartialReason::BudgetExceeded,
+            MacroPartialReason::Recursion => PartialReason::SamePathRecursion,
+            MacroPartialReason::IncompleteTraversal => PartialReason::SemanticQueryFault,
+        }),
+        MacroRuntimeOutcome::Unresolved(failure) => match failure.reason {
+            UnresolvedReason::MissingDependency => {
+                unavailable_fact(PartialReason::MissingDependency)
+            }
+            _ => unavailable_fact(PartialReason::MissingSemanticNodeData),
+        },
+        MacroRuntimeOutcome::Unsupported(_) => unavailable_fact(PartialReason::SemanticQueryFault),
+    }
+}
+
+#[cfg(test)]
+mod published_completeness_tests {
+    use super::{unavailable_fact, VerterHost};
+    use verter_type_engine::request_context::{
+        fold_result_completeness, ColdComputeCompletenessScope,
+    };
+    use verter_type_engine::semantic_query::{ExecutionAbort, FactStatus, PartialReasonSet};
+
+    #[test]
+    fn an_abort_joins_the_published_summary_and_other_ambient_reasons_do_not() {
+        let fault = unavailable_fact(super::PartialReason::SemanticQueryFault);
+
+        let _scope = ColdComputeCompletenessScope::enter();
+        fold_result_completeness(
+            verter_type_engine::semantic_query::ResultCompleteness::partial(
+                PartialReasonSet::CANCELLED,
+            ),
+        );
+        let cancelled = VerterHost::completeness_of_published(&[fault]);
+        assert_eq!(
+            ExecutionAbort::observed_in(cancelled),
+            Some(ExecutionAbort::Cancelled)
+        );
+        assert!(cancelled
+            .reasons()
+            .contains(PartialReasonSet::SEMANTIC_QUERY_FAULT));
+        drop(_scope);
+
+        let _scope = ColdComputeCompletenessScope::enter();
+        fold_result_completeness(
+            verter_type_engine::semantic_query::ResultCompleteness::partial(
+                PartialReasonSet::BUDGET_EXCEEDED,
+            ),
+        );
+        let ambient = VerterHost::completeness_of_published(&[fault]);
+        assert!(ExecutionAbort::observed_in(ambient).is_none());
+        assert!(ambient
+            .reasons()
+            .contains(PartialReasonSet::SEMANTIC_QUERY_FAULT));
+        assert!(!ambient
+            .reasons()
+            .contains(PartialReasonSet::BUDGET_EXCEEDED));
+        drop(_scope);
+
+        let _scope = ColdComputeCompletenessScope::enter();
+        fold_result_completeness(
+            verter_type_engine::semantic_query::ResultCompleteness::partial(
+                PartialReasonSet::SUPERSEDED_GENERATION,
+            ),
+        );
+        let superseded = VerterHost::completeness_of_published(&[FactStatus::Complete]);
+        assert_eq!(
+            ExecutionAbort::observed_in(superseded),
+            Some(ExecutionAbort::Superseded)
+        );
+        drop(_scope);
     }
 }

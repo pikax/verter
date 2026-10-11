@@ -74,11 +74,13 @@ mod carrier_publication_store_tests;
 #[cfg(test)]
 mod cold_artifact_dedup_tests;
 mod compile;
+mod component_meta_delivery;
 #[cfg(test)]
 mod request_view_reuse_tests;
 pub use compile::VueMainAssemblyFailure;
 pub use compile::{assemble_vue_main_module, AssembleMapFailure, AssembledVueModule, MapFragment};
 pub use compile::{SfcRewriteRefusal, UncomposableCode, UncomposableFamily};
+pub use component_meta_delivery::ComponentMetaDelivery;
 #[cfg(test)]
 mod compile_blockers_snapshot_generation_tests;
 #[cfg(test)]
@@ -153,6 +155,8 @@ mod component_meta_pathological_recursion_tests;
 mod component_meta_pick_omit_tests;
 #[cfg(test)]
 mod component_meta_publication_demand_tests;
+#[cfg(test)]
+mod component_meta_publication_fence_tests;
 #[cfg(test)]
 mod component_meta_read_once_tests;
 #[cfg(test)]

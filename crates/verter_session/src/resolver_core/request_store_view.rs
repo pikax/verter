@@ -1071,6 +1071,15 @@ impl<'a> RequestStoreView<'a> {
         self.base
     }
 
+    pub(crate) fn publication_input_fingerprint(&self) -> Option<u64> {
+        self.base_is_current.then(|| {
+            self.base
+                .validation_token()
+                .with_overlay_identity(None)
+                .external_supersession_fingerprint()
+        })
+    }
+
     /// Test-only: peek the overlay's `whole_hashes` entry for a
     /// canonical id. The discriminating tests for the epoch guard
     /// inspect this to assert that `complete_canonical` is a no-op

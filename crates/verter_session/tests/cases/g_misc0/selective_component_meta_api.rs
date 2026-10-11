@@ -627,16 +627,15 @@ fn compat_checker_unchanged_calls_get_component_meta() {
     // The compat path must continue to call the legacy `getComponentMeta`
     // surface, NOT the new selective methods. The integration is wire-
     // level (compat reads the legacy ComponentMetaPayload bytes) and is
-    // verified at the architecture-guard level. Here we assert that the
-    // legacy `MetaSession::get_component_meta` method still exists with
-    // its pre-Tier-1 signature.
+    // verified at the architecture-guard level. Here we assert that
+    // `MetaSession::get_component_meta` still exists and returns a
+    // delivery: the analysis bytes plus the fact status. A refusal is
+    // not a bare analysis.
     use verter_session::meta::MetaSession;
     fn _signature_check(
         s: &MetaSession,
-    ) -> Result<
-        Option<verter_session_query::analysis::component_meta::ComponentMetaAnalysis>,
-        verter_session::meta::MetaError,
-    > {
+    ) -> Result<Option<verter_session::ComponentMetaDelivery>, verter_session::meta::MetaError>
+    {
         s.get_component_meta("x.vue")
     }
     let _ = _signature_check;
@@ -646,14 +645,13 @@ fn compat_checker_unchanged_calls_get_component_meta() {
 fn benchmark_worker_unchanged_calls_get_component_meta() {
     // Mirrors the compat test: the benchmark worker still calls
     // `getComponentMeta` (returns the existing payload bytes via the
-    // legacy encoder).
+    // legacy encoder). The session method returns the delivery, not a
+    // bare analysis.
     use verter_session::meta::MetaSession;
     fn _signature_check(
         s: &MetaSession,
-    ) -> Result<
-        Option<verter_session_query::analysis::component_meta::ComponentMetaAnalysis>,
-        verter_session::meta::MetaError,
-    > {
+    ) -> Result<Option<verter_session::ComponentMetaDelivery>, verter_session::meta::MetaError>
+    {
         s.get_component_meta("x.vue")
     }
     let _ = _signature_check;
