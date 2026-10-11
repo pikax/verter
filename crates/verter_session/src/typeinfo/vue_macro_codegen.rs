@@ -1595,6 +1595,12 @@ impl VerterHost {
             Ok(surface) => surface,
             Err(failure) => return failure.runtime(),
         };
+        // The root contribution's no-surface bit, sampled before member-value
+        // classification. That later work shares this cold scope and records
+        // the same class when ONE member's type has no surface. The member
+        // degrades; the authored siblings still publish. Reading the bit
+        // again after classification deletes that member set.
+        let root_contribution_has_no_member_set = flow_return_no_surface_observed();
 
         // Row identity, ordering, optionality, anchors, the member-tier
         // dependency names and the `withDefaults` association are the
@@ -1684,11 +1690,12 @@ impl VerterHost {
         // attribute silently falls through to `$attrs`. Refusing is loud,
         // and the TSX lane still type-checks the file.
         //
-        // `FLOW_RETURN_NO_SURFACE` is per contribution, not per surface. A
-        // sibling arm (an intersection operand or a heritage clause) makes
-        // the assembled object non-empty, and the emptiness check would
-        // then publish that sibling alone. The runtime lane refuses
-        // whenever that class was observed, empty or not.
+        // `FLOW_RETURN_NO_SURFACE` on the root contribution is per
+        // contribution, not per surface. A sibling arm (an intersection
+        // operand or a heritage clause) makes the assembled object
+        // non-empty, and the emptiness check would then publish that
+        // sibling alone. The lane refuses that sampled root bit, empty or
+        // not. A bit recorded while typing a member value is not this bit.
         //
         // Scoped to the demand that RENDERS the option object. A names-only
         // (TSX / IDE) compile reads the public binding names and renders no
@@ -1697,7 +1704,7 @@ impl VerterHost {
         // delete the whole file's type-check surface to prevent an option
         // object that demand never emits.
         if classify_constructors
-            && (flow_return_no_surface_observed()
+            && (root_contribution_has_no_member_set
                 || (props.is_empty() && flow_return_degradation_observed()))
         {
             return partial_failure().runtime();
@@ -1744,6 +1751,10 @@ impl VerterHost {
             Ok(surface) => surface,
             Err(failure) => return failure.runtime(),
         };
+        // Same cut as props: the root contribution's no-surface bit, before
+        // event-name and payload typing. A member-value position that has
+        // no surface must not delete the authored event names.
+        let root_contribution_has_no_member_set = flow_return_no_surface_observed();
         if emits_surface_has_invalid_member(dispatch, &surface, runtime_context) {
             return ProjectionFailure::Invalid(MacroInvalidReason::InvalidEmitsShape).runtime();
         }
@@ -1809,12 +1820,13 @@ impl VerterHost {
         // and `emits: []` for a component that declares emits sends every
         // listener silently through to `$attrs`. A no-surface producer
         // composed with a sibling event refuses even when that sibling
-        // makes the array non-empty. `renders_runtime_options` keeps a
-        // names-only (TSX / IDE) compile out of it — that demand emits no
-        // `emits` option and its TSX splices the authored macro call for
-        // the external checker.
+        // makes the array non-empty. The bit is the root contribution
+        // sampled above, not a later member-value observation.
+        // `renders_runtime_options` keeps a names-only (TSX / IDE) compile
+        // out of it — that demand emits no `emits` option and its TSX
+        // splices the authored macro call for the external checker.
         if renders_runtime_options
-            && (flow_return_no_surface_observed()
+            && (root_contribution_has_no_member_set
                 || (emits.is_empty() && flow_return_degradation_observed()))
         {
             return partial_failure().runtime();

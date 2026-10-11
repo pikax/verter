@@ -626,6 +626,11 @@ pub(super) fn flow_return_degradation_observed() -> bool {
 /// to address a member of. One authored intersection arm or one `interface
 /// … extends` heritage clause makes the assembled surface non-empty, and
 /// an emptiness check then publishes the sibling arm alone.
+///
+/// Sample this immediately after the root surface projection. Member-value
+/// classification shares the cold scope and records the same bit when one
+/// member's type has no surface; that observation degrades the member and
+/// is not a missing member set.
 pub(super) fn flow_return_no_surface_observed() -> bool {
     verter_type_engine::request_context::current_cold_compute_completeness()
         .reasons()
