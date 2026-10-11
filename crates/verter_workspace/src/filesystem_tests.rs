@@ -3229,3 +3229,50 @@ fn a_demand_in_flight_across_its_directory_deletion_is_served_but_not_retained()
         "a deleted importer records no dependency edge"
     );
 }
+
+#[test]
+fn snapshot_change_tombstone_on_close_preserves_the_backing_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = canonical_temp_root(&dir).join("globals.d.ts");
+    std::fs::write(&path, "interface Before { x: number }").unwrap();
+    let canonical = temp_canonical_id(&path);
+    let workspace = FilesystemWorkspace::new(FilesystemOptions::default());
+    assert_eq!(
+        workspace.read_file(&canonical).as_deref(),
+        Some("interface Before { x: number }")
+    );
+    let first = workspace.snapshot_changes_since(None).unwrap();
+    assert_eq!(
+        first.members,
+        [crate::SnapshotMemberChange {
+            canonical: canonical.clone(),
+            present: true
+        }]
+    );
+    std::fs::write(&path, "interface After { y: string }").unwrap();
+    workspace.notify_close(&canonical);
+    let closed = workspace
+        .snapshot_changes_since(Some(first.revision))
+        .unwrap();
+    assert_eq!(
+        closed.members,
+        [crate::SnapshotMemberChange {
+            canonical: canonical.clone(),
+            present: false
+        }]
+    );
+    assert_eq!(
+        workspace.read_file(&canonical).as_deref(),
+        Some("interface After { y: string }")
+    );
+    let reloaded = workspace
+        .snapshot_changes_since(Some(closed.revision))
+        .unwrap();
+    assert_eq!(
+        reloaded.members,
+        [crate::SnapshotMemberChange {
+            canonical,
+            present: true
+        }]
+    );
+}

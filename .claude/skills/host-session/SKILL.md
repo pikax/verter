@@ -1263,3 +1263,27 @@ class facts are served fresh without entering the pure-content store.
 `template_converter_inputs` is linkage-only. Semantic class domains flow
 through the opaque, revision-checked `TemplateClassDomainIndex`; callers must
 not manufacture raw class-domain tuples or recover domains from display text.
+
+## Injected ambient-root ingestion
+
+`MemorySnapshot::changes_since` captures a revision and the latest transition of
+only members changed after a workspace-local cursor. Both concrete workspaces
+expose it through `WorkspaceRead::snapshot_changes_since`; transaction readers
+forward it. Each consumer retains its own cursor, so sharing a workspace does
+not let one host consume another host's changes. Repeated edits replace the old
+transition; removal tombstones retain only the canonical and latest revision,
+not source bytes. Storage is proportional to distinct canonicals seen by the
+snapshot, rather than the number of edits.
+
+The global-contributor index serializes snapshot classification and owns its
+cursor, reset when the host store is cleared or its workspace replaced. Upsert
+classifies its own source; injected-root ingestion skips that canonical and
+classifies only the remaining changed members. Ordinary TypeScript ambient and
+script globals stay pending until contribution collection makes them
+IndexedReady. A snapshot-only edit evicts stale host content using
+`evict_loaded_content`, preserving the workspace overlay; removals retract
+pending and indexed contributions only when the workspace has neither an
+active overlay nor a backing file. A filesystem snapshot tombstone may merely
+invalidate its disk cache on editor close. Custom
+workspaces without incremental membership use the existing revision/listing
+contract. Semantic lookup never enumerates all concrete-workspace members.
