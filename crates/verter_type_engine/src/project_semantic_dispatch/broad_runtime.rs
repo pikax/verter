@@ -765,6 +765,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
 
 fn runtime_query_error_partial_reason(error: &QueryError) -> Option<PartialReasonSet> {
     match error {
+        QueryError::ExecutionAborted(abort) => Some(abort.reason_class()),
         // The checker's recovered error type is a complete answer.
         QueryError::Miss
         | QueryError::DeclPlaceholder { .. }

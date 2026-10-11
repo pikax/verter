@@ -326,8 +326,8 @@ fn complete_result_requires_every_planned_obligation() {
     assert!(
         matches!(
             outcome,
-            FlowSolveOutcome::Partial(ref partial)
-                if partial.reason == FlowPartialReason::ObligationSetMismatch
+            FlowSolveOutcome::NoValue(ref unavailable)
+                if unavailable.reason == FlowPartialReason::ObligationSetMismatch
         ),
         "a runtime missing one planned record must not complete: {outcome:?}"
     );
@@ -509,8 +509,9 @@ fn plan_binds_the_store_minted_graph_identity() {
     assert!(
         matches!(
             outcome,
-            FlowSolveOutcome::Partial(ref partial)
-                if partial.reason == FlowPartialReason::StaleBasis
+            FlowSolveOutcome::Aborted(
+                verter_type_engine::semantic_query::ExecutionAbort::Superseded
+            )
         ),
         "a foreign bound graph's plan must not complete: {outcome:?}"
     );
@@ -1422,14 +1423,16 @@ fn partial_replay_never_seals() {
         Err(FlowSealError::UndischargedObligations)
     ));
 
-    // A stale basis still reaches the finalizer as a typed partial, and a
-    // partial is never a warm candidate.
+    // A stale basis invalidates execution and carries no evaluated value.
     let mut stale_request = base_request();
     stale_request.input_basis = test_input_basis(2);
     let stale_plan = fixture.build_plan(stale_request).expect("plans");
     let (runtime, handle, sealed) = drive_to_completion(&plan);
     let outcome = finalize_flow_solve(&runtime, handle, &stale_plan, sealed);
-    assert!(matches!(outcome, FlowSolveOutcome::Partial(_)));
+    assert!(matches!(
+        outcome,
+        FlowSolveOutcome::Aborted(verter_type_engine::semantic_query::ExecutionAbort::Superseded)
+    ));
     assert!(outcome.warm_candidate().is_none());
 }
 
@@ -1480,7 +1483,12 @@ fn stale_basis_or_foreign_contract_cannot_complete() {
         let (runtime, handle, sealed) = drive_to_completion(&plan);
         let outcome = finalize_flow_solve(&runtime, handle, stale_plan, sealed);
         assert!(
-            matches!(outcome, FlowSolveOutcome::Partial(_)),
+            matches!(
+                outcome,
+                FlowSolveOutcome::Aborted(
+                    verter_type_engine::semantic_query::ExecutionAbort::Superseded
+                )
+            ),
             "a stale {name} must not complete: {outcome:?}"
         );
         assert!(outcome.warm_candidate().is_none());
@@ -2250,8 +2258,9 @@ fn parse_key_and_language_axes_rebind_the_demand_basis() {
     assert!(
         matches!(
             outcome,
-            FlowSolveOutcome::Partial(ref partial)
-                if partial.reason == FlowPartialReason::StaleBasis
+            FlowSolveOutcome::Aborted(
+                verter_type_engine::semantic_query::ExecutionAbort::Superseded
+            )
         ),
         "a proof cannot finalize across a parse-key boundary: {outcome:?}"
     );
@@ -2263,8 +2272,9 @@ fn parse_key_and_language_axes_rebind_the_demand_basis() {
     assert!(
         matches!(
             outcome,
-            FlowSolveOutcome::Partial(ref partial)
-                if partial.reason == FlowPartialReason::StaleBasis
+            FlowSolveOutcome::Aborted(
+                verter_type_engine::semantic_query::ExecutionAbort::Superseded
+            )
         ),
         "a proof cannot finalize across a language boundary: {outcome:?}"
     );

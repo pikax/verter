@@ -1942,6 +1942,7 @@ fn encode_property_key(enc: &mut Recipe, key: &AuthoredPropertyKey) {
 
 fn encode_query_error(enc: &mut Recipe, err: &QueryError) {
     let tag: u8 = match err {
+        QueryError::ExecutionAborted(_) => 24,
         QueryError::Miss => 1,
         QueryError::UnsupportedIntrinsic { .. } => 2,
         QueryError::BudgetExceeded(_) => 3,
@@ -1991,6 +1992,11 @@ fn encode_query_error(enc: &mut Recipe, err: &QueryError) {
                 crate::semantic_query::RecoveryBasis::Budget => 2,
             });
         }
+        QueryError::ExecutionAborted(abort) => enc.u8(match abort {
+            super::ExecutionAbort::Cancelled => 1,
+            super::ExecutionAbort::Superseded => 2,
+            super::ExecutionAbort::Shutdown => 3,
+        }),
         QueryError::UnsupportedIntrinsic { name } => enc.str(name),
         QueryError::RecursiveRef { name, .. } => enc.str(name),
         QueryError::Other(s) => enc.str(s),

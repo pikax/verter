@@ -2027,8 +2027,13 @@ fn a_tripped_demand_discovers_no_further_callee() {
             run(&host, MAX_CONNECTED_PROJECTION_WORK, Some(nth));
         assert!(cancelled, "cancelled at family {nth}");
         assert!(
-            matches!(step, FlowReturnStep::NoValue(_)),
-            "a cancellation at family {nth} ends on a typed no-value outcome: {step:?}"
+            matches!(
+                step,
+                FlowReturnStep::Aborted(
+                    verter_type_engine::semantic_query::ExecutionAbort::Cancelled
+                )
+            ),
+            "a cancellation at family {nth} ends on the typed execution abort: {step:?}"
         );
         assert!(
             discovered < 2 * LEVELS,

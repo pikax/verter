@@ -3613,9 +3613,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                     ),
                                 }
                             }
-                            Some(super::flow_solve::FlowSolveOutcome::NoValue(_)) | None => {
-                                crate::semantic_query::PartialReasonSet::default()
-                            }
+                            Some(super::flow_solve::FlowSolveOutcome::Aborted(_))
+                            | Some(super::flow_solve::FlowSolveOutcome::NoValue(_))
+                            | None => crate::semantic_query::PartialReasonSet::default(),
                             // Matched by the arm above.
                             Some(super::flow_solve::FlowSolveOutcome::Complete(_)) => {
                                 unreachable!()

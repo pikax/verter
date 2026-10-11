@@ -48,6 +48,59 @@ pub fn current_request_cancellation_token() -> Option<CancellationToken> {
 use crate::semantic_query::{PartialReasonSet, ResultCompleteness};
 
 thread_local! {
+    static EXECUTION_ABORTS: RefCell<Vec<Option<crate::semantic_query::ExecutionAbort>>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+/// Scoped execution validity. An abort always bubbles, even when an optional
+/// semantic observation is discarded. A fresh top-level scope starts clean.
+#[must_use]
+pub struct ExecutionValidityScope {
+    _private: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl ExecutionValidityScope {
+    /// Begin one execution or composition under independently tracked validity.
+    pub fn enter() -> Self {
+        EXECUTION_ABORTS.with(|stack| {
+            let mut stack = stack.borrow_mut();
+            let inherited = stack.last().copied().flatten();
+            stack.push(inherited);
+        });
+        Self {
+            _private: std::marker::PhantomData,
+        }
+    }
+}
+
+impl Drop for ExecutionValidityScope {
+    fn drop(&mut self) {
+        EXECUTION_ABORTS.with(|stack| {
+            let mut stack = stack.borrow_mut();
+            if let Some(Some(abort)) = stack.pop() {
+                if let Some(parent) = stack.last_mut() {
+                    parent.get_or_insert(abort);
+                }
+            }
+        });
+    }
+}
+
+/// Record an originating execution failure, never an explanatory reason set.
+pub fn observe_execution_abort(abort: crate::semantic_query::ExecutionAbort) {
+    EXECUTION_ABORTS.with(|stack| {
+        if let Some(top) = stack.borrow_mut().last_mut() {
+            top.get_or_insert(abort);
+        }
+    });
+}
+
+/// The active execution's validity refusal, independent of availability.
+pub fn current_execution_abort() -> Option<crate::semantic_query::ExecutionAbort> {
+    EXECUTION_ABORTS.with(|stack| stack.borrow().last().copied().flatten())
+}
+
+thread_local! {
     /// Per-thread nesting depth of [`RootTemplateDemandScope`].
     ///
     /// A plain `Cell<u32>` rather than a `RequestContext` field: the demand must
@@ -335,6 +388,7 @@ pub fn mark_request_result_inference_budget_exceeded() {
 
 /// Mark the active result partial for the exact cancellation reason.
 pub(crate) fn mark_request_result_cancelled() {
+    observe_execution_abort(crate::semantic_query::ExecutionAbort::Cancelled);
     mark_request_result_partial_with(PartialReasonSet::CANCELLED);
 }
 

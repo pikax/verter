@@ -28,6 +28,65 @@ fn status(step: &FlowReturnStep, observed: ResultCompleteness) -> FactStatus {
 }
 
 #[test]
+fn declining_an_aborted_probe_cannot_extract_its_apparent_value() {
+    let read = super::ObservedFlowRead {
+        value: evaluated(None),
+        abort: Some(ExecutionAbort::Superseded),
+        completeness: ResultCompleteness::Complete,
+        frame: super::BuildLocalTaint::default(),
+    };
+    assert_eq!(read.fact(), Err(ExecutionAbort::Superseded));
+    assert!(matches!(read.discard(), Err(ExecutionAbort::Superseded)));
+}
+
+#[test]
+fn discarded_quality_observations_cannot_discard_execution_aborts() {
+    use crate::request_context::{
+        current_execution_abort, observe_execution_abort, ColdComputeCompletenessScope,
+        ExecutionValidityScope,
+    };
+    for abort in [
+        ExecutionAbort::Cancelled,
+        ExecutionAbort::Superseded,
+        ExecutionAbort::Shutdown,
+    ] {
+        {
+            let _outer = ExecutionValidityScope::enter();
+            {
+                let _inner = ExecutionValidityScope::enter();
+                let quality = ColdComputeCompletenessScope::enter();
+                observe_execution_abort(abort);
+                quality.discard();
+            }
+            assert_eq!(current_execution_abort(), Some(abort));
+        }
+        let _retry = ExecutionValidityScope::enter();
+        assert_eq!(
+            current_execution_abort(),
+            None,
+            "a new execution has its own validity"
+        );
+    }
+}
+
+#[test]
+fn unnamed_partial_quality_cannot_become_a_complete_fact() {
+    let partial = ResultCompleteness::Partial(PartialReasonSet::empty());
+    let step = evaluated(None);
+    assert!(matches!(
+        flow_return_fact(&step, partial),
+        Ok(FactResult::Approximate { .. })
+    ));
+    let FlowReturnStep::Complete(value) = step else {
+        unreachable!()
+    };
+    assert!(matches!(
+        value.with_observed_completeness(partial).fact(),
+        FactResult::Approximate { .. }
+    ));
+}
+
+#[test]
 fn an_undegraded_value_with_a_complete_read_is_exact() {
     let step = evaluated(None);
     let fact = flow_return_fact(&step, ResultCompleteness::Complete).unwrap();
@@ -92,23 +151,34 @@ fn a_no_value_failure_is_unavailable_with_the_no_surface_class() {
 }
 
 #[test]
+fn refused_preparation_does_not_abort_an_independently_evaluated_value() {
+    let step = evaluated(None);
+    let fact = flow_return_fact(
+        &step,
+        ResultCompleteness::partial(PartialReasonSet::UNSTABLE_STATE),
+    )
+    .expect("a preparation cause alone does not invalidate evaluated evidence");
+    assert!(matches!(fact, FactResult::Approximate { .. }));
+}
+
+#[test]
 fn a_cancelled_or_torn_read_aborts_instead_of_answering() {
-    let value = evaluated(None);
-    let no_value = FlowReturnStep::NoValue(FlowReturnFailure::Unresolved);
-    for step in [&value, &no_value] {
+    for abort in [
+        ExecutionAbort::Cancelled,
+        ExecutionAbort::Superseded,
+        ExecutionAbort::Shutdown,
+    ] {
+        let step = FlowReturnStep::Aborted(abort);
         assert_eq!(
-            flow_return_fact(
-                step,
-                ResultCompleteness::partial(PartialReasonSet::CANCELLED)
-            ),
-            Err(ExecutionAbort::Cancelled)
+            flow_return_fact(&step, ResultCompleteness::Complete),
+            Err(abort)
         );
         assert_eq!(
             flow_return_fact(
-                step,
-                ResultCompleteness::partial(PartialReasonSet::UNSTABLE_STATE)
+                &step,
+                ResultCompleteness::partial(PartialReasonSet::FLOW_RETURN_UNVERIFIED)
             ),
-            Err(ExecutionAbort::Superseded)
+            Err(abort)
         );
     }
 }

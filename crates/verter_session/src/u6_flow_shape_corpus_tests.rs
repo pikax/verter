@@ -869,6 +869,7 @@ fn drive_flow(row: &Row, function: &str) -> MeasuredFlow {
         _ => None,
     };
     match dispatch.execute_function_return_source(&source, &canonical) {
+        verter_type_engine::project_semantic_dispatch::flow_return::FunctionReturnNode::Aborted(abort) => panic!("fixture execution aborted: {abort:?}"),
         verter_type_engine::project_semantic_dispatch::flow_return::FunctionReturnNode::Declared(hot) => {
             MeasuredFlow::Declared {
                 node: node_shape(dispatch.graph().node_data(hot.node()).as_deref()),
