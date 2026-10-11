@@ -1,5 +1,6 @@
 use rustc_hash::FxHashMap;
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -38,6 +39,21 @@ fn mark_parent_dir_dirty(engine: &Engine, canonical_id: &str) {
     }
 }
 
+/// One latest injected-snapshot transition. A removed member has no snapshot
+/// content even if the same canonical still has an open overlay or disk file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotMemberChange {
+    pub canonical: String,
+    pub present: bool,
+}
+
+/// Atomic batch for a workspace-local snapshot cursor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotChanges {
+    pub revision: u64,
+    pub members: Vec<SnapshotMemberChange>,
+}
+
 /// In-memory file content cache used by MemoryWorkspace and as the
 /// snapshot layer in FilesystemWorkspace.
 ///
@@ -46,6 +62,10 @@ fn mark_parent_dir_dirty(engine: &Engine, canonical_id: &str) {
 pub struct MemorySnapshot {
     entries: FxHashMap<String, Arc<str>>,
     revision: u64,
+    // One latest transition per canonical, including removal tombstones.
+    // Repeated edits replace their old entry rather than growing a log.
+    changed_at: FxHashMap<String, u64>,
+    changes: BTreeMap<u64, String>,
 }
 
 impl MemorySnapshot {
@@ -58,6 +78,35 @@ impl MemorySnapshot {
         self.revision
     }
 
+    fn note_change(&mut self, canonical: &str) {
+        self.revision = self
+            .revision
+            .checked_add(1)
+            .expect("snapshot revision exhausted");
+        if let Some(previous) = self.changed_at.insert(canonical.to_owned(), self.revision) {
+            self.changes.remove(&previous);
+        }
+        self.changes.insert(self.revision, canonical.to_owned());
+    }
+
+    /// Latest member transitions after a consumer's cursor, captured together
+    /// with the revision. Multiple consumers advance independently.
+    pub fn changes_since(&self, since: Option<u64>) -> crate::SnapshotChanges {
+        use std::ops::Bound::{Excluded, Unbounded};
+        let members = self
+            .changes
+            .range((Excluded(since.unwrap_or(0)), Unbounded))
+            .map(|(_, canonical)| crate::SnapshotMemberChange {
+                canonical: canonical.clone(),
+                present: self.entries.contains_key(canonical),
+            })
+            .collect();
+        crate::SnapshotChanges {
+            revision: self.revision,
+            members,
+        }
+    }
+
     /// Read file content from the snapshot.
     pub fn read(&self, canonical_id: &str) -> Option<Arc<str>> {
         self.entries.get(canonical_id).cloned()
@@ -68,11 +117,8 @@ impl MemorySnapshot {
         match self.entries.get(&canonical_id) {
             Some(existing) if Arc::ptr_eq(existing, &source) || **existing == *source => false,
             _ => {
+                self.note_change(&canonical_id);
                 self.entries.insert(canonical_id, source);
-                self.revision = self
-                    .revision
-                    .checked_add(1)
-                    .expect("snapshot revision exhausted");
                 true
             }
         }
@@ -82,10 +128,7 @@ impl MemorySnapshot {
     pub fn remove(&mut self, canonical_id: &str) -> bool {
         let removed = self.entries.remove(canonical_id).is_some();
         if removed {
-            self.revision = self
-                .revision
-                .checked_add(1)
-                .expect("snapshot revision exhausted");
+            self.note_change(canonical_id);
         }
         removed
     }
@@ -642,6 +685,10 @@ impl crate::traits::WorkspaceRead for MemoryWorkspace {
 
     fn snapshot_revision(&self) -> Option<u64> {
         Some(self.engine.snapshot_revision())
+    }
+
+    fn snapshot_changes_since(&self, since: Option<u64>) -> Option<crate::SnapshotChanges> {
+        Some(self.engine.snapshot_changes_since(since))
     }
 
     fn snapshot_canonicals(&self) -> Vec<String> {

@@ -726,3 +726,243 @@ fn all_base_demands_share_one_population_and_copy_proportional_to_additions() {
         "copies grow linearly with the contributors: {copied_per_size:?}"
     );
 }
+
+#[test]
+fn interleaved_inject_and_upsert_classifies_linear_members() {
+    for size in [250, 1_000, 4_000] {
+        let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        let host = VerterHost::new(HostConfig::default(), workspace.clone());
+        let index = host
+            .project_type_store()
+            .indexed()
+            .global_contributor_index();
+        index.reset_snapshot_scan_visit_count();
+        for n in 0..size {
+            let canonical = format!("/open/file{n}.ts");
+            let source: Arc<str> = if n % 20 == 0 {
+                Arc::from(format!(
+                    "export {{}}; declare global {{ interface Shared {{ m{n}: number }} }}"
+                ))
+            } else {
+                Arc::from(format!("export const v{n} = {n};"))
+            };
+            workspace.inject_file(canonical.clone(), source.clone());
+            let _ = host
+                .upsert(UpsertRequest {
+                    canonical_id: Some(canonical.clone()),
+                    input_id: canonical,
+                    source,
+                    file_language: FileLanguage::script_ts(),
+                    aliases: Vec::new(),
+                })
+                .expect("upsert");
+        }
+        host.ingest_program_ambient_roots();
+        assert!(
+            index.snapshot_scan_visit_count() <= 2 * size,
+            "{size} files required {} snapshot visits",
+            index.snapshot_scan_visit_count()
+        );
+        assert_eq!(
+            index
+                .snapshot()
+                .lookup(
+                    &AugmentationTargetKind::GlobalAugmentation,
+                    "Shared",
+                    None,
+                    true,
+                )
+                .entries
+                .len(),
+            (size as usize).div_ceil(20)
+        );
+    }
+}
+
+#[test]
+fn never_upserted_contributors_follow_snapshot_edits_and_removals() {
+    let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    let host = VerterHost::new(HostConfig::default(), workspace.clone());
+    workspace.inject_file(
+        "/global.ts".into(),
+        Arc::from("export {}; declare global { interface X { global: number } }"),
+    );
+    workspace.inject_file(
+        "/script.ts".into(),
+        Arc::from("interface X { script: string }"),
+    );
+    for n in 0..250 {
+        let canonical = format!("/bulk{n}.ts");
+        let source: Arc<str> = Arc::from("export const n = 1;");
+        workspace.inject_file(canonical.clone(), source.clone());
+        let _ = host
+            .upsert(UpsertRequest {
+                canonical_id: Some(canonical.clone()),
+                input_id: canonical,
+                source,
+                file_language: FileLanguage::script_ts(),
+                aliases: Vec::new(),
+            })
+            .expect("upsert");
+    }
+    let index = host
+        .project_type_store()
+        .indexed()
+        .global_contributor_index();
+    let contributors = |name: &str| {
+        host.ingest_program_ambient_roots();
+        index.snapshot().lookup(
+            &AugmentationTargetKind::GlobalAugmentation,
+            name,
+            None,
+            true,
+        )
+    };
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: Some("/use.ts".into()),
+            input_id: "/use.ts".into(),
+            source: Arc::from("export type Result = X;"),
+            file_language: FileLanguage::script_ts(),
+            aliases: Vec::new(),
+        })
+        .expect("consumer upsert");
+    let answer = || {
+        use verter_type_engine::semantic_query::{ProjectionMode, SemanticNodeData};
+        let node = host
+            .resolve_named_symbol("/use.ts", "Result", Some(ProjectionMode::Expanded))
+            .expect("global type resolves");
+        let store = host.project_type_store().semantic_graph();
+        let mut pending = vec![node];
+        let mut names = Vec::new();
+        while let Some(node) = pending.pop() {
+            let data = store.node_data(node).expect("node");
+            match data.as_ref() {
+                SemanticNodeData::Object(view) => names.extend(
+                    view.positive_members()
+                        .iter()
+                        .map(|member| member.string_name().expect("named property").to_string()),
+                ),
+                SemanticNodeData::MergedDecl { contributors } => {
+                    pending.extend(contributors.iter().copied())
+                }
+                other => panic!("expected X contributor object: {other:?}"),
+            }
+        }
+        names.sort();
+        names
+    };
+    let original = contributors("X");
+    assert_eq!(answer(), ["global", "script"]);
+    assert_eq!(original.entries.len(), 2);
+    workspace.inject_file(
+        "/global.ts".into(),
+        Arc::from("export {}; declare global { interface X { edited: boolean } }"),
+    );
+    let edited = contributors("X");
+    assert_eq!(edited.entries.len(), 2);
+    assert_ne!(edited.fingerprint, original.fingerprint);
+    assert_eq!(answer(), ["edited", "script"]);
+    workspace.inject_file(
+        "/script.ts".into(),
+        Arc::from("export {}; interface X { private: number }"),
+    );
+    assert_eq!(contributors("X").entries.len(), 1);
+    assert_eq!(answer(), ["edited"]);
+    workspace.remove_file("/global.ts");
+    assert!(contributors("X").entries.is_empty());
+    workspace.inject_file(
+        "/pending.ts".into(),
+        Arc::from("interface Pending { x: number }"),
+    );
+    host.ingest_injected_ambient_roots(None);
+    workspace.remove_file("/pending.ts");
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: Some("/use.ts".into()),
+            input_id: "/use.ts".into(),
+            source: Arc::from("export type Result = X; export const changed = true;"),
+            file_language: FileLanguage::script_ts(),
+            aliases: Vec::new(),
+        })
+        .expect("upsert drains a pending removal while holding admission");
+    assert!(contributors("Pending").entries.is_empty());
+    assert!(!index.has_pending_overlay_ambient());
+}
+
+#[test]
+fn snapshot_changes_preserve_overlay_contributors_and_independent_hosts() {
+    let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    let first = VerterHost::new(HostConfig::default(), workspace.clone());
+    let second = VerterHost::new(HostConfig::default(), workspace.clone());
+    workspace.inject_file(
+        "/shared.d.ts".into(),
+        Arc::from("interface SharedRoot { disk: number }"),
+    );
+    for host in [&first, &second] {
+        host.ingest_program_ambient_roots();
+        assert_eq!(
+            host.project_type_store()
+                .indexed()
+                .global_contributor_index()
+                .snapshot()
+                .lookup(
+                    &AugmentationTargetKind::GlobalAugmentation,
+                    "SharedRoot",
+                    None,
+                    true
+                )
+                .entries
+                .len(),
+            1
+        );
+    }
+    let _ = first
+        .upsert(UpsertRequest {
+            canonical_id: Some("/shared.d.ts".into()),
+            input_id: "/shared.d.ts".into(),
+            source: Arc::from("interface OverlayRoot { editor: string }"),
+            file_language: FileLanguage::script_ts(),
+            aliases: Vec::new(),
+        })
+        .expect("overlay upsert");
+    first.ingest_program_ambient_roots();
+    workspace.inject_file(
+        "/shared.d.ts".into(),
+        Arc::from("interface ChangedDisk { n: number }"),
+    );
+    workspace.remove_file("/shared.d.ts");
+    first.ingest_program_ambient_roots();
+    let population = first
+        .project_type_store()
+        .indexed()
+        .global_contributor_index()
+        .snapshot();
+    assert_eq!(
+        population
+            .lookup(
+                &AugmentationTargetKind::GlobalAugmentation,
+                "OverlayRoot",
+                None,
+                true
+            )
+            .entries
+            .len(),
+        1
+    );
+    assert!(population
+        .lookup(
+            &AugmentationTargetKind::GlobalAugmentation,
+            "ChangedDisk",
+            None,
+            true
+        )
+        .entries
+        .is_empty());
+}

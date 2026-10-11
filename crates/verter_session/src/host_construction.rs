@@ -1246,56 +1246,84 @@ impl VerterHost {
         }
     }
 
-    /// Ingest snapshot members that contribute globally and were never
-    /// upserted. Peeks workspace bytes; does not load export-only `.d.ts`
-    /// or unrelated ordinary scripts. Re-runs only when snapshot
-    /// content or membership changes.
+    /// Classify only changed injected members. Every contributor is made
+    /// IndexedReady before population lookup; ordinary scripts remain pending
+    /// until that lookup. The cursor is scoped to the attached workspace.
     pub(crate) fn ingest_injected_ambient_roots(&self, except: Option<&str>) {
         let index = self
             .project_type_store()
             .indexed()
             .global_contributor_index();
-        // Read the cheap owner revision before enumerating or cloning any IDs.
-        // If the snapshot changes during this scan, the next call sees a newer
-        // revision and scans again. Workspaces without a revision always scan.
-        let revision = self.workspace().snapshot_revision();
-        if index.snapshot_revision_is_ingested(revision) {
-            return;
-        }
-        let members = self.workspace().snapshot_canonicals();
-        #[cfg(test)]
-        for _ in &members {
+        let mut cursor = index.snapshot_ingestion_cursor();
+        let workspace = self.workspace();
+        let (revision, members) = if let Some(changes) = workspace.snapshot_changes_since(*cursor) {
+            (Some(changes.revision), changes.members)
+        } else {
+            let revision = workspace.snapshot_revision();
+            if revision.is_some() && *cursor == revision {
+                return;
+            }
+            (
+                revision,
+                workspace
+                    .snapshot_canonicals()
+                    .into_iter()
+                    .map(|canonical| verter_workspace::SnapshotMemberChange {
+                        canonical,
+                        present: true,
+                    })
+                    .collect(),
+            )
+        };
+        for change in members {
+            #[cfg(test)]
             index.note_snapshot_scan_visit();
-        }
-        for member in &members {
+            let member = change.canonical;
             if except == Some(member.as_str()) {
                 continue;
             }
-            if member.starts_with("ambient:/") {
-                let _ = self.ensure_loaded(member);
-                let _ = self.ensure_indexed_ready_serve(member);
+            index.retract_pending_overlay_ambient(&member);
+            if !is_ambient_declaration_canonical(&member)
+                && !is_ordinary_typescript_canonical(&member)
+            {
                 continue;
             }
-            if is_ambient_declaration_canonical(member) {
-                let Some(source) = self.workspace().read_file(member) else {
-                    continue;
-                };
-                self.ingest_ambient_contributor(member, source.as_ref());
-                continue;
-            }
-            if !is_ordinary_typescript_canonical(member) {
-                continue;
-            }
-            let Some(source) = self.workspace().read_file(member) else {
+            let Some(source) = workspace.read_file(&member) else {
+                if !change.present {
+                    // A snapshot tombstone may just invalidate a disk cache.
+                    // Retract host state only when the workspace also has no
+                    // active overlay or backing file for this canonical.
+                    // Upsert already holds the document admission fence.
+                    // Retire script content through the shared cache owners
+                    // without entering the fenced document-remove wrapper.
+                    self.project_type_store().evict_canonical(&member);
+                    self.resolver.runtime.hard_evict_canonical(&member);
+                    self.scheduler.remove(&member);
+                    self.drop_all_per_canonical_compile_caches(&member);
+                    self.bump_store_view_epoch();
+                }
                 continue;
             };
-            if crate::global_contributors::source_may_have_file_scope_global_contribution(
-                source.as_ref(),
-            ) {
-                index.note_pending_overlay_ambient(member);
+            if self
+                .scheduler
+                .try_get_source(&member)
+                .is_some_and(|loaded| loaded.source != source)
+            {
+                self.evict_loaded_content(&member);
+                self.project_type_store().evict_canonical(&member);
+                self.resolver.runtime.evict_canonical(&member);
+            }
+            if is_ambient_declaration_canonical(&member) {
+                self.ingest_ambient_contributor(&member, source.as_ref());
+            } else if crate::global_contributors::source_has_ambient_contribution(source.as_ref())
+                || crate::global_contributors::source_may_have_file_scope_global_contribution(
+                    source.as_ref(),
+                )
+            {
+                index.note_pending_overlay_ambient(&member);
             }
         }
-        index.set_ingested_snapshot_revision(revision);
+        *cursor = revision;
     }
 
     /// Host-owned scratch cache for the typeinfo

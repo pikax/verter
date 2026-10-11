@@ -2181,6 +2181,10 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
         Some(self.engine.snapshot_revision())
     }
 
+    fn snapshot_changes_since(&self, since: Option<u64>) -> Option<crate::SnapshotChanges> {
+        Some(self.engine.snapshot_changes_since(since))
+    }
+
     fn snapshot_canonicals(&self) -> Vec<String> {
         self.engine.snapshot_canonicals()
     }

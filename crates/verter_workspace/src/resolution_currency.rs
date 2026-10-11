@@ -3049,6 +3049,10 @@ impl crate::traits::WorkspaceRead for TransactionReader<'_> {
         self.inner.snapshot_revision()
     }
 
+    fn snapshot_changes_since(&self, since: Option<u64>) -> Option<crate::SnapshotChanges> {
+        self.inner.snapshot_changes_since(since)
+    }
+
     fn snapshot_canonicals(&self) -> Vec<String> {
         self.inner.snapshot_canonicals()
     }
