@@ -1280,6 +1280,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispat
         {
             return None;
         }
+        candidate.value.read_set_signature.bubble(self.ctx);
         Some(Arc::new(candidate.value.clone()))
     }
 

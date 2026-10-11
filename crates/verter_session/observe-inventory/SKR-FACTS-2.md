@@ -13,7 +13,7 @@
 | `ComponentMetaResultDb.live_counter` and `apply_live_delta` | Current store occupancy | REQUIRED-lifetime | Updated on each store mutation; owned by the host store snapshot | `component_meta_result_db` | always |
 | `ComponentMetaResultDb.stale_sweeps`, `observe_removed` and retention-refusal debug trace | none; historical eviction and refusal observations | OPTIONAL | Instrumented store lifetime | `component_meta_result_db` | cfg(feature = "semantic-observe") |
 | `ComponentMetaEvidence` facts, generation and external-input fingerprint; `ComponentMetaTrace` | Admission consumes opaque, completely traced evidence and validates the exact owner root and publication fence | REQUIRED | One traced compute through publication or refusal | `project_semantic_dispatch/memo` | always |
-| Final component read, trace and admit operations | Warm reads validate every retained dependency; cold publication consumes stable tracer evidence under an unchanged external-input fence | REQUIRED | Request-bound operation | `project_semantic_dispatch/memo` | always |
+| Final component read, trace and admit operations | Warm reads validate and adopt every retained dependency into enclosing tracers; rejected candidates contribute no facts; cold publication consumes stable tracer evidence under an unchanged external-input fence | REQUIRED | Request-bound operation | `project_semantic_dispatch/memo` | always |
 | `FactValidation.publication_input_fingerprint` | Engine publication binds to the captured request basis rather than sampling a new live basis | REQUIRED | Borrowed request snapshot | `resolver_core/fact_validation_port` | always |
 | `QueryBuildOutput.fold_partial` in place of replaceable quality setters | Named partial folds accumulate adopted failures | REQUIRED | Build output | `project_semantic_dispatch/walk` | always |
 
@@ -26,6 +26,6 @@
 | `classify_runtime` fact match | Per-member runtime constructors and typed degradation | REQUIRED | One member classification | `typeinfo/vue_macro_codegen/runtime` | always |
 | Final component cache hit/miss hooks, facade observation handle and refusal traces | none; request audit and cache history | OPTIONAL | Instrumented request/store lifetime | `component_meta_result_admission` | cfg(feature = "semantic-observe") |
 
-Unit-test builds retain observation seams needed by behavioral assertions.
+Unit-test and test-support builds retain observation seams needed by behavioral assertions.
 Default production builds omit the optional fields and event updates; their
 selection has no runtime enabled check.

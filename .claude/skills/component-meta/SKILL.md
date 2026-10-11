@@ -67,12 +67,20 @@ unrelated enclosing completeness does not authorize or veto the member.
 
 Final-component storage is engine-owned and generic; the session facade owns
 native payload policy. Its read validates the request generation and dependency
-signature. Its publish consumes engine-produced tracer evidence, checks exact
-owner coverage, and checks its generation and external-input publication fence.
+signature, then replays that signature into every enclosing tracer. A rejected
+candidate contributes no dependencies. Its publish consumes engine-produced
+tracer evidence, checks exact owner coverage, and checks its generation and
+external-input publication fence.
 Fresh cold dependencies can be absent from the request-entry snapshot; this
 does not turn cold publication into a warm lookup. All retained dependencies
 remain in the signature after the narrow owner-route filter and validate on read.
 Neither the facade nor another consumer has a production raw DB/map accessor.
+
+The [receiving fact contract](references/fact-consumer-contract.md) specifies
+the independent demands, typed reuse cases, dependency adoption, and proof
+required of TypeInfo-first component views, native diagnostic families,
+authored language-service operations, and generated semantic slices. It is
+an adoption contract, not retention authority for an arbitrary partial artifact.
 
 The official/native component-meta payload is the semantic authority. `@verter/component-meta/compat` is a projection layer for `vue-component-meta` interoperability, not a second semantic pipeline.
 

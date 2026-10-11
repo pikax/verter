@@ -89,3 +89,86 @@ fn captured_component_publication_fence_refuses_stale_and_unproven_bases() {
         }
     }
 }
+
+#[test]
+fn warm_native_component_read_replays_dependencies_and_rejected_read_replays_nothing() {
+    use crate::component_meta_host::ComponentMetaHost;
+    use crate::component_meta_result_admission::ComponentMetaResultRead;
+    use verter_session_query::facts::fact_read_set::FactReadSetFinalise;
+
+    let mh = ComponentMetaHost::new_standalone(HostConfig::default());
+    let owner = "/src/Comp.vue";
+    let dep = "/src/types.ts";
+    mh.upsert_base(dep, "export interface Props { a: string; }")
+        .unwrap();
+    mh.upsert_base(
+        owner,
+        "<script setup lang=\"ts\">import type { Props } from './types'; defineProps<Props>();</script>",
+    )
+    .unwrap();
+    let host = mh.host();
+    let cold = host.get_component_meta(owner).expect("cold native result");
+    assert_eq!(cold.props.len(), 1);
+    assert_eq!(cold.props[0].name, "a");
+    let key =
+        host.component_meta_result_key(owner, &crate::host_manage::ComponentMetaOptions::default());
+    let owner_hash = host.ensure_indexed_ready(owner).unwrap().whole_hash;
+    let db = host.project_type_store().component_meta_results();
+    let admitted = db.get(&key, owner_hash).expect("admitted cold result");
+    assert!(admitted
+        .read_set_signature
+        .canonical_ids()
+        .iter()
+        .any(|canonical| canonical.as_ref() == dep));
+
+    let current = host.resolver_store_view_read().current().unwrap();
+    let ctx = HostResolverContext::from_current(
+        host,
+        &current,
+        Arc::new(CanonicalCompletionOverlay::new()),
+    );
+    let dispatch = ProjectSemanticDispatch::new(&ctx);
+    let ((warm, inner_finalise), finalise) =
+        dispatch.traced_compute(|| dispatch.traced_compute(|| host.get_component_meta(owner)));
+    let warm = warm.expect("warm native result");
+    assert_eq!(warm.props.len(), cold.props.len());
+    assert_eq!(warm.props[0].name, cold.props[0].name);
+    let FactReadSetFinalise::Ok(inner_facts) = inner_finalise else {
+        panic!("a validated warm read must have cacheable evidence");
+    };
+    let FactReadSetFinalise::Ok(facts) = finalise else {
+        panic!("a validated warm read must have cacheable evidence");
+    };
+    assert_eq!(
+        inner_facts.as_ref(),
+        admitted.read_set_signature.facts.as_ref()
+    );
+    assert_eq!(
+        facts.as_ref(),
+        admitted.read_set_signature.facts.as_ref(),
+        "a consumer adopts the warm result's entire dependency signature"
+    );
+
+    mh.upsert_base(dep, "export interface Props { a: number; }")
+        .unwrap();
+    let current = host.resolver_store_view_read().current().unwrap();
+    let ctx = HostResolverContext::from_current(
+        host,
+        &current,
+        Arc::new(CanonicalCompletionOverlay::new()),
+    );
+    let dispatch = ProjectSemanticDispatch::new(&ctx);
+    let facade = ComponentMetaResultRead::new(&dispatch, db, host.provenance());
+    let (rejected, finalise) = dispatch.traced_compute(|| facade.peek(&key, owner_hash));
+    assert!(
+        rejected.is_none(),
+        "the edited dependency rejects the candidate"
+    );
+    let FactReadSetFinalise::Ok(facts) = finalise else {
+        panic!("a rejected candidate leaves the consumer's trace untouched");
+    };
+    assert!(
+        facts.is_empty(),
+        "validation must precede dependency replay"
+    );
+}
