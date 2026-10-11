@@ -467,6 +467,7 @@
           "crates/verter_session/src/flow_completion_inventory_tests.rs",
           "crates/verter_session/src/flow_gap_retraction_tests.rs",
           "crates/verter_session/src/for_tests.rs",
+          "crates/verter_session/src/global_contributors/ac3_tests.rs",
           "crates/verter_session/src/host_compile_audit.rs",
           "crates/verter_session/src/host_flow_return_audit.rs",
           "crates/verter_session/src/host_manage/component_meta_entry.rs",
