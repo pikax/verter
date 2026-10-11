@@ -25,6 +25,8 @@ const UTIL: &str = "export const label = 'util'\nexport const msg = label\n";
 /// from every version the fixture opens a document at.
 const UTIL_VERSION: i32 = 7;
 const CODE_ACTION_TITLE: &str = "Rename across files";
+const CARRIER_PATH: &str = "src/Target.vue";
+const CARRIER: &str = "<script setup lang=\"ts\">\ndefineProps<{ label: string }>()\nconst msg = 'child'\n</script>\n<template>{{ msg }}</template>\n";
 
 /// How the client applies edits, as `initialize` negotiates it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -317,6 +319,277 @@ impl Scenario {
             &self.fixture.canonical,
         )
     }
+}
+
+async fn assert_closed_carrier_applicability(route: CrossFileRoute, api: bool) {
+    for client in [Client::DocumentChanges, Client::ChangesOnly] {
+        for barrier in [
+            None,
+            Some(RequestBarrier::ProviderDecode),
+            Some(RequestBarrier::Settlement),
+        ] {
+            let app = if api {
+                APP.replace("const msg", "import Target from './Target.vue'\nconst msg")
+            } else {
+                APP.to_string()
+            };
+            let fixture = Fixture::with_files(
+                &[(APP_PATH, "vue", &app), (CARRIER_PATH, "vue", CARRIER)],
+                verter_session::HostConfig::default(),
+            )
+            .await;
+            let util_uri = workspace_uri(&fixture.workspace_id, CARRIER_PATH);
+            let util_canonical = crate::documents::uri_to_canonical_id(&util_uri);
+            fixture.server().client_applies_versioned_edits.store(
+                client == Client::DocumentChanges,
+                std::sync::atomic::Ordering::Release,
+            );
+            fixture.server().ensure_current_file_synced(&util_uri).await;
+            let child_ctx = fixture
+                .server()
+                .type_provider_context(&util_uri)
+                .expect("child IDE context");
+            let path = if api {
+                fixture
+                    .server()
+                    .provider_sync_states
+                    .get(&util_canonical)
+                    .and_then(|state| state.api_path.clone())
+                    .expect("child API path")
+            } else {
+                child_ctx.tsx_path.clone()
+            };
+            let snapshot = fixture
+                .server()
+                .documents
+                .provider_surfaces()
+                .current_snapshot(&path)
+                .expect("child projection");
+            fixture
+                .provider
+                .accept_unrecorded_delivery(&path, &snapshot.provider_content);
+            fixture
+                .provider
+                .hold_engine_target(&path, &snapshot.provider_content);
+            let needle = if api { "label" } else { "msg" };
+            let source_start = CARRIER
+                .find(if api { "label: string" } else { "const msg" })
+                .expect("source token")
+                + if api { 0 } else { 6 };
+            let source_index = crate::documents::line_index::LineIndex::new_utf16(CARRIER);
+            let expected_range = Range {
+                start: source_index
+                    .offset_to_position(source_start as u32)
+                    .expect("source start"),
+                end: source_index
+                    .offset_to_position((source_start + needle.len()) as u32)
+                    .expect("source end"),
+            };
+            let start = if api {
+                let captured = fixture
+                    .server()
+                    .documents
+                    .provider_surfaces()
+                    .capture_current_carrier_api_set();
+                let crate::type_provider::merge::ApiSurfaceResolution::Vouched(ctx) =
+                    crate::provider_surface_store::classify_captured_api_surface(
+                        None,
+                        &captured,
+                        &path,
+                        PositionEncodingKind::UTF16,
+                    )
+                else {
+                    panic!("vouched API");
+                };
+                snapshot
+                    .provider_content
+                    .match_indices(needle)
+                    .find_map(|(offset, _)| {
+                        let range = crate::type_provider::merge::api_surface_range_to_carrier_range(
+                            offset as u32,
+                            (offset + needle.len()) as u32,
+                            &ctx.tsx_line_index,
+                            &ctx.mapper,
+                            &ctx.carrier_line_index,
+                            &ctx.carrier_line_index,
+                        );
+                        (range == Some(expected_range)).then_some(offset as u32)
+                    })
+                    .expect("mapped API property")
+            } else {
+                (snapshot
+                    .provider_content
+                    .find("const msg")
+                    .expect("IDE declaration")
+                    + 6) as u32
+            };
+            let end = start + needle.len() as u32;
+            fixture.server().documents.did_close(&util_uri);
+            let scenario = Scenario {
+                fixture,
+                util_uri,
+                util_canonical,
+            };
+            let ctx = scenario.fixture.context().await;
+            let position = scenario.fixture.position("{{ msg", 3);
+            let offset = scenario.fixture.tsx_offset(&ctx, position);
+            let at = match route {
+                CrossFileRoute::References => {
+                    scenario.fixture.provider.set_references(
+                        &ctx.tsx_path,
+                        offset,
+                        vec![wire::TypeLocation {
+                            path: path.clone(),
+                            start,
+                            end,
+                        }],
+                    );
+                    Range {
+                        start: position,
+                        end: position,
+                    }
+                }
+                CrossFileRoute::Rename => {
+                    scenario.fixture.provider.set_rename_locations(
+                        &ctx.tsx_path,
+                        offset,
+                        vec![wire::RenameLocation {
+                            path: path.clone(),
+                            start,
+                            end,
+                        }],
+                    );
+                    Range {
+                        start: position,
+                        end: position,
+                    }
+                }
+                CrossFileRoute::CodeAction => {
+                    let range = scenario.fixture.range("const msg");
+                    scenario.fixture.provider.set_code_actions(
+                        &ctx.tsx_path,
+                        scenario.fixture.tsx_offset(&ctx, range.start),
+                        scenario.fixture.tsx_offset(&ctx, range.end),
+                        vec![wire::TypeCodeAction {
+                            title: CODE_ACTION_TITLE.to_string(),
+                            kind: Some("quickfix".to_string()),
+                            edits: vec![wire::TypeCodeEdit {
+                                path: path.clone(),
+                                start,
+                                end,
+                                new_text: "renamedMsg".to_string(),
+                            }],
+                        }],
+                    );
+                    range
+                }
+                CrossFileRoute::Definition => unreachable!("closed carrier control routes"),
+            };
+            scenario.fixture.barriers.clear();
+            if let Some(barrier) = barrier {
+                let server = scenario.fixture.server().clone();
+                let canonical = scenario.util_canonical.clone();
+                scenario.fixture.barriers.arm(
+                    barrier,
+                    Arc::new(move |_| {
+                        server.documents.host().notify_upsert(
+                            &canonical,
+                            Arc::from(format!("<!-- moved -->\n{CARRIER}")),
+                        );
+                        Box::pin(async {})
+                    }),
+                );
+            }
+            let response: tower_lsp_server::jsonrpc::Result<Vec<(Uri, Range)>> = match route {
+                CrossFileRoute::References => {
+                    scenario.locations(route, at).await.map(|locations| {
+                        locations
+                            .into_iter()
+                            .map(|location| (location.uri, location.range))
+                            .collect()
+                    })
+                }
+                CrossFileRoute::Rename => scenario.rename(at).await.map(|edit| {
+                    edit.into_iter()
+                        .flat_map(|edit| delivered_target_ranges(&edit))
+                        .collect()
+                }),
+                CrossFileRoute::CodeAction => scenario.code_action(at).await.map(|actions| {
+                    actions
+                        .into_iter()
+                        .flat_map(|edit| delivered_target_ranges(&edit))
+                        .collect()
+                }),
+                CrossFileRoute::Definition => unreachable!("closed carrier control routes"),
+            };
+            assert_eq!(
+                &*scenario
+                    .fixture
+                    .server()
+                    .documents
+                    .provider_surfaces()
+                    .current_snapshot(&path)
+                    .expect("projection still current")
+                    .provider_content,
+                &*snapshot.provider_content,
+                "only the real carrier source moved"
+            );
+            let current = scenario
+                .fixture
+                .server()
+                .documents
+                .provider_surfaces()
+                .current_snapshot(&path)
+                .expect("retained projection");
+            assert_eq!(current.stamp.map_hash, snapshot.stamp.map_hash);
+            assert_eq!(&*current.carrier_source, CARRIER);
+            if barrier.is_some() {
+                assert_eq!(
+                    response.expect_err("changed closed carrier refuses").code,
+                    tower_lsp_server::jsonrpc::ErrorCode::ContentModified,
+                    "{client:?}/{route:?}/{barrier:?}/API={api}"
+                );
+            } else {
+                let targets = response.expect("unchanged closed carrier succeeds");
+                assert!(targets.iter().any(|(uri, range)| scenario.is_util(uri) && *range == expected_range), "{client:?}/{route:?}/API={api}: unchanged answer targets the closed carrier: {targets:?}");
+            }
+        }
+    }
+}
+
+fn delivered_target_ranges(edit: &WorkspaceEdit) -> Vec<(Uri, Range)> {
+    let mut targets: Vec<_> = document_edits(edit)
+        .into_iter()
+        .flat_map(|(uri, _, edits)| edits.into_iter().map(move |edit| (uri.clone(), edit.range)))
+        .collect();
+    if let Some(changes) = &edit.changes {
+        targets.extend(
+            changes
+                .iter()
+                .flat_map(|(uri, edits)| edits.iter().map(move |edit| (uri.clone(), edit.range))),
+        );
+    }
+    targets
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn closed_carrier_ide_references_validate_retained_source() {
+    assert_closed_carrier_applicability(CrossFileRoute::References, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn closed_carrier_api_rename_validates_retained_source() {
+    assert_closed_carrier_applicability(CrossFileRoute::Rename, true).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn closed_carrier_rename_validates_retained_source() {
+    assert_closed_carrier_applicability(CrossFileRoute::Rename, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn closed_carrier_code_action_validates_retained_source() {
+    assert_closed_carrier_applicability(CrossFileRoute::CodeAction, false).await;
 }
 
 /// Every `(target, version, edits)` the edit delivers as a `TextDocumentEdit`.
