@@ -6044,6 +6044,28 @@ pub enum QueryResult<T> {
     Error(QueryError),
 }
 
+/// Apply an execution abort without renaming a typed cancellation.
+///
+/// [`QueryError::Cancelled`] is the query protocol's cancellation. Replacing
+/// it with [`QueryError::ExecutionAborted`] changes the result callers match.
+/// Every other result yields to the abort, so a superseded or shut-down
+/// evaluation cannot be delivered as a value.
+pub(crate) fn result_under_execution_abort<T>(
+    result: QueryResult<T>,
+    abort: ExecutionAbort,
+) -> QueryResult<T> {
+    if matches!(
+        (&result, abort),
+        (
+            QueryResult::Error(QueryError::Cancelled),
+            ExecutionAbort::Cancelled
+        )
+    ) {
+        return result;
+    }
+    QueryResult::Error(QueryError::ExecutionAborted(abort))
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // Value domains
 // ──────────────────────────────────────────────────────────────────────────
@@ -10879,6 +10901,7 @@ mod tests {
         // ADD NEW VARIANTS HERE when extending `QueryError` (the sibling
         // classification fixture in `raise_sentinel.rs` carries the same nudge).
         let variants: Vec<QueryError> = vec![
+            QueryError::ExecutionAborted(ExecutionAbort::Cancelled),
             QueryError::Miss,
             QueryError::UnsupportedIntrinsic {
                 name: Arc::from("I"),

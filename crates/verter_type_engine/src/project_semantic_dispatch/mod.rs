@@ -2995,7 +2995,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // Compatibility quality can veto admission, but cannot validate delivery.
         output.cache_suppress |= output.projection_fact(key).is_err();
         if let Some(abort) = crate::request_context::current_execution_abort() {
-            output.result = QueryResult::Error(QueryError::ExecutionAborted(abort));
+            output.result =
+                crate::semantic_query::result_under_execution_abort(output.result, abort);
             output.flow_completion = None;
             output.cache_suppress = true;
             output.mark_partial();
@@ -3048,7 +3049,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
         }
         if let Some(abort) = crate::request_context::current_execution_abort() {
-            cache_read.value = QueryResult::Error(QueryError::ExecutionAborted(abort));
+            cache_read.value =
+                crate::semantic_query::result_under_execution_abort(cache_read.value, abort);
             cache_read.cache_suppress = true;
             cache_read.result_is_partial = true;
             cache_read.partial_reasons = cache_read.partial_reasons.union(abort.reason_class());

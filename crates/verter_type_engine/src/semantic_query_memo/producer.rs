@@ -837,7 +837,7 @@ impl<'s> ProducerLease<'s> {
         let partial_reasons = completeness.reasons();
         let result = prepared::enforce_projection_value_shape(prepared.key(), result);
         let result = match crate::request_context::current_execution_abort() {
-            Some(abort) => QueryResult::Error(QueryError::ExecutionAborted(abort)),
+            Some(abort) => crate::semantic_query::result_under_execution_abort(result, abort),
             None => result,
         };
         let aborted = match &result {
@@ -1011,14 +1011,11 @@ impl SettledProducer<'_> {
                     true
                 }
                 WarmPublishOutcome::Skipped => true,
-                WarmPublishOutcome::Aborted => {
-                    self.result = QueryResult::Error(QueryError::ExecutionAborted(
-                        crate::semantic_query::ExecutionAbort::Superseded,
-                    ));
-                    self.cache_suppress = true;
-                    self.result_is_partial = true;
-                    false
-                }
+                // The sweep withholds the warm entry and the prefix backfills.
+                // The owner's computed value is unchanged; a flow return drops
+                // that value later, in `complete`, because a superseded flow
+                // evaluation is not a deliverable result.
+                WarmPublishOutcome::Aborted => false,
             };
             if !self.admission_linearized && flags.is_cancelled() {
                 if let Some(slot) = capture.publication.as_deref_mut() {
@@ -1144,8 +1141,10 @@ impl SettledProducer<'_> {
 
         // Complete the flight and wake its subscribers. An abort planted by
         // an invalidation stays: subscribers that wake on it retry rather
-        // than read the stale result.
-        {
+        // than read the stale result. The owner still receives the computed
+        // value. A flow return is the exception: a superseded evaluation is
+        // not a deliverable flow result.
+        let flight_aborted = {
             let mut state = inflight.state.lock();
             if !state.aborted {
                 state.completed = Some(result.clone());
@@ -1161,24 +1160,34 @@ impl SettledProducer<'_> {
                 state.partial_reasons = partial_reasons;
                 state.walker_diagnostics = Some(Arc::clone(&walker_diagnostics));
                 state.cost_receipt = cost_receipt.clone();
+                false
             } else {
-                drop(state);
-                inflight.ready.notify_all();
-                store.retire_inflight(&prepared, &inflight, independent);
-                return CacheRead {
-                    value: QueryResult::Error(QueryError::ExecutionAborted(
-                        crate::semantic_query::ExecutionAbort::Superseded,
-                    )),
-                    dep_signature,
-                    walker_diagnostics,
-                    cache_suppress: true,
-                    result_is_partial: true,
-                    partial_reasons: partial_reasons.union(PartialReasonSet::SUPERSEDED_GENERATION),
-                    receipt: crate::semantic_query::ReadReceipt::Unpriced,
-                };
+                true
             }
-        }
+        };
         inflight.ready.notify_all();
+        if flight_aborted && matches!(prepared.key(), SemanticQueryKey::FlowReturn(_)) {
+            let value = match &result {
+                QueryResult::Error(error)
+                    if crate::semantic_query::ExecutionAbort::from_query_error(error).is_some() =>
+                {
+                    result
+                }
+                _ => QueryResult::Error(QueryError::ExecutionAborted(
+                    crate::semantic_query::ExecutionAbort::Superseded,
+                )),
+            };
+            store.retire_inflight(&prepared, &inflight, independent);
+            return CacheRead {
+                value,
+                dep_signature,
+                walker_diagnostics,
+                cache_suppress: true,
+                result_is_partial: true,
+                partial_reasons: partial_reasons.union(PartialReasonSet::SUPERSEDED_GENERATION),
+                receipt: crate::semantic_query::ReadReceipt::Unpriced,
+            };
+        }
 
         // Retire the flight whatever the admission decided: a flight left
         // behind would let a later claim — after an invalidation evicted the

@@ -4174,13 +4174,9 @@ fn semantic_graph_stats_cold_aborts_swept_increments_when_forced() {
     );
 
     assert!(
-        matches!(
-            result.value,
-            QueryResult::Error(QueryError::ExecutionAborted(
-                verter_type_engine::semantic_query::ExecutionAbort::Superseded
-            ))
-        ),
-        "invalidated evaluation cannot deliver its computed value",
+        matches!(result.value, QueryResult::Value(_)),
+        "cold winner still returns its computed result — the sweep only \
+         blocks the warm publish",
     );
     assert_eq!(
         call_count, 1,
@@ -4297,12 +4293,7 @@ fn cold_abort_trigger_is_scoped_to_its_store_not_process_global() {
             (QueryResult::Value(id), empty_signature())
         },
     );
-    assert!(matches!(
-        a_result.value,
-        QueryResult::Error(QueryError::ExecutionAborted(
-            verter_type_engine::semantic_query::ExecutionAbort::Superseded
-        ))
-    ));
+    assert!(matches!(a_result.value, QueryResult::Value(_)));
     assert_eq!(
         store_a.memo_entry_count(),
         0,
@@ -4775,12 +4766,7 @@ fn cold_abort_sweep_global_counter_increments_without_request_context() {
             (QueryResult::Value(id), empty_signature())
         },
     );
-    assert!(matches!(
-        result.value,
-        QueryResult::Error(QueryError::ExecutionAborted(
-            verter_type_engine::semantic_query::ExecutionAbort::Superseded
-        ))
-    ));
+    assert!(matches!(result.value, QueryResult::Value(_)));
 
     let snap = store.stats_snapshot();
     assert_eq!(
@@ -4834,12 +4820,7 @@ fn cold_abort_sweep_attributes_to_per_request_context() {
             (QueryResult::Value(id), empty_signature())
         },
     );
-    assert!(matches!(
-        result.value,
-        QueryResult::Error(QueryError::ExecutionAborted(
-            verter_type_engine::semantic_query::ExecutionAbort::Superseded
-        ))
-    ));
+    assert!(matches!(result.value, QueryResult::Value(_)));
 
     let snap = store.stats_snapshot();
     assert_eq!(
