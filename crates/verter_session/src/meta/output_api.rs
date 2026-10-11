@@ -6,7 +6,46 @@
 
 #[cfg(test)]
 use super::PAYLOAD_ITEM_COMPLETENESS_PROBE;
-use super::{component_meta_resolution_budget_error, MetaError, MetaSession};
+use super::{
+    component_meta_evaluated_budget_error, component_meta_resolution_budget_error, MetaError,
+    MetaSession,
+};
+
+/// The cold payload path returns [`MetaError::Host`] for a fatal symbolic
+/// expansion budget. Replay must return that same error before it encodes
+/// the recovery as a successful payload.
+fn retained_payload_budget_error(
+    host: &crate::VerterHost,
+    canonical: &str,
+    retained: &crate::component_meta_result_db::ComponentMetaRetainedRefusal<
+        crate::component_meta_cached_result::CachedComponentMetaResult,
+    >,
+) -> Option<MetaError> {
+    let cached = &*retained.recovery;
+    if let Some(snapshot) =
+        crate::host_manage::component_meta_entry_resolution::reload_component_meta_template_snapshot(
+            host,
+            cached.canonical_id.as_ref(),
+            cached.whole_hash,
+        )
+    {
+        // Rehydrate carries the template. The retained ledger status is the
+        // refusal's completeness; the template's own copy is not.
+        let mut resolved = cached.resolution_template.rehydrate(snapshot, 0);
+        resolved.completeness = retained.completeness;
+        resolved.synthesis_should_suppress = retained.completeness.is_partial();
+        return component_meta_resolution_budget_error(
+            canonical,
+            Some(&cached.analysis),
+            &resolved,
+        );
+    }
+    component_meta_evaluated_budget_error(
+        canonical,
+        Some(&cached.analysis),
+        cached.resolution_template.evaluated_types.as_ref(),
+    )
+}
 
 impl MetaSession {
     /// Output-envelope scalar through this session's overlay view: the
@@ -217,6 +256,9 @@ impl MetaSession {
         if let Some(retained) =
             host.replay_component_meta_refusal_with_view(canonical.as_str(), view, fixed)
         {
+            if let Some(err) = retained_payload_budget_error(host, canonical.as_str(), &retained) {
+                return Err(err);
+            }
             let overlay =
                 std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
             let session_ctx = crate::resolver_core::SessionResolverContext::from_cold_seed(

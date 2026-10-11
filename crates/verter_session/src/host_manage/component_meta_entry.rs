@@ -807,6 +807,18 @@ impl VerterHost {
             }
         };
 
+        // The request exists before the warm probe. A retained refusal
+        // replays its request spend only when a request is at its entry
+        // state; installing after the probe drops that replay and the cold
+        // producer runs again. Install-if-none, so a batch or outer context
+        // keeps its own request. The same guard arms the projection-budget
+        // fuse across the cold resolve and the fallthrough extract.
+        let _view_budget_ctx_guard = self.install_request_budget_context_if_none(
+            self.next_request_id(),
+            canonical.as_str(),
+            self.config.audit_timing_capture && self.config.audit_enabled,
+        );
+
         // Try the view-aware warm cache fast path.
         if let Some(warm) =
             self.try_component_meta_cache_hit_with_view_inner(canonical.as_str(), view, fixed)
@@ -820,21 +832,6 @@ impl VerterHost {
             }
             return Ok(Some(warm));
         }
-
-        // Arm the projection-budget fuse + the per-cold-compute completeness
-        // rail across the FULL cold body (resolve AND the fallthrough
-        // extract). Without this the view-aware path ran the fallthrough
-        // extract context-free — the inner `resolve_component_meta_with_*`
-        // install-if-none dropped before the extract, so the `[P0]` op-budget
-        // fuse was inert here. Install-if-none (never install-always), so a
-        // batch / outer-context caller keeps its context and the inner
-        // resolve install no-ops. Matches the inner audited id source so the
-        // resolve-phase audit is unchanged.
-        let _view_budget_ctx_guard = self.install_request_budget_context_if_none(
-            self.next_request_id(),
-            canonical.as_str(),
-            self.config.audit_timing_capture && self.config.audit_enabled,
-        );
 
         // Cold build. The view's overlay content (when present) has
         // been pre-warmed into `FileArtifactStore` under the overlay's
@@ -1462,29 +1459,20 @@ impl VerterHost {
         // (certified divergence, this operation profile, or an isolated
         // root) is retained with its original status. Every other partial,
         // including a missing input or an abort, stays return-only.
-        let refusal_class = if final_completeness.is_partial() {
-            match crate::component_meta_result_db::classify_final_component_retention(
-                final_completeness,
-                admission,
-            ) {
-                crate::component_meta_result_db::FinalComponentRetention::Retain(class) => {
-                    Some(class)
-                }
-                crate::component_meta_result_db::FinalComponentRetention::Complete
-                | crate::component_meta_result_db::FinalComponentRetention::NotAdmitted => {
-                    #[cfg(feature = "semantic-observe")]
-                    tracing::debug!(
-                        target: "verter::audit::record",
-                        file = %canonical,
-                        "skipping component-meta cache promotion (view-aware path): partial result is not an eligible refusal",
-                    );
-                    return crate::component_meta_result_db::ComponentMetaPublishDecision::return_only(
-                        verter_audit::NonAdmissionReason::PartialResult,
-                    );
-                }
+        let refusal_class = match component_meta_refusal_gate(final_completeness, admission) {
+            ComponentMetaRefusalGate::Publish => None,
+            ComponentMetaRefusalGate::Retain(class) => Some(class),
+            ComponentMetaRefusalGate::Ineligible => {
+                #[cfg(feature = "semantic-observe")]
+                tracing::debug!(
+                    target: "verter::audit::record",
+                    file = %canonical,
+                    "skipping component-meta cache promotion (view-aware path): partial result is not an eligible refusal",
+                );
+                return crate::component_meta_result_db::ComponentMetaPublishDecision::return_only(
+                    verter_audit::NonAdmissionReason::PartialResult,
+                );
             }
-        } else {
-            None
         };
         // Publish fence: a superseded or non-current snapshot never warms
         // the shared cache.
@@ -1510,29 +1498,14 @@ impl VerterHost {
             canonical_id: Arc::from(canonical),
             whole_hash,
         };
-        if let Some(class) = refusal_class {
-            let Some(status) = crate::component_meta_result_db::final_component_refusal_status(
-                final_completeness.reasons(),
-            ) else {
-                return crate::component_meta_result_db::ComponentMetaPublishDecision::return_only(
-                    verter_audit::NonAdmissionReason::PartialResult,
-                );
-            };
-            return crate::component_meta_result_db::ComponentMetaPublishDecision::retain_refusal(
-                key,
-                whole_hash,
-                crate::component_meta_result_db::refusal_identity_for(class, refusal_query),
-                status,
-                final_completeness,
-                Arc::new(cached),
-                validated_at_generation,
-            );
-        }
-        crate::component_meta_result_db::ComponentMetaPublishDecision::publish(
+        publish_or_retain_component_meta(
+            refusal_class,
             key,
             whole_hash,
-            Arc::new(cached),
+            cached,
             validated_at_generation,
+            final_completeness,
+            refusal_query,
         )
     }
 
@@ -1568,29 +1541,20 @@ impl VerterHost {
         // Same classification as the view-aware decision: complete facts
         // publish, eligible refusals are retained, and every other partial
         // stays return-only.
-        let refusal_class = if final_completeness.is_partial() {
-            match crate::component_meta_result_db::classify_final_component_retention(
-                final_completeness,
-                admission,
-            ) {
-                crate::component_meta_result_db::FinalComponentRetention::Retain(class) => {
-                    Some(class)
-                }
-                crate::component_meta_result_db::FinalComponentRetention::Complete
-                | crate::component_meta_result_db::FinalComponentRetention::NotAdmitted => {
-                    #[cfg(feature = "semantic-observe")]
-                    tracing::debug!(
-                        target: "verter::audit::record",
-                        file = %canonical,
-                        "skipping component-meta cache promotion: partial result is not an eligible refusal",
-                    );
-                    return crate::component_meta_result_db::ComponentMetaPublishDecision::return_only(
-                        verter_audit::NonAdmissionReason::PartialResult,
-                    );
-                }
+        let refusal_class = match component_meta_refusal_gate(final_completeness, admission) {
+            ComponentMetaRefusalGate::Publish => None,
+            ComponentMetaRefusalGate::Retain(class) => Some(class),
+            ComponentMetaRefusalGate::Ineligible => {
+                #[cfg(feature = "semantic-observe")]
+                tracing::debug!(
+                    target: "verter::audit::record",
+                    file = %canonical,
+                    "skipping component-meta cache promotion: partial result is not an eligible refusal",
+                );
+                return crate::component_meta_result_db::ComponentMetaPublishDecision::return_only(
+                    verter_audit::NonAdmissionReason::PartialResult,
+                );
             }
-        } else {
-            None
         };
         // Publish fence: recheck the seed view's validation token against
         // the live host immediately before promotion, AND decline a
@@ -1621,29 +1585,14 @@ impl VerterHost {
             canonical_id: Arc::from(canonical),
             whole_hash,
         };
-        if let Some(class) = refusal_class {
-            let Some(status) = crate::component_meta_result_db::final_component_refusal_status(
-                final_completeness.reasons(),
-            ) else {
-                return crate::component_meta_result_db::ComponentMetaPublishDecision::return_only(
-                    verter_audit::NonAdmissionReason::PartialResult,
-                );
-            };
-            return crate::component_meta_result_db::ComponentMetaPublishDecision::retain_refusal(
-                key,
-                whole_hash,
-                crate::component_meta_result_db::refusal_identity_for(class, refusal_query),
-                status,
-                final_completeness,
-                Arc::new(cached),
-                validated_at_generation,
-            );
-        }
-        crate::component_meta_result_db::ComponentMetaPublishDecision::publish(
+        publish_or_retain_component_meta(
+            refusal_class,
             key,
             whole_hash,
-            Arc::new(cached),
+            cached,
             validated_at_generation,
+            final_completeness,
+            refusal_query,
         )
     }
 
@@ -1693,6 +1642,72 @@ impl VerterHost {
 #[cfg(test)]
 #[path = "component_meta_entry_tests.rs"]
 mod component_meta_entry_tests;
+
+/// Classification shared by the view-aware and base publish decisions.
+/// The debug line stays at each caller: the two messages differ.
+enum ComponentMetaRefusalGate {
+    Publish,
+    Retain(crate::component_meta_result_db::ComponentMetaRefusalClass),
+    Ineligible,
+}
+
+fn component_meta_refusal_gate(
+    final_completeness: verter_type_engine::semantic_query::ResultCompleteness,
+    admission: crate::component_meta_result_db::FinalComponentAdmissionProof,
+) -> ComponentMetaRefusalGate {
+    if !final_completeness.is_partial() {
+        return ComponentMetaRefusalGate::Publish;
+    }
+    match crate::component_meta_result_db::classify_final_component_retention(
+        final_completeness,
+        admission,
+    ) {
+        crate::component_meta_result_db::FinalComponentRetention::Retain(class) => {
+            ComponentMetaRefusalGate::Retain(class)
+        }
+        crate::component_meta_result_db::FinalComponentRetention::Complete
+        | crate::component_meta_result_db::FinalComponentRetention::NotAdmitted => {
+            ComponentMetaRefusalGate::Ineligible
+        }
+    }
+}
+
+fn publish_or_retain_component_meta(
+    refusal_class: Option<crate::component_meta_result_db::ComponentMetaRefusalClass>,
+    key: crate::component_meta_result_db::ComponentMetaResultKey,
+    whole_hash: verter_session_query::analysis::types::Hash16,
+    cached: crate::component_meta_cached_result::CachedComponentMetaResult,
+    validated_at_generation: u64,
+    final_completeness: verter_type_engine::semantic_query::ResultCompleteness,
+    refusal_query: &crate::component_meta_result_db::ComponentMetaRefusalQuery,
+) -> crate::component_meta_result_db::ComponentMetaPublishDecision<
+    crate::component_meta_cached_result::CachedComponentMetaResult,
+> {
+    if let Some(class) = refusal_class {
+        let Some(status) = crate::component_meta_result_db::final_component_refusal_status(
+            final_completeness.reasons(),
+        ) else {
+            return crate::component_meta_result_db::ComponentMetaPublishDecision::return_only(
+                verter_audit::NonAdmissionReason::PartialResult,
+            );
+        };
+        return crate::component_meta_result_db::ComponentMetaPublishDecision::retain_refusal(
+            key,
+            whole_hash,
+            crate::component_meta_result_db::refusal_identity_for(class, refusal_query),
+            status,
+            final_completeness,
+            std::sync::Arc::new(cached),
+            validated_at_generation,
+        );
+    }
+    crate::component_meta_result_db::ComponentMetaPublishDecision::publish(
+        key,
+        whole_hash,
+        std::sync::Arc::new(cached),
+        validated_at_generation,
+    )
+}
 
 /// A cold computation that produced no value: absent, unless its request was
 /// cancelled, in which case the missing value is the abort and nothing is

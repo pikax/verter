@@ -10,7 +10,11 @@ use verter_type_engine::resolver_core::fact_validation_port::FactValidation;
 
 #[test]
 fn captured_component_publication_fence_refuses_stale_and_unproven_bases() {
-    for (is_current, edit_after_capture) in [(true, true), (false, false)] {
+    for (is_current, edit_after_capture, admits) in [
+        (true, true, false),
+        (false, false, false),
+        (true, false, true),
+    ] {
         let host = VerterHost::new_standalone(HostConfig::default());
         let owner = "/src/Owner.vue";
         let dep = "/src/dep.ts";
@@ -60,6 +64,12 @@ fn captured_component_publication_fence_refuses_stale_and_unproven_bases() {
             || {
                 verter_type_engine::resolver_core::resolver_context::observe_fan_out(
                     FactVersionRef::FileWholeHash {
+                        canonical_id: owner.into(),
+                        hash: owner_hash,
+                    },
+                );
+                verter_type_engine::resolver_core::resolver_context::observe_fan_out(
+                    FactVersionRef::FileWholeHash {
                         canonical_id: dep.into(),
                         hash: dep_hash,
                     },
@@ -76,11 +86,19 @@ fn captured_component_publication_fence_refuses_stale_and_unproven_bases() {
             },
         );
         assert_eq!(value, 45, "the caller retains its computed value");
-        assert!(
-            admitted.is_none(),
-            "stale or unproven captured bases must not publish"
-        );
-        assert!(db.is_empty());
+        if admits {
+            assert!(
+                admitted.is_some(),
+                "a current capture with an unchanged dependency publishes"
+            );
+            assert!(!db.is_empty());
+        } else {
+            assert!(
+                admitted.is_none(),
+                "stale or unproven captured bases must not publish"
+            );
+            assert!(db.is_empty());
+        }
         if !is_current {
             assert!(
                 ctx.publication_input_fingerprint().is_none(),

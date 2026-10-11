@@ -804,6 +804,18 @@ impl VerterHost {
         Ok(output)
     }
 
+    /// Published-fact summary, plus an abort the active compute scope
+    /// observed. Any other ambient reason stays out of the summary.
+    fn completeness_of_published(published: &[FactStatus]) -> ResultCompleteness {
+        let summary = summarize(published.iter());
+        let observed = verter_type_engine::request_context::current_cold_compute_completeness();
+        if ExecutionAbort::observed_in(observed).is_some() {
+            summary.merge(observed)
+        } else {
+            summary
+        }
+    }
+
     fn compute_vue_macro_codegen_output(
         &self,
         ctx: &(dyn ResolverContext<crate::resolver_core::HostCapabilities> + Sync),
@@ -828,8 +840,11 @@ impl VerterHost {
                 let mut state = self.produce_vue_macro_codegen_inner(ctx, owner_canonical, demand);
                 // The artifact summary is the statuses of the facts this
                 // produce actually published. It does not authorize a fact,
-                // and it is not a filter over the ambient reason bag.
-                state.completeness = summarize(state.published.iter());
+                // and it is not a filter over the ambient reason bag. An
+                // abort is not one of those facts, but it still refuses the
+                // bundle: the producer maps it onto a fault row, and
+                // `ExecutionAbort::observed_in` only reads the abort class.
+                state.completeness = Self::completeness_of_published(&state.published);
                 state
             },
         );
@@ -2096,5 +2111,64 @@ fn runtime_outcome_fact(outcome: &MacroRuntimeOutcome) -> FactStatus {
             _ => unavailable_fact(PartialReason::MissingSemanticNodeData),
         },
         MacroRuntimeOutcome::Unsupported(_) => unavailable_fact(PartialReason::SemanticQueryFault),
+    }
+}
+
+#[cfg(test)]
+mod published_completeness_tests {
+    use super::{unavailable_fact, VerterHost};
+    use verter_type_engine::request_context::{
+        fold_result_completeness, ColdComputeCompletenessScope,
+    };
+    use verter_type_engine::semantic_query::{ExecutionAbort, FactStatus, PartialReasonSet};
+
+    #[test]
+    fn an_abort_joins_the_published_summary_and_other_ambient_reasons_do_not() {
+        let fault = unavailable_fact(super::PartialReason::SemanticQueryFault);
+
+        let _scope = ColdComputeCompletenessScope::enter();
+        fold_result_completeness(
+            verter_type_engine::semantic_query::ResultCompleteness::partial(
+                PartialReasonSet::CANCELLED,
+            ),
+        );
+        let cancelled = VerterHost::completeness_of_published(&[fault]);
+        assert_eq!(
+            ExecutionAbort::observed_in(cancelled),
+            Some(ExecutionAbort::Cancelled)
+        );
+        assert!(cancelled
+            .reasons()
+            .contains(PartialReasonSet::SEMANTIC_QUERY_FAULT));
+        drop(_scope);
+
+        let _scope = ColdComputeCompletenessScope::enter();
+        fold_result_completeness(
+            verter_type_engine::semantic_query::ResultCompleteness::partial(
+                PartialReasonSet::BUDGET_EXCEEDED,
+            ),
+        );
+        let ambient = VerterHost::completeness_of_published(&[fault]);
+        assert!(ExecutionAbort::observed_in(ambient).is_none());
+        assert!(ambient
+            .reasons()
+            .contains(PartialReasonSet::SEMANTIC_QUERY_FAULT));
+        assert!(!ambient
+            .reasons()
+            .contains(PartialReasonSet::BUDGET_EXCEEDED));
+        drop(_scope);
+
+        let _scope = ColdComputeCompletenessScope::enter();
+        fold_result_completeness(
+            verter_type_engine::semantic_query::ResultCompleteness::partial(
+                PartialReasonSet::SUPERSEDED_GENERATION,
+            ),
+        );
+        let superseded = VerterHost::completeness_of_published(&[FactStatus::Complete]);
+        assert_eq!(
+            ExecutionAbort::observed_in(superseded),
+            Some(ExecutionAbort::Superseded)
+        );
+        drop(_scope);
     }
 }

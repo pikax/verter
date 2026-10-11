@@ -51,6 +51,7 @@ impl ComponentMetaEvidence {
             divergence_certificate: self.divergence_certificate,
             schedule_cut: self.schedule_cut,
             entered_isolated: query.entered_isolated && self.spent_alone && !self.schedule_cut,
+            request_spend_owned: self.spent_alone,
         }
     }
 }
@@ -1313,6 +1314,58 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispat
         Some(Arc::new(candidate.value.clone()))
     }
 
+    /// Whether this compute may still be stored: the request is live, the
+    /// schema and generation match, and the owner's whole-hash fact is the
+    /// one this evidence recorded.
+    fn component_meta_fence_holds<P>(
+        &self,
+        db: &crate::component_meta_result_db::ComponentMetaResultDb<P>,
+        key: &crate::component_meta_result_db::ComponentMetaResultKey,
+        owner_whole_hash: verter_session_query::analysis::types::Hash16,
+        evidence: &ComponentMetaEvidence,
+        generation: u64,
+    ) -> bool {
+        !self.snapshot.flags().is_cancelled()
+            && db.is_current_schema()
+            && generation == evidence.generation
+            && generation == self.current_project_generation()
+            && evidence.external_fingerprint == self.ctx.current_external_supersession_fingerprint()
+            && self
+                .ctx
+                .authoritative_current_content_hash(&key.owner_canonical)
+                == Some(owner_whole_hash)
+            && evidence.facts.iter().any(|fact| {
+                matches!(
+                    fact,
+                    FactVersionRef::FileWholeHash { canonical_id, hash }
+                        if canonical_id.as_str() == key.owner_canonical.as_ref()
+                            && *hash == owner_whole_hash
+                )
+            })
+    }
+
+    /// Signature stored with a candidate or a refusal. The owner's route
+    /// fact is not part of it: both admission paths drop the same fact.
+    fn retained_signature(evidence: &ComponentMetaEvidence, owner: &str) -> ReadSetSignature {
+        let facts = evidence
+            .facts
+            .iter()
+            .filter(|fact| {
+                !matches!(
+                    fact,
+                    FactVersionRef::DerivedFactHash {
+                        canonical_id,
+                        kind: verter_session_query::facts::fact_cache::DerivedFactKind::Route,
+                        ..
+                    } if canonical_id.as_str() == owner
+                )
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+            .into();
+        ReadSetSignature::new(facts)
+    }
+
     /// Admit a traced final result only while its complete external-input
     /// publication fence still holds. Warm reads validate its precise facts.
     pub fn admit_component_meta_result<P: verter_session_query::retention::RetainedFootprint>(
@@ -1324,26 +1377,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispat
         payload: Arc<P>,
         generation: u64,
     ) -> Option<Arc<crate::component_meta_result_db::ComponentMetaResultEntry<P>>> {
-        if self.snapshot.flags().is_cancelled()
-            || !db.is_current_schema()
-            || generation != evidence.generation
-            || generation != self.current_project_generation()
-            || evidence.external_fingerprint != self.ctx.current_external_supersession_fingerprint()
-            || self.ctx.authoritative_current_content_hash(&key.owner_canonical) != Some(owner_whole_hash)
-            || !evidence.facts.iter().any(|fact| matches!(fact,
-                FactVersionRef::FileWholeHash { canonical_id, hash }
-                    if canonical_id.as_str() == key.owner_canonical.as_ref() && *hash == owner_whole_hash
-            ))
-        {
+        if !self.component_meta_fence_holds(db, &key, owner_whole_hash, &evidence, generation) {
             return None;
         }
-        let facts = evidence.facts.iter().filter(|fact| !matches!(fact,
-            FactVersionRef::DerivedFactHash { canonical_id, kind: verter_session_query::facts::fact_cache::DerivedFactKind::Route, .. }
-                if canonical_id == key.owner_canonical.as_ref()
-        )).cloned().collect::<Vec<_>>().into();
         let entry = Arc::new(crate::component_meta_result_db::ComponentMetaResultEntry {
             payload,
-            read_set_signature: ReadSetSignature::new(facts),
+            read_set_signature: Self::retained_signature(&evidence, key.owner_canonical.as_ref()),
             validated_at_generation: generation,
         });
         // A cold trace can observe a freshly completed dependency that the
@@ -1477,50 +1516,18 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispat
         generation: u64,
     ) -> Option<crate::component_meta_result_db::ComponentMetaRetainedRefusal<P>> {
         if status.is_complete()
-            || self.snapshot.flags().is_cancelled()
-            || !db.is_current_schema()
-            || generation != evidence.generation
-            || generation != self.current_project_generation()
-            || evidence.external_fingerprint != self.ctx.current_external_supersession_fingerprint()
-            || self
-                .ctx
-                .authoritative_current_content_hash(&key.owner_canonical)
-                != Some(owner_whole_hash)
-            || !evidence.facts.iter().any(|fact| {
-                matches!(
-                    fact,
-                    FactVersionRef::FileWholeHash { canonical_id, hash }
-                        if canonical_id.as_str() == key.owner_canonical.as_ref()
-                            && *hash == owner_whole_hash
-                )
-            })
+            || !self.component_meta_fence_holds(db, &key, owner_whole_hash, &evidence, generation)
         {
             return None;
         }
-        let facts = evidence
-            .facts
-            .iter()
-            .filter(|fact| {
-                !matches!(
-                    fact,
-                    FactVersionRef::DerivedFactHash {
-                        canonical_id,
-                        kind: verter_session_query::facts::fact_cache::DerivedFactKind::Route,
-                        ..
-                    } if canonical_id == key.owner_canonical.as_ref()
-                )
-            })
-            .cloned()
-            .collect::<Vec<_>>()
-            .into();
         db.seal_refusal(
-            key,
+            key.clone(),
             owner_whole_hash,
             identity,
             status,
             completeness,
             recovery,
-            ReadSetSignature::new(facts),
+            Self::retained_signature(&evidence, key.owner_canonical.as_ref()),
             generation,
             evidence.effects,
         )

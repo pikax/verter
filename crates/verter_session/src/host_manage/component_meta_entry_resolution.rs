@@ -928,7 +928,7 @@ impl VerterHost {
 }
 
 /// Select the exact currently authoritative artifact at the warm template reload boundary.
-fn reload_component_meta_template_snapshot(
+pub(crate) fn reload_component_meta_template_snapshot(
     host: &crate::VerterHost,
     canonical_id: &str,
     whole_hash: verter_session_query::analysis::types::Hash16,

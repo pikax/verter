@@ -1758,6 +1758,101 @@ mod tests {
     }
 
     #[test]
+    fn a_sibling_spend_is_not_an_operation_profile() {
+        use std::sync::Barrier;
+        use std::thread;
+        use verter_type_engine::request_context::{
+            current_request_budget, RequestContext, RequestContextGuard,
+        };
+        use verter_type_engine::semantic_query::{PartialReasonSet, ResultCompleteness};
+
+        let canonical = "/w/sibling-operation.vue";
+        let (host, owner_hash) = indexed_vue(canonical);
+        let db: ComponentMetaResultDb<u32> = ComponentMetaResultDb::new();
+        let dispatch =
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+        let publish =
+            crate::component_meta_result_admission::ComponentMetaResultPublish::new(&dispatch, &db);
+        let read = crate::component_meta_result_admission::ComponentMetaResultRead::new(
+            &dispatch,
+            &db,
+            host.provenance().as_ref(),
+        );
+        let budget = ResultCompleteness::partial(PartialReasonSet::BUDGET_EXCEEDED);
+        let key = mk_result_key(canonical, [9u8; 16]);
+        let install = |id: u64| {
+            RequestContextGuard::install(RequestContext::with_kind_timing_and_projection_budget(
+                id,
+                Arc::from(canonical),
+                verter_audit::RequestKind::ComponentMeta,
+                false,
+                false,
+                None,
+                8,
+            ))
+        };
+
+        let _contended = install(1);
+        let query = dispatch.component_meta_refusal_query(canonical);
+        let start = Arc::new(Barrier::new(2));
+        let spent = Arc::new(Barrier::new(2));
+        let sibling_budget = current_request_budget().expect("request");
+        let start_s = Arc::clone(&start);
+        let spent_s = Arc::clone(&spent);
+        let sibling = thread::spawn(move || {
+            start_s.wait();
+            sibling_budget.check_projection_op_count();
+            spent_s.wait();
+        });
+        let runs = Arc::new(AtomicU64::new(0));
+        let runs_c = Arc::clone(&runs);
+        publish.compute_and_admit(
+            canonical,
+            "contended-operation",
+            || {
+                start.wait();
+                spent.wait();
+                sibling.join().expect("sibling");
+                runs_c.fetch_add(1, Ordering::SeqCst);
+                observe_owner(canonical, owner_hash);
+                1u32
+            },
+            |_, evidence| {
+                let proof = dispatch.component_meta_admission_proof(&query, evidence);
+                assert!(
+                    !proof.request_spend_owned,
+                    "a sibling spend is not this compute's allowance"
+                );
+                assert_eq!(
+                    classify_final_component_retention(budget, proof),
+                    FinalComponentRetention::NotAdmitted
+                );
+                ComponentMetaPublishDecision::no_value()
+            },
+        );
+        assert!(read.replay_refusal(&key, owner_hash, &query).is_none());
+        drop(_contended);
+
+        let _again = install(2);
+        let again = Arc::clone(&runs);
+        publish.compute_and_admit(
+            canonical,
+            "recompute-operation",
+            || {
+                again.fetch_add(1, Ordering::SeqCst);
+                observe_owner(canonical, owner_hash);
+                2u32
+            },
+            |_, _evidence| ComponentMetaPublishDecision::no_value(),
+        );
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            2,
+            "an operation refusal the compute did not own recomputes"
+        );
+    }
+
+    #[test]
     fn a_producer_certificate_retains_and_an_uncertified_recursion_does_not() {
         use verter_type_engine::project_semantic_dispatch::connected_demand::{
             note_component_meta_divergence_for_test, note_component_meta_schedule_cut_for_test,
@@ -2020,5 +2115,130 @@ mod tests {
             assert!(trip.contains(PartialReasonSet::PROJECTION_WORK_LIMIT));
             assert!(root.try_charge().is_err());
         });
+    }
+
+    #[test]
+    fn retained_symbolic_budget_replay_is_a_host_error_and_skips_the_producer() {
+        use std::sync::atomic::Ordering::Relaxed;
+        use verter_session_query::analysis::type_expand::{
+            ExpandedMacroObjectShape, ExpandedObjectShape, ExpansionDiagnostic, ExpansionResult,
+            ExpansionStopReason,
+        };
+        use verter_type_engine::project_semantic_dispatch::memo::ComponentMetaTrace;
+        use verter_type_engine::request_context::current_request_budget;
+        use verter_type_engine::semantic_query::{PartialReasonSet, ResultCompleteness};
+
+        let canonical = "/w/symbolic-budget-replay.vue";
+        let (host, owner_hash) = indexed_vue(canonical);
+        let (mut analysis, resolved) = host
+            .get_component_meta_with_resolution(canonical)
+            .expect("indexed vue resolves");
+        analysis.props.clear();
+        analysis.events.clear();
+        analysis.slots.clear();
+        analysis.models.clear();
+        analysis.exposed.clear();
+        let mut template =
+            crate::component_meta_cached_result::ResolutionTemplate::from_resolved_state(&resolved);
+        let mut evaluated = template.evaluated_types.take().unwrap_or_default();
+        evaluated.define_slots.push(ExpandedMacroObjectShape {
+            macro_index: 0,
+            result: ExpansionResult::partial(
+                ExpandedObjectShape::empty(),
+                vec![ExpansionDiagnostic {
+                    reason: ExpansionStopReason::BudgetExceeded,
+                    context: String::new(),
+                    property_name: None,
+                }],
+            ),
+        });
+        template.evaluated_types = Some(evaluated);
+        let key = host.component_meta_result_key(
+            canonical,
+            &crate::host_manage::ComponentMetaOptions::default(),
+        );
+        let db = host.project_type_store().component_meta_results();
+        assert!(
+            db.remove(&key, owner_hash).is_some(),
+            "the successful resolve must not mask the planted refusal"
+        );
+
+        let _request =
+            host.install_request_budget_context_if_none(host.next_request_id(), canonical, false);
+        let dispatch =
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+        let query = dispatch.component_meta_refusal_query(canonical);
+        let budget = ResultCompleteness::partial(PartialReasonSet::BUDGET_EXCEEDED);
+        let status = final_component_refusal_status(budget.reasons()).expect("refusal status");
+        let generation = dispatch.current_project_generation();
+        let (_, trace) = dispatch.traced_component_meta_compute(canonical, || {
+            current_request_budget()
+                .expect("request")
+                .check_projection_op_count();
+        });
+        let ComponentMetaTrace::Observed(evidence) = trace else {
+            panic!("the owner whole-hash observation must be cacheable");
+        };
+        let cached = crate::component_meta_cached_result::CachedComponentMetaResult {
+            analysis,
+            resolution_template: template,
+            canonical_id: Arc::from(canonical),
+            whole_hash: owner_hash,
+        };
+        assert!(
+            dispatch
+                .admit_component_meta_refusal(
+                    db,
+                    key,
+                    owner_hash,
+                    evidence,
+                    refusal_identity_for(ComponentMetaRefusalClass::OperationProfile, &query),
+                    status,
+                    budget,
+                    Arc::new(cached),
+                    generation,
+                )
+                .is_some(),
+            "the planted symbolic-budget refusal must seal"
+        );
+        drop(_request);
+
+        let cold_before =
+            crate::host_manage::component_meta_entry::COLD_BODY_ENTRIES.with(|count| count.get());
+        let encodes_before = host.provenance().payload_encodes.load(Relaxed);
+        let view = crate::session_view::HostViewRef::new(&host);
+        let delivery = host
+            .get_component_meta_via_view(canonical, &view)
+            .expect("the view-aware probe replays the retained refusal");
+        assert!(
+            !delivery.is_complete(),
+            "a retained operation refusal is not a successful value"
+        );
+        assert_eq!(
+            crate::host_manage::component_meta_entry::COLD_BODY_ENTRIES.with(|count| count.get()),
+            cold_before,
+            "installing the request before the view probe replays the spend"
+        );
+
+        let project = crate::meta::MetaProject::new(host);
+        let session = project.open_session_batch().expect("session");
+        for _ in 0..2 {
+            match session.get_component_meta_payload(canonical, |_| vec![1]) {
+                Err(crate::meta::MetaError::Host(message)) => {
+                    assert!(message.contains("symbolic expansion budget"), "{message}");
+                }
+                other => panic!("replay must be the symbolic budget host error, got {other:?}"),
+            }
+        }
+        assert_eq!(
+            project.host().provenance().payload_encodes.load(Relaxed),
+            encodes_before,
+            "a budget refusal is not encoded as a successful payload"
+        );
+        assert_eq!(
+            crate::host_manage::component_meta_entry::COLD_BODY_ENTRIES.with(|count| count.get()),
+            cold_before,
+            "payload replay must not enter the cold producer"
+        );
     }
 }

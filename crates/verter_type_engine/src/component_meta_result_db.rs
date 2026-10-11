@@ -273,12 +273,18 @@ pub enum FinalComponentRetention {
 /// divergence requires `divergence_certificate`. A schedule cut is the
 /// wait cycle's accounting signal and admits nothing. `entered_isolated`
 /// is true only when the demand entered alone and its own spend was the
-/// request's spend.
+/// request's spend. `request_spend_owned` is that same ownership for an
+/// operation-profile refusal: a sibling thread's spend is not this
+/// compute's allowance, and the refusal is not retained.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FinalComponentAdmissionProof {
     pub divergence_certificate: bool,
     pub schedule_cut: bool,
     pub entered_isolated: bool,
+    /// This compute's recorded request spend was its own, or there was no
+    /// request to interleave with. An operation-profile refusal is not
+    /// retained when this is false.
+    pub request_spend_owned: bool,
 }
 
 impl FinalComponentAdmissionProof {
@@ -289,6 +295,7 @@ impl FinalComponentAdmissionProof {
             divergence_certificate: false,
             schedule_cut: false,
             entered_isolated,
+            request_spend_owned: true,
         }
     }
 
@@ -299,6 +306,7 @@ impl FinalComponentAdmissionProof {
             divergence_certificate: true,
             schedule_cut: false,
             entered_isolated: false,
+            request_spend_owned: true,
         }
     }
 }
@@ -390,7 +398,7 @@ pub fn classify_final_component_retention(
     if depth && proof.entered_isolated && !operation {
         return FinalComponentRetention::Retain(ComponentMetaRefusalClass::IsolatedRoot);
     }
-    if operation && !depth {
+    if operation && !depth && proof.request_spend_owned {
         return FinalComponentRetention::Retain(ComponentMetaRefusalClass::OperationProfile);
     }
     FinalComponentRetention::NotAdmitted
@@ -1184,6 +1192,23 @@ mod refusal_ledger_tests {
                 FinalComponentAdmissionProof::isolated(true)
             ),
             FinalComponentRetention::Retain(ComponentMetaRefusalClass::OperationProfile)
+        );
+        let mut unowned = FinalComponentAdmissionProof::isolated(true);
+        unowned.request_spend_owned = false;
+        assert_eq!(
+            classify_final_component_retention(budget, unowned),
+            FinalComponentRetention::NotAdmitted,
+            "an operation refusal whose spend was a sibling's is not retained"
+        );
+        let mut certified = FinalComponentAdmissionProof::certified();
+        certified.request_spend_owned = false;
+        assert_eq!(
+            classify_final_component_retention(
+                ResultCompleteness::partial(PartialReasonSet::SAME_PATH_RECURSION),
+                certified
+            ),
+            FinalComponentRetention::Retain(ComponentMetaRefusalClass::CertifiedDivergence),
+            "certified divergence does not consult spend ownership"
         );
         let mixed = ResultCompleteness::partial(
             PartialReasonSet::BUDGET_EXCEEDED.union(PartialReasonSet::MISSING_DEPENDENCY),
