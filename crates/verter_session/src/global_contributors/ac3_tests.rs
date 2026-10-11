@@ -729,24 +729,42 @@ fn all_base_demands_share_one_population_and_copy_proportional_to_additions() {
 
 #[test]
 fn interleaved_inject_and_upsert_classifies_linear_members() {
-    for size in [250, 1_000, 4_000] {
+    for size in [250, 1_000, 4_000, 8_441] {
         let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(
             verter_workspace::MemoryOptions::default(),
         ));
         let host = VerterHost::new(HostConfig::default(), workspace.clone());
+        workspace.inject_file(
+            "/open/tsconfig.json".into(),
+            Arc::from(r#"{"compilerOptions":{"noLib":true},"include":["**/*.ts"]}"#),
+        );
+        let mut project = verter_workspace::ide_project_config(
+            "/open".into(),
+            "/open".into(),
+            Some("/open/tsconfig.json".into()),
+        );
+        project.compiler_options =
+            verter_workspace::load_compiler_options(workspace.as_ref(), "/open/tsconfig.json");
+        host.configure_projects(vec![project]);
+        workspace.inject_file(
+            "/open/lib.d.ts".into(),
+            Arc::from("interface SharedRoot { value: number }"),
+        );
         let index = host
             .project_type_store()
             .indexed()
             .global_contributor_index();
         index.reset_snapshot_scan_visit_count();
         for n in 0..size {
-            let canonical = format!("/open/file{n}.ts");
+            let canonical = format!("/open/dir{}/file{n}.ts", n % 104);
             let source: Arc<str> = if n % 20 == 0 {
                 Arc::from(format!(
                     "export {{}}; declare global {{ interface Shared {{ m{n}: number }} }}"
                 ))
             } else {
-                Arc::from(format!("export const v{n} = {n};"))
+                Arc::from(format!(
+                    "export const v{n} = {n}; export type Root{n} = SharedRoot;"
+                ))
             };
             workspace.inject_file(canonical.clone(), source.clone());
             let _ = host
@@ -760,6 +778,10 @@ fn interleaved_inject_and_upsert_classifies_linear_members() {
                 .expect("upsert");
         }
         host.ingest_program_ambient_roots();
+        eprintln!(
+            "opened {size} configured files: {} snapshot visits",
+            index.snapshot_scan_visit_count()
+        );
         assert!(
             index.snapshot_scan_visit_count() <= 2 * size,
             "{size} files required {} snapshot visits",
@@ -777,6 +799,20 @@ fn interleaved_inject_and_upsert_classifies_linear_members() {
                 .entries
                 .len(),
             (size as usize).div_ceil(20)
+        );
+        assert_eq!(
+            index
+                .snapshot()
+                .lookup(
+                    &AugmentationTargetKind::GlobalAugmentation,
+                    "SharedRoot",
+                    None,
+                    true,
+                )
+                .entries
+                .len(),
+            1,
+            "the never-upserted shared library remains a global contributor"
         );
     }
 }
