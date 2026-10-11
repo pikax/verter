@@ -1,0 +1,22 @@
+[
+  {
+    "glob": "tests/framework-angular/ANG0/manifest.json",
+    "reason": "Reviewed Angular contract data; no ci.yml lane reads these bytes yet. Executable specs and future consumed products require an explicit lane owner."
+  },
+  {
+    "glob": "tests/framework-angular/ANG0/cases.md",
+    "reason": "Reviewed Angular contract data; no ci.yml lane reads these bytes yet. Executable specs and future consumed products require an explicit lane owner."
+  },
+  {
+    "glob": "tests/framework-angular/ANG0/products/angular-version-lock.json",
+    "reason": "Reviewed Angular contract data; no ci.yml lane reads these bytes yet. Executable specs and future consumed products require an explicit lane owner."
+  },
+  {
+    "glob": "tests/framework-angular/ANG0/products/angular-capability-matrix.json",
+    "reason": "Reviewed Angular contract data; no ci.yml lane reads these bytes yet. Executable specs and future consumed products require an explicit lane owner."
+  },
+  {
+    "glob": "tests/framework-angular/ANG0/products/angular-activation-policy.json",
+    "reason": "Reviewed Angular contract data; no ci.yml lane reads these bytes yet. Executable specs and future consumed products require an explicit lane owner."
+  }
+]
