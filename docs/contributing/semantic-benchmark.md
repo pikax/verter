@@ -522,10 +522,30 @@ statistics reading must be of the session's own process (the record's pid),
 and every recorded input digest must be the catalog's — the benchmark
 library's included. A session killed after its complete record was written
 keeps its measurement (the kill took nothing from it); a kill inside a step
-counts as the engine's only on the probes' memory-kill evidence. The observe
+counts as the engine's only on the probes' memory-kill evidence. Both runners
+flush each completed step, including its answers and timings, to
+`<out>.steps.jsonl`. The reader uses this journal when the final record is
+absent, discards an unterminated last line, and rejects malformed or reordered
+completed entries. Completed steps remain classifiable after a kill; only
+the step named by the phase marker is killed, and unstarted steps are absent.
+Partial sessions contribute completed step timings but no final statistics
+or retention comparison. Reusing an output path clears the previous run.
+The observe
 arm's REQUIRED-state identity is enforced: a build that retains differently
 fails validation, and a session where an arm has no completed measured
 invocation reports `n/a` with a warning.
+
+Observation accepts JSON answers beyond the decoder's default nesting limit.
+Stack growth covers decoding, TypeExpr conversion, rendering and destruction;
+malformed answers remain decoding errors.
+
+On macOS, CPU columns sum sampled user and kernel counters across process
+lifetimes, with reaped-child accounting deduplicated against those samples.
+The watchdog reads the exited leader before reaping it: Apple's
+[proc_pid_rusage API](https://github.com/apple-oss-distributions/xnu/blob/main/libsyscall/wrappers/libproc/libproc.h)
+supports zombies. CPU units are milliseconds. Descendants that exit between
+sweeps retain sampling uncertainty; Linux and Windows keep their existing
+kernel accounting.
 
 ## Capacity
 

@@ -24,6 +24,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { readSessionRecord } from "./session-record.mjs";
 
 import {
   ARMS,
@@ -578,7 +579,13 @@ export function rawFileProblems(run) {
     }
     if (stable(sup) !== stable(embedded))
       problems.push(`${id}: the supervisor record on disk differs from results.json`);
-    if (stable(read(inv.sessionOut)) !== stable(inv.session ?? null))
+    let session = null;
+    try {
+      session = readSessionRecord(inv.sessionOut);
+    } catch {
+      /* compared below */
+    }
+    if (stable(session) !== stable(inv.session ?? null))
       problems.push(`${id}: the session record on disk differs from results.json`);
   }
   for (const inv of run.invocations ?? []) {

@@ -175,7 +175,13 @@ export function sessionAnswers(inv, session, limits) {
   const tool = ARMS[inv.arm].tool;
   const out = [];
   session.steps.forEach((step, s) => {
-    const got = end.kind === "exited" ? record.steps?.[s] : null;
+    const trusted = ["exited", "killed", "unattributed-kill"].includes(end.kind);
+    const got = trusted ? record?.steps?.[s] : null;
+    const running = /^step-(\d+)$/.exec(inv.phase ?? "");
+    // Unstarted steps have no measurement or answer. A kill during setup
+    // still keeps the invocation-level failure, with no invented demands.
+    if (end.kind !== "exited" && trusted && !got && (!running || s !== Number(running[1]))) return;
+    const stepEnd = got && trusted ? { kind: "exited", exitCode: 0 } : end;
     if (step.kind === "demand")
       step.requests.forEach((req, r) =>
         out.push({
@@ -185,11 +191,13 @@ export function sessionAnswers(inv, session, limits) {
           file: req.file,
           alias: req.alias,
           expect: req.expect,
-          answer: demandAnswer(end, got?.requests?.[r], tool, peakOf(record)),
+          answer: demandAnswer(stepEnd, got?.requests?.[r], tool, peakOf(record)),
         }),
       );
     else if (step.kind === "meta" && tool === "verter")
-      out.push({ step: s, kind: "meta", file: step.file, expect: step.expect, got, end });
+      out.push({ step: s, kind: "meta", file: step.file, expect: step.expect, got, end: stepEnd });
+    else if (step.kind === "edit" && !got && stepEnd.kind !== "exited")
+      out.push({ step: s, kind: "edit", file: step.file, end: stepEnd });
   });
   return out;
 }
@@ -204,8 +212,15 @@ function expectedDigest(text) {
 }
 
 function classifyEntry(entry, tool, budgetBytes) {
-  if (entry.kind === "meta") {
+  if (entry.kind !== "demand") {
     const end = entry.end;
+    if (tool === "tsc")
+      return tscAnswerStatus(
+        { end, outcome: { kind: "missing" }, warmKinds: [] },
+        null,
+        null,
+        budgetBytes,
+      );
     if (end.kind === "killed") return { class: "killed", detail: end.detail };
     if (end.kind !== "exited")
       return {
@@ -231,40 +246,54 @@ function sessionArmSummary(arm, invs, session, limits) {
       verdict: classifyEntry(e, tool, limits.budgetBytes),
     })),
   );
-  const demands = (perInv[0] ?? []).map((entry, k) => {
-    const verdicts = perInv.map((list) => list[k].verdict);
-    const name = entry.kind === "meta" ? `${entry.file} (meta)` : `${entry.file}#${entry.alias}`;
-    if (tool === "verter") {
-      const classes = [...new Set(verdicts.map((v) => v.class))];
-      const worst = CLASSES.find((c) => classes.includes(c)) ?? classes[0];
+  const entryKey = (e) => `${e.step}|${e.kind}|${e.request ?? "meta"}`;
+  const entries = new Map(perInv.flat().map((e) => [entryKey(e), e]));
+  const demands = [...entries.values()]
+    .sort((a, b) => a.step - b.step || (a.request ?? 0) - (b.request ?? 0))
+    .map((entry) => {
+      const verdicts = perInv.flatMap((list) =>
+        list.filter((e) => entryKey(e) === entryKey(entry)).map((e) => e.verdict),
+      );
+      const name =
+        entry.kind === "demand" ? `${entry.file}#${entry.alias}` : `${entry.file} (${entry.kind})`;
+      if (tool === "verter") {
+        const classes = [...new Set(verdicts.map((v) => v.class))];
+        const worst = CLASSES.find((c) => classes.includes(c)) ?? classes[0];
+        return {
+          step: entry.step,
+          demand: name,
+          class: worst,
+          repetitionsDiffer: classes.length > 1,
+          detail: verdicts.find((v) => v.class === worst)?.detail ?? "",
+        };
+      }
+      const problems = [...new Set(verdicts.filter((v) => v.problem).map((v) => v.problem))];
+      const kinds = [...new Set(verdicts.map((v) => v.status))];
       return {
         step: entry.step,
         demand: name,
-        class: worst,
-        repetitionsDiffer: classes.length > 1,
-        detail: verdicts.find((v) => v.class === worst)?.detail ?? "",
+        class: problems.length
+          ? "inconsistent-with-reference"
+          : kinds.length === 1
+            ? kinds[0]
+            : "inconsistent",
+        problems,
+        detail: verdicts.find((v) => v.detail)?.detail ?? "",
       };
-    }
-    const problems = [...new Set(verdicts.filter((v) => v.problem).map((v) => v.problem))];
-    const kinds = [...new Set(verdicts.map((v) => v.status))];
-    return {
-      step: entry.step,
-      demand: name,
-      class: problems.length
-        ? "inconsistent-with-reference"
-        : kinds.length === 1
-          ? kinds[0]
-          : "inconsistent",
-      problems,
-      detail: verdicts.find((v) => v.detail)?.detail ?? "",
-    };
-  });
+    });
   // Statistics only over invocations whose record was written (a session
   // killed after that point kept everything it measured).
   const completed = measured.filter(
     (i) => ["exited", "observe-killed"].includes(invocationEnd(i, limits).kind) && i.session,
   );
   const records = completed.map((i) => i.session);
+  const partialRecords = measured
+    .filter(
+      (i) =>
+        ["killed", "unattributed-kill"].includes(invocationEnd(i, limits).kind) &&
+        i.session?.stage === "partial",
+    )
+    .map((i) => i.session);
   const out = {
     invocations: invs.length,
     measured: measured.length,
@@ -274,9 +303,11 @@ function sessionArmSummary(arm, invs, session, limits) {
     class:
       tool === "verter"
         ? (CLASSES.find((c) => demands.some((d) => d.class === c)) ?? "not-run")
-        : demands.some((d) => d.class !== "reference")
-          ? (demands.find((d) => d.class !== "reference")?.class ?? "not-run")
-          : "reference",
+        : !demands.length
+          ? "not-run"
+          : demands.some((d) => d.class !== "reference")
+            ? (demands.find((d) => d.class !== "reference")?.class ?? "not-run")
+            : "reference",
     metrics: {
       setupMs: stats(
         records.map((r) => (tool === "verter" ? r.phases?.setup / 1000 : r.phases?.setupMs)),
@@ -287,7 +318,7 @@ function sessionArmSummary(arm, invs, session, limits) {
       steps: session.steps.map((step, s) => ({
         step: s,
         kind: step.kind,
-        ms: stats(records.map((r) => stepMs(tool, r.steps?.[s]))),
+        ms: stats([...records, ...partialRecords].map((r) => stepMs(tool, r.steps?.[s]))),
       })),
       peakBytes: stats(records.map(peakOf)),
     },
@@ -322,12 +353,12 @@ export function summarizeSessions(run, sessions, resolution = { single: 1 }) {
     if (arms.verter && arms["tsc-api"]) {
       session.steps.forEach((step, s) => {
         if (step.kind === "meta") return;
-        const verterOk = arms.verter.demands
-          .filter((d) => d.step === s)
-          .every((d) => d.class === "matched");
-        const tscOk = arms["tsc-api"].demands
-          .filter((d) => d.step === s)
-          .every((d) => d.class === "reference");
+        const verterDemands = arms.verter.demands.filter((d) => d.step === s);
+        const tscDemands = arms["tsc-api"].demands.filter((d) => d.step === s);
+        const hasStep = (arm) =>
+          armInvs[arm].some((i) => stepMs(ARMS[arm].tool, i.session?.steps?.[s]) !== null);
+        const verterOk = hasStep("verter") && verterDemands.every((d) => d.class === "matched");
+        const tscOk = hasStep("tsc-api") && tscDemands.every((d) => d.class === "reference");
         if (!verterOk || !tscOk) return;
         const times = (arm, tool) =>
           armInvs[arm]
@@ -357,7 +388,7 @@ export function summarizeSessions(run, sessions, resolution = { single: 1 }) {
 }
 
 /** Problems with one session record against the script. */
-export function sessionRecordProblems(record, session, { tool }) {
+export function sessionRecordProblems(record, session, { tool, partial = false }) {
   const p = [];
   const need = (cond, what) => {
     if (!cond) p.push(what);
@@ -365,11 +396,14 @@ export function sessionRecordProblems(record, session, { tool }) {
   need(record?.schema === 1, `session record schema ${record?.schema} is not 1`);
   need(record?.tool === tool, `record from ${record?.tool}, not ${tool}`);
   need(record?.kind === "session", "not a session record");
-  need(record?.stage === "complete", `record stage ${record?.stage}, not complete`);
+  need(
+    record?.stage === (partial ? "partial" : "complete"),
+    `unexpected record stage ${record?.stage}`,
+  );
   need(record?.initOutcome?.kind === "value", "the init request did not answer");
   const steps = record?.steps ?? [];
   need(
-    steps.length === session.steps.length,
+    partial ? steps.length <= session.steps.length : steps.length === session.steps.length,
     `${steps.length} steps recorded, the script has ${session.steps.length}`,
   );
   session.steps.forEach((step, s) => {
@@ -401,6 +435,7 @@ export function sessionRecordProblems(record, session, { tool }) {
       else need(got.applicable === false, `step ${s}: tsc has no component metadata`);
     }
   });
+  if (partial) return p;
   const reading = tool === "verter" ? record?.afterSteps : record?.serverAfterSteps;
   const pid = tool === "verter" ? record?.pid : record?.serverPid;
   need(
@@ -424,7 +459,7 @@ export function tscIncrementalProblems(record, session, projectDir) {
   if (record?.incremental !== INCREMENTAL_FACILITY)
     p.push(`tsc's incremental facility is ${record?.incremental}, not ${INCREMENTAL_FACILITY}`);
   let last = 0;
-  session.steps.forEach((step, s) => {
+  session.steps.slice(0, record?.steps?.length ?? 0).forEach((step, s) => {
     if (step.kind !== "edit") return;
     const got = record?.steps?.[s];
     const want = [`${projectDir}/${step.file}`].map((f) => f.replace(/\\/g, "/").toLowerCase());
@@ -551,7 +586,8 @@ export function validateSessions(run, selected, { schedule, bins, libText = null
     }
     // A session killed after its complete record was written is validated
     // like an exited one: the kill took nothing from the measurement.
-    if (end.kind !== "exited" && end.kind !== "observe-killed") continue;
+    const partial = Boolean(inv.session) && ["killed", "unattributed-kill"].includes(end.kind);
+    if (end.kind !== "exited" && end.kind !== "observe-killed" && !partial) continue;
     if (end.kind === "exited" && sup.exitCode !== 0) {
       fail(`${id}: failed child: exit ${sup.exitCode}`);
       continue;
@@ -560,7 +596,13 @@ export function validateSessions(run, selected, { schedule, bins, libText = null
       fail(`${id}: failed child: no session record (${inv.sessionReadError})`);
       continue;
     }
-    for (const p of sessionRecordProblems(inv.session, session, { tool })) fail(`${id}: ${p}`);
+    for (const p of sessionRecordProblems(inv.session, session, { tool, partial }))
+      fail(`${id}: ${p}`);
+    if (partial) {
+      const running = /^step-(\d+)$/.exec(inv.phase ?? "");
+      if (running && inv.session.steps?.length > Number(running[1]) + 1)
+        fail(`${id}: session journal contains steps beyond the running phase ${inv.phase}`);
+    }
     if (tool === "verter") {
       if (inv.session.observability !== false)
         fail(`${id}: a session runs the production configuration`);

@@ -246,6 +246,8 @@ pub(crate) struct Exited {
     pub descendants: u64,
     /// Processes teardown could not remove.
     pub survivors: u64,
+    #[cfg(target_os = "macos")]
+    pub cpu: Vec<crate::cpu_accounting::CpuReading>,
 }
 
 /// What the watchdog link produced since the last look.
@@ -456,6 +458,11 @@ impl WatchdogLink {
 /// `X <code|-> <signal|-> <exit_ns> <descendants> <survivors>`.
 fn parse_exit(text: &str) -> Option<Exited> {
     let fields: Vec<&str> = text.split_whitespace().collect();
+    #[cfg(target_os = "macos")]
+    let [code, signal, exit_ns, descendants, survivors, cpu] = fields[..] else {
+        return None;
+    };
+    #[cfg(not(target_os = "macos"))]
     let [code, signal, exit_ns, descendants, survivors] = fields[..] else {
         return None;
     };
@@ -467,19 +474,27 @@ fn parse_exit(text: &str) -> Option<Exited> {
         exit_ns: exit_ns.parse().ok()?,
         descendants: descendants.parse().ok()?,
         survivors: survivors.parse().ok()?,
+        #[cfg(target_os = "macos")]
+        cpu: serde_json::from_str(cpu).ok()?,
     })
 }
 
 pub(crate) fn format_exit(exited: &Exited) -> String {
     let field = |value: Option<String>| value.unwrap_or_else(|| "-".to_owned());
-    format!(
-        "X {} {} {} {} {}\n",
+    let result = format!(
+        "X {} {} {} {} {}",
         field(exited.exit.code.map(|code| code.to_string())),
         field(exited.exit.signal.map(|signal| signal.to_string())),
         exited.exit_ns,
         exited.descendants,
         exited.survivors
-    )
+    );
+    #[cfg(target_os = "macos")]
+    let result = format!(
+        "{result} {}",
+        serde_json::to_string(&exited.cpu).expect("CPU readings serialize")
+    );
+    format!("{result}\n")
 }
 
 /// Wait until `fd` is readable (or hung up) for at most `limit`.

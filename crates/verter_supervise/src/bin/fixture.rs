@@ -51,6 +51,8 @@ fn main() {
         }
         "sleep" => std::thread::sleep(Duration::from_millis(rest[0].parse().expect("ms"))),
         "alloc" => alloc(rest[0].parse().expect("chunk MiB")),
+        #[cfg(target_os = "macos")]
+        "cpu" => cpu(rest[0].parse().expect("CPU duration ms")),
         "spawn-wait" => {
             let mut child = spawn_grandchild(&rest[0], &rest[1..], Launch::Plain);
             child.wait().ok();
@@ -72,6 +74,26 @@ fn main() {
         }
         other => panic!("unknown fixture mode {other:?}"),
     }
+}
+
+#[cfg(target_os = "macos")]
+fn cpu(duration_ms: u64) {
+    let until = std::time::Instant::now() + Duration::from_millis(duration_ms);
+    let mut value = 0u64;
+    while std::time::Instant::now() < until {
+        for i in 0..10_000 {
+            value = std::hint::black_box(value.wrapping_add(i));
+        }
+    }
+    // SAFETY: the output is a correctly sized rusage; RUSAGE_SELF is our
+    // own process, including its startup before this fixture's work.
+    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    assert_eq!(unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) }, 0);
+    let ms = |t: libc::timeval| t.tv_sec as f64 * 1_000.0 + t.tv_usec as f64 / 1_000.0;
+    println!(
+        "{}",
+        serde_json::json!({ "userMs": ms(usage.ru_utime), "kernelMs": ms(usage.ru_stime) })
+    );
 }
 
 fn alloc(chunk_mib: usize) -> ! {
