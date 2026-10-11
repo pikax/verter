@@ -314,8 +314,278 @@ export function subLoopBodyLet(flag: boolean) {
 
 const CANONICAL: &str = "/ws/flow-exec.ts";
 
+#[test]
+fn flow_superseded_evaluation_cannot_deliver_a_value() {
+    use verter_type_engine::semantic_query::{
+        ExecutionAbort, FactResult, FlowReturnStep, ReturnProjectionDemand,
+    };
+    let host = make_host();
+    let identity = return_identity("subLiteral", FunctionPartIdentity::DeclarationBody, 0);
+    with_dispatch(&host, |dispatch| {
+        let key = dispatch.flow_return_key_for(&identity);
+        {
+            let _sweep = dispatch.graph().test_force_cold_abort_sweep();
+            assert!(matches!(
+                dispatch.execute_flow_return(key.clone()),
+                FlowReturnStep::Aborted(ExecutionAbort::Superseded)
+            ));
+        }
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0
+        );
+        {
+            let _sweep = dispatch.graph().test_force_cold_abort_sweep();
+            let public = host
+                .get_flow_return_type_with_audit(&identity, ReturnProjectionDemand::whole_return());
+            assert!(matches!(
+                public.as_result(),
+                Err(crate::host_flow_return_audit::FlowReturnError::Aborted(
+                    ExecutionAbort::Superseded
+                ))
+            ));
+        }
+    });
+    let retry =
+        host.get_flow_return_type_with_audit(&identity, ReturnProjectionDemand::whole_return());
+    assert!(matches!(
+        retry.as_result().unwrap().fact(),
+        FactResult::Complete(_)
+    ));
+}
+
+#[test]
+fn flow_execution_abort_is_delivered_to_singleflight_follower() {
+    use super::flow_return::flow_admission_fault_injection as inject;
+    use verter_type_engine::semantic_query::{ExecutionAbort, ReturnProjectionDemand};
+    let host = make_host();
+    let identity = return_identity("subLiteral", FunctionPartIdentity::DeclarationBody, 0);
+    let gate = Arc::new(std::sync::Barrier::new(2));
+    *host
+        .flow_fault_injection
+        .foreign_evaluation_gate
+        .lock()
+        .unwrap() = Some(Arc::clone(&gate));
+    {
+        let _fault = inject::Guard::arm(&host.flow_fault_injection.foreign_evaluation_evidence);
+        std::thread::scope(|threads| {
+            let producer = threads.spawn(|| {
+                host.get_flow_return_type_with_audit(
+                    &identity,
+                    ReturnProjectionDemand::whole_return(),
+                )
+            });
+            gate.wait();
+            let follower = threads.spawn(|| {
+                host.get_flow_return_type_with_audit(
+                    &identity,
+                    ReturnProjectionDemand::whole_return(),
+                )
+            });
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let joined = with_dispatch(&host, |dispatch| {
+                while dispatch
+                    .graph()
+                    .task_registry_for_tests()
+                    .wait_count_for_tests()
+                    == 0
+                    && std::time::Instant::now() < deadline
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                dispatch
+                    .graph()
+                    .task_registry_for_tests()
+                    .wait_count_for_tests()
+                    > 0
+            });
+            // Release before asserting, so a failed rendezvous cannot strand a worker.
+            gate.wait();
+            let producer = producer.join().unwrap();
+            let follower = follower.join().unwrap();
+            assert!(
+                joined,
+                "the follower must subscribe to the real producer flight"
+            );
+            for result in [producer, follower] {
+                assert!(matches!(
+                    result.as_result(),
+                    Err(crate::host_flow_return_audit::FlowReturnError::Aborted(
+                        ExecutionAbort::Superseded
+                    ))
+                ));
+            }
+        });
+    }
+    let retry =
+        host.get_flow_return_type_with_audit(&identity, ReturnProjectionDemand::whole_return());
+    assert!(matches!(
+        retry.as_result().unwrap().fact(),
+        verter_type_engine::semantic_query::FactResult::Complete(_)
+    ));
+}
+
+#[test]
+fn flow_execution_abort_reaches_raw_direct_and_public_consumers() {
+    use super::flow_return::flow_admission_fault_injection as inject;
+    use verter_type_engine::semantic_query::{ExecutionAbort, FlowReturnStep};
+    let host = make_host();
+    let identity = return_identity("subLiteral", FunctionPartIdentity::DeclarationBody, 0);
+    {
+        let _fault = inject::Guard::arm(&host.flow_fault_injection.foreign_evaluation_evidence);
+        with_dispatch(&host, |dispatch| {
+            let key = dispatch.flow_return_key_for(&identity);
+            let raw = dispatch
+                .execute_via_cold_build_helper(SemanticQueryKey::FlowReturn(Box::new(key.clone())));
+            assert!(
+                matches!(
+                    raw.value,
+                    QueryResult::Error(QueryError::ExecutionAborted(ExecutionAbort::Superseded))
+                ),
+                "raw dispatch cannot deliver rejected evidence: {:?}",
+                raw.value
+            );
+            assert!(raw.cache_suppress);
+            assert!(matches!(
+                dispatch.execute_flow_return(key.clone()),
+                FlowReturnStep::Aborted(ExecutionAbort::Superseded)
+            ));
+            assert!(matches!(
+                dispatch.execute_function_return_source(
+                    &verter_type_expr::facts::FunctionReturnSource::Flow(identity.clone()),
+                    CANONICAL
+                ),
+                super::flow_return::FunctionReturnNode::Aborted(ExecutionAbort::Superseded)
+            ));
+            assert_eq!(
+                dispatch
+                    .graph()
+                    .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+                0
+            );
+        });
+        let public = host.get_flow_return_type_with_audit(
+            &identity,
+            verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+        );
+        assert!(matches!(
+            public.as_result(),
+            Err(crate::host_flow_return_audit::FlowReturnError::Aborted(
+                ExecutionAbort::Superseded
+            ))
+        ));
+        let enclosing = return_identity(
+            "subOuterCallsInner",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let composed = host.get_flow_return_type_with_audit(
+            &enclosing,
+            verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+        );
+        assert!(matches!(
+            composed.as_result(),
+            Err(crate::host_flow_return_audit::FlowReturnError::Aborted(
+                ExecutionAbort::Superseded
+            ))
+        ));
+    }
+    let recovered = host.get_flow_return_type_with_audit(
+        &identity,
+        verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+    );
+    assert!(matches!(
+        recovered.as_result().unwrap().fact(),
+        verter_type_engine::semantic_query::FactResult::Complete(_)
+    ));
+}
+
+#[test]
+fn flow_refused_preparation_is_publicly_approximate_without_admission() {
+    use verter_type_engine::semantic_query::{
+        FactResult, PartialReasonSet, ReturnProjectionDemand,
+    };
+    let host = make_host_with_config(HostConfig {
+        audit_enabled: true,
+        ..HostConfig::default()
+    });
+    let identity = return_identity("subLiteral", FunctionPartIdentity::DeclarationBody, 0);
+    host.flow_fault_injection
+        .unserved_demand_site
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let public =
+        host.get_flow_return_type_with_audit(&identity, ReturnProjectionDemand::whole_return());
+    let result = public
+        .as_result()
+        .expect("independently evaluated value remains observable");
+    let FactResult::Approximate { causes, .. } = result.fact() else {
+        panic!("refused preparation must be approximate");
+    };
+    assert!(causes.get().contains(PartialReasonSet::UNSTABLE_STATE));
+    assert_eq!(
+        public
+            .audit()
+            .flow_return_inference_payload()
+            .expect("audited flow payload")
+            .partiality,
+        Some(
+            verter_audit::payloads::flow_return::FlowPartialityTag::Degraded(
+                verter_audit::payloads::flow_return::FlowDegradationTag::PartialInterior
+            )
+        )
+    );
+    with_dispatch(&host, |dispatch| {
+        let key = dispatch.flow_return_key_for(&identity);
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0
+        );
+    });
+    let retry =
+        host.get_flow_return_type_with_audit(&identity, ReturnProjectionDemand::whole_return());
+    assert!(matches!(
+        retry.as_result().unwrap().fact(),
+        FactResult::Complete(_)
+    ));
+}
+
+#[test]
+fn flow_incomplete_evaluation_has_no_public_value() {
+    use super::flow_return::flow_admission_fault_injection as inject;
+    let host = make_host();
+    let identity = return_identity("subLiteral", FunctionPartIdentity::DeclarationBody, 0);
+    {
+        let _fault = inject::Guard::arm(&host.flow_fault_injection.short_execution_ledger);
+        let public = host.get_flow_return_type_with_audit(
+            &identity,
+            verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+        );
+        assert!(matches!(
+            public.as_result(),
+            Err(crate::host_flow_return_audit::FlowReturnError::Failure(
+                verter_type_engine::semantic_query::FlowReturnFailure::Unresolved
+            ))
+        ));
+    }
+    assert!(host
+        .get_flow_return_type_with_audit(
+            &identity,
+            verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return()
+        )
+        .as_result()
+        .is_ok());
+}
+
 fn make_host() -> Arc<VerterHost> {
-    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    make_host_with_config(HostConfig::default())
+}
+
+fn make_host_with_config(config: HostConfig) -> Arc<VerterHost> {
+    let host = Arc::new(VerterHost::new_standalone(config));
     let _ = host.upsert(UpsertRequest {
         canonical_id: Some(CANONICAL.to_string()),
         input_id: CANONICAL.to_string(),
@@ -6448,8 +6718,7 @@ fn production_flow_proof_has_evaluator_origin() {
     use super::flow_return::flow_admission_fault_injection as inject;
 
     // Negative leg: evidence whose provenance is not this evaluation's
-    // one-shot mint refuses finalization — the usable value still flows,
-    // nothing publishes.
+    // one-shot mint invalidates delivery: no value or candidate survives.
     let host = make_host();
     with_dispatch(&host, |dispatch| {
         let _foreign = inject::Guard::arm(&host.flow_fault_injection.foreign_evaluation_evidence);
@@ -6459,8 +6728,15 @@ fn production_flow_proof_has_evaluator_origin() {
             FunctionPartIdentity::DeclarationBody,
             0,
         );
-        let result = flow_result_value(dispatch, key.clone());
-        assert_eq!(result.degradation(), None, "the value itself stays usable");
+        assert!(
+            matches!(
+                dispatch.execute_flow_return(key.clone()),
+                verter_type_engine::semantic_query::FlowReturnStep::Aborted(
+                    verter_type_engine::semantic_query::ExecutionAbort::Superseded
+                )
+            ),
+            "foreign evaluated evidence cannot deliver a value"
+        );
         assert_eq!(
             dispatch
                 .graph()
@@ -6723,9 +6999,8 @@ fn deferred_scc_member_finalizes_after_per_key_substitution() {
 /// opaque evaluation provenance (semantic-store identity + request
 /// generation + the demand's OWN ledger ordinal — demand-unique). A
 /// demand carrier stamped with a provenance from another store or a
-/// stale generation makes the whole solve a typed partial/ReturnOnly:
-/// the usable value still flows, and NEITHER the root nor any SCC member
-/// produces a candidate; so does evaluation evidence from ANOTHER demand
+/// stale generation aborts the whole solve: no value, and NEITHER the root
+/// nor any SCC member produces a candidate; so does evidence from ANOTHER demand
 /// of the SAME store and generation (the demand-ordinal axis).
 #[test]
 fn foreign_flow_value_provenance_is_rejected() {
@@ -6741,8 +7016,15 @@ fn foreign_flow_value_provenance_is_rejected() {
             FunctionPartIdentity::DeclarationBody,
             0,
         );
-        let result = flow_result_value(dispatch, key.clone());
-        assert_eq!(result.degradation(), None, "the value itself stays usable");
+        assert!(
+            matches!(
+                dispatch.execute_flow_return(key.clone()),
+                verter_type_engine::semantic_query::FlowReturnStep::Aborted(
+                    verter_type_engine::semantic_query::ExecutionAbort::Superseded
+                )
+            ),
+            "foreign evaluated evidence cannot deliver a value"
+        );
         assert_eq!(
             dispatch
                 .graph()
@@ -6759,11 +7041,14 @@ fn foreign_flow_value_provenance_is_rejected() {
         let _stale = inject::Guard::arm(&scc_host.flow_fault_injection.stale_demand_carrier);
         let root = scc_key(dispatch, "scCleanA");
         let peer = scc_key(dispatch, "scCleanB");
-        let result = flow_result_value(dispatch, root.clone());
-        assert_eq!(
-            result.degradation(),
-            None,
-            "the component value stays usable"
+        assert!(
+            matches!(
+                dispatch.execute_flow_return(root.clone()),
+                verter_type_engine::semantic_query::FlowReturnStep::Aborted(
+                    verter_type_engine::semantic_query::ExecutionAbort::Superseded
+                )
+            ),
+            "foreign evaluated evidence cannot deliver a value"
         );
         for (name, key) in [("scCleanA", root), ("scCleanB", peer)] {
             assert_eq!(
@@ -6789,8 +7074,15 @@ fn foreign_flow_value_provenance_is_rejected() {
             FunctionPartIdentity::DeclarationBody,
             0,
         );
-        let result = flow_result_value(dispatch, key.clone());
-        assert_eq!(result.degradation(), None, "the value itself stays usable");
+        assert!(
+            matches!(
+                dispatch.execute_flow_return(key.clone()),
+                verter_type_engine::semantic_query::FlowReturnStep::Aborted(
+                    verter_type_engine::semantic_query::ExecutionAbort::Superseded
+                )
+            ),
+            "foreign evaluated evidence cannot deliver a value"
+        );
         assert_eq!(
             dispatch
                 .graph()
@@ -6804,11 +7096,14 @@ fn foreign_flow_value_provenance_is_rejected() {
         let _foreign = inject::Guard::arm(&scc_host.flow_fault_injection.foreign_demand_provenance);
         let root = scc_key(dispatch, "scCleanA");
         let peer = scc_key(dispatch, "scCleanB");
-        let result = flow_result_value(dispatch, root.clone());
-        assert_eq!(
-            result.degradation(),
-            None,
-            "the component value stays usable"
+        assert!(
+            matches!(
+                dispatch.execute_flow_return(root.clone()),
+                verter_type_engine::semantic_query::FlowReturnStep::Aborted(
+                    verter_type_engine::semantic_query::ExecutionAbort::Superseded
+                )
+            ),
+            "foreign evaluated evidence cannot deliver a value"
         );
         for (name, key) in [("scCleanA", root), ("scCleanB", peer)] {
             assert_eq!(
@@ -10201,7 +10496,7 @@ fn unproven_flow_member_withholds_flow_root_verdict() {
 /// never by copying the plan's selection. An evaluation whose walk
 /// ledger is short/aborted (modelling an early-exit run that did not
 /// complete the structural walk) claims NO structural obligation: the
-/// usable value still flows, zero candidates, and the second demand
+/// value is withheld, zero candidates remain, and the second demand
 /// recomputes. The unarmed control warms. Mutation: assign the witness's
 /// executed selection from the plan unconditionally; the armed leg
 /// admits and fails.
@@ -10218,8 +10513,15 @@ fn short_walk_ledger_never_discharges_structural_claims() {
             FunctionPartIdentity::DeclarationBody,
             0,
         );
-        let result = flow_result_value(dispatch, key.clone());
-        assert_eq!(result.degradation(), None, "the value itself stays usable");
+        assert!(
+            matches!(
+                dispatch.execute_flow_return(key.clone()),
+                verter_type_engine::semantic_query::FlowReturnStep::NoValue(
+                    verter_type_engine::semantic_query::FlowReturnFailure::Unresolved
+                )
+            ),
+            "an incomplete evaluation supplies no value"
+        );
         assert_eq!(
             dispatch
                 .graph()
@@ -10256,12 +10558,11 @@ fn short_walk_ledger_never_discharges_structural_claims() {
 /// across them, and the finalizer's carrier comparison could not tell
 /// one runtime's first-demand evidence from the other's. Both first
 /// tokens must differ, and finalizing one runtime's demand with the
-/// OTHER runtime's first-demand token must be the typed
-/// `ForeignProvenance` partial — never a proof.
+/// OTHER runtime's first-demand token aborts as superseded evidence — no value.
 #[test]
 fn provenance_distinguishes_first_demands_of_two_runtimes() {
     use super::dispatch_txn::flow_obligation_state::ObservedFlowConvergence;
-    use super::flow_solve::{FlowPartialReason, FlowSolveOutcome};
+    use super::flow_solve::FlowSolveOutcome;
 
     let host = make_host();
     let key_of = |dispatch: &ProjectSemanticDispatch<crate::resolver_core::HostCapabilities>| {
@@ -10326,11 +10627,12 @@ fn provenance_distinguishes_first_demands_of_two_runtimes() {
         assert!(
             matches!(
                 verdict,
-                Some(FlowSolveOutcome::Partial(ref partial))
-                    if matches!(partial.reason, FlowPartialReason::ForeignProvenance)
+                Some(FlowSolveOutcome::Aborted(
+                    verter_type_engine::semantic_query::ExecutionAbort::Superseded
+                ))
             ),
             "the other runtime's first-demand token must finalize as the \
-             typed ForeignProvenance partial, got {verdict:?}"
+             typed Superseded abort, got {verdict:?}"
         );
     });
 }

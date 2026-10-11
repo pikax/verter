@@ -1,0 +1,5 @@
+error[E0451]: field `_private` of struct `ExecutionValidityScope` is private
+ --> tests/cases/compile-fail/execution_validity_scope_cannot_be_forged.rs:5:44
+  |
+5 |     let _forged = ExecutionValidityScope { _private: Default::default() };
+  |                                            ^^^^^^^^ private field

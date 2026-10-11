@@ -24,9 +24,9 @@
 //!   in-flight recursive hold surfacing at its consumer. Always carries
 //!   [`PartialReason::FlowReturnNoSurface`](crate::semantic_query::PartialReason::FlowReturnNoSurface), plus whatever the read
 //!   observed.
-//! - **Aborted** — a read that observed cancellation or a superseded/torn
-//!   view is not a fact at all ([`ExecutionAbort`]): the consumer publishes
-//!   nothing from it.
+//! - **Aborted** — [`FlowReturnStep::Aborted`] carries invalid execution
+//!   evidence ([`ExecutionAbort`]); the consumer publishes nothing. A
+//!   preparation cause alone never invalidates an independently evaluated value.
 //!
 //! The arm decides; the causes explain. A consumer never re-derives
 //! availability from the reason classes.
@@ -43,9 +43,10 @@
 //! [`ObservedFlowRead::discard`] drops them because the fall-through
 //! route owns the answer. A failed probe therefore never marks the
 //! enclosing composition partial, and an adopted one never hides its
-//! partiality.
+//! partiality. Execution validity has a separate, non-discardable scope:
+//! declining a proof probe cannot clear an abort it observed.
 
-use super::flow_return::{degradation_reason, NO_VALUE_REASON};
+use super::flow_return::NO_VALUE_REASON;
 use super::{BuildLocalTaint, BuildLocalTaintGuard, ProjectSemanticDispatch};
 use crate::semantic_query::surface_resolution::NonEmptyReasons;
 use crate::semantic_query::{
@@ -57,6 +58,7 @@ use crate::semantic_query::{
 #[must_use = "a scoped flow read must be adopted or discarded"]
 pub(super) struct ObservedFlowRead<T> {
     value: T,
+    abort: Option<ExecutionAbort>,
     completeness: ResultCompleteness,
     frame: BuildLocalTaint,
 }
@@ -69,16 +71,20 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// [`ObservedFlowRead::adopt`] or [`ObservedFlowRead::discard`],
     /// whether they join it.
     pub(super) fn observe_flow_read<T>(&self, read: impl FnOnce() -> T) -> ObservedFlowRead<T> {
+        let validity = crate::request_context::ExecutionValidityScope::enter();
         let deferred_sticky = crate::request_context::DeferredPartialStickyScope::enter();
         let completeness_scope = crate::request_context::ColdComputeCompletenessScope::enter();
         let frame = BuildLocalTaintGuard::push(&self.build_local_taint);
         let value = read();
+        let abort = crate::request_context::current_execution_abort();
         let frame = frame.finish();
         let completeness = crate::request_context::current_cold_compute_completeness();
         completeness_scope.discard();
         drop(deferred_sticky);
+        drop(validity);
         ObservedFlowRead {
             value,
+            abort,
             completeness,
             frame,
         }
@@ -91,16 +97,25 @@ impl<T> ObservedFlowRead<T> {
     pub(super) fn adopt<C: crate::resolver_core::ResolverCapabilities>(
         self,
         dispatch: &ProjectSemanticDispatch<'_, C>,
-    ) -> T {
+    ) -> Result<T, ExecutionAbort> {
+        if let Some(abort) = self.abort {
+            crate::request_context::observe_execution_abort(abort);
+            return Err(abort);
+        }
         crate::request_context::fold_result_completeness(self.completeness);
         dispatch.fold_observed_frame_into_top(&self.frame);
-        self.value
+        Ok(self.value)
     }
 
     /// The consumer DECLINES the value and a fall-through route owns the
     /// answer: the read's observations are dropped.
-    pub(super) fn discard(self) -> T {
-        self.value
+    pub(super) fn discard(self) -> Result<T, ExecutionAbort> {
+        if let Some(abort) = self.abort {
+            crate::request_context::observe_execution_abort(abort);
+            Err(abort)
+        } else {
+            Ok(self.value)
+        }
     }
 }
 
@@ -108,6 +123,9 @@ impl ObservedFlowRead<FlowReturnStep> {
     /// The fact this flow-return read established. See the module
     /// documentation for each arm's guarantee.
     pub(super) fn fact(&self) -> Result<FactResult<&FlowReturnResult>, ExecutionAbort> {
+        if let Some(abort) = self.abort {
+            return Err(abort);
+        }
         flow_return_fact(&self.value, self.completeness)
     }
 }
@@ -119,15 +137,27 @@ pub(super) fn flow_return_fact(
     step: &FlowReturnStep,
     observed: ResultCompleteness,
 ) -> Result<FactResult<&FlowReturnResult>, ExecutionAbort> {
-    if let Some(abort) = ExecutionAbort::observed_in(observed) {
-        return Err(abort);
+    if let FlowReturnStep::Aborted(abort) = step {
+        return Err(*abort);
     }
-    let observed_reasons = NonEmptyReasons::new(observed.reasons());
+    let observed_reasons = match observed {
+        ResultCompleteness::Complete => None,
+        ResultCompleteness::Partial(reasons) => {
+            Some(NonEmptyReasons::new(reasons).unwrap_or_else(|| {
+                NonEmptyReasons::of(crate::semantic_query::PartialReason::SemanticQueryFault)
+            }))
+        }
+    };
     Ok(match step {
+        FlowReturnStep::Aborted(_) => unreachable!("aborts are not facts"),
         FlowReturnStep::Complete(result) => {
-            let own = result
-                .degradation()
-                .map(|degradation| NonEmptyReasons::of(degradation_reason(degradation)));
+            let own = match result.fact() {
+                FactResult::Complete(_) => None,
+                FactResult::Approximate { causes, .. } => Some(causes),
+                FactResult::Unavailable { .. } => {
+                    unreachable!("a flow value has evaluated evidence")
+                }
+            };
             match join(own, observed_reasons) {
                 None => FactResult::complete(result),
                 Some(causes) => FactResult::approximate(result, causes),
