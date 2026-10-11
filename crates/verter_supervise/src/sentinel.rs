@@ -143,12 +143,16 @@ fn reap(pid: libc::pid_t) -> crate::unix::ExitInfo {
 
 /// Tear the exited workload's tree down, reap it and report.
 fn finish_workload(workload: &Workload, exit_ns: u64) -> Exited {
+    #[cfg(target_os = "macos")]
+    let cpu = workload.cpu_readings();
     let (descendants, survivors) = workload.teardown();
     Exited {
         exit: reap(workload.pid()),
         exit_ns,
         descendants,
         survivors,
+        #[cfg(target_os = "macos")]
+        cpu,
     }
 }
 

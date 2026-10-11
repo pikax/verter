@@ -29,7 +29,7 @@
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFileSync, renameSync, writeFileSync } from "node:fs";
+import { appendFileSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -72,6 +72,8 @@ async function main() {
   const job = JSON.parse(readFileSync(jobPath, "utf8"));
   if (job.schema !== 1) throw new Error(`session job schema ${job.schema} is not 1`);
   if (!job.steps?.length) throw new Error("a session runs at least one step");
+  for (const path of [outPath, `${outPath}.steps.jsonl`, `${outPath}.phase`])
+    rmSync(path, { force: true });
   const { API } = await import(
     pathToFileURL(join(job.tsPackageDir, "dist", "api", "async", "api.js")).href
   );
@@ -153,6 +155,23 @@ async function main() {
   const initMs = await serverTime("getTypeAtPosition");
 
   const steps = [];
+  writeFileSync(
+    `${outPath}.steps.jsonl`,
+    JSON.stringify({
+      schema: RESULT_SCHEMA,
+      tool: "tsc",
+      kind: "session",
+      stage: "partial",
+      incremental: INCREMENTAL_FACILITY,
+      tscExe: job.tscExe,
+      statsExe: job.statsExe,
+      serverPid,
+      rootFiles,
+      phases: { spawnMs, setupMs, setupRoundTripMs, initMs, initRoundTripMs },
+      initOutcome: init.outcome,
+    }) + "\n",
+    { flush: true },
+  );
   for (const [index, step] of job.steps.entries()) {
     phase(`step-${index}`);
     if (step.kind === "meta") {
@@ -222,6 +241,9 @@ async function main() {
         requests: records,
       });
     } else throw new Error(`unknown step kind ${step.kind}`);
+    appendFileSync(`${outPath}.steps.jsonl`, JSON.stringify({ index, step: steps.at(-1) }) + "\n", {
+      flush: true,
+    });
   }
 
   phase("stats");

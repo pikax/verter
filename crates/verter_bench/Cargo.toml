@@ -60,7 +60,9 @@ oxc_parser = { workspace = true }
 oxc_span = { workspace = true }
 oxc_ast = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
+serde_json = { workspace = true, features = ["unbounded_depth"] }
+serde_stacker = "0.1"
+stacker = "0.1.25"
 walkdir = "2.5"
 glob = "0.3.3"
 rayon = "1.12"
@@ -76,6 +78,7 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Syste
 libc = "0.2"
 
 [dev-dependencies]
+verter_supervise = { path = "../verter_supervise" }
 verter_session_query = { workspace = true }
 # Activates `test-support` on `verter_compiler` for THIS crate's own
 # bench/example targets only — `real_world_compile_bench.rs` and the
