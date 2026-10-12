@@ -17,3 +17,45 @@ Inner declarations NEVER enter file-scope `type_symbols`/`value_symbols`. Parse-
 
 **Guards**: `session_overlay_augmenter_isolated_from_base_index`, `session_overlay_augmentation_isolated_from_base_meta` (the e2e overlay-isolation oracle).
 
+**Shared collection and finite reads.** `GlobalContributorPopulation` owns
+project-filtered global views and augmentation collection orders. Each view is
+materialized once for its immutable contributor population and workspace
+membership revision. The collection order contains `AugmentationCandidate`
+slots into the shared augmenter/contributor arrays, never copied lists per
+declaring base. It preserves configured `files` precedence, canonical/hash
+ties, and the interface/namespace co-declaration rule. Configured-file ranks
+are indexed once on the owning workspace snapshot. Canonical/hash-ordered
+source arrays merge linearly, and four stable byte-radix passes apply configured
+ranks without comparison sorting. The work metric includes merging, rank
+visits, bucket offsets and entry moves. Global interface bases apply defaults
+in their declaring scope before reusing the first declaration's shared
+instantiation; the application retains all supplied positional arguments even
+when the first declaration has fewer parameters. Peers bind any remaining
+defaults in their own contributor contexts. Wide signature completion indexes
+the observed root hashes in one fact pass and removes precise roots through
+that same index, preserving strict validation of every contributor. The probe's
+work metric includes root-fact visits and lookups. Content and source-environment
+facts continue to fence every merged result.
+
+Finite indexed access over an object resolves its shared subject once through
+`normalize_node_for_structural_fact_demand`,
+builds one `SurfaceKeyIndex`, and applies the path walker's known-member and
+terminal rules to the keys. It retains optional-property widening, accessors,
+visible method overloads, key coercion and projection-mode semantics. Each
+terminal has independent cycle tracking, so repeated references to one
+declaration expand as they do in separate indexed reads. An absent
+key or unsupported subject uses the ordinary indexed-access path. This avoids
+one full merged-surface construction and dependency closure per member;
+`M[keyof M]` and a subsequent member projection have linear member visits and
+graph edges without changing operational limits.
+
+Deferred evaluation can read a declaration's current augmentation even when
+the declaring file's own bytes are unchanged. Its memo therefore stores the
+evaluation's fact signature alongside its result and cost receipt, validates
+contributing file roots on every hit, and replays those facts into the caller.
+All observed whole-file facts are strict roots: the memo key has no single
+file owner, and an untracked contributor must reject the cached answer.
+Each continuation frame traces its own reads; completing a child folds its
+signature into its parent. The metadata and evidence pages use the existing
+aggregate retention account. A newly added consumer must observe augmenter
+edits and additions even when its declaration subject was already evaluated.
