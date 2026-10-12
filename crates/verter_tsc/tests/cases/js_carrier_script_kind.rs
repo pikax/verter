@@ -289,6 +289,19 @@ mod harness {
     /// assertion downstream consumes a [`GatedRun`], which only this function
     /// mints. Nothing here asserts how long a healthy run takes.
     pub fn run_verter_tsc(command: GatedCommand, label: &str, deadline: Duration) -> GatedRun {
+        run_verter_tsc_after_start(command, label, deadline, || true)
+    }
+
+    /// How long a still-living child may take to record readiness. A child that
+    /// has already exited fails at once; this bound is not slept out for it.
+    const STARTUP_BACKSTOP: Duration = Duration::from_secs(5);
+
+    fn run_verter_tsc_after_start(
+        command: GatedCommand,
+        label: &str,
+        deadline: Duration,
+        mut started: impl FnMut() -> bool,
+    ) -> GatedRun {
         let mut command = command.0;
         command
             .stdin(Stdio::null())
@@ -314,9 +327,39 @@ mod harness {
             buf
         });
 
+        // Poll readiness against the live child. A fixture that dies before it
+        // records a pid (bad interpreter, immediate exit) must surface that
+        // status instead of sitting out STARTUP_BACKSTOP.
+        let startup_deadline = Instant::now() + STARTUP_BACKSTOP;
+        let mut startup = Ok(());
+        while !started() {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    startup = Err(format!(
+                        "the child exited ({status}) before the fixture was ready"
+                    ));
+                    break;
+                }
+                Ok(None) => {
+                    if Instant::now() >= startup_deadline {
+                        startup = Err(
+                            "the fixture never became ready before the startup backstop".into()
+                        );
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(e) => {
+                    tree.kill_tree();
+                    let _ = child.wait();
+                    panic!("failed to wait for {label}: {e}");
+                }
+            }
+        }
+
         let hard_stop = Instant::now() + deadline;
         let mut blew_deadline = false;
-        loop {
+        while startup.is_ok() {
             match child.try_wait() {
                 Ok(Some(_status)) => break,
                 Ok(None) => {
@@ -348,6 +391,10 @@ mod harness {
         let stderr =
             String::from_utf8_lossy(&err_reader.join().expect("stderr reader")).into_owned();
 
+        assert!(
+            startup.is_ok(),
+            "{label} fixture startup failed: {startup:?}"
+        );
         assert!(
             !blew_deadline,
             "{label} did not finish within {deadline:?}; its process tree was killed. \
@@ -449,6 +496,44 @@ mod harness {
         );
     }
 
+    /// DISCRIMINATING: a child that dies before readiness fails at once.
+    ///
+    /// The startup backstop is only for a live child that has not yet recorded
+    /// readiness. Waiting it out after the child has already exited hides the
+    /// exit status behind a five-second poll.
+    #[test]
+    fn a_child_that_exits_before_readiness_fails_without_waiting_out_startup() {
+        let started_at = Instant::now();
+        let outcome = std::panic::catch_unwind(|| {
+            let command = if cfg!(windows) {
+                let mut command = Command::new("cmd");
+                command.args(["/C", "exit", "1"]);
+                command
+            } else {
+                let mut command = Command::new("sh");
+                command.args(["-c", "exit 1"]);
+                command
+            };
+            run_verter_tsc_after_start(
+                GatedCommand(command),
+                "exited-before-ready",
+                Duration::from_millis(100),
+                || false,
+            )
+        });
+        let elapsed = started_at.elapsed();
+        let message =
+            panic_text(outcome).expect("a child that exits before readiness must fail the run");
+        assert!(
+            message.contains("exited") && message.contains("before the fixture was ready"),
+            "the failure must report the child's exit, not the startup backstop: {message}"
+        );
+        assert!(
+            elapsed < STARTUP_BACKSTOP,
+            "a dead child must not sit out the startup backstop ({STARTUP_BACKSTOP:?}): {elapsed:?}"
+        );
+    }
+
     /// DISCRIMINATING: the runner KILLS a wedged child's process tree and FAILS,
     /// instead of blocking until the outer gate kills the whole job.
     ///
@@ -499,34 +584,36 @@ mod harness {
         // on `Command::output()`, or on joining a pipe reader a live grandchild
         // keeps open — otherwise hangs until the gate's own killer, reporting a
         // timeout of everything instead of a failure of this. The bound is
-        // liveness only: it is six times the runner's own deadline, so it can
-        // only be reached by a runner that does not terminate at all.
-        //
-        // The runner's deadline here has to outlast the FIXTURE's startup, not
-        // just the wedge: `/bin/sh` must run, fork `sleep 600`, and record the
-        // pid before the kill lands, and under the gate's test parallelism that
-        // is not instant. Ten seconds against a 600s sleep still proves the
-        // bound fires.
+        // liveness only. Wait for the grandchild's pid before arming the short
+        // deadline, so scheduler delays during startup cannot remove the tree
+        // this test must exercise. Startup failure still kills and reaps it.
         let (tx, rx) = std::sync::mpsc::channel();
         let wedged = script.clone();
-        std::thread::spawn(move || {
+        let startup_pid_file = pid_file.clone();
+        let runner = std::thread::spawn(move || {
             let outcome = std::panic::catch_unwind(|| {
-                run_verter_tsc(
+                run_verter_tsc_after_start(
                     GatedCommand(Command::new(&wedged)),
                     "wedged-fixture",
-                    Duration::from_secs(10),
+                    Duration::from_millis(100),
+                    || {
+                        std::fs::read_to_string(&startup_pid_file)
+                            .ok()
+                            .is_some_and(|text| text.trim().parse::<u32>().is_ok())
+                    },
                 )
             });
             let _ = tx.send(panic_text(outcome));
         });
 
         let panic_message = rx
-            .recv_timeout(Duration::from_secs(60))
+            .recv_timeout(Duration::from_secs(8))
             .expect(
                 "the runner never returned: a wedged child must be killed and reported \
                  HERE, not left to block until the outer gate kills the job",
             )
             .expect("a wedged child must FAIL the run, never return a clean empty output");
+        runner.join().expect("the runner thread completed");
         assert!(
             panic_message.contains("did not finish within"),
             "the failure must name the deadline it blew: {panic_message}"
@@ -534,24 +621,13 @@ mod harness {
 
         // Negative: the tree really was killed — a grandchild left alive would
         // mean the "bound" only abandoned the child and leaked the real process.
-        // Poll for the record: the fixture writes it from a shell that may still
-        // be scheduling when the bound fires.
-        let pid_deadline = Instant::now() + Duration::from_secs(5);
-        let recorded = loop {
-            match std::fs::read_to_string(&pid_file) {
-                Ok(text) if !text.trim().is_empty() => break text,
-                other => {
-                    assert!(
-                        Instant::now() < pid_deadline,
-                        "the wedged fixture never recorded its grandchild pid: {other:?}"
-                    );
-                    std::thread::sleep(Duration::from_millis(25));
-                }
-            }
-        };
+        let recorded = std::fs::read_to_string(&pid_file).expect("the fixture recorded its pid");
         let grandchild: u32 = recorded.trim().parse().expect("a numeric pid");
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while process_alive(grandchild) && Instant::now() < deadline {
+        // Returns on the first dead observation. Ten seconds is only how long a
+        // loaded host or a slow init reaper may take to drop the pid; a passing
+        // run does not sleep the bound. A 500ms cap races that reaper.
+        let reap_deadline = Instant::now() + Duration::from_secs(10);
+        while process_alive(grandchild) && Instant::now() < reap_deadline {
             std::thread::sleep(Duration::from_millis(50));
         }
         assert!(
