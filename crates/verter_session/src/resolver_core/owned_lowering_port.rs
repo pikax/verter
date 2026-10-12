@@ -633,17 +633,33 @@ macro_rules! owned_lowering_from_source_inputs {
             }
             fn global_contributor_answer(
                 &self,
+                demand_canonical: &str,
                 name: &str,
                 space: verter_session_query::facts::SymbolSpace,
             ) -> verter_type_engine::resolver_core::request_ports::ContributorAnswer {
                 verter_type_engine::count_resolver_context_call!("OwnedLowering::global_contributor_answer");
-                SourceInputProvider::source_host(self).ingest_program_ambient_roots();
-                OwnedLowering::contributor_answer(self,
-                    &crate::file_artifact_store::AugmentationTargetKind::GlobalAugmentation,
-                    name,
-                    true,
-                    Some(space),
-                )
+                let host = SourceInputProvider::source_host(self);
+                host.ingest_program_ambient_roots();
+                let (_, discriminator) = crate::session_view::augmentation_population_for_view(
+                    SourceInputProvider::source_session_view(self));
+                let population = host.project_type_store().indexed().global_contributor_index().snapshot();
+                let root = host.workspace().published_root();
+                let project_for = |canonical: &str| root.as_ref()
+                    .and_then(|root| root.snapshot.owners_for_file(canonical).first().copied());
+                let project = project_for(demand_canonical);
+                let contributors = population.lookup_in_project(name, space, discriminator, project,
+                    root.as_ref().map(|root| root.snapshot.generation.0),
+                    |entry| {
+                        let owner = project_for(entry.artifact_key.canonical.as_ref());
+                        owner.is_none() || owner == project
+                    },
+                    |canonical| root.as_ref().map_or(u32::MAX, |root| root.snapshot.declaration_sequence_rank(canonical)));
+                verter_type_engine::resolver_core::request_ports::ContributorAnswer {
+                    population_fingerprint: population.observation_fingerprint(
+                        &crate::file_artifact_store::AugmentationTargetKind::GlobalAugmentation,
+                        name, discriminator),
+                    contributors,
+                }
             }
             fn contributor_answer(
                 &self,
@@ -673,6 +689,21 @@ macro_rules! owned_lowering_from_source_inputs {
                     population_fingerprint,
                     contributors,
                 }
+            }
+            fn augmentation_contributor_order(
+                &self,
+                key: &crate::file_artifact_store::AugmentationTargetKey,
+                augmenters: &verter_session_query::resolution::AugmenterSet,
+                name: &str,
+                contributors: &verter_session_query::inputs::contributors::SymbolContributors,
+            ) -> Arc<[verter_session_query::inputs::contributors::AugmentationCandidate]> {
+                verter_type_engine::count_resolver_context_call!("OwnedLowering::augmentation_contributor_order");
+                let host = SourceInputProvider::source_host(self);
+                let root = host.workspace().published_root();
+                host.project_type_store().indexed().global_contributor_index().snapshot()
+                    .augmentation_order(key, augmenters, name, contributors,
+                        root.as_ref().map(|root| root.snapshot.generation.0),
+                        |canonical| root.as_ref().map_or(u32::MAX, |root| root.snapshot.declaration_sequence_rank(canonical)))
             }
             fn augmenter_artifact_answer(
                 &self,

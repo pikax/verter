@@ -607,6 +607,7 @@ pub trait OwnedLowering {
     );
     fn global_contributor_answer(
         &self,
+        demand_canonical: &str,
         name: &str,
         space: verter_session_query::facts::SymbolSpace,
     ) -> ContributorAnswer;
@@ -617,6 +618,13 @@ pub trait OwnedLowering {
         allow_automatic_libs: bool,
         space: Option<verter_session_query::facts::SymbolSpace>,
     ) -> ContributorAnswer;
+    fn augmentation_contributor_order(
+        &self,
+        key: &verter_session_query::resolution::AugmentationTargetKey,
+        augmenters: &verter_session_query::resolution::AugmenterSet,
+        name: &str,
+        contributors: &verter_session_query::inputs::contributors::SymbolContributors,
+    ) -> Arc<[verter_session_query::inputs::contributors::AugmentationCandidate]>;
     fn augmenter_artifact_answer(
         &self,
         captured: &verter_session_query::source::artifact_key::FileArtifactKey,
