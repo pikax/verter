@@ -1963,13 +1963,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         finalise: FactReadSetFinalise,
     ) -> EvaluateDeferredOutcome {
         let evidence = match finalise {
-            FactReadSetFinalise::Ok(facts) => self
-                .ctx
-                .complete_graph_signature(
-                    &self.observed_self_roots_from_nodes([frame.entry_node, result]),
-                    &facts,
-                )
-                .ok(),
+            FactReadSetFinalise::Ok(facts) => {
+                use verter_session_query::facts::fact_cache::{signature_entries, FactVersionRef};
+
+                let mut roots = self.observed_self_roots_from_nodes([frame.entry_node, result]);
+                // This memo has no single file owner. Every consumed
+                // declaration and augmentation contributor is a strict root,
+                // including whole-file facts retained on evidence pages.
+                roots.extend(signature_entries(&facts).filter_map(|fact| match fact {
+                    FactVersionRef::FileWholeHash { canonical_id, hash } => {
+                        Some((Arc::from(canonical_id.as_str()), *hash))
+                    }
+                    _ => None,
+                }));
+                self.ctx.complete_graph_signature(&roots, &facts).ok()
+            }
             FactReadSetFinalise::NonCacheable(_) => None,
             FactReadSetFinalise::MutationUnstable => {
                 frame.completeness = frame.completeness.merge(ResultCompleteness::partial(
@@ -2049,7 +2057,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // memo; one this demand cannot pay for is evaluated here.
         if let Some(served) =
             self.graph()
-                .evaluate_deferred_memo_get_with_context(node, reduction_context, self.ctx)
+                .evaluate_deferred_memo_get(node, reduction_context, self.ctx)
         {
             if self.admits_served(&served.receipt) {
                 return EvaluateDeferredOutcome::complete(served.value);
@@ -2170,7 +2178,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 };
                 let memo_hit = if check_memo {
                     self.graph()
-                        .evaluate_deferred_memo_get_with_context(entry_node, context, self.ctx)
+                        .evaluate_deferred_memo_get(entry_node, context, self.ctx)
                         .filter(|served| self.admits_served(&served.receipt))
                         .map(|served| served.value)
                 } else {

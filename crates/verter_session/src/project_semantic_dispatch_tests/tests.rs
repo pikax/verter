@@ -28978,13 +28978,17 @@ fn evaluate_deferred_memo_does_not_publish_budget_tainted_result() {
     // No-poison: the budget-tainted `(outer, ctx)` evaluation must NOT have
     // published a warm entry into the shared memo.
     assert!(
-        graph.evaluate_deferred_memo_get(outer, context).is_none(),
+        graph
+            .peek_evaluate_deferred_memo_for_tests(outer, context)
+            .is_none(),
         "POISON: budget-tainted evaluate result published (outer, ctx) into evaluate_deferred_memo"
     );
     // Precision: the gate is targeted at the tainted entry only — `inner`
     // completed before the budget trip and stays legitimately warm.
     assert!(
-        graph.evaluate_deferred_memo_get(inner, context).is_some(),
+        graph
+            .peek_evaluate_deferred_memo_for_tests(inner, context)
+            .is_some(),
         "the clean sub-evaluation (inner) must remain cached; only the tainted entry is withheld"
     );
 }
@@ -29277,7 +29281,7 @@ fn evaluate_deferred_memo_withholds_partial_without_request_context() {
     // (absent) request context.
     assert!(
         graph
-            .evaluate_deferred_memo_get(template, context)
+            .peek_evaluate_deferred_memo_for_tests(template, context)
             .is_none(),
         "POISON: a partial deferred evaluation published into evaluate_deferred_memo with NO \
          RequestContext installed — the publish gate must use the evaluated entry's OWN \
@@ -29722,7 +29726,7 @@ fn real_query_deep_finite_nested_demand_completes_and_warms() {
 
     assert!(
         graph
-            .evaluate_deferred_memo_get(deep_value, context)
+            .peek_evaluate_deferred_memo_for_tests(deep_value, context)
             .is_some(),
         "a complete deep finite evaluation must be eligible for the shared deferred memo"
     );
@@ -30032,7 +30036,9 @@ fn evaluate_deferred_memo_refuses_complete_with_cache_suppress() {
     // shared `evaluate_deferred_memo`. Pre-fix (gate = `!is_partial()` only) it
     // published and this would be `Some`; post-fix the entry is refused.
     assert!(
-        graph.evaluate_deferred_memo_get(mapped, context).is_none(),
+        graph
+            .peek_evaluate_deferred_memo_for_tests(mapped, context)
+            .is_none(),
         "POISON: a Complete-with-cache_suppress deferred evaluation published into \
          evaluate_deferred_memo — the publish gate must refuse admission when cache_suppress is \
          set (the CacheRead::cache_suppress contract: the memo refuses insertion when true), else \
@@ -30130,7 +30136,7 @@ fn import_type_arm_threads_nested_read_cache_suppress_into_outcome() {
     // Composed with LB1: the suppressed entry is refused warm admission.
     assert!(
         graph
-            .evaluate_deferred_memo_get(import_type, context)
+            .peek_evaluate_deferred_memo_for_tests(import_type, context)
             .is_none(),
         "composed LB1+LB2 no-poison: a suppressed ImportType evaluation must not be admitted into \
          evaluate_deferred_memo"
@@ -30214,7 +30220,7 @@ fn carrier_direct_serve_fence_refuses_evaluate_deferred_memo_and_recomputes() {
     );
     // No-poison: the fenced-derived Complete entry is REFUSED admission.
     assert!(
-        graph.evaluate_deferred_memo_get(bare, context).is_none(),
+        graph.peek_evaluate_deferred_memo_for_tests(bare, context).is_none(),
         "POISON: a fenced DIRECT carrier serve published into evaluate_deferred_memo — the publish \
          gate must refuse admission when the evaluator observed the direct fenced serve, else a \
          later warm hit replays the served-without-publication result"
@@ -30227,7 +30233,9 @@ fn carrier_direct_serve_fence_refuses_evaluate_deferred_memo_and_recomputes() {
          entry)"
     );
     assert!(
-        graph.evaluate_deferred_memo_get(bare, context).is_none(),
+        graph
+            .peek_evaluate_deferred_memo_for_tests(bare, context)
+            .is_none(),
         "the fenced entry must stay ABSENT from evaluate_deferred_memo across repeated evals"
     );
     host.test_force
@@ -30285,7 +30293,9 @@ fn carrier_direct_serve_unfenced_publishes_into_evaluate_deferred_memo() {
          positive here would make the fenced assertion meaningless"
     );
     assert!(
-        graph.evaluate_deferred_memo_get(bare, context).is_some(),
+        graph
+            .peek_evaluate_deferred_memo_for_tests(bare, context)
+            .is_some(),
         "an unfenced Complete carrier evaluation MUST publish into evaluate_deferred_memo (a \
          published serve is cacheable) — the fix must not blanket-suppress non-fenced serves"
     );
@@ -30351,7 +30361,9 @@ fn carrier_unresolved_name_stays_cacheable_even_with_fence_armed() {
          fence suppresses ONLY a resolved direct serve, never a stable miss (no over-suppression)"
     );
     assert!(
-        graph.evaluate_deferred_memo_get(bare, context).is_some(),
+        graph
+            .peek_evaluate_deferred_memo_for_tests(bare, context)
+            .is_some(),
         "a stable unresolved authored name is cacheable — its identity entry must PUBLISH into \
          evaluate_deferred_memo (the fix must not over-suppress honest misses)"
     );
@@ -30422,7 +30434,7 @@ fn single_segment_import_type_direct_serve_fence_refuses_evaluate_deferred_memo(
     );
     assert!(
         graph
-            .evaluate_deferred_memo_get(import_type, context)
+            .peek_evaluate_deferred_memo_for_tests(import_type, context)
             .is_none(),
         "POISON: a fenced single-segment ImportType direct serve published into \
          evaluate_deferred_memo — the publish gate must refuse it when the evaluator observed the \

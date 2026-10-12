@@ -182,9 +182,11 @@ continuation traces its steps; completed operands replay their proof into the
 parent. A warm read validates and bubbles that exact candidate's proof against
 the request view. Interned node identity alone cannot validate an evaluated
 `typeof` answer when the declaring source is unchanged and a barrel changes.
-Stale evaluations are replaced under the content-free key; return-only or
-partial evaluations are not published. Proof pages and entry storage reserve
-the shared retention account.
+All consumed whole-file facts, including paged augmentation contributors,
+join the node roots as strict self roots. A stale read retires only the exact
+candidate it validated; recomputation replaces it under the content-free key.
+Return-only or partial evaluations are not published. Proof pages, signatures,
+root names and entry storage reserve the shared retention account.
 
 ### Module-resolution keying (split env)
 

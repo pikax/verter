@@ -21,6 +21,7 @@ use verter_type_engine::semantic_query_memo::SemanticGraphStore;
 mod abstract_construct_tests;
 mod ambient_module_value_tests;
 mod apparent_type_tests;
+mod augmentation_scale_tests;
 mod base_signature_tests;
 mod broad_runtime_tests;
 mod call_resolve_tests;

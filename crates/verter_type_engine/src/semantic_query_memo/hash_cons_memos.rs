@@ -111,26 +111,14 @@ impl SemanticGraphStore {
         }
     }
 
-    /// Test-only inspection of the retained evaluation, without validation.
-    #[cfg(any(test, feature = "test-support"))]
+    /// A deferred operator can read declarations and export routes. Its
+    /// interned input is immutable, but its evaluated answer needs the
+    /// complete read proof to validate against this request's view.
     pub fn evaluate_deferred_memo_get(
         &self,
         node: SemanticNodeId,
         context: ProjectionReductionContext,
-    ) -> Option<crate::semantic_query::CacheRead<SemanticNodeId>> {
-        self.read_deferred_evaluation(node, context, |_| true)
-    }
-
-    /// A deferred operator can read declarations and export routes. Its
-    /// interned input is immutable, but its evaluated answer needs the
-    /// complete read proof to validate against this request's view.
-    pub(crate) fn evaluate_deferred_memo_get_with_context<
-        C: crate::resolver_core::ResolverCapabilities,
-    >(
-        &self,
-        node: SemanticNodeId,
-        context: ProjectionReductionContext,
-        ctx: &dyn crate::resolver_core::ResolverContext<C>,
+        ctx: &dyn crate::resolver_core::fact_validation_port::FactValidation,
     ) -> Option<crate::semantic_query::CacheRead<SemanticNodeId>> {
         self.read_deferred_evaluation(node, context, |entry| {
             verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::clone(
@@ -150,19 +138,29 @@ impl SemanticGraphStore {
             .evaluate_deferred_memo
             .get(&(node, context))
             .map(|entry| Arc::clone(entry.value()));
-        let hit = entry.filter(|entry| validate(entry)).map(|entry| {
-            crate::fact_signature_helpers::bubble_fact_signature_via_tls(&entry.evidence.0);
-            crate::semantic_query::CacheRead {
-                lease: entry.lease.clone(),
-                value: entry.result,
-                dep_signature: super::empty_signature(),
-                walker_diagnostics: Arc::from([]),
-                cache_suppress: false,
-                result_is_partial: false,
-                partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
-                receipt: crate::semantic_query::ReadReceipt::Priced(Arc::clone(&entry.receipt)),
-            }
-        });
+        let hit = entry
+            .filter(|entry| {
+                if validate(entry) {
+                    true
+                } else {
+                    self.evaluate_deferred_memo
+                        .remove_if(&(node, context), |_, current| Arc::ptr_eq(current, entry));
+                    false
+                }
+            })
+            .map(|entry| {
+                crate::fact_signature_helpers::bubble_fact_signature_via_tls(&entry.evidence.0);
+                crate::semantic_query::CacheRead {
+                    lease: entry.lease.clone(),
+                    value: entry.result,
+                    dep_signature: super::empty_signature(),
+                    walker_diagnostics: Arc::from([]),
+                    cache_suppress: false,
+                    result_is_partial: false,
+                    partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
+                    receipt: crate::semantic_query::ReadReceipt::Priced(Arc::clone(&entry.receipt)),
+                }
+            });
         if hit.is_some() {
             self.stats
                 .evaluate_deferred_memo_hits
@@ -188,9 +186,18 @@ impl SemanticGraphStore {
         if receipt.reserve_retention(self.retention_account()).is_err() {
             return;
         }
+        let own_bytes = std::mem::size_of::<DeferredEvaluationMemoEntry>()
+            + verter_session_query::retention::ENTRY_OVERHEAD_BYTES
+            + evidence.0.len()
+                * std::mem::size_of::<verter_session_query::facts::fact_cache::FactVersionRef>()
+            + evidence
+                .1
+                .iter()
+                .map(|root| root.len() + std::mem::size_of::<Arc<str>>())
+                .sum::<usize>();
         let retention = match verter_session_query::facts::receipt::reserve_retained_with_evidence(
             self.retention_account(),
-            std::mem::size_of::<DeferredEvaluationMemoEntry>(),
+            own_bytes,
             &[&evidence.0],
         ) {
             verter_session_query::retention::RetentionAdmission::Admitted(charge) => charge,
@@ -226,6 +233,18 @@ impl SemanticGraphStore {
                 }
             }
         }
+    }
+
+    /// Admission inspection for tests; production reads always validate facts.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn peek_evaluate_deferred_memo_for_tests(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+    ) -> Option<()> {
+        self.evaluate_deferred_memo
+            .contains_key(&(node, context))
+            .then_some(())
     }
 
     /// Release both stores during explicit graph invalidation. Ordinary
