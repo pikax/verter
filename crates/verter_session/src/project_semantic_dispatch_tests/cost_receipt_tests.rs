@@ -694,7 +694,19 @@ fn assert_reversed_checker_answer(count: usize, expected: u8) {
             let _request = fresh_request(100);
             root_read(&host, &key, full)
         };
+        let before_reductions = ProjectSemanticDispatch::<crate::resolver_core::HostCapabilities>::relation_reductions_for_tests();
+        let before_visits = ProjectSemanticDispatch::<crate::resolver_core::HostCapabilities>::relation_union_arm_visits_for_tests();
         let cold = read();
+        let reductions = ProjectSemanticDispatch::<crate::resolver_core::HostCapabilities>::relation_reductions_for_tests() - before_reductions;
+        let visits = ProjectSemanticDispatch::<crate::resolver_core::HostCapabilities>::relation_union_arm_visits_for_tests() - before_visits;
+        assert!(
+            visits <= 12 * count + 32,
+            "{count} arms: linear union traversal, got {visits}"
+        );
+        assert!(
+            reductions <= 4 * count + 8,
+            "{count} arms: linear structural queries, got {reductions}"
+        );
         assert_eq!(
             cold.answer,
             format!("literal Number({expected}.0)"),
@@ -730,7 +742,7 @@ fn assert_reversed_checker_answer(count: usize, expected: u8) {
             "{count} arms: no recomputation"
         );
         println!(
-            "reversed-{count}: {} partial={} work={} bytes={} repeat_misses=0",
+            "reversed-{count}: {} partial={} work={} bytes={} reductions={reductions} visits={visits} repeat_misses=0",
             cold.answer, cold.partial, cold.work, cold.bytes
         );
     }
