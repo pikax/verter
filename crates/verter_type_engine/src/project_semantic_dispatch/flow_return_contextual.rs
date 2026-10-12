@@ -83,6 +83,14 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
             if param.rest {
                 rest_element = match graph.node_data(param.ty).as_deref() {
                     Some(SemanticNodeData::Array { element, .. }) => Some(*element),
+                    Some(SemanticNodeData::Tuple { elements, .. })
+                        if elements
+                            .iter()
+                            .all(|element| !element.optional && !element.rest) =>
+                    {
+                        parameters.extend(elements.iter().map(|element| element.value));
+                        None
+                    }
                     _ => return None,
                 };
                 break;

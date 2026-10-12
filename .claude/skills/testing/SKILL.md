@@ -112,6 +112,24 @@ mod tests;
 
 Extracted file contains module contents directly — `use super::*;`, helpers, and `#[test]` fns. No wrapping `mod tests { }` block.
 
+### Repository guard scans
+
+Repository source guards reuse immutable source inventories or indexes within
+each test process. A necessary-condition filter may avoid parsing or scanning
+content only when every possible violation still reaches the original rule;
+retain each rule's path scope, integrity checks, and discriminating fixtures.
+Nextest isolates tests in separate processes, so a once-cell alone does not
+share a scan between nextest tests: the cold scan must also be efficient.
+
+The observation-feature guard resolves each production root and dev closure
+independently for host and wasm targets. Cargo remains the activation authority;
+metadata declarations only bound which seed activations can affect those
+closures. Cache default closures within that target/configuration and fixture
+metadata within the immutable fixture. Keep package identity (including source
+and version), weak edges, dependency defaults, and dev unification controls.
+The bounded repository guards are held to the standard nextest speed gate and
+are not on its known-slow list.
+
 ### TDD Workflow
 
 Behavioral code changes use TDD. Documentation, generated projections, formatting, and mechanical metadata changes use their owning freshness/validation evidence unless they also change executable behavior.
@@ -141,6 +159,20 @@ Tests are evidence, not a quota. At preflight, map each changed contract to the 
 - New features and bug fixes still require adequate regression evidence. Refactors must keep applicable existing coverage green; they do not earn new tests merely by changing structure.
 
 ### LSP request barriers
+
+Reuse one server for read-only fixture matrices. Batch independent edit cases
+with distinct canonical paths through one workspace per provider so their real
+quiet windows overlap; settle every case's diagnostic receipt before measuring
+foreground work. The coordinator's `block_in_place` path requires a multithreaded
+runtime, which cannot use Tokio's paused clock. After proving the edit publications
+finished, its test-only dispatch barrier can hold subsequent background revalidation
+while foreground counters are sampled; already-dispatched diagnostics must finish
+before sampling. For queued-waiter cancellation, poll the acquire future to
+`Pending`, assert participant registration, then drop the future; a zero-duration
+timeout still pays a timer turn. Concurrency regressions
+should force the relevant orders and observe lock ownership at the decision
+boundary rather than rely on repeated probabilistic races. Fixture drain tasks
+must abort on assertion failure as well as success.
 
 LSP mock foreign-target checks settle after both `ProviderDispatch` and
 `ProviderDecode` barrier waits. Capture the held target bytes before the
@@ -224,12 +256,50 @@ jobs below that, always capped by available CPUs. This keeps the documented
 measured 12-job peak was 11.60 GiB and is too close to call portable there.
 Explicit positive overrides remain exact. Windows uses full nextest capacity;
 the provider-free core has no provider-specific `max-threads = 1` groups.
-The three wide reversed-union checker-boundary rows share the
-`relation-comparison-envelope` group: only one retains its full pair evidence
-at a time, with the same answers, comparison allowances and watchdogs. Other
-core tests and the BF2 inventory keep their normal nextest concurrency.
+Core tests and the BF2 inventory keep their normal nextest concurrency; no test
+group serialises slow rows (serialised, the three reversed-union rows alone
+outran the 30-minute core step).
 Real-provider tests run through dedicated serial libtest jobs, while compile-fail
 fixtures run through standalone Cargo binaries rather than nextest test targets.
+
+The semantic gateway privacy rails remain in the core nextest inventory. They
+type-check their foreign-crate fixtures directly with rustc, preserving the
+diagnostic snapshots and checking a sanctioned gateway positive control first.
+`scripts/compile-fixture-artifacts.mjs archive` builds/lists the test binaries,
+stages compiler metadata and proc-macro libraries reported by that Cargo
+build plus the sources backing imported diagnostic excerpts, then archives the
+warm binaries and metadata. Both CI and the canonical
+gate use this builder. Metadata comes from Cargo artifact messages, never a
+glob over a potentially stale target directory.
+Cargo-reported `.rmeta` files are preferred when available; otherwise the
+reported `.rlib` supplies its embedded metadata. An unreported `.rmeta` sibling
+is never assumed or selected. Proc-macro libraries and transitive dependencies
+remain in the bundle, and a missing selected artifact is a setup failure.
+The manifest binds the bundle
+to the test binary and external metadata by SHA-256 content, and uses relative
+paths so extraction relocates it. Local consumers also compare available build
+metadata, catching metadata-only rebuilds; validation runs once per test process.
+The rail discovers every `tests/ui/fixtures/*.rs` file at runtime and requires
+its diagnostic snapshot rather than maintaining a filename inventory.
+
+For a focused local run, prepare metadata with the same package/target/feature
+options before running nextest:
+
+```bash
+node scripts/compile-fixture-artifacts.mjs prepare -p verter_semantic --test main
+cargo nextest run -p verter_semantic --test main type_info_privacy_rails
+```
+
+To build a reusable archive directly:
+
+```bash
+node scripts/compile-fixture-artifacts.mjs archive --workspace --archive-file artifacts/rust-nextest-archive.tar.zst
+```
+
+The archive includes `compile-fixtures` under the target directory, independently
+of the Cargo profile and target triple. Missing or
+mismatched metadata fails the privacy test instead of rebuilding dependencies
+inside it. Other compile contracts continue to use their standalone lane.
 
 On Windows, `--prepare` still warm-lists every archived suite and accepts only
 an exact status 0. Proc-macro suites are real test suites, not filterable
