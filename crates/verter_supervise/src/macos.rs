@@ -249,7 +249,7 @@ pub(crate) fn supervise(launch: Launch<'_>, report: &mut Report) {
                 && report.sampling.count == MIDRUN_FAULT_OBSERVATION;
             match sweep(pgid, &mut known, injected, Some(&queue)) {
                 Ok(outcome) => {
-                    cpu.observe(outcome.cpu);
+                    cpu.observe(outcome.cpu, parent_after_disappearance);
                     let done = Instant::now();
                     for gone in &outcome.gone {
                         known.remove(gone);
@@ -329,21 +329,21 @@ pub(crate) fn supervise(launch: Launch<'_>, report: &mut Report) {
                     // SZOMB is a later, racier signal. A live replacement
                     // has exit time 0.
                     for reading in events.exited.iter().filter_map(|&pid| exit_reading(pid)) {
-                        cpu.record_exit(reading);
+                        cpu.record_exit(reading, current_cpu_reading);
                     }
                     // Snapshot every known pid before the slower enumeration.
                     // A parent blocked in waitpid may already have reaped the
-                    // exited child; if that parent is still readable, its
+                    // exited child; if that parent is still alive, its
                     // child counters are the attribution.
                     if let Some(early) = snapshot_known(&known) {
-                        cpu.observe(early);
+                        cpu.observe(early, parent_after_disappearance);
                     }
                     let (members, discovered) = enumerate_tree(pgid, &mut known, Some(&queue));
                     let readings: Vec<_> = members
                         .into_iter()
                         .filter_map(|pid| usage(pid).ok().map(|r| cpu_reading(pid, &r)))
                         .collect();
-                    cpu.observe(readings);
+                    cpu.observe(readings, parent_after_disappearance);
                     tree_ever.extend(discovered);
                 }
                 if events.forked || !events.exited.is_empty() {
@@ -359,7 +359,7 @@ pub(crate) fn supervise(launch: Launch<'_>, report: &mut Report) {
     };
 
     if let Some(exited) = &exited {
-        cpu.observe(exited.cpu.clone());
+        cpu.observe(exited.cpu.clone(), parent_after_disappearance);
         report.wall_ms = Some(ns_to_ms(exited.exit_ns.saturating_sub(start_ns)));
         report.termination_latency_ms =
             kill_ns.map(|at| ns_to_ms(exited.exit_ns.saturating_sub(at)));
@@ -654,6 +654,21 @@ fn enumerate_tree(
     (seen, discovered)
 }
 
+fn current_cpu_reading(pid: libc::pid_t) -> Option<CpuReading> {
+    usage(pid).ok().map(|info| cpu_reading(pid, &info))
+}
+
+/// A missing CPU sample alone can also mean an unreadable zombie. Confirm
+/// lifetime disappearance before acquiring the parent's living-identity read.
+fn parent_after_disappearance(child: &CpuReading, parent: libc::pid_t) -> Option<CpuReading> {
+    match usage(child.pid) {
+        Ok(info) if info.ri_proc_start_abstime != child.started => {}
+        Err(error) if error.raw_os_error() == Some(libc::ESRCH) && !exists(child.pid) => {}
+        _ => return None,
+    }
+    current_cpu_reading(parent)
+}
+
 fn exit_reading(pid: libc::pid_t) -> Option<CpuReading> {
     let info = usage(pid).ok()?;
     if info.ri_proc_exit_abstime == 0 {
@@ -689,15 +704,33 @@ fn footprint(pid: libc::pid_t) -> Result<u64, std::io::Error> {
 }
 
 fn cpu_reading(pid: libc::pid_t, info: &libc::rusage_info_v4) -> CpuReading {
-    CpuReading {
+    static TIMEBASE: std::sync::OnceLock<(u32, u32)> = std::sync::OnceLock::new();
+    let &(numer, denom) = TIMEBASE.get_or_init(|| {
+        // libc redirects Mach bindings to a separate crate; the system ABI
+        // remains supported. Keep that compatibility allowance at this call.
+        #[allow(deprecated)]
+        {
+            let mut info = libc::mach_timebase_info { numer: 0, denom: 0 };
+            // SAFETY: a valid local out-parameter. Darwin's fixed machine
+            // timebase is shared by own and reaped-child rusage counters.
+            let status = unsafe { libc::mach_timebase_info(&mut info) };
+            assert_eq!(status, libc::KERN_SUCCESS, "mach_timebase_info");
+            assert!(info.numer > 0 && info.denom > 0, "invalid Mach timebase");
+            (info.numer, info.denom)
+        }
+    });
+    let mut reading = CpuReading {
         pid,
         parent: bsd_info(pid).map_or(-1, |bsd| bsd.pbi_ppid as i32),
         started: info.ri_proc_start_abstime,
+        exited: info.ri_proc_exit_abstime != 0,
         user: info.ri_user_time,
         kernel: info.ri_system_time,
         child_user: info.ri_child_user_time,
         child_kernel: info.ri_child_system_time,
-    }
+    };
+    reading.normalize_timebase(numer, denom);
+    reading
 }
 
 fn usage(pid: libc::pid_t) -> Result<libc::rusage_info_v4, std::io::Error> {
