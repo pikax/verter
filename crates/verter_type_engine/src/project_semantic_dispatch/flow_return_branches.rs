@@ -651,50 +651,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                                 &partition.subject,
                                 partition.remainder,
                             );
-                        } else if let Some((remainder, total)) =
-                            self.switch_discriminant_remainder(subject, &eval.tests)
-                        {
-                            if remainder.len() < total {
-                                // Every arm covered leaves the
-                                // clause reachable with the
-                                // reference `never`: its
-                                // contributors are typed through
-                                // it, as the checker keeps them.
-                                let node =
-                                    if remainder.is_empty() {
-                                        self.dispatch.graph().intern_node(
-                                            SemanticNodeData::Primitive(PrimitiveKind::Never),
-                                        )
-                                    } else {
-                                        self.union(&remainder)
-                                    };
-                                // The remainder's arms are the
-                                // PARENT reference's, so the
-                                // fact lands there — the root
-                                // for a shallow discriminant,
-                                // the enclosing reference for
-                                // a nested one.
-                                let parent_subject =
-                                    verter_session_query::flow::slice::SliceNarrowSubject {
-                                        root: subject.root.clone(),
-                                        path: Arc::from(
-                                            subject.path[..subject.path.len().saturating_sub(1)]
-                                                .to_vec()
-                                                .into_boxed_slice(),
-                                        ),
-                                    };
-                                self.bake_narrow_into_state(&mut dispatch, &parent_subject, node);
-                            }
                         } else {
-                            // A DECLINED probe leaves this
-                            // edge carrying the WHOLE
-                            // discriminant where the checker
-                            // subtracts the matched cases — a
-                            // superset, so it degrades rather
-                            // than publishing clean.
-                            self.record_degradation(FlowReturnDegradation::FlowGap(
-                                verter_session_query::flow::policy::FlowGap::GuardNarrowing,
-                            ));
+                            self.bake_switch_remainder(&mut dispatch, subject, &eval.tests);
                         }
                     }
                 }
@@ -747,6 +705,32 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         self.switch_next_clause(eval)
     }
 
+    /// Narrow a general switch's default or no-match edge from its entry
+    /// state. A declined relation retains the subject and degrades the answer.
+    fn bake_switch_remainder(
+        &mut self,
+        state: &mut FlowLayerState,
+        subject: &verter_session_query::flow::slice::SliceNarrowSubject,
+        tests: &[verter_session_query::flow::slice::SliceGuardLiteral],
+    ) {
+        match self.switch_discriminant_remainder(subject, tests) {
+            Some((remainder, total)) if remainder.len() < total => {
+                // These arms belong to the tested property's parent, including
+                // a nested parent. Complete coverage narrows it to `never`.
+                let node = self.union_or_never(&remainder);
+                let parent = verter_session_query::flow::slice::SliceNarrowSubject {
+                    root: subject.root.clone(),
+                    path: Arc::from(&subject.path[..subject.path.len().saturating_sub(1)]),
+                };
+                self.bake_narrow_into_state(state, &parent, node);
+            }
+            Some(_) => {}
+            None => self.record_degradation(FlowReturnDegradation::FlowGap(
+                verter_session_query::flow::policy::FlowGap::GuardNarrowing,
+            )),
+        }
+    }
+
     fn finish_switch<'r>(&mut self, mut eval: Box<SwitchEval<'r>>) -> BranchStep<'r> {
         let mut exit_states: Vec<FlowLayerState> = Vec::new();
         // The no-matching-case edge when only the evaluator proves it dead:
@@ -761,6 +745,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         &partition.subject,
                         partition.remainder,
                     );
+                } else if let Some(subject) = eval.discriminant {
+                    // Clause writes and narrowings do not reach this edge.
+                    self.restore_layer_state(eval.entry.clone());
+                    self.bake_switch_remainder(&mut state, subject, &eval.tests);
                 }
                 exit_states.push(state);
             } else {

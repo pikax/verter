@@ -157,6 +157,45 @@ fn switch_union_controls() {
 }
 
 #[test]
+fn switch_fallback_multi_literal_fallout() {
+    let declaration = "type U = {kind: 'a' | 'b'; value: 1} | {kind: 'c'; value: 2};";
+    for (body, expected) in [
+        ("case 'a': return 10; case 'b': return 20;", vec![2, 10, 20]),
+        ("case 'a': return 10;", vec![1, 2, 10]),
+        ("case 'a': break; case 'b': return 20;", vec![1, 2, 20]),
+        (
+            "case 'a': x = {kind: 'c', value: 2}; return 10; case 'b': return 20;",
+            vec![2, 10, 20],
+        ),
+    ] {
+        let source = format!("{declaration} function f(x: U) {{ switch (x.kind) {{ {body} }} return x.value; }} type Result = ReturnType<typeof f>;");
+        assert_switch_literals(resolve_switch(&source), &expected, false);
+    }
+    let source = format!("{declaration} function f(x: U) {{ switch (x.kind) {{ case 'a': return 10; case 'b': return 20; default: return x.value; }} }} type Result = ReturnType<typeof f>;");
+    assert_switch_literals(resolve_switch(&source), &[2, 10, 20], false);
+    let source = format!("{declaration} function f(x: {{payload: U}}) {{ switch (x.payload.kind) {{ case 'a': return 10; case 'b': return 20; }} return x.payload.value; }} type Result = ReturnType<typeof f>;");
+    assert_switch_literals(resolve_switch(&source), &[2, 10, 20], false);
+}
+
+#[test]
+fn switch_fallback_enum_fallout() {
+    let declaration = "enum Kind { A = 'a', B = 'b', C = 'c' } type U = {kind: Kind.A; value: 1} | {kind: Kind.B; value: 2} | {kind: Kind.C; value: 3};";
+    for (body, tail) in [
+        (
+            "case Kind.A: return 10; case Kind.B: return 20;",
+            "return x.value;",
+        ),
+        (
+            "case Kind.A: return 10; case Kind.B: return 20; default: return x.value;",
+            "",
+        ),
+    ] {
+        let source = format!("{declaration} function f(x: U) {{ switch (x.kind) {{ {body} }} {tail} }} type Result = ReturnType<typeof f>;");
+        assert_switch_literals(resolve_switch(&source), &[3, 10, 20], false);
+    }
+}
+
+#[test]
 fn switch_union_unit_discriminants_and_shared_labels() {
     for (declaration, discriminant, cases) in [
         (

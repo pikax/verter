@@ -8,7 +8,10 @@ no-match exit. Clause fall-through still joins its live predecessor state with
 the dispatch state; break exits keep their own state. Broad leaves, enum units,
 unresolved projections, guard clauses (`switch (true)` / `switch (typeof x)`)
 and non-strict nullability retain the general relation-based rules. The
-partition is evaluation-local and introduces no reusable-cache authority.
+general remainder narrows both default dispatch and implicit no-match exits
+from the switch entry state, including union-valued and enum discriminants.
+Partly covered members remain, and break exits retain their own reaching state.
+The partition is evaluation-local and introduces no reusable-cache authority.
 The finite default limits allow 16,384 selected graph nodes and 32,768 proof
 obligations; the request projection fuse defaults to 16,384 operations.
 These limits admit wide finite switches without changing the typed refusal or
