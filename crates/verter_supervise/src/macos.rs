@@ -330,12 +330,12 @@ pub(crate) fn supervise(launch: Launch<'_>, report: &mut Report) {
                     // has exit time 0.
                     for reading in events.exited.iter().filter_map(|&pid| exit_reading(pid)) {
                         cpu.record_exit(reading, |parent| {
-                            usage(parent).ok().map(|info| info.ri_proc_start_abstime)
+                            usage(parent).ok().map(|info| cpu_reading(parent, &info))
                         });
                     }
                     // Snapshot every known pid before the slower enumeration.
                     // A parent blocked in waitpid may already have reaped the
-                    // exited child; if that parent is still readable, its
+                    // exited child; if that parent is still alive, its
                     // child counters are the attribution.
                     if let Some(early) = snapshot_known(&known) {
                         cpu.observe(early);
@@ -695,6 +695,7 @@ fn cpu_reading(pid: libc::pid_t, info: &libc::rusage_info_v4) -> CpuReading {
         pid,
         parent: bsd_info(pid).map_or(-1, |bsd| bsd.pbi_ppid as i32),
         started: info.ri_proc_start_abstime,
+        exited: info.ri_proc_exit_abstime != 0,
         user: info.ri_user_time,
         kernel: info.ri_system_time,
         child_user: info.ri_child_user_time,

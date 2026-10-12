@@ -546,22 +546,25 @@ identity immediately and sweeps before consuming watchdog completion. The
 kernel publishes that exit rusage (`ri_proc_exit_abstime` nonzero) before it
 marks the process a zombie and before it wakes a parent blocked in `waitpid`.
 The same turn also reads every known process before the slower tree walk. A
-child already reaped by a parent that is still readable is attributed from
+child already reaped by a parent that is still alive is attributed from
 that parent's child counters: the workload reaps with `waitpid` as soon as
 the child exits and does not wait for the sampler. A successful exit read
-with the parent still present preserves the final descendant counters even when
+with the parent still alive preserves the final descendant counters even when
 no periodic sweep falls between nested exits, and even when the next snapshot
 finds both generations gone. That read is the attribution: the exit counters
 are a floor for the lifetime, and a descendant first seen on that read counts
-when its parent is still present. If the exited process and its parent are
+when its parent is still alive. If the exited process and its parent are
 both already gone, the supervisor retains the ambiguity instead.
-Parent presence is established by a fresh start-identity read after the exit
-sample, never by the previous sweep's cached presence. If parent metadata is
-unavailable, the stored parent selects the lifetime to verify; a missing or
-reused parent cannot certify attribution. Exit counters remain lifetime floors
+Parent presence is established by a fresh matching start identity and a zero
+exit timestamp after the exit sample, never by the previous sweep's cached
+presence. Readable zombies retain their start identities after orphaning their
+surviving children, so neither parent verification nor a later snapshot uses an
+exited parent to certify attribution. If parent metadata is unavailable, the
+stored parent selects the lifetime to verify; a missing, exited or reused parent
+cannot certify attribution. Exit counters remain lifetime floors
 even when that verification fails, so unresolved histories retain unavailable
 totals and bounds that include the final sampled counters.
-When a child disappears while its parent is still sampled, cumulative child
+When a child disappears while its parent is still alive, cumulative child
 counters retain unsampled tails without adding the child's sampled usage twice.
 Live reparented descendants remain independent, and reused PIDs are separate
 lifetimes. If a descendant and its parent both disappear before the
