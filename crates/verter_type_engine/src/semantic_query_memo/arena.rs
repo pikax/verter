@@ -540,6 +540,7 @@ pub(crate) struct NodeArenaCore {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ArenaRaceEvent {
     BeforeDedupLookup,
+    BeforeInnerWrite,
     BeforeDedupRetain,
     BeforeRootRelease { blocked: bool },
     AfterRootRelease,
@@ -769,7 +770,7 @@ impl NodeArena {
         // Sharded dedup hot path. The fingerprint routes to its shard and
         // the bucket scan checks for an existing id; the miss path acquires
         // `inner.write()` briefly to push the new slot.
-        let (id, is_miss, write_wait_ns) = {
+        let (id, is_miss) = {
             let timing_on = verter_execution::request_context::current_timing_enabled();
             // Fast path: shard-hit. Shard Mutex is short-lived; parallel
             // across shards.
@@ -785,7 +786,7 @@ impl NodeArena {
             crate::request_observers::record_node_arena_lock_acquisition(lock_wait);
             #[cfg(test)]
             self.race_event(ArenaRaceEvent::BeforeDedupLookup);
-            let mut inner = self.inner.write();
+            let mut inner = self.write_for_intern();
             let hit = shard
                 .lookup(fingerprint, &data, &scope, |id| {
                     matches!(inner.slot(id), Slot::Live(..))
@@ -798,7 +799,7 @@ impl NodeArena {
                 });
             drop(inner);
             if let Some(existing) = hit {
-                (existing, false, 0u64)
+                (existing, false)
             } else {
                 drop(shard);
                 #[cfg(any(test, feature = "test-support"))]
@@ -816,7 +817,7 @@ impl NodeArena {
                     .map(|t| t.elapsed())
                     .unwrap_or(std::time::Duration::ZERO);
                 crate::request_observers::record_node_arena_lock_acquisition(lock_wait);
-                let mut inner = self.inner.write();
+                let mut inner = self.write_for_intern();
                 if let Some(existing) = shard.lookup(fingerprint, &data, &scope, |id| {
                     matches!(inner.slot(id), Slot::Live(..))
                 }) {
@@ -826,10 +827,8 @@ impl NodeArena {
                         .get_mut(&(existing.0 >> CHUNK_BITS))
                         .unwrap()
                         .owners[(existing.0 & CHUNK_MASK) as usize] += 1;
-                    (existing, false, 0u64)
+                    (existing, false)
                 } else {
-                    let write_start = Instant::now();
-                    let wait = write_start.elapsed().as_nanos() as u64;
                     // The id this payload would take. Ids are monotonic and
                     // never reused (storage is chunked, not a vector), so the
                     // next id to hand out is the allocation point the
@@ -874,7 +873,7 @@ impl NodeArena {
                         scope,
                         id,
                     ));
-                    (id, true, wait)
+                    (id, true)
                 }
             }
         };
@@ -885,13 +884,27 @@ impl NodeArena {
             if is_miss {
                 prov.node_arena_intern_miss.fetch_add(1, Relaxed);
             }
-            prov.node_arena_inner_write_wait_ns
-                .fetch_add(write_wait_ns, Relaxed);
             // In range by construction: the array is sized to the tag bound.
             prov.node_arena_pushes_per_discriminant[discriminant].fetch_add(1, Relaxed);
         }
 
         Ok(id)
+    }
+
+    /// Record acquisition time on every intern write, including dedup hits
+    /// and writes that subsequently refuse an invalid operand.
+    fn write_for_intern(&self) -> parking_lot::RwLockWriteGuard<'_, ArenaInner> {
+        #[cfg(test)]
+        self.race_event(ArenaRaceEvent::BeforeInnerWrite);
+        let start = self.provenance.as_ref().map(|prov| (prov, Instant::now()));
+        let inner = self.inner.write();
+        if let Some((prov, start)) = start {
+            prov.node_arena_inner_write_wait_ns.fetch_add(
+                start.elapsed().as_nanos() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
+        inner
     }
 
     pub(super) fn try_intern_owned(
@@ -1213,6 +1226,60 @@ impl NodeArena {
 mod counted_tests {
     use super::*;
     use crate::semantic_query::LiteralValue;
+
+    #[test]
+    fn arena_wait_counter_includes_hit_and_both_miss_acquisitions() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            mpsc,
+        };
+        use std::time::Duration;
+
+        const WAIT: Duration = Duration::from_secs(30);
+        const HOLD: Duration = Duration::from_millis(20);
+        for (hit, acquisition) in [(true, 1), (false, 1), (false, 2)] {
+            let mut arena = NodeArena::default();
+            let provenance = Arc::new(crate::engine_provenance::EngineProvenance::default());
+            arena.provenance = Some(Arc::clone(&provenance));
+            let data = SemanticNodeData::Literal(LiteralValue::String("contended".into()));
+            if hit {
+                let _ = arena.push(data.clone());
+            }
+            let before = provenance
+                .node_arena_inner_write_wait_ns
+                .load(Ordering::Relaxed);
+            let (parked_tx, parked_rx) = mpsc::channel();
+            let (resume_tx, resume_rx) = mpsc::channel();
+            let resume_rx = parking_lot::Mutex::new(resume_rx);
+            let acquisitions = AtomicUsize::new(0);
+            *arena.race_hook.lock() = Some(Arc::new(move |event| {
+                if event == ArenaRaceEvent::BeforeInnerWrite
+                    && acquisitions.fetch_add(1, Ordering::Relaxed) + 1 == acquisition
+                {
+                    parked_tx.send(()).unwrap();
+                    resume_rx.lock().recv_timeout(WAIT).unwrap();
+                }
+            }));
+            std::thread::scope(|threads| {
+                // Disconnect a parked worker before joining on assertion failure.
+                let resume = resume_tx;
+                let worker = threads.spawn(|| arena.push(data));
+                parked_rx.recv_timeout(WAIT).unwrap();
+                let held = arena.inner.write();
+                resume.send(()).unwrap();
+                std::thread::sleep(HOLD);
+                drop(held);
+                worker.join().unwrap();
+            });
+            *arena.race_hook.lock() = None;
+            let waited = provenance
+                .node_arena_inner_write_wait_ns
+                .load(Ordering::Relaxed)
+                - before;
+            assert!(waited >= HOLD.as_nanos() as u64 / 2,
+                "hit={hit}, acquisition={acquisition}: blocked write acquisition was not counted ({waited}ns)");
+        }
+    }
 
     #[test]
     fn multiset_guard_distinguishes_planted_omission_and_duplicate() {

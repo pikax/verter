@@ -16,6 +16,11 @@ The production absence contract is an automatically discovered session
 compile-fail fixture; ordinary-constructor and legacy-sweep negative controls
 are arena unit tests.
 
+`ProjectSemanticDispatch::with_ownership_harness` consumes that same fixture
+and binds its counted graph to a test context. It opens no construction scope,
+so session composition tests can exercise the gaps between real dispatches.
+This adapter is also restricted to `test` or `test-support` builds.
+
 ## Roots, retained edges and destruction
 
 `NodeRootSet` retains an immutable operand multiset in its issuing arena.
@@ -75,6 +80,16 @@ scopes have returned. Materialized output values acquire roots from their
 sealed payload's issuing engine identity; member shape keys acquire from the
 output authority's engine. Neither uses the ambient scope to select an arena.
 Unbound test carriers still require an explicit fixture construction scope.
+
+Session key-domain builders open their own construction scope and return a
+`NodeRoot` through the consuming Pick/Omit dispatch. Macro payload and surface
+producers likewise return rooted nodes, including merged emit objects and
+incomplete positive subsets. Publication tokens retain the surface and member
+operands through enumeration, admission and terminal sink consumption. These
+internal owners do not rely on an enclosing request or audit scope.
+Route-admission carriers acquire the gated witness's node from its issuing
+graph before the orchestration scope closes, retaining it through the route
+publication sink. Their semantic admission gates remain unchanged.
 
 The dedup/final-release regression uses per-arena test rendezvous: acquisition
 wins with the arena lock held from live-slot validation through root reservation;

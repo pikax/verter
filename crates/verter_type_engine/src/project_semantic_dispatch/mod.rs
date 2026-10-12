@@ -749,6 +749,18 @@ impl<'g> Drop for RelationEnvironmentScope<'g> {
 }
 
 impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
+    /// Bind the controlled counted fixture to real dispatch without an
+    /// enclosing construction scope. Unavailable in production builds.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_ownership_harness(
+        ctx: &'a dyn ResolverContext<C>,
+        harness: crate::semantic_query_memo::ownership_harness::CountedOwnershipHarness,
+    ) -> Self {
+        let mut dispatch = Self::new(ctx);
+        dispatch.binding.graph = Arc::new(harness.into_graph());
+        dispatch
+    }
+
     /// Create a dispatcher bound to a sealed request context.
     ///
     /// Production construction paths supply `HostResolverContext` or
