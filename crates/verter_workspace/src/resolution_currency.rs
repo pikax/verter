@@ -361,8 +361,10 @@ pub(crate) fn classify_resolution_observation(fact: &FactVersionRef) -> Resoluti
 /// the ledger's contents, ordering, or the signatures derived from it depends
 /// on which hasher produced the buckets: witness canonicalisation orders facts
 /// structurally, never by hash.
+/// Immutable keys share their path payloads across HAMT node copies. Updating
+/// one fact in a cloned root must not deep-clone neighboring canonical paths.
 type FactVersionLedger = imbl::GenericHashMap<
-    ResolutionFactKey,
+    Arc<ResolutionFactKey>,
     ResolutionFactVersion,
     rustc_hash::FxBuildHasher,
     imbl::shared_ptr::DefaultSharedPtr,
@@ -480,7 +482,7 @@ impl ResolutionFactRoot {
     /// Semantic advance: the fact's observed meaning moved. Records the
     /// key as a propagation seed for the enclosing mutation batch.
     pub(crate) fn advance(&mut self, key: ResolutionFactKey, version: ResolutionFactVersion) {
-        self.versions.insert(key.clone(), version);
+        self.versions.insert(Arc::new(key.clone()), version);
         self.pending_seeds.push(key);
     }
 
@@ -497,7 +499,7 @@ impl ResolutionFactRoot {
         key: ResolutionFactKey,
         version: ResolutionFactVersion,
     ) {
-        self.versions.insert(key, version);
+        self.versions.insert(Arc::new(key), version);
     }
 
     pub(crate) fn remove(&mut self, key: &ResolutionFactKey) {
@@ -657,7 +659,7 @@ impl ResolutionFactRoot {
         let floor = self.derived_floor;
         for node in self.forward.keys() {
             if !self.versions.contains_key(node) {
-                self.versions.insert(node.clone(), floor);
+                self.versions.insert(Arc::new(node.clone()), floor);
             }
         }
         for node in std::mem::take(&mut self.retired_nodes) {
@@ -787,7 +789,8 @@ impl ResolutionFactRoot {
                 if !visited.insert(dependent.clone()) {
                     continue;
                 }
-                self.versions.insert(dependent.clone(), fresh_version());
+                self.versions
+                    .insert(Arc::new(dependent.clone()), fresh_version());
                 advanced.push(dependent.clone());
                 queue.push_back(dependent);
             }

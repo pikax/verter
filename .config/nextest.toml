@@ -24,6 +24,11 @@ max-threads = 1
 # this one tightens to `terminate-after = 2` when the list empties.
 slow-timeout = { period = "10s", terminate-after = 6 }
 
+# Session engine regressions retain the 20-second speed deadline.
+[[profile.default.overrides]]
+filter = 'package(verter_session) & (test(publication_surfaces_publish_and_survive_renames_on_both_claimed_engines) | test(configured_project_opening_classifies_linear_members) | test(det_05_partial_resident_cache) | test(backend_projection_checks_clean_on_both_claimed_engines) | test(query_retention_refusal_preserves_delivery_validation_and_lowering) | test(projected_carrier_corruption_is_caught_on_both_claimed_engines) | test(lib_awaited_tail_runs_answer_past_the_checker_limit_and_stop_at_verters_budget))'
+slow-timeout = { period = "10s", terminate-after = 2 }
+
 # Live provider tests drive a real tsgo/tsserver child and carry their own
 # in-test deadlines (up to 230s); CI runs them in their own lanes with cargo
 # test. Locally they keep the 5-minute hang backstop.
@@ -49,16 +54,9 @@ filter = '''
   (package(verter_session) & test(=cases::corpus_audit_tests::chunk_005::corpus_audit_chunk_005_produces_audit_records_or_documents_skips)) |
   (package(verter_session) & test(=cases::corpus_audit_tests::chunk_004::corpus_audit_chunk_004_produces_audit_records_or_documents_skips)) |
   (package(verter_compiler) & test(=ide::template::flow_check::tests::chains_and_nested_scopes_grow_linearly)) |
-  (package(verter_session) & test(=cases::sts0_profile_gate::publication_surfaces_publish_and_survive_renames_on_both_claimed_engines)) |
-  (package(verter_session) & test(=global_contributors::ac3_tests::configured_project_opening_classifies_linear_members)) |
   (package(verter_compiler) & test(=ide::template::flow_check::tests::callback_count_scales_without_path_expansion)) |
   (package(verter_session) & test(=project_semantic_dispatch_tests::cost_receipt_tests::cold_query_entries_fit_within_the_checker_relation_envelope)) |
   (package(verter_compiler) & test(=ide::template::flow_tests::component_functions_read_one_flow_of_every_branch)) |
-  (package(verter_session) & test(=cases::g_block::semantic_determinism_matrix::det_05_partial_resident_cache)) |
-  (package(verter_session) & test(=cases::sts0_profile_gate::backend_projection_checks_clean_on_both_claimed_engines)) |
-  (package(verter_session) & test(=cache_runtime_tests::node_tests::query_retention_refusal_preserves_delivery_validation_and_lowering)) |
-  (package(verter_session) & test(=cases::sts0_profile_gate::projected_carrier_corruption_is_caught_on_both_claimed_engines)) |
-  (package(verter_session) & test(=project_semantic_dispatch_tests::flow_return_coverage_tests::lib_awaited_tail_runs_answer_past_the_checker_limit_and_stop_at_verters_budget)) |
   (package(verter_session) & test(=project_semantic_dispatch_tests::augmentation_scale_tests::merged_interface_indexed_access_work_is_linear)) |
   (package(verter_session) & test(=project_semantic_dispatch_tests::augmentation_scale_tests::merged_interface_indexed_access_keeps_every_contributor)) |
   (package(verter_session) & test(=project_semantic_dispatch_tests::differential_depth_tests::an_800_guard_narrowing_chain_answers_without_strict_null_checks)) |
@@ -73,6 +71,11 @@ test-group = 'progressive-child-contract-completion'
 
 [profile.ci]
 # The speed gate (see [profile.default]): flagged at 10s, failed at 20s.
+slow-timeout = { period = "10s", terminate-after = 2 }
+
+# Session engine regressions retain the 20-second speed deadline.
+[[profile.ci.overrides]]
+filter = 'package(verter_session) & (test(publication_surfaces_publish_and_survive_renames_on_both_claimed_engines) | test(configured_project_opening_classifies_linear_members) | test(det_05_partial_resident_cache) | test(backend_projection_checks_clean_on_both_claimed_engines) | test(query_retention_refusal_preserves_delivery_validation_and_lowering) | test(projected_carrier_corruption_is_caught_on_both_claimed_engines) | test(lib_awaited_tail_runs_answer_past_the_checker_limit_and_stop_at_verters_budget))'
 slow-timeout = { period = "10s", terminate-after = 2 }
 
 [[profile.ci.overrides]]
@@ -91,16 +94,9 @@ filter = '''
   (package(verter_session) & test(=cases::corpus_audit_tests::chunk_005::corpus_audit_chunk_005_produces_audit_records_or_documents_skips)) |
   (package(verter_session) & test(=cases::corpus_audit_tests::chunk_004::corpus_audit_chunk_004_produces_audit_records_or_documents_skips)) |
   (package(verter_compiler) & test(=ide::template::flow_check::tests::chains_and_nested_scopes_grow_linearly)) |
-  (package(verter_session) & test(=cases::sts0_profile_gate::publication_surfaces_publish_and_survive_renames_on_both_claimed_engines)) |
-  (package(verter_session) & test(=global_contributors::ac3_tests::configured_project_opening_classifies_linear_members)) |
   (package(verter_compiler) & test(=ide::template::flow_check::tests::callback_count_scales_without_path_expansion)) |
   (package(verter_session) & test(=project_semantic_dispatch_tests::cost_receipt_tests::cold_query_entries_fit_within_the_checker_relation_envelope)) |
   (package(verter_compiler) & test(=ide::template::flow_tests::component_functions_read_one_flow_of_every_branch)) |
-  (package(verter_session) & test(=cases::g_block::semantic_determinism_matrix::det_05_partial_resident_cache)) |
-  (package(verter_session) & test(=cases::sts0_profile_gate::backend_projection_checks_clean_on_both_claimed_engines)) |
-  (package(verter_session) & test(=cache_runtime_tests::node_tests::query_retention_refusal_preserves_delivery_validation_and_lowering)) |
-  (package(verter_session) & test(=cases::sts0_profile_gate::projected_carrier_corruption_is_caught_on_both_claimed_engines)) |
-  (package(verter_session) & test(=project_semantic_dispatch_tests::flow_return_coverage_tests::lib_awaited_tail_runs_answer_past_the_checker_limit_and_stop_at_verters_budget)) |
   (package(verter_session) & test(=project_semantic_dispatch_tests::augmentation_scale_tests::merged_interface_indexed_access_work_is_linear)) |
   (package(verter_session) & test(=project_semantic_dispatch_tests::augmentation_scale_tests::merged_interface_indexed_access_keeps_every_contributor)) |
   (package(verter_session) & test(=project_semantic_dispatch_tests::differential_depth_tests::an_800_guard_narrowing_chain_answers_without_strict_null_checks)) |

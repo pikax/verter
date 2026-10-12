@@ -5,6 +5,13 @@ description: Verter scheduler — Scheduler, submit_request/submit_batch/submit_
 
 # Scheduler
 
+Each `FileNode` keeps four shards for its small per-profile artifact map,
+independent of the host CPU count. Source-only scripts still allocate that
+map, so machine-wide sharding multiplies empty storage across an opened
+project. The map remains a DashMap with the same generation fences and
+concurrent profile access. The scheduler's artifact coherence and concurrency
+tests cover publication; allocation comparisons are advisory measurements.
+
 Concise reference for the `verter_scheduler` crate.
 
 **Live** surface (current tree): the `submit_request` / `submit_batch` /
