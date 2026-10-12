@@ -239,7 +239,12 @@ stages compiler metadata and proc-macro libraries reported by that Cargo
 build plus the sources backing imported diagnostic excerpts, then archives the
 warm binaries and metadata. Both CI and the canonical
 gate use this builder. Metadata comes from Cargo artifact messages, never a
-glob over a potentially stale target directory. The manifest binds the bundle
+glob over a potentially stale target directory.
+Cargo-reported `.rmeta` files are preferred when available; otherwise the
+reported `.rlib` supplies its embedded metadata. An unreported `.rmeta` sibling
+is never assumed or selected. Proc-macro libraries and transitive dependencies
+remain in the bundle, and a missing selected artifact is a setup failure.
+The manifest binds the bundle
 to the test binary and external metadata by SHA-256 content, and uses relative
 paths so extraction relocates it. Local consumers also compare available build
 metadata, catching metadata-only rebuilds; validation runs once per test process.

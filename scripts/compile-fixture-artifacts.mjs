@@ -59,12 +59,17 @@ export function stageFixtureArtifacts(messages) {
   const sources = {};
   for (const artifact of artifacts) {
     for (const filename of artifact.filenames) {
-      const metadata = filename.endsWith(".rlib")
-        ? filename.replace(/\.rlib$/, ".rmeta")
-        : filename;
+      // An rlib carries metadata too. Prefer standalone metadata only when
+      // Cargo reports it, never an assumed (possibly stale) sibling.
+      if (
+        filename.endsWith(".rlib") &&
+        artifact.filenames.includes(filename.replace(/\.rlib$/, ".rmeta"))
+      )
+        continue;
+      const metadata = filename;
       const procMacro =
         artifact.target.kind.includes("proc-macro") && /\.(dll|so|dylib)$/.test(metadata);
-      if (!metadata.endsWith(".rmeta") && !procMacro) continue;
+      if (!/\.(rmeta|rlib)$/.test(metadata) && !procMacro) continue;
       if (!existsSync(metadata)) throw new Error(`missing compiler artifact: ${metadata}`);
       const name = basename(metadata);
       if (files.has(name) && files.get(name) !== metadata) {
