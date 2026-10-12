@@ -63,7 +63,7 @@ fn lookup_path_source_has_no_known_canonicals_scan() {
         .and_then(|rest| rest.split("\n    fn ").next())
         .expect("collect_augmentation_contributions body");
     assert!(
-        collect.contains("enum OrderedOrigin"),
+        collect.contains("augmentation_contributor_order"),
         "augmenter and file-scope contributors must be ordered together before lowering"
     );
     assert!(
@@ -725,6 +725,150 @@ fn all_base_demands_share_one_population_and_copy_proportional_to_additions() {
         smallest_copied * largest as u64,
         "copies grow linearly with the contributors: {copied_per_size:?}"
     );
+}
+
+#[test]
+fn project_filtered_population_is_shared_and_tracks_membership_revision() {
+    use std::cell::Cell;
+    use verter_session_query::facts::SymbolSpace;
+    use verter_session_query::resolution::ProjectId;
+    let store = FileArtifactStore::new();
+    for i in 0..128 {
+        publish(
+            &store,
+            &format!("/p{}/decl{i:04}.d.ts", i % 2),
+            &format!("interface Shared {{ p{i}: {i} }}"),
+        );
+    }
+    let snapshot = store.global_contributor_index().snapshot();
+    let visits = Cell::new(0);
+    let lookup = |project, generation, prefix: &str| {
+        snapshot.lookup_in_project(
+            "Shared",
+            SymbolSpace::Type,
+            None,
+            Some(ProjectId(project)),
+            Some(generation),
+            |entry| {
+                visits.set(visits.get() + 1);
+                entry.artifact_key.canonical.starts_with(prefix)
+            },
+            |_| 0,
+        )
+    };
+    let first = lookup(0, 1, "/p0/");
+    assert_eq!(first.entries.len(), 64);
+    let visits_after_first = visits.get();
+    for _ in 0..128 {
+        let again = lookup(0, 1, "/p0/");
+        assert!(Arc::ptr_eq(&first.entries, &again.entries));
+    }
+    assert_eq!(
+        visits.get(),
+        visits_after_first,
+        "repeated demands do not scan or copy contributors"
+    );
+    let other = lookup(1, 1, "/p1/");
+    assert!(other
+        .entries
+        .iter()
+        .all(|entry| entry.artifact_key.canonical.starts_with("/p1/")));
+    let moved = lookup(0, 2, "/p1/");
+    assert_eq!(
+        moved
+            .entries
+            .iter()
+            .map(|entry| entry.artifact_key.clone())
+            .collect::<Vec<_>>(),
+        other
+            .entries
+            .iter()
+            .map(|entry| entry.artifact_key.clone())
+            .collect::<Vec<_>>(),
+        "ownership change replaces the filtered view"
+    );
+    assert_eq!(
+        first.fingerprint, moved.fingerprint,
+        "population fact stays on the unfiltered observation rail"
+    );
+    assert!(first
+        .entries
+        .iter()
+        .all(|entry| entry.artifact_key.canonical.starts_with("/p0/")));
+}
+
+#[test]
+fn every_base_borrows_one_augmentation_collection_order() {
+    use std::cell::Cell;
+    use verter_session_query::inputs::contributors::AugmentationCandidate;
+    use verter_session_query::resolution::{
+        AugmentationPopulation, AugmentationTargetKey, AugmenterSet, ProjectIdentity,
+    };
+    let key = AugmentationTargetKey {
+        project_identity: ProjectIdentity([0; 16]),
+        resolve_env_hash: [0; 16],
+        lib_env_hash: [0; 16],
+        population: AugmentationPopulation::Base,
+        target: AugmentationTargetKind::GlobalAugmentation,
+    };
+    let augmenters = AugmenterSet {
+        entries: Default::default(),
+        fingerprint: [0; 16],
+    };
+    for size in [128usize, 512, 2048] {
+        let store = FileArtifactStore::new();
+        for i in 0..size {
+            publish(
+                &store,
+                &format!("/decl{i:04}.d.ts"),
+                &format!("interface Shared {{ p{i}: {i} }}"),
+            );
+        }
+        let snapshot = store.global_contributor_index().snapshot();
+        let contributors = snapshot.lookup(&key.target, "Shared", None, true);
+        let ranks = Cell::new(0);
+        let lookup = |generation, reverse| {
+            snapshot.augmentation_order(
+                &key,
+                &augmenters,
+                "Shared",
+                &contributors,
+                Some(generation),
+                |canonical| {
+                    ranks.set(ranks.get() + 1);
+                    if reverse && canonical == "/decl0000.d.ts" {
+                        1
+                    } else {
+                        0
+                    }
+                },
+            )
+        };
+        let first = lookup(1, false);
+        assert_eq!(first.len(), size);
+        let copied = snapshot.materialized_view_entry_count();
+        assert_eq!(ranks.get(), size, "rank each contributor once");
+        for _ in 0..size {
+            assert!(Arc::ptr_eq(&first, &lookup(1, false)));
+        }
+        assert_eq!(
+            ranks.get(),
+            size,
+            "base demands do not recollect the population"
+        );
+        assert_eq!(
+            snapshot.materialized_view_entry_count(),
+            copied,
+            "base demands copy no contributor slots"
+        );
+        assert!(matches!(first[0], AugmentationCandidate::FileScope(0)));
+        let reordered = lookup(2, true);
+        assert!(
+            matches!(reordered[size - 1], AugmentationCandidate::FileScope(0)),
+            "membership revision changes precedence"
+        );
+        assert_eq!(ranks.get(), 2 * size);
+    }
 }
 
 #[test]

@@ -6432,16 +6432,34 @@ fn a_long_thenable_chain_awaits_to_its_value_within_the_work_budget() {
             async_generator_of(never(), number()),
         );
     }
-    // The budget's measure: a cold chain charges 16 units per element plus
-    // 7, every tail step and the return site among them, so under a budget
-    // of 807 units a 50-element chain answers and a 51-element one does not.
+    // Measure the live cold-work boundary rather than pinning a query-layout
+    // count. A fresh 50-element demand must finish at that exact allowance,
+    // while one more element must refuse; every tail step remains charged.
+    let cold_work = |steps| {
+        let file = format!("/ws/cov/thenable_chain_{steps}.ts");
+        let source = chain(steps);
+        let host = host_with(&[(file.as_str(), source.as_str())]);
+        with_dispatch(&host, |dispatch| {
+            let key = key_of(dispatch, &file, "awaitChain");
+            let outcome = eval_key_on(&host, dispatch, key);
+            assert!(
+                matches!(&outcome, Outcome::Value { ty, degradation: None, .. } if *ty == promise_of(number()))
+            );
+            dispatch.connected_demand().work_used_for_tests()
+        })
+    };
+    let allowance = cold_work(50);
+    assert!(
+        cold_work(51) > allowance,
+        "the additional tail step costs work"
+    );
     for (steps, answers) in [(50, true), (51, false)] {
         let file = format!("/ws/cov/thenable_chain_{steps}.ts");
         let source = chain(steps);
         let host = host_with(&[(file.as_str(), source.as_str())]);
         let outcome = with_dispatch(&host, |dispatch| {
             dispatch.set_connected_limits_for_tests(
-                16 * 50 + 7,
+                allowance,
                 super::connected_demand::MAX_CONNECTED_QUERY_DEPTH,
             );
             let key = key_of(dispatch, &file, "awaitChain");
@@ -6450,10 +6468,14 @@ fn a_long_thenable_chain_awaits_to_its_value_within_the_work_budget() {
         if answers {
             assert!(
                 matches!(&outcome, Outcome::Value { ty, degradation: None, .. } if *ty == promise_of(number())),
-                "{steps} elements answer within 807 units, got {outcome:?}"
+                "{steps} elements answer within the measured allowance, got {outcome:?}"
             );
         } else {
-            assert_eq!(outcome, Outcome::Miss, "{steps} elements exceed 807 units");
+            assert_eq!(
+                outcome,
+                Outcome::Miss,
+                "{steps} elements exceed the measured allowance"
+            );
         }
     }
     // The same 200-step chain under a work budget it cannot finish within:

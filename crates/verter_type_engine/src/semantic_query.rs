@@ -4373,6 +4373,34 @@ impl<'a> SurfaceKeyIndex<'a> {
                 .filter(|member| member.visibility.is_public()),
         )
     }
+
+    pub(crate) fn project_known_key_overload_group(
+        &self,
+        key: &PropertyKey,
+    ) -> Option<Vec<SemanticNodeId>> {
+        visible_method_overloads(self.colliding(key).iter().copied())
+    }
+}
+
+fn visible_method_overloads<'a>(
+    members: impl Iterator<Item = &'a SurfaceMember>,
+) -> Option<Vec<SemanticNodeId>> {
+    let group: Vec<_> = members
+        .filter(|member| member.visibility.is_public())
+        .collect();
+    if group.len() < 2
+        || !group
+            .iter()
+            .all(|member| member.method_kind == Some(verter_type_expr::ObjectMethodKind::Method))
+    {
+        return None;
+    }
+    Some(
+        visible_overload_ordinals(group.iter().map(|member| member.has_implementation_body))
+            .into_iter()
+            .map(|ordinal| group[ordinal].value)
+            .collect(),
+    )
 }
 
 /// Key evidence available from the sole positive-member state.
@@ -4582,30 +4610,13 @@ impl SurfaceView {
         &self,
         key: &PropertyKey,
     ) -> Option<Vec<SemanticNodeId>> {
-        let group: Vec<&SurfaceMember> = self
-            .members
-            .iter()
-            .filter(|member| {
-                member.visibility.is_public()
-                    && member
-                        .key
-                        .as_known()
-                        .is_some_and(|known| known.element_access_collides(&key.as_ref()))
-            })
-            .collect();
-        if group.len() < 2
-            || !group.iter().all(|member| {
-                member.method_kind == Some(verter_type_expr::ObjectMethodKind::Method)
-            })
-        {
-            return None;
-        }
-        Some(
-            visible_overload_ordinals(group.iter().map(|member| member.has_implementation_body))
-                .into_iter()
-                .map(|ordinal| group[ordinal].value)
-                .collect(),
-        )
+        visible_method_overloads(self.members.iter().filter(|member| {
+            note_key_scan_comparison();
+            member
+                .key
+                .as_known()
+                .is_some_and(|known| known.element_access_collides(&key.as_ref()))
+        }))
     }
 
     /// The ACCESSOR a key names: the public `get` and / or `set` members
@@ -4639,6 +4650,7 @@ impl SurfaceView {
             smallvec::SmallVec<[&SurfaceMember; 1]>,
         > = std::collections::HashMap::default();
         for member in self.members.iter() {
+            note_key_scan_comparison();
             if let Some(known) = member.key.cloned_known() {
                 members
                     .entry(property_spelling(known))
