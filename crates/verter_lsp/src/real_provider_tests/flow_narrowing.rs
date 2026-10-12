@@ -246,6 +246,8 @@ real_provider_test!(
                 ide_fixtures::flat_matrix(n, true),
                 ide_fixtures::nested_matrix(n, false),
                 ide_fixtures::nested_matrix(n, true),
+                ide_fixtures::nested_component_matrix(n, false),
+                ide_fixtures::nested_component_matrix(n, true),
                 ide_fixtures::component_matrix(n, false),
                 ide_fixtures::component_matrix(n, true),
             ] {

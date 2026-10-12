@@ -193,10 +193,15 @@ test("release.yml leaves BF2 to CI and publishes only after proving that CI pass
   }
 });
 
-test("nextest retains the two base hang-protection policies without Windows-only serialized groups", () => {
+test("nextest retains base hang protection while allowing per-test resource bounds", () => {
   const config = readFileSync(join(REPO_ROOT, ".config", "nextest.toml"), "utf8");
-  assert.doesNotMatch(config, /max-threads\s*=\s*1/);
   assert.doesNotMatch(config, /test-group\s*=\s*'(?:shared-provider-live|lsp-server-unit)'/);
-  assert.equal((config.match(/terminate-after\s*=\s*5/g) || []).length, 2);
-  assert.equal((config.match(/terminate-after\s*=/g) || []).length, 2);
+  const sections = config.replaceAll("\r\n", "\n").split(/(?=^\[)/m);
+  for (const profile of ["default", "ci"]) {
+    const base = sections.filter((section) => section.startsWith(`[profile.${profile}]\n`));
+    assert.equal(base.length, 1, `${profile} must define exactly one base profile`);
+    const policies = [...base[0].matchAll(/^slow-timeout\s*=\s*([^\r\n]+)$/gm)];
+    assert.equal(policies.length, 1, `${profile} must retain its base watchdog`);
+    assert.match(policies[0][1], /^\{\s*period\s*=\s*"60s",\s*terminate-after\s*=\s*5\s*\}$/);
+  }
 });

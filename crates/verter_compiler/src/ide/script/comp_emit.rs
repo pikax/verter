@@ -9,7 +9,7 @@
 //! - `ComponentFlow`: the conditional structure component functions read
 //!   their narrowing from, emitted once per chain.
 //! - `extract_vslot_binding_names` / `extract_vfor_binding_names`,
-//!   `find_scope_for_tag`, `walk_children_for_comp`,
+//!   `walk_children_for_comp`,
 //!   `serialize_element_props`, `resolve_all_prop_refs_in_expr`, the
 //!   `collect_prop_refs*` family, `collect_binding_pattern_names`, and
 //!   `emit_comp_function_for_element`.
@@ -330,10 +330,20 @@ enum CompScope {
     },
 }
 
+impl CompScope {
+    fn binding_names(&self) -> &[String] {
+        match self {
+            Self::VSlot { binding_names, .. } | Self::VFor { binding_names, .. } => binding_names,
+        }
+    }
+}
+
 /// Each lexical scope is owned once; sibling walks share its ancestry.
 #[derive(Default)]
 struct CompScopes {
     nodes: Vec<CompScopeLink>,
+    active: CompScopeId,
+    bindings: rustc_hash::FxHashMap<String, Vec<usize>>,
 }
 
 type CompScopeId = Option<usize>;
@@ -353,6 +363,7 @@ impl CompScopes {
     }
 
     fn push(&mut self, parent: CompScopeId, scope: CompScope) -> CompScopeId {
+        verter_debug_assert::verter_debug_assert_eq!(self.active, parent);
         crate::ide::template::flow::record(|work| work.scope_links += 1);
         let id = self.nodes.len();
         self.nodes.push(CompScopeLink {
@@ -360,7 +371,36 @@ impl CompScopes {
             depth: self.depth(parent) + 1,
             scope,
         });
+        for name in self.nodes[id].scope.binding_names() {
+            crate::ide::template::flow::record(|work| work.scope_links += 1);
+            self.bindings.entry(name.clone()).or_default().push(id);
+        }
+        self.active = Some(id);
         Some(id)
+    }
+
+    /// Leave only frames opened for this element and restore shadowed names.
+    fn leave_to(&mut self, parent: CompScopeId) {
+        while self.active != parent {
+            let id = self.active.expect("the enclosing scope is still active");
+            crate::ide::template::flow::record(|work| work.scope_links += 1);
+            for name in self.nodes[id].scope.binding_names() {
+                crate::ide::template::flow::record(|work| work.scope_links += 1);
+                let bindings = self.bindings.get_mut(name).expect("an active binding");
+                bindings.pop();
+                if bindings.is_empty() {
+                    self.bindings.remove(name);
+                }
+            }
+            self.active = self.nodes[id].parent;
+        }
+    }
+
+    /// The innermost active binding, without searching inherited frames.
+    fn for_tag(&self, tag_name: &str) -> Option<&CompScope> {
+        crate::ide::template::flow::record(|work| work.scope_links += 1);
+        let id = *self.bindings.get(tag_name)?.last()?;
+        Some(&self.nodes[id].scope)
     }
 }
 
@@ -414,29 +454,6 @@ fn extract_vfor_binding_names(params: &str) -> Vec<String> {
             }
         })
         .collect()
-}
-
-/// Check if a tag name is introduced by any scope in the chain.
-/// Returns the innermost scope that introduces this binding.
-fn find_scope_for_tag<'a>(
-    tag_name: &str,
-    scopes: &'a CompScopes,
-    mut id: CompScopeId,
-) -> Option<&'a CompScope> {
-    while let Some(index) = id {
-        crate::ide::template::flow::record(|work| work.scope_links += 1);
-        let link = &scopes.nodes[index];
-        let scope = &link.scope;
-        let names = match scope {
-            CompScope::VSlot { binding_names, .. } => binding_names,
-            CompScope::VFor { binding_names, .. } => binding_names,
-        };
-        if names.iter().any(|n| n == tag_name) {
-            return Some(scope);
-        }
-        id = link.parent;
-    }
-    None
 }
 
 /// A branch of the component-function flow: one `v-if` / `v-else-if` /
@@ -913,18 +930,7 @@ fn walk_children_for_comp(
                 let offset = el.tag_open.start;
                 let props_lit = serialize_element_props(el, source, prop_names);
                 emit_comp_function_for_element(
-                    buf,
-                    gs,
-                    gn,
-                    el,
-                    source,
-                    offset,
-                    region,
-                    flow,
-                    scopes,
-                    new_comp_scopes,
-                    is_jsx,
-                    &props_lit,
+                    buf, gs, gn, el, source, offset, region, flow, scopes, is_jsx, &props_lit,
                 );
                 all_comp_offsets.push(offset);
                 if emit_root_comps {
@@ -1019,6 +1025,7 @@ fn walk_children_for_comp(
                     prop_names,
                 );
             }
+            scopes.leave_to(comp_scopes);
         }
     }
 }
@@ -1405,7 +1412,7 @@ fn collect_binding_pattern_names<'a>(
 
 /// Emit a single Comp{offset} function for an element.
 ///
-/// When `comp_scopes` indicates the tag comes from a v-slot or v-for scope,
+/// When the active bindings indicate the tag comes from a v-slot or v-for scope,
 /// the function reconstructs the type through the parent's instantiated type
 /// rather than referencing the tag name directly (which isn't in top-level scope).
 ///
@@ -1425,7 +1432,6 @@ fn emit_comp_function_for_element(
     region: Option<FlowRegionRef>,
     flow: &mut ComponentFlow,
     scopes: &CompScopes,
-    comp_scopes: CompScopeId,
     is_jsx: bool,
     props_literal: &str,
 ) {
@@ -1502,7 +1508,7 @@ fn emit_comp_function_for_element(
         TagType::Component => {
             // The statements that bind the tag and props before the component
             // is instantiated, and the instantiated tag and props.
-            let (bindings, tag, props) = match find_scope_for_tag(tag_name, scopes, comp_scopes) {
+            let (bindings, tag, props) = match scopes.for_tag(tag_name) {
                 // Reconstruct the type through the parent's instantiated slot
                 // type. The parent Comp function instantiates the parent
                 // component with its actual props, so TypeScript infers generics

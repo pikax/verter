@@ -257,6 +257,13 @@ fn flat_and_nested_matrices_grow_linearly() {
 }
 
 #[test]
+fn nested_component_tags_grow_linearly() {
+    let series = production_series(|n| ide_fixtures::nested_component_matrix(n, false));
+    println!("nested component matrix: {series:?}");
+    assert_linear("nested component matrix", &series).unwrap();
+}
+
+#[test]
 fn component_functions_read_one_flow_of_every_branch() {
     // Each component function, its branch's navigator and each chain block is
     // emitted once, and no component function re-states a condition: a
@@ -294,6 +301,20 @@ fn component_functions_read_one_flow_of_every_branch() {
         assert!(
             !compiled.code.contains("if(!("),
             "no component function guards with its condition path"
+        );
+        let nested = compile(&ide_fixtures::nested_component_matrix(n, false));
+        assert_eq!(
+            nested.code.matches("function ___VERTER___Comp").count(),
+            n + 1,
+            "every nested component ref and the native root has a function"
+        );
+        assert_eq!(
+            nested
+                .code
+                .matches("instantiateComponent(___VERTER___s")
+                .count(),
+            n,
+            "every nested component is instantiated through its narrowed flow"
         );
     }
 }
