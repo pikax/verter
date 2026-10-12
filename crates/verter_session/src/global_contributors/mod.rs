@@ -77,6 +77,8 @@ pub struct GlobalContributorPopulation {
     collection_views: Arc<CollectionViews>,
     #[cfg(any(test, feature = "semantic-observe"))]
     materialized_view_entries: Arc<AtomicU64>,
+    #[cfg(any(test, feature = "semantic-observe"))]
+    ordering_work: Arc<AtomicU64>,
 }
 
 /// One view of one symbol's population. The view is a pure function of the
@@ -127,6 +129,8 @@ impl GlobalContributorPopulation {
             collection_views: Arc::new(DashMap::with_hasher(rustc_hash::FxBuildHasher)),
             #[cfg(any(test, feature = "semantic-observe"))]
             materialized_view_entries: Arc::new(AtomicU64::new(0)),
+            #[cfg(any(test, feature = "semantic-observe"))]
+            ordering_work: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -141,6 +145,11 @@ impl GlobalContributorPopulation {
     #[must_use]
     pub fn materialized_view_entry_count(&self) -> u64 {
         self.materialized_view_entries.load(Ordering::Relaxed)
+    }
+
+    #[cfg(any(test, feature = "semantic-observe"))]
+    pub fn ordering_work_count(&self) -> u64 {
+        self.ordering_work.load(Ordering::Relaxed)
     }
 
     /// Contributors for `target` + `decl_name` in type and namespace
@@ -219,7 +228,7 @@ impl GlobalContributorPopulation {
         project: Option<verter_session_query::resolution::ProjectId>,
         membership_generation: Option<u64>,
         belongs: impl Fn(&ContributorEntry) -> bool,
-        order: impl FnOnce(&mut [ContributorEntry]),
+        rank: impl Fn(&str) -> u32,
     ) -> SymbolContributors {
         let key = ProjectViewKey {
             name: Arc::from(name),
@@ -250,7 +259,13 @@ impl GlobalContributorPopulation {
                     .filter(|entry| belongs(entry))
                     .cloned()
                     .collect();
-                order(&mut entries);
+                let ordering_work =
+                    stable_rank_order(&mut entries, |entry| rank(&entry.artifact_key.canonical));
+                #[cfg(any(test, feature = "semantic-observe"))]
+                self.ordering_work
+                    .fetch_add(ordering_work, Ordering::Relaxed);
+                #[cfg(not(any(test, feature = "semantic-observe")))]
+                let _ = ordering_work;
                 #[cfg(any(test, feature = "semantic-observe"))]
                 self.materialized_view_entries
                     .fetch_add(entries.len() as u64, Ordering::Relaxed);
@@ -297,7 +312,10 @@ impl GlobalContributorPopulation {
                         .filter(|entry| entry.origin == ContributorOrigin::FileScopeInterface)
                         .map(|entry| (entry.artifact_key.canonical.as_ref(), entry.symbol.as_ref()))
                         .collect();
-                    let mut ordered: Vec<_> = augmenters
+                    // Both source arrays already have canonical/hash order. Merge
+                    // them stably before applying configured precedence, preserving
+                    // augmenter-first ties without another comparison sort.
+                    let mut augmenter_rows = augmenters
                         .entries
                         .iter()
                         .enumerate()
@@ -309,35 +327,49 @@ impl GlobalContributorPopulation {
                                 AugmentationCandidate::Augmenter(i),
                             )
                         })
-                        .collect();
-                    ordered.extend(
-                        contributors
-                            .entries
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, entry)| {
-                                entry.origin == ContributorOrigin::FileScopeInterface
-                                    || (entry.origin == ContributorOrigin::FileScopeNamespace
-                                        && !interface_declarers.contains(&(
-                                            entry.artifact_key.canonical.as_ref(),
-                                            entry.symbol.as_ref(),
-                                        )))
-                            })
-                            .map(|(i, entry)| {
-                                (
-                                    rank(&entry.artifact_key.canonical),
-                                    Arc::clone(&entry.artifact_key.canonical),
-                                    entry.parse_stable_hash,
-                                    AugmentationCandidate::FileScope(i),
-                                )
-                            }),
-                    );
-                    ordered.sort_by(|left, right| {
-                        left.0
-                            .cmp(&right.0)
-                            .then_with(|| left.1.cmp(&right.1))
-                            .then_with(|| left.2.cmp(&right.2))
-                    });
+                        .peekable();
+                    let mut contributor_rows = contributors
+                        .entries
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, entry)| {
+                            entry.origin == ContributorOrigin::FileScopeInterface
+                                || (entry.origin == ContributorOrigin::FileScopeNamespace
+                                    && !interface_declarers.contains(&(
+                                        entry.artifact_key.canonical.as_ref(),
+                                        entry.symbol.as_ref(),
+                                    )))
+                        })
+                        .map(|(i, entry)| {
+                            (
+                                rank(&entry.artifact_key.canonical),
+                                Arc::clone(&entry.artifact_key.canonical),
+                                entry.parse_stable_hash,
+                                AugmentationCandidate::FileScope(i),
+                            )
+                        })
+                        .peekable();
+                    let mut ordered =
+                        Vec::with_capacity(augmenters.entries.len() + contributors.entries.len());
+                    let mut ordering_work = 0;
+                    while let (Some(left), Some(right)) =
+                        (augmenter_rows.peek(), contributor_rows.peek())
+                    {
+                        ordering_work += 1;
+                        if (&left.1, &left.2) <= (&right.1, &right.2) {
+                            ordered.push(augmenter_rows.next().expect("peeked augmenter"));
+                        } else {
+                            ordered.push(contributor_rows.next().expect("peeked contributor"));
+                        }
+                    }
+                    ordered.extend(augmenter_rows);
+                    ordered.extend(contributor_rows);
+                    ordering_work += stable_rank_order(&mut ordered, |row| row.0);
+                    #[cfg(any(test, feature = "semantic-observe"))]
+                    self.ordering_work
+                        .fetch_add(ordering_work, Ordering::Relaxed);
+                    #[cfg(not(any(test, feature = "semantic-observe")))]
+                    let _ = ordering_work;
                     #[cfg(any(test, feature = "semantic-observe"))]
                     self.materialized_view_entries
                         .fetch_add(ordered.len() as u64, Ordering::Relaxed);
@@ -449,6 +481,44 @@ impl GlobalContributorPopulation {
             fingerprint,
         }
     }
+}
+
+/// Stable byte radix ordering of configured ranks. The input's canonical/hash
+/// tie order survives; rank lookup and four fixed passes take linear work even
+/// when the configured file sequence is an arbitrary permutation.
+fn stable_rank_order<T: Clone>(entries: &mut [T], rank: impl Fn(&T) -> u32) -> u64 {
+    let mut positions: Vec<_> = entries
+        .iter()
+        .enumerate()
+        .map(|(i, entry)| (rank(entry), i))
+        .collect();
+    let mut scratch = vec![(0u32, 0usize); entries.len()];
+    let mut work = entries.len() as u64;
+    for shift in [0, 8, 16, 24] {
+        let mut offsets = [0usize; 256];
+        for (rank, _) in &positions {
+            offsets[((rank >> shift) & 255) as usize] += 1;
+        }
+        let mut start = 0;
+        for offset in &mut offsets {
+            let count = *offset;
+            *offset = start;
+            start += count;
+        }
+        for &(rank, position) in &positions {
+            let bucket = ((rank >> shift) & 255) as usize;
+            scratch[offsets[bucket]] = (rank, position);
+            offsets[bucket] += 1;
+        }
+        std::mem::swap(&mut positions, &mut scratch);
+        work += 2 * entries.len() as u64 + 256;
+    }
+    let ordered: Vec<_> = positions
+        .iter()
+        .map(|(_, position)| entries[*position].clone())
+        .collect();
+    entries.clone_from_slice(&ordered);
+    work + 2 * entries.len() as u64
 }
 
 fn overlay_replacements<'a>(

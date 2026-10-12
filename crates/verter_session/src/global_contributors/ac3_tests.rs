@@ -753,7 +753,7 @@ fn project_filtered_population_is_shared_and_tracks_membership_revision() {
                 visits.set(visits.get() + 1);
                 entry.artifact_key.canonical.starts_with(prefix)
             },
-            |_| {},
+            |_| 0,
         )
     };
     let first = lookup(0, 1, "/p0/");

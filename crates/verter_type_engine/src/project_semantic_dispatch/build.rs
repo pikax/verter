@@ -4855,49 +4855,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
         };
 
-        // Every declaring file names the same global interface. Assemble
-        // it through its first declaration's shared instantiation, so a
-        // demand from another base does not lower all contributors again.
-        if authored_resolution_debt.is_none()
-            && self.declares_global_interface(decl_canonical, decl_owner, decl_name, prepared.kind)
-        {
-            if let Some(first) = self.first_global_declaration(decl_canonical, decl_name) {
-                if first.canonical_id != *decl_canonical
-                    && self
-                        .ctx
-                        .prepared_type_decl(&first.canonical_id, first.owner, &first.symbol_name)
-                        .ok()
-                        .flatten()
-                        .is_some_and(|decl| {
-                            decl.kind == verter_session_query::declarations::TypeDeclKind::Interface
-                        })
-                {
-                    let read = self.execute_read(SemanticQueryKey::Instantiate(
-                        crate::semantic_query::InstantiateKey::new(
-                            self.type_slot_for(
-                                Arc::clone(&first.canonical_id),
-                                first.owner,
-                                Arc::clone(&first.symbol_name),
-                            ),
-                            Arc::clone(args),
-                            self.instantiate_context_for(&first.canonical_id, context),
-                        ),
-                    ));
-                    let mut out = crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
-                        read.value,
-                        self.dep_signature_for(decl_canonical, decl_whole_hash),
-                    ))
-                    .with_observed_self_roots([(Arc::clone(decl_canonical), decl_whole_hash)]);
-                    if read.result_is_partial {
-                        out.mark_partial_with(read.partial_reasons);
-                    }
-                    out.walker_diagnostics = read.walker_diagnostics.to_vec();
-                    out.cache_suppress = read.cache_suppress;
-                    return InstantiateStart::Done(Box::new(out));
-                }
-            }
-        }
-
         // 4. Bind type parameters to args (positional). When a
         // parameter has no explicit arg but carries a default
         // expression, lower the default in the decl's scope and bind
@@ -4960,7 +4917,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 )
             })
         };
-        let (env, _bindings) = self.bind_declared_type_arguments(
+        let (env, bindings) = self.bind_declared_type_arguments(
             &prepared,
             args,
             &binding_scope,
@@ -4968,6 +4925,57 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             context,
             unbound_parameter,
         );
+
+        // Defaults are applied in the declaring scope before sharing a global
+        // application, and every peer receives the same positional bindings.
+        let effective_args: Arc<[SemanticNodeId]> = bindings
+            .into_iter()
+            .take_while(Option::is_some)
+            .flatten()
+            .collect();
+
+        // Every declaring file names the same global interface. Assemble
+        // it through its first declaration's shared instantiation, so a
+        // demand from another base does not lower all contributors again.
+        if authored_resolution_debt.is_none()
+            && self.declares_global_interface(decl_canonical, decl_owner, decl_name, prepared.kind)
+        {
+            if let Some(first) = self.first_global_declaration(decl_canonical, decl_name) {
+                if first.canonical_id != *decl_canonical
+                    && self
+                        .ctx
+                        .prepared_type_decl(&first.canonical_id, first.owner, &first.symbol_name)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|decl| {
+                            decl.kind == verter_session_query::declarations::TypeDeclKind::Interface
+                        })
+                {
+                    let read = self.execute_read(SemanticQueryKey::Instantiate(
+                        crate::semantic_query::InstantiateKey::new(
+                            self.type_slot_for(
+                                Arc::clone(&first.canonical_id),
+                                first.owner,
+                                Arc::clone(&first.symbol_name),
+                            ),
+                            Arc::clone(&effective_args),
+                            self.instantiate_context_for(&first.canonical_id, context),
+                        ),
+                    ));
+                    let mut out = crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+                        read.value,
+                        self.dep_signature_for(decl_canonical, decl_whole_hash),
+                    ))
+                    .with_observed_self_roots([(Arc::clone(decl_canonical), decl_whole_hash)]);
+                    if read.result_is_partial {
+                        out.mark_partial_with(read.partial_reasons);
+                    }
+                    out.walker_diagnostics = read.walker_diagnostics.to_vec();
+                    out.cache_suppress = read.cache_suppress;
+                    return InstantiateStart::Done(Box::new(out));
+                }
+            }
+        }
 
         // 5. Shallow-lower the body. Collects substitution facts for
         // origin-edge emission. `name_resolution` is the prepared
@@ -5028,6 +5036,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             decl_whole_hash,
             base,
             args: Arc::clone(args),
+            effective_args,
             scope,
             prepared,
             scope_payload,
@@ -5341,7 +5350,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 if let Some(stitch) = self.stitch_global_declarations(
                     decl_canonical,
                     decl_name,
-                    args,
+                    &build.effective_args,
                     result,
                     scope,
                     context,
@@ -6218,13 +6227,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(
                             aug_scope_payload.as_ref(),
                         );
-                    let aug_env: FxHashMap<String, SemanticNodeId> = prepared
-                        .type_parameters
-                        .iter()
-                        .zip(type_arguments.iter())
-                        .map(|(param, argument)| (param.name.clone(), *argument))
-                        .collect();
                     let mut aug_subs: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
+                    let (aug_env, _) = self.bind_declared_type_arguments(
+                        &prepared,
+                        type_arguments,
+                        &DeclarationBindingScope {
+                            scope: &aug_scope,
+                            scope_payload: aug_scope_payload.as_ref(),
+                            shadowing: &aug_shadowing,
+                            authored_resolution_debt: None,
+                        },
+                        &mut aug_subs,
+                        context,
+                        |_, _| None,
+                    );
                     let locator = verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
                 verter_type_expr::locators::TypeBodySlot {
                     anchor: verter_type_expr::locators::AuthoredAnchor {
@@ -17643,6 +17659,7 @@ pub(super) struct InstantiateBuild {
     decl_whole_hash: crate::semantic_query::HashValue,
     base: SemanticNodeId,
     pub(super) args: Arc<[SemanticNodeId]>,
+    effective_args: Arc<[SemanticNodeId]>,
     scope: NodeScopeId,
     prepared: Arc<PreparedTypeDecl>,
     scope_payload: Option<crate::resolver_core::bare_name_resolve::DeclarationScopePayload>,

@@ -650,12 +650,7 @@ macro_rules! owned_lowering_from_source_inputs {
                 let contributors = population.lookup_in_project(name, space, discriminator, project,
                     root.as_ref().map(|root| root.snapshot.generation.0),
                     |entry| project_for(entry.artifact_key.canonical.as_ref()) == project,
-                    |entries| entries.sort_by(|left, right| {
-                        root.as_ref().map_or(u32::MAX, |root| root.snapshot.declaration_sequence_rank(&left.artifact_key.canonical))
-                            .cmp(&root.as_ref().map_or(u32::MAX, |root| root.snapshot.declaration_sequence_rank(&right.artifact_key.canonical)))
-                            .then_with(|| left.artifact_key.canonical.cmp(&right.artifact_key.canonical))
-                            .then_with(|| left.parse_stable_hash.cmp(&right.parse_stable_hash))
-                    }));
+                    |canonical| root.as_ref().map_or(u32::MAX, |root| root.snapshot.declaration_sequence_rank(canonical)));
                 verter_type_engine::resolver_core::request_ports::ContributorAnswer {
                     population_fingerprint: population.observation_fingerprint(
                         &crate::file_artifact_store::AugmentationTargetKind::GlobalAugmentation,

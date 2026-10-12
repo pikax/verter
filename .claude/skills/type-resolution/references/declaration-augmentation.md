@@ -24,9 +24,13 @@ membership revision. The collection order contains `AugmentationCandidate`
 slots into the shared augmenter/contributor arrays, never copied lists per
 declaring base. It preserves configured `files` precedence, canonical/hash
 ties, and the interface/namespace co-declaration rule. Configured-file ranks
-are indexed once on the owning workspace snapshot. Global interface bases
-reuse the first interface declaration's shared instantiation; member bodies
-still lower in their own contributor contexts. Content and source-environment
+are indexed once on the owning workspace snapshot. Canonical/hash-ordered
+source arrays merge linearly, and four stable byte-radix passes apply configured
+ranks without comparison sorting. The work metric includes merging, rank
+visits, bucket offsets and entry moves. Global interface bases apply defaults
+in their declaring scope before reusing the first declaration's shared
+instantiation; peers receive effective positional arguments and bind any
+remaining defaults in their own contributor contexts. Content and source-environment
 facts continue to fence every merged result.
 
 Finite indexed access over an object resolves its shared subject once through

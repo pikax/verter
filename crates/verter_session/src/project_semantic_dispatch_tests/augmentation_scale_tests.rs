@@ -18,8 +18,43 @@ fn upsert_ts(host: &VerterHost, canonical: &str, source: &str) {
         .expect("upsert contributor");
 }
 
-fn probe(size: usize, global: bool) -> (usize, usize) {
-    let host = VerterHost::new_standalone(HostConfig::default());
+fn probe(size: usize, global: bool) -> (usize, usize, usize) {
+    let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    let host = VerterHost::new(HostConfig::default(), workspace.clone());
+    let mut files: Vec<_> = (0..size)
+        .map(|i| {
+            if global {
+                format!("reg-{i:04}.ts")
+            } else {
+                format!("plugin-{i:04}.ts")
+            }
+        })
+        .collect();
+    let mut random = 17usize;
+    for i in (1..size).rev() {
+        random ^= random << 13;
+        random ^= random >> 7;
+        random ^= random << 17;
+        files.swap(i, random % (i + 1));
+    }
+    files.extend(["core.ts".to_owned(), "scenario.ts".to_owned()]);
+    workspace.inject_file(
+        "/tsconfig.json".into(),
+        Arc::from(
+            serde_json::json!({"compilerOptions": {"noLib": true}, "files": files}).to_string(),
+        ),
+    );
+    let mut project =
+        verter_workspace::ide_project_config("/".into(), "/".into(), Some("/tsconfig.json".into()));
+    project.compiler_options =
+        verter_workspace::load_compiler_options(workspace.as_ref(), "/tsconfig.json");
+    project.membership.spec.files = files
+        .iter()
+        .map(|file| verter_workspace::CanonicalPath::new(&format!("/{file}")))
+        .collect();
+    host.configure_projects(vec![project]);
     if !global {
         upsert_ts(
             &host,
@@ -98,15 +133,22 @@ fn probe(size: usize, global: bool) -> (usize, usize) {
         .global_contributor_index()
         .snapshot()
         .materialized_view_entry_count() as usize;
+    let ordering = host
+        .project_type_store()
+        .indexed()
+        .global_contributor_index()
+        .snapshot()
+        .ordering_work_count() as usize;
     let cold_queries = graph.stats_snapshot().misses as usize;
     eprintln!(
-        "size={size}, global={global}: scans={scans}, nodes={}, edges={}, collection={collection_entries}, queries={cold_queries}",
+        "size={size}, global={global}: scans={scans}, ordering={ordering}, nodes={}, edges={}, collection={collection_entries}, queries={cold_queries}",
         ownership.live_nodes,
         ownership.internal_edges,
     );
     (
-        scans + ownership.internal_edges + collection_entries + cold_queries,
+        scans + ownership.internal_edges + collection_entries + ordering + cold_queries,
         scans,
+        ordering,
     )
 }
 
@@ -114,12 +156,20 @@ fn probe(size: usize, global: bool) -> (usize, usize) {
 fn merged_interface_indexed_access_work_is_linear() {
     for global in [false, true] {
         let mut work = Vec::new();
+        let mut ordering_work = Vec::new();
         for size in [128, 512, 2048] {
-            let (total_work, scans) = probe(size, global);
+            let (total_work, scans, ordering) = probe(size, global);
+            ordering_work.push(ordering);
             work.push((size, total_work));
             assert!(
                 scans <= 40 * size,
                 "surface scans must be linear: size={size}, scans={scans}"
+            );
+        }
+        for pair in ordering_work.windows(2) {
+            assert!(
+                pair[1] <= 4 * pair[0] + 256,
+                "ordering work must grow linearly: {ordering_work:?}"
             );
         }
         for pair in work.windows(2) {
@@ -354,6 +404,46 @@ fn merged_interface_indexed_access_keeps_every_contributor() {
     for size in [100, 500, 2000, 4000] {
         for global in [false, true] {
             probe(size, global);
+        }
+    }
+}
+
+#[test]
+fn global_interface_default_arguments_survive_shared_instantiation() {
+    for (first, second) in [
+        ("<T = string>", "<T = string>"),
+        ("<T>", "<T = string>"),
+        ("<T = string, U = T[]>", "<T = string, U = T[]>"),
+    ] {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        upsert_ts(
+            &host,
+            "/a.ts",
+            &format!("interface Shared{first} {{ first: T }}"),
+        );
+        let member = if second.contains("U =") { "U" } else { "T" };
+        upsert_ts(&host, "/b.ts", &format!("interface Shared{second} {{ second: {member} }} type Probe = Shared['second']; type Explicit = Shared<number>['second'];"));
+        for (name, expected) in [("Probe", "string"), ("Explicit", "number")] {
+            let node = host
+                .resolve_named_symbol("/b.ts", name, Some(ProjectionMode::Expanded))
+                .expect("projection");
+            let ty = host
+                .project_node_to_type_expr_for_test(node)
+                .expect("raised member");
+            let expected = verter_type_expr::TypeExpr::Primitive(if expected == "string" {
+                verter_type_expr::PrimitiveName::String
+            } else {
+                verter_type_expr::PrimitiveName::Number
+            });
+            let expected = if member == "U" {
+                verter_type_expr::TypeExpr::Array {
+                    element: Arc::new(expected),
+                    readonly: false,
+                }
+            } else {
+                expected
+            };
+            assert_eq!(ty, expected, "{first} / {second}: {name}");
         }
     }
 }
