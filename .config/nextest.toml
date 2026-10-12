@@ -1,11 +1,6 @@
 # Nextest configuration
 # https://nexte.st/docs/configuration/
 
-# Full checker-boundary rows retain visited pair evidence until their root
-# closes. Bound their overlapping live state without limiting other tests.
-[test-groups.relation-comparison-envelope]
-max-threads = 1
-
 [profile.default]
 # A speed gate, on the debug build: a test aims at under 2s and must stay
 # under 10s even on a loaded machine. Past 10s it is flagged slow, and at 20s
@@ -34,10 +29,6 @@ slow-timeout = { period = "60s", terminate-after = 5 }
 [[profile.default.overrides]]
 filter = 'test(reversed_object_unions_reach_the_checker_answer_)'
 slow-timeout = { period = "60s", terminate-after = 15 }
-
-[[profile.default.overrides]]
-filter = 'test(reversed_object_unions_reach_the_checker_answer_1800) | test(reversed_object_unions_reach_the_checker_answer_2100) | test(reversed_object_unions_reach_the_checker_answer_3200)'
-test-group = 'relation-comparison-envelope'
 
 # Known slow tests (CI, 2026-10-12): over 10s each, so over the speed target.
 # Each has a fix task; a test leaves this list when its fix lands. Never add to it.
@@ -86,10 +77,6 @@ slow-timeout = { period = "10s", terminate-after = 2 }
 [[profile.ci.overrides]]
 filter = 'test(reversed_object_unions_reach_the_checker_answer_)'
 slow-timeout = { period = "60s", terminate-after = 15 }
-
-[[profile.ci.overrides]]
-filter = 'test(reversed_object_unions_reach_the_checker_answer_1800) | test(reversed_object_unions_reach_the_checker_answer_2100) | test(reversed_object_unions_reach_the_checker_answer_3200)'
-test-group = 'relation-comparison-envelope'
 
 # Known slow tests (CI, 2026-10-12): over 10s each, so over the speed target.
 # Each has a fix task; a test leaves this list when its fix lands. Never add to it.
