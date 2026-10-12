@@ -273,7 +273,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         current
                     }
                 }
-                SemanticNodeData::IndexedAccess { .. } => {
+                SemanticNodeData::IndexedAccess { .. }
+                | SemanticNodeData::TemplateLiteral { .. } => {
                     if self.mentions_binder(current) {
                         current
                     } else {

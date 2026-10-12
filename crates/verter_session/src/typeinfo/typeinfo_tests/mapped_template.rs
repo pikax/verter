@@ -2,7 +2,165 @@
 
 use super::oracle;
 use super::support::*;
+use std::collections::BTreeSet;
 use verter_session_oracle_macro::oracle_row;
+
+#[test]
+fn mapped_index_materializes_key_independent_template_unions() {
+    let host = make_host_with_footprint();
+    upsert_ts(&host, "/constant.ts", "type Label<T> = T extends number ? 'num' : never; export type Probe = { [K in 'a' | 'b']: 'direct' | `nested.${Label<1>}` }['a' | 'b'];");
+    let (answer, _) = resolve_expr(
+        &host,
+        "/constant.ts",
+        "Probe",
+        &[],
+        ProjectionMode::Expanded,
+    );
+    assert_literal_union(&answer, &["direct", "nested.num"]);
+}
+
+#[test]
+fn generic_mapped_index_keeps_the_access_and_alias_arguments() {
+    let host = make_host_with_footprint();
+    upsert_ts(&host, "/generic.ts", "export type Wrap<T> = { value: T }; export type Deferred<S> = { [K in keyof S]: Wrap<S[K]> }[keyof S];");
+    let parameter = Arc::new(TypeExpr::TypeParameter(verter_type_expr::TypeParam {
+        name: "S".into(),
+        constraint: None,
+        default: None,
+        is_const: false,
+    }));
+    let (answer, _) = resolve_expr(
+        &host,
+        "/generic.ts",
+        "Deferred",
+        &[parameter],
+        ProjectionMode::Expanded,
+    );
+    let TypeExpr::IndexedAccess { object, index } = &answer else {
+        panic!("an open mapped index must retain its access, got {answer:?}");
+    };
+    assert!(
+        matches!(index.as_ref(), TypeExpr::KeyOf(_)),
+        "the deferred index must retain keyof S: {index:?}"
+    );
+    let TypeExpr::Mapped { value, .. } = object.as_ref() else {
+        panic!("the deferred object must retain its mapping: {object:?}");
+    };
+    let TypeExpr::Ref {
+        name,
+        type_arguments,
+    } = value.as_ref()
+    else {
+        panic!("the mapped value must retain its alias application: {value:?}");
+    };
+    assert_eq!(name.as_ref(), "Wrap");
+    assert_eq!(type_arguments.len(), 1);
+    assert!(
+        matches!(&type_arguments[0], TypeExpr::IndexedAccess { .. }),
+        "the alias argument must retain S[K]: {type_arguments:?}"
+    );
+}
+
+#[test]
+fn recursive_mapped_index_publishes_dotted_paths_across_modules() {
+    for (count, groups) in [(20, 3), (100, 5), (300, 5)] {
+        let mut files = vec![(
+            "/paths/utils.ts".to_string(),
+            "export interface Meta<T> { tag: T; created: number }\n\
+             export type Paths<T, D extends unknown[] = []> = D['length'] extends 3 ? never\n\
+             : T extends object ? { [K in keyof T & string]: K | `${K}.${Paths<T[K], [...D, 0]>}` }[keyof T & string] : never;".to_string(),
+        )];
+        for group in 0..groups {
+            let mut source = "import type { Meta } from './utils';\n".to_string();
+            for other in 0..groups {
+                if other != group {
+                    let imports = (other..count)
+                        .step_by(groups)
+                        .map(|i| format!("E{i}"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    source.push_str(&format!(
+                        "import type {{ {imports} }} from './entities-{other}';\n"
+                    ));
+                }
+            }
+            for i in (group..count).step_by(groups) {
+                source.push_str(&format!("export interface E{i} {{ id: {i}; name: string; next: E{}; owner: E{}; meta: Meta<{i}> }}\n", (i + 1) % count, (i * 7 + 3) % count));
+            }
+            files.push((format!("/paths/entities-{group}.ts"), source));
+        }
+        let mut api = String::new();
+        for group in 0..groups {
+            let imports = (group..count)
+                .step_by(groups)
+                .map(|i| format!("E{i}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            api.push_str(&format!(
+                "import type {{ {imports} }} from './entities-{group}';\n"
+            ));
+        }
+        api.push_str("export interface Api {\n");
+        for i in 0..count {
+            api.push_str(&format!("e{i}: E{i};\n"));
+        }
+        api.push_str("}\n");
+        files.push(("/paths/api.ts".to_string(), api));
+        files.push(("/paths/scenario.ts".to_string(), "import type { Api } from './api'; import type { Paths } from './utils'; export type Probe = Paths<Api>;".to_string()));
+        let borrowed = files
+            .iter()
+            .map(|(path, source)| (path.as_str(), source.as_str()))
+            .collect::<Vec<_>>();
+        // Complete enumeration of the larger closures needs an explicit
+        // request allowance; the smallest layout exercises the default fuse.
+        let host = make_host_with_workspace_files_config(
+            &borrowed,
+            crate::HostConfig {
+                audit_enabled: true,
+                projection_op_budget: if count == 20 { 0 } else { 50_000 },
+                ..crate::HostConfig::default()
+            },
+        );
+        for (path, source) in &borrowed {
+            upsert_ts(&host, path, source);
+        }
+        let (answer, record) = resolve_expr(
+            &host,
+            "/paths/scenario.ts",
+            "Probe",
+            &[],
+            ProjectionMode::Expanded,
+        );
+        let mut expected = BTreeSet::new();
+        for i in 0..count {
+            expected.insert(format!("e{i}"));
+            for field in ["id", "name", "next", "owner", "meta"] {
+                expected.insert(format!("e{i}.{field}"));
+            }
+            for field in ["next", "owner"] {
+                for child in ["id", "name", "next", "owner", "meta"] {
+                    expected.insert(format!("e{i}.{field}.{child}"));
+                }
+            }
+            for child in ["tag", "created"] {
+                expected.insert(format!("e{i}.meta.{child}"));
+            }
+        }
+        let TypeExpr::Union(arms) = &answer else {
+            panic!("{count} entities/{groups} modules must publish a path union, got {answer:?}; audit: {:?}", record.kind_payload)
+        };
+        let actual = arms
+            .iter()
+            .map(|arm| {
+                let TypeExpr::Literal(verter_type_expr::LiteralValue::String(path)) = arm else {
+                    panic!("path must be a string literal, got {arm:?}")
+                };
+                path.clone()
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(actual, expected, "{count} entities/{groups} modules");
+    }
+}
 
 #[test]
 fn mapped_type_without_key_remap_materializes_required_surface() {

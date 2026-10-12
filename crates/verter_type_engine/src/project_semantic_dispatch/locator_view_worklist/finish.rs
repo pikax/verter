@@ -632,7 +632,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 )
             }
             SemanticNodeData::KeyOf { base } => {
-                let base_id = projected(memo, *base, context);
+                let base_id = projected(
+                    memo,
+                    *base,
+                    context.into_structural_transit_with_mode(ProjectionMode::Navigate),
+                );
                 if may_reduce_operator(context) {
                     match self.execute_type_node(SemanticQueryKey::KeyOf {
                         base: base_id,

@@ -4,6 +4,9 @@ Generic substitutions are part of semantic meaning and therefore part of semanti
 
 - Query keys for reusable semantic work must include the relevant type arguments or substitution environment.
 - Member projection and indexed access against generic aliases, instantiated types, or mapped helpers must apply substitutions before deciding what member or keyspace is visible.
+- Mapped values and name remaps remain parameterized through locator-view projection and reducing lowering. Outer arguments substitute into the shape first; the per-key materializer then binds the mapped parameter before evaluating helpers, conditionals, or template holes. Projecting a recursive helper while its mapped key is still unbound can replace the application with a recursion sentinel and lose its arguments.
+- A finite mapped index distributes over the selected key domain through the shared indexed-access query. Intersection key domains use the shared key-literal enumerator: finite arms intersect by typed key identity, and primitive `string`, `number`, or `symbol` arms filter key kinds. An open arm preserves the deferred access. A mapped carrier that stops before consuming a path retains the full remaining indexed-access structure; the mapping itself is never the answer to its pending index.
+- `keyof` lowers and projects its operand in structural transit with `Navigate`, then reads its key domain under the caller's demand. Mapped key-domain queries do not inspect values. Reverse-homomorphic inference selects the key before unwrapping a helper template and registering its indexed inference holes; those holes remain patterns rather than ordinary member reads.
 - If two callers reach the same instantiated semantic node through different entry paths, they converge onto the same cache entry.
 - If two callers reach the same declaration name with different type arguments, they do not alias to the same cache entry.
 - When a declaration body is navigated in `Navigate` or `Shallow` mode with some type parameters unbound, the resulting graph preserves those parameters as first-class type-parameter references. Clients may later instantiate the preserved graph by applying a substitution environment.
@@ -19,4 +22,3 @@ Concrete expectations:
 - Navigating `Box<C>['full']['bar']` resolves `"full"` against the instantiated `Box<C>` meaning, not the unsubstituted generic body.
 - If `ProjectMember(ResolveDecl(Box), "full", [C])` is already cached, a later path reaching the same instantiated query reuses it.
 - Navigating `MyType<T>` with `T` free returns a shape whose body preserves `T` as a parameter reference. Navigating `MyType<string>` returns a shape with `T` substituted, every substituted position carrying a `SubstituteTypeParam` origin edge to the decl's parameter list.
-

@@ -110,12 +110,6 @@ enum ProjectionFrame {
         data: Arc<SemanticNodeData>,
         source: SemanticNodeId,
     },
-    MappedAfterValue {
-        state: Box<MappedContinuationState>,
-    },
-    MappedFinish {
-        state: Box<MappedContinuationState>,
-    },
     ReferenceArgsResume {
         node: SemanticNodeId,
         context: ProjectionReductionContext,
@@ -181,14 +175,6 @@ pub(super) enum ProjectionPoll {
 pub(super) enum ProjectionFinish {
     Node(SemanticNodeId),
     Instantiate(SemanticQueryKey),
-}
-
-struct MappedContinuationState {
-    node: SemanticNodeId,
-    context: ProjectionReductionContext,
-    data: Arc<SemanticNodeData>,
-    source_id: SemanticNodeId,
-    key_space: SemanticNodeId,
 }
 
 struct ReferenceArgsState {
@@ -1017,64 +1003,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     } else {
                         source_id
                     };
-                    let value_expr = mapper.value_expr;
-                    frames.push(ProjectionFrame::MappedAfterValue {
-                        state: Box::new(MappedContinuationState {
-                            node,
-                            context,
-                            data,
-                            source_id,
-                            key_space,
-                        }),
-                    });
-                    frames.push(ProjectionFrame::Enter {
-                        node: value_expr,
-                        context,
-                    });
-                }
-                ProjectionFrame::MappedAfterValue { state } => {
-                    let SemanticNodeData::Mapped { mapper, .. } = state.data.as_ref() else {
-                        unreachable!("mapped staging frame must carry a mapped node")
-                    };
-                    if let Some(name_remap) = mapper.name_remap {
-                        let context = state.context;
-                        frames.push(ProjectionFrame::MappedFinish { state });
-                        frames.push(ProjectionFrame::Enter {
-                            node: name_remap,
-                            context,
-                        });
-                    } else {
-                        work_credit.settle();
-                        let result = self.finish_mapped_projection(
-                            state.node,
-                            state.context,
-                            state.data.as_ref(),
-                            state.source_id,
-                            state.key_space,
-                            memo,
-                        );
-                        if let Err(reasons) = work_credit.refresh() {
-                            trip = Some(reasons);
-                            break;
-                        }
-                        self.memoize_projected(memo, state.node, state.context, result);
-                    }
-                }
-                ProjectionFrame::MappedFinish { state } => {
                     work_credit.settle();
                     let result = self.finish_mapped_projection(
-                        state.node,
-                        state.context,
-                        state.data.as_ref(),
-                        state.source_id,
-                        state.key_space,
-                        memo,
+                        node,
+                        context,
+                        data.as_ref(),
+                        source_id,
+                        key_space,
                     );
                     if let Err(reasons) = work_credit.refresh() {
                         trip = Some(reasons);
                         break;
                     }
-                    self.memoize_projected(memo, state.node, state.context, result);
+                    self.memoize_projected(memo, node, context, result);
                 }
                 ProjectionFrame::AwaitInstantiation { .. } => {
                     unreachable!("an awaiting node resumes only with its delivery")
@@ -1393,13 +1334,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         data: &SemanticNodeData,
         source_id: SemanticNodeId,
         key_space: SemanticNodeId,
-        memo: &ViewMemo,
     ) -> SemanticNodeId {
         let SemanticNodeData::Mapped { mapper, .. } = data else {
             unreachable!("mapped finish frame must carry a mapped node")
         };
-        let value_expr = projected(memo, mapper.value_expr, context);
-        let name_remap = mapper.name_remap.map(|name| projected(memo, name, context));
+        // Outer parameters have already substituted into this shape. The
+        // mapped binder is still unbound: value and remap evaluation belongs
+        // to the per-key materializer, after it supplies the selected key.
+        let value_expr = mapper.value_expr;
+        let name_remap = mapper.name_remap;
         let projected_mapper = MapperKey {
             parameter_node: mapper.parameter_node,
             key_space,
@@ -1408,14 +1351,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             readonly: mapper.readonly,
             over_type_variable: mapper.over_type_variable,
             name_remap,
-            kind: crate::semantic_query::MapperKind::classify_value_expr(
-                self.graph(),
-                value_expr,
-                source_id,
-                mapper.parameter_node,
-            ),
+            kind: mapper.kind,
         };
-        if super::raise::mapped_type_is_open_or_unknown(self, source_id, &projected_mapper) {
+        if !may_reduce_operator(context)
+            || super::raise::mapped_type_is_open_or_unknown(self, source_id, &projected_mapper)
+        {
             self.graph().intern_preserving_scope(
                 node,
                 SemanticNodeData::Mapped {
@@ -1647,7 +1587,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     .filter(|_| remaining == 0)
                     .map(|target| (target, context))
             }
-            SemanticNodeData::KeyOf { base } => (index == 0).then_some((*base, context)),
+            SemanticNodeData::KeyOf { base } => (index == 0).then_some((
+                *base,
+                context.into_structural_transit_with_mode(ProjectionMode::Navigate),
+            )),
             SemanticNodeData::IndexedAccess {
                 object,
                 index: index_key,

@@ -5421,8 +5421,59 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return RelationResult::Unknown;
         };
         let bindings_len = bindings.len();
-        let template =
+        let mut template =
             self.substitute_semantic_type_param(spec.template, spec.mapper_parameter, key);
+        // The selected key closes the helper's arguments. Unwrap its authored
+        // body before registering projection holes, preserving indexed holes
+        // as patterns rather than evaluating them as ordinary member reads.
+        let mut seen_templates = FxHashSet::default();
+        loop {
+            if !seen_templates.insert(template) {
+                self.relation_session_rollback(&property_checkpoint);
+                return RelationResult::Unknown;
+            }
+            let identity_and_args = match self.graph().node_data(template).as_deref() {
+                Some(SemanticNodeData::Alias(inner)) => {
+                    template = *inner;
+                    continue;
+                }
+                Some(SemanticNodeData::InstantiationRef { base, args }) => {
+                    Some((base.clone(), Arc::clone(args)))
+                }
+                Some(SemanticNodeData::DeclRef { identity }) => {
+                    Some((identity.clone(), Arc::from([])))
+                }
+                _ => None,
+            };
+            let Some((identity, args)) = identity_and_args else {
+                break;
+            };
+            let read = self.execute_read(SemanticQueryKey::Instantiate(
+                crate::semantic_query::InstantiateKey::new(
+                    self.type_slot_for(
+                        Arc::clone(&identity.canonical_id),
+                        identity.owner,
+                        Arc::clone(&identity.decl_name),
+                    ),
+                    args,
+                    self.instantiate_context_for(
+                        &identity.canonical_id,
+                        ProjectionReductionContext::structural_transit(),
+                    ),
+                ),
+            ));
+            if read.result_is_partial {
+                self.relation_session_rollback(&property_checkpoint);
+                return RelationResult::Unknown;
+            }
+            template = match read.value {
+                QueryResult::Value(value) => value,
+                _ => {
+                    self.relation_session_rollback(&property_checkpoint);
+                    return RelationResult::Unknown;
+                }
+            };
+        }
         let projection_probe = self.graph().intern_node(SemanticNodeData::IndexedAccess {
             object: spec.base_infer,
             index: IndexKey::Computed(spec.mapper_parameter),

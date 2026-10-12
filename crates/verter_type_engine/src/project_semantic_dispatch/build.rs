@@ -11120,14 +11120,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 keys: Vec<IndexKey>,
                 seen: FxHashSet<IndexKey>,
             },
-            /// An intersection: the keys common to every member, in the
-            /// first member's order.
-            Intersection {
-                node: SemanticNodeId,
-                members: Arc<[SemanticNodeId]>,
-                next: usize,
-                common: Option<Vec<IndexKey>>,
-            },
             /// A named key type: its declaration's keys.
             Named { node: SemanticNodeId },
         }
@@ -11159,16 +11151,28 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             seen: FxHashSet::default(),
                         });
                     }
-                    SemanticNodeData::Intersection(members) => {
-                        let members = members.members_arc();
+                    SemanticNodeData::Intersection(_) => {
                         drop(data);
-                        open.insert(node);
-                        pending.push(Pending::Intersection {
-                            node,
-                            members,
-                            next: 0,
-                            common: None,
-                        });
+                        let domain = self.key_literals_from_keyspace_node(node)?;
+                        keys = Some(
+                            domain
+                                .into_iter()
+                                .map(|key| match key.literal {
+                                    Some(literal) => self.normalized_index_key_node(
+                                        self.graph()
+                                            .intern_node(SemanticNodeData::Literal(literal)),
+                                    ),
+                                    None => match key.key {
+                                        crate::semantic_query::PropertyKey::UniqueSymbol(
+                                            symbol,
+                                        ) => IndexKey::UniqueSymbol(symbol),
+                                        _ => unreachable!(
+                                            "a string or numeric key carries its literal"
+                                        ),
+                                    },
+                                })
+                                .collect(),
+                        );
                     }
                     SemanticNodeData::KeyOf { base } => {
                         let base = *base;
@@ -11277,42 +11281,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         keys = Some(std::mem::take(collected));
                         keys_seen = Some(std::mem::take(seen));
                     }
-                    Pending::Intersection {
-                        members,
-                        next,
-                        common,
-                        ..
-                    } => {
-                        keys_seen = None;
-                        if let Some(delivered) = keys.take() {
-                            *common = Some(match common.take() {
-                                None => delivered,
-                                Some(common) => {
-                                    let mut present: FxHashSet<IndexKey> = FxHashSet::default();
-                                    for key in &delivered {
-                                        first_index_key(&mut present, key);
-                                    }
-                                    common
-                                        .into_iter()
-                                        .filter(|key| index_key_present(&present, key))
-                                        .collect()
-                                }
-                            });
-                        }
-                        if let Some(member) = members.get(*next) {
-                            *next += 1;
-                            visit = Some(*member);
-                            break;
-                        }
-                        // An intersection of no members has no key set.
-                        keys = Some(common.take()?);
-                    }
                     Pending::Named { .. } => {}
                 }
                 let closed = match pending.pop().expect("the waiting key type") {
-                    Pending::Union { node, .. }
-                    | Pending::Intersection { node, .. }
-                    | Pending::Named { node } => node,
+                    Pending::Union { node, .. } | Pending::Named { node } => node,
                 };
                 open.remove(&closed);
             }
@@ -11884,7 +11856,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .and_then(|settled| self.graph().node_data(settled))
             .as_deref()
         {
-            if crate::project_semantic_dispatch::raise::mapped_type_is_open_or_unknown(
+            if crate::project_semantic_dispatch::raise::mapped_type_key_domain_is_open_or_unknown(
                 self, *source, mapper,
             ) {
                 return None;
@@ -12017,7 +11989,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             let settled = match self.class_expression_read_surface(kept) {
                 Some(surface) => surface,
-                None => self.resolve_signature_source_carrier(kept, published),
+                None => self.resolve_signature_source_carrier(
+                    kept,
+                    crate::semantic_query::ProjectionReductionContext::structural_transit(),
+                ),
             };
             if settled == kept {
                 return None;
@@ -13475,6 +13450,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
         let substituted =
             self.substitute_semantic_type_param(mapper.value_expr, mapper.parameter_node, key_arg);
+        let substituted = self.reduce_instantiated_operators(substituted);
         let evaluated = self
             .evaluate_deferred_semantic_node_with_context(substituted, context)
             .into_active_query_build_node(self);
@@ -13703,8 +13679,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         mapper: &crate::semantic_query::MapperKey,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> SemanticNodeId {
+        let value_expr = self.reduce_instantiated_operators(mapper.value_expr);
         let evaluated = self
-            .evaluate_deferred_semantic_node_with_context(mapper.value_expr, context)
+            .evaluate_deferred_semantic_node_with_context(value_expr, context)
             .into_active_query_build_node(self);
         let resolved = match self.graph().node_data(evaluated).as_deref() {
             Some(SemanticNodeData::InstantiationRef { base, args }) => {
@@ -13946,8 +13923,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> (SemanticNodeId, crate::semantic_query::PartialReasonSet) {
         let graph = self.graph();
         let mut reasons = crate::semantic_query::PartialReasonSet::empty();
+        let value_expr = self.reduce_instantiated_operators(mapper.value_expr);
         let evaluated = self
-            .evaluate_deferred_semantic_node_with_context(mapper.value_expr, context)
+            .evaluate_deferred_semantic_node_with_context(value_expr, context)
             .into_active_query_build_node(self);
         let resolved = match graph.node_data(evaluated).as_deref() {
             Some(SemanticNodeData::InstantiationRef { base, args }) => {
@@ -17763,16 +17741,6 @@ fn first_index_key(
     #[cfg(any(test, feature = "test-support"))]
     INDEX_KEY_PROBES.with(|probes| probes.set(probes.get() + 1));
     seen.insert(key.clone())
-}
-
-/// Whether `key` is in `present` (a hash probe).
-fn index_key_present(
-    present: &FxHashSet<crate::semantic_query::IndexKey>,
-    key: &crate::semantic_query::IndexKey,
-) -> bool {
-    #[cfg(any(test, feature = "test-support"))]
-    INDEX_KEY_PROBES.with(|probes| probes.set(probes.get() + 1));
-    present.contains(key)
 }
 
 #[cfg(any(test, feature = "test-support"))]

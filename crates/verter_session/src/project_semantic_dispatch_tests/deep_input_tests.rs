@@ -102,12 +102,6 @@ const PLAN_BUDGET: u32 = 256;
 /// 200 levels, 861,701 at 400).
 const WORK_BUDGET: usize = 100_000;
 
-/// The connected-demand work budget a mapped-type nest is read under: the
-/// nest's work grows by four units a level (813 at 200, 1,613 at 400,
-/// 4,013 at 1,000), so [`BUDGET_DEPTH`] levels charge past this, where a
-/// nest a quarter as deep answers.
-const MAPPED_WORK_BUDGET: usize = 1_000;
-
 /// The depth a form that lowers inside a type alias, or is walked at index
 /// time — on a worker's 8 MiB — is checked at.
 const WORKER_DEPTH: usize = 10_000;
@@ -1114,24 +1108,40 @@ fn mapped_types(depth: usize) -> String {
     format!("type D = {};\n", wrap(depth, "{ [K in \"a\"]: ", " }"))
 }
 
-/// Mapped types nested deep lower as frames of the locator lowering's
-/// stack (their binder frames a shared chain) and are judged open by a
-/// walk whose levels carry only the arm they take. Past the
-/// connected-demand work budget ([`MAPPED_WORK_BUDGET`]: the nest's work
-/// grows by four units a level) the probe returns the budget's typed
-/// failure, the plan budget at its production default — read on
-/// [`MAPPED_STACK`], as reading `keyof D` over the nest needs.
+/// The key-domain read reports a typed work-budget refusal. Derive its
+/// allowance from fresh requests: skipping unrequested mapped values can
+/// change the amount of work without changing this refusal contract.
 #[test]
 fn mapped_types_nested_past_the_work_budget_return() {
     in_a_fresh_process(test_path!(), || {
-        assert_returns_past_a_work_budget(
-            format!(
-                "{}export function pf() {{ const p: keyof D = null as any; return p; }}\n",
-                mapped_types(BUDGET_DEPTH)
-            ),
-            MAPPED_WORK_BUDGET,
-            MAPPED_STACK,
+        let source = format!(
+            "{}export function pf() {{ const p: keyof D = null as any; return p; }}\n",
+            mapped_types(BUDGET_DEPTH)
         );
+        let outcome_at = |work| {
+            let source = source.clone();
+            on_a_stack(MAPPED_STACK, move || {
+                let _work = super::connected_demand::WorkBudgetForTests::install(work);
+                audited_return_on(&footprint_host(), &source).0
+            })
+        };
+        let mut refused = 1;
+        assert_eq!(outcome_at(refused), WORK_BUDGET_EXCEEDED);
+        let mut allowance = 2;
+        loop {
+            assert!(
+                allowance <= WORK_BUDGET,
+                "the request completes under the available work allowance"
+            );
+            let outcome = outcome_at(allowance);
+            if outcome == Ok(None) {
+                break;
+            }
+            assert_eq!(outcome, WORK_BUDGET_EXCEEDED);
+            refused = allowance;
+            allowance *= 2;
+        }
+        assert_returns_past_a_work_budget(source, refused, MAPPED_STACK);
     });
 }
 

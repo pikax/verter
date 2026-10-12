@@ -96,20 +96,27 @@ pub(crate) fn make_host_with_footprint() -> Arc<VerterHost> {
 }
 
 pub(crate) fn make_host_with_workspace_files_footprint(files: &[(&str, &str)]) -> Arc<VerterHost> {
+    make_host_with_workspace_files_config(
+        files,
+        HostConfig {
+            audit_enabled: true,
+            footprint_capture: true,
+            ..HostConfig::default()
+        },
+    )
+}
+
+pub(crate) fn make_host_with_workspace_files_config(
+    files: &[(&str, &str)],
+    config: HostConfig,
+) -> Arc<VerterHost> {
     let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(
         verter_workspace::MemoryOptions::default(),
     ));
     for (path, source) in files {
         workspace.inject_file((*path).to_string(), Arc::from(*source));
     }
-    Arc::new(VerterHost::new(
-        HostConfig {
-            audit_enabled: true,
-            footprint_capture: true,
-            ..HostConfig::default()
-        },
-        workspace,
-    ))
+    Arc::new(VerterHost::new(config, workspace))
 }
 
 pub(crate) fn upsert_ts(host: &VerterHost, canonical_id: &str, source: &str) {

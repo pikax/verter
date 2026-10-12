@@ -655,6 +655,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// recursively re-entering the evaluator.
     fn normalized_index_key_from_evaluated_node(&self, resolved: SemanticNodeId) -> IndexKey {
         match self.graph().node_data(resolved).as_deref() {
+            Some(data @ SemanticNodeData::TypeOfNominal(_)) => IndexKey::UniqueSymbol(
+                data.typeof_nominal_identity()
+                    .expect("nominal typeof has its declaration identity")
+                    .clone(),
+            ),
             Some(SemanticNodeData::Literal(LiteralValue::String(text))) => {
                 IndexKey::String(Arc::from(text.as_str()))
             }

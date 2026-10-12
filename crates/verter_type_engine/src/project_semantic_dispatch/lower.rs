@@ -1309,7 +1309,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 frames.push(LowerFrame::KeyOf {
                     context: reduction_context,
                 });
-                LowerStep::Descend(operand, reduction_context)
+                LowerStep::Descend(
+                    operand,
+                    reduction_context.into_structural_transit_with_mode(ProjectionMode::Navigate),
+                )
             }
             // Indexed access at shell level routes through the IndexedAccess
             // dispatch. The path walker materialises `T[K]` via
@@ -2406,6 +2409,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
                 mapper_env.insert(parameter.clone(), parameter_id);
 
+                // The binder is not a selected key yet. Keep helper
+                // applications and operators intact until per-key substitution.
                 let value_sem = self.lower_type_expr_with_infer_factory(
                     infer_binders,
                     value,
@@ -2415,7 +2420,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     scope_payload,
                     shadowing,
                     substitutions,
-                    reduction_context,
+                    reduction_context.into_structural_transit_with_mode(ProjectionMode::Navigate),
                 );
 
                 let optionality = match optional {
@@ -2439,7 +2444,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         scope_payload,
                         shadowing,
                         substitutions,
-                        reduction_context,
+                        reduction_context
+                            .into_structural_transit_with_mode(ProjectionMode::Navigate),
                     )
                 });
 
@@ -2493,9 +2499,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // path-precisely under a publication demand. The shared
                 // open-mapped predicate decides openness (no second
                 // walker).
-                if crate::project_semantic_dispatch::raise::mapped_type_is_open_or_unknown(
-                    self, source_sem, &mapper,
-                ) {
+                if !crate::semantic_query::may_reduce_operator(reduction_context)
+                    || crate::project_semantic_dispatch::raise::mapped_type_is_open_or_unknown(
+                        self, source_sem, &mapper,
+                    )
+                {
                     return graph.intern_node_with_scope(
                         SemanticNodeData::Mapped {
                             source: source_sem,

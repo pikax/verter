@@ -3672,6 +3672,38 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     current = resolved;
                 }
                 SemanticNodeData::Mapped { source, mapper } => {
+                    // Homomorphic arrays and tuples carry element layout and
+                    // optionality; their owner maps the container before a
+                    // selected element is read as an ordinary tuple/array hop.
+                    if mapper.over_type_variable && mapper.name_remap.is_none() {
+                        let subject = self.dispatch.resolve_signature_source_carrier(
+                            *source,
+                            self.context
+                                .into_structural_transit_with_mode(ProjectionMode::Navigate),
+                        );
+                        if matches!(
+                            self.graph().node_data(subject).as_deref(),
+                            Some(SemanticNodeData::Array { .. } | SemanticNodeData::Tuple { .. })
+                        ) {
+                            let resolved = match self.execute_read_folding_partial(
+                                SemanticQueryKey::MappedType {
+                                    source: *source,
+                                    mapper: mapper.clone(),
+                                    context: self.context,
+                                },
+                            ) {
+                                QueryResult::Value(value) => value,
+                                _ => {
+                                    results.push(self.opaque_miss());
+                                    return;
+                                }
+                            };
+                            if resolved != current {
+                                current = resolved;
+                                continue;
+                            }
+                        }
+                    }
                     // Operator-level Mapped narrowing: when the walker
                     // has a literal key segment and the mapper has no
                     // name remap, close the selected key directly
@@ -4302,7 +4334,22 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                             }
                         };
                     if resolved == current {
-                        results.push(current);
+                        // A deferred mapping has not consumed the pending
+                        // access. Preserve that operation for later substitution.
+                        let mut deferred = current;
+                        for segment in &path[index..] {
+                            let deferred_index = match segment {
+                                PathSegment::Index(key) => key.clone(),
+                                PathSegment::Member(key) => match key {
+                                    crate::semantic_query::PropertyKey::String(text) => IndexKey::String(Arc::clone(text)),
+                                    crate::semantic_query::PropertyKey::Number(number) => IndexKey::Number(*number),
+                                    crate::semantic_query::PropertyKey::UniqueSymbol(symbol) => IndexKey::UniqueSymbol(symbol.clone()),
+                                },
+                            };
+                            deferred = self.graph().intern_preserving_scope(current, SemanticNodeData::IndexedAccess { object: deferred, index: deferred_index });
+                        }
+                        results.push(deferred);
+                        self.record_intermediate(None);
                         return;
                     }
                     current = resolved;
