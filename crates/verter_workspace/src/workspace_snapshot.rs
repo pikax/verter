@@ -71,6 +71,7 @@ pub const OWNERS_MEMO_CAP: usize = 16 * 1024;
 ///   hasher would be a collision hazard.
 pub struct OwnersMemo {
     map: DashMap<Box<str>, SmallVec<[ProjectId; 2]>>,
+    declaration_ranks: DashMap<ProjectId, rustc_hash::FxHashMap<Box<str>, u32>>,
     cap: usize,
 }
 
@@ -80,6 +81,7 @@ impl OwnersMemo {
     pub fn with_cap(cap: usize) -> Self {
         Self {
             map: DashMap::new(),
+            declaration_ranks: DashMap::new(),
             cap,
         }
     }
@@ -159,6 +161,35 @@ pub enum ConfiguredOwnerResolution {
 }
 
 impl WorkspaceSnapshot {
+    /// Declaration precedence from the configured `files` sequence. Build
+    /// its index once per immutable snapshot, rather than scanning that
+    /// sequence once for every member of an augmentation population.
+    pub fn declaration_sequence_rank(&self, canonical: &str) -> u32 {
+        let Some(pid) = self.owners_for_file(canonical).first().copied() else {
+            return u32::MAX;
+        };
+        let ProjectPayload::Configured { membership, .. } = &self.project(pid).payload else {
+            return u32::MAX;
+        };
+        if let Some(ranks) = self.owners_memo.declaration_ranks.get(&pid) {
+            return ranks.get(canonical).copied().unwrap_or(u32::MAX);
+        }
+        let ranks = self
+            .owners_memo
+            .declaration_ranks
+            .entry(pid)
+            .or_insert_with(|| {
+                let mut ranks = rustc_hash::FxHashMap::default();
+                for (ordinal, file) in membership.spec.files.iter().enumerate() {
+                    ranks
+                        .entry(Box::<str>::from(file.as_str()))
+                        .or_insert(ordinal as u32);
+                }
+                ranks
+            });
+        ranks.get(canonical).copied().unwrap_or(u32::MAX)
+    }
+
     /// All projects claiming this file via exact snapshot membership.
     ///
     /// Ordered by pre-sorted project precedence (precomputed during build,
