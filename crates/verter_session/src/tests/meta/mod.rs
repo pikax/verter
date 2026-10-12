@@ -1087,6 +1087,7 @@ fn blank_output_analysis() -> verter_session_query::analysis::component_meta::Co
 {
     use verter_session_query::analysis::component_meta as cm;
     cm::ComponentMetaAnalysis {
+        domain_guarantees: Default::default(),
         props: Vec::new(),
         events: Vec::new(),
         slots: Vec::new(),

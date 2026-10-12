@@ -235,26 +235,40 @@ impl<'a> OutputSourceMemo<'a> {
                     std::collections::hash_map::Entry::Occupied(hit) => hit.get().clone(),
                     std::collections::hash_map::Entry::Vacant(slot) => {
                         self.materialize_calls += 1;
-                        let value = materialize_output_source(
+                        let value = match materialize_output_source(
                             dispatch,
                             cap,
                             effective_scope,
                             verter_type_expr::TopLevelOwnerId::instance(0),
                             selected_source,
-                        )
-                        .map_err(|failure| {
-                            crate::meta_resolve::ComponentMetaOutputError {
-                                lane,
-                                index,
-                                inner_index,
-                                position: Box::new(
-                                    verter_type_expr::facts::SourcePosition::Present(
-                                        selected_source.as_ref().clone(),
-                                    ),
-                                ),
-                                failure,
+                        ) {
+                            Ok(value) => value,
+                            Err(failure) => {
+                                if verter_type_engine::request_context::current_execution_abort()
+                                    .is_some()
+                                {
+                                    return Err(crate::meta_resolve::ComponentMetaOutputError {
+                                        lane,
+                                        index,
+                                        inner_index,
+                                        position: Box::new(
+                                            verter_type_expr::facts::SourcePosition::Present(
+                                                selected_source.as_ref().clone(),
+                                            ),
+                                        ),
+                                        failure,
+                                    });
+                                }
+                                verter_type_engine::request_context::fold_result_completeness(verter_type_engine::semantic_query::ResultCompleteness::partial(verter_type_engine::semantic_query::PartialReasonSet::SEMANTIC_QUERY_FAULT));
+                                return Ok(crate::meta_resolve::MaterializedTypePublication::from_parts(
+                                    cap,
+                                    PublicationResult::Failed { failure: verter_type_expr::TypedResolutionFailure::SourceConstruction(verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredMemberValue), provenance: verter_type_expr::ResolutionProvenance::SessionProjector },
+                                    None,
+                                    crate::meta_resolve::TerminalTypeDisplay::from_text(cap, None),
+                                    std::sync::Arc::from([]),
+                                ));
                             }
-                        })?;
+                        };
                         slot.insert(value.clone());
                         value
                     }
@@ -679,8 +693,12 @@ pub(crate) fn build_component_meta_output(
     // ONE dispatch for the whole output payload; the capability mint and
     // every sealed-carrier unwrap live here, in the terminal sink.
     let cap = MetaResolveProjectorsOutputCap::new(dispatch);
+    let _materialization_scope =
+        verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
     let types =
         materialize_component_meta_output_types(dispatch, &cap, scope_canonical_id, &analysis)?;
+    let completeness = completeness
+        .merge(verter_type_engine::request_context::current_cold_compute_completeness());
     let adapter_id = ctx
         .ensure_indexed_ready_serve(scope_canonical_id)
         .and_then(|serve| {

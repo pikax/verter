@@ -237,7 +237,7 @@ export type NativeTypeExpr =
   | { kind: "templateLiteral"; quasis: string[]; expressions: NativeTypeExpr[] }
   | { kind: "parenthesized"; inner: NativeTypeExpr }
   | { kind: "unknown"; raw: string }
-  | { kind: "infer"; name: string }
+  | { kind: "infer"; name: string; constraint?: NativeTypeExprLike }
   | { kind: "rest"; inner: NativeTypeExpr }
   | {
       kind: "syntheticSlotBinding";
@@ -2779,7 +2779,7 @@ function graphTypeExprToString(expr: GraphTypeExprRef): string {
     case NODE_PARENTHESIZED:
       return `(${graphTypeExprToString(createGraphTypeExprRef(expr.graph, node.innerNodeId))})`;
     case NODE_INFER:
-      return `infer ${expr.graph.getString(node.nameId)}`;
+      return `infer ${expr.graph.getString(node.nameId)}${node.constraintNodeId ? ` extends ${graphTypeExprToString(createGraphTypeExprRef(expr.graph, node.constraintNodeId))}` : ""}`;
     case NODE_REST:
       return `...${graphTypeExprToString(createGraphTypeExprRef(expr.graph, node.innerNodeId))}`;
     case NODE_RECURSIVE_REF:
@@ -2844,6 +2844,8 @@ function nativeTypeExprToString(expr: NativeTypeExpr): string {
       return `keyof ${nativeTypeExprToString(expr.operand)}`;
     case "typeOf":
       return `typeof ${expr.path.join(".")}`;
+    case "infer":
+      return `infer ${expr.name}${expr.constraint ? ` extends ${nativeTypeExprToString(expr.constraint as NativeTypeExpr)}` : ""}`;
     case "unknown":
       return expr.raw;
     case "syntheticSlotBinding":

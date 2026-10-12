@@ -182,6 +182,11 @@ impl ComponentMetaOutput {
         )
     }
 
+    /// Quality of the published facts, including terminal member materialization.
+    pub fn completeness(&self) -> verter_type_engine::semantic_query::ResultCompleteness {
+        self.completeness
+    }
+
     /// Borrow the public contract availability.
     pub fn contract(&self) -> &crate::framework::ComponentContractAvailability {
         &self.contract

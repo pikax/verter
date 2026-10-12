@@ -1,3 +1,4 @@
+import type { FactResult } from "./facts.js";
 import { basename } from "node:path";
 
 import { typeExprToDescriptor } from "./type-expr-bridge.js";
@@ -221,6 +222,9 @@ export type NativeComponentContractAvailability =
     };
 
 export interface NativePropMeta {
+  requiredFact?: FactResult<boolean>;
+  hasDefaultFact?: FactResult<boolean>;
+  typeFact?: FactResult<NativeTypeExprLike | undefined>;
   name: string;
   type?: NativeTypeExprLike;
   publication: NativeTypePublication;
@@ -246,6 +250,7 @@ export interface NativePropMeta {
 }
 
 export interface NativeEventMeta {
+  typeFact?: FactResult<NativeTypeExprLike | undefined>;
   name: string;
   payload: NativeTypeExprLike;
   publication: NativeTypePublication;
@@ -257,6 +262,7 @@ export interface NativeEventMeta {
 }
 
 export interface NativeSlotBindingMeta {
+  typeFact?: FactResult<NativeTypeExprLike | undefined>;
   name: string;
   type?: NativeTypeExprLike;
   publication: NativeTypePublication;
@@ -265,6 +271,7 @@ export interface NativeSlotBindingMeta {
 }
 
 export interface NativeSlotMeta {
+  returnFact?: FactResult<NativeTypeExprLike | undefined>;
   name: string;
   isScoped: boolean;
   bindings: NativeSlotBindingMeta[];
@@ -712,7 +719,30 @@ export interface NativeOriginGraph {
   metaStrings: string[];
 }
 
+export type NativeSemanticLane =
+  | "props"
+  | "events"
+  | "slots"
+  | "models"
+  | "exposed"
+  | "acceptedProps"
+  | "acceptedEvents"
+  | "rootReachability"
+  | "fallthroughSurface"
+  | "publicInstance"
+  | "componentPublicContract"
+  | "typeRegistry";
+export type NativeComponentFacts = {
+  readonly [K in Exclude<NativeSemanticLane, "componentPublicContract">]: FactResult<
+    NativeComponentMetaResult[K]
+  >;
+} & {
+  readonly delivery: FactResult<undefined>;
+  readonly componentPublicContract: FactResult<NativeComponentPublicContract>;
+};
+
 export interface NativeComponentMetaResult {
+  facts?: NativeComponentFacts;
   componentPublicContract: NativeComponentContractAvailability;
   resultCompleteness: NativeResultCompleteness;
   props: NativePropMeta[];
@@ -804,6 +834,7 @@ export function nativeComponentMetaToComponentMeta(meta: NativeComponentMetaResu
     optionsApi: meta.optionsApi,
     componentPublicContract: meta.componentPublicContract,
     resultCompleteness: meta.resultCompleteness,
+    facts: meta.facts,
     props: meta.props.map((prop) => ({
       name: prop.name,
       type: publishedTypeExprToDescriptor(prop, `prop ${prop.name}`, publicationRegistry),

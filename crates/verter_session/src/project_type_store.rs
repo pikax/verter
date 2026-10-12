@@ -2136,6 +2136,7 @@ mod tests {
             FallthroughSurface, NoFallthroughReason, RootReachability,
         };
         ComponentMetaAnalysis {
+            domain_guarantees: Default::default(),
             props: Vec::new(),
             events: Vec::new(),
             slots: Vec::new(),

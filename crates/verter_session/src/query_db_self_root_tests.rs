@@ -4293,6 +4293,7 @@ fn component_meta_result_db_get_with_view_rejects_entry_from_superseded_generati
             FallthroughSurface, NoFallthroughReason, RootReachability,
         };
         ComponentMetaAnalysis {
+            domain_guarantees: Default::default(),
             props: Vec::new(),
             events: Vec::new(),
             slots: Vec::new(),

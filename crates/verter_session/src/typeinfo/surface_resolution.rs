@@ -18,19 +18,81 @@ use verter_type_engine::semantic_query::{FactResult, MemberDomain};
 /// - An approximate domain yields its presence-only subset, and an
 ///   unavailable one yields `None`; both record the fact's causes first, so
 ///   a subset never passes as the complete surface.
-pub(crate) fn adopt_surface<T>(resolution: SurfaceResolution<T>) -> Option<T> {
-    let fact: FactResult<MemberDomain<T>> = resolution.into_fact();
+pub(crate) fn adopt_surface(
+    resolution: SurfaceResolution<super::surface::TypeInfoSurface>,
+) -> Option<super::surface::TypeInfoSurface> {
+    let fact: FactResult<MemberDomain<super::surface::TypeInfoSurface>> = resolution.into_fact();
     fold_result_completeness(fact.status().completeness());
+    let mut guarantee = metadata_guarantee(
+        fact.status(),
+        matches!(
+            &fact,
+            FactResult::Complete(MemberDomain::Open(_))
+                | FactResult::Approximate {
+                    value: MemberDomain::Open(_),
+                    ..
+                }
+        ),
+    );
     match fact {
         FactResult::Complete(MemberDomain::NoSurface) | FactResult::Unavailable { .. } => None,
         FactResult::Complete(MemberDomain::Closed(surface) | MemberDomain::Open(surface))
         | FactResult::Approximate {
             value: MemberDomain::Closed(surface) | MemberDomain::Open(surface),
             ..
-        } => Some(surface),
+        } => {
+            let mut surface = surface;
+            guarantee.open |= surface.has_index_signature || surface.keyspace.is_some();
+            surface.domain_guarantee = guarantee;
+            Some(surface)
+        }
         FactResult::Approximate {
             value: MemberDomain::NoSurface,
             ..
         } => None,
     }
+}
+
+/// Context-free output projection of a demanded fact's own status.
+pub(crate) fn metadata_guarantee(
+    status: verter_type_engine::semantic_query::FactStatus,
+    open: bool,
+) -> verter_session_query::analysis::component_meta::MetadataFactGuarantee {
+    use verter_type_engine::semantic_query::{FactStatus, PartialReason};
+    let (kind, reasons) = match status {
+        FactStatus::Complete => (1, None),
+        FactStatus::Approximate(causes) => (2, Some(causes)),
+        FactStatus::Unavailable(causes) => (3, Some(causes)),
+    };
+    let causes = reasons
+        .map(|reasons| {
+            reasons
+                .get()
+                .iter()
+                .map(|reason| match reason {
+                    PartialReason::BudgetExceeded => 1,
+                    PartialReason::Cancelled => 2,
+                    PartialReason::SupersededGeneration => 3,
+                    PartialReason::UnstableState => 4,
+                    PartialReason::SamePathRecursion => 5,
+                    PartialReason::WalkerFatal => 6,
+                    PartialReason::Propagated => 7,
+                    PartialReason::DeferredEvaluationLimit => 8,
+                    PartialReason::StructuralFactDemandLimit => 9,
+                    PartialReason::SemanticQueryFault => 10,
+                    PartialReason::MissingSemanticNodeData => 11,
+                    PartialReason::ProjectionWorkLimit => 12,
+                    PartialReason::ConnectedQueryDepthLimit => 13,
+                    PartialReason::MissingDependency => 14,
+                    PartialReason::FlowReturnUninferred => 15,
+                    PartialReason::FlowReturnUnverified => 16,
+                    PartialReason::FlowReturnNoSurface => 17,
+                    PartialReason::UndecidedConditional => 18,
+                    PartialReason::ConnectedMemoryLimit => 19,
+                    PartialReason::OperationBudget => 20,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    verter_session_query::analysis::component_meta::MetadataFactGuarantee { kind, causes, open }
 }

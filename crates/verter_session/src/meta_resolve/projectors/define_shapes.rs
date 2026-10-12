@@ -159,6 +159,7 @@ fn define_props_shape(
     macro_index: usize,
     evaluated_types: &ExpandedComponentTypes,
 ) -> Option<ExpansionResult<ExpandedObjectShape>> {
+    let _domain_scope = verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
     if !macro_surface_resolves(
         ctx,
         dispatch,
@@ -166,7 +167,7 @@ fn define_props_shape(
         macro_index,
         AnalyzedMacroKind::DefineProps,
     ) {
-        return None;
+        return Some(missing_macro_domain());
     }
     let dtos_read = crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx(
         ctx,
@@ -222,6 +223,7 @@ fn define_props_shape(
     );
     Some(ExpansionResult {
         value: ExpandedObjectShape {
+            domain_guarantee: dtos.domain_guarantee.clone(),
             properties,
             index_signatures,
             call_signatures: Vec::new(),
@@ -256,6 +258,7 @@ fn define_emits_shape(
 ) -> Option<ExpansionResult<ExpandedObjectShape>> {
     // Unresolved emits macro → no shape (see `define_props_shape`). A resolved
     // emits surface with no events is `Some(empty)`.
+    let _domain_scope = verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
     if !macro_surface_resolves(
         ctx,
         dispatch,
@@ -263,7 +266,7 @@ fn define_emits_shape(
         macro_index,
         AnalyzedMacroKind::DefineEmits,
     ) {
-        return None;
+        return Some(missing_macro_domain());
     }
     let dtos_read = crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx(
         ctx,
@@ -308,6 +311,7 @@ fn define_emits_shape(
     );
     Some(ExpansionResult {
         value: ExpandedObjectShape {
+            domain_guarantee: dtos.domain_guarantee.clone(),
             properties,
             index_signatures,
             call_signatures: Vec::new(),
@@ -332,6 +336,7 @@ fn define_slots_shape(
 ) -> Option<ExpansionResult<ExpandedObjectShape>> {
     // Unresolved slots macro → no shape (see `define_props_shape`). A resolved
     // slots surface with no slot members is `Some(empty)`.
+    let _domain_scope = verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
     if !macro_surface_resolves(
         ctx,
         dispatch,
@@ -339,7 +344,7 @@ fn define_slots_shape(
         macro_index,
         AnalyzedMacroKind::DefineSlots,
     ) {
-        return None;
+        return Some(missing_macro_domain());
     }
     let dtos_read = crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx(
         ctx,
@@ -366,6 +371,7 @@ fn define_slots_shape(
         .collect();
 
     Some(ExpansionResult::exact_symbolic(ExpandedObjectShape {
+        domain_guarantee: dtos.domain_guarantee.clone(),
         properties,
         index_signatures: Vec::new(),
         call_signatures: Vec::new(),
@@ -532,3 +538,29 @@ fn merge_execution_status(
 #[cfg(test)]
 #[path = "define_shapes_tests.rs"]
 mod tests;
+
+/// Preserve a refused membership demand independently of any authored recovery.
+fn missing_macro_domain() -> ExpansionResult<ExpandedObjectShape> {
+    use verter_type_engine::semantic_query::{FactStatus, ResultCompleteness};
+    let completeness = verter_type_engine::request_context::current_cold_compute_completeness();
+    let status = match completeness {
+        ResultCompleteness::Complete => FactStatus::Complete,
+        ResultCompleteness::Partial(causes) => {
+            verter_type_engine::semantic_query::FactResult::from_demand_inputs(causes).status()
+        }
+    };
+    let mut value = ExpandedObjectShape::empty();
+    value.domain_guarantee = Some(crate::typeinfo::surface_resolution::metadata_guarantee(
+        status, false,
+    ));
+    ExpansionResult {
+        value,
+        exactness: if matches!(status, FactStatus::Complete) {
+            SolverExactness::ExactSymbolic
+        } else {
+            SolverExactness::Incomplete
+        },
+        execution_status: ExecutionStatus::Completed,
+        diagnostics: Vec::new(),
+    }
+}

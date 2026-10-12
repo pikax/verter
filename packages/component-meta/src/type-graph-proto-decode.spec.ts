@@ -1,14 +1,25 @@
 import { create, toBinary } from "@bufbuild/protobuf";
 import { describe, expect, it } from "vitest";
 import {
-  ComponentMetaPayloadSchema,
-  createTestComponentMetaPayload,
+  LegacyComponentMetaPayloadSchema as ComponentMetaPayloadSchema,
+  ComponentMetaPayloadSchema as FactPayloadSchema,
+  createTestComponentMetaPayload as factFixture,
+  createLegacyTestComponentMetaPayload as createTestComponentMetaPayload,
   OriginGraphSchema,
   SurfacePartialReasonSchema,
 } from "@verter/proto";
 import { decodeTypedComponentMetaPayload } from "./type-graph-proto-decode.js";
 
 describe("decodeTypedComponentMetaPayload", () => {
+  it("publishes independent semantic facts", () => {
+    const fixture = factFixture();
+    const result = decodeTypedComponentMetaPayload(
+      toBinary(FactPayloadSchema, create(FactPayloadSchema, fixture)),
+    );
+    expect(result).toMatchObject({
+      facts: { props: { kind: "complete" }, events: { kind: "complete" } },
+    });
+  });
   it("accepts the current schema version and rejects an older response", () => {
     const current = createTestComponentMetaPayload();
     expect(current.schemaVersion).toBe(12);
@@ -19,7 +30,7 @@ describe("decodeTypedComponentMetaPayload", () => {
           create(ComponentMetaPayloadSchema, { ...current, schemaVersion: 7 }),
         ),
       ),
-    ).toThrow(/expected 12, found 7/);
+    ).toThrow(/expected 13, found 7/);
   });
 
   it("decodes supported contract type references from the shared graph", () => {
@@ -440,7 +451,8 @@ describe("typed property keys", () => {
 
   it("decodes every property-key kind", async () => {
     const { create, toBinary } = await import("@bufbuild/protobuf");
-    const { ComponentMetaPayloadSchema } = await import("@verter/proto");
+    const { LegacyComponentMetaPayloadSchema: ComponentMetaPayloadSchema } =
+      await import("@verter/proto");
     const payload = create(
       ComponentMetaPayloadSchema,
       payloadWithMembers([
@@ -483,7 +495,8 @@ describe("typed property keys", () => {
 
   it("resolves display names for string, number, and symbol keys through the bridge", async () => {
     const { create, toBinary } = await import("@bufbuild/protobuf");
-    const { ComponentMetaPayloadSchema } = await import("@verter/proto");
+    const { LegacyComponentMetaPayloadSchema: ComponentMetaPayloadSchema } =
+      await import("@verter/proto");
     const { nativeTypeRegistryToMap } = await import("./native-component-meta.js");
     const { decodeComponentMetaPayload } = await import("./type-graph.js");
     const payload = create(
@@ -513,13 +526,14 @@ describe("typed property keys", () => {
 
   it("rejects a schema-4 payload with the typed version error", async () => {
     const { create, toBinary } = await import("@bufbuild/protobuf");
-    const { ComponentMetaPayloadSchema } = await import("@verter/proto");
+    const { LegacyComponentMetaPayloadSchema: ComponentMetaPayloadSchema } =
+      await import("@verter/proto");
     const payload = create(ComponentMetaPayloadSchema, {
       ...payloadWithMembers([]),
       schemaVersion: 4,
     });
     const bytes = toBinary(ComponentMetaPayloadSchema, payload);
-    expect(() => decodeTypedComponentMetaPayload(bytes)).toThrow(/expected 12, found 4/);
+    expect(() => decodeTypedComponentMetaPayload(bytes)).toThrow(/expected 13, found 4/);
   });
 });
 
@@ -658,5 +672,106 @@ describe("result completeness fail-closed branches", () => {
 
   it("still accepts the well-formed complete surface", () => {
     expect(decodeCompletenessOf({ kind: 1, partialReasons: [] })).toEqual({ kind: "complete" });
+  });
+});
+
+describe("independent component facts", () => {
+  const fixture = () => create(FactPayloadSchema, factFixture());
+  const decode = (payload: ReturnType<typeof fixture>) =>
+    decodeTypedComponentMetaPayload(toBinary(FactPayloadSchema, payload));
+
+  it("retains unknown causes and isolates unavailable facts from exact siblings", () => {
+    const payload = fixture();
+    payload.body!.facts!.events = {
+      ...payload.body!.facts!.events!,
+      guarantee: { $typeName: "verter.v1.FactGuarantee", kind: 3, causes: [9001] },
+      value: undefined,
+    };
+    const result = decode(payload);
+    expect(result.facts!.events).toEqual({ kind: "unavailable", causes: [9001] });
+    expect(result.facts!.props.kind).toBe("complete");
+    expect(result.props[0]?.typeFact?.kind).toBe("complete");
+    expect(result.resultCompleteness).toEqual({ kind: "partial", reasons: ["propagated"] });
+    expect(result.events).toEqual([]);
+  });
+
+  it("preserves false, proven absence, and a complete open membership domain", () => {
+    const payload = fixture();
+    payload.body!.facts!.props!.value!.open = true;
+    payload.body!.facts!.props!.value!.entries[0].requiredFact!.value = false;
+    const result = decode(payload);
+    expect(result.facts!.props).toMatchObject({ kind: "complete", open: true });
+    expect(result.props[0]?.required).toBe(false);
+    expect(result.props[0]?.hasDefault).toBe(false);
+    expect(result.props[0]?.requiredFact).toEqual({ kind: "complete", value: false });
+    expect(result.props[0]?.hasDefaultFact).toEqual({ kind: "complete", value: false });
+    expect(result.facts!.publicInstance).toEqual({ kind: "complete", value: undefined });
+  });
+
+  it.each(["approximateWithoutCauses", "unavailableWithValue"] as const)(
+    "refuses a contradictory %s without poisoning siblings",
+    (mode) => {
+      const payload = fixture();
+      payload.body!.facts!.props!.guarantee!.kind = mode === "approximateWithoutCauses" ? 2 : 3;
+      const result = decode(payload);
+      expect(result.facts!.props).toEqual({ kind: "unavailable", causes: [100] });
+      expect(result.facts!.events.kind).toBe("complete");
+    },
+  );
+
+  it("propagates an invalid shared node only to dependent value facts", () => {
+    const payload = fixture();
+    payload.typeGraph!.nodes[0].kind = {
+      case: "array",
+      value: { $typeName: "verter.v1.ArrayNode", elementNodeId: 999, readonly: false },
+    };
+    const first = payload.body!.facts!.props!.value!.entries[0];
+    payload.body!.facts!.props!.value!.entries.push({ ...first, nameId: 6, typeNodeId: 2 });
+    const result = decode(payload);
+    expect(result.facts!.props.kind).toBe("complete");
+    expect(result.props[0]?.typeFact).toEqual({ kind: "unavailable", causes: [100] });
+    expect(result.props[0]?.type).toBeUndefined();
+    expect(result.props[1]?.typeFact?.kind).toBe("complete");
+    expect(result.slots[0]?.bindings[0]?.typeFact?.kind).toBe("unavailable");
+    expect(result.facts!.events.kind).toBe("complete");
+  });
+
+  it("keeps constrained binders distinct and renders their constraints", async () => {
+    const { typeExprToDescriptor } = await import("./type-expr-bridge.js");
+    const payload = fixture();
+    payload.typeGraph!.nodes.push({
+      $typeName: "verter.v1.TypeNode",
+      kind: {
+        case: "infer",
+        value: { $typeName: "verter.v1.InferNode", nameId: 2, constraintNodeId: 1 },
+      },
+    });
+    payload.typeGraph!.nodes.push({
+      $typeName: "verter.v1.TypeNode",
+      kind: {
+        case: "infer",
+        value: { $typeName: "verter.v1.InferNode", nameId: 2, constraintNodeId: 2 },
+      },
+    });
+    const first = payload.body!.facts!.props!.value!.entries[0];
+    first.typeNodeId = 6;
+    payload.body!.facts!.props!.value!.entries.push({ ...first, nameId: 6, typeNodeId: 7 });
+    const result = decode(payload);
+    expect(typeExprToDescriptor(result.props[0].type!)).toMatchObject({
+      rawType: "infer TreeNode extends string",
+    });
+    expect(typeExprToDescriptor(result.props[1].type!)).toMatchObject({
+      rawType: "infer TreeNode extends undefined",
+    });
+  });
+
+  it("ignores a conflicting legacy summary and preserves the delivery refusal", () => {
+    const payload = fixture();
+    payload.body!.facts!.delivery!.kind = 3;
+    payload.body!.facts!.delivery!.causes = [20];
+    const result = decode(payload);
+    expect(result.facts!.delivery).toEqual({ kind: "unavailable", causes: [20] });
+    expect(result.resultCompleteness).toEqual({ kind: "partial", reasons: ["budgetExceeded"] });
+    expect(result.facts!.props.kind).toBe("complete");
   });
 });

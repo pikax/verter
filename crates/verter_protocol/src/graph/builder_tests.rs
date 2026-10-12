@@ -4,6 +4,29 @@ use verter_type_expr::{
     LiteralValue, PrimitiveName, RecursiveConditionalBranch, RecursiveConditionalFrame, TypeExpr,
 };
 
+#[test]
+fn constrained_infer_keeps_a_structured_binder() {
+    let mut builder = GraphBuilder::new();
+    let expression = TypeExpr::Infer {
+        name: "Item".into(),
+        constraint: Some(Arc::new(TypeExpr::Primitive(PrimitiveName::String))),
+    };
+    let id = builder.node_id(&expression);
+    assert!(matches!(
+        builder.nodes()[id as usize - 1],
+        GraphNode::Infer { .. }
+    ));
+    let GraphNode::Infer { constraint, .. } = builder.nodes()[id as usize - 1] else {
+        unreachable!()
+    };
+    assert_ne!(constraint, 0);
+    assert!(matches!(
+        builder.nodes()[constraint as usize - 1],
+        GraphNode::Primitive { primitive: 1 }
+    ));
+    assert_eq!(builder.node_id(&expression), id);
+}
+
 /// Own-once + first-encounter-order invariant for the string / node
 /// interners (the encode-path de-duplication): each interned string is
 /// stored EXACTLY once in `strings`, each structurally-distinct wire node

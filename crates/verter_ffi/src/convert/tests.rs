@@ -530,6 +530,7 @@ fn resolution_output_with(
 
 fn empty_analysis() -> verter_session_query::analysis::component_meta::ComponentMetaAnalysis {
     verter_session_query::analysis::component_meta::ComponentMetaAnalysis {
+        domain_guarantees: Default::default(),
         props: Vec::new(),
         events: Vec::new(),
         slots: Vec::new(),
@@ -666,6 +667,7 @@ fn host_cpu_threads_forwards_to_host_config() {
 #[test]
 fn component_meta_type_registry_keeps_expanded_and_pre_expansion_type_information() {
     let analysis = verter_session_query::analysis::component_meta::ComponentMetaAnalysis {
+        domain_guarantees: Default::default(),
         props: Vec::new(),
         events: Vec::new(),
         slots: Vec::new(),
@@ -767,6 +769,7 @@ fn component_meta_type_registry_keeps_expanded_and_pre_expansion_type_informatio
 #[test]
 fn component_meta_type_registry_reads_positional_lane_with_duplicate_names() {
     let analysis = verter_session_query::analysis::component_meta::ComponentMetaAnalysis {
+        domain_guarantees: Default::default(),
         props: Vec::new(),
         events: Vec::new(),
         slots: Vec::new(),
@@ -917,6 +920,7 @@ fn component_meta_type_registry_reads_positional_lane_with_duplicate_names() {
 #[test]
 fn component_meta_ffi_exposes_root_info_summary() {
     let analysis = verter_session_query::analysis::component_meta::ComponentMetaAnalysis {
+        domain_guarantees: Default::default(),
         props: Vec::new(),
         events: Vec::new(),
         slots: Vec::new(),
@@ -4113,4 +4117,110 @@ fn ffi_component_meta_distinguishes_unresolved_import_from_empty_surface() {
         "the unresolved-import results are still refused warm admission on \
          the second request",
     );
+}
+
+#[test]
+fn native_fact_refusal_replay_heals_and_invalidates() {
+    use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+    let canonical = "/FactBudget.vue";
+    let project =
+        host::meta::MetaProject::new(host::VerterHost::new_standalone(host::HostConfig::default()));
+    project.upsert_base(canonical, r#"<script setup lang="ts">defineProps<{one:string;two:number;three:boolean}>()</script><template><div/></template>"#).unwrap();
+    let session = project.open_session().unwrap();
+    let payload = |budget| {
+        let base = RequestContext::new(1, Arc::from(canonical), false, None);
+        let context = RequestContext::with_kind_timing_and_projection_budget(
+            1,
+            Arc::from(canonical),
+            base.kind.clone(),
+            false,
+            false,
+            None,
+            budget,
+        );
+        let _guard = RequestContextGuard::install(context);
+        session
+            .get_component_meta_payload(canonical, |output| {
+                let ffi = super::component_meta_output_to_ffi(output);
+                let json = serde_json::to_value(&ffi).unwrap();
+                let proto = verter_protocol::component_meta::component_meta_payload(&ffi);
+                assert_eq!(
+                    json["facts"]["delivery"]["kind"],
+                    if proto
+                        .body
+                        .as_ref()
+                        .unwrap()
+                        .facts
+                        .as_ref()
+                        .unwrap()
+                        .delivery
+                        .as_ref()
+                        .unwrap()
+                        .kind
+                        == 1
+                    {
+                        "complete"
+                    } else {
+                        "unavailable"
+                    }
+                );
+                assert!(
+                    json.get("origin").is_none(),
+                    "default capture contributes no origin graph"
+                );
+                verter_protocol::component_meta::encode_component_meta_payload(&ffi)
+            })
+            .unwrap()
+            .unwrap()
+    };
+    let cold = payload(1);
+    let recomputes = project
+        .host()
+        .provenance()
+        .component_meta_resolved_state_recomputes
+        .load(std::sync::atomic::Ordering::Relaxed);
+    assert!(recomputes > 0, "cold path executes real producers");
+    let repeat = payload(1);
+    assert_eq!(
+        project
+            .host()
+            .provenance()
+            .component_meta_resolved_state_recomputes
+            .load(std::sync::atomic::Ordering::Relaxed),
+        recomputes,
+        "same-profile refusal replays without semantic recomputation"
+    );
+    assert_eq!(
+        cold, repeat,
+        "same profile preserves the exact refusal and recovery"
+    );
+    use prost::Message;
+    let refused =
+        verter_protocol::verter::v1::ComponentMetaPayload::decode(cold.as_slice()).unwrap();
+    let refused_facts = refused.body.unwrap().facts.unwrap();
+    assert_eq!(refused_facts.delivery.as_ref().unwrap().kind, 3);
+    assert!(!refused_facts.delivery.as_ref().unwrap().causes.is_empty());
+    let healed =
+        verter_protocol::verter::v1::ComponentMetaPayload::decode(payload(20_000).as_slice())
+            .unwrap();
+    let props = healed.body.unwrap().facts.unwrap().props.unwrap();
+    assert_eq!(props.guarantee.unwrap().kind, 1);
+    assert_eq!(props.value.unwrap().entries.len(), 3);
+    session.upsert(canonical, r#"<script setup lang="ts">defineProps<{edited: string}>()</script><template><div/></template>"#.into()).unwrap();
+    let edited =
+        verter_protocol::verter::v1::ComponentMetaPayload::decode(payload(20_000).as_slice())
+            .unwrap();
+    let strings = edited.type_graph.unwrap().strings;
+    let entries = edited
+        .body
+        .unwrap()
+        .facts
+        .unwrap()
+        .props
+        .unwrap()
+        .value
+        .unwrap()
+        .entries;
+    assert_eq!(entries.len(), 1);
+    assert_eq!(strings[entries[0].name_id as usize - 1], "edited");
 }

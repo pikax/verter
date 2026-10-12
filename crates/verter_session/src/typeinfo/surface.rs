@@ -250,6 +250,8 @@ pub enum TypeInfoSurfaceEntry {
 /// names. `Clone` + `Send + Sync` (all fields are `Arc`-backed or `Copy`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TypeInfoSurface {
+    /// Membership guarantee projected from the engine fact, independent of member values.
+    pub domain_guarantee: verter_session_query::analysis::component_meta::MetadataFactGuarantee,
     /// Canonical resolver-owned declaration stream.
     pub entries: Arc<[TypeInfoSurfaceEntry]>,
     /// Named members in declaration order.
@@ -275,6 +277,10 @@ impl TypeInfoSurface {
     #[must_use]
     pub fn empty() -> Self {
         Self {
+            domain_guarantee:
+                verter_session_query::analysis::component_meta::MetadataFactGuarantee::complete(
+                    false,
+                ),
             entries: Arc::from([]),
             members: Arc::from(Vec::new().into_boxed_slice()),
             call_signatures: Arc::from(Vec::new().into_boxed_slice()),
@@ -340,6 +346,10 @@ impl TypeInfoSurface {
             }
         }
         Self {
+            domain_guarantee:
+                verter_session_query::analysis::component_meta::MetadataFactGuarantee::complete(
+                    has_index_signature || keyspace.is_some(),
+                ),
             entries: Arc::from(entries.into_boxed_slice()),
             members: Arc::from(members.into_boxed_slice()),
             call_signatures: Arc::from(call_signatures.into_boxed_slice()),

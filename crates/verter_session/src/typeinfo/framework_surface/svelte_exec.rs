@@ -1268,6 +1268,7 @@ fn retain_svelte_snippet_members(
         .cloned()
         .collect();
     TypeInfoSurface {
+        domain_guarantee: surface.domain_guarantee.clone(),
         entries: surface
             .entries
             .iter()

@@ -31,7 +31,7 @@ use crate::verter::v1::{
     UnionNode, UnknownNode, UnresolvedBranchReason, UnresolvedRootTargetReason, VueApiCallMeta,
 };
 
-pub const COMPONENT_META_SCHEMA_VERSION: u32 = 12;
+pub const COMPONENT_META_SCHEMA_VERSION: u32 = 13;
 
 pub fn component_meta_payload(meta: &FfiComponentMeta) -> ComponentMetaPayload {
     let mut builder = GraphBuilder::new();
@@ -40,7 +40,11 @@ pub fn component_meta_payload(meta: &FfiComponentMeta) -> ComponentMetaPayload {
         .iter()
         .map(|entry| type_registry_entry_to_proto(&mut builder, entry))
         .collect();
-    let body = Some(component_meta_body_to_proto(&mut builder, meta));
+    let body = Some(component_meta_body_to_proto(
+        &mut builder,
+        meta,
+        type_registry,
+    ));
     // Consume the builder's interned tables BY VALUE: the string table moves
     // straight onto the wire (no whole-table clone) and each node is consumed
     // into `graph_node_to_proto` so its id/member vectors MOVE into the proto
@@ -55,7 +59,6 @@ pub fn component_meta_payload(meta: &FfiComponentMeta) -> ComponentMetaPayload {
     ComponentMetaPayload {
         schema_version: COMPONENT_META_SCHEMA_VERSION,
         type_graph,
-        type_registry,
         body,
         origin_graph,
     }
@@ -72,8 +75,149 @@ pub fn build_test_payload() -> ComponentMetaPayload {
 fn component_meta_body_to_proto(
     builder: &mut GraphBuilder,
     meta: &FfiComponentMeta,
+    type_registry: Vec<TypeRegistryEntry>,
 ) -> ComponentMetaBody {
+    let legacy = legacy_component_meta_body_to_proto(builder, meta);
+    let native_facts = meta.facts();
+    let facts = proto::ComponentFacts {
+        delivery: Some(fact_guarantee(&native_facts.delivery)),
+        props: Some(proto::PropsFact {
+            guarantee: Some(fact_guarantee(&native_facts.props)),
+            value: native_facts.props.value().map(|_| proto::PropsValue {
+                entries: legacy.props,
+                open: native_facts.props.open(),
+            }),
+        }),
+        events: Some(proto::EventsFact {
+            guarantee: Some(fact_guarantee(&native_facts.events)),
+            value: native_facts.events.value().map(|_| proto::EventsValue {
+                entries: legacy.events,
+                open: native_facts.events.open(),
+            }),
+        }),
+        slots: Some(proto::SlotsFact {
+            guarantee: Some(fact_guarantee(&native_facts.slots)),
+            value: native_facts.slots.value().map(|_| proto::SlotsValue {
+                entries: legacy.slots,
+                open: native_facts.slots.open(),
+            }),
+        }),
+        models: Some(proto::ModelsFact {
+            guarantee: Some(fact_guarantee(&native_facts.models)),
+            value: native_facts.models.value().map(|_| proto::ModelsValue {
+                entries: legacy.models,
+                open: native_facts.models.open(),
+            }),
+        }),
+        exposed: Some(proto::ExposedFact {
+            guarantee: Some(fact_guarantee(&native_facts.exposed)),
+            value: native_facts.exposed.value().map(|_| proto::ExposedValue {
+                entries: legacy.exposed,
+                open: native_facts.exposed.open(),
+            }),
+        }),
+        accepted_props: Some(proto::AcceptedPropsFact {
+            guarantee: Some(fact_guarantee(&native_facts.accepted_props)),
+            value: native_facts
+                .accepted_props
+                .value()
+                .map(|_| proto::AcceptedPropsValue {
+                    entries: legacy.accepted_props,
+                    open: native_facts.accepted_props.open(),
+                }),
+        }),
+        accepted_events: Some(proto::AcceptedEventsFact {
+            guarantee: Some(fact_guarantee(&native_facts.accepted_events)),
+            value: native_facts
+                .accepted_events
+                .value()
+                .map(|_| proto::AcceptedEventsValue {
+                    entries: legacy.accepted_events,
+                    open: native_facts.accepted_events.open(),
+                }),
+        }),
+        root_reachability: Some(proto::RootReachabilityFact {
+            guarantee: Some(fact_guarantee(&native_facts.root_reachability)),
+            value: if native_facts.root_reachability.value().is_some() {
+                legacy.root_reachability
+            } else {
+                None
+            },
+            absent: native_facts.root_reachability.value().is_some() && false,
+        }),
+        fallthrough_surface: Some(proto::FallthroughSurfaceFact {
+            guarantee: Some(fact_guarantee(&native_facts.fallthrough_surface)),
+            value: if native_facts.fallthrough_surface.value().is_some() {
+                legacy.fallthrough_surface
+            } else {
+                None
+            },
+            absent: native_facts.fallthrough_surface.value().is_some() && false,
+        }),
+        public_instance: Some(proto::PublicInstanceFact {
+            guarantee: Some(fact_guarantee(&native_facts.public_instance)),
+            value: if native_facts.public_instance.value().is_some() {
+                legacy.public_instance
+            } else {
+                None
+            },
+            absent: native_facts.public_instance.value().is_some()
+                && meta.public_instance.is_none(),
+        }),
+        component_public_contract: Some(proto::ComponentContractFact {
+            guarantee: Some(fact_guarantee(&native_facts.component_public_contract)),
+            value: legacy.component_public_contract.and_then(|availability| {
+                match availability.availability {
+                    Some(proto::component_contract_availability::Availability::Supported(
+                        contract,
+                    )) => Some(contract),
+                    _ => None,
+                }
+            }),
+            absent: native_facts.component_public_contract.value().is_some() && false,
+        }),
+        type_registry: Some(proto::TypeRegistryFact {
+            guarantee: Some(fact_guarantee(&native_facts.type_registry)),
+            value: native_facts
+                .type_registry
+                .value()
+                .map(|_| proto::TypeRegistryValue {
+                    entries: type_registry,
+                    open: native_facts.type_registry.open(),
+                }),
+        }),
+    };
     ComponentMetaBody {
+        file_path_id: legacy.file_path_id,
+        options_api: legacy.options_api,
+        components: legacy.components,
+        template_refs: legacy.template_refs,
+        imports: legacy.imports,
+        bindings: legacy.bindings,
+        vue_api_calls: legacy.vue_api_calls,
+        styles: legacy.styles,
+        flags: legacy.flags,
+        resolution: legacy.resolution,
+        root_info: legacy.root_info,
+        macro_expansion_diagnostics: legacy.macro_expansion_diagnostics,
+        ordered_sfc_structure: legacy.ordered_sfc_structure,
+        result_completeness: Some(result_completeness_to_proto(&meta.derived_completeness())),
+        facts: Some(facts),
+    }
+}
+
+fn fact_guarantee<T>(fact: &crate::component_facts::FfiFact<T>) -> proto::FactGuarantee {
+    proto::FactGuarantee {
+        kind: fact.kind(),
+        causes: fact.causes().to_vec(),
+    }
+}
+
+fn legacy_component_meta_body_to_proto(
+    builder: &mut GraphBuilder,
+    meta: &FfiComponentMeta,
+) -> proto::LegacyComponentMetaBody {
+    proto::LegacyComponentMetaBody {
         file_path_id: builder.string_id(&meta.file_path),
         options_api: meta.options_api,
         props: meta
@@ -236,6 +380,20 @@ fn component_meta_body_to_proto(
 
 fn prop_meta_to_proto(builder: &mut GraphBuilder, prop: &FfiPropMeta) -> PropMeta {
     PropMeta {
+        required_fact: Some(proto::BoolFact {
+            guarantee: Some(proto::FactGuarantee {
+                kind: 1,
+                causes: Vec::new(),
+            }),
+            value: Some(prop.required),
+        }),
+        has_default_fact: Some(proto::BoolFact {
+            guarantee: Some(proto::FactGuarantee {
+                kind: 1,
+                causes: Vec::new(),
+            }),
+            value: Some(prop.has_default),
+        }),
         name_id: builder.string_id(&prop.name),
         type_node_id: prop
             .r#type
@@ -278,6 +436,7 @@ fn type_publication_to_proto(publication: &FfiTypePublication) -> ProtoTypePubli
             provenance,
         } => {
             output.kind = TypePublicationKind::Failed as i32;
+            output.fact_causes = vec![102];
             output.failure = match failure {
                 FfiTypePublicationFailure::UnrepresentableRequiredMemberValue => {
                     TypePublicationFailure::UnrepresentableRequiredMemberValue
@@ -322,6 +481,9 @@ fn type_publication_to_proto(publication: &FfiTypePublication) -> ProtoTypePubli
                 FfiPublicationExactness::Incomplete => TypePublicationExactness::Incomplete,
             } as i32;
             output.provenance = publication_provenance_to_proto(*provenance) as i32;
+            if *exactness == FfiPublicationExactness::Incomplete {
+                output.fact_causes = vec![103];
+            }
             match reason {
                 FfiPublicationReason::ResolvedExactConcrete => {
                     output.reason = TypePublicationReason::ResolvedExactConcrete as i32;
@@ -762,7 +924,11 @@ fn component_meta_output_failure_to_proto(
 fn event_meta_to_proto(builder: &mut GraphBuilder, event: &FfiEventMeta) -> EventMeta {
     EventMeta {
         name_id: builder.string_id(&event.name),
-        payload_node_id: builder.node_id(&event.payload),
+        payload_node_id: event
+            .payload
+            .as_ref()
+            .map(|value| builder.node_id(value))
+            .unwrap_or(0),
         payload_expansion: event
             .payload_expansion
             .as_ref()
@@ -2326,7 +2492,10 @@ fn graph_node_to_proto(node: GraphNode) -> TypeNode {
             inner_node_id: inner,
         }),
         GraphNode::Unknown { raw } => type_node::Kind::Unknown(UnknownNode { raw_id: raw }),
-        GraphNode::Infer { name } => type_node::Kind::Infer(InferNode { name_id: name }),
+        GraphNode::Infer { name, constraint } => type_node::Kind::Infer(InferNode {
+            name_id: name,
+            constraint_node_id: constraint,
+        }),
         GraphNode::Rest { inner } => type_node::Kind::Rest(RestNode {
             inner_node_id: inner,
         }),
@@ -2548,7 +2717,9 @@ fn result_completeness_to_proto(value: &FfiResultCompleteness) -> proto::ResultC
     }
 }
 
-fn surface_partial_reason_to_proto(value: FfiSurfacePartialReason) -> proto::SurfacePartialReason {
+pub(crate) fn surface_partial_reason_to_proto(
+    value: FfiSurfacePartialReason,
+) -> proto::SurfacePartialReason {
     match value {
         FfiSurfacePartialReason::BudgetExceeded => proto::SurfacePartialReason::BudgetExceeded,
         FfiSurfacePartialReason::Cancelled => proto::SurfacePartialReason::Cancelled,
@@ -2687,6 +2858,21 @@ fn build_test_meta() -> FfiComponentMeta {
     }));
 
     FfiComponentMeta {
+        domain_guarantees:
+            verter_session_query::analysis::component_meta::ComponentDomainGuarantees {
+                props:
+                    verter_session_query::analysis::component_meta::MetadataFactGuarantee::complete(
+                        false,
+                    ),
+                events:
+                    verter_session_query::analysis::component_meta::MetadataFactGuarantee::complete(
+                        false,
+                    ),
+                slots:
+                    verter_session_query::analysis::component_meta::MetadataFactGuarantee::complete(
+                        false,
+                    ),
+            },
         result_completeness: FfiResultCompleteness::Complete,
         component_public_contract: FfiComponentContractAvailability::Supported {
             contract: FfiComponentPublicContract {
@@ -3083,14 +3269,14 @@ mod tests {
                 property_name: None,
             }],
         }];
-        assert_eq!(super::COMPONENT_META_SCHEMA_VERSION, 12);
+        assert_eq!(super::COMPONENT_META_SCHEMA_VERSION, 13);
         let decoded = ComponentMetaPayload::decode(
             super::component_meta_payload(&meta)
                 .encode_to_vec()
                 .as_slice(),
         )
         .expect("payload must round-trip");
-        assert_eq!(decoded.schema_version, 12);
+        assert_eq!(decoded.schema_version, 13);
         let body = decoded.body.as_ref().expect("component-meta body");
         let completeness = body
             .result_completeness
@@ -3317,7 +3503,21 @@ mod tests {
             "file path string should survive round-trip"
         );
         assert_eq!(
-            decoded.type_registry.len(),
+            decoded
+                .body
+                .as_ref()
+                .unwrap()
+                .facts
+                .as_ref()
+                .unwrap()
+                .type_registry
+                .as_ref()
+                .unwrap()
+                .value
+                .as_ref()
+                .unwrap()
+                .entries
+                .len(),
             1,
             "registry entry should survive round-trip"
         );
@@ -3325,7 +3525,18 @@ mod tests {
             graph.strings[(decoded
                 .body
                 .as_ref()
-                .and_then(|body| body.props.first())
+                .and_then(|body| body
+                    .facts
+                    .as_ref()
+                    .unwrap()
+                    .props
+                    .as_ref()
+                    .unwrap()
+                    .value
+                    .as_ref()
+                    .unwrap()
+                    .entries
+                    .first())
                 .map(|prop| prop.name_id)
                 .expect("prop should exist")
                 - 1) as usize]
@@ -3399,22 +3610,22 @@ mod tests {
         // equality) demand in lockstep: a decoder that trusts the
         // completeness position must never accept a payload old enough to
         // omit it.
-        assert_eq!(super::COMPONENT_META_SCHEMA_VERSION, 12);
+        assert_eq!(super::COMPONENT_META_SCHEMA_VERSION, 13);
     }
 
     #[test]
     fn full_body_roundtrips_supported_contract_and_completeness_tags() {
         let payload = build_test_payload();
-        assert_eq!(payload.schema_version, 12);
+        assert_eq!(payload.schema_version, 13);
         let encoded = payload.encode_to_vec();
         let decoded =
             ComponentMetaPayload::decode(encoded.as_slice()).expect("full payload decodes");
-        assert_eq!(decoded.schema_version, 12);
+        assert_eq!(decoded.schema_version, 13);
         let body = decoded.body.expect("component-meta body");
         let bytes = body.encode_to_vec();
         assert!(
-            bytes.windows(2).any(|window| window == [0xd2, 0x01]),
-            "field 26 wire key must be present"
+            bytes.windows(2).any(|window| window == [0xe2, 0x01]),
+            "field 28 fact-owner wire key must be present"
         );
         assert!(
             bytes.windows(2).any(|window| window == [0xda, 0x01]),
@@ -3428,16 +3639,13 @@ mod tests {
             proto::ResultCompletenessKind::Complete as i32,
             "a complete payload states so rather than leaving the position              at its unset default"
         );
-        let availability = body
+        let contract = body
+            .facts
+            .unwrap()
             .component_public_contract
-            .expect("mandatory contract availability")
-            .availability
-            .expect("closed availability arm");
-        let proto::component_contract_availability::Availability::Supported(contract) =
-            availability
-        else {
-            panic!("test payload must carry Supported");
-        };
+            .unwrap()
+            .value
+            .expect("supported contract");
         assert_eq!(contract.props.len(), 1);
         assert_eq!(contract.events.len(), 1);
         assert_eq!(contract.events[0].overloads.len(), 1);
@@ -3493,15 +3701,24 @@ mod tests {
         let encoded = super::component_meta_payload(&meta).encode_to_vec();
         let decoded =
             ComponentMetaPayload::decode(encoded.as_slice()).expect("full payload decodes");
-        let availability = decoded
+        let fact = decoded
             .body
-            .and_then(|body| body.component_public_contract)
-            .and_then(|availability| availability.availability)
-            .expect("unsupported availability");
+            .unwrap()
+            .facts
+            .unwrap()
+            .component_public_contract
+            .unwrap();
+        assert_eq!(fact.guarantee.unwrap().kind, 3);
+        assert!(fact.value.is_none());
+        let mut builder = crate::graph::GraphBuilder::new();
+        let availability =
+            super::component_contract_to_proto(&mut builder, &meta.component_public_contract)
+                .availability
+                .unwrap();
         let proto::component_contract_availability::Availability::Unsupported(unsupported) =
             availability
         else {
-            panic!("Unsupported expected");
+            panic!("unsupported projection");
         };
         assert_eq!(
             unsupported.reason,

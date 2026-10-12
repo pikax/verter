@@ -1,6 +1,6 @@
 import type { TypeDescriptor } from "@verter/type-ir";
 
-export const GRAPH_FORMAT_VERSION = 12;
+export const GRAPH_FORMAT_VERSION = 13;
 
 export const NODE_PRIMITIVE = 1;
 export const NODE_LITERAL = 2;
@@ -235,7 +235,7 @@ export type GraphNodeRecord =
   | { kind: typeof NODE_TEMPLATE_LITERAL; quasiIds: number[]; expressionNodeIds: number[] }
   | { kind: typeof NODE_PARENTHESIZED; innerNodeId: number }
   | { kind: typeof NODE_UNKNOWN; rawId: number }
-  | { kind: typeof NODE_INFER; nameId: number }
+  | { kind: typeof NODE_INFER; nameId: number; constraintNodeId?: number }
   | { kind: typeof NODE_REST; innerNodeId: number }
   | {
       kind: typeof NODE_RECURSIVE_REF;
@@ -277,7 +277,11 @@ export class DecodedTypeGraph {
     return this.getString(id);
   }
 
+  factMode = false;
+  readonly invalidNodeIds = new Set<number>();
+
   getNode(id: number): GraphNodeRecord {
+    if (this.invalidNodeIds.has(id)) throw graphError(`component-meta graph node ${id} is invalid`);
     if (id <= 0 || id > this.nodes.length) {
       throw graphError(`component-meta graph missing node id ${id}`);
     }

@@ -209,3 +209,6 @@ export type {
   ComponentSurfaceDto,
   QueryResultDto,
 } from "./semantic-bridge.js";
+
+export type { FactResult, FactCause, FactCauses } from "./facts.js";
+export type { NativeComponentFacts } from "./native-component-meta.js";

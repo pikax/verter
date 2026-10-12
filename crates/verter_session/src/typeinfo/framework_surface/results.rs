@@ -534,6 +534,9 @@ pub struct NamedTypeMember {
 /// the same six-surface shapes.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct MacroSurfaceDtos {
+    /// Output projection of this macro membership demand, independent of its fields.
+    pub domain_guarantee:
+        Option<verter_session_query::analysis::component_meta::MetadataFactGuarantee>,
     /// The resolved props surface.
     pub props: Option<PropsSurface>,
     /// The resolved emits surface.
@@ -862,6 +865,7 @@ mod tests {
         // future surface addition forces this test to acknowledge it.
         let dtos = MacroSurfaceDtos::default();
         let MacroSurfaceDtos {
+            domain_guarantee: _,
             props,
             emits,
             slots,

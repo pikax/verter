@@ -949,8 +949,9 @@ pub(crate) fn vue_macro_dtos_with_ctx<C: crate::session_attachment::SessionCapab
                     // forgeable `&VueMacroSurface`. The mint lives here — the
                     // framework-surface resolution sink — so no non-sink code can
                     // reverse-materialize a member `TypeExpr` from a forged surface.
+                    let domain_guarantee = macro_surface.surface.domain_guarantee.clone();
                     let resolved = resolved_vue_surface(macro_surface);
-                    match macro_kind {
+                    let mut dtos = match macro_kind {
                         AnalyzedMacroKind::DefineProps => MacroSurfaceDtos {
                             // A props member is `properties + index signatures`: capture
                             // the surface's index signatures (key/value raised through
@@ -1063,7 +1064,9 @@ pub(crate) fn vue_macro_dtos_with_ctx<C: crate::session_attachment::SessionCapab
                         // `resolve_vue_macro_surface_with_ctx` returns `None` for it and
                         // this arm is unreachable.
                         AnalyzedMacroKind::WithDefaults => MacroSurfaceDtos::default(),
-                    }
+                    };
+                    dtos.domain_guarantee = Some(domain_guarantee);
+                    dtos
                 }
                 None => MacroSurfaceDtos::default(),
             }

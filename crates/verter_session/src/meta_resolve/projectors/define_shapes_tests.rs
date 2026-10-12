@@ -309,7 +309,7 @@ defineEmits<{ save: [id: number] }>()
 /// (source `None`) is NOT a failure — the central missing-source policy
 /// keeps rendering the canonical typed `Unknown`.
 #[test]
-fn member_path_projection_onto_interned_miss_fails_output_typed_never_silent_unknown() {
+fn member_path_projection_onto_interned_miss_refuses_value_never_silent_unknown() {
     let project = project_with(
         "/App.vue",
         r#"<script setup lang="ts">
@@ -373,7 +373,7 @@ defineEmits<{ save: [id: number] }>()
         None,
         &verter_type_expr::PublicationPolicy::exact_only(),
     );
-    let err = crate::meta_resolve::projectors::build_component_meta_output(
+    let output = crate::meta_resolve::projectors::build_component_meta_output(
         host,
         &fixture_dispatch_1,
         "/App.vue",
@@ -381,27 +381,19 @@ defineEmits<{ save: [id: number] }>()
         None,
         crate::meta_resolve::PublishedCompleteness::COMPLETE,
     )
-    .expect_err(
-        "a member-path projection landing on the interned failed-query node must FAIL \
-         the output with a typed error — never silently publish Unknown",
+    .expect("one unavailable value must preserve the component envelope");
+    assert!(output.completeness().is_partial());
+    let (_, _, types) = output.into_parts();
+    let lanes = types.into_lanes();
+    let failed = &lanes.events[0].payload;
+    assert!(
+        failed.materialized_type().is_none(),
+        "a miss never publishes Unknown as a successful value"
     );
-    assert_eq!(
-        err.lane,
-        crate::meta_resolve::ComponentMetaOutputLane::EventPayload,
-        "the error must name the failed lane"
-    );
-    assert_eq!(err.index, 0, "the error must carry the failed lane index");
-    assert_eq!(
-        *err.position,
-        verter_type_expr::facts::SourcePosition::Present(miss_projection_source),
-        "the error must carry the failed position"
-    );
-    assert_eq!(
-        err.failure,
-        crate::meta_resolve::ComponentMetaOutputFailure::UnraisableSource,
-        "the failure class must be the raise miss, got {:?}",
-        err.failure
-    );
+    assert!(matches!(
+        failed.publication(),
+        verter_type_expr::PublicationResult::Failed { .. }
+    ));
 
     // DISTINCT: a genuinely ABSENT payload position (no typed source at
     // all) is NOT a failure — the output materializes and the lane

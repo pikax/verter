@@ -3509,6 +3509,7 @@ name = "verter_ffi"
 version = "0.0.1-beta.6"
 dependencies = [
  "log",
+ "prost",
  "serde_json",
  "verter_actions",
  "verter_compiler",

@@ -1,3 +1,4 @@
+import type { NativeComponentFacts } from "./native-component-meta.js";
 /**
  * Component metadata types extracted from Vue SFCs.
  */
@@ -23,10 +24,11 @@ export interface ComponentMeta {
    * Whether this metadata is the component's FULL surface, or a partial one
    * whose resolution degraded. An empty-because-degraded result is otherwise
    * indistinguishable from an empty-because-nothing-is-declared result. A
-   * `partial` result never carries `componentPublicContract.exactness ===
-   * "exact"`.
+   * summary does not determine the guarantee of an independently published fact.
    */
   resultCompleteness: NativeResultCompleteness;
+  /** Typed native facts; compatibility arrays below are derived projections. */
+  facts?: NativeComponentFacts;
   /** Props declared via `defineProps` or Options API `props`. */
   props: PropMeta[];
   /** Events declared via `defineEmits` or Options API `emits`. */

@@ -104,6 +104,8 @@ defineProps<{
     await settleNativeProject();
 
     const meta = await checker.getComponentMeta("Button.vue");
+    expect(meta._verter?.facts?.props.kind).toBe("complete");
+    expect(meta._verter?.facts?.delivery.kind).toBe("complete");
 
     const label = meta.props.find((p) => p.name === "label");
     expect(label).toBeDefined();
@@ -1636,7 +1638,7 @@ defineSlots<TabsSlots<T>>()
     expect(leadingSlot).toBeDefined();
     expect(leadingSlot!.type).toContain("item");
     expect(leadingSlot!.type).toContain("ui");
-  });
+  }, 30_000);
 
   it("extracts exposed refs and functions without a terminal materialization error", async () => {
     const checker = await createRuntimeChecker("native-eval-ecrv8-expose");

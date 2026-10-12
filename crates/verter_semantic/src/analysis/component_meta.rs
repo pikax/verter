@@ -904,6 +904,7 @@ pub fn extract_component_meta(input: ComponentMetaInput<'_>) -> ComponentMetaAna
         collect_macro_expansion_diagnostics(evaluated_types, input.macros);
 
     ComponentMetaAnalysis {
+        domain_guarantees: component_domain_guarantees(evaluated_types, input.macros),
         props,
         events,
         slots,
@@ -2942,3 +2943,70 @@ fn extract_flags(input: &ComponentMetaInput<'_>) -> ComponentMetaFlags {
 #[cfg(test)]
 #[path = "component_meta_tests.rs"]
 mod component_meta_tests;
+
+fn component_domain_guarantees(
+    evaluated: Option<&verter_session_query::analysis::type_expand::ExpandedComponentTypes>,
+    macros: &[AnalyzedMacro],
+) -> verter_session_query::analysis::component_meta::ComponentDomainGuarantees {
+    use verter_session_query::analysis::component_meta::{
+        ComponentDomainGuarantees, MetadataFactGuarantee,
+    };
+    fn lane(
+        macros: &[AnalyzedMacro],
+        kind: AnalyzedMacroKind,
+        rows: Option<&[verter_session_query::analysis::type_expand::ExpandedMacroObjectShape]>,
+        props: Option<&[verter_session_query::analysis::type_expand::ExpandedMacroProps]>,
+    ) -> MetadataFactGuarantee {
+        let mut result = MetadataFactGuarantee::complete(false);
+        for (index, item) in macros
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| item.kind == kind && item.is_type_based)
+        {
+            let next = rows
+                .and_then(|rows| {
+                    rows.iter()
+                        .find(|row| row.macro_index == index)
+                        .and_then(|row| row.result.value.domain_guarantee.as_ref())
+                })
+                .or_else(|| {
+                    props.and_then(|rows| {
+                        rows.iter()
+                            .find(|row| row.macro_index == index)
+                            .and_then(|row| row.result.value.domain_guarantee.as_ref())
+                    })
+                })
+                .cloned()
+                .unwrap_or_default();
+            let _ = item;
+            result.kind = result.kind.max(next.kind);
+            result.open |= next.open;
+            for cause in next.causes {
+                if !result.causes.contains(&cause) {
+                    result.causes.push(cause);
+                }
+            }
+        }
+        result
+    }
+    ComponentDomainGuarantees {
+        props: lane(
+            macros,
+            AnalyzedMacroKind::DefineProps,
+            None,
+            evaluated.map(|value| value.define_props.as_slice()),
+        ),
+        events: lane(
+            macros,
+            AnalyzedMacroKind::DefineEmits,
+            evaluated.map(|value| value.define_emits.as_slice()),
+            None,
+        ),
+        slots: lane(
+            macros,
+            AnalyzedMacroKind::DefineSlots,
+            evaluated.map(|value| value.define_slots.as_slice()),
+            None,
+        ),
+    }
+}

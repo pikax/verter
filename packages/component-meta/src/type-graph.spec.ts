@@ -3,7 +3,7 @@
  */
 
 import { create, toBinary } from "@bufbuild/protobuf";
-import { ComponentMetaPayloadSchema } from "@verter/proto";
+import { LegacyComponentMetaPayloadSchema as ComponentMetaPayloadSchema } from "@verter/proto";
 import {
   ExpansionExactness,
   ExpansionExecutionStatus,
