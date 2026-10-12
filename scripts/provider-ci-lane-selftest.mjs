@@ -12,6 +12,7 @@ import {
   PROVIDER_CI_LANES,
   PROVIDER_LIVE_SELECTORS,
   buildProviderLaneFilterExpr,
+  selectorFilterExpr,
   verifyProviderCiPartition,
 } from "./provider-ci-internals.mjs";
 import { providerCargoInvocations, verifyArchive } from "./provider-ci.mjs";
@@ -65,6 +66,66 @@ test("provider filters form one non-empty, disjoint canonical partition", () => 
   const missingVerdict = verifyProviderCiPartition(missingExact);
   assert.equal(missingVerdict.ok, false);
   assert.match(missingVerdict.errors.join("\n"), /exact provider test .* matched 0 times/);
+});
+
+test("mock child-contract completions keep core ownership and ordinary nextest timeouts", () => {
+  const prefix = "svelte_progressive_component_completion_uses_committed_child_contract_";
+  const variants = ["none", "tsgo", "tsserver", "editor_tsserver"];
+  const inventory = syntheticInventory();
+  const before = verifyProviderCiPartition(inventory);
+  const completion = readFileSync(
+    join(REPO_ROOT, "crates/verter_lsp/src/server/tests/completion.rs"),
+    "utf8",
+  );
+  for (const variant of variants) {
+    const name = `${prefix}${variant}`;
+    assert.ok(completion.includes(`async fn ${name}()`), `${name} must remain a test`);
+    inventory["rust-suites"].verter_lsp.testcases[`server::server_tests::completion::${name}`] = {};
+  }
+  const after = verifyProviderCiPartition(inventory);
+  assert.equal(after.ok, true, after.errors.join("\n"));
+  assert.deepEqual(after.counts, { ...before.counts, core: before.counts.core + variants.length });
+
+  const config = readFileSync(join(REPO_ROOT, ".config/nextest.toml"), "utf8");
+  const sections = config.replaceAll("\r\n", "\n").split(/(?=^\[)/m);
+  const providerOwnership = PROVIDER_LIVE_SELECTORS.filter((selector) =>
+    ["verter_lsp", "verter_type_runtime"].includes(selector.package),
+  )
+    .map(selectorFilterExpr)
+    .join(" or ");
+  const liveFilter = `test(/tsserver|tsgo/) and (${providerOwnership})`;
+  // Bind the timeout exemption to the same ownership authority as the Core
+  // partition, rather than granting it to every test mentioning an engine.
+  const liveOverride = sections.find((section) =>
+    section.startsWith("[[profile.default.overrides]]\n"),
+  );
+  const configuredFilter =
+    liveOverride.match(/^filter = '''\n([\s\S]*?)\n'''/m)?.[1] ??
+    liveOverride.match(/^filter = '([^'\n]+)'/m)?.[1];
+  assert.equal(configuredFilter?.replace(/\s+/g, ""), liveFilter.replace(/\s+/g, ""));
+  assert.match(liveOverride, /slow-timeout = \{ period = "60s", terminate-after = 5 \}/);
+
+  for (const [profile, terminateAfter] of [
+    ["default", 6],
+    ["ci", 2],
+  ]) {
+    const base = sections.find((section) => section.startsWith(`[profile.${profile}]\n`));
+    assert.match(
+      base,
+      new RegExp(`slow-timeout = \\{ period = "10s", terminate-after = ${terminateAfter} \\}`),
+    );
+    const overrides = sections.filter((section) =>
+      section.startsWith(`[[profile.${profile}.overrides]]\n`),
+    );
+    const mockOverrides = overrides.filter((section) => section.includes(prefix));
+    assert.equal(mockOverrides.length, 1, `${profile} has one mock completion group override`);
+    assert.match(mockOverrides[0], /test-group = 'progressive-child-contract-completion'/);
+    assert.doesNotMatch(mockOverrides[0], /slow-timeout/);
+  }
+  const group = sections.find((section) =>
+    section.startsWith("[test-groups.progressive-child-contract-completion]\n"),
+  );
+  assert.match(group, /^max-threads = 1$/m);
 });
 
 // @ai-generated - Ensures real-provider modules cannot fall through to the provider-free core lane.

@@ -261,6 +261,11 @@ group serialises slow rows (serialised, the three reversed-union rows alone
 outran the 30-minute core step).
 Real-provider tests run through dedicated serial libtest jobs, while compile-fail
 fixtures run through standalone Cargo binaries rather than nextest test targets.
+The local live-provider timeout override uses the structural CI ownership
+selectors for LSP and type-runtime tests; `provider-ci-lane-selftest.mjs` pins
+that agreement. Mock child-contract completion variants keep Core ownership,
+their serial test group, and each profile's ordinary watchdog even when their
+names include `tsgo` or `tsserver`.
 
 On Windows, `--prepare` still warm-lists every archived suite and accepts only
 an exact status 0. Proc-macro suites are real test suites, not filterable
