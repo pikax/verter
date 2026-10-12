@@ -195,6 +195,11 @@ test("release.yml leaves BF2 to CI and publishes only after proving that CI pass
 
 test("nextest retains base hang protection while allowing per-test resource bounds", () => {
   const config = readFileSync(join(REPO_ROOT, ".config", "nextest.toml"), "utf8");
+  assert.equal(
+    [...config.matchAll(/^\s*slow-timeout\s*=/gm)].length,
+    2,
+    "only the default and CI base profiles may define termination policies",
+  );
   assert.doesNotMatch(config, /test-group\s*=\s*'(?:shared-provider-live|lsp-server-unit)'/);
   const sections = config.replaceAll("\r\n", "\n").split(/(?=^\[)/m);
   for (const profile of ["default", "ci"]) {

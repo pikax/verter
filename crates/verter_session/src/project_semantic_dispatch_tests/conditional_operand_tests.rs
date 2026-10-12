@@ -124,3 +124,62 @@ fn an_approximate_extreme_cannot_select_a_conditional_branch() {
         );
     }
 }
+
+#[test]
+fn approximate_member_evidence_cannot_select_a_conditional_branch() {
+    use super::checker_probe_lane_tests::{
+        default_probe_host, flow_return_audited_on_host, with_probe_outcome_on_host, ProbeProject,
+    };
+    use verter_type_engine::semantic_query::{
+        BranchSelection, FactStatus, LiteralValue, OriginEdgeKind, OriginMeta, SemanticNodeData,
+    };
+
+    for depth in [1000, 0] {
+        let source = format!(
+            "export function f(x: number) {{ {} return x; {} }}",
+            "{".repeat(depth),
+            "}".repeat(depth)
+        );
+        let host = default_probe_host();
+        let returned = flow_return_audited_on_host(&host, &source, "f")
+            .into_result()
+            .expect("the nested return retains its evaluated value");
+        assert_eq!(
+            matches!(returned.fact().status(), FactStatus::Approximate(_)),
+            depth != 0,
+            "the source must distinguish a refused proof from a complete return"
+        );
+        with_probe_outcome_on_host(
+            &host,
+            ProbeProject::default(),
+            &source,
+            "{ a: ReturnType<typeof f> } extends { a: number } ? 'yes' : 'no'",
+            |dispatch, outcome| {
+                let selected = dispatch.graph().export_all_origin_edges().into_iter().any(
+                    |(_, kind, edge)| {
+                        kind == OriginEdgeKind::ConditionalSelect
+                            && matches!(
+                                edge.meta,
+                                OriginMeta::Branch(BranchSelection::True | BranchSelection::False)
+                            )
+                    },
+                );
+                if depth != 0 {
+                    assert!(
+                        !selected,
+                        "approximate member evidence must not establish a conditional branch"
+                    );
+                    assert!(outcome.into_complete_node().is_none());
+                } else {
+                    assert!(selected, "the exact member control selects its branch");
+                    let node = outcome.into_complete_node().expect("the control completes");
+                    assert!(matches!(
+                        dispatch.graph().node_data(node).as_deref(),
+                        Some(SemanticNodeData::Literal(LiteralValue::String(value)))
+                            if value.as_str() == "yes"
+                    ));
+                }
+            },
+        );
+    }
+}

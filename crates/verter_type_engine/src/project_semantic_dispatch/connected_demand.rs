@@ -1031,13 +1031,23 @@ impl ConnectedDemandLedger<'_> {
         if footprint.tail_steps >= self.tail_steps_limit && footprint.tail_steps > 0 {
             return Err(ReplayRefusal::TailSteps);
         }
+        let operations_paid = request.map(|request| request.operations_paid());
+        if self.paid.borrow().contains(receipt.identity())
+            && operations_paid
+                .as_ref()
+                .is_none_or(|paid| paid.contains(receipt.identity()))
+        {
+            // The closure walk stops at a root paid in both ledgers.
+            // Check its entry footprint above, then avoid allocating an
+            // empty replay and repeating zero-charge bookkeeping.
+            return Ok(0);
+        }
         let work_room = self.work_limit.get().saturating_sub(self.work_used.get()) as u64;
         let operation_room = request.map_or(u64::MAX, |request| {
             request
                 .effective_projection_op_budget()
                 .saturating_sub(request.projection_ops_executed_count()) as u64
         });
-        let operations_paid = request.map(|request| request.operations_paid());
         let (unpaid, unpaid_operations, total) = {
             let paid = self.paid.borrow();
             let mut unpaid: Vec<&CostIdentity> = Vec::new();

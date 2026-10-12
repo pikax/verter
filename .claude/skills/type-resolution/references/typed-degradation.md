@@ -109,6 +109,14 @@ Conditional decisions retain the completeness of operand normalization before
 relating either operand. Relation early rejection cannot establish `False`
 when that normalization lacked exact evidence, just as approximation cannot
 establish `True`.
+The relation's own observed dependencies must also be complete before a
+verdict selects a branch: nested member values may first be demanded after
+operand normalization. An incomplete relation retains the conditional shell
+and its adopted causes, rather than committing an approximate winner.
+The relation producer's typed comparison refusal for that exact operand pair
+may supply the checker's explicit false recovery. The conditional propagates
+the authored false value as Approximate with the refusal diagnostic, without
+publishing a `ConditionalSelect` proof or counting an exact branch decision.
 
 ### Signature source and selected member evidence
 

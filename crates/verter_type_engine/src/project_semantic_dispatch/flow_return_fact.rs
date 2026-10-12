@@ -413,6 +413,10 @@ impl<T> ObservedRead<T> {
         &self.value
     }
 
+    pub(super) fn operation_refusals(&self) -> &[super::walk::ShallowDiagnostic] {
+        &self.frame.operation_refusals
+    }
+
     /// Keep a provisional value and its observations separate until the
     /// consumer either retains that exact position or replaces it.
     pub(super) fn split(self) -> Result<(T, ObservedRead<()>), ExecutionAbort> {

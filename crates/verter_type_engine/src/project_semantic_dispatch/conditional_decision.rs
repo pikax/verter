@@ -459,12 +459,56 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         }
         let check = operands.check;
         let observation = self.observe_read(|| self.conditional_branch_selection(check, extends));
-        let (selection, infer) = if observation.value().0 == ConditionalBranchSelection::Deferred {
+        let relation_complete = observation.observations_are_complete();
+        let false_recovery = observation.value().0 == ConditionalBranchSelection::False
+            && observation.operation_refusals().iter().any(|refusal| {
+                matches!(
+                    refusal,
+                    super::walk::ShallowDiagnostic::RelationTooComplex { source, target }
+                        if *source == check && *target == extends
+                )
+            });
+        let adopted = if observation.value().0 == ConditionalBranchSelection::Deferred {
             observation.discard()
         } else {
             observation.adopt(self)
+        };
+        let (mut selection, mut infer) = match adopted {
+            Ok(value) => value,
+            Err(abort) => {
+                return super::walk::QueryBuildOutput::from((
+                    QueryResult::Error(QueryError::ExecutionAborted(abort)),
+                    self.project_generation_signature(),
+                ));
+            }
+        };
+        if !relation_complete && selection != ConditionalBranchSelection::Deferred {
+            if false_recovery {
+                if self.cancellation.is_cancelled() {
+                    return self.cancelled_build_output();
+                }
+                // The relation producer's refusal names this exact check
+                // and supplies the checker's false recovery. It is a usable
+                // recovered value, never a ConditionalSelect proof.
+                let recovered = branches.branch(self, false);
+                let mut output = super::walk::QueryBuildOutput::from((
+                    QueryResult::Value(recovered),
+                    self.project_generation_signature(),
+                ))
+                .with_observed_self_roots(
+                    self.observed_self_roots_from_nodes([check, extends, recovered]),
+                );
+                output.approximation =
+                    Some(super::projection_fact::ProjectionInterpretation::CheckerRecovery);
+                branches.committed(self, false, &mut output);
+                return output;
+            }
+            // Member values can first be demanded inside the relation,
+            // after operand normalization. Its scalar verdict cannot prove
+            // a branch unless those adopted observations are exact too.
+            selection = ConditionalBranchSelection::Undecided;
+            infer = None;
         }
-        .unwrap_or((ConditionalBranchSelection::Undecided, None));
         if let Some(output) = self.absorb_named_error_operand(check, extends) {
             return output;
         }
@@ -873,7 +917,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             .unwrap_or_else(|| {
                 super::walk::QueryBuildOutput::from((QueryResult::Value(result), fence))
                     // Selection already required exact operands and the relation
-                    // authority's verdict (including its typed checker recovery).
+                    // authority's exact verdict.
                     // The completed winner retains its authored value positions.
                     .with_positional_guarantee()
             })
