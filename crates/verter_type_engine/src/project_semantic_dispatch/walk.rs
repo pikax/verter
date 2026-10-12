@@ -1665,6 +1665,25 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         self.dispatch.opaque(QueryError::Miss)
     }
 
+    fn preserve_deferred_path(&self, base: SemanticNodeId, path: &[PathSegment]) -> SemanticNodeId {
+        path.iter().fold(base, |object, segment| {
+            let index = match segment {
+                PathSegment::Index(key) => key.clone(),
+                PathSegment::Member(key) => match key {
+                    crate::semantic_query::PropertyKey::String(text) => {
+                        IndexKey::String(Arc::clone(text))
+                    }
+                    crate::semantic_query::PropertyKey::Number(number) => IndexKey::Number(*number),
+                    crate::semantic_query::PropertyKey::UniqueSymbol(symbol) => {
+                        IndexKey::UniqueSymbol(symbol.clone())
+                    }
+                },
+            };
+            self.graph()
+                .intern_preserving_scope(base, SemanticNodeData::IndexedAccess { object, index })
+        })
+    }
+
     /// The type an indexed access reads off the index signatures
     /// `signatures` for a key no property names — the index step of
     /// TypeScript's `getPropertyTypeForIndexType` over
@@ -3666,7 +3685,8 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                             }
                         };
                     if resolved == current {
-                        results.push(current);
+                        results.push(self.preserve_deferred_path(current, &path[index..]));
+                        self.record_intermediate(None);
                         return;
                     }
                     current = resolved;
@@ -4172,37 +4192,36 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         results.push(self.opaque_miss());
                         return;
                     }
+                    let nonliteral_key_arg = if literal_key.is_none() && mapper.name_remap.is_none() {
+                        match next_segment {
+                            Some(PathSegment::Index(key)) => self.dispatch
+                                .mapped_nonliteral_index_argument(mapper.key_space, key),
+                            Some(PathSegment::Member(
+                                crate::semantic_query::PropertyKey::UniqueSymbol(identity),
+                            )) => self.dispatch.mapped_nonliteral_index_argument(
+                                mapper.key_space,
+                                &IndexKey::UniqueSymbol(identity.clone()),
+                            ),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
                     let can_narrow = literal_key.is_some()
                         && mapper.name_remap.is_none()
                         && matches!(key_admission, MappedKeyAdmission::Admitted);
-                    if can_narrow {
-                        let key = literal_key.expect("literal_key is_some checked above");
-                        // Preserve string-vs-number literal kind through
-                        // substitution. `M['1']` and `M[1]` are
-                        // semantically distinct keys; the substituted
-                        // K must carry the originating segment's kind
-                        // so any value expression that depends on K
-                        // (identity mapping, `K extends ...`, template
-                        // literal positions, …) instantiates with the
-                        // correct LiteralValue variant.
-                        let key_literal_value = match &key {
-                            LiteralKey::String(s) => {
-                                crate::semantic_query::LiteralValue::String(s.as_ref().to_string())
-                            }
-                            // `LiteralKey::Number` already carries the
-                            // recovered f64 (construction sites pick
-                            // the convention-specific bits→f64 vs
-                            // int→f64 conversion). Intern the matching
-                            // `LiteralValue::Number` variant — `M[1]`
-                            // substitutes K = `Literal::Number(1)`,
-                            // NOT `Literal::String("1")`.
-                            LiteralKey::Number(n) => {
-                                crate::semantic_query::LiteralValue::Number(*n)
-                            }
+                    if can_narrow || nonliteral_key_arg.is_some() {
+                        let key_arg = if let Some(key_arg) = nonliteral_key_arg {
+                            key_arg
+                        } else {
+                            // Preserve the admitted literal's kind when binding
+                            // K: a numeric key substitutes its number, not text.
+                            let literal = match literal_key.expect("literal admission checked above") {
+                                LiteralKey::String(text) => crate::semantic_query::LiteralValue::String(text.as_ref().to_string()),
+                                LiteralKey::Number(number) => crate::semantic_query::LiteralValue::Number(number),
+                            };
+                            self.graph().intern_node(SemanticNodeData::Literal(literal))
                         };
-                        let key_arg = self
-                            .graph()
-                            .intern_node(SemanticNodeData::Literal(key_literal_value));
                         // An Identity mapper's per-key value IS
                         // `source[K]` by definition — dispatch it
                         // through the shared `IndexedAccess` query
@@ -4336,19 +4355,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     if resolved == current {
                         // A deferred mapping has not consumed the pending
                         // access. Preserve that operation for later substitution.
-                        let mut deferred = current;
-                        for segment in &path[index..] {
-                            let deferred_index = match segment {
-                                PathSegment::Index(key) => key.clone(),
-                                PathSegment::Member(key) => match key {
-                                    crate::semantic_query::PropertyKey::String(text) => IndexKey::String(Arc::clone(text)),
-                                    crate::semantic_query::PropertyKey::Number(number) => IndexKey::Number(*number),
-                                    crate::semantic_query::PropertyKey::UniqueSymbol(symbol) => IndexKey::UniqueSymbol(symbol.clone()),
-                                },
-                            };
-                            deferred = self.graph().intern_preserving_scope(current, SemanticNodeData::IndexedAccess { object: deferred, index: deferred_index });
-                        }
-                        results.push(deferred);
+                        results.push(self.preserve_deferred_path(current, &path[index..]));
                         self.record_intermediate(None);
                         return;
                     }

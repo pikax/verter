@@ -10909,12 +10909,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 
     /// Single-hop union-index distribution — the `IndexedAccessUnionDistribution`
     /// reduction for `Obj[A | B]`. Resolves the index node; when it denotes a
-    /// FINITE set of literal keys ([`Self::finite_index_keys`]: a union of
-    /// literal keys, `keyof T` over an enumerable `T`, or an intersection of
-    /// those), projects `Obj[key]` per key through the shared `IndexedAccess`
+    /// closed set of literal keys or broad key kinds (a key union, `keyof T`
+    /// over a closed `T`, or an intersection of those), projects `Obj[key]`
+    /// per domain member through the shared `IndexedAccess`
     /// query and renormalises the results through `ReduceUnion`. Returns
     /// `None` (fall through to the path walker) for a non-`TypeNode` index, a
-    /// single literal key, an open/generic key, or any per-key projection
+    /// single literal or broad key, an open/generic key, or any per-key projection
     /// miss — so symbolic / partial cases keep their carrier.
     fn distribute_union_index(
         &self,
@@ -10948,8 +10948,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             _ => {}
         }
-        let keys = self.finite_index_keys(resolved)?;
+        let keys = self
+            .finite_index_keys(resolved)
+            .or_else(|| self.index_keys_from_keyspace_node(resolved))?;
         if keys.is_empty() {
+            let never = self.primitive_node(PrimitiveKind::Never);
+            return Some(
+                crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+                    QueryResult::Value(never),
+                    self.project_generation_signature(),
+                ))
+                .with_observed_self_roots(self.observed_self_roots_from_nodes([base])),
+            );
+        }
+        // A single broad key belongs to the walker. Re-dispatching that same
+        // index would recurse instead of selecting the mapped binder.
+        if matches!(keys.as_slice(), [IndexKey::Computed(node)] if *node == resolved) {
             return None;
         }
         // Resolve the shared subject once through the same declaration and
@@ -11151,7 +11165,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             seen: FxHashSet::default(),
                         });
                     }
-                    SemanticNodeData::Intersection(_) => {
+                    SemanticNodeData::Intersection(_) | SemanticNodeData::KeyOf { .. } => {
                         drop(data);
                         let domain = self.key_literals_from_keyspace_node(node)?;
                         keys = Some(
@@ -11170,33 +11184,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                             "a string or numeric key carries its literal"
                                         ),
                                     },
-                                })
-                                .collect(),
-                        );
-                    }
-                    SemanticNodeData::KeyOf { base } => {
-                        let base = *base;
-                        drop(data);
-                        let settled = self.resolve_signature_source_carrier(
-                            base,
-                            crate::semantic_query::ProjectionReductionContext::published(
-                                ProjectionMode::Expanded,
-                            ),
-                        );
-                        let names = self.key_names_from_base_node(settled)?;
-                        keys = Some(
-                            names
-                                .into_iter()
-                                .map(|name| match name {
-                                    crate::semantic_query::PropertyKey::String(text) => {
-                                        IndexKey::String(text)
-                                    }
-                                    crate::semantic_query::PropertyKey::Number(number) => {
-                                        IndexKey::Number(number)
-                                    }
-                                    crate::semantic_query::PropertyKey::UniqueSymbol(identity) => {
-                                        IndexKey::UniqueSymbol(identity)
-                                    }
                                 })
                                 .collect(),
                         );
@@ -11335,10 +11322,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
         }
         // Union-index distribution (`Obj[A | B]` = `Obj[A] | Obj[B]`). A
-        // single-hop indexed access whose index resolves to a FINITE union of
-        // literal keys distributes per-arm through the shared `IndexedAccess`
-        // query and renormalises. Multi-segment paths, non-union indices, and
-        // open/generic union arms fall through to the path walker unchanged
+        // single-hop indexed access whose closed domain contains literal keys
+        // or broad key kinds distributes through the shared `IndexedAccess`
+        // query and renormalises. Multi-segment paths, a single broad key, and
+        // open/generic domains fall through to the path walker unchanged
         // (one engine — this re-dispatches the shared key, never hand-reduces).
         if let [PathSegment::Index(index)] = path.as_ref() {
             if let Some(distributed) = self.distribute_union_index(base, index, context) {

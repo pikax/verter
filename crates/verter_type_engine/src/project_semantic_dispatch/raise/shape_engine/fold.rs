@@ -465,9 +465,15 @@ fn fold_index_key<A: RaisedShapeAlgebra, C: crate::resolver_core::ResolverCapabi
     Some(match index {
         IndexKey::String(text) => alg.literal(LiteralValue::String(text.as_ref().to_string())),
         IndexKey::Number(number) => alg.literal(LiteralValue::Number(number.get() as f64)),
-        // The legacy raised algebra has no nominal unique-symbol leaf. Reject
-        // explicitly rather than lowering the identity to display text.
-        IndexKey::UniqueSymbol(_) => return None,
+        IndexKey::UniqueSymbol(identity) => {
+            let mut segments = identity
+                .symbol
+                .split('.')
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            segments.extend(identity.member_path.iter().cloned());
+            alg.type_of(segments, Vec::new())
+        }
         IndexKey::Computed(node) => fold_node(alg, dispatch, *node, active)?,
     })
 }

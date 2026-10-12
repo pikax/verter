@@ -5,6 +5,129 @@ use super::support::*;
 use std::collections::BTreeSet;
 use verter_session_oracle_macro::oracle_row;
 
+fn mapped_index_wire_answer(
+    host: &crate::VerterHost,
+    name: &str,
+    arguments: &[Arc<TypeExpr>],
+) -> TypeExpr {
+    let (outcome, _) = host
+        .resolve_named_symbol_wire_with_audit(
+            "/indices.ts",
+            name,
+            arguments,
+            Some(ProjectionMode::Expanded),
+        )
+        .into_parts();
+    let node = outcome.expect("resolution succeeds").expect("type exists");
+    let bytes = host
+        .project_node_to_type_expr_json_bytes(node)
+        .unwrap_or_else(|| panic!("{name} must survive JSON projection"));
+    serde_json::from_slice(&bytes).expect("valid TypeExpr JSON")
+}
+
+#[test]
+fn mapped_index_unique_symbol_survives_json_projection() {
+    let host = make_host_with_footprint();
+    upsert_ts(&host, "/indices.ts", "declare const tag: unique symbol; export type Control = typeof tag; export type Direct = { [K in typeof tag]: K }[typeof tag]; export type Filtered = { [K in typeof tag]: K }[typeof tag & symbol]; export type Deferred<S> = { [K in keyof S]: S[K] }[typeof tag];");
+    let free = Arc::new(TypeExpr::TypeParameter(verter_type_expr::TypeParam {
+        name: "Free".into(),
+        constraint: None,
+        default: None,
+        is_const: false,
+    }));
+    for _ in 0..2 {
+        let control = mapped_index_wire_answer(&host, "Control", &[]);
+        assert!(matches!(control, TypeExpr::TypeOf(_)));
+        for name in ["Direct", "Filtered"] {
+            assert_eq!(
+                mapped_index_wire_answer(&host, name, &[]),
+                control,
+                "{name}"
+            );
+        }
+        let deferred = mapped_index_wire_answer(&host, "Deferred", &[Arc::clone(&free)]);
+        let TypeExpr::IndexedAccess { index, .. } = &deferred else {
+            panic!("open mapping must retain the nominal index: {deferred:?}");
+        };
+        assert_eq!(index.as_ref(), &control);
+    }
+}
+
+#[test]
+fn mapped_index_broad_domains_read_dictionary_values() {
+    let host = make_host_with_footprint();
+    upsert_ts(&host, "/indices.ts", "interface S { [key: string]: 1 } interface Named { [key: string]: 1; named: 1 } export type Dictionary = { [K in keyof S & string]: S[K] }[keyof S & string]; export type AllKeys = { [K in keyof S]: S[K] }[keyof S]; export type NamedDictionary = { [K in keyof Named & string]: Named[K] }[keyof Named & string]; export type Strings = { [K in string]: K }[string]; export type Numbers = { [K in number]: 1 }[number]; export type Symbols = { [K in symbol]: 1 }[symbol];");
+    for _ in 0..2 {
+        assert_primitive(
+            &mapped_index_wire_answer(&host, "Strings", &[]),
+            PrimitiveName::String,
+        );
+        for name in [
+            "Dictionary",
+            "AllKeys",
+            "NamedDictionary",
+            "Numbers",
+            "Symbols",
+        ] {
+            assert_eq!(
+                mapped_index_wire_answer(&host, name, &[]),
+                TypeExpr::Literal(verter_type_expr::LiteralValue::Number(1.0)),
+                "{name}"
+            );
+        }
+    }
+}
+
+#[test]
+fn mapped_index_empty_filtered_domains_are_never() {
+    let host = make_host_with_footprint();
+    upsert_ts(&host, "/indices.ts", "interface Numeric { 0: 1 } interface Empty {} export type NumericOnly = { [K in keyof Numeric & string]: Numeric[K] }[keyof Numeric & string]; export type NoKeys = { [K in keyof Empty & string]: Empty[K] }[keyof Empty & string]; export type Disjoint = { [K in string & number]: K }[string & number];");
+    for _ in 0..2 {
+        for name in ["NumericOnly", "NoKeys", "Disjoint"] {
+            assert_primitive(
+                &mapped_index_wire_answer(&host, name, &[]),
+                PrimitiveName::Never,
+            );
+        }
+    }
+}
+
+#[test]
+fn mapped_index_deferred_access_retains_trailing_indices() {
+    let host = make_host_with_footprint();
+    upsert_ts(&host, "/indices.ts", "type Wrap<T> = { value: T }; export type Probe<S> = { [K in keyof S]: Wrap<S[K]> }[keyof S]['value'];");
+    let free = Arc::new(TypeExpr::TypeParameter(verter_type_expr::TypeParam {
+        name: "Free".into(),
+        constraint: None,
+        default: None,
+        is_const: false,
+    }));
+    for _ in 0..2 {
+        let answer = mapped_index_wire_answer(&host, "Probe", &[Arc::clone(&free)]);
+        let TypeExpr::IndexedAccess { object, index } = &answer else {
+            panic!("trailing access must remain: {answer:?}");
+        };
+        assert_string_literal(index, "value");
+        let TypeExpr::IndexedAccess { object, index } = object.as_ref() else {
+            panic!("mapped access must remain: {object:?}");
+        };
+        assert!(matches!(index.as_ref(), TypeExpr::KeyOf(_)));
+        let TypeExpr::Mapped { value, .. } = object.as_ref() else {
+            panic!("mapping must remain: {object:?}");
+        };
+        let TypeExpr::Ref {
+            name,
+            type_arguments,
+        } = value.as_ref()
+        else {
+            panic!("alias application must remain: {value:?}");
+        };
+        assert_eq!(name.as_ref(), "Wrap");
+        assert_eq!(type_arguments.len(), 1);
+        assert!(matches!(&type_arguments[0], TypeExpr::IndexedAccess { .. }));
+    }
+}
+
 #[test]
 fn mapped_index_materializes_key_independent_template_unions() {
     let host = make_host_with_footprint();

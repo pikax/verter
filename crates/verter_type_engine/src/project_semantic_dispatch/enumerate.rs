@@ -13,7 +13,7 @@ use rustc_hash::FxHashSet;
 
 use super::ProjectSemanticDispatch;
 use crate::semantic_query::{
-    HashValue, LiteralValue, PrimitiveKind, PropertyKey, SemanticNodeData, SemanticNodeId,
+    HashValue, IndexKey, LiteralValue, PrimitiveKind, PropertyKey, SemanticNodeData, SemanticNodeId,
 };
 use verter_session_query::facts::registry::{FactKey, InternedName, SymbolSpace};
 
@@ -549,6 +549,105 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         node: SemanticNodeId,
     ) -> Option<Vec<KeyDomainKey>> {
+        let domain = self.key_space_domain(node)?;
+        domain.broad.is_empty().then_some(domain.keys)
+    }
+
+    /// Index distribution also retains broad key kinds. Named members alone
+    /// cannot prove that a dictionary's key domain is finite or empty.
+    pub(super) fn index_keys_from_keyspace_node(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<Vec<IndexKey>> {
+        if matches!(
+            self.graph().node_data(node).as_deref(),
+            Some(SemanticNodeData::Primitive(
+                PrimitiveKind::Any | PrimitiveKind::Unknown
+            ))
+        ) {
+            return None;
+        }
+        let domain = self.key_space_domain(node)?;
+        let mut keys = domain
+            .keys
+            .iter()
+            .map(|key| {
+                self.key_domain_binder(key)
+                    .map(|node| self.normalized_index_key_node(node))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        // Fixed kind order; canonical reduction owns the published union order.
+        for kind in [
+            PrimitiveKind::String,
+            PrimitiveKind::Number,
+            PrimitiveKind::Symbol,
+        ] {
+            if domain.broad.contains(&kind) {
+                keys.push(IndexKey::Computed(
+                    self.graph().intern_node(SemanticNodeData::Primitive(kind)),
+                ));
+            }
+        }
+        Some(keys)
+    }
+
+    /// The mapped binder for a nominal or broad access, only when the shared
+    /// key-domain proof admits the entire requested domain. Literal selection
+    /// and remap preimages remain the path walker's existing owners.
+    pub(super) fn mapped_nonliteral_index_argument(
+        &self,
+        key_space: SemanticNodeId,
+        index: &IndexKey,
+    ) -> Option<SemanticNodeId> {
+        let node = match index {
+            IndexKey::UniqueSymbol(identity) => self.unique_symbol_key_type(identity),
+            IndexKey::Computed(node) => *node,
+            IndexKey::String(_) | IndexKey::Number(_) => return None,
+        };
+        if matches!(
+            self.graph().node_data(node).as_deref(),
+            Some(SemanticNodeData::Primitive(
+                PrimitiveKind::Any | PrimitiveKind::Unknown
+            ))
+        ) {
+            return None;
+        }
+        let requested = self.key_space_domain(node)?;
+        if requested.broad.is_empty()
+            && !matches!(
+                requested.keys.as_slice(),
+                [KeyDomainKey {
+                    key: PropertyKey::UniqueSymbol(_),
+                    ..
+                }]
+            )
+        {
+            return None;
+        }
+        let constraint = self.key_space_domain(key_space)?;
+        if !requested.broad.is_subset(&constraint.broad)
+            || !requested.keys.iter().all(|key| constraint.admits(key))
+        {
+            return None;
+        }
+        let mut arguments = requested
+            .keys
+            .iter()
+            .map(|key| self.key_domain_binder(key))
+            .collect::<Option<Vec<_>>>()?;
+        for kind in [
+            PrimitiveKind::String,
+            PrimitiveKind::Number,
+            PrimitiveKind::Symbol,
+        ] {
+            if requested.broad.contains(&kind) {
+                arguments.push(self.graph().intern_node(SemanticNodeData::Primitive(kind)));
+            }
+        }
+        Some(self.intern_normalized_union_or_intersection(&arguments, true))
+    }
+
+    fn key_space_domain(&self, node: SemanticNodeId) -> Option<KeySpaceDomain> {
         // Key-set reads stay in structural transit. The explicit stack also
         // carries alias followups, so authored nesting cannot grow the stack.
         let (_connected_guard, trip) = self.enter_connected_demand(false);
@@ -651,8 +750,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
         }
-        let domain = values.pop()?;
-        domain.broad.is_empty().then_some(domain.keys)
+        values.pop()
     }
 
     fn key_space_leaf(&self, resolved: SemanticNodeId) -> Option<KeySpaceLeaf> {
@@ -683,76 +781,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             SemanticNodeData::Primitive(PrimitiveKind::Never) => {
                 Some(KeySpaceLeaf::Finite(Vec::new()))
             }
-            // `keyof` routes through the member-name enumerator: surface
-            // member names are strings, so every enumerated key carries
-            // the STRING substitution kind. (Known model gap, recorded:
-            // tsgo keeps `keyof { 1: string }` numeric-kinded — the
-            // surface-member model stores names only, so the declared
-            // kind does not survive `keyof`.)
-            //
-            // When the member-name enumerator cannot resolve the base (the
-            // base is a `BareRef` / `ImportType` carrier head, or a generic
-            // `InstantiationRef` the name enumerator does not unwrap), route
-            // the `keyof` through the shared `SemanticQueryKey::KeyOf`
-            // producer (which normalises the base carrier at entry and
-            // reduces `keyof InstantiationRef<…>` to its literal key union)
-            // and recurse on the produced union — `keyof BareRef(Foo)<T>` /
-            // `keyof Foo<T>` over a fixed-key body then enumerates its keys.
+            SemanticNodeData::TypeOfNominal(_) => Some(KeySpaceLeaf::Finite(vec![KeyDomainKey {
+                key: PropertyKey::UniqueSymbol(data.typeof_nominal_identity()?.clone()),
+                literal: None,
+            }])),
+            SemanticNodeData::TypeOf(_) => {
+                let nominal = self.evaluate_deferred_semantic_node(resolved);
+                (nominal != resolved).then_some(KeySpaceLeaf::Next(nominal))
+            }
+            // The canonical keyof producer includes index-signature domains
+            // beside typed named keys. Demand only keys, never member values.
             SemanticNodeData::KeyOf { base } => {
-                if let Some(names) = self.key_names_from_base_node(*base) {
-                    return Some(KeySpaceLeaf::Finite(KeyDomainKey::from_keys(names)));
-                }
-                // A `DeclRef` carrier as the keyof BASE (`keyof Q` in a
-                // utility key argument before Q's surface materialises —
-                // `Pick<Q, keyof Q>` at the macro boundary). The base-node
-                // enumerator deliberately does not unwrap decl carriers
-                // (mapped-surface synthesis depends on that to reach its
-                // modifier-carrying source projection), so the KEY-DOMAIN
-                // route expands the base here instead: one shared
-                // `Instantiate`, then enumerate the produced surface.
-                // `keyof Q` over a closed declaration is a CLOSED key
-                // domain; a base that does not instantiate to a distinct
-                // node stays unenumerated — never a fabricated empty set.
-                if let Some(SemanticNodeData::DeclRef { identity }) =
-                    self.graph().node_data(*base).as_deref()
-                {
-                    let read =
-                        self.execute_read(crate::semantic_query::SemanticQueryKey::Instantiate(
-                            crate::semantic_query::InstantiateKey::new(
-                                self.type_slot_for(
-                                    Arc::clone(&identity.canonical_id),
-                                    identity.owner,
-                                    Arc::clone(&identity.decl_name),
-                                ),
-                                Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-                                self.instantiate_context_for(
-                                    &identity.canonical_id,
-                                    crate::semantic_query::ProjectionReductionContext::published(
-                                        crate::semantic_query::ProjectionMode::Expanded,
-                                    ),
-                                ),
-                            ),
-                        ));
-                    // A2 signal-split: fold a genuinely-incomplete keyspace
-                    // instantiation onto the request's sticky partial flag.
-                    crate::request_context::observe_component_meta_read_suppress(&read);
-                    if let crate::semantic_query::QueryResult::Value(instantiated) = read.value {
-                        if instantiated != *base {
-                            if let Some(names) = self.key_names_from_base_node(instantiated) {
-                                return Some(KeySpaceLeaf::Finite(KeyDomainKey::from_keys(names)));
-                            }
-                        }
-                    }
-                }
-                // Key-domain enumeration needs the literal KEY UNION of `keyof
-                // base`, NOT the member VALUES of `base`. Resolve the `keyof`
-                // under the publication SHALLOW context (NOT `Expanded`): the
-                // `KeyOf` producer normalises the base carrier and reduces to
-                // the literal key union without materialising member value
-                // surfaces — the value-expansion-free key-domain enumeration
-                // semantics (no Table.vue-storm-adjacent eager value expansion).
+                let subject = self.resolve_signature_source_carrier(
+                    *base,
+                    crate::semantic_query::ProjectionReductionContext::structural_transit(),
+                );
                 let read = self.execute_read(crate::semantic_query::SemanticQueryKey::KeyOf {
-                    base: *base,
+                    base: subject,
                     context: crate::semantic_query::ProjectionReductionContext::published(
                         crate::semantic_query::ProjectionMode::Shallow,
                     ),
