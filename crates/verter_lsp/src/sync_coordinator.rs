@@ -121,6 +121,9 @@ pub struct SyncCoordinatorHandle {
 #[cfg(test)]
 #[derive(Clone, Default)]
 pub(crate) struct CoordinatorReceipts {
+    /// Pause dispatch between complete sync passes to isolate foreground work
+    /// counters from independently re-armed background revalidation.
+    pub(crate) dispatch_barrier: Arc<tokio::sync::Mutex<()>>,
     /// One notify after each coordinator select-arm, so paused-time tests
     /// wait for an exact loop tick instead of a yield-count flush.
     pub(crate) loop_tick: Arc<tokio::sync::Notify>,
@@ -184,6 +187,13 @@ struct PendingSignal {
 }
 
 impl SyncCoordinatorHandle {
+    #[cfg(test)]
+    pub(crate) async fn pause_dispatch_for_test(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        Arc::clone(&self.receipts.dispatch_barrier)
+            .lock_owned()
+            .await
+    }
+
     /// Signal that a file has changed and needs a debounced sync.
     ///
     /// `received_at` is when the change REACHED the server — the caller's own
@@ -1167,6 +1177,9 @@ async fn coordinator_loop(
                     None => std::future::pending::<()>().await,
                 }
             } => {
+                #[cfg(test)]
+                let _dispatch = receipts.dispatch_barrier.lock().await;
+
                 // Find files that have been quiet for >= debounce_ms. A file
                 // whose change is still in flight is NOT quiet however old its
                 // last receipt is: without this gate, receipt-time stamping

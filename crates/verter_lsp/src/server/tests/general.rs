@@ -4694,119 +4694,62 @@ fn stale_reconcile_add_gated_when_high_water_advances_in_decide_record_window() 
     );
 }
 
-/// D3 (atomic / linearizable remove-if-empty) + D2 (over-close root cause). The
-/// refcount's remove-if-empty MUST decide emptiness and remove the slot under a
-/// SINGLE held shard lock, so a concurrent insert of ANOTHER still-open root's
-/// edge into the SAME shared overlay slot is never clobbered (the D3 lost
-/// update). D2 is the consequence: if root S's edge is lost when root R is
-/// released, S's shared overlay is wrongly closed and S's bare carrier import
-/// strands on TS2307 — so the D2 ROOT CAUSE is exactly "S's edge survives R's
-/// release", asserted here at the refcount level.
-///
-/// DISCRIMINATING via a stress loop: two tasks race per iteration — one
-/// RELEASES R from a shared slot (`DeclOverlayOwner::release_root`), the other
-/// RE-RECORDS S into the SAME slot (`DeclOverlayOwner::reconcile_root_reachability`)
-/// starting from a slot reached by R ALONE (`{R}`), exactly the setup where R
-/// closes while S is FIRST recording its edge into the same overlay.
-///
-/// With the atomic remove-if-empty, S's edge ALWAYS survives: either the
-/// reconcile lands first (`{R,S}` → release removes R → `{S}`, non-empty, kept),
-/// or the release lands first (`{R}` → atomically removed) and the reconcile
-/// re-creates `{S}`. The release's emptiness-check-and-remove is ONE held-lock
-/// critical section, so it can never delete a slot that the reconcile
-/// concurrently populated. The non-atomic pre-fix pattern (snapshot keys →
-/// get_mut/check-empty with the guard DROPPED → SEPARATE unconditional `remove`)
-/// loses S when: release's get_mut sees `{R}`, removes R → empty → decides
-/// drained, then — in the gap before its `remove` — the reconcile inserts S
-/// (`{S}`), and release's unconditional `remove` then deletes the now-`{S}` slot.
-///
-/// DISCRIMINATING via a high-contention stress loop on REAL OS threads aligned by
-/// a `Barrier` (so both enter their critical section together), repeated many
-/// times. RED-before: the pre-fix non-atomic `remove` loses S in ≥1 race (the
-/// test fails reporting the loss count). GREEN-after: zero losses across every
-/// iteration. This is a STRESS discriminator (not a single deterministic
-/// interleave — the production functions expose no yield point between the
-/// emptiness decision and the remove to pin a deterministic interleave), so it is
-/// run with enough contention/iterations to make the pre-fix loss reliably
-/// observable.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn decl_refcount_remove_if_empty_never_clobbers_concurrent_record() {
-    use std::sync::Barrier;
+/// Both orders of releasing R and recording S retain S's shared overlay edge.
+/// At the release-first drain decision, the slot remains write-locked: a recorder
+/// cannot populate it between the emptiness decision and the tombstone handoff.
+#[test]
+fn decl_refcount_remove_if_empty_never_clobbers_concurrent_record() {
+    use std::sync::mpsc;
+    use std::time::Duration;
 
-    let shared_overlay = "/ws/Shared.d.vue.ts".to_string();
-    let r_root = "/ws/R.vue".to_string();
-    let s_root = "/ws/S.vue".to_string();
+    let shared = "/ws/Shared.d.vue.ts".to_string();
+    let r = "/ws/R.vue";
+    let s = "/ws/S.vue";
+    let owner = DeclOverlayOwner::default();
 
-    let iterations = 300_000usize;
-    let s_edge_lost = Arc::new(AtomicUsize::new(0));
-
-    // Real OS threads + a 3-phase barrier per iteration: (1) align both critical
-    // sections, (2) both done → measure, (3) measurement done → reset for next
-    // iteration. The reset + measure both run on the release thread, bracketed by
-    // barriers, so the record thread cannot run during reset/measure and the reset
-    // cannot run during measure — the only concurrency is release || record.
-    std::thread::scope(|scope| {
-        let owner: Arc<DeclOverlayOwner> = Arc::new(DeclOverlayOwner::default());
-        let barrier = Arc::new(Barrier::new(2));
-        let lost = Arc::clone(&s_edge_lost);
-
-        let owner_a = Arc::clone(&owner);
-        let barrier_a = Arc::clone(&barrier);
-        let shared_a = shared_overlay.clone();
-        let r_a = r_root.clone();
-        let s_a = s_root.clone();
-        let release_thread = scope.spawn(move || {
-            for _ in 0..iterations {
-                // Reset the slot to {R} ALONE (the D2 setup).
-                owner_a.test_replace_slot(&shared_a, &[r_a.as_str()], 1);
-                // Phase (1): aligned start of the concurrent section.
-                barrier_a.wait();
-                // R closes: drop R from every overlay it reaches.
-                owner_a.release_root(&r_a);
-                // Phase (2): both critical sections complete — now MEASURE that S
-                // still reaches the overlay (R's release must not have clobbered
-                // S's concurrent first-time record).
-                barrier_a.wait();
-                let s_present = owner_a
-                    .test_slot_roots(&shared_a)
-                    .map(|set| set.contains(&s_a))
-                    .unwrap_or(false);
-                if !s_present {
-                    lost.fetch_add(1, Ordering::Relaxed);
-                }
-                // Phase (3): measured — safe to reset the slot next iteration.
-                barrier_a.wait();
-            }
-        });
-
-        let owner_b = Arc::clone(&owner);
-        let barrier_b = Arc::clone(&barrier);
-        let shared_b = shared_overlay.clone();
-        let s_b = s_root.clone();
-        let record_thread = scope.spawn(move || {
-            for _ in 0..iterations {
-                // Phase (1): aligned start.
-                barrier_b.wait();
-                // S records (FIRST time) that it reaches the shared overlay,
-                // concurrently with R's release.
-                owner_b.reconcile_root_reachability(&s_b, std::slice::from_ref(&shared_b), 1);
-                // Phase (2): both complete — the release thread measures.
-                barrier_b.wait();
-                // Phase (3): next iteration.
-                barrier_b.wait();
-            }
-        });
-
-        release_thread.join().expect("release thread");
-        record_thread.join().expect("record thread");
-    });
-
-    let lost = s_edge_lost.load(Ordering::Relaxed);
+    // Record-first: releasing R must neither erase S nor issue a close.
+    owner.test_replace_slot(&shared, &[r], 1);
+    owner.reconcile_root_reachability(s, std::slice::from_ref(&shared), 1);
+    assert!(owner.release_root(r).is_empty());
     assert_eq!(
-        lost, 0,
-        "the atomic remove-if-empty must NEVER clobber a concurrent re-record of a \
-         still-open root's edge (D3 lost update → D2 over-close → TS2307); S's edge \
-         to the shared overlay vanished in {lost}/{iterations} races"
+        owner.test_slot_roots(&shared),
+        Some(HashSet::from([s.to_string()]))
+    );
+
+    // Release-first: park the release at its empty-slot decision and start the
+    // recorder while the entry is held. Channels fix the order; deadlines only
+    // bound failures, and dropping the sender releases the worker on a panic.
+    owner.test_replace_slot(&shared, &[r], 1);
+    let targets = std::thread::scope(|scope| {
+        let (drained_tx, drained_rx) = mpsc::channel();
+        let (recording_tx, recording_rx) = mpsc::channel();
+        let owner = &owner;
+        let shared = &shared;
+        let record = scope.spawn(move || {
+            drained_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("release reached drain decision");
+            recording_tx.send(()).expect("recording signal");
+            owner.reconcile_root_reachability(s, std::slice::from_ref(shared), 1);
+        });
+        let targets = owner.test_release_root_observed(r, &|path| {
+            assert!(
+                owner.test_slot_write_locked(path),
+                "the empty-slot decision must retain its write lock"
+            );
+            drained_tx.send(()).expect("drain signal");
+            recording_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("recorder started");
+        });
+        record.join().expect("record thread");
+        targets
+    });
+    assert_eq!(targets.len(), 1, "R drained the slot before S recorded");
+    assert_eq!(targets[0].decl_path, shared);
+    assert_eq!(
+        owner.test_slot_roots(&shared),
+        Some(HashSet::from([s.to_string()]))
     );
 }
 

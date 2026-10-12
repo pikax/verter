@@ -142,6 +142,20 @@ Tests are evidence, not a quota. At preflight, map each changed contract to the 
 
 ### LSP request barriers
 
+Reuse one server for read-only fixture matrices. Batch independent edit cases
+with distinct canonical paths through one workspace per provider so their real
+quiet windows overlap; settle every case's diagnostic receipt before measuring
+foreground work. The coordinator's `block_in_place` path requires a multithreaded
+runtime, which cannot use Tokio's paused clock. After proving the edit publications
+finished, its test-only dispatch barrier can hold subsequent background revalidation
+while foreground counters are sampled; already-dispatched diagnostics must finish
+before sampling. For queued-waiter cancellation, poll the acquire future to
+`Pending`, assert participant registration, then drop the future; a zero-duration
+timeout still pays a timer turn. Concurrency regressions
+should force the relevant orders and observe lock ownership at the decision
+boundary rather than rely on repeated probabilistic races. Fixture drain tasks
+must abort on assertion failure as well as success.
+
 LSP mock foreign-target checks settle after both `ProviderDispatch` and
 `ProviderDecode` barrier waits. Capture the held target bytes before the
 response and compare them immediately before return; checking inside the
