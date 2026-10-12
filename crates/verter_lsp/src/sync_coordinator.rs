@@ -1691,6 +1691,13 @@ async fn sync_file(
     let Some(project_sync) = deps.project_sync.as_ref() else {
         return SyncFileOutcome::Settled;
     };
+    // Kind None is provider-neutral even when an embedder or a test injects a
+    // provider object (feature queries still reach it). The debounced carrier
+    // delivery must not open or update that object's buffers; diagnostics are
+    // published by the caller after this returns.
+    if matches!(deps.type_provider_kind, crate::TypeProviderKind::None) {
+        return SyncFileOutcome::Settled;
+    }
     // ONE lane per open document, shared with the interactive repair and every
     // other background writer. Asked at the point of DELIVERY, so a transaction
     // that started while the document was closed and finds it open now serializes
