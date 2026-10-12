@@ -548,9 +548,15 @@ unsampled tails without adding sampled descendants twice. If a descendant and
 its parent both disappear, the descendant may have exited as an orphan without
 an observed reparenting. Its sampled usage stays separate unless an ancestor's
 child counters have increased enough to cover the whole newly missing sampled
-subtree, preserving independently reaped parent tails when that increase is too
-small. Earlier reaped-child CPU cannot cover a new orphan. That classification is
-retained so later unrelated reaped children cannot consume the orphan's usage.
+subtree. This is a heuristic: counter growth does not identify which descendants
+were reaped. For example, sampled root/parent/grandchild user counters of
+10/20/100 followed by root user 20 and child-user 150 can represent nested
+reaping (total 170) or a parent that used 150 without reaping its child
+(retained total 270). An unseen reaped sibling can produce the same ambiguity.
+The current accounting reports 170 in all of these cases, losing the orphan's
+sampled 100 in the latter cases. User and kernel counter thresholds cannot
+resolve this ambiguity. Earlier reaped-child CPU is excluded from the threshold,
+and the resulting classification is retained for later samples.
 The watchdog reads the exited leader before reaping it: Apple's
 [proc_pid_rusage API](https://github.com/apple-oss-distributions/xnu/blob/main/libsyscall/wrappers/libproc/libproc.h)
 supports zombies. CPU units are milliseconds. Descendants that exit between
