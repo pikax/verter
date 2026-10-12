@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::super::dispatch_txn::SessionId;
 use crate::semantic_query::{
@@ -244,6 +244,7 @@ pub struct InferenceSession {
     setup: InferenceSessionSetup,
     /// Per-parameter candidate state.
     infos: Vec<InferenceInfo>,
+    info_positions: FxHashMap<SemanticNodeId, usize>,
     /// Reverse-projection journals, present only for a reverse-homomorphic
     /// session selected at open.
     reverse_projection: Option<ReverseProjectionState>,
@@ -265,7 +266,7 @@ impl InferenceSession {
         setup: InferenceSessionSetup,
         reverse_projection: Option<ReverseProjectionState>,
     ) -> Self {
-        let infos = setup
+        let infos: Vec<_> = setup
             .infos
             .iter()
             .map(|info| InferenceInfo {
@@ -277,11 +278,16 @@ impl InferenceSession {
                 implied_arity: None,
             })
             .collect();
+        let mut info_positions = FxHashMap::default();
+        for (position, info) in infos.iter().enumerate() {
+            info_positions.entry(info.param_node).or_insert(position);
+        }
         Self {
             fresh_literal_deposits: Vec::new(),
             id,
             setup,
             infos,
+            info_positions,
             reverse_projection,
             staged_bindings: None,
             opened_at_depth: 0,
@@ -538,9 +544,9 @@ impl InferenceSession {
             return false;
         }
         let Some(info) = self
-            .infos
-            .iter_mut()
-            .find(|info| info.param_node == param_node)
+            .info_positions
+            .get(&param_node)
+            .and_then(|&position| self.infos.get_mut(position))
         else {
             return false;
         };
@@ -580,7 +586,29 @@ impl InferenceSession {
 
     /// Whether this session infers `param_node`.
     pub(crate) fn infers(&self, param_node: SemanticNodeId) -> bool {
-        self.infos.iter().any(|info| info.param_node == param_node)
+        self.info_positions.contains_key(&param_node)
+    }
+
+    /// A contextual mapper fixes only the binders its argument reads, rather
+    /// than solving the entire clause again for each callback in a chain.
+    pub(crate) fn fixation_inputs_for(
+        &self,
+        params: &[SemanticNodeId],
+    ) -> Option<Vec<FixationInput>> {
+        if self.state != InferenceSessionState::Collecting {
+            return None;
+        }
+        params
+            .iter()
+            .map(|param| {
+                let info = self.infos.get(*self.info_positions.get(param)?)?;
+                Some(FixationInput {
+                    param: info.param_node,
+                    name: Arc::clone(&info.param_name),
+                    candidates: super::winning_candidates(&info.candidates),
+                })
+            })
+            .collect()
     }
 
     /// Record the arity the call's arguments imply for the bare rest type

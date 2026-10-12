@@ -132,9 +132,8 @@ pub(super) struct FinishRoute {
     args: Vec<crate::semantic_query::CallArgKey>,
     function_arguments: Vec<Option<SliceExpr>>,
     step: Positional<ResolveCallStep>,
+    contextual: super::super::call_resolve::ContextualCallState,
     retyped: bool,
-    /// The arguments retyped so far.
-    rounds: usize,
     /// The argument being retyped.
     position: usize,
 }
@@ -794,15 +793,19 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             flow: crate::semantic_query::FlowNarrowingKey::empty(),
             context: self.dispatch.resolve_call_context_for(self.canonical),
         };
-        let step = Positional::Value(self.dispatch.execute_resolve_call(key.clone()));
+        let mut contextual = super::super::call_resolve::ContextualCallState::default();
+        let step = Positional::Value(
+            self.dispatch
+                .execute_contextual_call(key.clone(), &mut contextual),
+        );
         Some(Box::new(FinishRoute {
             _serve,
             key,
             args,
             function_arguments,
             step,
+            contextual,
             retyped: false,
-            rounds: 0,
             position: 0,
         }))
     }
@@ -877,10 +880,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 first_pass: None,
                 literal_mode: crate::semantic_query::ArgumentLiteralMode::Literal,
             };
-            finish.function_arguments[position] = None;
-            finish.key.args = Arc::from(finish.args.clone().into_boxed_slice());
-            finish.step = Positional::Value(self.dispatch.execute_resolve_call(finish.key.clone()));
-            finish.rounds += 1;
+            finish.step = Positional::Value(self.dispatch.resume_contextual_call(
+                &mut finish.key,
+                &finish.args,
+                position,
+                &mut finish.contextual,
+            ));
         }
         match self.next_retyped_argument(&finish) {
             Some((position, Some(request))) => {
@@ -910,9 +915,6 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         &mut self,
         finish: &FinishRoute,
     ) -> Option<(usize, Option<FunctionArgumentRequest>)> {
-        if finish.rounds >= finish.args.len() {
-            return None;
-        }
         let (position, contextual) = Self::contextual_argument_request(&finish.step)?;
         let expr = finish.function_arguments.get(position).cloned().flatten()?;
         if matches!(expr, SliceExpr::Object { .. } | SliceExpr::Array { .. }) {
