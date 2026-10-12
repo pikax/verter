@@ -224,10 +224,9 @@ jobs below that, always capped by available CPUs. This keeps the documented
 measured 12-job peak was 11.60 GiB and is too close to call portable there.
 Explicit positive overrides remain exact. Windows uses full nextest capacity;
 the provider-free core has no provider-specific `max-threads = 1` groups.
-The three wide reversed-union checker-boundary rows share the
-`relation-comparison-envelope` group: only one retains its full pair evidence
-at a time, with the same answers, comparison allowances and watchdogs. Other
-core tests and the BF2 inventory keep their normal nextest concurrency.
+Core tests and the BF2 inventory keep their normal nextest concurrency; no test
+group serialises slow rows (serialised, the three reversed-union rows alone
+outran the 30-minute core step).
 Real-provider tests run through dedicated serial libtest jobs, while compile-fail
 fixtures run through standalone Cargo binaries rather than nextest test targets.
 
