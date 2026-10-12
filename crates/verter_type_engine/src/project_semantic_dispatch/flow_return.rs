@@ -7087,18 +7087,107 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// `getAssignmentReducedType` gate (a NON-union declared type
     /// supplies its binding verbatim). A `keyof` whose keys settle IS the
     /// union of those keys (`keyof Box<string>` is `"value" | "size"`); the
-    /// carrier only keeps the name the checker prints it by.
+    /// carrier only keeps the name the checker prints it by. Named
+    /// unions are inspected through shallow body lowering;
+    /// class surfaces and deferred operations stay lazy until demanded.
     fn union_arms_of(&self, node: SemanticNodeId) -> Option<Vec<SemanticNodeId>> {
-        let base = match self.graph().node_data(node).as_deref() {
-            Some(SemanticNodeData::Union(members)) => return Some(members.to_vec()),
-            Some(SemanticNodeData::KeyOf { base }) => *base,
-            _ => return None,
-        };
-        let keys = self.key_set_of(base)?;
-        match self.graph().node_data(keys).as_deref() {
-            Some(SemanticNodeData::Union(members)) => Some(members.to_vec()),
-            _ => None,
+        let mut current = node;
+        let mut seen = rustc_hash::FxHashSet::default();
+        while seen.insert(current) {
+            let (identity, args): (crate::semantic_query::DeclIdentity, Arc<[SemanticNodeId]>) =
+                match self.graph().node_data(current).as_deref()? {
+                    SemanticNodeData::Union(members) => return Some(members.to_vec()),
+                    SemanticNodeData::KeyOf { base } => {
+                        current = self.key_set_of(*base)?;
+                        continue;
+                    }
+                    SemanticNodeData::Alias(inner) => {
+                        current = *inner;
+                        continue;
+                    }
+                    SemanticNodeData::DeclRef { identity } => (identity.clone(), Arc::from([])),
+                    SemanticNodeData::InstantiationRef { base, args } => {
+                        (base.clone(), Arc::clone(args))
+                    }
+                    _ => return None,
+                };
+            let prepared = self.ctx.prepared_type_decl_return_only(
+                &identity.canonical_id,
+                identity.owner,
+                &identity.decl_name,
+            )?;
+            if prepared.kind != verter_session_query::declarations::TypeDeclKind::Alias {
+                return None;
+            }
+            let body = super::raise::deref_slot_body(self.ctx, &prepared.body_facts.body_slot)?;
+            let mut outer = &body;
+            while let verter_type_expr::TypeExpr::Parenthesized(inner) = outer {
+                outer = inner;
+            }
+            let shallow = match outer {
+                verter_type_expr::TypeExpr::Union(_) => true,
+                verter_type_expr::TypeExpr::Ref { type_arguments, .. } => {
+                    prepared.type_parameters.is_empty()
+                        || type_arguments.iter().all(|argument| {
+                            matches!(argument, verter_type_expr::TypeExpr::Ref { name, type_arguments }
+                                if type_arguments.is_empty()
+                                    && prepared.type_parameters.iter().any(|parameter| parameter.name == name.as_ref()))
+                        })
+                }
+                _ => false,
+            };
+            if !shallow {
+                return None;
+            }
+            let indexed = self
+                .ctx
+                .ensure_indexed_ready_serve(&identity.canonical_id)?
+                .indexed;
+            let scope = crate::semantic_query::NodeScopeId::File {
+                canonical_id: Arc::clone(&identity.canonical_id),
+                owner: identity.owner,
+                whole_hash: indexed.whole_hash,
+                local_scope: None,
+            };
+            let payload = self
+                .ctx
+                .prepared_decl_bundle(&identity.canonical_id)
+                .map(|bundle| {
+                    crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
+                        &bundle,
+                        identity.owner,
+                    )
+                });
+            let shadowing =
+                crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(
+                    payload.as_ref(),
+                );
+            let arguments = self.declared_application_arguments(
+                &identity,
+                &args,
+                crate::semantic_query::ProjectionReductionContext::structural_transit(),
+            )?;
+            let env = prepared
+                .type_parameters
+                .iter()
+                .zip(arguments.iter().copied())
+                .map(|(parameter, argument)| (parameter.name.clone(), argument))
+                .collect();
+            current = self.shallow_lower_type_expr_with_context_at_locator(
+                &body,
+                &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
+                    prepared.body_facts.body_slot.clone(),
+                ),
+                &env,
+                &scope,
+                &prepared.name_resolution,
+                payload.as_ref(),
+                &shadowing,
+                &mut Vec::new(),
+                crate::semantic_query::ProjectionReductionContext::structural_transit(),
+            );
         }
+        None
     }
 
     /// Join one function's return-site contributors with the fallthrough
@@ -8592,6 +8681,15 @@ enum GuardNarrowing {
         verter_session_query::flow::slice::SliceNarrowSubject,
         SemanticNodeId,
     ),
+}
+
+/// Parent dispatch and member reads can retain different information after
+/// a property write. Exhaustiveness reads the entering discriminant itself.
+struct SwitchDiscriminantRemainder {
+    parents: Vec<SemanticNodeId>,
+    parent_count: usize,
+    discriminant: SemanticNodeId,
+    covered: bool,
 }
 
 /// What an equality's value is to an `unknown` subject
@@ -18450,13 +18548,6 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 comparison,
             );
         }
-        // A `case` clause's dispatch edge is baked as ONE fact: the
-        // discriminant's parent.
-        if comparison == LiteralComparison::SwitchCase {
-            return self.narrow_parent_by_discriminant(subject, &mut |this, member| {
-                this.narrow_type_by_equality(member, literal_node, negated, false)
-            });
-        }
         // The discriminant narrows the tested property's PARENT
         // reference, so that fact lands at the parent subject: a later
         // read of the parent, or of any member projected from it,
@@ -18470,6 +18561,26 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let parent = self.narrow_parent_by_discriminant(subject, &mut |this, member| {
             this.narrow_type_by_equality(member, literal_node, negated, loose)
         });
+        if comparison == LiteralComparison::SwitchCase {
+            if let GuardNarrowing::Narrowed(parent_subject, node) = &parent {
+                // A selected unit tag supplies the checker's case type even
+                // after a write. A union-valued tag still intersects the
+                // existing member fact with the clause's equality.
+                self.push_narrowing(parent_subject, *node);
+                if let Some(member) = self.member_declared_node(subject) {
+                    let member = if self.is_guard_unit(member) {
+                        member
+                    } else {
+                        self.narrowed_read(subject).unwrap_or(member)
+                    };
+                    if let Some(narrowed) =
+                        self.narrow_type_by_equality(member, literal_node, negated, loose)
+                    {
+                        return GuardNarrowing::Narrowed(subject.clone(), narrowed);
+                    }
+                }
+            }
+        }
         // A member whose type this frame cannot read establishes no
         // readable narrow: a later read of it is unreadable on its own.
         if before.is_some_and(|node| self.dispatch.graph().node_reaches_unresolved(node)) {
@@ -20238,16 +20349,18 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     ///
     /// "Covers" is per-LEAF mutual assignability between the arm's
     /// projected member and a test literal
-    /// ([`Self::switch_member_covered`]): a broad leaf a literal merely
+    /// ([`Self::switch_member_remainder`]): a broad leaf a literal merely
     /// fits (`string` under `case "a":`) is NOT covered — the checker's
     /// default edge keeps it. Returns the surviving arms and the arm
     /// count, so the caller can tell "no narrow established"
-    /// (survivors == arms) from a real one.
+    /// (survivors == arms) from a real one. Member reads retain an exact
+    /// fact when a surviving tag is union-valued. Coverage uses the entering
+    /// discriminant fact even when the parent still has unhandled arms.
     fn switch_discriminant_remainder(
         &mut self,
         subject: &verter_session_query::flow::slice::SliceNarrowSubject,
         tests: &[verter_session_query::flow::slice::SliceGuardLiteral],
-    ) -> Option<(Vec<SemanticNodeId>, usize)> {
+    ) -> Option<SwitchDiscriminantRemainder> {
         // The narrow lands at the tested property's PARENT reference
         // (the root itself for a whole-subject or one-segment
         // discriminant), so the arms are the parent's — a nested
@@ -20334,22 +20447,46 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             test_nodes.push(node);
         }
         let mut survivors: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
+        let mut surviving_tags = Vec::new();
+        let mut retains_member_fact = false;
         for arm in &arms {
             let member = if subject.path.is_empty() {
                 *arm
             } else {
                 self.project_segments_navigate(*arm, &subject.path[subject.path.len() - 1..])?
             };
-            if !self.switch_member_covered(member, &test_nodes)? {
+            let tags = self.switch_member_remainder(member, &test_nodes)?;
+            if !tags.is_empty() {
+                retains_member_fact |= !self.is_guard_unit(member);
                 survivors.push(*arm);
+                surviving_tags.extend(tags);
             }
         }
-        let total = arms.len();
-        Some((survivors, total))
+        let covered = if subject.path.is_empty() {
+            // The parent is the tested value, already read through its current
+            // narrowing above. Its remainder also decides coverage; asking the
+            // same relation again would charge each surviving leaf twice.
+            survivors.is_empty()
+        } else if let Some(current) = self.narrowed_read(subject) {
+            let remaining = self.switch_member_remainder(current, &test_nodes)?;
+            let covered = remaining.is_empty();
+            if retains_member_fact {
+                surviving_tags = remaining;
+            }
+            covered
+        } else {
+            survivors.is_empty()
+        };
+        Some(SwitchDiscriminantRemainder {
+            parents: survivors,
+            parent_count: arms.len(),
+            discriminant: self.union_or_never(&surviving_tags),
+            covered,
+        })
     }
 
-    /// Whether every runtime value of one arm's tested member is matched
-    /// by some carried case test — the coverage relation behind the
+    /// The runtime values of one arm's tested member not matched
+    /// by any carried case test — the coverage relation behind the
     /// switch remainder and the exhaustiveness verdict. Coverage is
     /// decided per LEAF of the member: its enumerated union arms, with a
     /// `boolean` leaf decomposing into its two literals — the checker's
@@ -20359,11 +20496,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// arms cannot be enumerated: coverage is then unknowable and the
     /// whole probe declines — the callers degrade instead of publishing
     /// a clean unnarrowed edge or a false liveness verdict.
-    fn switch_member_covered(
+    fn switch_member_remainder(
         &mut self,
         member: SemanticNodeId,
         tests: &[SemanticNodeId],
-    ) -> Option<bool> {
+    ) -> Option<Vec<SemanticNodeId>> {
         let mut leaves = Vec::new();
         let mut expanded = rustc_hash::FxHashSet::default();
         let mut gapped = false;
@@ -20396,15 +20533,16 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 }
             })
             .collect();
+        let mut survivors = Vec::new();
         'leaves: for leaf in &leaves {
             for test in tests {
                 if self.assignable(*leaf, *test)? && self.assignable(*test, *leaf)? {
                     continue 'leaves;
                 }
             }
-            return Some(false);
+            survivors.push(*leaf);
         }
-        Some(true)
+        Some(survivors)
     }
 
     /// `subject instanceof Ctor`, applying the checker's own per-arm
