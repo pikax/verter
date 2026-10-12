@@ -10,6 +10,9 @@ Runs whose required property is absent are rejected in batches: their logical
 checker comparisons, work, construction charges and recursion footprint stay
 in the parent cost receipt, preserving TS2859 subjects and cold/warm budget
 behavior without allocating a query and obligation for each negative pair.
+At a partial batch boundary, charge the next alternative, admit its checker
+comparison and reserve its pair bytes before charging an apparent `Object`
+read. An exhausted comparison reports TS2859 without paying for that read.
 Inference sessions, fresh sources, optional properties, signatures, index
 signatures, deferred values and unit-valued targets retain the general path;
 unit targets may need the existing discriminant-splitting proof.

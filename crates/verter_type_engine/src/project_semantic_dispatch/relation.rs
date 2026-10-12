@@ -8988,9 +8988,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if admitted == count {
             return None;
         }
-        // Pay the next alternative and query entry independently: an odd
-        // remaining work allowance is consumed before its refusal.
-        if !self.charge_relation_work(1) || (pair_units == 2 && !self.charge_relation_work(1)) {
+        // The next alternative enters before comparison admission; its
+        // apparent Object read enters only after that pair is admitted.
+        if !self.charge_relation_work(1) {
             return Some(RelationResult::Unknown);
         }
         if admitted == comparison_room as usize {
@@ -9009,6 +9009,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
         if self.connected_demand.reserve_bytes(pair_bytes).is_err() {
             self.note_relation_budget_exceeded(u64::from(self.connected_trip_limit()));
+            return Some(RelationResult::Unknown);
+        }
+        if pair_units == 2 && !self.charge_relation_work(1) {
             return Some(RelationResult::Unknown);
         }
         unreachable!("a partial batch must stop at its work, bytes or comparison boundary")

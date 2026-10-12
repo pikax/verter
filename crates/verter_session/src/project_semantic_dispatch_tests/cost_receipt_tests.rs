@@ -1235,6 +1235,98 @@ fn operation_refusal_isolates_depth_and_preceding_connected_work() {
     });
 }
 
+/// An exhausted comparison refuses before its apparent Object query enters,
+/// even when the next alternative fits the last unit of connected work.
+#[test]
+fn object_union_comparison_refusal_precedes_apparent_read() {
+    use super::checker_probe_lane_tests::{
+        probe_host, with_probe_on_host, ProbeProject, PROBE_FILE,
+    };
+    use verter_type_engine::semantic_query::checker_policy::with_relation_comparisons_for_tests;
+    use verter_type_engine::semantic_query::{
+        PartialReasonSet, ProjectionMode, ProjectionReductionContext, SemanticNodeData,
+        SemanticQueryKey,
+    };
+
+    let observe = |aliased| {
+        let project = ProbeProject {
+            compiler_options: Some(r#"{"strict": true, "noLib": true}"#),
+            files: &[("lib.object.d.ts", "interface Object { z: number; }")],
+            ..Default::default()
+        };
+        let host = probe_host(project);
+        // Missing keys never read these values. Aliases disable the index
+        // without changing which structured comparisons the relation enters.
+        let source = if aliased {
+            "type V0 = 0; type V1 = 1; type V2 = 2; type V3 = 3; \
+             type S = {p0: V0} | {p1: V1} | {p2: V2} | {p3: V3};"
+        } else {
+            "type S = {p0: 0} | {p1: 1} | {p2: 2} | {p3: 3};"
+        };
+        let source = format!("{source} type T = {{q2: number}} | {{q1: number}} | {{q0: number}};");
+        let key = with_probe_on_host(&host, project, &source, "[S, T]", |dispatch, node| {
+            assert!(
+                matches!(
+                    dispatch.global_wrapper_surface("Object", &[], PROBE_FILE),
+                    super::apparent_type::GlobalWrapper::Surface(_)
+                ),
+                "the apparent Object interface is available"
+            );
+            let data = dispatch.graph().node_data(node).expect("the tuple exists");
+            let SemanticNodeData::Tuple { elements, .. } = data.as_ref() else {
+                panic!("the probe reads [S, T]: {data:?}");
+            };
+            let normalize = |node| {
+                dispatch
+                    .normalize_node_for_structural_fact_demand(
+                        node,
+                        ProjectionReductionContext::published(ProjectionMode::Expanded),
+                    )
+                    .into_complete_node()
+                    .expect("the union is prepared")
+            };
+            dispatch
+                .relate_key_for(normalize(elements[0].value), normalize(elements[1].value))
+                .to_query_key()
+        });
+        let SemanticQueryKey::Relate { source, target, .. } = &key else {
+            unreachable!("a relation key")
+        };
+        with_relation_comparisons_for_tests(3, || {
+            let read = || {
+                let _request = verter_type_engine::request_context::RequestContextGuard::install(
+                    verter_type_engine::request_context::RequestContext::with_kind_timing_and_projection_budget(
+                        1, Arc::from(PROBE_FILE), verter_audit::RequestKind::ComponentMeta, false, false, None, 1_000_000));
+                root_read(&host, &key, 20)
+            };
+            let cold = read();
+            assert_eq!(read(), cold, "exact repeat, aliased={aliased}");
+            assert_eq!(
+                cold.refusals,
+                vec![super::walk::ShallowDiagnostic::RelationTooComplex {
+                    source: *source,
+                    target: *target
+                }],
+                "TS2859 subjects: {cold:?}"
+            );
+            (cold.answer, cold.partial, cold.reasons)
+        })
+    };
+    let ordinary = observe(true);
+    assert_eq!(
+        ordinary,
+        (
+            "NotAssignable".to_owned(),
+            true,
+            PartialReasonSet::OPERATION_BUDGET
+        )
+    );
+    assert_eq!(
+        observe(false),
+        ordinary,
+        "indexed and ordinary refusal classes"
+    );
+}
 /// Install a fresh request with an operation fuse no relation here reaches.
 fn fresh_request(id: u64) -> verter_type_engine::request_context::RequestContextGuard {
     verter_type_engine::request_context::RequestContextGuard::install(
