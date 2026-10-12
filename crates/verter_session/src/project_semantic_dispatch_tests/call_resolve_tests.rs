@@ -178,6 +178,65 @@ fn relation_only_assumption_replays_but_own_return_assumption_refuses() {
     );
     drop(txn);
 
+    let callback = signature(
+        &dispatch,
+        "receiverCallback",
+        0,
+        SignatureKind::Call,
+        vec![FunctionParam::synthetic(None, number, false, false)],
+        Vec::new(),
+        number,
+    );
+    let contextual = signature(
+        &dispatch,
+        "contextualReceiver",
+        0,
+        SignatureKind::Call,
+        vec![
+            FunctionParam::synthetic(Some(Arc::from("this")), number, false, false),
+            FunctionParam::synthetic(None, callback, false, false),
+        ],
+        Vec::new(),
+        number,
+    );
+    let contextual_callee = callable(&dispatch, vec![contextual], Vec::new());
+    dispatch
+        .dispatch_txn
+        .borrow_mut()
+        .reentry_mut()
+        .push_relate(
+            relation_key.clone(),
+            InferenceOccurrence::ARGUMENT_COVARIANT,
+            0,
+        );
+    let result = dispatch.resolve_contextual_call_for_tests(call_key(
+        &dispatch,
+        contextual_callee,
+        CallKind::Call,
+        Some(number),
+        vec![CallArgKey::Eager {
+            first_pass: None,
+            ty: callback,
+            spread: false,
+            literal_mode: ArgumentLiteralMode::Literal,
+            context_sensitive: true,
+            const_view: None,
+        }],
+    ));
+    dispatch.dispatch_txn.borrow_mut().reentry_mut().pop();
+    abandon_provisional_call_members(&dispatch);
+    assert!(
+        matches!(
+            result,
+            super::call_resolve::ResolveCallStep::Degraded(
+                verter_type_engine::semantic_query::ResolveCallFailure::ContextSensitiveInference {
+                    contextual: Some(_)
+                }
+            )
+        ),
+        "a relation-only receiver assumption must reach callback typing, got {result:?}"
+    );
+
     let recursive_occurrence = occurrence("recursive", 0);
     let recursive_identity = recursive_occurrence.function.clone();
     let recursive = signature_with_carrier(
@@ -367,6 +426,79 @@ fn selected_query(
         }) => result.as_ref().clone(),
         other => panic!("ResolveCall query must return its staged winner, got {other:?}"),
     }
+}
+
+#[test]
+fn ordinary_nested_call_does_not_consume_a_suspended_contextual_candidate() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let graph = dispatch.graph();
+    let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let callback = signature(
+        &dispatch,
+        "callback",
+        0,
+        SignatureKind::Call,
+        vec![FunctionParam::synthetic(None, number, false, false)],
+        Vec::new(),
+        number,
+    );
+    let callback_type = callable(&dispatch, vec![callback], Vec::new());
+    let outer = signature(
+        &dispatch,
+        "outer",
+        0,
+        SignatureKind::Call,
+        vec![FunctionParam::synthetic(None, callback_type, false, false)],
+        Vec::new(),
+        number,
+    );
+    let outer_type = callable(&dispatch, vec![outer], Vec::new());
+    let outer_key = call_key(
+        &dispatch,
+        outer_type,
+        CallKind::Call,
+        None,
+        vec![CallArgKey::Eager {
+            first_pass: None,
+            ty: callback_type,
+            spread: false,
+            literal_mode: ArgumentLiteralMode::Literal,
+            context_sensitive: true,
+            const_view: None,
+        }],
+    );
+    let inner = signature(
+        &dispatch,
+        "inner",
+        0,
+        SignatureKind::Call,
+        vec![FunctionParam::synthetic(None, string, false, false)],
+        Vec::new(),
+        string,
+    );
+    let inner_type = callable(&dispatch, vec![inner], Vec::new());
+    let mut inner_key = call_key(
+        &dispatch,
+        inner_type,
+        CallKind::Call,
+        None,
+        vec![eager(string)],
+    );
+    inner_key.point.offset += 1;
+    let result =
+        selected(dispatch.resolve_call_under_suspended_context_for_tests(outer_key, inner_key));
+    let ResolvedCallResult::Selected {
+        return_type,
+        recovery_diagnostic,
+        ..
+    } = result
+    else {
+        panic!("the nested call must select its own signature");
+    };
+    assert_eq!(return_type, string);
+    assert_eq!(recovery_diagnostic, None);
 }
 
 /// Declaration order is the ranking rule: the literal overload wins before
@@ -1090,6 +1222,103 @@ fn call_resolution_budget_exceeded_admits_nothing() {
     assert_eq!(
         graph.slot_candidate_count_for_tests(&SemanticQueryKey::ResolveCall(Box::new(key))),
         0
+    );
+}
+
+#[test]
+fn contextual_receiver_budget_exhaustion_admits_nothing() {
+    use verter_type_engine::semantic_query::ResolveCallFailure;
+    let mut refused = false;
+    let mut suspended = false;
+    for allowance in [1, 2, 4, 8, 16, 32, 128, 1024] {
+        let host = host();
+        let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+        let graph = dispatch.graph();
+        let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let t = graph.intern_node(SemanticNodeData::TypeParam {
+            decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("ReceiverT"),
+            param_index: 0,
+            constraint: None,
+            default: None,
+            display_name: Arc::from("T"),
+        });
+        let receiver = graph.intern_node(SemanticNodeData::Tuple {
+            elements: Arc::from(vec![
+                TupleElement {
+                    label: None,
+                    value: number,
+                    optional: false,
+                    rest: false,
+                };
+                128
+            ]),
+            readonly: false,
+        });
+        let target = graph.intern_node(SemanticNodeData::Array {
+            element: t,
+            readonly: false,
+        });
+        let callback = signature(
+            &dispatch,
+            "callback",
+            0,
+            SignatureKind::Call,
+            vec![FunctionParam::synthetic(None, t, false, false)],
+            Vec::new(),
+            number,
+        );
+        let candidate = signature(
+            &dispatch,
+            "contextual",
+            0,
+            SignatureKind::Call,
+            vec![
+                FunctionParam::synthetic(Some(Arc::from("this")), target, false, false),
+                FunctionParam::synthetic(None, callback, false, false),
+            ],
+            vec![TypeParamDecl {
+                name: Arc::from("T"),
+                param: t,
+                constraint: None,
+                default: None,
+                is_const: false,
+            }],
+            number,
+        );
+        let callee = callable(&dispatch, vec![candidate], Vec::new());
+        let key = call_key(
+            &dispatch,
+            callee,
+            CallKind::Call,
+            Some(receiver),
+            vec![CallArgKey::Eager {
+                first_pass: None,
+                ty: callback,
+                spread: false,
+                literal_mode: ArgumentLiteralMode::Literal,
+                context_sensitive: true,
+                const_view: None,
+            }],
+        );
+        dispatch
+            .connected_demand()
+            .set_limits_for_tests(allowance, 256);
+        let result = dispatch.resolve_contextual_call_for_tests(key.clone());
+        eprintln!("receiver work allowance {allowance}: {result:?}");
+        match result {
+            super::call_resolve::ResolveCallStep::Degraded(ResolveCallFailure::Budget) => {
+                refused = true;
+                assert!(dispatch.dispatch_txn.borrow().relation.sessions.iter()
+                    .all(|session| session.state == InferenceSessionState::Abandoned));
+                assert_eq!(graph.slot_candidate_count_for_tests(&SemanticQueryKey::ResolveCall(Box::new(key))), 0);
+            }
+            super::call_resolve::ResolveCallStep::Degraded(ResolveCallFailure::ContextSensitiveInference { contextual: Some(_) }) => suspended = true,
+            other => panic!("receiver budget {allowance} must refuse operationally or reach its callback, got {other:?}"),
+        }
+    }
+    assert!(
+        refused && suspended,
+        "exercise both receiver refusal and callback delivery: refused={refused}, suspended={suspended}"
     );
 }
 
