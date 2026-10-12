@@ -112,6 +112,24 @@ mod tests;
 
 Extracted file contains module contents directly — `use super::*;`, helpers, and `#[test]` fns. No wrapping `mod tests { }` block.
 
+### Repository guard scans
+
+Repository source guards reuse immutable source inventories or indexes within
+each test process. A necessary-condition filter may avoid parsing or scanning
+content only when every possible violation still reaches the original rule;
+retain each rule's path scope, integrity checks, and discriminating fixtures.
+Nextest isolates tests in separate processes, so a once-cell alone does not
+share a scan between nextest tests: the cold scan must also be efficient.
+
+The observation-feature guard resolves each production root and dev closure
+independently for host and wasm targets. Cargo remains the activation authority;
+metadata declarations only bound which seed activations can affect those
+closures. Cache default closures within that target/configuration and fixture
+metadata within the immutable fixture. Keep package identity (including source
+and version), weak edges, dependency defaults, and dev unification controls.
+The bounded repository guards are held to the standard nextest speed gate and
+are not on its known-slow list.
+
 ### TDD Workflow
 
 Behavioral code changes use TDD. Documentation, generated projections, formatting, and mechanical metadata changes use their owning freshness/validation evidence unless they also change executable behavior.
@@ -151,6 +169,20 @@ Tests are evidence, not a quota. At preflight, map each changed contract to the 
 - New features and bug fixes still require adequate regression evidence. Refactors must keep applicable existing coverage green; they do not earn new tests merely by changing structure.
 
 ### LSP request barriers
+
+Reuse one server for read-only fixture matrices. Batch independent edit cases
+with distinct canonical paths through one workspace per provider so their real
+quiet windows overlap; settle every case's diagnostic receipt before measuring
+foreground work. The coordinator's `block_in_place` path requires a multithreaded
+runtime, which cannot use Tokio's paused clock. After proving the edit publications
+finished, its test-only dispatch barrier can hold subsequent background revalidation
+while foreground counters are sampled; already-dispatched diagnostics must finish
+before sampling. For queued-waiter cancellation, poll the acquire future to
+`Pending`, assert participant registration, then drop the future; a zero-duration
+timeout still pays a timer turn. Concurrency regressions
+should force the relevant orders and observe lock ownership at the decision
+boundary rather than rely on repeated probabilistic races. Fixture drain tasks
+must abort on assertion failure as well as success.
 
 LSP mock foreign-target checks settle after both `ProviderDispatch` and
 `ProviderDecode` barrier waits. Capture the held target bytes before the

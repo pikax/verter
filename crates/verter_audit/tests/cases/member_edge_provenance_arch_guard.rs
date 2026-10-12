@@ -31,12 +31,41 @@ fn walk_rust(dir: &Path, out: &mut Vec<PathBuf>) {
     };
     for entry in entries.flatten() {
         let p = entry.path();
-        if p.is_dir() {
+        let is_dir = entry.file_type().map_or_else(
+            |_| p.is_dir(),
+            |kind| kind.is_dir() || (kind.is_symlink() && p.is_dir()),
+        );
+        if is_dir {
             walk_rust(&p, out);
         } else if p.extension().is_some_and(|e| e == "rs") {
             out.push(p);
         }
     }
+}
+
+/// All three rules cover the same Rust corpus (including test emit sites for
+/// the construction rules). Read it once and retain only possible matches;
+/// the individual rules still apply their own scopes and exclusions.
+fn provenance_sources() -> &'static [(PathBuf, String)] {
+    static SOURCES: std::sync::OnceLock<Vec<(PathBuf, String)>> = std::sync::OnceLock::new();
+    SOURCES.get_or_init(|| {
+        let mut files = Vec::new();
+        walk_rust(&workspace_root().join("crates"), &mut files);
+        files
+            .into_iter()
+            .filter_map(|file| {
+                let body = fs::read_to_string(&file).ok()?;
+                [
+                    "OriginMeta::MemberName",
+                    "OriginMeta::ProjectedMember",
+                    "OriginEdgeMetaDto::ProjectMember",
+                ]
+                .iter()
+                .any(|needle| body.contains(needle))
+                .then_some((file, body))
+            })
+            .collect()
+    })
 }
 
 fn workspace_root() -> PathBuf {
@@ -119,13 +148,9 @@ const SUBSTRATE_FILES: &[&str] = &[
 
 #[test]
 fn retired_origin_meta_member_name_variant_is_not_referenced_in_production() {
-    let root = workspace_root().join("crates");
-    let mut files = Vec::new();
-    walk_rust(&root, &mut files);
-
     let mut violations: Vec<String> = Vec::new();
 
-    for file in &files {
+    for (file, body) in provenance_sources() {
         if !is_production_source(file) {
             continue;
         }
@@ -133,10 +158,6 @@ fn retired_origin_meta_member_name_variant_is_not_referenced_in_production() {
         if SUBSTRATE_FILES.iter().any(|s| r == *s) {
             continue;
         }
-        let body = match fs::read_to_string(file) {
-            Ok(b) => b,
-            Err(_) => continue,
-        };
         if body.contains("OriginMeta::MemberName") {
             violations.push(format!(
                 "{r}: references retired `OriginMeta::MemberName` — every \
@@ -155,24 +176,16 @@ fn retired_origin_meta_member_name_variant_is_not_referenced_in_production() {
 
 #[test]
 fn projected_member_construction_never_uses_default_rest_spread() {
-    let root = workspace_root().join("crates");
-    let mut files = Vec::new();
-    walk_rust(&root, &mut files);
-
     let mut violations: Vec<String> = Vec::new();
     let self_path = rel(Path::new(file!()));
 
-    for file in &files {
+    for (file, body) in provenance_sources() {
         let r = rel(file);
         // Skip the guard test file itself (it contains forbidden-pattern
         // descriptions as strings).
         if r.ends_with(&self_path) || r.contains("member_edge_provenance_arch_guard.rs") {
             continue;
         }
-        let body = match fs::read_to_string(file) {
-            Ok(b) => b,
-            Err(_) => continue,
-        };
         for (idx, line) in body.lines().enumerate() {
             if !line.contains("OriginMeta::ProjectedMember") {
                 continue;
@@ -200,22 +213,14 @@ fn projected_member_construction_never_uses_default_rest_spread() {
 
 #[test]
 fn audit_dto_project_member_construction_carries_provenance() {
-    let root = workspace_root().join("crates");
-    let mut files = Vec::new();
-    walk_rust(&root, &mut files);
-
     let mut violations: Vec<String> = Vec::new();
     let self_marker = "member_edge_provenance_arch_guard.rs";
 
-    for file in &files {
+    for (file, body) in provenance_sources() {
         let r = rel(file);
         if r.contains(self_marker) {
             continue;
         }
-        let body = match fs::read_to_string(file) {
-            Ok(b) => b,
-            Err(_) => continue,
-        };
         let lines: Vec<&str> = body.lines().collect();
         for (idx, line) in lines.iter().enumerate() {
             if !line.contains("OriginEdgeMetaDto::ProjectMember {") {

@@ -545,7 +545,11 @@ pub(super) fn invalidation_by_canonical_impl_exists(
     crate_root: &std::path::Path,
     type_head: &str,
 ) -> bool {
+    use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
+    use std::sync::{Mutex, OnceLock};
+
+    static IMPLS: OnceLock<Mutex<BTreeMap<std::path::PathBuf, BTreeSet<String>>>> = OnceLock::new();
 
     fn walk(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
         let Ok(read_dir) = fs::read_dir(dir) else {
@@ -561,39 +565,41 @@ pub(super) fn invalidation_by_canonical_impl_exists(
         }
     }
 
-    let mut files = Vec::new();
-    walk(crate_root, &mut files);
+    let mut by_root = IMPLS.get_or_init(Mutex::default).lock().unwrap();
+    let heads = by_root.entry(crate_root.to_path_buf()).or_insert_with(|| {
+        let mut files = Vec::new();
+        walk(crate_root, &mut files);
+        let mut heads = BTreeSet::new();
+        for file in files {
+            let Ok(src) = fs::read_to_string(&file) else {
+                continue;
+            };
+            // Whitespace folding is needed only in files naming the trait.
+            if src.contains("InvalidationByCanonical") {
+                heads.extend(invalidation_impl_heads(&src));
+            }
+        }
+        heads
+    });
+    heads.contains(type_head)
+}
 
-    // Two variants matched: `for <Head>` (concrete) and `for <Head><`
-    // (generic). The pattern allows arbitrary whitespace and the
-    // optional `crate::invalidation_domain::` prefix.
-    let needle_concrete = format!("InvalidationByCanonical for {type_head}");
-    let needle_generic = format!("InvalidationByCanonical for {type_head}<");
-    let needle_concrete_eol = format!("InvalidationByCanonical for {type_head}\n");
-    let needle_concrete_brace = format!("InvalidationByCanonical for {type_head} ");
-
-    for file in files {
-        let Ok(src) = fs::read_to_string(&file) else {
-            continue;
-        };
-        // A path-qualified trait (`verter_type_engine::invalidation_domain::
-        // InvalidationByCanonical`) is long enough that rustfmt breaks the
-        // header before `for`; match the header with whitespace runs collapsed
-        // to one space so the line break does not hide the impl.
-        let collapsed = src.split_whitespace().collect::<Vec<_>>().join(" ");
-        if src.contains(&needle_generic)
-            || src.contains(&needle_concrete_eol)
-            || src.contains(&needle_concrete_brace)
-            || src.contains(&format!("{needle_concrete}\r\n"))
-            || src.contains(&format!("{needle_concrete}{{"))
-            || collapsed.contains(&needle_generic)
-            || collapsed.contains(&needle_concrete_brace)
-            || collapsed.contains(&format!("{needle_concrete}{{"))
-        {
-            return true;
+/// Index exactly the concrete/generic header boundaries accepted by the
+/// source guard, including qualified traits and rustfmt-wrapped headers.
+pub(super) fn invalidation_impl_heads(src: &str) -> std::collections::BTreeSet<String> {
+    let collapsed = src.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut heads = std::collections::BTreeSet::new();
+    for text in [src, collapsed.as_str()] {
+        for (offset, needle) in text.match_indices("InvalidationByCanonical for ") {
+            let tail = &text[offset + needle.len()..];
+            if let Some(end) = tail.find(['<', ' ', '\n', '{', '\r']) {
+                if tail.as_bytes()[end] != b'\r' || tail[end..].starts_with("\r\n") {
+                    heads.insert(tail[..end].to_owned());
+                }
+            }
         }
     }
-    false
+    heads
 }
 
 /// Architecture guard: every bump of the `inflight_aborted_retries`
