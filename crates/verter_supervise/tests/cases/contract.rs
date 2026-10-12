@@ -11,19 +11,12 @@ const LIMITS: &[&str] = &["--mem-mb", "512", "--timeout-ms", "30000"];
 #[cfg(target_os = "macos")]
 fn exit_notifications_preserve_exact_three_generation_cpu() {
     let dir = scratch("exit-sampled-cpu");
-    let samples = dir.join("exit-samples");
-    std::fs::create_dir_all(&samples).unwrap();
-    let samples = samples.to_string_lossy().into_owned();
     let mut limits = LIMITS.to_vec();
     // Longer than the run deadline: exits must be observed without a
     // periodic sweep, independently of this worker's scheduling speed.
+    // cpu-tree reaps with wait as soon as each child exits.
     limits.extend(["--sample-ms", "60000"]);
-    let run = supervise_in(
-        &dir,
-        &limits,
-        &["cpu-exit-tree", "2", "50"],
-        &[(verter_supervise::EXIT_SAMPLE_DIR_ENV, samples.as_str())],
-    );
+    let run = supervise_in(&dir, &limits, &["cpu-tree", "2", "50"], &[]);
     assert_eq!(run.code, Some(0), "stderr: {}", run.stderr);
     assert_eq!(run.result["errors"], serde_json::json!([]));
     let measured: serde_json::Value =

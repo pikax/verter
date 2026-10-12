@@ -65,6 +65,11 @@ extern "C" {
         actions: *mut libc::posix_spawn_file_actions_t,
         path: *const c_char,
     ) -> c_int;
+    /// `QOS_CLASS_USER_INTERACTIVE` is `0x21`. Relative priority must be 0.
+    fn pthread_set_qos_class_self_np(
+        class: libc::c_uint,
+        relative_priority: libc::c_int,
+    ) -> libc::c_int;
 }
 
 pub(crate) fn supervise(launch: Launch<'_>, report: &mut Report) {
@@ -179,6 +184,9 @@ pub(crate) fn supervise(launch: Launch<'_>, report: &mut Report) {
         }
     };
     report.launched = true;
+    // The kernel wakes a parent blocked in waitpid after NOTE_EXIT. This
+    // thread has to read the cached exit rusage, or that parent, first.
+    prefer_sampling_ahead_of_waiters();
     let started = Instant::now();
 
     let deadline = started + spec.timeout;
@@ -316,26 +324,19 @@ pub(crate) fn supervise(launch: Launch<'_>, report: &mut Report) {
                 if !events.exited.is_empty() {
                     // Read NOTE_EXIT identities first, before enumeration or
                     // consuming the watchdog's completion on the next turn.
-                    let final_readings: Vec<_> = events
-                        .exited
-                        .iter()
-                        .filter_map(|&pid| {
-                            let usage = usage(pid).ok()?;
-                            // A queued exit can outlive its PID. Never mark a
-                            // replacement live process's counters as final.
-                            let bsd = bsd_info(pid).ok()?;
-                            if bsd.pbi_status != libc::SZOMB {
-                                return None;
-                            }
-                            let mut reading = cpu_reading(pid, &usage);
-                            reading.parent = bsd.pbi_ppid as i32;
-                            Some(reading)
-                        })
-                        .collect();
-                    let sampled_pids: Vec<_> =
-                        final_readings.iter().map(|reading| reading.pid).collect();
-                    for reading in final_readings {
+                    // `ri_proc_exit_abstime` is published before the process
+                    // is marked a zombie and before the parent is woken, so
+                    // SZOMB is a later, racier signal. A live replacement
+                    // has exit time 0.
+                    for reading in events.exited.iter().filter_map(|&pid| exit_reading(pid)) {
                         cpu.record_exit(reading);
+                    }
+                    // Snapshot every known pid before the slower enumeration.
+                    // A parent blocked in waitpid may already have reaped the
+                    // exited child; if that parent is still readable, its
+                    // child counters are the attribution.
+                    if let Some(early) = snapshot_known(&known) {
+                        cpu.observe(early);
                     }
                     let (members, discovered) = enumerate_tree(pgid, &mut known, Some(&queue));
                     let readings: Vec<_> = members
@@ -343,12 +344,6 @@ pub(crate) fn supervise(launch: Launch<'_>, report: &mut Report) {
                         .filter_map(|pid| usage(pid).ok().map(|r| cpu_reading(pid, &r)))
                         .collect();
                     cpu.observe(readings);
-                    // Signal only after the sample and the sweep, so a fixture
-                    // waiting on this directory reaps a zombie the read already
-                    // took. Unset in production.
-                    for pid in sampled_pids {
-                        note_exit_sampled(pid);
-                    }
                     tree_ever.extend(discovered);
                 }
                 if events.forked || !events.exited.is_empty() {
@@ -659,14 +654,34 @@ fn enumerate_tree(
     (seen, discovered)
 }
 
-fn note_exit_sampled(pid: libc::pid_t) {
-    let Ok(dir) = std::env::var(crate::EXIT_SAMPLE_DIR_ENV) else {
-        return;
-    };
-    if dir.is_empty() {
-        return;
+fn exit_reading(pid: libc::pid_t) -> Option<CpuReading> {
+    let info = usage(pid).ok()?;
+    if info.ri_proc_exit_abstime == 0 {
+        return None;
     }
-    let _ = std::fs::write(std::path::Path::new(&dir).join(pid.to_string()), b"");
+    Some(cpu_reading(pid, &info))
+}
+
+/// Readings for members that still exist. `None` if any read failed for a
+/// reason other than ESRCH, so a partial snapshot is not applied.
+fn snapshot_known(known: &BTreeSet<libc::pid_t>) -> Option<Vec<CpuReading>> {
+    let mut readings = Vec::with_capacity(known.len());
+    for &pid in known {
+        match usage(pid) {
+            Ok(info) => readings.push(cpu_reading(pid, &info)),
+            Err(error) if error.raw_os_error() == Some(libc::ESRCH) => {}
+            Err(_) => return None,
+        }
+    }
+    Some(readings)
+}
+
+fn prefer_sampling_ahead_of_waiters() {
+    // SAFETY: 0x21 is QOS_CLASS_USER_INTERACTIVE. Relative priority 0 is the
+    // only legal offset for that class. Failure leaves the default class.
+    unsafe {
+        pthread_set_qos_class_self_np(0x21, 0);
+    }
 }
 
 fn footprint(pid: libc::pid_t) -> Result<u64, std::io::Error> {

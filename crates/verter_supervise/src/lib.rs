@@ -61,13 +61,6 @@ use report::Report;
 ///   the child exists and before it is released (it prints the child's pid).
 pub const FAULT_ENV: &str = "VERTER_SUPERVISE_FAULT";
 
-/// Directory the macOS backend fills with one empty file per pid after a
-/// successful `NOTE_EXIT` sample and the sweep that follows it. The
-/// `cpu-exit-tree` fixture blocks on its child's file before reaping, so the
-/// zombie stays readable until that sample instead of for a fixed sleep.
-/// Unset in production: workloads reap on their own.
-pub const EXIT_SAMPLE_DIR_ENV: &str = "VERTER_SUPERVISE_EXIT_SAMPLE_DIR";
-
 /// An injected fault (see [`FAULT_ENV`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Fault {

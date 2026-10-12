@@ -50,7 +50,14 @@ impl TreeCpu {
         // never seen counts only as the child of a parent that is still
         // present; a stray pid is not a member.
         let identity = (reading.pid, reading.started);
-        let parent_now = self.live_parent(reading.parent);
+        // bsd_info can fail while the cached exit rusage is already published.
+        // The parent recorded on the earlier sample is still the attribution.
+        let stored_parent = self.entries.get(&identity).and_then(|entry| {
+            entry
+                .parent
+                .filter(|id| self.entries.get(id).is_some_and(|parent| !parent.missing))
+        });
+        let parent_now = self.live_parent(reading.parent).or(stored_parent);
         if let Some(entry) = self.entries.get_mut(&identity) {
             raise_floor(&mut entry.reading, &reading);
             if parent_now.is_some() {
@@ -320,6 +327,40 @@ mod tests {
         zombie.kernel = 50;
         tree.observe(vec![reading(1, 0, 20, 150), zombie]);
         tree.observe(vec![reading(1, 0, 20, 150)]);
+        assert_eq!(tree.totals(), Some((170, 85)));
+    }
+
+    #[test]
+    fn exit_read_without_a_ppid_keeps_the_stored_parent() {
+        let mut tree = TreeCpu::default();
+        tree.observe(vec![
+            reading(1, 0, 10, 0),
+            reading(2, 1, 20, 0),
+            reading(3, 2, 100, 0),
+        ]);
+        tree.record_exit(reading(3, -1, 110, 0));
+        tree.record_exit(reading(2, -1, 40, 110));
+        tree.observe(vec![reading(1, 0, 20, 150)]);
+        assert_eq!(tree.totals(), Some((170, 85)));
+        tree.observe(vec![]);
+        assert_eq!(tree.totals(), Some((170, 85)));
+    }
+
+    #[test]
+    fn reaped_exit_with_the_parent_still_readable_needs_no_zombie_sample() {
+        let mut tree = TreeCpu::default();
+        tree.observe(vec![
+            reading(1, 0, 10, 0),
+            reading(2, 1, 20, 0),
+            reading(3, 2, 100, 0),
+        ]);
+        // waitpid already reaped the grandchild. The parent is still alive,
+        // so its child counter is the attribution. No exit sample of pid 3.
+        tree.observe(vec![reading(1, 0, 10, 0), reading(2, 1, 40, 110)]);
+        assert_eq!(tree.totals(), Some((160, 80)));
+        tree.observe(vec![reading(1, 0, 20, 150)]);
+        assert_eq!(tree.totals(), Some((170, 85)));
+        tree.observe(vec![]);
         assert_eq!(tree.totals(), Some((170, 85)));
     }
 

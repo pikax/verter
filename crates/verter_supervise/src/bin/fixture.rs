@@ -8,10 +8,8 @@
 //! touch <path>                       create <path> (proves the child ran)
 //! sleep <ms>                         sleep, then exit 0
 //! cpu-tree <depth> <ms>             (macOS) burn CPU in each generation,
-//!                                    reap descendants and report tree usage
-//! cpu-exit-tree <depth> <ms>        (macOS) reap each descendant after its
-//!                                    NOTE_EXIT sample, or at once if no
-//!                                    sample directory is set
+//!                                    reap each descendant with wait as soon
+//!                                    as it exits, and report tree usage
 //! alloc <chunk-mb>                   commit and touch <chunk-mb> chunks until
 //!                                    an allocation is refused, then wait to be
 //!                                    killed (never exits on its own)
@@ -62,13 +60,6 @@ fn main() {
         "cpu-tree" => cpu_tree(
             rest[0].parse().expect("depth"),
             rest[1].parse().expect("CPU duration ms"),
-            false,
-        ),
-        #[cfg(target_os = "macos")]
-        "cpu-exit-tree" => cpu_tree(
-            rest[0].parse().expect("depth"),
-            rest[1].parse().expect("CPU duration ms"),
-            true,
         ),
         "spawn-wait" => {
             let mut child = spawn_grandchild(&rest[0], &rest[1..], Launch::Plain);
@@ -100,16 +91,13 @@ fn cpu(duration_ms: u64) {
 }
 
 #[cfg(target_os = "macos")]
-fn cpu_tree(depth: u32, duration_ms: u64, hold_exit: bool) {
+fn cpu_tree(depth: u32, duration_ms: u64) {
     burn_cpu(duration_ms);
     if depth > 0 {
+        // Same reap as a parent blocked in waitpid: no pause, no sampler handshake.
         let child = Command::new(std::env::current_exe().expect("fixture path"))
             .args([
-                if hold_exit {
-                    "cpu-exit-tree"
-                } else {
-                    "cpu-tree"
-                },
+                "cpu-tree",
                 &(depth - 1).to_string(),
                 &duration_ms.to_string(),
             ])
@@ -118,51 +106,10 @@ fn cpu_tree(depth: u32, duration_ms: u64, hold_exit: bool) {
             .stderr(Stdio::piped())
             .spawn()
             .expect("run CPU descendant");
-        if hold_exit {
-            // Observed exit, zombie still held. Reap when the supervisor has
-            // recorded the NOTE_EXIT sample, not after a fixed sleep. With no
-            // sample directory, reap on the next call — the same wait as
-            // cpu-tree, once the exit itself has been observed.
-            let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
-            loop {
-                // SAFETY: child is ours; WNOWAIT leaves it for wait_with_output.
-                let result = unsafe {
-                    libc::waitid(
-                        libc::P_PID,
-                        child.id(),
-                        &mut info,
-                        libc::WEXITED | libc::WNOWAIT,
-                    )
-                };
-                if result == 0 {
-                    break;
-                }
-                assert_eq!(
-                    std::io::Error::last_os_error().kind(),
-                    std::io::ErrorKind::Interrupted
-                );
-            }
-            wait_for_exit_sample(child.id());
-        }
         let child = child.wait_with_output().expect("reap CPU descendant");
         assert!(child.status.success(), "CPU descendant failed: {child:?}");
     }
     report_cpu(true);
-}
-
-#[cfg(target_os = "macos")]
-fn wait_for_exit_sample(pid: u32) {
-    let Ok(dir) = std::env::var(verter_supervise::EXIT_SAMPLE_DIR_ENV) else {
-        return;
-    };
-    if dir.is_empty() {
-        return;
-    }
-    let marker = std::path::Path::new(&dir).join(pid.to_string());
-    let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    while !marker.exists() && std::time::Instant::now() < deadline {
-        std::thread::yield_now();
-    }
 }
 
 #[cfg(target_os = "macos")]

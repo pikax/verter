@@ -542,14 +542,19 @@ malformed answers remain decoding errors.
 On macOS, CPU columns sum sampled user and kernel counters across process
 lifetimes, with reaped-child accounting deduplicated against those samples.
 The kqueue watcher reports each `NOTE_EXIT`; the supervisor reads the exited
-identity immediately and sweeps before consuming watchdog completion. Newly
-discovered descendants are watched during enumeration. A successful exit read
+identity immediately and sweeps before consuming watchdog completion. The
+kernel publishes that exit rusage (`ri_proc_exit_abstime` nonzero) before it
+marks the process a zombie and before it wakes a parent blocked in `waitpid`.
+The same turn also reads every known process before the slower tree walk. A
+child already reaped by a parent that is still readable is attributed from
+that parent's child counters: the workload reaps with `waitpid` as soon as
+the child exits and does not wait for the sampler. A successful exit read
 with the parent still present preserves the final descendant counters even when
 no periodic sweep falls between nested exits, and even when the next snapshot
 finds both generations gone. That read is the attribution: the exit counters
 are a floor for the lifetime, and a descendant first seen on that read counts
-when its parent is still present. If the kernel notification or zombie read
-arrives too late, the supervisor retains the ambiguity instead.
+when its parent is still present. If the exited process and its parent are
+both already gone, the supervisor retains the ambiguity instead.
 When a child disappears while its parent is still sampled, cumulative child
 counters retain unsampled tails without adding the child's sampled usage twice.
 Live reparented descendants remain independent, and reused PIDs are separate
