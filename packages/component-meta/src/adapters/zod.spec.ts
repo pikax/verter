@@ -174,6 +174,48 @@ describe("propsToZodString", () => {
     // required prop should not have .optional()
     expect(result).not.toContain('"title": z.string().optional()');
   });
+
+  it("keeps a prop whose requiredness is unavailable", () => {
+    const meta: ComponentMeta = {
+      filePath: "Comp.vue",
+      componentName: "Comp",
+      optionsApi: false,
+      props: [
+        {
+          name: "label",
+          type: { kind: "primitive", name: "string" },
+          required: undefined,
+          hasDefault: undefined,
+        },
+      ],
+      events: [],
+      slots: [],
+      models: [],
+      exposed: [],
+      components: [],
+      templateRefs: [],
+      imports: [],
+      bindings: [],
+      vueApiCalls: [],
+      styles: [],
+      flags: {
+        asyncSetup: false,
+        hasReactiveState: false,
+        hasComputed: false,
+        hasWatchers: false,
+        hasLifecycleHooks: false,
+        hasProvide: false,
+        hasInject: false,
+        hasInheritAttrsFalse: false,
+        hasStoreUsage: false,
+      },
+    };
+    expect(propsToZodString(meta)).toContain('"label": z.string().optional()');
+    const schema = propsToZodSchema(meta) as z.ZodObject<any>;
+    expect(schema.parse({ label: "ok" })).toEqual({ label: "ok" });
+    expect(schema.parse({})).toEqual({});
+    expect(() => schema.parse({ label: 1 })).toThrow();
+  });
 });
 
 describe("typeToZodSchema (runtime)", () => {

@@ -1902,6 +1902,7 @@ mod tests {
 
     fn empty_component_meta(root_reachability: RootReachability) -> ComponentMetaAnalysis {
         ComponentMetaAnalysis {
+            domain_guarantees: Default::default(),
             props: Vec::new(),
             events: Vec::new(),
             slots: Vec::new(),

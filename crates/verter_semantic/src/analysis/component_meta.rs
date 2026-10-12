@@ -266,6 +266,16 @@ pub struct ResolvedMacroInput {
     pub exposed: Vec<ResolvedExposeInput>,
     /// Producer-owned prop names with authored runtime defaults.
     pub default_keys: Vec<String>,
+    /// Producer-owned props-lane claim. `None` makes no claim, so a Vue row
+    /// does not override the expansion-row classifier.
+    pub props_guarantee:
+        Option<verter_session_query::analysis::component_meta::MetadataFactGuarantee>,
+    /// Producer-owned events-lane claim. `None` makes no claim.
+    pub events_guarantee:
+        Option<verter_session_query::analysis::component_meta::MetadataFactGuarantee>,
+    /// Producer-owned slots-lane claim. `None` makes no claim.
+    pub slots_guarantee:
+        Option<verter_session_query::analysis::component_meta::MetadataFactGuarantee>,
 }
 
 pub struct ComponentMetaInput<'a> {
@@ -904,6 +914,11 @@ pub fn extract_component_meta(input: ComponentMetaInput<'_>) -> ComponentMetaAna
         collect_macro_expansion_diagnostics(evaluated_types, input.macros);
 
     ComponentMetaAnalysis {
+        domain_guarantees: component_domain_guarantees(
+            evaluated_types,
+            input.macros,
+            input.resolved_macros,
+        ),
         props,
         events,
         slots,
@@ -1250,7 +1265,22 @@ fn merged_resolved_macro_input(
             slot_return_publications: Vec::new(),
             exposed: Vec::new(),
             default_keys: Vec::new(),
+            props_guarantee: None,
+            events_guarantee: None,
+            slots_guarantee: None,
         });
+        verter_session_query::analysis::component_meta::MetadataFactGuarantee::absorb_option(
+            &mut entry.props_guarantee,
+            resolved.props_guarantee.clone(),
+        );
+        verter_session_query::analysis::component_meta::MetadataFactGuarantee::absorb_option(
+            &mut entry.events_guarantee,
+            resolved.events_guarantee.clone(),
+        );
+        verter_session_query::analysis::component_meta::MetadataFactGuarantee::absorb_option(
+            &mut entry.slots_guarantee,
+            resolved.slots_guarantee.clone(),
+        );
 
         for prop in &resolved.props {
             if let Some(existing) = entry
@@ -2942,3 +2972,83 @@ fn extract_flags(input: &ComponentMetaInput<'_>) -> ComponentMetaFlags {
 #[cfg(test)]
 #[path = "component_meta_tests.rs"]
 mod component_meta_tests;
+
+fn component_domain_guarantees(
+    evaluated: Option<&verter_session_query::analysis::type_expand::ExpandedComponentTypes>,
+    macros: &[AnalyzedMacro],
+    resolved_macros: &[ResolvedMacroInput],
+) -> verter_session_query::analysis::component_meta::ComponentDomainGuarantees {
+    use verter_session_query::analysis::component_meta::{
+        ComponentDomainGuarantees, MetadataFactGuarantee,
+    };
+    fn lane(
+        macros: &[AnalyzedMacro],
+        kind: AnalyzedMacroKind,
+        rows: Option<&[verter_session_query::analysis::type_expand::ExpandedMacroObjectShape]>,
+        props: Option<&[verter_session_query::analysis::type_expand::ExpandedMacroProps]>,
+    ) -> MetadataFactGuarantee {
+        let mut result = MetadataFactGuarantee::complete(false);
+        for (index, item) in macros
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| item.kind == kind && item.is_type_based)
+        {
+            let next = rows
+                .and_then(|rows| {
+                    rows.iter()
+                        .find(|row| row.macro_index == index)
+                        .and_then(|row| row.result.value.domain_guarantee.as_ref())
+                })
+                .or_else(|| {
+                    props.and_then(|rows| {
+                        rows.iter()
+                            .find(|row| row.macro_index == index)
+                            .and_then(|row| row.result.value.domain_guarantee.as_ref())
+                    })
+                })
+                .cloned()
+                .unwrap_or_default();
+            let _ = item;
+            result.kind = result.kind.max(next.kind);
+            result.open |= next.open;
+            for cause in next.causes {
+                if !result.causes.contains(&cause) {
+                    result.causes.push(cause);
+                }
+            }
+        }
+        result
+    }
+    let mut guarantees = ComponentDomainGuarantees {
+        props: lane(
+            macros,
+            AnalyzedMacroKind::DefineProps,
+            None,
+            evaluated.map(|value| value.define_props.as_slice()),
+        ),
+        events: lane(
+            macros,
+            AnalyzedMacroKind::DefineEmits,
+            evaluated.map(|value| value.define_emits.as_slice()),
+            None,
+        ),
+        slots: lane(
+            macros,
+            AnalyzedMacroKind::DefineSlots,
+            evaluated.map(|value| value.define_slots.as_slice()),
+            None,
+        ),
+    };
+    for resolved in resolved_macros {
+        if let Some(next) = &resolved.props_guarantee {
+            guarantees.props.absorb(next);
+        }
+        if let Some(next) = &resolved.events_guarantee {
+            guarantees.events.absorb(next);
+        }
+        if let Some(next) = &resolved.slots_guarantee {
+            guarantees.slots.absorb(next);
+        }
+    }
+    guarantees
+}

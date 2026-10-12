@@ -1,3 +1,4 @@
+import type { FactResult } from "./facts.js";
 import { basename } from "node:path";
 
 import { typeExprToDescriptor } from "./type-expr-bridge.js";
@@ -17,6 +18,8 @@ import type {
 } from "./types.js";
 import type { TypeDescriptor } from "@verter/type-ir";
 import type { NativeTypeExprLike } from "./type-expr-bridge.js";
+
+export type { NativeTypeExprLike };
 
 export interface NativeJsdocTag {
   name: string;
@@ -221,13 +224,18 @@ export type NativeComponentContractAvailability =
     };
 
 export interface NativePropMeta {
+  requiredFact?: FactResult<boolean>;
+  hasDefaultFact?: FactResult<boolean>;
+  typeFact?: FactResult<NativeTypeExprLike | undefined>;
   name: string;
   type?: NativeTypeExprLike;
   publication: NativeTypePublication;
   terminalDisplay: NativeTerminalTypeDisplay;
   typeExpansion?: NativeExpansionMetadata;
-  required: boolean;
-  hasDefault: boolean;
+  /** Absent when the producer published no boolean. Absence is not false. */
+  required: boolean | undefined;
+  /** Absent when the producer published no boolean. Absence is not false. */
+  hasDefault: boolean | undefined;
   defaultValue?: string;
   description?: string;
   tags?: NativeJsdocTag[];
@@ -246,8 +254,10 @@ export interface NativePropMeta {
 }
 
 export interface NativeEventMeta {
+  typeFact?: FactResult<NativeTypeExprLike | undefined>;
   name: string;
-  payload: NativeTypeExprLike;
+  /** Absent when the payload fact is unavailable. */
+  payload?: NativeTypeExprLike;
   publication: NativeTypePublication;
   terminalDisplay: NativeTerminalTypeDisplay;
   payloadExpansion?: NativeExpansionMetadata;
@@ -257,6 +267,7 @@ export interface NativeEventMeta {
 }
 
 export interface NativeSlotBindingMeta {
+  typeFact?: FactResult<NativeTypeExprLike | undefined>;
   name: string;
   type?: NativeTypeExprLike;
   publication: NativeTypePublication;
@@ -265,6 +276,7 @@ export interface NativeSlotBindingMeta {
 }
 
 export interface NativeSlotMeta {
+  returnFact?: FactResult<NativeTypeExprLike | undefined>;
   name: string;
   isScoped: boolean;
   bindings: NativeSlotBindingMeta[];
@@ -288,12 +300,14 @@ export interface NativeSlotMeta {
 
 export interface NativeModelMeta {
   name: string;
-  type: NativeTypeExprLike;
+  type?: NativeTypeExprLike;
+  typeFact?: FactResult<NativeTypeExprLike | undefined>;
 }
 
 export interface NativeExposedMeta {
   name: string;
-  type: NativeTypeExprLike;
+  type?: NativeTypeExprLike;
+  typeFact?: FactResult<NativeTypeExprLike | undefined>;
   typeExpansion?: NativeExpansionMetadata;
   description?: string;
   tags?: NativeJsdocTag[];
@@ -307,7 +321,9 @@ export interface NativePublicInstanceMeta {
 export interface NativePublicInstanceMemberMeta {
   name: string;
   kind: "prop" | "slotContainer" | "exposed";
-  type: NativeTypeExprLike;
+  /** Absent when this member's value fact failed and siblings stayed. */
+  type?: NativeTypeExprLike;
+  typeFact?: FactResult<NativeTypeExprLike | undefined>;
   typeExpansion?: NativeExpansionMetadata;
   rawType?: string;
   description?: string;
@@ -326,8 +342,10 @@ export interface NativeResolvedTypeMeta {
   /**
    * Expanded lightweight native type.
    * This is what compat/public mapping consumes.
+   * Absent when the registry value fact is unavailable.
    */
-  type: NativeTypeExprLike;
+  type?: NativeTypeExprLike;
+  typeFact?: FactResult<NativeTypeExprLike | undefined>;
   typeExpansion?: NativeExpansionMetadata;
   /**
    * Pre-expansion source form retained for native callers that need to inspect
@@ -501,6 +519,7 @@ export interface NativeComponentFlags {
 export interface NativeAcceptedPropMeta {
   name: string;
   type?: NativeTypeExprLike;
+  typeFact?: FactResult<NativeTypeExprLike | undefined>;
   publication: NativeTypePublication;
   terminalDisplay: NativeTerminalTypeDisplay;
   required: boolean;
@@ -511,7 +530,8 @@ export interface NativeAcceptedPropMeta {
 
 export interface NativeAcceptedEventMeta {
   name: string;
-  payload: NativeTypeExprLike;
+  payload?: NativeTypeExprLike;
+  typeFact?: FactResult<NativeTypeExprLike | undefined>;
   rawSignature?: string;
   provenance: NativeMemberProvenance;
   availability: NativeMemberAvailability;
@@ -660,6 +680,7 @@ export type NativeUnresolvedBranchReason =
 export interface NativeFallthroughPropEntry {
   name: string;
   type?: NativeTypeExprLike;
+  typeFact?: FactResult<NativeTypeExprLike | undefined>;
   publication: NativeTypePublication;
   terminalDisplay: NativeTerminalTypeDisplay;
   sources: NativeInheritedSource[];
@@ -667,7 +688,8 @@ export interface NativeFallthroughPropEntry {
 
 export interface NativeFallthroughEventEntry {
   name: string;
-  payload: NativeTypeExprLike;
+  payload?: NativeTypeExprLike;
+  typeFact?: FactResult<NativeTypeExprLike | undefined>;
   rawSignature?: string;
   sources: NativeInheritedSource[];
 }
@@ -712,7 +734,30 @@ export interface NativeOriginGraph {
   metaStrings: string[];
 }
 
+export type NativeSemanticLane =
+  | "props"
+  | "events"
+  | "slots"
+  | "models"
+  | "exposed"
+  | "acceptedProps"
+  | "acceptedEvents"
+  | "rootReachability"
+  | "fallthroughSurface"
+  | "publicInstance"
+  | "componentPublicContract"
+  | "typeRegistry";
+export type NativeComponentFacts = {
+  readonly [K in Exclude<NativeSemanticLane, "componentPublicContract">]: FactResult<
+    NativeComponentMetaResult[K]
+  >;
+} & {
+  readonly delivery: FactResult<undefined>;
+  readonly componentPublicContract: FactResult<NativeComponentPublicContract>;
+};
+
 export interface NativeComponentMetaResult {
+  facts?: NativeComponentFacts;
   componentPublicContract: NativeComponentContractAvailability;
   resultCompleteness: NativeResultCompleteness;
   props: NativePropMeta[];
@@ -795,6 +840,25 @@ function compatRawType(display: NativeTerminalTypeDisplay): { rawType?: string }
   return typeof display.text === "string" ? { rawType: display.text } : {};
 }
 
+function usableMemberType<
+  T extends {
+    type?: NativeTypeExprLike | null;
+    typeFact?: { kind: string };
+    publication?: { kind: string };
+  },
+>(row: T): row is T & { type: NativeTypeExprLike } {
+  // JSON delivery serializes a missing type as null and omits typeFact.
+  return (
+    row.type != null && row.typeFact?.kind !== "unavailable" && row.publication?.kind !== "failed"
+  );
+}
+
+function usablePayload<
+  T extends { payload?: NativeTypeExprLike | null; typeFact?: { kind: string } },
+>(row: T): row is T & { payload: NativeTypeExprLike } {
+  return row.payload != null && row.typeFact?.kind !== "unavailable";
+}
+
 export function nativeComponentMetaToComponentMeta(meta: NativeComponentMetaResult): ComponentMeta {
   const nativeRegistry = buildNativeTypeRegistry(meta);
   const publicationRegistry = buildNativePublicationRegistry(meta);
@@ -804,52 +868,61 @@ export function nativeComponentMetaToComponentMeta(meta: NativeComponentMetaResu
     optionsApi: meta.optionsApi,
     componentPublicContract: meta.componentPublicContract,
     resultCompleteness: meta.resultCompleteness,
-    props: meta.props.map((prop) => ({
-      name: prop.name,
-      type: publishedTypeExprToDescriptor(prop, `prop ${prop.name}`, publicationRegistry),
-      ...(prop.typeExpansion !== undefined ? { typeExpansion: prop.typeExpansion } : {}),
-      required: prop.required,
-      hasDefault: prop.hasDefault,
-      ...compatRawType(prop.terminalDisplay),
-      ...(prop.defaultValue !== undefined ? { default: prop.defaultValue } : {}),
-      ...(prop.description !== undefined ? { description: prop.description } : {}),
-      ...(prop.tags?.length ? { tags: prop.tags } : {}),
-      // Forward-compat coerce — see `NativePropMeta.declaredInMacroTypeArg`
-      // JSDoc above. The field is optional on the native sidecar type
-      // because older native builds (predating the producer fact on
-      // `PropMeta` proto field 10) emit payloads without it; missing is
-      // correctly `false` (matching the "drop unless explicitly
-      // declared" semantics that the Refined policy enforces). This is
-      // legitimate forward-compat.
-      declaredInMacroTypeArg: Boolean(prop.declaredInMacroTypeArg),
-    })),
-    events: meta.events.map((event) => ({
-      name: event.name,
-      payload: publishedTypeExprToDescriptor(
-        { type: event.payload, publication: event.publication },
-        `event ${event.name}`,
-        publicationRegistry,
-      ),
-      ...(event.payloadExpansion !== undefined ? { payloadExpansion: event.payloadExpansion } : {}),
-      hasValidator: false,
-      isDeclared: true,
-      ...(event.rawSignature !== undefined ? { rawSignature: event.rawSignature } : {}),
-      ...(event.description !== undefined ? { description: event.description } : {}),
-      ...(event.tags?.length ? { tags: event.tags } : {}),
-    })),
+    facts: meta.facts,
+    props: meta.props
+      .filter((prop) => prop.typeFact?.kind !== "unavailable")
+      .map((prop) => ({
+        name: prop.name,
+        type: publishedTypeExprToDescriptor(prop, `prop ${prop.name}`, publicationRegistry),
+        ...(prop.typeExpansion !== undefined ? { typeExpansion: prop.typeExpansion } : {}),
+        required: prop.required,
+        hasDefault: prop.hasDefault,
+        ...compatRawType(prop.terminalDisplay),
+        ...(prop.defaultValue !== undefined ? { default: prop.defaultValue } : {}),
+        ...(prop.description !== undefined ? { description: prop.description } : {}),
+        ...(prop.tags?.length ? { tags: prop.tags } : {}),
+        // Forward-compat coerce — see `NativePropMeta.declaredInMacroTypeArg`
+        // JSDoc above. The field is optional on the native sidecar type
+        // because older native builds (predating the producer fact on
+        // `PropMeta` proto field 10) emit payloads without it; missing is
+        // correctly `false` (matching the "drop unless explicitly
+        // declared" semantics that the Refined policy enforces). This is
+        // legitimate forward-compat.
+        declaredInMacroTypeArg: Boolean(prop.declaredInMacroTypeArg),
+      })),
+    events: meta.events
+      .filter((event) => event.typeFact?.kind !== "unavailable")
+      .map((event) => ({
+        name: event.name,
+        payload: publishedTypeExprToDescriptor(
+          { type: event.payload, publication: event.publication },
+          `event ${event.name}`,
+          publicationRegistry,
+        ),
+        ...(event.payloadExpansion !== undefined
+          ? { payloadExpansion: event.payloadExpansion }
+          : {}),
+        hasValidator: false,
+        isDeclared: true,
+        ...(event.rawSignature !== undefined ? { rawSignature: event.rawSignature } : {}),
+        ...(event.description !== undefined ? { description: event.description } : {}),
+        ...(event.tags?.length ? { tags: event.tags } : {}),
+      })),
     slots: meta.slots.map((slot) => ({
       name: slot.name,
       isScoped: slot.isScoped,
-      bindings: slot.bindings.map((binding) => ({
-        name: binding.name,
-        type: publishedTypeExprToDescriptor(
-          binding,
-          `slot binding ${slot.name}.${binding.name}`,
-          publicationRegistry,
-        ),
-        ...(binding.typeExpansion !== undefined ? { typeExpansion: binding.typeExpansion } : {}),
-        ...compatRawType(binding.terminalDisplay),
-      })),
+      bindings: slot.bindings
+        .filter((binding) => binding.typeFact?.kind !== "unavailable")
+        .map((binding) => ({
+          name: binding.name,
+          type: publishedTypeExprToDescriptor(
+            binding,
+            `slot binding ${slot.name}.${binding.name}`,
+            publicationRegistry,
+          ),
+          ...(binding.typeExpansion !== undefined ? { typeExpansion: binding.typeExpansion } : {}),
+          ...compatRawType(binding.terminalDisplay),
+        })),
       isRequired: slot.isRequired,
       ...(slot.returnType !== undefined ? { returnType: slot.returnType } : {}),
       ...(slot.description !== undefined ? { description: slot.description } : {}),
@@ -857,11 +930,11 @@ export function nativeComponentMetaToComponentMeta(meta: NativeComponentMetaResu
       // Forward-compat coerce — see `NativeSlotMeta.declaredInMacroTypeArg`.
       declaredInMacroTypeArg: Boolean(slot.declaredInMacroTypeArg),
     })),
-    models: meta.models.map((model) => ({
+    models: meta.models.filter(usableMemberType).map((model) => ({
       name: model.name,
       type: typeExprToDescriptor(model.type, nativeRegistry),
     })),
-    exposed: meta.exposed.map((exposed) => ({
+    exposed: meta.exposed.filter(usableMemberType).map((exposed) => ({
       name: exposed.name,
       type: typeExprToDescriptor(exposed.type, nativeRegistry),
       ...(exposed.typeExpansion !== undefined ? { typeExpansion: exposed.typeExpansion } : {}),
@@ -872,7 +945,7 @@ export function nativeComponentMetaToComponentMeta(meta: NativeComponentMetaResu
       ? {
           publicInstance: {
             completeness: meta.publicInstance.completeness,
-            members: meta.publicInstance.members.map((member) => ({
+            members: meta.publicInstance.members.filter(usableMemberType).map((member) => ({
               name: member.name,
               kind: member.kind,
               type: typeExprToDescriptor(member.type, nativeRegistry),
@@ -1026,7 +1099,7 @@ function mapNativeAcceptedProps(
   props: NativeAcceptedPropMeta[],
   publicationRegistry?: Map<string, NativeTypeExprLike>,
 ): AcceptedPropMeta[] {
-  return props.map((p) => ({
+  return props.filter(usableMemberType).map((p) => ({
     name: p.name,
     type: publishedTypeExprToDescriptor(p, `accepted prop ${p.name}`, publicationRegistry),
     ...compatRawType(p.terminalDisplay),
@@ -1041,7 +1114,7 @@ function mapNativeAcceptedEvents(
   events: NativeAcceptedEventMeta[],
   nativeRegistry?: Map<string, NativeTypeExprLike>,
 ): AcceptedEventMeta[] {
-  return events.map((e) => ({
+  return events.filter(usablePayload).map((e) => ({
     name: e.name,
     payload: typeExprToDescriptor(e.payload, nativeRegistry),
     ...(e.rawSignature !== undefined ? { rawSignature: e.rawSignature } : {}),
@@ -1075,13 +1148,13 @@ function mapNativeFallthroughBranch(
   return {
     branchKey: branch.branchKey,
     ...(branch.conditionText !== undefined ? { conditionText: branch.conditionText } : {}),
-    props: branch.props.map((p) => ({
+    props: branch.props.filter(usableMemberType).map((p) => ({
       name: p.name,
       type: publishedTypeExprToDescriptor(p, `fallthrough prop ${p.name}`, publicationRegistry),
       ...compatRawType(p.terminalDisplay),
       sources: p.sources,
     })),
-    events: branch.events.map((e) => ({
+    events: branch.events.filter(usablePayload).map((e) => ({
       name: e.name,
       payload: typeExprToDescriptor(e.payload, nativeRegistry),
       ...(e.rawSignature !== undefined ? { rawSignature: e.rawSignature } : {}),
@@ -1101,6 +1174,7 @@ export function nativeTypeRegistryToMap(
   }
   const registry = new Map<string, TypeDescriptor>();
   for (const entry of meta.typeRegistry ?? []) {
+    if (!usableMemberType(entry)) continue;
     registry.set(entry.name, typeExprToDescriptor(entry.type, nativeRegistry));
   }
   return registry;
@@ -1115,9 +1189,10 @@ function buildNativeTypeRegistry(
 
   const registry = new Map<string, NativeTypeExprLike>();
   for (const entry of meta.typeRegistry) {
+    if (!usableMemberType(entry)) continue;
     registry.set(entry.name, entry.type);
   }
-  return registry;
+  return registry.size === 0 ? undefined : registry;
 }
 
 function buildNativePublicationRegistry(
@@ -1130,5 +1205,7 @@ function buildNativePublicationRegistry(
   if (localEntries.length === 0) {
     return undefined;
   }
-  return new Map(localEntries.map((entry) => [entry.name, entry.type]));
+  const entries = localEntries.filter(usableMemberType);
+  if (entries.length === 0) return undefined;
+  return new Map(entries.map((entry) => [entry.name, entry.type]));
 }

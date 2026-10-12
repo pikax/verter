@@ -30,7 +30,9 @@ fn retained_payload_budget_error(
         )
     {
         // Rehydrate carries the template. The retained ledger status is the
-        // refusal's completeness; the template's own copy is not.
+        // refusal's completeness; the template's own copy is not. The
+        // template's `synthesis_should_suppress` stays as recovered — refusal
+        // partiality must not overwrite it.
         let mut resolved = cached.resolution_template.rehydrate(snapshot, 0);
         resolved.completeness = retained.completeness;
         return component_meta_resolution_budget_error(
@@ -293,6 +295,7 @@ impl MetaSession {
                         )
                     });
             let output = output_result?;
+
             let payload = encode_fn(output);
             host.provenance().payload_encodes.fetch_add(1, Relaxed);
             // The cold path records this beside the encode. A replay that
@@ -409,6 +412,7 @@ impl MetaSession {
                     )
                 });
         let output = output_result?;
+        let output_complete = !output.completeness().is_partial();
         // Snapshot the output-materialization tracer's non-cacheability bit
         // BEFORE `finalise` consumes the read-set below. A fenced (ReturnOnly,
         // `store_published == false`) `IndexedReady` serve consumed inside
@@ -472,6 +476,7 @@ impl MetaSession {
             && !output_non_cacheable
             && fixed.payload_promotion_admissible(host)
             && !final_completeness.get().is_partial()
+            && output_complete
         {
             // Stamp from the FLIGHT-CAPTURED generation (the fixed
             // view's captured token), never the live counter: a project

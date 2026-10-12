@@ -212,6 +212,23 @@ fn an_untyped_props_destructure_resolves_through_the_shared_surface() {
         vec![("disabled".to_string(), true), ("label".to_string(), false),],
         "the untyped destructure's public keys did not reach the shared props surface"
     );
+    let ResolvedOutcome::Resolved(value) = &outcome else {
+        unreachable!("props_rows already required a resolved surface");
+    };
+    assert!(
+        matches!(
+            value.domain_guarantee,
+            None | Some(
+                verter_session_query::analysis::component_meta::MetadataFactGuarantee {
+                    kind: 1,
+                    open: false,
+                    ..
+                }
+            )
+        ),
+        "a closed untyped destructure stays a complete closed domain: {:?}",
+        value.domain_guarantee
+    );
 }
 
 #[test]
@@ -231,17 +248,26 @@ fn a_component_with_no_props_call_keeps_the_legacy_surface_reachable() {
 #[test]
 fn an_open_rest_props_destructure_publishes_no_closed_surface() {
     // A top-level rest element leaves the enumerated public-key set INCOMPLETE.
-    // Publishing only `label` would make TypeScript reject every prop the rest
-    // element deliberately accepts, so the surface claims nothing rather than
-    // claiming a closed set that is wrong.
+    // Publishing only `label` would close a domain the author left open, and
+    // `Missing` would let the classifier treat that open set as exact absence.
     let outcome = runes_props_surface(
         "/RestProps.svelte",
         "<script>\n  let { label, ...rest } = $props();\n</script>\n\n<p>{label}</p>\n",
     );
+    let ResolvedOutcome::Resolved(value) = &outcome else {
+        panic!("an open-key `$props()` destructure publishes an open domain: {outcome:?}");
+    };
     assert!(
-        matches!(outcome, ResolvedOutcome::Missing),
-        "an open-key `$props()` destructure must not publish a closed surface: {outcome:?}"
+        value.props.is_none(),
+        "enumerated keys are not published as a closed member list"
     );
+    let guarantee = value
+        .domain_guarantee
+        .as_ref()
+        .expect("the open domain carries a producer claim");
+    assert_eq!(guarantee.kind, 1);
+    assert!(guarantee.open);
+    assert!(guarantee.causes.is_empty());
 }
 
 /// An UNRESOLVABLE `$props()` type must not publish zero props as a
@@ -351,6 +377,13 @@ fn unavailable_script_facts_surface_is_partial_not_missing() {
         value.props.is_none(),
         "no exact props DTO may be fabricated"
     );
+    let guarantee = value
+        .domain_guarantee
+        .as_ref()
+        .expect("unavailable script facts carry an unavailable claim");
+    assert_eq!(guarantee.kind, 3);
+    assert_eq!(guarantee.causes, vec![104]);
+    assert!(guarantee.open);
     assert!(
         diagnostics
             .iter()
