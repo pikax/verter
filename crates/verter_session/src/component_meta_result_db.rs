@@ -1507,6 +1507,134 @@ mod tests {
         (host, owner_hash)
     }
 
+    #[test]
+    fn retained_refusal_preserves_resolve_phase_suppression() {
+        use verter_type_engine::project_semantic_dispatch::memo::ComponentMetaTrace;
+        use verter_type_engine::request_context::current_request_budget;
+        use verter_type_engine::semantic_query::PartialReasonSet;
+
+        let canonical = "/w/extraction-refusal.vue";
+        let (mut host, owner_hash) = indexed_vue(canonical);
+        let (analysis, mut cold) = host
+            .get_component_meta_with_resolution(canonical)
+            .expect("complete cold resolve");
+        assert!(!cold.completeness.is_partial());
+        assert!(!cold.synthesis_should_suppress);
+        host.config.projection_op_budget = 1;
+
+        let completeness = {
+            let key = host.component_meta_result_key(
+                canonical,
+                &crate::host_manage::ComponentMetaOptions::default(),
+            );
+            let db = host.project_type_store().component_meta_results();
+            assert!(db.remove(&key, owner_hash).is_some());
+            let _request = host.install_request_budget_context_if_none(
+                host.next_request_id(),
+                canonical,
+                false,
+            );
+            let dispatch =
+                verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+            let query = dispatch.component_meta_refusal_query(canonical);
+            // The extraction contribution trips after synthesis completed.
+            // Trace real request spending so refusal replay must restore it.
+            let (extract, trace) = dispatch.traced_component_meta_compute(canonical, || {
+                let budget = current_request_budget().expect("request");
+                assert!(!budget.check_projection_op_count());
+                assert!(budget.check_projection_op_count());
+                ResultCompleteness::partial(PartialReasonSet::PROJECTION_WORK_LIMIT)
+            });
+            cold.completeness = cold.completeness.merge(extract);
+            let ComponentMetaTrace::Observed(evidence) = trace else {
+                panic!("the owner observation must be cacheable");
+            };
+            let template =
+                crate::component_meta_cached_result::ResolutionTemplate::from_resolved_state(&cold);
+            let reconstructed = template.rehydrate(cold.snapshot.clone(), 0);
+            assert_eq!(reconstructed.completeness, cold.completeness);
+            assert!(!reconstructed.synthesis_should_suppress);
+            let cached = crate::component_meta_cached_result::CachedComponentMetaResult {
+                analysis: analysis.clone(),
+                resolution_template: template,
+                canonical_id: Arc::from(canonical),
+                whole_hash: owner_hash,
+            };
+            assert!(
+                dispatch
+                    .admit_component_meta_refusal(
+                        db,
+                        key,
+                        owner_hash,
+                        evidence,
+                        refusal_identity_for(ComponentMetaRefusalClass::OperationProfile, &query),
+                        final_component_refusal_status(cold.completeness.reasons()).unwrap(),
+                        cold.completeness,
+                        Arc::new(cached),
+                        dispatch.current_project_generation(),
+                    )
+                    .is_some(),
+                "the extraction-only operation refusal must seal"
+            );
+            cold.completeness
+        };
+
+        let cold_entries =
+            crate::host_manage::component_meta_entry::COLD_BODY_ENTRIES.with(|count| count.get());
+        let (recovered, replayed) = host
+            .get_component_meta_with_resolution(canonical)
+            .expect("host replay");
+        assert_eq!(replayed.completeness, completeness);
+        assert!(!replayed.synthesis_should_suppress);
+        assert_eq!(recovered.props[0].name, analysis.props[0].name);
+
+        let project = crate::meta::MetaProject::new(host);
+        let session = project.open_session_batch().expect("session");
+        let (recovered, replayed) = session
+            .get_component_meta_with_resolution(canonical)
+            .expect("session replay")
+            .expect("recovery");
+        assert_eq!(replayed.completeness, completeness);
+        assert!(!replayed.synthesis_should_suppress);
+        assert_eq!(recovered.props[0].name, analysis.props[0].name);
+
+        struct ProbeGuard;
+        impl Drop for ProbeGuard {
+            fn drop(&mut self) {
+                crate::meta::MetaSession::take_payload_completeness_probe();
+            }
+        }
+        crate::meta::MetaSession::arm_payload_completeness_probe();
+        let _probe = ProbeGuard;
+        let payload = session
+            .get_component_meta_payload(canonical, |output| {
+                let (recovered, _, _, _, status) = output.into_parts_with_contract();
+                assert_eq!(status, completeness);
+                assert_eq!(recovered.props[0].name, analysis.props[0].name);
+                vec![7]
+            })
+            .expect("payload replay")
+            .expect("recovery payload");
+        assert_eq!(payload, vec![7]);
+        assert_eq!(
+            crate::meta::MetaSession::take_payload_completeness_probe().get(canonical),
+            Some(&(true, false))
+        );
+        assert_eq!(
+            crate::host_manage::component_meta_entry::COLD_BODY_ENTRIES.with(|count| count.get()),
+            cold_entries,
+            "all consumers must replay without executing the cold producer"
+        );
+        assert_eq!(
+            project
+                .host()
+                .project_type_store()
+                .component_meta_results()
+                .len(),
+            0
+        );
+    }
+
     fn observe_owner(canonical: &str, owner_hash: Hash16) {
         verter_type_engine::resolver_core::resolver_context::observe_fan_out(
             verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
