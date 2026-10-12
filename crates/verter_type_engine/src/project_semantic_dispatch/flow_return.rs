@@ -1926,7 +1926,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     verter_session_query::function_program::ProgramExpressionSource::FieldInitializer {
                         source: verter_type_expr::facts::FunctionReturnSource::Flow(identity),
                         readonly,
-                    } => regular(self.field_initializer_value(identity, *readonly)),
+                    } => regular(self.initializer_value(identity, *readonly)),
                     verter_session_query::function_program::ProgramExpressionSource::FieldInitializer { .. } => {
                         crate::request_context::mark_request_result_partial();
                         None
@@ -1935,6 +1935,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         crate::request_context::mark_request_result_partial();
                         None
                     }
+                    verter_session_query::function_program::ProgramExpressionSource::SemanticCall {
+                        initializer: Some(initializer), ..
+                    } => regular(self.initializer_value(&initializer.function, initializer.preserve_literals)),
                     verter_session_query::function_program::ProgramExpressionSource::Value
                     | verter_session_query::function_program::ProgramExpressionSource::SemanticCall { .. } => {
                         let expression = source_demand.indexed_program_expression_ir(record)?;
@@ -1949,14 +1952,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
-    /// The value of a class field whose initializer is served as its own
+    /// The value of a field or declarator whose initializer is served as its own
     /// position: the position's body-derived return, its fresh literals
     /// widened for a mutable field (the checker's widened literal type of a
     /// property initializer) and kept for a `readonly` one. A read made
     /// while the position is already being evaluated — the initializer
     /// reads, through `this`, a field whose own initializer reads it back
     /// — is the checker's circular initializer (TS7022): `any`.
-    fn field_initializer_value(
+    fn initializer_value(
         &self,
         identity: &verter_type_expr::facts::FlowFunctionReturnIdentity,
         readonly: bool,
@@ -9075,6 +9078,13 @@ pub(super) trait FlowDemandDriver {
         key: ResolveCallKey,
         state: &mut super::call_resolve::ContextualCallState,
     ) -> ResolveCallStep;
+    fn resume_contextual_call(
+        &self,
+        key: &mut ResolveCallKey,
+        args: &[crate::semantic_query::CallArgKey],
+        position: usize,
+        state: &mut super::call_resolve::ContextualCallState,
+    ) -> ResolveCallStep;
     fn demand_type_node(
         &self,
         key: SemanticQueryKey,
@@ -9493,6 +9503,15 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         state: &mut super::call_resolve::ContextualCallState,
     ) -> ResolveCallStep {
         ProjectSemanticDispatch::execute_contextual_call(self, key, state)
+    }
+    fn resume_contextual_call(
+        &self,
+        key: &mut ResolveCallKey,
+        args: &[crate::semantic_query::CallArgKey],
+        position: usize,
+        state: &mut super::call_resolve::ContextualCallState,
+    ) -> ResolveCallStep {
+        ProjectSemanticDispatch::resume_contextual_call(self, key, args, position, state)
     }
     fn demand_type_node(
         &self,
@@ -10103,6 +10122,16 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
         state: &mut super::call_resolve::ContextualCallState,
     ) -> ResolveCallStep {
         self.driver.execute_contextual_call(key, state)
+    }
+    fn resume_contextual_call(
+        &self,
+        key: &mut ResolveCallKey,
+        args: &[crate::semantic_query::CallArgKey],
+        position: usize,
+        state: &mut super::call_resolve::ContextualCallState,
+    ) -> ResolveCallStep {
+        self.driver
+            .resume_contextual_call(key, args, position, state)
     }
     fn demand_type_node(
         &self,

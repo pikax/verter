@@ -110,6 +110,9 @@ pub enum CheckerDiagnosticCode {
     ArgumentCountAtLeast,
 }
 
+// Diagnostic codes and message templates, including TS2769 and TS2322:
+// TypeScript v5.9.3, src/compiler/diagnosticMessages.json.
+// https://github.com/microsoft/TypeScript/blob/v5.9.3/src/compiler/diagnosticMessages.json
 impl CheckerDiagnosticCode {
     /// Whether the checker reports this code when a type operation runs out
     /// of an allowance (TS2589, TS2590, TS2799, TS2859). Verter reports these

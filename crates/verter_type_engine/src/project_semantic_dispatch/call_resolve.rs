@@ -31,6 +31,24 @@ use crate::semantic_query::{
 };
 pub(super) use contextual::ContextualCallState;
 
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static ARGUMENT_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Argument acquisition/copy positions and candidate arity parameter visits.
+#[cfg(any(test, feature = "test-support"))]
+pub fn argument_work_for_tests() -> usize {
+    ARGUMENT_WORK.with(std::cell::Cell::get)
+}
+
+pub(in crate::project_semantic_dispatch) fn record_argument_work(count: usize) {
+    #[cfg(any(test, feature = "test-support"))]
+    ARGUMENT_WORK.with(|work| work.set(work.get() + count));
+    #[cfg(not(any(test, feature = "test-support")))]
+    let _ = count;
+}
+
 /// Whether a fresh-literal deposit's binder occurs at the top level of a
 /// binder-bearing structure ([`ProjectSemanticDispatch::deposit_binder_reach`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1367,16 +1385,115 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             )
     }
 
-    /// Whether the return of a call signature of `target` — the contextual
-    /// signature a context-sensitive function argument is checked under —
-    /// mentions one of `params`. A signature list that does not settle
-    /// answers `true`: nothing proves the return free of them.
     /// The contextual type a context-sensitive argument is typed under: the
     /// parameter type `target` with every type parameter `fixed`, its one
     /// call signature's return read under the `inferred` bindings alone,
     /// so an uninferred parameter stays itself there (a literal context
     /// through its constraint).
     fn contextual_argument_type(
+        &self,
+        target: SemanticNodeId,
+        fixed: &CanonicalTypeSubstitution,
+        inferred: &CanonicalTypeSubstitution,
+    ) -> SemanticNodeId {
+        // Traverse wrapper templates, never the images of substituted binders.
+        // Each callback keeps fixed parameter types and an unfixed return.
+        let mut pending = vec![(target, false)];
+        let mut mapped = FxHashMap::default();
+        while let Some((node, finishing)) = pending.pop() {
+            if mapped.contains_key(&node) {
+                continue;
+            }
+            let data = self.graph().node_data(node);
+            let children: Vec<_> = match data.as_deref() {
+                Some(SemanticNodeData::Object(surface)) => surface
+                    .entries
+                    .iter()
+                    .filter_map(|entry| match entry {
+                        crate::semantic_query::SurfaceEntry::Member(member) => Some(member.value),
+                        crate::semantic_query::SurfaceEntry::CallSignature(signature) => {
+                            Some(*signature)
+                        }
+                        crate::semantic_query::SurfaceEntry::IndexSignature(index) => {
+                            Some(index.value_type)
+                        }
+                        _ => None,
+                    })
+                    .collect(),
+                Some(SemanticNodeData::Tuple { elements, .. }) => {
+                    elements.iter().map(|element| element.value).collect()
+                }
+                Some(SemanticNodeData::Array { element, .. }) => vec![*element],
+                _ => {
+                    mapped.insert(node, self.contextual_callable_type(node, fixed, inferred));
+                    continue;
+                }
+            };
+            if !finishing {
+                pending.push((node, true));
+                pending.extend(children.into_iter().map(|child| (child, false)));
+                continue;
+            }
+            let rebuilt = match data.as_deref().expect("wrapper node") {
+                SemanticNodeData::Object(surface) => {
+                    let entries = surface
+                        .entries
+                        .iter()
+                        .map(|entry| match entry {
+                            crate::semantic_query::SurfaceEntry::Member(member) => {
+                                let mut member = member.clone();
+                                member.value = mapped[&member.value];
+                                crate::semantic_query::SurfaceEntry::Member(member)
+                            }
+                            crate::semantic_query::SurfaceEntry::CallSignature(signature) => {
+                                crate::semantic_query::SurfaceEntry::CallSignature(
+                                    mapped[signature],
+                                )
+                            }
+                            crate::semantic_query::SurfaceEntry::IndexSignature(index) => {
+                                let mut index = index.clone();
+                                index.value_type = mapped[&index.value_type];
+                                index.key_type = self.substitute_canonical(index.key_type, fixed);
+                                crate::semantic_query::SurfaceEntry::IndexSignature(index)
+                            }
+                            crate::semantic_query::SurfaceEntry::ConstructSignature(signature) => {
+                                crate::semantic_query::SurfaceEntry::ConstructSignature(
+                                    self.substitute_canonical(*signature, fixed),
+                                )
+                            }
+                        })
+                        .collect();
+                    SemanticNodeData::Object(crate::semantic_query::SurfaceView::from_entries(
+                        entries,
+                        surface
+                            .keyspace
+                            .map(|keyspace| self.substitute_canonical(keyspace, fixed)),
+                        surface.closed().has_index_signature(),
+                    ))
+                }
+                SemanticNodeData::Tuple { elements, readonly } => SemanticNodeData::Tuple {
+                    elements: elements
+                        .iter()
+                        .map(|element| {
+                            let mut element = element.clone();
+                            element.value = mapped[&element.value];
+                            element
+                        })
+                        .collect(),
+                    readonly: *readonly,
+                },
+                SemanticNodeData::Array { element, readonly } => SemanticNodeData::Array {
+                    element: mapped[element],
+                    readonly: *readonly,
+                },
+                _ => unreachable!("wrapper classified above"),
+            };
+            mapped.insert(node, self.graph().intern_preserving_scope(node, rebuilt));
+        }
+        mapped[&target]
+    }
+
+    fn contextual_callable_type(
         &self,
         target: SemanticNodeId,
         fixed: &CanonicalTypeSubstitution,
@@ -1575,6 +1692,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> Result<Vec<CallArgument>, ResolveCallFailure> {
         let mut result = Vec::new();
         for argument in key.args.iter() {
+            record_argument_work(1);
             let context_sensitive = argument.is_context_sensitive();
             let (node, spread, literal_mode, (const_view, first_pass)) = match argument {
                 CallArgKey::Eager {
@@ -3966,6 +4084,7 @@ fn call_candidate_arity(
     params: &[FunctionParam],
     rest: Option<&RestParam<'_>>,
 ) -> (usize, Option<usize>, bool) {
+    record_argument_work(params.len());
     let fixed = params
         .iter()
         .filter(|param| !param.rest)

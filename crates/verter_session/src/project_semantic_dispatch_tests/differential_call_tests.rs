@@ -40,6 +40,9 @@ fn overloaded_contextual_chains_infer_each_stage_from_the_previous_return() {
             .collect::<Vec<_>>()
             .join(", ");
         source.push_str(&format!("export function chain{stages}() {{ const r = pipe(0 as const, {callbacks}); return r; }}\n"));
+        source.push_str(&format!(
+            "const r{stages} = pipe(0 as const, {callbacks});\n"
+        ));
         expected.push((
             format!("chain{stages}"),
             (0..stages).fold("0".to_owned(), |nested, i| format!("{{ v{i}: {nested}; }}")),
@@ -51,6 +54,23 @@ fn overloaded_contextual_chains_infer_each_stage_from_the_previous_return() {
         .collect::<Vec<_>>();
     let matrix = Matrix::new(&source);
     let mut failures = matrix.returns(&rows);
+    let types = expected
+        .iter()
+        .map(|(name, answer)| {
+            (
+                format!("typeof r{}", name.trim_start_matches("chain")),
+                answer.as_str(),
+            )
+        })
+        .collect::<Vec<_>>();
+    failures.extend(
+        matrix.types(
+            &types
+                .iter()
+                .map(|(name, answer)| (name.as_str(), *answer))
+                .collect::<Vec<_>>(),
+        ),
+    );
     failures
         .extend(matrix.unproven_returns(&rows.iter().map(|(name, _)| *name).collect::<Vec<_>>()));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
@@ -69,14 +89,22 @@ export function genericStage() { return pipe(0 as const, (x) => <U>(y: U) => ({ 
 declare function alternatives<A, B, C>(a: A, f: (x: A) => B, g: (x: B) => never): 'rejected';
 declare function alternatives<A, B, C>(a: A, f: (x: A) => B, g: (x: B) => C): C;
 export function isolated() { return alternatives(0 as const, (x) => ({ v0: x }), (x) => ({ v1: x })); }
+const scalar = pipe(0 as const, x => x);
+let mutable = pipe(0 as const, x => x);
+const topFixed = fixed(0 as const, x => ({v0:x}), x => ({v1:x}));
 "#
     );
     let matrix = Matrix::new(&source);
-    let failures = matrix.returns(&[
+    let mut failures = matrix.types(&[
+        ("typeof scalar", "0"),
+        ("typeof mutable", "0"),
+        ("typeof topFixed", "{ v1: { v0: 0; }; }"),
+    ]);
+    failures.extend(matrix.returns(&[
         ("nonOverloaded", "{ v1: { v0: 0; }; }"),
         ("genericStage", "{ input: 0; value: \"ok\"; }"),
         ("isolated", "{ v1: { v0: 0; }; }"),
-    ]);
+    ]));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
@@ -131,10 +159,14 @@ export function isolated() { return alternatives(0 as const, (x) => ({ v0: x }),
 
 #[test]
 fn contextual_chain_inference_work_grows_linearly() {
-    let work = |stages| {
-        let mut source = (1..=20)
-            .map(|arity| pipe_declaration(arity, "pipe"))
-            .collect::<String>();
+    let work = |stages, overloaded| {
+        let mut source = if overloaded {
+            (1..=20)
+                .map(|arity| pipe_declaration(arity, "pipe"))
+                .collect::<String>()
+        } else {
+            pipe_declaration(stages, "pipe")
+        };
         let callbacks = (0..stages)
             .map(|i| format!("(x) => ({{ v{i}: x }})"))
             .collect::<Vec<_>>()
@@ -146,13 +178,63 @@ fn contextual_chain_inference_work_grows_linearly() {
             .settings(&super::differential_harness_tests::ALL[..1])
             .return_relation_work("chain")
     };
-    let (small, medium, large) = (work(5), work(10), work(20));
-    eprintln!("contextual relation work: 5={small}, 10={medium}, 20={large}");
-    assert!(small > 0);
-    assert!(
-        large - medium <= 3 * (medium - small),
-        "doubling stages repeats earlier inference: {small}, {medium}, {large}"
-    );
+    for overloaded in [false, true] {
+        let (small, medium, large) = (
+            work(5, overloaded),
+            work(10, overloaded),
+            work(20, overloaded),
+        );
+        eprintln!("contextual (relation, argument/parameter) work (overloaded={overloaded}): 5={small:?}, 10={medium:?}, 20={large:?}");
+        assert!(small.0 > 0 && small.1 > 0);
+        for (small, medium, large) in [
+            (small.0, medium.0, large.0),
+            (small.1 as u64, medium.1 as u64, large.1 as u64),
+        ] {
+            assert!(
+                large - medium <= 3 * (medium - small),
+                "doubling stages repeats earlier work: {small}, {medium}, {large}"
+            );
+        }
+    }
+}
+
+#[test]
+fn contextual_candidates_reject_eager_mismatches_before_typing_callbacks() {
+    let source = r#"
+declare function pick(a: string, f: (x: string) => string): 'S';
+declare function pick(a: number, f: (x: number) => number): 'N';
+export function first() { return pick('s', x => x); }
+export function later() { return pick(1, x => x); }
+declare function generic<A, B>(a: 's', seed: A, f: (x: string) => B): 'bad';
+declare function generic<A, B>(a: 'n', seed: A, f: (x: A) => B): B;
+export function discriminant() { return generic('n', 0 as const, x => ({value: x})); }
+"#;
+    let failures = Matrix::new(source).returns(&[
+        ("first", "\"S\""),
+        ("later", "\"N\""),
+        ("discriminant", "{ value: 0; }"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn contextual_callback_returns_infer_through_object_and_tuple_wrappers() {
+    let source = r#"
+declare function wrapped<A,B>(a:A,f:{run:(x:A)=>B}):B;
+declare function wrapped<A,B,C>(a:A,f:{run:(x:A)=>B},g:(x:B)=>C):C;
+declare function tuple<A,B>(a:A,f:[(x:A)=>B]):B;
+declare function tuple<A,B,C>(a:A,f:[(x:A)=>B],g:(x:B)=>C):C;
+declare function plain<A,B,C>(a:A,f:(x:A)=>B,g:(x:B)=>C):C;
+export function object() { return wrapped(0 as const,{run:x=>({v:x})},x=>({w:x})); }
+export function array() { return tuple(0 as const,[x=>({v:x})],x=>({w:x})); }
+export function control() { return plain(0 as const,x=>({v:x}),x=>({w:x})); }
+"#;
+    let failures = Matrix::new(source).returns(&[
+        ("object", "{ w: { v: 0; }; }"),
+        ("array", "{ w: { v: 0; }; }"),
+        ("control", "{ w: { v: 0; }; }"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 /// Overloaded declarations by type, arity, literal and generic parameters.

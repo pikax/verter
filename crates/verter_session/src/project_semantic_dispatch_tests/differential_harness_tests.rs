@@ -344,7 +344,7 @@ impl<'a> Matrix<'a> {
         unproven
     }
 
-    pub(super) fn return_relation_work(&self, function: &str) -> u64 {
+    pub(super) fn return_relation_work(&self, function: &str) -> (u64, usize) {
         let host = self.host(&[]);
         let canonical = format!("{}/probe.ts", self.settings[0].root);
         let store_view = host.resolver_store_view_read().into_owned_view();
@@ -366,6 +366,8 @@ impl<'a> Matrix<'a> {
             result_contract: super::flow_solve::flow_return_result_contract_id(),
         };
         let before = dispatch.graph().stats_snapshot().relation_check_count;
+        let argument_before =
+            verter_type_engine::project_semantic_dispatch::call_resolve::argument_work_for_tests();
         let result = dispatch.execute_read(
             verter_type_engine::semantic_query::SemanticQueryKey::FlowReturn(Box::new(key)),
         );
@@ -374,7 +376,11 @@ impl<'a> Matrix<'a> {
             "{function}: {:?}",
             result.partial_reasons
         );
-        dispatch.graph().stats_snapshot().relation_check_count - before
+        (
+            dispatch.graph().stats_snapshot().relation_check_count - before,
+            verter_type_engine::project_semantic_dispatch::call_resolve::argument_work_for_tests()
+                - argument_before,
+        )
     }
 
     /// Each row's verdict in each setting, in row then setting order.

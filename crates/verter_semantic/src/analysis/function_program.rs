@@ -107,6 +107,11 @@ impl<'source, 'ast> DiscoveryCtx<'source, 'ast> {
     fn push(&mut self, entry: FunctionProgramDiscovery, node: FunctionNode<'ast>) {
         if let Some(nodes) = &mut self.nodes {
             let self_name = match entry.locator.descent.last() {
+                Some(FunctionDescentStep::VariableInitializer { .. })
+                    if matches!(node, FunctionNode::Initializer(_)) =>
+                {
+                    None
+                }
                 Some(FunctionDescentStep::VariableInitializer { .. }) => Some(Arc::from(
                     entry
                         .key
@@ -1620,6 +1625,39 @@ fn discover_variable_declaration<'ast>(
         let base_descent = FunctionDescent::new()
             .then(FunctionDescentStep::VariableInitializer { declarator_ordinal });
         if let Some(anchor) = ctx.anchor(contributor_index) {
+            let mut source = program_expression_source(&ctx.walks, init);
+            let contextual_call = matches!(&source, ProgramExpressionSource::SemanticCall { site, .. }
+                if site.args.iter().any(|argument| argument.is_function_value));
+            if contextual_call {
+                // The initializer is a served expression body. Its callbacks
+                // use the same flow evaluator and call continuation as bodies.
+                discover_initializer_inner(
+                    init,
+                    &name,
+                    FunctionPartIdentity::Initializer,
+                    contributor_index,
+                    base_descent.clone(),
+                    ctx,
+                );
+                if let ProgramExpressionSource::SemanticCall { initializer, .. } = &mut source {
+                    *initializer = Some(
+                        verter_session_query::function_program::ProgramInitializerSource {
+                            function: FlowFunctionReturnIdentity {
+                                anchor: AuthoredAnchor {
+                                    canonical_id: Arc::clone(&ctx.canonical_id),
+                                    owner: anchor.owner,
+                                    symbol: Arc::from(name.as_str()),
+                                    space: LocatorSymbolSpace::Value,
+                                },
+                                function_part: FunctionPartIdentity::Initializer,
+                                overload_ordinal: 0,
+                            },
+                            preserve_literals: var_decl.kind
+                                == oxc_ast::ast::VariableDeclarationKind::Const,
+                        },
+                    );
+                }
+            }
             ctx.expressions.push(ProgramExpressionRecord {
                 point: ProgramExpressionIdentity {
                     canonical_id: Arc::clone(&ctx.canonical_id),
@@ -1630,9 +1668,11 @@ fn discover_variable_declaration<'ast>(
                     contributor: anchor,
                     descent: base_descent.clone(),
                 },
-                source: program_expression_source(&ctx.walks, init),
+                source,
             });
-            discover_top_level_call_arg_positions(init, &name, anchor, &base_descent, ctx);
+            if !contextual_call {
+                discover_top_level_call_arg_positions(init, &name, anchor, &base_descent, ctx);
+            }
         }
         let descent = |extra: FunctionDescentStep| base_descent.then(extra);
         match init {
@@ -1803,10 +1843,12 @@ fn program_expression_source(
         Expression::CallExpression(call) => ProgramExpressionSource::SemanticCall {
             kind: ProgramExpressionCallKind::Call,
             site: call_site_record(call),
+            initializer: None,
         },
         Expression::NewExpression(call) => ProgramExpressionSource::SemanticCall {
             kind: ProgramExpressionCallKind::Construct,
             site: new_site_record(call),
+            initializer: None,
         },
         expression if expression_has_call(walks, expression) => {
             ProgramExpressionSource::UnsupportedCall
@@ -4034,8 +4076,13 @@ pub fn resolve_function_node<'a>(
                 match steps.peek().copied() {
                     None => {
                         return Some(ResolvedFunctionNode {
-                            node: function_from_expression(init)?,
-                            self_name,
+                            node: function_from_expression(init)
+                                .unwrap_or(FunctionNode::Initializer(init)),
+                            self_name: if function_from_expression(init).is_some() {
+                                self_name
+                            } else {
+                                None
+                            },
                             enclosing_type_parameters: None,
                             enclosing_heritage,
                             enclosing_this,
@@ -4070,7 +4117,9 @@ pub fn resolve_function_node<'a>(
                     Some(_) => {
                         // Non-terminal: a nested position inside the
                         // initializer function's own body.
-                        current_body = function_from_expression(init)?.body();
+                        current_body = function_from_expression(init)
+                            .unwrap_or(FunctionNode::Initializer(init))
+                            .body();
                     }
                 }
             }

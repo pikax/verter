@@ -880,11 +880,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 first_pass: None,
                 literal_mode: crate::semantic_query::ArgumentLiteralMode::Literal,
             };
-            finish.key.args = Arc::from(finish.args.clone().into_boxed_slice());
-            finish.step = Positional::Value(
-                self.dispatch
-                    .execute_contextual_call(finish.key.clone(), &mut finish.contextual),
-            );
+            finish.step = Positional::Value(self.dispatch.resume_contextual_call(
+                &mut finish.key,
+                &finish.args,
+                position,
+                &mut finish.contextual,
+            ));
         }
         match self.next_retyped_argument(&finish) {
             Some((position, Some(request))) => {

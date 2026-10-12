@@ -30,6 +30,8 @@ pub(in crate::project_semantic_dispatch) struct ContextualCallState {
     typed_arguments: FxHashMap<usize, CallArgument>,
     arity_candidates: FxHashSet<SemanticNodeId>,
     active: Option<ContextualCandidate>,
+    delivery: Option<CallArgument>,
+    ready: Option<(SemanticNodeId, Vec<CallArgument>)>,
     arity_fit: bool,
     diagnostics_enabled: bool,
     pub(super) diagnostic: Option<crate::semantic_query::CheckerDiagnosticCode>,
@@ -75,7 +77,7 @@ impl ContextualCallState {
 
 #[derive(Debug)]
 struct ContextualCandidate {
-    signature: SemanticNodeId,
+    signature: SignatureRef,
     arguments: Vec<CallArgument>,
     deferred: Vec<(usize, SemanticNodeId)>,
     cursor: usize,
@@ -152,6 +154,84 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         step
     }
 
+    /// A callback delivery advances only its suspended candidate. Full call
+    /// acquisition and publication run again only on completion or rejection.
+    pub(in crate::project_semantic_dispatch) fn resume_contextual_call(
+        &self,
+        key: &mut ResolveCallKey,
+        args: &[CallArgKey],
+        position: usize,
+        state: &mut ContextualCallState,
+    ) -> ResolveCallStep {
+        let (_connected_guard, initial_trip) = self.enter_connected_demand(false);
+        if initial_trip.is_some() {
+            state.active = None;
+            return ResolveCallStep::Degraded(ResolveCallFailure::Budget);
+        }
+        let Some(candidate) = state
+            .active
+            .as_ref()
+            .map(|progress| progress.signature.clone())
+        else {
+            // Spread and explicitly instantiated calls use the executor's
+            // ordinary contextual recheck, without a suspended collector.
+            record_argument_work(args.len());
+            key.args = Arc::from(args);
+            return self.execute_contextual_call(key.clone(), state);
+        };
+        let Some(argument) = args.get(position) else {
+            return ResolveCallStep::Degraded(ResolveCallFailure::Undecidable);
+        };
+        let mut delivery_key = key.clone();
+        delivery_key.args = Arc::from([argument.clone()]);
+        let delivery = match self.acquire_call_arguments(&delivery_key) {
+            Ok(mut arguments) if arguments.len() == 1 => arguments.pop(),
+            Ok(_) => return ResolveCallStep::Degraded(ResolveCallFailure::Undecidable),
+            Err(failure) => return ResolveCallStep::Degraded(failure),
+        };
+        state.delivery = delivery;
+        let resume_at = state.resume_at;
+        let outer_applicability = self.dispatch_txn.borrow().call.applicability;
+        if let Some((applicability, _)) = resume_at {
+            self.dispatch_txn.borrow_mut().call.applicability = applicability;
+        }
+        let outer = self
+            .dispatch_txn
+            .borrow_mut()
+            .call
+            .contextual
+            .replace(std::mem::take(state));
+        let result = self.prepare_contextual_candidate(
+            key,
+            &candidate,
+            &[],
+            &mut CallResolutionBudget::new(&self.connected_demand),
+        );
+        *state = self
+            .dispatch_txn
+            .borrow_mut()
+            .call
+            .contextual
+            .take()
+            .expect("installed contextual call");
+        self.dispatch_txn.borrow_mut().call.contextual = outer;
+        self.dispatch_txn.borrow_mut().call.applicability = outer_applicability;
+        match result {
+            Err(ContextualCandidateFailure::Degraded(failure)) => {
+                ResolveCallStep::Degraded(failure)
+            }
+            completed => {
+                if let Ok(arguments) = completed {
+                    state.ready = Some((candidate.node, arguments));
+                }
+                state.resume_at = resume_at;
+                record_argument_work(args.len());
+                key.args = Arc::from(args);
+                self.execute_contextual_call(key.clone(), state)
+            }
+        }
+    }
+
     /// Type each deferred argument exactly once for this candidate and pass.
     /// The final applicability check still belongs to `check_call_candidate`.
     pub(super) fn prepare_contextual_candidate(
@@ -182,26 +262,42 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         budget: &mut CallResolutionBudget<'_>,
         state: &mut ContextualCallState,
     ) -> Result<Vec<CallArgument>, ContextualCandidateFailure> {
-        let original = state.original.get_or_insert_with(|| arguments.to_vec());
-        if !original.iter().any(|argument| argument.context_sensitive)
-            || !key.explicit_type_args.is_empty()
-            || key.args.iter().any(|arg| match arg {
-                CallArgKey::Eager { spread, .. } | CallArgKey::ProgramExpression { spread, .. } => {
-                    *spread
-                }
-            })
+        if state
+            .ready
+            .as_ref()
+            .is_some_and(|(signature, _)| *signature == candidate.node)
+        {
+            return Ok(state.ready.take().expect("completed candidate").1);
+        }
+        let resumed = state.active.take();
+        let original = state.original.get_or_insert_with(|| {
+            record_argument_work(arguments.len());
+            arguments.to_vec()
+        });
+        if resumed.is_none()
+            && (!original.iter().any(|argument| argument.context_sensitive)
+                || !key.explicit_type_args.is_empty()
+                || key.args.iter().any(|arg| match arg {
+                    CallArgKey::Eager { spread, .. }
+                    | CallArgKey::ProgramExpression { spread, .. } => *spread,
+                }))
         {
             return Ok(arguments.to_vec());
         }
         state.diagnostics_enabled = true;
         let graph = self.graph();
-        let Some(SemanticNodeData::Signature {
-            params,
-            type_parameters,
-            ..
-        }) = graph.node_data(candidate.node).as_deref().cloned()
-        else {
-            return Ok(arguments.to_vec());
+        let (params, type_parameters) = if resumed.is_none() {
+            let Some(SemanticNodeData::Signature {
+                params,
+                type_parameters,
+                ..
+            }) = graph.node_data(candidate.node).as_deref().cloned()
+            else {
+                return Ok(arguments.to_vec());
+            };
+            (params, type_parameters)
+        } else {
+            (Arc::from([]), Arc::from([]))
         };
         let (receiver, ordinary) = crate::semantic_query::split_this_receiver(&params);
         let rest = ordinary
@@ -211,15 +307,16 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 param,
                 shape: self.rest_shape(param.ty),
             });
-        let (required, maximum, _) = call_candidate_arity(ordinary, rest.as_ref());
-        if original.len() < required || maximum.is_some_and(|max| original.len() > max) {
-            return Err(ContextualCandidateFailure::Mismatch);
+        if resumed.is_none() {
+            let (required, maximum, _) = call_candidate_arity(ordinary, rest.as_ref());
+            if original.len() < required || maximum.is_some_and(|max| original.len() > max) {
+                return Err(ContextualCandidateFailure::Mismatch);
+            }
+            state.arity_fit = true;
+            state.arity_candidates.insert(candidate.node);
         }
-        state.arity_fit = true;
-        state.arity_candidates.insert(candidate.node);
-        let resumed = state.active.take();
         let (mut progress, session_id) = if let Some(progress) = resumed {
-            verter_debug_assert_eq!(progress.signature, candidate.node);
+            verter_debug_assert_eq!(progress.signature.node, candidate.node);
             let id = progress.session.as_ref().expect("suspended collector").id;
             (progress, id)
         } else {
@@ -253,8 +350,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             let session = self.take_contextual_session(id);
             (
                 ContextualCandidate {
-                    signature: candidate.node,
-                    arguments: original.clone(),
+                    signature: candidate.clone(),
+                    arguments: {
+                        record_argument_work(original.len());
+                        original.clone()
+                    },
                     deferred: Vec::new(),
                     cursor: 0,
                     session: Some(session),
@@ -274,21 +374,23 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let result = (|| {
             if progress.pending_target.is_some() {
                 let (position, _) = progress.deferred[progress.cursor];
-                let typed = arguments
-                    .get(position)
+                let typed = state
+                    .delivery
+                    .take()
+                    .or_else(|| arguments.get(position).copied())
                     .filter(|arg| !arg.context_sensitive)
                     .ok_or(ContextualCandidateFailure::Degraded(
                         ResolveCallFailure::Undecidable,
                     ))?;
                 let target = progress.pending_target.take().expect("pending callback");
-                state.typed_arguments.insert(position, *typed);
-                if !self.collect_contextual_argument(typed, target, budget)? {
+                state.typed_arguments.insert(position, typed);
+                if !self.collect_contextual_argument(&typed, target, budget)? {
                     state.diagnostic =
                         Some(self.contextual_argument_failure(typed.node, target, budget));
                     state.resume_at = None;
                     return Err(ContextualCandidateFailure::Mismatch);
                 }
-                progress.arguments[position] = *typed;
+                progress.arguments[position] = typed;
                 progress.cursor += 1;
             } else {
                 // Eager arguments infer before a context-sensitive callback is
@@ -298,6 +400,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Void))
                     });
                     let step = self.call_receiver_relation(source, receiver.ty, source, budget);
+                    if matches!(step, RelationStep::NotAssignable) {
+                        return Err(ContextualCandidateFailure::Mismatch);
+                    }
                     if matches!(
                         step,
                         RelationStep::Unknown
@@ -368,7 +473,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         generic_arguments.push((argument, signature, target));
                         continue;
                     }
-                    self.collect_contextual_argument(&argument, target, budget)?;
+                    if !self.collect_contextual_argument(&argument, target, budget)? {
+                        return Err(ContextualCandidateFailure::Mismatch);
+                    }
                 }
                 for (mut argument, signature, target) in generic_arguments {
                     argument.node = self
@@ -382,7 +489,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         )
                         .map_err(ContextualCandidateFailure::Degraded)?
                         .unwrap_or(argument.node);
-                    self.collect_contextual_argument(&argument, target, budget)?;
+                    if !self.collect_contextual_argument(&argument, target, budget)? {
+                        return Err(ContextualCandidateFailure::Mismatch);
+                    }
                 }
             }
             while let Some(&(position, target)) = progress.deferred.get(progress.cursor) {
@@ -412,7 +521,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 ));
             }
             state.resume_at = None;
-            Ok(progress.arguments.clone())
+            Ok(std::mem::take(&mut progress.arguments))
         })();
         progress.session = Some(self.take_contextual_session(session_id));
         if matches!(
