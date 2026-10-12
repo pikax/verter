@@ -36,6 +36,63 @@ export function callH() { return h('s' as string); }
 ";
 
 #[test]
+fn large_mapped_index_reduces_each_selected_value() {
+    for count in [1_000, 3_000, 10_000] {
+        let mut source = String::from("interface Big {\n");
+        for i in 0..count {
+            let value = match i % 3 {
+                0 => i.to_string(),
+                1 => format!("\"s{i}\""),
+                _ => "boolean".to_string(),
+            };
+            source.push_str(&format!("k{i}: {value};\n"));
+        }
+        source.push_str("}\n");
+        let before = verter_type_engine::semantic_query::key_scan_comparisons_for_tests();
+        let failures = mismatches(
+            &source,
+            &[(
+                "{ [K in keyof Big]: Big[K] extends number ? 'n' : Big[K] extends string ? 's' : 'b' }[keyof Big]",
+                "\"b\" | \"n\" | \"s\"",
+            )],
+        );
+        assert!(failures.is_empty(), "{count} keys: {}", failures.join("\n"));
+        let comparisons =
+            verter_type_engine::semantic_query::key_scan_comparisons_for_tests() - before;
+        println!("{count} keys: {comparisons} member comparisons");
+        assert!(
+            comparisons <= 64 * count,
+            "{count} keys required {comparisons} member comparisons"
+        );
+    }
+}
+
+#[test]
+fn wide_source_index_preserves_accessors_overloads_and_key_kinds() {
+    let mut source = String::from("declare const marker: unique symbol; declare class Wide {\n");
+    for i in 0..20 {
+        source.push_str(&format!("padding{i}: {i};\n"));
+    }
+    source.push_str(
+        "1: 'numeric'; [marker]: 'symbol'; optional?: 'present';\n\
+         get value(): 'getter'; set value(v: string);\n\
+         method(x: 'a'): 'first'; method(x: 'b'): 'last'; }\n",
+    );
+    let failures = mismatches(
+        &source,
+        &[
+            ("Wide[1]", "\"numeric\""),
+            ("Wide['1']", "\"numeric\""),
+            ("Wide[typeof marker]", "\"symbol\""),
+            ("Wide['optional']", "\"present\" | undefined"),
+            ("Wide['value']", "\"getter\""),
+            ("ReturnType<Wide['method']>", "\"last\""),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
 fn mapped_index_reads_values_in_the_selected_key_domain() {
     let source = "interface Src { readonly a: 1; b?: 'two'; c: boolean }\n\
         type Values<T> = { [K in keyof T]: T[K] }[keyof T];\n\

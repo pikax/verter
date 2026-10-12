@@ -27,7 +27,12 @@ manifests under `scripts/benchmark/evidence-run-fixtures/` (`pnpm test:scripts`)
 
 `scripts/benchmark/evidence-runs/<name>.json`. Each run name has exactly one
 owner: the change that needs the run adds its manifest and no other change
-edits it. Shipped: `skr-perf0-structural`.
+edits it. Shipped: `skr-perf0-structural`, `skr-mapped-indexb`.
+
+`skr-mapped-indexb` demands conditional mapped values through the entire source
+key domain at 1,000, 3,000 and 10,000 keys. The recorded TypeScript 7.0.2 answer
+is `"b" | "n" | "s"`. Its strict, cold Verter cells require `firstTypeMs` and
+`peakBytes`; the fleet measures those cells on the benchmark worker.
 
 | Field                             | Meaning                                                                                                                                                        |
 | --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |

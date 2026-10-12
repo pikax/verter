@@ -13136,6 +13136,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // [`Self::evaluate_k_independent_mapped_value`].
         let mut shared_value: Option<SemanticNodeId> = None;
         let mut produced: Vec<SurfaceMember> = Vec::with_capacity(keys.len());
+        let mut source_by_key = std::collections::HashMap::with_capacity(source_members.len());
+        for member in &source_members {
+            if let Some(key) = member.key.cloned_known() {
+                source_by_key.entry(key).or_insert(member);
+            }
+        }
+        let mut produced_by_key = std::collections::HashMap::with_capacity(keys.len());
         let mut project_member_edges: Vec<(SemanticNodeId, PropertyKey)> = Vec::new();
         // A key whose `as` remap fails closed (`DeferCarrier`) taints the whole
         // mapped type: it returns the deferred `Mapped` carrier rather than a
@@ -13177,9 +13184,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     break;
                 }
             };
-            let source_member = source_members
-                .iter()
-                .find(|member| member.key.cloned_known().as_ref() == Some(&key.key));
+            let source_member = source_by_key.get(&key.key).copied();
             let optional = match mapper.optionality {
                 crate::semantic_query::OptionalityMod::Add => true,
                 crate::semantic_query::OptionalityMod::Remove => false,
@@ -13288,12 +13293,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // first production keeps the member slot (position,
                 // modifiers, and declaration site); later same-name
                 // productions fold their value into a Union arm.
-                if let Some(existing) = produced.iter_mut().find(|member| {
-                    member
-                        .key
-                        .cloned_known()
-                        .is_some_and(|k| k.element_access_collides(&produced_name))
-                }) {
+                let spelling = crate::semantic_query::property_spelling(produced_name.clone());
+                if let Some(&ordinal) = produced_by_key.get(&spelling) {
+                    let existing: &mut SurfaceMember = &mut produced[ordinal];
                     if existing.value != value {
                         // Canonical construction: duplicate produced names
                         // UNION their per-K values through the one authority.
@@ -13316,6 +13318,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // NOT via own-body declaration in any consuming macro's
                 // T body. The construction layer is structurally
                 // heritage-equivalent — `false` is the truth.
+                produced_by_key.insert(spelling, produced.len());
                 produced.push(SurfaceMember {
                     key: crate::semantic_query::AuthoredPropertyKey::from_known(
                         produced_name.clone(),

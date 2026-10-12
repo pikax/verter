@@ -4278,7 +4278,7 @@ std::thread_local! {
 }
 
 /// Count one member a key lookup compared by scanning a surface.
-fn note_key_scan_comparison() {
+pub(crate) fn note_key_scan_comparison() {
     #[cfg(any(test, feature = "test-support"))]
     KEY_SCAN_COMPARISONS.with(|count| count.set(count.get() + 1));
 }
@@ -4317,7 +4317,7 @@ fn known_key_accessor<'a>(
 /// the canonical spelling of an admissible integer is that number, so two
 /// keys collide under element access exactly when their spellings are
 /// equal.
-fn property_spelling(key: PropertyKey) -> PropertyKey {
+pub(crate) fn property_spelling(key: PropertyKey) -> PropertyKey {
     match key.element_access_equivalent() {
         Some(numeric @ verter_type_expr::PropertyKey::Number(_))
             if matches!(key, verter_type_expr::PropertyKey::String(_)) =>
@@ -4336,26 +4336,22 @@ fn property_spelling(key: PropertyKey) -> PropertyKey {
 /// with it, so relating a surface of `n` members to one of `m` costs
 /// `n + m` lookups rather than `n × m` comparisons.
 pub(crate) struct SurfaceKeyIndex<'a> {
-    members: std::collections::HashMap<PropertyKey, smallvec::SmallVec<[&'a SurfaceMember; 1]>>,
+    members: &'a [SurfaceMember],
+    ordinals: Arc<crate::semantic_query_memo::member_index::MemberOrdinalIndex>,
 }
 
 impl<'a> SurfaceKeyIndex<'a> {
     /// The members addressing `key`, in member order.
-    fn colliding(&self, key: &PropertyKey) -> &[&'a SurfaceMember] {
-        let spelled = match key {
-            verter_type_expr::PropertyKey::String(_) => key
-                .element_access_equivalent()
-                .filter(|numeric| matches!(numeric, verter_type_expr::PropertyKey::Number(_))),
-            _ => None,
-        };
-        self.members
-            .get(spelled.as_ref().unwrap_or(key))
-            .map_or(&[], |members| members.as_slice())
+    fn colliding(&self, key: &PropertyKey) -> impl Iterator<Item = &'a SurfaceMember> + '_ {
+        self.ordinals
+            .colliding(key)
+            .iter()
+            .map(|ordinal| &self.members[*ordinal as usize])
     }
 
     /// [`SurfaceView::project_known_key`] through the index.
     pub(crate) fn project_known_key(&self, key: &PropertyKey) -> SurfaceKeyProjection<'a> {
-        match self.colliding(key).first() {
+        match self.colliding(key).next() {
             Some(member) => SurfaceKeyProjection::Exact(member),
             None => SurfaceKeyProjection::AbsentProven,
         }
@@ -4368,8 +4364,6 @@ impl<'a> SurfaceKeyIndex<'a> {
     ) -> Option<KnownKeyAccessor<'a>> {
         known_key_accessor(
             self.colliding(key)
-                .iter()
-                .copied()
                 .filter(|member| member.visibility.is_public()),
         )
     }
@@ -4378,7 +4372,7 @@ impl<'a> SurfaceKeyIndex<'a> {
         &self,
         key: &PropertyKey,
     ) -> Option<Vec<SemanticNodeId>> {
-        visible_method_overloads(self.colliding(key).iter().copied())
+        visible_method_overloads(self.colliding(key))
     }
 }
 
@@ -4645,20 +4639,21 @@ impl SurfaceView {
     /// addresses, for a caller that looks up many keys
     /// ([`SurfaceKeyIndex`]).
     pub(crate) fn key_index(&self) -> SurfaceKeyIndex<'_> {
-        let mut members: std::collections::HashMap<
-            PropertyKey,
-            smallvec::SmallVec<[&SurfaceMember; 1]>,
-        > = std::collections::HashMap::default();
-        for member in self.members.iter() {
-            note_key_scan_comparison();
-            if let Some(known) = member.key.cloned_known() {
-                members
-                    .entry(property_spelling(known))
-                    .or_default()
-                    .push(member);
-            }
+        self.key_index_from_ordinals(Arc::new(
+            crate::semantic_query_memo::member_index::MemberOrdinalIndex::from_members(
+                &self.members,
+            ),
+        ))
+    }
+
+    pub(crate) fn key_index_from_ordinals(
+        &self,
+        ordinals: Arc<crate::semantic_query_memo::member_index::MemberOrdinalIndex>,
+    ) -> SurfaceKeyIndex<'_> {
+        SurfaceKeyIndex {
+            members: &self.members,
+            ordinals,
         }
-        SurfaceKeyIndex { members }
     }
 
     /// Project an ordinary string key supplied by a string-only external

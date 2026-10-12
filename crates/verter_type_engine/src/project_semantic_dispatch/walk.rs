@@ -2538,6 +2538,13 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         index: Option<&crate::semantic_query::SurfaceKeyIndex<'_>>,
         index_read: bool,
     ) -> Option<SemanticNodeId> {
+        let cached_index = (index.is_none()
+            && surface.positive_members().len()
+                > crate::semantic_query_memo::MEMBER_ORDINAL_INDEX_LINEAR_SCAN_MAX)
+            .then(|| {
+                surface.key_index_from_ordinals(self.graph().member_ordinal_index(object, surface))
+            });
+        let index = index.or(cached_index.as_ref());
         let overloads = match index {
             Some(index) => index.project_known_key_overload_group(key),
             None => surface.project_known_key_overload_group(key),
@@ -8414,6 +8421,15 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         // dead and must never be materialised.
         let mut shared_value: Option<SemanticNodeId> = None;
         let mut members: Vec<ShallowSurfaceMember> = Vec::with_capacity(keys.len());
+        let mut source_by_key = std::collections::HashMap::new();
+        if let Some(source_members) = source_members.as_ref() {
+            for member in source_members {
+                if let Some(key) = member.key.cloned_known() {
+                    source_by_key.entry(key).or_insert(member);
+                }
+            }
+        }
+        let mut produced_by_key = std::collections::HashMap::with_capacity(keys.len());
         for key in keys.into_iter() {
             // Cancellation before this key's remap substitution.
             //
@@ -8462,10 +8478,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 return None;
             }
             let member = {
-                let source_member = source_members.as_ref().and_then(|m| {
-                    m.iter()
-                        .find(|sm| sm.key.cloned_known().as_ref() == Some(&key.key))
-                });
+                let source_member = source_by_key.get(&key.key).copied();
                 // Optionality / readonly resolution per TS semantics:
                 //   - Add → always on
                 //   - Remove → always off
@@ -8599,11 +8612,9 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 // `{ [K in 1 | "1"]: K }` = `{ 1: 1 | "1" }`). The first
                 // production keeps the member slot (position, modifiers,
                 // and declaration site).
-                if let Some(existing) = members.iter_mut().find(|m| {
-                    m.key
-                        .cloned_known()
-                        .is_some_and(|k| k.element_access_collides(&produced_name))
-                }) {
+                let spelling = crate::semantic_query::property_spelling(produced_name.clone());
+                if let Some(&ordinal) = produced_by_key.get(&spelling) {
+                    let existing: &mut ShallowSurfaceMember = &mut members[ordinal];
                     if existing.value != value {
                         // Canonical construction (same fold as
                         // `build_mapped_type`'s rail — see that site).
@@ -8616,6 +8627,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 }
                 // Rationale on `build::mapped_produced_key_inherits_declaration_site`
                 // — the one shared predicate both rails judge inheritance with.
+                produced_by_key.insert(spelling, members.len());
                 let inherits_declaration_site = has_source_member
                     && crate::project_semantic_dispatch::build::mapped_produced_key_inherits_declaration_site(
                         &produced_name,
