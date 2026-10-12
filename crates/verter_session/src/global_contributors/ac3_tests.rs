@@ -927,7 +927,10 @@ fn interleaved_inject_and_upsert_classifies_linear_members() {
 
 #[test]
 fn configured_project_opening_classifies_linear_members() {
-    for size in [250, 1_000, 4_000, 8_441] {
+    let mut previous_visits = None;
+    // Every size spans all directory buckets. Count classification work across
+    // four doublings instead of repeating a large project's scheduler waits.
+    for size in [125, 250, 500, 1_000] {
         let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(
             verter_workspace::MemoryOptions::default(),
         ));
@@ -976,15 +979,19 @@ fn configured_project_opening_classifies_linear_members() {
                 .expect("upsert");
         }
         host.ingest_program_ambient_roots();
-        eprintln!(
-            "opened {size} configured files: {} snapshot visits",
-            index.snapshot_scan_visit_count()
-        );
+        let visits = index.snapshot_scan_visit_count();
+        eprintln!("opened {size} configured files: {visits} snapshot visits",);
         assert!(
-            index.snapshot_scan_visit_count() <= 2 * size,
-            "{size} files required {} snapshot visits",
-            index.snapshot_scan_visit_count()
+            visits <= 2 * size,
+            "{size} files required {visits} snapshot visits",
         );
+        if let Some(previous) = previous_visits {
+            assert!(
+                visits <= 2 * previous,
+                "doubling configured members grew snapshot visits from {previous} to {visits}",
+            );
+        }
+        previous_visits = Some(visits);
         assert_eq!(
             index
                 .snapshot()

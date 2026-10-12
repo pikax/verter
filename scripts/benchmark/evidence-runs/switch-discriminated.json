@@ -1,0 +1,72 @@
+{
+  "name": "switch-discriminated",
+  "description": "Exhaustive discriminated switches: equivalent return answers, cold release latency and peak memory, plus warm demands.",
+  "tier": "standard",
+  "scenarios": ["switch-discriminated"],
+  "settings": ["strict"],
+  "arms": ["verter", "tsc-api"],
+  "modes": ["cold", "warm"],
+  "threads": ["default"],
+  "noise": [
+    "docs/contributing/semantic-benchmark.md#verdicts",
+    "docs/contributing/semantic-benchmark.md#schedule"
+  ],
+  "requiredCells": [
+    {
+      "scenario": "switch-discriminated-128",
+      "setting": "strict",
+      "arm": "verter",
+      "mode": "cold",
+      "threads": "default",
+      "metrics": ["coldMs", "peakBytes"]
+    },
+    {
+      "scenario": "switch-discriminated-512",
+      "setting": "strict",
+      "arm": "verter",
+      "mode": "cold",
+      "threads": "default",
+      "metrics": ["coldMs", "peakBytes"]
+    },
+    {
+      "scenario": "switch-discriminated-1000",
+      "setting": "strict",
+      "arm": "verter",
+      "mode": "cold",
+      "threads": "default",
+      "metrics": ["firstTypeMs", "coldMs", "peakBytes", "retainedBytes"]
+    },
+    {
+      "scenario": "switch-discriminated-1000",
+      "setting": "strict",
+      "arm": "verter",
+      "mode": "warm",
+      "threads": "default",
+      "metrics": ["warmMs"]
+    },
+    {
+      "scenario": "switch-discriminated-1000",
+      "setting": "strict",
+      "arm": "tsc-api",
+      "mode": "cold",
+      "threads": "default",
+      "metrics": ["firstTypeMs", "coldMs", "peakBytes", "retainedBytes"]
+    },
+    {
+      "scenario": "switch-discriminated-1000",
+      "setting": "strict",
+      "arm": "tsc-api",
+      "mode": "warm",
+      "threads": "default",
+      "metrics": ["warmMs"]
+    },
+    {
+      "scenario": "switch-discriminated-2048",
+      "setting": "strict",
+      "arm": "verter",
+      "mode": "cold",
+      "threads": "default",
+      "metrics": ["coldMs", "peakBytes"]
+    }
+  ]
+}

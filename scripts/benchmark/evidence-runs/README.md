@@ -27,7 +27,7 @@ manifests under `scripts/benchmark/evidence-run-fixtures/` (`pnpm test:scripts`)
 
 `scripts/benchmark/evidence-runs/<name>.json`. Each run name has exactly one
 owner: the change that needs the run adds its manifest and no other change
-edits it. Shipped: `skr-perf0-structural`.
+edits it. Shipped: `skr-perf0-structural`, `switch-discriminated`.
 
 | Field                             | Meaning                                                                                                                                                        |
 | --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
