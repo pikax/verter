@@ -130,6 +130,17 @@ and version), weak edges, dependency defaults, and dev unification controls.
 The bounded repository guards are held to the standard nextest speed gate and
 are not on its known-slow list.
 
+Generated component-meta corpus chunks retain a 10-second slow warning and a
+20-second termination deadline in both nextest profiles, including the local
+profile while its unrelated known-slow list remains. Apply policy to the whole
+chunk namespace so regenerated chunks cannot inherit a longer base watchdog.
+The compiled session policy guard probes nextest's override precedence and
+profile inheritance, with an unrelated base-policy control. The corpus
+layout and generator-parity guards preserve complete fixture coverage, authored
+overrides and fresh host state per logical row. Set `VERTER_CORPUS_AUDIT_TIMING=1`
+when running the chunk inventory to collect pool and row timings; report these
+as evidence without asserting machine-dependent elapsed times.
+
 ### TDD Workflow
 
 Behavioral code changes use TDD. Documentation, generated projections, formatting, and mechanical metadata changes use their owning freshness/validation evidence unless they also change executable behavior.
