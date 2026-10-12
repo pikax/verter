@@ -14,6 +14,17 @@
 use super::checker_probe_lane_tests::mismatches;
 
 #[test]
+fn contextual_this_marker_returning_this_preserves_the_marker_argument() {
+    let source = "export {}; declare global { interface ThisType<T> {} }
+function whole() { return { m() { return this; } } satisfies ThisType<{ n: 3 }>; }";
+    let failures = mismatches(
+        source,
+        &[("ReturnType<ReturnType<typeof whole>['m']>", "{ n: 3; }")],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
 fn contextual_this_marker_uses_inferred_data_before_methods() {
     let source = "\
 export {};
