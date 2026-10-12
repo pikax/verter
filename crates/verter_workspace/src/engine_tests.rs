@@ -1455,7 +1455,7 @@ fn lazy_resolution_retention_claims_wide_consumed_evidence_at_publication() {
         ChargeClass, ResolutionRetention, RetentionLimits, SemanticRetentionAccount,
     };
     for overlay_lane in [false, true] {
-        for admitted in [true, false] {
+        for (admitted, pressure) in [(true, false), (false, false), (false, true)] {
             let workspace = ownership_workspace();
             let importer = "/p/owner.ts";
             workspace.inject_file(importer.into(), Arc::from("import './dep'"));
@@ -1492,8 +1492,18 @@ fn lazy_resolution_retention_claims_wide_consumed_evidence_at_publication() {
             drop(facts);
             let witness = ReadSetSignature::new(Arc::from(vec![FactVersionRef::Receipt(consumed)]));
             assert!(witness.validates(world.as_ref()));
+            let captured = witness.clone();
             let account = SemanticRetentionAccount::new(RetentionLimits {
-                max_entry_bytes: if admitted { usize::MAX } else { page_bytes - 1 },
+                max_entry_bytes: if admitted || pressure {
+                    usize::MAX
+                } else {
+                    page_bytes
+                },
+                aggregate_ceiling_bytes: if pressure {
+                    page_bytes
+                } else {
+                    RetentionLimits::defaults().aggregate_ceiling_bytes
+                },
                 ..RetentionLimits::defaults()
             });
             WorkspaceAccess::install_resolution_retention(
@@ -1558,7 +1568,24 @@ fn lazy_resolution_retention_claims_wide_consumed_evidence_at_publication() {
                     }
                 );
             }
-            drop((outcome, world, workspace, overlay, pages));
+            workspace.inject_file(
+                "/p/unrelated.ts".into(),
+                Arc::from("export const unrelated = 1"),
+            );
+            let unrelated = WorkspaceRead::capture_resolution_world(&workspace).unwrap();
+            assert!(
+                captured.validates(unrelated.as_ref()),
+                "unrelated edits preserve the complete paged witness"
+            );
+            workspace.remove_file("/p/wide/1024.ts");
+            let edited = WorkspaceRead::capture_resolution_world(&workspace).unwrap();
+            assert!(
+                !captured.validates(edited.as_ref()),
+                "the last evidence page participates in invalidation"
+            );
+            drop((
+                outcome, world, unrelated, edited, captured, workspace, overlay, pages,
+            ));
             assert_eq!(account.snapshot().retained_bytes, 0);
         }
     }

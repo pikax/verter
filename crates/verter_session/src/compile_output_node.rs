@@ -51,6 +51,33 @@ use verter_type_engine::cache_runtime::node::{
 };
 use verter_type_engine::cache_runtime::singleflight::InflightTable;
 
+#[cfg(test)]
+thread_local! {
+    static SESSION_PUBLISH_EVIDENCE: std::cell::RefCell<Option<(ReadSetSignature, verter_session_query::retention::StoreAccount)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Inject fresh unclaimed evidence at the production publish boundary, after
+/// signature finalisation. The guard removes the seam on assertion failure.
+#[cfg(test)]
+pub(crate) fn with_session_publish_evidence_for_test<R>(
+    signature: ReadSetSignature,
+    account: verter_session_query::retention::StoreAccount,
+    run: impl FnOnce() -> R,
+) -> R {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            SESSION_PUBLISH_EVIDENCE.with(|hook| *hook.borrow_mut() = None);
+        }
+    }
+    SESSION_PUBLISH_EVIDENCE.with(|hook| {
+        assert!(hook.borrow().is_none(), "publish seams cannot nest");
+        *hook.borrow_mut() = Some((signature, account));
+    });
+    let _reset = Reset;
+    run()
+}
+
 // ── Key shapes ────────────────────────────────────────────────────────
 
 /// Cache key for the content-addressed compile-output node.
@@ -565,8 +592,20 @@ impl CompileOutputNodeFactValidatedSession {
     ) -> SessionPublishOutcome {
         match admission {
             SignatureAdmission::Cacheable(signature) => {
+                #[cfg(test)]
+                let (signature, account) = SESSION_PUBLISH_EVIDENCE.with(|hook| {
+                    match hook.borrow().as_ref() {
+                        Some((extra, account)) => {
+                            let facts = signature.facts.iter().chain(extra.facts.iter()).cloned().collect();
+                            (ReadSetSignature::new(verter_session_query::facts::fact_read_set::seal_canonical_signature(facts)), account.clone())
+                        }
+                        None => (signature, self.retention_account.clone()),
+                    }
+                });
+                #[cfg(not(test))]
+                let account = &self.retention_account;
                 if let Err(refusal) = verter_session_query::facts::receipt::claim_evidence_pages(
-                    self.retention_account.get(),
+                    account.get(),
                     &signature.facts,
                 ) {
                     profile_state.compile_slot_remove_for_node(profile_hash);
