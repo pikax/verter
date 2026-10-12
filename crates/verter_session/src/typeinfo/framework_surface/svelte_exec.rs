@@ -55,7 +55,7 @@ use crate::typeinfo::framework_surface::vue_exec::{
 };
 use crate::typeinfo::framework_surface::{SvelteSurfaceKey, SvelteSurfaceSource};
 use crate::typeinfo::surface::{TypeInfoSurface, TypeInfoSurfaceEntry};
-use crate::typeinfo::surface_resolution::adopt_surface;
+use crate::typeinfo::surface_resolution::{adopt_surface, adopt_surface_claim};
 use crate::typeinfo::types::TypeInfoQueryLevel;
 use verter_type_engine::project_semantic_dispatch::callable_view::{
     CallableNodeView, PositionalParamNode,
@@ -604,64 +604,55 @@ fn resolve_runes_props(
     // per-member `origin.canonical_file` is the heritage-aware declaration file
     // (the file the member's `name`/`: T` is written in), so a member inherited
     // from an imported base reports THAT base's file, not the props_type's.
-    let surface = navigate_param_to_object_surface(ctx, dispatch, owner, props_type);
-    let (mut fields, prop_origins) = match surface {
-        verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::Resolved(
-            surface,
-        )
-        | verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::OpenPresence(
-            surface,
-        ) => {
-            let surface = surface.into_inner();
-            let prop_origins = prop_origins_from_surface(owner, &surface);
-
-            let callable_roles = surface
-                .members
-                .iter()
-                .filter(|member| member.visibility.is_public())
-                .filter_map(|member| {
-                    member.published_name().map(|name| {
-                        (
-                            name.to_string(),
-                            classify_svelte_callable_role(
-                                dispatch,
-                                member.value,
-                                &facts.snippet_imports,
-                            ),
-                        )
+    let (adopted, guarantee) = adopt_surface_claim(navigate_param_to_object_surface(
+        ctx, dispatch, owner, props_type,
+    ));
+    // A complete surface (closed or open) classifies callable roles. An
+    // approximate subset publishes the members it built and keeps the claim.
+    // No surface and an unavailable claim both publish an empty props vector
+    // with that claim attached, so a missing `$props` type is not exact absence.
+    let (mut fields, prop_origins) = if guarantee.kind == 1 {
+        match adopted {
+            Some(surface) => {
+                let prop_origins = prop_origins_from_surface(owner, &surface);
+                let callable_roles = surface
+                    .members
+                    .iter()
+                    .filter(|member| member.visibility.is_public())
+                    .filter_map(|member| {
+                        member.published_name().map(|name| {
+                            (
+                                name.to_string(),
+                                classify_svelte_callable_role(
+                                    dispatch,
+                                    member.value,
+                                    &facts.snippet_imports,
+                                ),
+                            )
+                        })
                     })
-                })
-                .collect::<std::collections::HashMap<_, _>>();
-            let fields = props_from_typeinfo_surface(
-                ctx,
-                dispatch,
-                &macro_surface_shell(surface, AnalyzedMacroKind::DefineProps, owner),
-            );
-            let fields = fields
-                .into_iter()
-                .map(|mut field| {
-                    field.callable_role = callable_roles
-                        .get(&field.analysis.name)
-                        .cloned()
-                        .unwrap_or_default();
-                    field
-                })
-                .collect();
-            (fields, prop_origins)
+                    .collect::<std::collections::HashMap<_, _>>();
+                let fields = props_from_typeinfo_surface(
+                    ctx,
+                    dispatch,
+                    &macro_surface_shell(surface, AnalyzedMacroKind::DefineProps, owner),
+                );
+                let fields = fields
+                    .into_iter()
+                    .map(|mut field| {
+                        field.callable_role = callable_roles
+                            .get(&field.analysis.name)
+                            .cloned()
+                            .unwrap_or_default();
+                        field
+                    })
+                    .collect();
+                (fields, prop_origins)
+            }
+            None => (Vec::new(), Vec::new()),
         }
-        // A props type that RESOLVES to no object surface (a primitive /
-        // open generic) still establishes a PRESENT props surface —
-        // supported-empty, never a Missing.
-        verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::NoSurface(_) => {
-            (Vec::new(), Vec::new())
-        }
-        // An UNRESOLVABLE `$props()` type is NOT a supported-empty surface:
-        // record the typed reason (the enclosing cold-compute scope turns the
-        // outcome PARTIAL on the wire and refuses store admission) and
-        // publish the usable positive subset the producer still built.
-        verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::Incomplete(
-            incomplete,
-        ) => match incomplete.into_recorded_partial() {
+    } else {
+        match adopted {
             Some(surface) => {
                 let prop_origins = prop_origins_from_surface(owner, &surface);
                 let fields = props_from_typeinfo_surface(
@@ -672,7 +663,7 @@ fn resolve_runes_props(
                 (fields, prop_origins)
             }
             None => (Vec::new(), Vec::new()),
-        },
+        }
     };
     for row in &mut fields {
         if matches!(
@@ -711,6 +702,7 @@ fn resolve_runes_props(
         }
     }
     let dtos = MacroSurfaceDtos {
+        domain_guarantee: Some(guarantee),
         props: Some(PropsSurface {
             fields,
             index_signatures: Vec::new(),
@@ -980,17 +972,18 @@ fn resolve_snippet_props(
     // An INCOMPLETE props-surface resolution records its typed reason; the
     // enclosing cold-compute scope then publishes the snippet surface as
     // PARTIAL instead of laundering it into an ordinary absent macro.
-    let Some(surface) = adopt_surface(navigate_param_to_object_surface(
+    let (surface, guarantee) = adopt_surface_claim(navigate_param_to_object_surface(
         ctx, dispatch, owner, props_type,
-    )) else {
-        return ResolvedOutcome::Missing;
+    ));
+    let Some(surface) = surface else {
+        return snippet_claim_outcome(guarantee);
     };
 
     let filtered = retain_svelte_snippet_members(&surface, |member| {
         classify_svelte_callable_role(dispatch, member.value, &facts.snippet_imports)
     });
     if filtered.members.is_empty() {
-        return ResolvedOutcome::Missing;
+        return snippet_claim_outcome(guarantee);
     }
     // Typed role proof has already filtered every member before the callable
     // reader becomes reachable.
@@ -1001,11 +994,28 @@ fn resolve_snippet_props(
     );
     let (slots, slot_return_publications) = rows.into_iter().unzip();
     let dtos = MacroSurfaceDtos {
+        domain_guarantee: Some(guarantee),
         slots: Some(slots),
         slot_return_publications,
         ..Default::default()
     };
     ResolvedOutcome::Resolved(Arc::new(dtos))
+}
+
+/// A complete closed snippet domain with no snippet members is absence.
+/// An open, approximate, or unavailable claim stays on an empty slot list
+/// so the classifier cannot promote it to exact absence.
+fn snippet_claim_outcome(
+    guarantee: verter_session_query::analysis::component_meta::MetadataFactGuarantee,
+) -> ResolvedMacroPayload {
+    if guarantee.kind == 1 && !guarantee.open {
+        return ResolvedOutcome::Missing;
+    }
+    ResolvedOutcome::Resolved(Arc::new(MacroSurfaceDtos {
+        domain_guarantee: Some(guarantee),
+        slots: Some(Vec::new()),
+        ..Default::default()
+    }))
 }
 
 /// The SVELTE-SPECIFIC snippet-slot normalizer.
@@ -1515,18 +1525,20 @@ fn resolve_dispatcher(
     // An UNRESOLVABLE event map records its typed reason (the enclosing
     // cold-compute scope publishes PARTIAL); a genuinely surface-less event
     // map stays the present-but-empty emits surface.
-    let fields = adopt_surface(navigate_param_to_object_surface(
+    let (surface, guarantee) = adopt_surface_claim(navigate_param_to_object_surface(
         ctx, dispatch, owner, event_map,
-    ))
-    .map(|surface| {
-        emits_from_typeinfo_surface(
-            ctx,
-            dispatch,
-            &macro_surface_shell(surface, AnalyzedMacroKind::DefineEmits, owner),
-        )
-    })
-    .unwrap_or_default();
+    ));
+    let fields = surface
+        .map(|surface| {
+            emits_from_typeinfo_surface(
+                ctx,
+                dispatch,
+                &macro_surface_shell(surface, AnalyzedMacroKind::DefineEmits, owner),
+            )
+        })
+        .unwrap_or_default();
     let dtos = MacroSurfaceDtos {
+        domain_guarantee: Some(guarantee),
         emits: Some(EmitsSurface {
             fields,
             index_signatures: Vec::new(),
@@ -1566,14 +1578,16 @@ fn resolve_callback_prop_events(
     // An UNRESOLVABLE `$props()` source records its typed reason (the
     // enclosing cold-compute scope publishes PARTIAL); a resolvable props
     // type with no `on*` members stays the present-but-empty emits surface.
-    let fields = adopt_surface(navigate_param_to_object_surface(
+    let (surface, guarantee) = adopt_surface_claim(navigate_param_to_object_surface(
         ctx, dispatch, owner, props_type,
-    ))
-    .map(|surface| {
-        callback_events_from_props_surface(dispatch, &surface, &props_type.locator, owner)
-    })
-    .unwrap_or_default();
+    ));
+    let fields = surface
+        .map(|surface| {
+            callback_events_from_props_surface(dispatch, &surface, &props_type.locator, owner)
+        })
+        .unwrap_or_default();
     let dtos = MacroSurfaceDtos {
+        domain_guarantee: Some(guarantee),
         emits: Some(EmitsSurface {
             fields,
             index_signatures: Vec::new(),

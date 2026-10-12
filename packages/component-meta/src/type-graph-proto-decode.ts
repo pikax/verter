@@ -292,6 +292,7 @@ function decodeLegacyPayload(message: ComponentMetaPayload): NativeComponentMeta
     typeRegistry,
     ...(origin !== undefined ? { origin } : {}),
   } as unknown as NativeComponentMetaResult;
+  stampLegacyMemberFacts(result);
   result.facts = adaptLegacyFacts(result);
   return result;
 }
@@ -483,6 +484,54 @@ function summarizeFacts(facts: Record<string, FactResult<unknown>>): NativeResul
   return reasons.length === 0
     ? { kind: "complete" }
     : { kind: "partial", reasons: [...new Set(reasons)] };
+}
+
+function legacyPublicationFact(
+  publication: { kind: string; exactness?: string },
+  type: unknown,
+): FactResult<unknown> {
+  if (publication.kind === "failed" || (type === undefined && publication.kind !== "absent")) {
+    return { kind: "unavailable", causes: [102] };
+  }
+  if (publication.kind === "absent") return { kind: "complete", value: undefined };
+  if (publication.kind === "published" && publication.exactness === "incomplete") {
+    return { kind: "approximate", value: type, causes: [101] };
+  }
+  return { kind: "complete", value: type };
+}
+
+function stampLegacyMemberFacts(result: NativeComponentMetaResult): void {
+  for (const prop of result.props) {
+    prop.typeFact ??= legacyPublicationFact(prop.publication, prop.type) as NonNullable<
+      typeof prop.typeFact
+    >;
+  }
+  for (const event of result.events) {
+    event.typeFact ??= legacyPublicationFact(event.publication, event.payload) as NonNullable<
+      typeof event.typeFact
+    >;
+  }
+  for (const slot of result.slots) {
+    for (const binding of slot.bindings) {
+      binding.typeFact ??= legacyPublicationFact(binding.publication, binding.type) as NonNullable<
+        typeof binding.typeFact
+      >;
+    }
+  }
+  for (const prop of result.acceptedProps) {
+    prop.typeFact ??= legacyPublicationFact(prop.publication, prop.type) as NonNullable<
+      typeof prop.typeFact
+    >;
+  }
+  if (result.fallthroughSurface.kind === "branches") {
+    for (const branch of result.fallthroughSurface.branches) {
+      for (const prop of branch.props) {
+        prop.typeFact ??= legacyPublicationFact(prop.publication, prop.type) as NonNullable<
+          typeof prop.typeFact
+        >;
+      }
+    }
+  }
 }
 
 function adaptLegacyFacts(result: NativeComponentMetaResult): NativeComponentMetaResult["facts"] {
@@ -933,7 +982,7 @@ function decodeTypeRegistryEntry(
 ): Record<string, unknown> {
   return {
     name: graph.getString(readRequiredId(entry.nameId, "registry name")),
-    type: createGraphTypeExprRef(graph, readRequiredId(entry.typeNodeId, "registry type")),
+    ...decodeTypedRef(graph, entry.typeNodeId, "registry type"),
     ...maybe(
       "typeExpansion",
       decodeOptionalExpansionMetadata(entry.typeExpansion as ProtoRecord | undefined, graph),
@@ -1802,12 +1851,12 @@ function decodeProp(prop: ProtoRecord, graph: DecodedTypeGraph): Record<string, 
     ),
     required: requiredFact
       ? requiredFact.kind === "unavailable"
-        ? false
+        ? undefined
         : requiredFact.value
       : Boolean(prop.required),
     hasDefault: hasDefaultFact
       ? hasDefaultFact.kind === "unavailable"
-        ? false
+        ? undefined
         : hasDefaultFact.value
       : Boolean(prop.hasDefault),
     ...(graph.factMode ? { requiredFact, hasDefaultFact } : {}),
@@ -1897,14 +1946,14 @@ function decodeSlot(slot: ProtoRecord, graph: DecodedTypeGraph): Record<string, 
 function decodeModel(model: ProtoRecord, graph: DecodedTypeGraph): Record<string, unknown> {
   return {
     name: graph.getString(readRequiredId(model.nameId, "model name")),
-    type: createGraphTypeExprRef(graph, readRequiredId(model.typeNodeId, "model type")),
+    ...decodeTypedRef(graph, model.typeNodeId, "model type"),
   };
 }
 
 function decodeExposed(exposed: ProtoRecord, graph: DecodedTypeGraph): Record<string, unknown> {
   return {
     name: graph.getString(readRequiredId(exposed.nameId, "exposed name")),
-    type: createGraphTypeExprRef(graph, readRequiredId(exposed.typeNodeId, "exposed type")),
+    ...decodeTypedRef(graph, exposed.typeNodeId, "exposed type"),
     ...maybe(
       "typeExpansion",
       decodeOptionalExpansionMetadata(exposed.typeExpansion as ProtoRecord | undefined, graph),
@@ -2070,10 +2119,7 @@ function decodeAcceptedProp(prop: ProtoRecord, graph: DecodedTypeGraph): Record<
 function decodeAcceptedEvent(event: ProtoRecord, graph: DecodedTypeGraph): Record<string, unknown> {
   return {
     name: graph.getString(readRequiredId(event.nameId, "accepted event name")),
-    payload: createGraphTypeExprRef(
-      graph,
-      readRequiredId(event.payloadNodeId, "accepted event payload"),
-    ),
+    ...decodeTypedRef(graph, event.payloadNodeId, "accepted event payload", "payload"),
     ...maybe("rawSignature", graph.getStringMaybe(Number(event.rawSignatureId ?? 0))),
     provenance: decodeMemberProvenance(
       requireProtoMessage(event.provenance as ProtoRecord | undefined, "member provenance"),
@@ -2311,10 +2357,7 @@ function decodeFallthroughBranch(
     })),
     events: ((branch.events as ProtoRecord[] | undefined) ?? []).map((event) => ({
       name: graph.getString(readRequiredId(event.nameId, "fallthrough event name")),
-      payload: createGraphTypeExprRef(
-        graph,
-        readRequiredId(event.payloadNodeId, "fallthrough event payload"),
-      ),
+      ...decodeTypedRef(graph, event.payloadNodeId, "fallthrough event payload", "payload"),
       ...maybe("rawSignature", graph.getStringMaybe(Number(event.rawSignatureId ?? 0))),
       sources: decodeInheritedSources((event.sources as ProtoRecord[] | undefined) ?? [], graph),
     })),
@@ -2851,6 +2894,23 @@ function decodeGenericResolutionFailure(
       throw graphError(
         `component-meta graph payload has unknown generic resolution failure ${value}`,
       );
+  }
+}
+
+function decodeTypedRef(
+  graph: DecodedTypeGraph,
+  nodeId: unknown,
+  label: string,
+  key = "type",
+): Record<string, unknown> {
+  if (!graph.factMode) {
+    return { [key]: createGraphTypeExprRef(graph, readRequiredId(nodeId, label)) };
+  }
+  try {
+    const type = createGraphTypeExprRef(graph, readRequiredId(nodeId, label));
+    return { [key]: type, typeFact: { kind: "complete", value: type } };
+  } catch {
+    return { typeFact: { kind: "unavailable", causes: [100] } };
   }
 }
 

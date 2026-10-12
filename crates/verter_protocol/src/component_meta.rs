@@ -3114,6 +3114,101 @@ mod tests {
     const SCHEMA_12_EXPANSION_STOP_REASONS: i32 = 14;
     const SCHEMA_12_RESOLUTION_DIAGNOSTIC_KINDS: i32 = 14;
 
+    #[test]
+    fn partial_public_instance_is_approximate_on_json_and_protobuf() {
+        use crate::types::FfiPublicInstanceMeta;
+
+        let mut meta = super::build_test_meta();
+        meta.public_instance = Some(FfiPublicInstanceMeta {
+            completeness: "partial".to_string(),
+            members: Vec::new(),
+        });
+        let json = serde_json::to_value(&meta).expect("json");
+        assert_eq!(json["facts"]["publicInstance"]["kind"], "approximate");
+        assert_eq!(json["facts"]["publicInstance"]["open"], true);
+        assert_eq!(
+            json["facts"]["publicInstance"]["causes"],
+            serde_json::json!([103])
+        );
+        assert!(json["facts"]["publicInstance"]["value"].is_object());
+
+        let payload = super::component_meta_payload(&meta);
+        let guarantee = payload
+            .body
+            .expect("body")
+            .facts
+            .expect("facts")
+            .public_instance
+            .expect("public instance")
+            .guarantee
+            .expect("guarantee");
+        assert_eq!(guarantee.kind, 2);
+        assert_eq!(guarantee.causes, vec![103]);
+
+        meta.public_instance
+            .as_mut()
+            .expect("instance")
+            .completeness = "exact".to_string();
+        let exact = meta.facts().public_instance;
+        assert_eq!(exact.kind(), 1);
+        assert!(!exact.open());
+        meta.public_instance = None;
+        let absent = meta.facts().public_instance;
+        assert_eq!(absent.kind(), 1);
+        assert!(absent.value().expect("absent value").is_none());
+    }
+
+    #[test]
+    fn slot_json_projects_return_facts() {
+        use crate::types::{
+            FfiPublicationExactness, FfiPublicationProvenance, FfiPublicationReason,
+            FfiPublicationSemanticAuthority, FfiResolutionProvenance, FfiTypePublication,
+            FfiTypePublicationFailure,
+        };
+        use verter_type_expr::{PrimitiveName, TypeExpr};
+
+        let published = |exactness, reason| FfiTypePublication::Published {
+            semantic_authority: FfiPublicationSemanticAuthority::Resolved,
+            exactness,
+            reason,
+            provenance: FfiPublicationProvenance::Resolved(
+                FfiResolutionProvenance::SemanticEvaluator,
+            ),
+        };
+        let mut meta = super::build_test_meta();
+        let slot = &mut meta.slots[0];
+        slot.return_value = Some(TypeExpr::Primitive(PrimitiveName::String));
+        slot.return_publication = Some(published(
+            FfiPublicationExactness::ExactSymbolic,
+            FfiPublicationReason::ResolvedExactSymbolic,
+        ));
+        let complete = serde_json::to_value(&*slot).expect("complete json");
+        assert_eq!(complete["returnFact"]["kind"], "complete");
+        assert!(complete.get("returnValue").is_some());
+
+        slot.return_publication = Some(published(
+            FfiPublicationExactness::Incomplete,
+            FfiPublicationReason::ResolvedIncomplete,
+        ));
+        let approximate = serde_json::to_value(&*slot).expect("approximate json");
+        assert_eq!(approximate["returnFact"]["kind"], "approximate");
+        assert_eq!(
+            approximate["returnFact"]["causes"],
+            serde_json::json!([103])
+        );
+        assert!(approximate.get("returnValue").is_some());
+
+        slot.return_publication = Some(FfiTypePublication::Failed {
+            failure: FfiTypePublicationFailure::UnrepresentableRequiredMemberValue,
+            provenance: FfiResolutionProvenance::SemanticEvaluator,
+        });
+        let failed = serde_json::to_value(&*slot).expect("failed json");
+        assert_eq!(failed["returnFact"]["kind"], "unavailable");
+        assert_eq!(failed["returnFact"]["causes"], serde_json::json!([102]));
+        assert!(failed.get("returnValue").is_none());
+        assert!(failed.get("returnPublication").is_some());
+    }
+
     /// The surface-partial reason taxonomy has three hand-written mirrors —
     /// the serialized Rust enum, the proto enum, and the TypeScript decoder's
     /// native names — and only the serde spelling is mechanically derived

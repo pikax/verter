@@ -143,7 +143,12 @@ impl FfiComponentMeta {
             } else {
                 lower_bound(&self.fallthrough_surface)
             },
-            public_instance: complete(&self.public_instance),
+            public_instance: match self.public_instance.as_ref() {
+                Some(instance) if instance.completeness == "partial" => {
+                    lower_bound(&self.public_instance)
+                }
+                _ => complete(&self.public_instance),
+            },
             component_public_contract: match &self.component_public_contract {
                 FfiComponentContractAvailability::Supported { contract } => {
                     if matches!(contract.exactness, FfiContractExactness::Exact) {
@@ -373,6 +378,47 @@ impl Serialize for FfiEventMeta {
         if !self.tags.is_empty() {
             output.serialize_field("tags", &self.tags)?;
         }
+        output.end()
+    }
+}
+
+impl Serialize for FfiSlotMeta {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let return_fact = self
+            .return_publication
+            .as_ref()
+            .map(|publication| publication_fact(publication, self.return_value.as_ref()));
+        let omit_return_value = matches!(return_fact, Some(FfiFact::Unavailable { .. }));
+        let mut output = serializer.serialize_struct("FfiSlotMeta", 12)?;
+        output.serialize_field("name", &self.name)?;
+        output.serialize_field("isScoped", &self.is_scoped)?;
+        output.serialize_field("bindings", &self.bindings)?;
+        output.serialize_field("isRequired", &self.is_required)?;
+        if let Some(value) = &self.return_type {
+            output.serialize_field("returnType", value)?;
+        }
+        if let Some(fact) = &return_fact {
+            output.serialize_field("returnFact", fact)?;
+        }
+        if !omit_return_value {
+            if let Some(value) = &self.return_value {
+                output.serialize_field("returnValue", value)?;
+            }
+        }
+        if let Some(value) = &self.return_publication {
+            output.serialize_field("returnPublication", value)?;
+        }
+        if let Some(value) = &self.return_terminal_display {
+            output.serialize_field("returnTerminalDisplay", value)?;
+        }
+        if let Some(value) = &self.description {
+            output.serialize_field("description", value)?;
+        }
+        if !self.tags.is_empty() {
+            output.serialize_field("tags", &self.tags)?;
+        }
+        output.serialize_field("declaredInMacroTypeArg", &self.declared_in_macro_type_arg)?;
         output.end()
     }
 }

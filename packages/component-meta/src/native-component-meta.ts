@@ -19,6 +19,8 @@ import type {
 import type { TypeDescriptor } from "@verter/type-ir";
 import type { NativeTypeExprLike } from "./type-expr-bridge.js";
 
+export type { NativeTypeExprLike };
+
 export interface NativeJsdocTag {
   name: string;
   text?: string;
@@ -230,8 +232,10 @@ export interface NativePropMeta {
   publication: NativeTypePublication;
   terminalDisplay: NativeTerminalTypeDisplay;
   typeExpansion?: NativeExpansionMetadata;
-  required: boolean;
-  hasDefault: boolean;
+  /** Absent when the producer published no boolean. Absence is not false. */
+  required: boolean | undefined;
+  /** Absent when the producer published no boolean. Absence is not false. */
+  hasDefault: boolean | undefined;
   defaultValue?: string;
   description?: string;
   tags?: NativeJsdocTag[];
@@ -252,7 +256,8 @@ export interface NativePropMeta {
 export interface NativeEventMeta {
   typeFact?: FactResult<NativeTypeExprLike | undefined>;
   name: string;
-  payload: NativeTypeExprLike;
+  /** Absent when the payload fact is unavailable. */
+  payload?: NativeTypeExprLike;
   publication: NativeTypePublication;
   terminalDisplay: NativeTerminalTypeDisplay;
   payloadExpansion?: NativeExpansionMetadata;
@@ -295,12 +300,14 @@ export interface NativeSlotMeta {
 
 export interface NativeModelMeta {
   name: string;
-  type: NativeTypeExprLike;
+  type?: NativeTypeExprLike;
+  typeFact?: FactResult<NativeTypeExprLike | undefined>;
 }
 
 export interface NativeExposedMeta {
   name: string;
-  type: NativeTypeExprLike;
+  type?: NativeTypeExprLike;
+  typeFact?: FactResult<NativeTypeExprLike | undefined>;
   typeExpansion?: NativeExpansionMetadata;
   description?: string;
   tags?: NativeJsdocTag[];
@@ -333,8 +340,10 @@ export interface NativeResolvedTypeMeta {
   /**
    * Expanded lightweight native type.
    * This is what compat/public mapping consumes.
+   * Absent when the registry value fact is unavailable.
    */
-  type: NativeTypeExprLike;
+  type?: NativeTypeExprLike;
+  typeFact?: FactResult<NativeTypeExprLike | undefined>;
   typeExpansion?: NativeExpansionMetadata;
   /**
    * Pre-expansion source form retained for native callers that need to inspect
@@ -508,6 +517,7 @@ export interface NativeComponentFlags {
 export interface NativeAcceptedPropMeta {
   name: string;
   type?: NativeTypeExprLike;
+  typeFact?: FactResult<NativeTypeExprLike | undefined>;
   publication: NativeTypePublication;
   terminalDisplay: NativeTerminalTypeDisplay;
   required: boolean;
@@ -518,7 +528,8 @@ export interface NativeAcceptedPropMeta {
 
 export interface NativeAcceptedEventMeta {
   name: string;
-  payload: NativeTypeExprLike;
+  payload?: NativeTypeExprLike;
+  typeFact?: FactResult<NativeTypeExprLike | undefined>;
   rawSignature?: string;
   provenance: NativeMemberProvenance;
   availability: NativeMemberAvailability;
@@ -667,6 +678,7 @@ export type NativeUnresolvedBranchReason =
 export interface NativeFallthroughPropEntry {
   name: string;
   type?: NativeTypeExprLike;
+  typeFact?: FactResult<NativeTypeExprLike | undefined>;
   publication: NativeTypePublication;
   terminalDisplay: NativeTerminalTypeDisplay;
   sources: NativeInheritedSource[];
@@ -674,7 +686,8 @@ export interface NativeFallthroughPropEntry {
 
 export interface NativeFallthroughEventEntry {
   name: string;
-  payload: NativeTypeExprLike;
+  payload?: NativeTypeExprLike;
+  typeFact?: FactResult<NativeTypeExprLike | undefined>;
   rawSignature?: string;
   sources: NativeInheritedSource[];
 }
@@ -825,6 +838,18 @@ function compatRawType(display: NativeTerminalTypeDisplay): { rawType?: string }
   return typeof display.text === "string" ? { rawType: display.text } : {};
 }
 
+function usableMemberType<T extends { type?: NativeTypeExprLike; typeFact?: { kind: string } }>(
+  row: T,
+): row is T & { type: NativeTypeExprLike } {
+  return row.type !== undefined && row.typeFact?.kind !== "unavailable";
+}
+
+function usablePayload<T extends { payload?: NativeTypeExprLike; typeFact?: { kind: string } }>(
+  row: T,
+): row is T & { payload: NativeTypeExprLike } {
+  return row.payload !== undefined && row.typeFact?.kind !== "unavailable";
+}
+
 export function nativeComponentMetaToComponentMeta(meta: NativeComponentMetaResult): ComponentMeta {
   const nativeRegistry = buildNativeTypeRegistry(meta);
   const publicationRegistry = buildNativePublicationRegistry(meta);
@@ -896,11 +921,11 @@ export function nativeComponentMetaToComponentMeta(meta: NativeComponentMetaResu
       // Forward-compat coerce — see `NativeSlotMeta.declaredInMacroTypeArg`.
       declaredInMacroTypeArg: Boolean(slot.declaredInMacroTypeArg),
     })),
-    models: meta.models.map((model) => ({
+    models: meta.models.filter(usableMemberType).map((model) => ({
       name: model.name,
       type: typeExprToDescriptor(model.type, nativeRegistry),
     })),
-    exposed: meta.exposed.map((exposed) => ({
+    exposed: meta.exposed.filter(usableMemberType).map((exposed) => ({
       name: exposed.name,
       type: typeExprToDescriptor(exposed.type, nativeRegistry),
       ...(exposed.typeExpansion !== undefined ? { typeExpansion: exposed.typeExpansion } : {}),
@@ -1065,7 +1090,7 @@ function mapNativeAcceptedProps(
   props: NativeAcceptedPropMeta[],
   publicationRegistry?: Map<string, NativeTypeExprLike>,
 ): AcceptedPropMeta[] {
-  return props.map((p) => ({
+  return props.filter(usableMemberType).map((p) => ({
     name: p.name,
     type: publishedTypeExprToDescriptor(p, `accepted prop ${p.name}`, publicationRegistry),
     ...compatRawType(p.terminalDisplay),
@@ -1080,7 +1105,7 @@ function mapNativeAcceptedEvents(
   events: NativeAcceptedEventMeta[],
   nativeRegistry?: Map<string, NativeTypeExprLike>,
 ): AcceptedEventMeta[] {
-  return events.map((e) => ({
+  return events.filter(usablePayload).map((e) => ({
     name: e.name,
     payload: typeExprToDescriptor(e.payload, nativeRegistry),
     ...(e.rawSignature !== undefined ? { rawSignature: e.rawSignature } : {}),
@@ -1114,13 +1139,13 @@ function mapNativeFallthroughBranch(
   return {
     branchKey: branch.branchKey,
     ...(branch.conditionText !== undefined ? { conditionText: branch.conditionText } : {}),
-    props: branch.props.map((p) => ({
+    props: branch.props.filter(usableMemberType).map((p) => ({
       name: p.name,
       type: publishedTypeExprToDescriptor(p, `fallthrough prop ${p.name}`, publicationRegistry),
       ...compatRawType(p.terminalDisplay),
       sources: p.sources,
     })),
-    events: branch.events.map((e) => ({
+    events: branch.events.filter(usablePayload).map((e) => ({
       name: e.name,
       payload: typeExprToDescriptor(e.payload, nativeRegistry),
       ...(e.rawSignature !== undefined ? { rawSignature: e.rawSignature } : {}),
@@ -1140,6 +1165,7 @@ export function nativeTypeRegistryToMap(
   }
   const registry = new Map<string, TypeDescriptor>();
   for (const entry of meta.typeRegistry ?? []) {
+    if (!usableMemberType(entry)) continue;
     registry.set(entry.name, typeExprToDescriptor(entry.type, nativeRegistry));
   }
   return registry;
@@ -1154,9 +1180,10 @@ function buildNativeTypeRegistry(
 
   const registry = new Map<string, NativeTypeExprLike>();
   for (const entry of meta.typeRegistry) {
+    if (!usableMemberType(entry)) continue;
     registry.set(entry.name, entry.type);
   }
-  return registry;
+  return registry.size === 0 ? undefined : registry;
 }
 
 function buildNativePublicationRegistry(
@@ -1169,5 +1196,7 @@ function buildNativePublicationRegistry(
   if (localEntries.length === 0) {
     return undefined;
   }
-  return new Map(localEntries.map((entry) => [entry.name, entry.type]));
+  const entries = localEntries.filter(usableMemberType);
+  if (entries.length === 0) return undefined;
+  return new Map(entries.map((entry) => [entry.name, entry.type]));
 }

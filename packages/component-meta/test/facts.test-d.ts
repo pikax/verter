@@ -1,5 +1,6 @@
 import type { FactResult as SourceFact } from "../src/facts.js";
 import type { FactResult as PublicFact } from "../dist/index.js";
+import type { NativeEventMeta, NativeTypeExprLike } from "../src/native-component-meta.js";
 
 const complete: SourceFact<boolean> = { kind: "complete", value: false };
 const approximate: PublicFact<boolean> = { kind: "approximate", value: false, causes: [9001] };
@@ -13,3 +14,11 @@ const emptyCauses: PublicFact<boolean> = { kind: "approximate", value: false, ca
 void publicComplete;
 void sourceApproximate;
 void emptyCauses;
+
+declare const unavailableEvent: NativeEventMeta;
+// @ts-expect-error an unavailable payload is not a value the caller can read
+const missingPayload: NativeTypeExprLike = unavailableEvent.payload;
+declare const healthyEvent: NativeEventMeta & { payload: NativeTypeExprLike };
+const presentPayload: NativeTypeExprLike = healthyEvent.payload;
+void missingPayload;
+void presentPayload;

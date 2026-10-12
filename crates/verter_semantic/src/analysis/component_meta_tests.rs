@@ -252,6 +252,9 @@ fn resolved_emit_macro_input(
         slot_return_publications: Vec::new(),
         exposed: Vec::new(),
         default_keys: Vec::new(),
+        props_guarantee: None,
+        events_guarantee: None,
+        slots_guarantee: None,
     }
 }
 
@@ -576,6 +579,9 @@ fn resolved_macro_projection_merges_all_entries_for_one_macro_index() {
             slot_return_publications: Vec::new(),
             exposed: Vec::new(),
             default_keys: Vec::new(),
+            props_guarantee: None,
+            events_guarantee: None,
+            slots_guarantee: None,
         },
         crate::analysis::component_meta::ResolvedMacroInput {
             macro_index: 0,
@@ -585,6 +591,9 @@ fn resolved_macro_projection_merges_all_entries_for_one_macro_index() {
             slot_return_publications: Vec::new(),
             exposed: Vec::new(),
             default_keys: Vec::new(),
+            props_guarantee: None,
+            events_guarantee: None,
+            slots_guarantee: None,
         },
     ];
 
@@ -602,6 +611,40 @@ fn resolved_macro_projection_merges_all_entries_for_one_macro_index() {
             .collect::<Vec<_>>(),
         vec!["x", "y"]
     );
+}
+
+#[test]
+fn svelte_producer_guarantees_classify_the_membership_lanes() {
+    let unavailable = verter_session_query::analysis::component_meta::MetadataFactGuarantee {
+        kind: 3,
+        causes: vec![14],
+        open: true,
+    };
+    let open =
+        verter_session_query::analysis::component_meta::MetadataFactGuarantee::complete(true);
+    let resolved = vec![ResolvedMacroInput {
+        macro_index: 0,
+        props: Vec::new(),
+        emits: Vec::new(),
+        slots: Vec::new(),
+        slot_return_publications: Vec::new(),
+        exposed: Vec::new(),
+        default_keys: Vec::new(),
+        props_guarantee: Some(unavailable),
+        events_guarantee: Some(open),
+        slots_guarantee: None,
+    }];
+    let mut input = empty_input(&[]);
+    input.resolved_macros = &resolved;
+    let result = extract_component_meta(input);
+    assert_eq!(result.domain_guarantees.props.kind, 3);
+    assert_eq!(result.domain_guarantees.props.causes, vec![14]);
+    assert!(result.domain_guarantees.props.open);
+    assert_eq!(result.domain_guarantees.events.kind, 1);
+    assert!(result.domain_guarantees.events.open);
+    assert!(result.domain_guarantees.events.causes.is_empty());
+    assert_eq!(result.domain_guarantees.slots.kind, 1);
+    assert!(!result.domain_guarantees.slots.open);
 }
 
 #[test]
@@ -628,6 +671,9 @@ fn resolved_macro_projection_merges_metadata_without_splicing_evidence() {
             slot_return_publications: Vec::new(),
             exposed: Vec::new(),
             default_keys: Vec::new(),
+            props_guarantee: None,
+            events_guarantee: None,
+            slots_guarantee: None,
         },
         crate::analysis::component_meta::ResolvedMacroInput {
             macro_index: 0,
@@ -637,6 +683,9 @@ fn resolved_macro_projection_merges_metadata_without_splicing_evidence() {
             slot_return_publications: Vec::new(),
             exposed: Vec::new(),
             default_keys: Vec::new(),
+            props_guarantee: None,
+            events_guarantee: None,
+            slots_guarantee: None,
         },
     ];
 
@@ -831,6 +880,9 @@ fn define_emits_eval_cannot_supplement_resolver_owned_occurrences() {
         slots: Vec::new(),
         slot_return_publications: Vec::new(),
         default_keys: Vec::new(),
+        props_guarantee: None,
+        events_guarantee: None,
+        slots_guarantee: None,
     }];
     let evaluated = verter_session_query::analysis::type_expand::ExpandedComponentTypes {
         exposed: Vec::new(),
@@ -943,6 +995,9 @@ fn define_emits_eval_does_not_resurrect_omitted_imported_events() {
         slots: Vec::new(),
         slot_return_publications: Vec::new(),
         default_keys: Vec::new(),
+        props_guarantee: None,
+        events_guarantee: None,
+        slots_guarantee: None,
     }];
     let evaluated = verter_session_query::analysis::type_expand::ExpandedComponentTypes {
         exposed: Vec::new(),
@@ -2179,6 +2234,9 @@ fn partial_identifier_props_keep_resolved_authority_and_authored_evidence() {
         slot_return_publications: Vec::new(),
         exposed: Vec::new(),
         default_keys: Vec::new(),
+        props_guarantee: None,
+        events_guarantee: None,
+        slots_guarantee: None,
     }];
     let evaluated = verter_session_query::analysis::type_expand::ExpandedComponentTypes {
         exposed: Vec::new(),
@@ -2818,6 +2876,9 @@ fn resolved_slots_merge_local_details_and_append_new_slots() {
                 return_expr_scope: lower_for_test(Some("any")).1,
             },
         ],
+        props_guarantee: None,
+        events_guarantee: None,
+        slots_guarantee: None,
     }];
 
     let mut input = empty_input(&macros);
@@ -3590,6 +3651,9 @@ fn resolved_macros_supply_imported_metadata_without_snapshot_mutation() {
         slot_return_publications: Vec::new(),
         exposed: Vec::new(),
         default_keys: Vec::new(),
+        props_guarantee: None,
+        events_guarantee: None,
+        slots_guarantee: None,
     }];
 
     let mut input = empty_input(&macros);
@@ -3656,6 +3720,9 @@ fn resolved_macros_merge_with_local_prop_fields_for_mixed_type_sources() {
         slot_return_publications: Vec::new(),
         exposed: Vec::new(),
         default_keys: Vec::new(),
+        props_guarantee: None,
+        events_guarantee: None,
+        slots_guarantee: None,
     }];
 
     let mut input = empty_input(&macros);
@@ -3724,6 +3791,9 @@ fn native_framework_input_preserves_defaults_duplicate_event_publications_and_sl
         slot_return_publications: Vec::new(),
         exposed: Vec::new(),
         default_keys: vec!["count".to_string()],
+        props_guarantee: None,
+        events_guarantee: None,
+        slots_guarantee: None,
     }];
     let mut input = empty_input(&macros);
     input.resolved_macros = &resolved_macros;
@@ -3945,6 +4015,9 @@ fn runtime_prop_type_payload_wins_over_host_unknown_placeholder() {
         slot_return_publications: Vec::new(),
         exposed: Vec::new(),
         default_keys: Vec::new(),
+        props_guarantee: None,
+        events_guarantee: None,
+        slots_guarantee: None,
     }];
     let mut input = empty_input(&macros);
     input.resolved_macros = &resolved;

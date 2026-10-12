@@ -146,6 +146,7 @@ export function propsToJsonSchema(meta: ComponentMeta): JSONSchema {
   const required: string[] = [];
 
   for (const prop of meta.props) {
+    if (typeof prop.required !== "boolean") continue;
     properties[prop.name] = typeToJsonSchema(prop.type);
     if (prop.required) {
       required.push(prop.name);

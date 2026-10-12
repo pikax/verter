@@ -71,6 +71,29 @@ impl MetadataFactGuarantee {
             open,
         }
     }
+
+    /// Join another producer claim into this one. Unavailable outranks
+    /// approximate, which outranks complete. Openness and causes accumulate.
+    pub fn absorb(&mut self, next: &Self) {
+        self.kind = self.kind.max(next.kind);
+        self.open |= next.open;
+        for cause in &next.causes {
+            if !self.causes.contains(cause) {
+                self.causes.push(*cause);
+            }
+        }
+    }
+
+    /// Join an optional claim. `None` is not a claim and leaves `slot` unchanged.
+    pub fn absorb_option(slot: &mut Option<Self>, next: Option<Self>) {
+        let Some(next) = next else {
+            return;
+        };
+        match slot {
+            None => *slot = Some(next),
+            Some(current) => current.absorb(&next),
+        }
+    }
 }
 impl Default for MetadataFactGuarantee {
     fn default() -> Self {

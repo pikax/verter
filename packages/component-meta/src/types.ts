@@ -137,10 +137,16 @@ export interface PropMeta {
   type: TypeDescriptor;
   /** Native expansion exactness/status for the prop type, when available. */
   typeExpansion?: TypeExpansionMeta;
-  /** Whether the prop is required (no default, no `?`). */
-  required: boolean;
-  /** Whether the prop has a default value (via `withDefaults` or Options API). */
-  hasDefault: boolean;
+  /**
+   * Whether the prop is required (no default, no `?`).
+   * `undefined` means the producer published no boolean; it is not false.
+   */
+  required: boolean | undefined;
+  /**
+   * Whether the prop has a default value (via `withDefaults` or Options API).
+   * `undefined` means the producer published no boolean; it is not false.
+   */
+  hasDefault: boolean | undefined;
   /** Original TS type annotation string (e.g. `"string | number"`). */
   rawType?: string;
   /** Vue runtime constructor names (e.g. `["String", "Number"]`). */

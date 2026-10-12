@@ -1582,21 +1582,17 @@ pub struct FfiEventMeta {
     pub tags: Vec<FfiJsdocTag>,
 }
 
-#[derive(Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone)]
 pub struct FfiSlotMeta {
     pub name: String,
     pub is_scoped: bool,
     pub bindings: Vec<FfiSlotBindingMeta>,
     pub is_required: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub return_type: Option<String>,
     pub return_value: Option<verter_type_expr::TypeExpr>,
     pub return_publication: Option<FfiTypePublication>,
     pub return_terminal_display: Option<FfiTerminalTypeDisplay>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<FfiJsdocTag>,
     /// Producer fact: does this slot come from the component's own AUTHORED
     /// slots surface (the resolved `defineSlots<T>()` macro surface or a

@@ -8,6 +8,12 @@ import {
   OriginGraphSchema,
   SurfacePartialReasonSchema,
 } from "@verter/proto";
+import {
+  BoolFactSchema,
+  ExposedMetaSchema,
+  ModelMetaSchema,
+  TypeRegistryEntrySchema,
+} from "../../proto/src/gen/verter/v1/component_meta_pb.js";
 import { decodeTypedComponentMetaPayload } from "./type-graph-proto-decode.js";
 
 describe("decodeTypedComponentMetaPayload", () => {
@@ -691,6 +697,33 @@ describe("result completeness fail-closed branches", () => {
   it("still accepts the well-formed complete surface", () => {
     expect(decodeCompletenessOf({ kind: 1, partialReasons: [] })).toEqual({ kind: "complete" });
   });
+
+  it("stamps a schema-12 failed publication without dropping the healthy sibling", async () => {
+    const base = createTestComponentMetaPayload();
+    const healthy = base.body!.props![0]!;
+    base.body!.props!.push({
+      ...healthy,
+      nameId: 6,
+      typeNodeId: 0,
+      publication: {
+        ...healthy.publication!,
+        kind: 1,
+        failure: 1,
+        provenance: 1,
+      },
+      terminalDisplay: { textId: 0 },
+    });
+    const result = decodeTypedComponentMetaPayload(
+      toBinary(ComponentMetaPayloadSchema, create(ComponentMetaPayloadSchema, base)),
+    );
+    expect(result.facts!.props.kind).not.toBe("unavailable");
+    expect(result.props.map((prop) => prop.name)).toEqual(["root", "label"]);
+    expect(result.props[1]?.typeFact).toEqual({ kind: "unavailable", causes: [102] });
+    expect(result.props[0]?.typeFact?.kind).toBe("complete");
+    const { nativeComponentMetaToComponentMeta } = await import("./native-component-meta.js");
+    const projected = nativeComponentMetaToComponentMeta(result);
+    expect(projected.props.map((prop) => prop.name)).toEqual(["root"]);
+  });
 });
 
 describe("independent component facts", () => {
@@ -786,6 +819,188 @@ describe("independent component facts", () => {
     expect(typeExprToDescriptor(result.props[1].type!)).toMatchObject({
       rawType: "infer TreeNode extends undefined",
     });
+  });
+
+  it("keeps healthy models and registry entries when one value node is invalid", async () => {
+    const payload = fixture();
+    payload.typeGraph!.nodes[0].kind = {
+      case: "array",
+      value: { $typeName: "verter.v1.ArrayNode", elementNodeId: 999, readonly: false },
+    };
+    payload.body!.facts!.models!.value!.entries.push(
+      create(ModelMetaSchema, { nameId: 6, typeNodeId: 1 }),
+      create(ModelMetaSchema, { nameId: 7, typeNodeId: 2 }),
+    );
+    payload.body!.facts!.exposed!.value!.entries.push(
+      create(ExposedMetaSchema, { nameId: 6, typeNodeId: 1, descriptionId: 0, tags: [] }),
+      create(ExposedMetaSchema, { nameId: 7, typeNodeId: 2, descriptionId: 0, tags: [] }),
+    );
+    payload.body!.facts!.typeRegistry!.value!.entries.push(
+      create(TypeRegistryEntrySchema, { nameId: 6, typeNodeId: 1, rawTypeId: 0 }),
+      create(TypeRegistryEntrySchema, { nameId: 7, typeNodeId: 2, rawTypeId: 0 }),
+    );
+    const result = decode(payload);
+    expect(result.facts!.models.kind).toBe("complete");
+    expect(result.models.map((model) => model.name)).toEqual(["label", "next"]);
+    expect(result.models[0]?.typeFact).toEqual({ kind: "unavailable", causes: [100] });
+    expect(result.models[1]?.typeFact?.kind).toBe("complete");
+    expect(result.models[1]?.type).toBeDefined();
+    expect(result.facts!.exposed.kind).toBe("complete");
+    expect(result.exposed.map((entry) => entry.name)).toEqual(["label", "next"]);
+    expect(result.exposed[0]?.typeFact?.kind).toBe("unavailable");
+    expect(result.exposed[1]?.type).toBeDefined();
+    expect(result.facts!.typeRegistry.kind).toBe("complete");
+    expect(result.typeRegistry.map((entry) => entry.name)).toEqual(["TreeNode", "label", "next"]);
+    expect(result.typeRegistry.find((entry) => entry.name === "next")?.typeFact?.kind).toBe(
+      "complete",
+    );
+    const { nativeComponentMetaToComponentMeta, nativeTypeRegistryToMap } =
+      await import("./native-component-meta.js");
+    const projected = nativeComponentMetaToComponentMeta(result);
+    expect(projected.models.map((model) => model.name)).toEqual(["next"]);
+    expect(projected.exposed.map((entry) => entry.name)).toEqual(["next"]);
+    expect([...(nativeTypeRegistryToMap(result)?.keys() ?? [])]).toEqual(["next"]);
+  });
+
+  it("projects an unavailable boolean fact as absence, not false", async () => {
+    const payload = fixture();
+    const props = payload.body!.facts!.props!.value!.entries;
+    const unavailableBool = () =>
+      create(BoolFactSchema, {
+        guarantee: { kind: 3, causes: [104] },
+      });
+    const falseBool = () =>
+      create(BoolFactSchema, {
+        guarantee: { kind: 1, causes: [] },
+        value: false,
+      });
+    props[0].requiredFact = unavailableBool();
+    props[0].hasDefaultFact = unavailableBool();
+    props.push({ ...props[0], nameId: 6 });
+    props[1].requiredFact = falseBool();
+    props[1].hasDefaultFact = falseBool();
+    const result = decode(payload);
+    expect(result.facts!.props.kind).toBe("complete");
+    expect(result.props.map((prop) => prop.name)).toEqual(["root", "label"]);
+    expect(result.props[0]?.required).toBeUndefined();
+    expect(result.props[0]?.hasDefault).toBeUndefined();
+    expect(result.props[0]?.requiredFact).toEqual({ kind: "unavailable", causes: [104] });
+    expect(result.props[1]?.required).toBe(false);
+    expect(result.props[1]?.hasDefault).toBe(false);
+    const { nativeComponentMetaToComponentMeta } = await import("./native-component-meta.js");
+    const { propsToJsonSchema } = await import("./adapters/json-schema.js");
+    const { propsToZodString } = await import("./adapters/zod.js");
+    const projected = nativeComponentMetaToComponentMeta(result);
+    expect(projected.props.map((prop) => prop.name)).toEqual(["root", "label"]);
+    expect(projected.props[0]?.required).toBeUndefined();
+    expect(projected.props[1]?.required).toBe(false);
+    const schema = propsToJsonSchema(projected);
+    expect(schema.properties).not.toHaveProperty("root");
+    expect(schema.properties).toHaveProperty("label");
+    expect(schema.required ?? []).not.toContain("label");
+    const zod = propsToZodString(projected);
+    expect(zod).not.toContain("root");
+    expect(zod).toContain("label");
+    expect(zod).toContain(".optional()");
+  });
+
+  it("keeps failed accepted and fallthrough values from aborting projection", async () => {
+    const result = decode(fixture());
+    const type = result.props[0].type!;
+    const publication = result.props[0].publication;
+    const terminalDisplay = result.props[0].terminalDisplay;
+    const failedPublication = {
+      kind: "failed" as const,
+      failure: "unrepresentableRequiredMemberValue" as const,
+      provenance: "semanticEvaluator" as const,
+    };
+    result.acceptedProps = [
+      {
+        name: "bad",
+        typeFact: { kind: "unavailable", causes: [102] },
+        publication: failedPublication,
+        terminalDisplay: {},
+        required: true,
+        provenance: { kind: "declared" },
+        availability: { kind: "always" },
+        kind: "declaredProp",
+      },
+      {
+        name: "ok",
+        type,
+        typeFact: { kind: "complete", value: type },
+        publication,
+        terminalDisplay,
+        required: false,
+        provenance: { kind: "declared" },
+        availability: { kind: "always" },
+        kind: "declaredProp",
+      },
+    ];
+    result.acceptedEvents = [
+      {
+        name: "bad",
+        typeFact: { kind: "unavailable", causes: [100] },
+        provenance: { kind: "declared" },
+        availability: { kind: "always" },
+        kind: "listener",
+      },
+      {
+        name: "ok",
+        payload: type,
+        typeFact: { kind: "complete", value: type },
+        provenance: { kind: "declared" },
+        availability: { kind: "always" },
+        kind: "declaredEmit",
+      },
+    ];
+    result.fallthroughSurface = {
+      kind: "branches",
+      branches: [
+        {
+          branchKey: "root",
+          props: [
+            {
+              name: "bad",
+              typeFact: { kind: "unavailable", causes: [102] },
+              publication: failedPublication,
+              terminalDisplay: {},
+              sources: [],
+            },
+            {
+              name: "ok",
+              type,
+              typeFact: { kind: "complete", value: type },
+              publication,
+              terminalDisplay,
+              sources: [],
+            },
+          ],
+          events: [
+            { name: "bad", typeFact: { kind: "unavailable", causes: [100] }, sources: [] },
+            {
+              name: "ok",
+              payload: type,
+              typeFact: { kind: "complete", value: type },
+              sources: [],
+            },
+          ],
+          rootChain: [],
+          status: { kind: "resolved" },
+        },
+      ],
+    };
+    const { nativeComponentMetaToComponentMeta } = await import("./native-component-meta.js");
+    const projected = nativeComponentMetaToComponentMeta(result);
+    expect(projected.acceptedProps.map((prop) => prop.name)).toEqual(["ok"]);
+    expect(projected.acceptedEvents.map((event) => event.name)).toEqual(["ok"]);
+    if (projected.fallthroughSurface.kind !== "branches") {
+      throw new Error("expected fallthrough branches");
+    }
+    expect(projected.fallthroughSurface.branches[0].props.map((prop) => prop.name)).toEqual(["ok"]);
+    expect(projected.fallthroughSurface.branches[0].events.map((event) => event.name)).toEqual([
+      "ok",
+    ]);
   });
 
   it("ignores a conflicting legacy summary and preserves the delivery refusal", () => {
