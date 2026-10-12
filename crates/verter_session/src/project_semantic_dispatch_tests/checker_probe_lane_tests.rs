@@ -326,23 +326,8 @@ pub(super) fn degradation_in(
         .ok_or(())
 }
 
-/// The typed outcome of the body-derived return of `function` in a module
-/// of `source`, checked in `project`: its degradation when it produced a
-/// value, or the typed [`FlowReturnError`](crate::host_flow_return_audit::FlowReturnError) it
-/// answered instead — a missing function (`Failure(Missing)`) told apart
-/// from a budget or any other incompleteness.
-pub(super) fn flow_return_outcome_in(
-    project: ProbeProject<'_>,
-    source: &str,
-    function: &str,
-) -> Result<
-    Option<verter_type_engine::semantic_query::FlowReturnDegradation>,
-    crate::host_flow_return_audit::FlowReturnError,
-> {
-    flow_return_outcome_on_host(&probe_host(project), source, function)
-}
-
-/// [`flow_return_outcome_in`] on `host`, a probe host the caller configured
+/// The typed outcome of body-derived return inference on a probe host
+/// the caller configured
 /// (a budget set on its stores, say): the probe module is (re)written on it
 /// and `function`'s return read through the audited boundary.
 pub(super) fn flow_return_outcome_on_host(
