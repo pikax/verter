@@ -302,12 +302,14 @@ defineEmits<{ save: [id: number] }>()
 /// A property-style emit whose projected MEMBER-PATH source has a VALID
 /// base but whose path projection lands on the walker's interned
 /// failed-query node (`Opaque(Miss)` — the payload declares no such
-/// member) FAILS the output with the typed
-/// `ComponentMetaOutputFailure::UnraisableSource` — a
-/// PRESENT-but-unraisable source must NEVER silently publish as
-/// `Unknown`. DISTINCT: a genuinely schema-ABSENT payload position
-/// (source `None`) is NOT a failure — the central missing-source policy
-/// keeps rendering the canonical typed `Unknown`.
+/// member) keeps the component envelope. The lane is
+/// `PublicationResult::Failed` with no materialized value, and output
+/// completeness folds `SEMANTIC_QUERY_FAULT`. A present unraisable
+/// source must never publish as `Unknown`, and one unavailable value
+/// must not sink the envelope. An execution abort still returns
+/// `ComponentMetaOutputError`. DISTINCT: a genuinely schema-ABSENT
+/// payload position (source `None`) is NOT a failure — the central
+/// missing-source policy keeps rendering the canonical typed `Unknown`.
 #[test]
 fn member_path_projection_onto_interned_miss_refuses_value_never_silent_unknown() {
     let project = project_with(
