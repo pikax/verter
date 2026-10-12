@@ -177,6 +177,20 @@ fn switch_fallback_subtracts_handled_tags() {
 }
 
 #[test]
+fn switch_preserves_exact_discriminant_writes() {
+    for (parameter, discriminant) in [("U", "x.kind"), ("{payload: U}", "x.payload.kind")] {
+        for body in [
+            "case 'b': return DISCRIMINANT; default: return 'handled' as const;",
+            "case 'a': return 'handled' as const; default: return DISCRIMINANT;",
+        ] {
+            let body = body.replace("DISCRIMINANT", discriminant);
+            let source = format!("type U = {{kind: 'a'; value: 1}} | {{kind: 'b'; value: 2}}; function f(x: {parameter}) {{ {discriminant} = 'a'; switch ({discriminant}) {{ {body} }} }} type Result = ReturnType<typeof f>;");
+            assert_literal_union(&resolve_switch(&source), &["b", "handled"]);
+        }
+    }
+}
+
+#[test]
 fn parameter_assignment_updates_member_reads() {
     for (body, expected) in [
         ("x = y; return x.value;", vec![2]),
@@ -187,6 +201,24 @@ fn parameter_assignment_updates_member_reads() {
     ] {
         let source = format!("type U = {{kind: 'a' | 'b'; value: 1}} | {{kind: 'c'; value: 2}}; function f(x: U, y: {{kind: 'c'; value: 2}}) {{ {body} }} type Result = ReturnType<typeof f>;");
         assert_switch_literals(resolve_switch(&source), &expected, false);
+    }
+}
+
+#[test]
+fn named_union_local_assignments_select_the_declared_member() {
+    for declaration in [
+        "type U = {kind: 'a'; value: 1} | {kind: 'b'; value: 2}; type Named = U;",
+        "type U<T> = {kind: 'a'; value: T} | {kind: 'b'; value: 2}; type Named = U<1>;",
+        "type U<T> = {kind: 'a'; value: T} | {kind: 'b'; value: 2}; type Forward<T> = U<T>; type Named = Forward<1>;",
+        "type U<T = 1> = {kind: 'a'; value: T} | {kind: 'b'; value: 2}; type Named = U;",
+    ] {
+        for body in [
+            "let x: Named = y; return x.value;",
+            "let x: Named; x = y; return x.value;",
+        ] {
+            let source = format!("{declaration} function f(y: {{kind: 'b'; value: 2}}) {{ {body} }} type Result = ReturnType<typeof f>;");
+            assert_switch_literals(resolve_switch(&source), &[2], false);
+        }
     }
 }
 

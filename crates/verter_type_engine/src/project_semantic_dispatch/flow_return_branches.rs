@@ -468,6 +468,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         {
             return None;
         }
+        if !subject.path.is_empty() && self.narrowed_read(subject).is_some() {
+            return None;
+        }
         let parent = verter_session_query::flow::slice::SliceNarrowSubject {
             root: subject.root.clone(),
             path: Arc::from(&subject.path[..subject.path.len().saturating_sub(1)]),

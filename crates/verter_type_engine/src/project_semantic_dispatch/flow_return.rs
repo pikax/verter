@@ -7070,23 +7070,107 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// `getAssignmentReducedType` gate (a NON-union declared type
     /// supplies its binding verbatim). A `keyof` whose keys settle IS the
     /// union of those keys (`keyof Box<string>` is `"value" | "size"`); the
-    /// carrier only keeps the name the checker prints it by. Named union
-    /// declarations use the same identity resolution as the relation engine.
+    /// carrier only keeps the name the checker prints it by. Named
+    /// unions are inspected through shallow body lowering;
+    /// class surfaces and deferred operations stay lazy until demanded.
     fn union_arms_of(&self, node: SemanticNodeId) -> Option<Vec<SemanticNodeId>> {
-        let node = match self.unwrap_identity_carrier_for_relation(node) {
-            IdentityCarrierUnwrap::Concrete(node) => node,
-            IdentityCarrierUnwrap::Unresolvable => return None,
-        };
-        let base = match self.graph().node_data(node).as_deref() {
-            Some(SemanticNodeData::Union(members)) => return Some(members.to_vec()),
-            Some(SemanticNodeData::KeyOf { base }) => *base,
-            _ => return None,
-        };
-        let keys = self.key_set_of(base)?;
-        match self.graph().node_data(keys).as_deref() {
-            Some(SemanticNodeData::Union(members)) => Some(members.to_vec()),
-            _ => None,
+        let mut current = node;
+        let mut seen = rustc_hash::FxHashSet::default();
+        while seen.insert(current) {
+            let (identity, args): (crate::semantic_query::DeclIdentity, Arc<[SemanticNodeId]>) =
+                match self.graph().node_data(current).as_deref()? {
+                    SemanticNodeData::Union(members) => return Some(members.to_vec()),
+                    SemanticNodeData::KeyOf { base } => {
+                        current = self.key_set_of(*base)?;
+                        continue;
+                    }
+                    SemanticNodeData::Alias(inner) => {
+                        current = *inner;
+                        continue;
+                    }
+                    SemanticNodeData::DeclRef { identity } => (identity.clone(), Arc::from([])),
+                    SemanticNodeData::InstantiationRef { base, args } => {
+                        (base.clone(), Arc::clone(args))
+                    }
+                    _ => return None,
+                };
+            let prepared = self.ctx.prepared_type_decl_return_only(
+                &identity.canonical_id,
+                identity.owner,
+                &identity.decl_name,
+            )?;
+            if prepared.kind != verter_session_query::declarations::TypeDeclKind::Alias {
+                return None;
+            }
+            let body = super::raise::deref_slot_body(self.ctx, &prepared.body_facts.body_slot)?;
+            let mut outer = &body;
+            while let verter_type_expr::TypeExpr::Parenthesized(inner) = outer {
+                outer = inner;
+            }
+            let shallow = match outer {
+                verter_type_expr::TypeExpr::Union(_) => true,
+                verter_type_expr::TypeExpr::Ref { type_arguments, .. } => {
+                    prepared.type_parameters.is_empty()
+                        || type_arguments.iter().all(|argument| {
+                            matches!(argument, verter_type_expr::TypeExpr::Ref { name, type_arguments }
+                                if type_arguments.is_empty()
+                                    && prepared.type_parameters.iter().any(|parameter| parameter.name == name.as_ref()))
+                        })
+                }
+                _ => false,
+            };
+            if !shallow {
+                return None;
+            }
+            let indexed = self
+                .ctx
+                .ensure_indexed_ready_serve(&identity.canonical_id)?
+                .indexed;
+            let scope = crate::semantic_query::NodeScopeId::File {
+                canonical_id: Arc::clone(&identity.canonical_id),
+                owner: identity.owner,
+                whole_hash: indexed.whole_hash,
+                local_scope: None,
+            };
+            let payload = self
+                .ctx
+                .prepared_decl_bundle(&identity.canonical_id)
+                .map(|bundle| {
+                    crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
+                        &bundle,
+                        identity.owner,
+                    )
+                });
+            let shadowing =
+                crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(
+                    payload.as_ref(),
+                );
+            let arguments = self.declared_application_arguments(
+                &identity,
+                &args,
+                crate::semantic_query::ProjectionReductionContext::structural_transit(),
+            )?;
+            let env = prepared
+                .type_parameters
+                .iter()
+                .zip(arguments.iter().copied())
+                .map(|(parameter, argument)| (parameter.name.clone(), argument))
+                .collect();
+            current = self.shallow_lower_type_expr_with_context_at_locator(
+                &body,
+                &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
+                    prepared.body_facts.body_slot.clone(),
+                ),
+                &env,
+                &scope,
+                &prepared.name_resolution,
+                payload.as_ref(),
+                &shadowing,
+                &mut Vec::new(),
+                crate::semantic_query::ProjectionReductionContext::structural_transit(),
+            );
         }
+        None
     }
 
     /// Join one function's return-site contributors with the fallthrough
@@ -16528,9 +16612,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         expanded: &mut rustc_hash::FxHashSet<SemanticNodeId>,
         gapped: &mut bool,
     ) {
-        if let Some(members) = self.dispatch.union_arms_of(node) {
+        if let Some(SemanticNodeData::Union(members)) =
+            self.dispatch.arena().node_data(node).as_deref()
+        {
             if expanded.insert(node) {
-                for member in members {
+                for member in members.iter().copied() {
                     self.collect_enumerated_arms(member, arms, expanded, gapped);
                 }
             }
@@ -18411,6 +18497,20 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let parent = self.narrow_parent_by_discriminant(subject, &mut |this, member| {
             this.narrow_type_by_equality(member, literal_node, negated, loose)
         });
+        if comparison == LiteralComparison::SwitchCase {
+            if let GuardNarrowing::Narrowed(parent_subject, node) = &parent {
+                // Switch dispatch reads the selected parent's discriminant,
+                // including when an earlier property write has its own fact.
+                self.push_narrowing(parent_subject, *node);
+                if let Some(member) = self.member_declared_node(subject) {
+                    if let Some(narrowed) =
+                        self.narrow_type_by_equality(member, literal_node, negated, loose)
+                    {
+                        return GuardNarrowing::Narrowed(subject.clone(), narrowed);
+                    }
+                }
+            }
+        }
         // A member whose type this frame cannot read establishes no
         // readable narrow: a later read of it is unreadable on its own.
         if before.is_some_and(|node| self.dispatch.graph().node_reaches_unresolved(node)) {
