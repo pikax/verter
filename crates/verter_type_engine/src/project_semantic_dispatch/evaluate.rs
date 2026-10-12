@@ -333,6 +333,7 @@ enum DeferredEvaluationStage {
 }
 
 struct DeferredEvaluationFrame {
+    tracer: std::rc::Rc<crate::resolver_core::resolver_context::OwnedFactTracer>,
     entry_node: SemanticNodeId,
     node: SemanticNodeId,
     context: ProjectionReductionContext,
@@ -351,10 +352,18 @@ struct DeferredEvaluationFrame {
 }
 
 impl DeferredEvaluationFrame {
-    fn new(node: SemanticNodeId, context: ProjectionReductionContext, budget_epoch: u64) -> Self {
+    fn new(
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+        budget_epoch: u64,
+        basis: verter_session_query::facts::fact_cache::AggregateGenerations,
+    ) -> Self {
         let mut visited = rustc_hash::FxHashSet::default();
         visited.insert(node);
         Self {
+            tracer: std::rc::Rc::new(
+                crate::resolver_core::resolver_context::OwnedFactTracer::new(basis),
+            ),
             entry_node: node,
             node,
             context,
@@ -2047,11 +2056,34 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
+    fn evaluation_fact_basis(
+        &self,
+    ) -> verter_session_query::facts::fact_cache::AggregateGenerations {
+        verter_session_query::facts::fact_cache::AggregateGenerations::from_seed(
+            &verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+            &self.snapshot.clocks().live(),
+        )
+    }
+
     fn finish_deferred_evaluation_frame(
         &self,
         mut frame: DeferredEvaluationFrame,
         result: SemanticNodeId,
+        parent: Option<&DeferredEvaluationFrame>,
     ) -> EvaluateDeferredOutcome {
+        let tracer = std::rc::Rc::try_unwrap(frame.tracer)
+            .unwrap_or_else(|_| unreachable!("a completed evaluation owns its tracer"));
+        let signature = verter_session_query::facts::fact_cache::SignatureAdmission::from_finalise(
+            tracer.into_read_set().finalise(),
+        )
+        .into_cacheable();
+        if let Some(signature) = &signature {
+            use crate::fact_signature_helpers::ReadSetSignatureExt as _;
+            let _parent_scope = parent.map(|parent| parent.tracer.install());
+            signature.bubble(self.ctx);
+        } else {
+            frame.cache_suppress = true;
+        }
         // A recovery made under the evaluation — an inline relation, a
         // canonical construction — makes it a resource partial, never a
         // published memo entry, even where no read carried its reason here.
@@ -2091,12 +2123,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             self.connected_demand
                 .record_prerequisite(receipt, super::cost_receipt::Nesting::InPlace);
         }
-        if let (true, false, Some(receipt)) = (complete, frame.cache_suppress, receipt) {
+        if let (true, false, Some(receipt), Some(signature)) =
+            (complete, frame.cache_suppress, receipt, signature)
+        {
             self.graph().evaluate_deferred_memo_publish(
                 frame.entry_node,
                 frame.context,
                 result,
                 receipt,
+                signature,
             );
         }
         let availability = if !frame.completeness.is_partial() {
@@ -2136,9 +2171,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // A completed cacheable evaluation needs no connected work beyond
         // what its receipt charges. Limited outcomes can never reach this
         // memo; one this demand cannot pay for is evaluated here.
-        if let Some(served) = self
-            .graph()
-            .evaluate_deferred_memo_get(node, reduction_context)
+        if let Some(served) =
+            self.graph()
+                .evaluate_deferred_memo_get(node, reduction_context, self.ctx)
         {
             if self.admits_served(&served.receipt) {
                 return EvaluateDeferredOutcome::complete(served.value);
@@ -2152,6 +2187,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             node,
             reduction_context,
             self.operation_budget_epoch.get(),
+            self.evaluation_fact_basis(),
         );
         self.connected_demand.open_cost_scope(
             super::cost_receipt::CostIdentity::of_key((node, reduction_context)).with_roots(
@@ -2175,6 +2211,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 return aborted_evaluation_outcome(&frames, completed_child.as_ref(), reasons);
             }
 
+            let frame_tracer =
+                std::rc::Rc::clone(&frames.last().expect("active evaluator frame").tracer);
+            let tracer_scope = frame_tracer.install();
             let action = if let Some(child) = completed_child.take() {
                 let frame = frames
                     .last_mut()
@@ -2248,7 +2287,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 };
                 let memo_hit = if check_memo {
                     self.graph()
-                        .evaluate_deferred_memo_get(entry_node, context)
+                        .evaluate_deferred_memo_get(entry_node, context, self.ctx)
                         .filter(|served| self.admits_served(&served.receipt))
                         .map(|served| served.value)
                 } else {
@@ -2441,6 +2480,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     }
                 }
             };
+            drop(tracer_scope);
+            drop(frame_tracer);
 
             match action {
                 DeferredEvaluationAction::Continue => {}
@@ -2449,21 +2490,24 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         node,
                         context,
                         self.operation_budget_epoch.get(),
+                        self.evaluation_fact_basis(),
                     ));
                 }
                 DeferredEvaluationAction::Finish(result) => {
                     let frame = frames.pop().expect("finishing an active evaluator frame");
-                    let outcome = self.finish_deferred_evaluation_frame(frame, result);
+                    let outcome =
+                        self.finish_deferred_evaluation_frame(frame, result, frames.last());
                     if frames.is_empty() {
                         return outcome;
                     }
                     completed_child = Some(outcome);
                 }
                 DeferredEvaluationAction::Cached(cached) => {
-                    frames
+                    let frame = frames
                         .pop()
                         .expect("a memo hit belongs to an active evaluator frame");
-                    let outcome = EvaluateDeferredOutcome::complete(cached);
+                    let outcome =
+                        self.finish_deferred_evaluation_frame(frame, cached, frames.last());
                     if frames.is_empty() {
                         return outcome;
                     }

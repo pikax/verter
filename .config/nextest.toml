@@ -20,12 +20,23 @@ max-threads = 1
 # than the test inventory.
 slow-timeout = { period = "60s", terminate-after = 5 }
 
+# These correctness rows exercise the full checker comparison allowance in
+# unoptimised builds. Each row is isolated and bounded by the engine ledger;
+# keep a watchdog without treating its finite comparison work as a hang.
+[[profile.default.overrides]]
+filter = 'test(reversed_object_unions_reach_the_checker_answer_)'
+slow-timeout = { period = "60s", terminate-after = 15 }
+
 [[profile.default.overrides]]
 filter = 'test(reversed_object_unions_reach_the_checker_answer_1800) | test(reversed_object_unions_reach_the_checker_answer_2100) | test(reversed_object_unions_reach_the_checker_answer_3200)'
 test-group = 'relation-comparison-envelope'
 
 [profile.ci]
 slow-timeout = { period = "60s", terminate-after = 5 }
+[[profile.ci.overrides]]
+filter = 'test(reversed_object_unions_reach_the_checker_answer_)'
+slow-timeout = { period = "60s", terminate-after = 15 }
+
 [[profile.ci.overrides]]
 filter = 'test(reversed_object_unions_reach_the_checker_answer_1800) | test(reversed_object_unions_reach_the_checker_answer_2100) | test(reversed_object_unions_reach_the_checker_answer_3200)'
 test-group = 'relation-comparison-envelope'

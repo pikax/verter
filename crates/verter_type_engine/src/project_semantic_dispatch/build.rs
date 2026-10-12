@@ -489,6 +489,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> Vec<crate::semantic_query_memo::ObservedGraphSelfRoot> {
         let graph = self.graph();
         let mut roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot> = Vec::new();
+        let mut seen = FxHashSet::default();
         for node in nodes {
             if let Some(NodeScopeId::File {
                 canonical_id,
@@ -496,11 +497,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 ..
             }) = graph.node_scope(node)
             {
-                if !roots
-                    .iter()
-                    .any(|(c, h)| *c == canonical_id && *h == whole_hash)
-                {
-                    roots.push((canonical_id, whole_hash));
+                let root = (canonical_id, whole_hash);
+                if seen.insert(root.clone()) {
+                    roots.push(root);
                 }
             }
         }
@@ -543,6 +542,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let graph = self.graph();
         let mut roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot> = Vec::new();
         let mut visited: FxHashSet<SemanticNodeId> = FxHashSet::default();
+        let mut seen_roots = FxHashSet::default();
         // Depth-first from the LAST pushed node; inputs are pushed in
         // reverse so the first input is walked first.
         let mut stack: Vec<SemanticNodeId> = nodes.into_iter().collect();
@@ -561,11 +561,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     whole_hash,
                     ..
                 }) => {
-                    if !roots
-                        .iter()
-                        .any(|(c, h)| *c == canonical_id && *h == whole_hash)
-                    {
-                        roots.push((canonical_id, whole_hash));
+                    let root = (canonical_id, whole_hash);
+                    if seen_roots.insert(root.clone()) {
+                        roots.push(root);
                     }
                 }
                 Some(NodeScopeId::Global) => {
@@ -4976,7 +4974,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 )
             })
         };
-        let (env, _bindings) = self.bind_declared_type_arguments(
+        let (env, bindings) = self.bind_declared_type_arguments(
             &prepared,
             args,
             &binding_scope,
@@ -4984,6 +4982,63 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             context,
             unbound_parameter,
         );
+
+        // Keep every supplied argument: a merged peer may introduce additional
+        // defaulted parameters beyond this declaration's clause. Only append
+        // defaults for positions the application did not supply.
+        let effective_args: Arc<[SemanticNodeId]> = args
+            .iter()
+            .copied()
+            .chain(
+                bindings
+                    .into_iter()
+                    .skip(args.len())
+                    .take_while(Option::is_some)
+                    .flatten(),
+            )
+            .collect();
+
+        // Every declaring file names the same global interface. Assemble
+        // it through its first declaration's shared instantiation, so a
+        // demand from another base does not lower all contributors again.
+        if authored_resolution_debt.is_none()
+            && self.declares_global_interface(decl_canonical, decl_owner, decl_name, prepared.kind)
+        {
+            if let Some(first) = self.first_global_declaration(decl_canonical, decl_name) {
+                if first.canonical_id != *decl_canonical
+                    && self
+                        .ctx
+                        .prepared_type_decl(&first.canonical_id, first.owner, &first.symbol_name)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|decl| {
+                            decl.kind == verter_session_query::declarations::TypeDeclKind::Interface
+                        })
+                {
+                    let read = self.execute_read(SemanticQueryKey::Instantiate(
+                        crate::semantic_query::InstantiateKey::new(
+                            self.type_slot_for(
+                                Arc::clone(&first.canonical_id),
+                                first.owner,
+                                Arc::clone(&first.symbol_name),
+                            ),
+                            Arc::clone(&effective_args),
+                            self.instantiate_context_for(&first.canonical_id, context),
+                        ),
+                    ));
+                    let completeness = read.fact_status.completeness();
+                    let mut out = crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+                        read.value,
+                        self.dep_signature_for(decl_canonical, decl_whole_hash),
+                    ))
+                    .with_observed_self_roots([(Arc::clone(decl_canonical), decl_whole_hash)]);
+                    out.merge_completeness(completeness);
+                    out.walker_diagnostics = read.walker_diagnostics.to_vec();
+                    out.cache_suppress = read.cache_suppress;
+                    return InstantiateStart::Done(Box::new(out));
+                }
+            }
+        }
 
         // 5. Shallow-lower the body. Collects substitution facts for
         // origin-edge emission. `name_resolution` is the prepared
@@ -5045,6 +5100,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             base,
             args: Arc::clone(args),
             source_args: Arc::clone(args),
+            effective_args,
             scope,
             prepared,
             scope_payload,
@@ -5362,7 +5418,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 if let Some(stitch) = self.stitch_global_declarations(
                     decl_canonical,
                     decl_name,
-                    args,
+                    &build.effective_args,
                     result,
                     scope,
                     context,
@@ -5451,12 +5507,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // read. Every root entering here already carried its artifact key
         // through the fold, so its `FileSourceEnv` observation is on this
         // build's read-set by construction.
+        let mut seen_roots: rustc_hash::FxHashSet<_> =
+            observed_self_roots.iter().cloned().collect();
         for aug_root in augmenter_contributor_roots {
-            if !observed_self_roots
-                .iter()
-                .any(|(c, h)| *c == aug_root.canonical && *h == aug_root.whole_hash)
-            {
-                observed_self_roots.push((aug_root.canonical, aug_root.whole_hash));
+            let root = (aug_root.canonical, aug_root.whole_hash);
+            if seen_roots.insert(root.clone()) {
+                observed_self_roots.push(root);
             }
         }
         let unresolved_owner_debt = authored_resolution_debt
@@ -5864,71 +5920,25 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             verter_session_query::source::artifact_key::FileArtifactKey,
         )> = Vec::new();
         let mut base_position: Option<usize> = None;
-        enum OrderedOrigin {
-            Augmenter(usize),
-            FileScope(usize),
-        }
-        struct OrderedCandidate {
-            rank: u32,
-            canonical: Arc<str>,
-            parse_stable_hash: verter_session_query::analysis::types::Hash16,
-            origin: OrderedOrigin,
-        }
-        let file_scope_entries: Vec<&verter_session_query::inputs::contributors::ContributorEntry> = population_hit
-            .entries
-            .iter()
-            .filter(|entry| {
-                matches!(
-                    entry.origin,
-                    verter_session_query::inputs::contributors::ContributorOrigin::FileScopeInterface
-                        | verter_session_query::inputs::contributors::ContributorOrigin::FileScopeNamespace
-                )
-            })
-            .collect();
-        // A file's namespace merges into its own interface of the name, so
-        // that interface's declarer folds the namespace in already.
-        let interface_declarers: rustc_hash::FxHashSet<(&str, &str)> = file_scope_entries
-            .iter()
-            .filter(|entry| {
-                entry.origin
-                    == verter_session_query::inputs::contributors::ContributorOrigin::FileScopeInterface
-            })
-            .map(|entry| (entry.artifact_key.canonical.as_ref(), entry.symbol.as_ref()))
-            .collect();
-        let mut ordered: Vec<OrderedCandidate> =
-            Vec::with_capacity(augmenter_set.entries.len() + file_scope_entries.len());
-        for (idx, augmenter) in augmenter_set.entries.iter().enumerate() {
-            ordered.push(OrderedCandidate {
-                rank: self
-                    .ctx
-                    .declaration_sequence_rank(augmenter.canonical().as_ref()),
-                canonical: Arc::clone(augmenter.canonical()),
-                parse_stable_hash: augmenter.parse_stable_hash,
-                origin: OrderedOrigin::Augmenter(idx),
-            });
-        }
-        for (idx, entry) in file_scope_entries.iter().enumerate() {
-            ordered.push(OrderedCandidate {
-                rank: self
-                    .ctx
-                    .declaration_sequence_rank(entry.artifact_key.canonical.as_ref()),
-                canonical: Arc::clone(&entry.artifact_key.canonical),
-                parse_stable_hash: entry.parse_stable_hash,
-                origin: OrderedOrigin::FileScope(idx),
-            });
-        }
-        ordered.sort_by(|left, right| {
-            left.rank
-                .cmp(&right.rank)
-                .then_with(|| left.canonical.as_ref().cmp(right.canonical.as_ref()))
-                .then_with(|| left.parse_stable_hash.cmp(&right.parse_stable_hash))
-        });
-        for candidate in ordered {
-            if excluded_contributor == Some(candidate.canonical.as_ref()) {
+        use verter_session_query::inputs::contributors::AugmentationCandidate as OrderedOrigin;
+        let ordered = self.ctx.augmentation_contributor_order(
+            &key,
+            &augmenter_set,
+            decl_name,
+            &population_hit,
+        );
+        for candidate in ordered.iter().copied() {
+            let canonical = match candidate {
+                OrderedOrigin::Augmenter(i) => augmenter_set.entries[i].canonical().as_ref(),
+                OrderedOrigin::FileScope(i) => {
+                    population_hit.entries[i].artifact_key.canonical.as_ref()
+                }
+            };
+            if excluded_contributor == Some(canonical) {
                 base_position.get_or_insert(contributor_nodes.len());
                 continue;
             }
-            match candidate.origin {
+            match candidate {
                 OrderedOrigin::Augmenter(augmenter_idx) => {
                     let augmenter = &augmenter_set.entries[augmenter_idx];
                     let augmenter_canonical = augmenter.canonical();
@@ -6238,7 +6248,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     continue;
                 }
                 OrderedOrigin::FileScope(file_scope_idx) => {
-                    let entry = file_scope_entries[file_scope_idx];
+                    let entry = &population_hit.entries[file_scope_idx];
                     if entry.is_automatic_lib {
                         let name = entry
                             .artifact_key
@@ -6270,15 +6280,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     let effective_artifact_key = refreshed_key
                         .clone()
                         .unwrap_or_else(|| entry.artifact_key.clone());
-                    if entry.origin
-                        == verter_session_query::inputs::contributors::ContributorOrigin::FileScopeNamespace
-                        && interface_declarers.contains(&(
-                            entry.artifact_key.canonical.as_ref(),
-                            entry.symbol.as_ref(),
-                        ))
-                    {
-                        continue;
-                    }
+
                     let Some(bundle) = self.ctx.prepared_decl_bundle(canonical) else {
                         source_env_unobservable = true;
                         continue;
@@ -6311,13 +6313,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(
                             aug_scope_payload.as_ref(),
                         );
-                    let aug_env: FxHashMap<String, SemanticNodeId> = prepared
-                        .type_parameters
-                        .iter()
-                        .zip(type_arguments.iter())
-                        .map(|(param, argument)| (param.name.clone(), *argument))
-                        .collect();
                     let mut aug_subs: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
+                    let (aug_env, _) = self.bind_declared_type_arguments(
+                        &prepared,
+                        type_arguments,
+                        &DeclarationBindingScope {
+                            scope: &aug_scope,
+                            scope_payload: aug_scope_payload.as_ref(),
+                            shadowing: &aug_shadowing,
+                            authored_resolution_debt: None,
+                        },
+                        &mut aug_subs,
+                        context,
+                        |_, _| None,
+                    );
                     let locator = verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
                 verter_type_expr::locators::TypeBodySlot {
                     anchor: verter_type_expr::locators::AuthoredAnchor {
@@ -6802,7 +6811,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> verter_session_query::inputs::contributors::SymbolContributors {
         use verter_session_query::resolution::AugmentationTargetKind;
         let target = AugmentationTargetKind::GlobalAugmentation;
-        let answer = self.ctx.global_contributor_answer(name, space);
+        let answer = self
+            .ctx
+            .global_contributor_answer(demand_canonical, name, space);
         crate::resolver_core::resolver_context::observe_fan_out(
             verter_session_query::facts::fact_cache::FactVersionRef::RouteSurface(
                 verter_session_query::facts::fact_cache::RouteSurfaceFactRef {
@@ -6816,30 +6827,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 },
             ),
         );
-        let contributors = answer.contributors;
-        // The global scope is one program's: a contributor of another
-        // project's program declares nothing the demand reads.
-        let project = self.ctx.resolve_project_for_canonical(demand_canonical);
-        if contributors.entries.iter().all(|entry| {
-            self.ctx
-                .resolve_project_for_canonical(&entry.artifact_key.canonical)
-                == project
-        }) {
-            return contributors;
-        }
-        verter_session_query::inputs::contributors::SymbolContributors {
-            entries: contributors
-                .entries
-                .iter()
-                .filter(|entry| {
-                    self.ctx
-                        .resolve_project_for_canonical(&entry.artifact_key.canonical)
-                        == project
-                })
-                .cloned()
-                .collect(),
-            fingerprint: contributors.fingerprint,
-        }
+        answer.contributors
     }
 
     /// The declaration of the global `name` in `space` that the library of
@@ -6909,38 +6897,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             name,
             verter_session_query::facts::SymbolSpace::Type,
         );
-        let first = population
-            .entries
-            .iter()
-            .filter(|entry| {
-                !entry.is_automatic_lib
-                    && match entry.origin {
-                        ContributorOrigin::DeclareGlobal => {
-                            entry.module_kind == FileModuleKind::Module
-                        }
-                        ContributorOrigin::FileScopeInterface
-                        | ContributorOrigin::FileScopeType => true,
-                        ContributorOrigin::FileScopeNamespace
-                        | ContributorOrigin::FileScopeValue
-                        | ContributorOrigin::ModuleAugmentation => false,
+        let first = population.entries.iter().find(|entry| {
+            !entry.is_automatic_lib
+                && match entry.origin {
+                    ContributorOrigin::DeclareGlobal => entry.module_kind == FileModuleKind::Module,
+                    ContributorOrigin::FileScopeInterface | ContributorOrigin::FileScopeType => {
+                        true
                     }
-            })
-            .min_by(|left, right| {
-                self.ctx
-                    .declaration_sequence_rank(left.artifact_key.canonical.as_ref())
-                    .cmp(
-                        &self
-                            .ctx
-                            .declaration_sequence_rank(right.artifact_key.canonical.as_ref()),
-                    )
-                    .then_with(|| {
-                        left.artifact_key
-                            .canonical
-                            .as_ref()
-                            .cmp(right.artifact_key.canonical.as_ref())
-                    })
-                    .then_with(|| left.parse_stable_hash.cmp(&right.parse_stable_hash))
-            })?;
+                    ContributorOrigin::FileScopeNamespace
+                    | ContributorOrigin::FileScopeValue
+                    | ContributorOrigin::ModuleAugmentation => false,
+                }
+        })?;
         Some(ResolvedRootIdentity::new_in_owner(
             Arc::clone(&first.artifact_key.canonical),
             first.owner,
@@ -11148,6 +11116,54 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let keys = self.finite_index_keys(resolved)?;
         if keys.is_empty() {
             return None;
+        }
+        // Resolve the shared subject once through the same declaration and
+        // peer-merge owners the per-key walker uses, with all their
+        // contributor facts observed on this batch. No key-sized memo entry
+        // needs to copy that full dependency closure.
+        let subject = self
+            .normalize_node_for_structural_fact_demand(
+                base,
+                context.into_structural_transit_with_mode(ProjectionMode::Shallow),
+            )
+            .into_complete_node()?;
+        let object = match self.graph().node_data(subject).as_deref() {
+            Some(SemanticNodeData::MergedDecl { contributors }) => {
+                self.reduce_merged_decl(contributors)
+            }
+            _ => subject,
+        };
+        {
+            if let Some(data) = self.graph().node_data(object) {
+                if let SemanticNodeData::Object(surface) = data.as_ref() {
+                    let fence = self.project_generation_signature();
+                    let mut walker = PathWalker::new(self, context, &fence);
+                    if let Some(values) =
+                        walker.finite_object_index_values(base, object, surface, &keys)
+                    {
+                        let norm = self.execute_read(SemanticQueryKey::ReduceUnion {
+                            members: Arc::from(values.into_boxed_slice()),
+                            nullability:
+                                verter_session_query::flow::policy::NullabilityPolicy::Strict,
+                        });
+                        if let QueryResult::Value(id) = norm.value {
+                            let mut out =
+                                crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+                                    QueryResult::Value(id),
+                                    Arc::clone(&fence),
+                                ))
+                                .with_observed_self_roots(
+                                    self.observed_self_roots_from_nodes([base, object]),
+                                );
+                            out.fold_partial(norm.result_is_partial());
+                            out.merge_completeness(walker.completeness);
+                            out.cache_suppress |= walker.cache_suppress;
+                            out.walker_diagnostics = std::mem::take(&mut walker.walker_diagnostics);
+                            return Some(out);
+                        }
+                    }
+                }
+            }
         }
         let mut projected: Vec<SemanticNodeId> = Vec::with_capacity(keys.len());
         let mut any_partial = false;
@@ -17908,6 +17924,7 @@ pub(super) struct InstantiateBuild {
     base: SemanticNodeId,
     pub(super) args: Arc<[SemanticNodeId]>,
     source_args: Arc<[SemanticNodeId]>,
+    effective_args: Arc<[SemanticNodeId]>,
     scope: NodeScopeId,
     prepared: Arc<PreparedTypeDecl>,
     scope_payload: Option<crate::resolver_core::bare_name_resolve::DeclarationScopePayload>,
