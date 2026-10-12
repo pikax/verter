@@ -248,7 +248,6 @@ impl Default for SemanticGraphIdentity {
     }
 }
 
-#[derive(Default)]
 pub struct SemanticGraphStore {
     /// Process-local identity used only to confine opaque runtime operands to
     /// the store that issued them.
@@ -703,6 +702,82 @@ pub struct SemanticGraphStore {
         parking_lot::Mutex<Option<(SemanticQueryKey, test_support::ExhaustedJoinAbortForTests)>>,
 }
 
+impl Default for SemanticGraphStore {
+    fn default() -> Self {
+        Self::with_arena(Default::default())
+    }
+}
+
+impl SemanticGraphStore {
+    /// Bind signature-token ownership to the final arena before publishing
+    /// the store, including the controlled counted fixture constructor.
+    fn with_arena(arena: NodeArena) -> Self {
+        let signatures = crate::signature_kernel::SignatureStore::default();
+        signatures.bind_graph(&arena.core);
+        Self {
+            operand_identity: Default::default(),
+            arena,
+            signatures,
+            entries: Default::default(),
+            inflight: Default::default(),
+            task_registry: Default::default(),
+            independent_inflight: Default::default(),
+            derivation: Default::default(),
+            stats: Default::default(),
+            provenance: Default::default(),
+            retention_account: Default::default(),
+            force_cold_abort_sweep: Default::default(),
+            unresolved_reach: Default::default(),
+            released_any: Default::default(),
+            union_views: Default::default(),
+            key_classes: Default::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            union_order_reversed_for_tests: Default::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            invalidate_all_post_entries_clear_gate: Default::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            invalidate_all_pre_memo_budget_clear_gate: Default::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            publish_post_memo_budget_record_gate: Default::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            cold_winner_pre_backfill_gate: Default::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            cold_winner_post_admission_gate: Default::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            cancellation_abort_pre_retire_gate: Default::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            invalidate_all_pre_reverse_index_clear_gate: Default::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            publish_post_reverse_index_prune_gate: Default::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            relation_member_pre_entries_gate: Default::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            relation_root_pre_member_drain_gate: Default::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            invalidate_all_inflight_abort_gate: Default::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            invalidate_canonical_inflight_abort_gate: Default::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            joiner_on_condvar_count: Default::default(),
+            canonical_to_entries: Default::default(),
+            dep_signature_interner: Default::default(),
+            memo_budget: Default::default(),
+            candidate_admission_seq: Default::default(),
+            substitute_memo: Default::default(),
+            substitute_memo_fifo: Default::default(),
+            evaluate_deferred_memo: Default::default(),
+            evaluate_deferred_memo_fifo: Default::default(),
+            member_ordinal_index_memo: Default::default(),
+            member_ordinal_index_fifo: Default::default(),
+            refusal_summaries: Default::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            produce_hook: Default::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            exhausted_join_abort: Default::default(),
+        }
+    }
+}
+
 /// Exact memo candidate admitted by one cold-winner publication.
 ///
 /// The `admission_seq` is the store-owned ABA token for this candidate; the
@@ -842,7 +917,6 @@ impl SemanticGraphStore {
     /// The store's epoch-safe signature records.
     #[must_use]
     pub fn signature_store(&self) -> &crate::signature_kernel::SignatureStore {
-        self.signatures.bind_graph(&self.arena.core);
         &self.signatures
     }
 

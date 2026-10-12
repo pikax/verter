@@ -12,6 +12,16 @@ struct RootOwner {
     ids: Vec<SemanticNodeId>,
 }
 
+/// Storage acquired for a freshly interned node's construction root: the
+/// Arc owner and its one-element operand allocation, plus the scope vector's
+/// entry and geometric growth slack.
+pub(crate) fn construction_root_bytes() -> usize {
+    std::mem::size_of::<RootOwner>()
+        + 2 * std::mem::size_of::<usize>()
+        + std::mem::size_of::<SemanticNodeId>()
+        + 2 * std::mem::size_of::<NodeRoot>()
+}
+
 impl Drop for RootOwner {
     fn drop(&mut self) {
         self.arena.release_roots(&self.ids);

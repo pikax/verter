@@ -99,7 +99,11 @@ final drops drain the slots and index. Rendezvous hooks compile only under
 `cfg(test)`.
 
 Signature epochs retain graph-token roots through an arena attachment that is
-weak on the store side. `SignatureEpochLease` pins its exact epoch and supplies
+weak on the store side and bound once to the final arena during construction.
+The signature-store accessor only borrows that store. Union-view ownership is
+acquired and released outside the union table lock. Derived-node construction
+reservations include the root owner, scope vector capacity and arena count slots.
+`SignatureEpochLease` pins its exact epoch and supplies
 a read view after epoch replacement. `SignatureVersion` travels on signature
 set/result values; delivery uses that version rather than reacquiring whichever
 epoch happens to be current. No permanent list of delivered versions is added.

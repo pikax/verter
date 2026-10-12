@@ -50,9 +50,15 @@ pub const RELATION_PAIR_BYTES: usize = 2_048;
 
 /// The construction bytes interning one derived node reserves: its payload
 /// record, held twice (the arena slot and the dedup index's key), a fixed
-/// index entry, and the `payload_bytes` of text and children it owns.
+/// index entry, the construction root and arena ownership slots, and the
+/// `payload_bytes` of text and children it owns.
 pub(crate) fn derived_node_bytes(payload_bytes: usize) -> usize {
-    2 * std::mem::size_of::<crate::semantic_query::SemanticNodeData>() + 32 + payload_bytes
+    2 * std::mem::size_of::<crate::semantic_query::SemanticNodeData>()
+        + 32
+        + crate::semantic_query_memo::node_roots::construction_root_bytes()
+        + std::mem::size_of::<usize>()
+        + std::mem::size_of::<bool>()
+        + payload_bytes
 }
 
 /// Work-unit cap for one connected semantic demand: the operational

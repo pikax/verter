@@ -23,9 +23,8 @@ impl CountedOwnershipHarness {
     pub fn with_account(retention_account: verter_session_query::retention::StoreAccount) -> Self {
         Self {
             graph: SemanticGraphStore {
-                arena: NodeArena::counted_for_tests(),
                 retention_account,
-                ..Default::default()
+                ..SemanticGraphStore::with_arena(NodeArena::counted_for_tests())
             },
         }
     }
@@ -56,6 +55,56 @@ mod tests {
         CanonicalTypeSubstitution, IntersectionInputRef, IntersectionPurpose, IntersectionTerm,
         LiteralValue, NodeScopeId, SemanticNodeData, SemanticQueryKey,
     };
+
+    #[test]
+    fn signature_tokens_are_rooted_before_the_store_accessor_is_used() {
+        let harness = CountedOwnershipHarness::new();
+        let node = harness.run(|graph| {
+            let node = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+                "constructor attachment".into(),
+            )));
+            graph.signatures.intern_type_token(node, None).unwrap();
+            node
+        });
+        assert!(harness.graph.node_is_live(node));
+        harness.graph.signatures.replace_epoch().unwrap();
+        assert_eq!(harness.live_nodes(), 0);
+    }
+
+    #[test]
+    fn shape_key_roots_preserve_equality_and_hash_identity() {
+        use crate::component_meta_caches::ShapeCacheKey;
+        use crate::semantic_query::ProjectionMode;
+        use std::hash::{Hash, Hasher};
+
+        let harness = CountedOwnershipHarness::new();
+        let key = harness.run(|graph| {
+            let node = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+                "shape operand".into(),
+            )));
+            ShapeCacheKey::member_value_node_whole_for_test(
+                "/shape.ts".into(),
+                node,
+                ProjectionMode::Shallow,
+            )
+        });
+        let node = key.member_value_subject_node().unwrap();
+        let unrooted = ShapeCacheKey::member_value_node_whole_for_test(
+            "/shape.ts".into(),
+            node,
+            ProjectionMode::Shallow,
+        );
+        let hash = |key: &ShapeCacheKey| {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            key.hash(&mut hasher);
+            hasher.finish()
+        };
+        assert_eq!(key, unrooted);
+        assert_eq!(hash(&key), hash(&unrooted));
+        assert_eq!(harness.live_nodes(), 1);
+        drop(key);
+        assert_eq!(harness.live_nodes(), 0, "the key owns its operand");
+    }
 
     #[test]
     fn ordinary_graph_constructor_variants_keep_legacy_reclamation() {

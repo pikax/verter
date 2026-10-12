@@ -34,3 +34,10 @@ version registry is introduced. Policy reservations continue to use the one
 process retention account; no computation memory cap is added. Test fixture
 carrier defaults, compile-fail expectations and the memo layout sentinel reflect
 the transport interfaces, not separate production stores or telemetry.
+
+Constructor-time signature/arena binding and union-view ownership acquisition
+outside the table lock are REQUIRED lifetime operations; they introduce no
+observation fields. `construction_root_bytes` and the derived-node reservation's
+ownership-slot allowance are REQUIRED policy charges, computed from live type
+layouts in all builds, with no retained allocation history. Counted-arena tests
+live in `semantic_query_memo/arena_counted_tests.rs` under `cfg(test)`.
