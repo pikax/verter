@@ -18,12 +18,26 @@ type Identity = (i32, u64);
 struct Entry {
     reading: CpuReading,
     parent: Option<Identity>,
+    missing: bool,
+    newly_missing: bool,
     reaped: bool,
+    previous_children: (u64, u64),
+    // Scratch state for the current missing-subtree reconciliation.
+    covered: bool,
+}
+
+#[derive(Default)]
+struct PendingEntry {
+    children: usize,
+    sampled: (u64, u64),
+    newly_sampled: (u64, u64),
+    uncertain: (u64, u64),
 }
 
 #[derive(Default)]
 pub(crate) struct TreeCpu {
     entries: BTreeMap<Identity, Entry>,
+    total: (u64, u64),
 }
 
 impl TreeCpu {
@@ -33,13 +47,11 @@ impl TreeCpu {
             .map(|r| (r.pid, (r.pid, r.started)))
             .collect();
         for entry in self.entries.values_mut() {
-            if present.get(&entry.reading.pid) != Some(&(entry.reading.pid, entry.reading.started))
-                && entry.parent.is_some()
-            {
-                // A missing intermediate parent still carries this subtree
-                // into its own parent's cumulative reaped-child counters.
-                entry.reaped = true;
-            }
+            let missing = present.get(&entry.reading.pid)
+                != Some(&(entry.reading.pid, entry.reading.started));
+            entry.newly_missing = missing && !entry.missing;
+            entry.missing = missing;
+            entry.previous_children = (entry.reading.child_user, entry.reading.child_kernel);
         }
         for reading in readings {
             let identity = (reading.pid, reading.started);
@@ -47,57 +59,127 @@ impl TreeCpu {
             let entry = self.entries.entry(identity).or_insert_with(|| Entry {
                 reading: reading.clone(),
                 parent,
+                missing: false,
+                newly_missing: false,
                 reaped: false,
+                previous_children: (0, 0),
+                covered: false,
             });
             // Reparented live descendants were orphaned, not reaped into
             // the old parent. Keep their usage independently.
             if reading.parent >= 0 && entry.reading.parent != reading.parent {
                 entry.parent = parent;
             }
+            entry.missing = false;
+            entry.newly_missing = false;
             entry.reaped = false;
             entry.reading = reading;
         }
+        for entry in self.entries.values_mut() {
+            if entry.missing
+                && entry
+                    .parent
+                    .is_some_and(|id| present.get(&id.0) == Some(&id))
+            {
+                entry.reaped = true;
+            }
+        }
+        self.total = self.reconcile_missing();
     }
 
     pub fn totals(&self) -> (u64, u64) {
-        // Pending child count and reconciled child usage for each identity.
+        self.total
+    }
+
+    fn reconcile_missing(&mut self) -> (u64, u64) {
+        // Keep uncertain orphan usage separate from directly reaped children.
         // Fold leaves upward without recursion or repeated descendant scans.
         let mut pending: BTreeMap<_, _> = self
             .entries
             .keys()
-            .map(|id| (*id, (0usize, 0u64, 0u64)))
+            .map(|id| (*id, PendingEntry::default()))
             .collect();
         for entry in self.entries.values() {
-            if let Some(parent) = entry.parent.filter(|_| entry.reaped) {
-                if let Some((count, _, _)) = pending.get_mut(&parent) {
-                    *count += 1;
+            if let Some(parent) = entry.parent.filter(|_| entry.missing) {
+                if let Some(parent) = pending.get_mut(&parent) {
+                    parent.children += 1;
                 }
             }
         }
         let mut ready: Vec<_> = pending
             .iter()
-            .filter_map(|(id, (count, _, _))| (*count == 0).then_some(*id))
+            .filter_map(|(id, entry)| (entry.children == 0).then_some(*id))
             .collect();
         let mut total = (0u64, 0u64);
+        let mut order = Vec::with_capacity(self.entries.len());
         while let Some(id) = ready.pop() {
-            let (_, seen_user, seen_kernel) = pending.remove(&id).expect("ready identity");
+            let folded = pending.remove(&id).expect("ready identity");
             let entry = &self.entries[&id];
             let r = &entry.reading;
-            let user = r.user.saturating_add(r.child_user.max(seen_user));
-            let kernel = r.kernel.saturating_add(r.child_kernel.max(seen_kernel));
-            if let Some(parent) = entry.parent.filter(|_| entry.reaped) {
-                if let Some((count, child_user, child_kernel)) = pending.get_mut(&parent) {
-                    *child_user = child_user.saturating_add(user);
-                    *child_kernel = child_kernel.saturating_add(kernel);
-                    *count -= 1;
-                    if *count == 0 {
+            // Missing descendants of a missing parent may instead be orphans.
+            // Require the newly missing subtree to fit in both counter deltas;
+            // usage from earlier reaped children cannot cover a new orphan.
+            let covered = r.child_user.saturating_sub(entry.previous_children.0)
+                >= folded.newly_sampled.0.saturating_add(folded.uncertain.0)
+                && r.child_kernel.saturating_sub(entry.previous_children.1)
+                    >= folded.newly_sampled.1.saturating_add(folded.uncertain.1);
+            let (uncertain_user, uncertain_kernel) =
+                if covered { (0, 0) } else { folded.uncertain };
+            let user = r.user.saturating_add(r.child_user.max(folded.sampled.0));
+            let kernel = r
+                .kernel
+                .saturating_add(r.child_kernel.max(folded.sampled.1));
+            let parent = entry.parent.filter(|_| entry.missing);
+            let reaped = entry.reaped;
+            let newly_missing = entry.newly_missing;
+            self.entries.get_mut(&id).expect("folded identity").covered = covered;
+            order.push(id);
+            if let Some(parent) = parent {
+                if let Some(folded) = pending.get_mut(&parent) {
+                    let usage = if reaped {
+                        &mut folded.sampled
+                    } else {
+                        &mut folded.uncertain
+                    };
+                    usage.0 = usage.0.saturating_add(user);
+                    usage.1 = usage.1.saturating_add(kernel);
+                    if reaped && newly_missing {
+                        folded.newly_sampled.0 = folded.newly_sampled.0.saturating_add(user);
+                        folded.newly_sampled.1 = folded.newly_sampled.1.saturating_add(kernel);
+                    }
+                    folded.uncertain.0 = folded.uncertain.0.saturating_add(uncertain_user);
+                    folded.uncertain.1 = folded.uncertain.1.saturating_add(uncertain_kernel);
+                    folded.children -= 1;
+                    if folded.children == 0 {
                         ready.push(parent);
                     }
                     continue;
                 }
             }
-            total.0 = total.0.saturating_add(user);
-            total.1 = total.1.saturating_add(kernel);
+            total.0 = total.0.saturating_add(user).saturating_add(uncertain_user);
+            total.1 = total
+                .1
+                .saturating_add(kernel)
+                .saturating_add(uncertain_kernel);
+        }
+        // Resolve uncertain edges once, from ancestors to descendants. An
+        // uncovered orphan stays independent: later unrelated child counters
+        // must not retrospectively consume its retained CPU.
+        for id in order.into_iter().rev() {
+            let entry = &self.entries[&id];
+            let inherited = entry
+                .parent
+                .filter(|_| entry.missing)
+                .is_some_and(|parent| self.entries[&parent].covered);
+            let entry = self.entries.get_mut(&id).expect("folded identity");
+            if entry.missing && !entry.reaped && entry.parent.is_some() {
+                if inherited {
+                    entry.reaped = true;
+                } else {
+                    entry.parent = None;
+                }
+            }
+            entry.covered |= inherited;
         }
         total
     }
@@ -148,6 +230,43 @@ mod tests {
             assert_eq!(tree.totals(), (170, 85));
             tree.observe(vec![reading(1, 0, 30, 150)]);
             assert_eq!(tree.totals(), (180, 90));
+        }
+    }
+
+    #[test]
+    fn vanished_orphan_retains_independently_reaped_parent_tail() {
+        for previous_children in [0, 60, 600] {
+            let mut tree = TreeCpu::default();
+            tree.observe(vec![
+                reading(1, 0, 10, previous_children),
+                reading(2, 1, 20, 0),
+                reading(3, 2, 100, 0),
+            ]);
+            assert_eq!(
+                tree.totals(),
+                (130 + previous_children, 65 + previous_children / 2)
+            );
+            // The parent spends ten more units, exits without waiting for its
+            // child, and is reaped by the root. The orphan also exits before
+            // another sample can observe its reparenting. Earlier reaped CPU
+            // cannot serve as evidence that this subtree was reaped.
+            tree.observe(vec![reading(1, 0, 20, previous_children + 30)]);
+            assert_eq!(
+                tree.totals(),
+                (150 + previous_children, 75 + previous_children / 2)
+            );
+            tree.observe(vec![reading(1, 0, 30, previous_children + 30)]);
+            assert_eq!(
+                tree.totals(),
+                (160 + previous_children, 80 + previous_children / 2)
+            );
+            // Later reaped children of the root cannot retrospectively absorb
+            // an orphan that was already outside its reaped subtree.
+            tree.observe(vec![reading(1, 0, 30, previous_children + 150)]);
+            assert_eq!(
+                tree.totals(),
+                (280 + previous_children, 140 + previous_children / 2)
+            );
         }
     }
 

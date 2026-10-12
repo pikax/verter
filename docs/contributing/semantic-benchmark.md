@@ -544,7 +544,13 @@ lifetimes, with reaped-child accounting deduplicated against those samples.
 Reconciliation covers whole reaped subtrees, including intermediate parents
 that vanish between sweeps; live reparented descendants remain independent,
 and reused PIDs are separate lifetimes. Cumulative child counters retain
-unsampled tails without adding sampled descendants twice.
+unsampled tails without adding sampled descendants twice. If a descendant and
+its parent both disappear, the descendant may have exited as an orphan without
+an observed reparenting. Its sampled usage stays separate unless an ancestor's
+child counters have increased enough to cover the whole newly missing sampled
+subtree, preserving independently reaped parent tails when that increase is too
+small. Earlier reaped-child CPU cannot cover a new orphan. That classification is
+retained so later unrelated reaped children cannot consume the orphan's usage.
 The watchdog reads the exited leader before reaping it: Apple's
 [proc_pid_rusage API](https://github.com/apple-oss-distributions/xnu/blob/main/libsyscall/wrappers/libproc/libproc.h)
 supports zombies. CPU units are milliseconds. Descendants that exit between
