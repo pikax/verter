@@ -198,11 +198,12 @@ test("nextest fails a test at 20s in both profiles while allowing per-test resou
   const config = readFileSync(join(REPO_ROOT, ".config", "nextest.toml"), "utf8");
   assert.doesNotMatch(config, /test-group\s*=\s*'(?:shared-provider-live|lsp-server-unit)'/);
   const sections = config.replaceAll("\r\n", "\n").split(/(?=^\[)/m);
-  for (const profile of ["default", "ci"]) {
+  // CI fails at 20s; the local profile (also the agents' gate on loaded workers) at 60s until the slow list empties.
+  for (const [profile, terminateAfter] of [["default", 6], ["ci", 2]]) {
     const base = sections.filter((section) => section.startsWith(`[profile.${profile}]\n`));
     assert.equal(base.length, 1, `${profile} must define exactly one base profile`);
     const policies = [...base[0].matchAll(/^slow-timeout\s*=\s*([^\r\n]+)$/gm)];
     assert.equal(policies.length, 1, `${profile} must retain its base watchdog`);
-    assert.match(policies[0][1], /^\{\s*period\s*=\s*"10s",\s*terminate-after\s*=\s*2\s*\}$/);
+    assert.match(policies[0][1], new RegExp(`^\\{\\s*period\\s*=\\s*"10s",\\s*terminate-after\\s*=\\s*${terminateAfter}\\s*\\}$`));
   }
 });
