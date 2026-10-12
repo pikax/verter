@@ -277,7 +277,7 @@ pub struct GenerationWork {
     pub outer_refs: u64,
     /// `CodeTransform` operations issued.
     pub transform_ops: u64,
-    /// Path terms copied into a nested branch (`GuardStrategy::ReplayPath` only).
+    /// Path terms copied into branches and callback guards (`ReplayPath` only).
     pub replayed_terms: u64,
 }
 
