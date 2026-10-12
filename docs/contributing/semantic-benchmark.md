@@ -555,6 +555,12 @@ finds both generations gone. That read is the attribution: the exit counters
 are a floor for the lifetime, and a descendant first seen on that read counts
 when its parent is still present. If the exited process and its parent are
 both already gone, the supervisor retains the ambiguity instead.
+Parent presence is established by a fresh start-identity read after the exit
+sample, never by the previous sweep's cached presence. If parent metadata is
+unavailable, the stored parent selects the lifetime to verify; a missing or
+reused parent cannot certify attribution. Exit counters remain lifetime floors
+even when that verification fails, so unresolved histories retain unavailable
+totals and bounds that include the final sampled counters.
 When a child disappears while its parent is still sampled, cumulative child
 counters retain unsampled tails without adding the child's sampled usage twice.
 Live reparented descendants remain independent, and reused PIDs are separate

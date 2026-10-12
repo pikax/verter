@@ -329,7 +329,9 @@ pub(crate) fn supervise(launch: Launch<'_>, report: &mut Report) {
                     // SZOMB is a later, racier signal. A live replacement
                     // has exit time 0.
                     for reading in events.exited.iter().filter_map(|&pid| exit_reading(pid)) {
-                        cpu.record_exit(reading);
+                        cpu.record_exit(reading, |parent| {
+                            usage(parent).ok().map(|info| info.ri_proc_start_abstime)
+                        });
                     }
                     // Snapshot every known pid before the slower enumeration.
                     // A parent blocked in waitpid may already have reaped the
