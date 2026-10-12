@@ -6,7 +6,11 @@ each row's answer class against tsc 7.0.2, the warm-repeat checks, and the
 deterministic work and allocation counts at several sizes with their growth
 ratios. It is a portable summary; the raw harness runs stay out of the tree.
 
-## How it was measured
+## Historical benchmark run
+
+The following measurements describe the candidate named below. They retain its failures; they are not acceptance evidence for the current checkout.
+
+### How it was measured
 
 - **Worker.** One shared Windows 11 x86_64 developer worker, not the
   benchmark machine. Under the
@@ -142,7 +146,37 @@ edit to the scenario (cold, then warm):
 Every decided row's warm repeat is a cache hit (13 port calls) that answers
 the cold answer. The three partial reversed rows repeat their answer too, but
 each warm repeat makes the cold request's work again: the stopped relation is
-not retained, so the refusal is recomputed rather than repeated. This is an
-open finding against the relation engine, not against the benchmark: until a
-same-root refusal is retained at its operation identity, these rows' warm
-repeats cost what their cold request costs.
+not retained, so the refusal is recomputed rather than repeated. At that candidate this was an
+open engine defect: without a same-root refusal retained at its operation
+identity, these repeats cost what their cold request costs.
+
+## Current regression contract
+
+The `cost_receipt_tests::reversed_object_unions_reach_the_checker_answer_*` family reads
+all reversed benchmark sizes through the connected conditional root. It
+asserts the checker literal for the successful rows and the recovered `2`
+with `OPERATION_BUDGET` and `RelationTooComplex` subjects for the TS2859 rows.
+Each exact repeat must reproduce the full answer, partiality, diagnostics
+and logical work/bytes without a semantic miss. Each case prints fresh work
+observations; run logs belong with the candidate report, not this historical
+table.
+
+The connected construction allowance includes the full checker comparison
+mapping plus operand/projection headroom. Refusal summaries retain operation
+identity independently of ordinary relation verdicts. The small-row controls
+in `cost_receipt_tests` discriminate allowances, query/checker depth, edits,
+reset state, preceding request and connected-ledger work, and cancelled,
+torn or SCC-obligated roots. A different operation context evaluates its own
+check. Bounded projection/printing is preserved by the existing public probe
+controls; no resource refusal is stored as an ordinary negative.
+
+Run the focused proof with:
+
+```sh
+cargo nextest run -p verter_session --lib cost_receipt_tests relation_work_tests
+```
+
+Full benchmark timing, allocation and RSS remain advisory. Re-run the
+harness described above when those probe binaries are available; rebuilding
+its isolated release/observation targets is not needed to run these semantic
+regressions.

@@ -44,9 +44,9 @@ pub(crate) const CROSS_PRODUCT_UNION_SIZE: u64 = 100_000;
 /// cache, this, is the most the checker ever allows. The count lives on a
 /// relation chain's first frame, one chain per check, and skips memoized
 /// answers as the checker skips cached ones. The connected-work ledger is
-/// to be sized above it (two units per recorded comparison) once it charges
-/// the bytes a relation holds; until then it can refuse a relation first,
-/// as typed incompleteness.
+/// sized above it with reducer work, cold query-entry work and construction
+/// bytes mapped in `project_semantic_dispatch::connected_demand`, so reversed
+/// object rows reach this refusal before either operational rail stops them.
 ///
 /// Measured on TypeScript 7.0.2: a union of `M` single-property objects
 /// against the same objects in reverse order records about `M² / 2`

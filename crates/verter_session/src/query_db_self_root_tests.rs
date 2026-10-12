@@ -4336,6 +4336,7 @@ fn component_meta_result_db_get_with_view_rejects_entry_from_superseded_generati
             surface_identities: None,
             origin_graph: None,
             completeness: verter_type_engine::semantic_query::ResultCompleteness::Complete,
+            synthesis_should_suppress: false,
         },
         canonical_id: Arc::from(owner),
         whole_hash: owner_whole_hash,

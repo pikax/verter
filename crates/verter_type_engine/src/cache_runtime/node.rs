@@ -540,7 +540,10 @@ pub mod query {
                                     return match node.lower_unadmitted(&entry.value) {
                                         Some(value) => {
                                             entry.signature.bubble(resolver);
-                                            ComputeAdmission::ReturnOnly { value, reason }
+                                            ComputeAdmission::ReturnOnly {
+                                                value,
+                                                reason: NonAdmissionReason::PostComputeRevalidationFailed,
+                                            }
                                         }
                                         None => ComputeAdmission::Failed,
                                     };
@@ -577,6 +580,9 @@ pub mod query {
             // (non-cacheable; joiners fork) with its facts bubbled.
             |candidate: &Candidate<N::Discriminant, N::Value>| {
                 node.lower_unadmitted(&candidate.value).inspect(|_| {
+                    crate::cache_runtime::admission::propagate_non_admission(
+                        NonAdmissionReason::PostComputeRevalidationFailed,
+                    );
                     candidate.signature.bubble(resolver);
                 })
             },

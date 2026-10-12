@@ -2401,6 +2401,7 @@ mod tests {
                                 surface_identities: None,
                                 origin_graph: None,
                                 completeness: verter_type_engine::semantic_query::ResultCompleteness::Complete,
+                                synthesis_should_suppress: false,
                             },
                         canonical_id: Arc::from("/w/o.vue"),
                         whole_hash: hash,

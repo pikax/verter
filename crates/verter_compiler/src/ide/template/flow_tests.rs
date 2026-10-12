@@ -224,7 +224,9 @@ fn production_series(
                 + w.outer_refs
                 + w.snapshots
                 + w.component_branches
-                + w.component_functions,
+                + w.component_functions
+                + w.scope_links
+                + w.callback_discovery,
         ));
         snapshots.push((n, w.snapshots + w.outer_refs));
     }
@@ -255,6 +257,35 @@ fn flat_and_nested_matrices_grow_linearly() {
 }
 
 #[test]
+fn nested_component_tags_grow_linearly() {
+    let series = production_series(|n| ide_fixtures::nested_component_matrix(n, false));
+    println!("nested component matrix: {series:?}");
+    assert_linear("nested component matrix", &series).unwrap();
+}
+
+#[test]
+fn sibling_chains_share_deep_lexical_frames() {
+    let n = *MATRIX_SIZES.last().unwrap();
+    let compiled = compile(&ide_fixtures::sibling_component_chains(n, false));
+    assert_eq!(
+        compiled.code.matches("function ___VERTER___Comp").count(),
+        n,
+        "every sibling component retains its ref function"
+    );
+    assert_eq!(
+        compiled
+            .code
+            .matches("instantiateComponent(___VERTER___s")
+            .count(),
+        n,
+        "every sibling is instantiated in its narrowed flow"
+    );
+    let series = production_series(|n| ide_fixtures::sibling_component_chains(n, false));
+    println!("sibling component chains: {series:?}");
+    assert_linear("sibling component chains", &series).unwrap();
+}
+
+#[test]
 fn component_functions_read_one_flow_of_every_branch() {
     // Each component function, its branch's navigator and each chain block is
     // emitted once, and no component function re-states a condition: a
@@ -266,10 +297,11 @@ fn component_functions_read_one_flow_of_every_branch() {
         assert_eq!(compiled.work.component_branches as usize, 2 * n - 1);
         // The root chain function; per non-`v-else` branch its navigator, the
         // component's function, the nested chain's block, its navigator and
-        // its component's function; the `v-else` navigator and function.
+        // its component's function, plus the shared slot frame and its navigator;
+        // the `v-else` navigator and function.
         assert_eq!(
             compiled.work.component_functions as usize,
-            1 + 5 * (n - 1) + 2
+            1 + 7 * (n - 1) + 2
         );
         assert_eq!(
             compiled.code.matches("function ___VERTER___Comp").count(),
@@ -292,6 +324,20 @@ fn component_functions_read_one_flow_of_every_branch() {
         assert!(
             !compiled.code.contains("if(!("),
             "no component function guards with its condition path"
+        );
+        let nested = compile(&ide_fixtures::nested_component_matrix(n, false));
+        assert_eq!(
+            nested.code.matches("function ___VERTER___Comp").count(),
+            n + 1,
+            "every nested component ref and the native root has a function"
+        );
+        assert_eq!(
+            nested
+                .code
+                .matches("instantiateComponent(___VERTER___s")
+                .count(),
+            n,
+            "every nested component is instantiated through its narrowed flow"
         );
     }
 }

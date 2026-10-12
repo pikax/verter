@@ -466,6 +466,7 @@ struct WideArtifactNode {
     signature: ReadSetSignature,
     stale_generation: bool,
     strict_root: bool,
+    during_compute: Option<Arc<dyn Fn() + Send + Sync>>,
     account: Arc<verter_session_query::retention::SemanticRetentionAccount>,
 }
 
@@ -482,6 +483,7 @@ impl WideArtifactNode {
             inflight: InflightTable::new(),
             stale_generation: false,
             strict_root: false,
+            during_compute: None,
             signature: ReadSetSignature::new(
                 verter_session_query::facts::fact_read_set::seal_canonical_signature(facts),
             ),
@@ -547,6 +549,9 @@ impl ArtifactNode for WideArtifactNode {
     }
 
     fn compute(&self, key: &Self::Key, cx: &mut ComputeCtx<'_>) -> CacheAdmission<Self::Value> {
+        if let Some(hook) = &self.during_compute {
+            hook();
+        }
         CacheAdmission::Cacheable {
             value: format!("v{key}"),
             signature: self.signature.clone(),
@@ -625,8 +630,8 @@ fn cold_publish_claims_wide_signature_pages_and_is_refused_for_them() {
 #[test]
 fn retention_refusal_preserves_artifact_post_compute_validation() {
     use verter_session_query::retention::{RetentionLimits, SemanticRetentionAccount};
-    let host = VerterHost::new_standalone(HostConfig::default());
-    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = host.as_ref();
     for max_entry_bytes in [usize::MAX, 1] {
         for strict_root in [false, true] {
             let mut node = WideArtifactNode::new(SemanticRetentionAccount::new(RetentionLimits {
@@ -634,7 +639,13 @@ fn retention_refusal_preserves_artifact_post_compute_validation() {
                 ..RetentionLimits::defaults()
             }));
             node.strict_root = strict_root;
-            node.stale_generation = !strict_root;
+            if !strict_root {
+                node = node.with_valid_signature(&host);
+                let host = Arc::clone(&host);
+                node.during_compute = Some(Arc::new(move || {
+                    host.project_type_store().bump_project_generation();
+                }));
+            }
             assert_eq!(
                 lookup(&node, 7, ctx, ctx.request_flags()),
                 None,
@@ -663,6 +674,9 @@ impl QueryNode for WideQueryNode {
         None
     }
     fn compute(&self, key: &u32, cx: &mut ComputeCtx<'_>) -> CacheAdmission<String> {
+        if let Some(hook) = &self.artifact.during_compute {
+            hook();
+        }
         CacheAdmission::Cacheable {
             value: format!("v{key}"),
             signature: self.artifact.signature.clone(),
@@ -707,8 +721,8 @@ impl QueryNode for WideQueryNode {
 #[test]
 fn query_retention_refusal_preserves_delivery_validation_and_lowering() {
     use verter_session_query::retention::{RetentionLimits, SemanticRetentionAccount};
-    let host = VerterHost::new_standalone(HostConfig::default());
-    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = host.as_ref();
     for (limit, stale, lower) in [
         (usize::MAX, false, false),
         (1, false, false),
@@ -717,15 +731,21 @@ fn query_retention_refusal_preserves_delivery_validation_and_lowering() {
         (usize::MAX, true, true),
         (1, true, true),
     ] {
-        let artifact = WideArtifactNode::new(SemanticRetentionAccount::new(RetentionLimits {
+        let mut artifact = WideArtifactNode::new(SemanticRetentionAccount::new(RetentionLimits {
             max_entry_bytes: limit,
             ..RetentionLimits::defaults()
         }))
         .with_valid_signature(&host);
+        if stale {
+            let host = Arc::clone(&host);
+            artifact.during_compute = Some(Arc::new(move || {
+                host.project_type_store().bump_project_generation();
+            }));
+        }
         let node = WideQueryNode {
             artifact,
             store: ReverseIndexedCandidateStore::with_counter(Arc::new(AtomicU64::new(0))),
-            stale,
+            stale: false,
             lower,
         };
         let expected = if stale {
@@ -733,10 +753,20 @@ fn query_retention_refusal_preserves_delivery_validation_and_lowering() {
         } else {
             Some("v7")
         };
-        assert_eq!(
-            query::lookup(&node, 7, ctx, ctx.request_flags()).as_deref(),
-            expected
+        let (answer, finalise) = host.with_fact_tracer(
+            verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+            || query::lookup(&node, 7, ctx, ctx.request_flags()),
         );
+        assert_eq!(answer.as_deref(), expected);
+        if stale && lower {
+            assert!(finalise.non_cacheable_read_observed(),
+                "lowering an invalid candidate must taint its consumer even under retention pressure");
+        } else if !stale {
+            assert!(
+                !finalise.non_cacheable_read_observed(),
+                "valid storage refusals remain family-local"
+            );
+        }
         assert_eq!(
             node.store.slot_len_for_test(&7),
             usize::from(!stale && limit != 1)
