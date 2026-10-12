@@ -2298,15 +2298,24 @@ async fn component_completion_cold_parent_import_converges_without_test_prewarm(
     drop(service);
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn svelte_progressive_component_completion_uses_committed_child_contract() {
-    for (provider_label, provider_kind) in [
-        ("none", crate::TypeProviderKind::None),
-        ("tsgo", crate::TypeProviderKind::Tsgo),
-        ("tsserver", crate::TypeProviderKind::Tsserver),
-        ("editor-tsserver", crate::TypeProviderKind::EditorTsserver),
-    ] {
-        for (label, child_source, script_language) in [
+async fn svelte_progressive_component_completion_uses_committed_child_contract_for(
+    provider_label: &'static str,
+    provider_kind: crate::TypeProviderKind,
+) {
+    struct Case {
+        label: &'static str,
+        route: &'static str,
+        child_state: &'static str,
+        close_child: bool,
+        app_path: String,
+        child_path: String,
+        changed: String,
+    }
+    // Each case has distinct canonicals and a cold or open child. Share only
+    // the provider/workspace setup, keeping every language/route/state case.
+    let mut files = Vec::new();
+    let mut cases = Vec::new();
+    for (label, child_source, script_language) in [
         (
             "ts",
             "<script lang=\"ts\">\ninterface DraftProps { title: string; unusedOnly?: boolean }\nlet { title }: DraftProps = $props();\n</script>\n<p>{title}</p>\n",
@@ -2330,139 +2339,200 @@ async fn svelte_progressive_component_completion_uses_committed_child_contract()
                 let parent_initial = format!(
                     "<script{script_language}>\n{import_statement}\n</script>\n<p>ready</p>\n"
                 );
-                let mut files = vec![
-                    ("src/DraftCard.svelte", "svelte", child_source),
-                    ("src/App.svelte", "svelte", parent_initial.as_str()),
-                ];
+                let prefix = format!("src/{label}-{route}-{child_state}");
+                let app_path = format!("{prefix}/App.svelte");
+                let child_path = format!("{prefix}/DraftCard.svelte");
+                files.push((child_path.clone(), "svelte", child_source.to_string()));
+                files.push((app_path.clone(), "svelte", parent_initial.clone()));
                 if let Some(barrel_source) = barrel_source {
-                    files.push(("src/components.ts", "typescript", barrel_source));
+                    files.push((format!("{prefix}/components.ts"), "typescript", barrel_source.to_string()));
                 }
-            let (_temp, service, drain_handle, provider, workspace_id) =
-                make_definition_test_server_with_config(
-                    &files,
-                    provider_kind,
-                    HostConfig {
-                        analysis_scope: Some(verter_semantic::analysis::AnalysisScope::BUILD),
-                        metrics_enabled: true,
-                        ..HostConfig::default()
-                    },
-                    false,
-                )
-                .await;
-            let server = service.inner();
-            let app_uri = workspace_uri(&workspace_id, "src/App.svelte");
-            let child_uri = workspace_uri(&workspace_id, "src/DraftCard.svelte");
-            if close_child {
-                server.documents.did_close(&child_uri);
+                cases.push(Case {
+                    label, route, child_state, close_child, app_path, child_path,
+                    changed: parent_initial.replace("<p>ready</p>", "<DraftCard un />"),
+                });
             }
-            server.publish_import_dependencies_settled(&app_uri).await;
-            let child_id = format!("{workspace_id}/src/DraftCard.svelte");
-            assert!(
+        }
+    }
+    let files: Vec<_> = files
+        .iter()
+        .map(|(path, language, source)| (path.as_str(), *language, source.as_str()))
+        .collect();
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_definition_test_server_with_config(
+            &files,
+            provider_kind,
+            HostConfig {
+                analysis_scope: Some(verter_semantic::analysis::AnalysisScope::BUILD),
+                metrics_enabled: true,
+                ..HostConfig::default()
+            },
+            false,
+        )
+        .await;
+    let drain = AbortTaskOnDrop(drain_handle);
+    let server = service.inner();
+    let dispatch_before = server.sync_coordinator.dispatch_ticks();
+    let publications_before = server.sync_coordinator.diags_published_count();
+    for case in &cases {
+        let (label, route, child_state) = (case.label, case.route, case.child_state);
+        let app_uri = workspace_uri(&workspace_id, &case.app_path);
+        let child_uri = workspace_uri(&workspace_id, &case.child_path);
+        if case.close_child {
+            server.documents.did_close(&child_uri);
+        }
+        server.publish_import_dependencies_settled(&app_uri).await;
+        let child_id = format!("{workspace_id}/{}", case.child_path);
+        assert!(
                 server.cached_child_public_contract(&child_id).is_some(),
                 "{provider_label}/{label}/{route}/{child_state}: initial background publication must commit the child contract"
             );
-            let provider_calls_before_parent_edit = provider.file_sync_calls().len();
-            if matches!(provider_kind, crate::TypeProviderKind::None) {
-                assert_eq!(
+        let provider_calls_before_parent_edit = provider.file_sync_calls().len();
+        if matches!(provider_kind, crate::TypeProviderKind::None) {
+            assert_eq!(
                     provider_calls_before_parent_edit,
                     0,
                     "{provider_label}/{label}/{route}/{child_state}: provider-neutral child publication must not open or update provider buffers"
                 );
-            }
-            let changed = parent_initial.replace("<p>ready</p>", "<DraftCard un />");
-            super::super::lifecycle::handle_did_change(
-                server,
-                DidChangeTextDocumentParams {
-                    text_document: VersionedTextDocumentIdentifier {
-                        uri: app_uri.clone(),
-                        version: 2,
-                    },
-                    content_changes: vec![TextDocumentContentChangeEvent {
-                        range: None,
-                        range_length: None,
-                        text: changed.clone(),
-                    }],
+        }
+        let changed = &case.changed;
+        super::super::lifecycle::handle_did_change(
+            server,
+            DidChangeTextDocumentParams {
+                text_document: VersionedTextDocumentIdentifier {
+                    uri: app_uri.clone(),
+                    version: 2,
                 },
-            )
-            .await;
-            let cached = server
+                content_changes: vec![TextDocumentContentChangeEvent {
+                    range: None,
+                    range_length: None,
+                    text: changed.clone(),
+                }],
+            },
+        )
+        .await;
+        let cached = server
                 .cached_child_public_contract(&child_id)
                 .unwrap_or_else(|| panic!("{provider_label}/{label}/{route}/{child_state}: an unrelated parent edit must preserve the already-published child contract immediately"));
-            let verter_session::framework::ComponentContractAvailability::Supported(contract) =
-                cached
-            else {
-                panic!("{provider_label}/{label}/{route}/{child_state}: fixture contract must be supported")
-            };
-            assert!(
+        let verter_session::framework::ComponentContractAvailability::Supported(contract) = cached
+        else {
+            panic!("{provider_label}/{label}/{route}/{child_state}: fixture contract must be supported")
+        };
+        assert!(
                 contract.props.iter().any(|prop| prop.name.as_ref() == "unusedOnly"),
                 "{provider_label}/{label}/{route}/{child_state}: published contract must retain an unused declared prop"
             );
-
-            // `did_change` schedules import publication independently. The
-            // cached contract above must remain immediately readable, but the
-            // background lane can still be finishing a no-op/revalidation pass
-            // under a loaded runner. Settle that lane before attributing any
-            // later projection-count change to the foreground completion.
-            server.publish_import_dependencies_settled(&app_uri).await;
-
-            // Settle the independently-owned CURRENT-file provider surface
-            // before measuring the child-contract completion seam. The
-            // assertion below then discriminates child cache reads from either
-            // parent repair work or child projection work.
-            server.ensure_current_file_synced(&app_uri).await;
-
-            // Foreground repair settles only the IDE buffer; did_change also
-            // owes a debounced API sync and diagnostics pass. Await this
-            // fixture's first dispatch and completed publish before sampling
-            // counters, so those independent writes cannot be mistaken for
-            // work performed by completion. A cleared dirty bit or live-task
-            // gauge alone can be observed before the coordinator finishes.
-            server.sync_coordinator.await_until(
-                || {
-                    let receipts = &server.sync_coordinator.receipts;
-                    receipts.dispatch_ticks.load(std::sync::atomic::Ordering::SeqCst) > 0
-                        && receipts.diags_published_count.load(std::sync::atomic::Ordering::SeqCst) > 0
-                },
-                || panic!("{provider_label}/{label}/{route}/{child_state}: the parent edit's deferred sync and diagnostics must finish"),
-            ).await;
-
-            let provider_calls_for_completion = provider.file_sync_calls().len();
-            let projection_count = server.child_public_contract_projection_count_for_test();
-            let compile_requests = server.documents.host().metrics_snapshot().compile_requests;
-            let workspace = server
-                .vfs_workspace
-                .read()
-                .clone()
-                .expect("published test workspace");
-            let workspace_reads = workspace.vfs_provenance_snapshot();
-            let cursor = changed.find("<DraftCard un").expect("component")
-                + "<DraftCard un".len();
-            let position = LineIndex::new_utf16(&changed)
-                .offset_to_position(cursor as u32)
-                .expect("completion position");
-            let labels = completion_labels(
-                server
-                    .completion(completion_params(&app_uri, position, None))
-                    .await
-                    .expect("completion request"),
-            );
-            assert!(
+    }
+    // Batch edits through the real multithreaded coordinator. Its quiet
+    // windows overlap instead of paying one full window for every case.
+    for case in &cases {
+        let app_uri = workspace_uri(&workspace_id, &case.app_path);
+        server.publish_import_dependencies_settled(&app_uri).await;
+        server.ensure_current_file_synced(&app_uri).await;
+    }
+    server.sync_coordinator.await_until(
+            || server.sync_coordinator.dispatch_ticks() > dispatch_before
+                && server.sync_coordinator.diags_published_count() >= publications_before + cases.len()
+                && server.sync_coordinator.diag_tasks_live() == 0
+                && cases.iter().all(|case| server.documents.diagnostics_ready(
+                    &workspace_uri(&workspace_id, &case.app_path))),
+            || panic!("{provider_label}: every parent edit's deferred sync and diagnostics must finish"),
+        ).await;
+    // All edit publications are proved above. Hold the next dispatch so a
+    // later generation revalidation cannot contaminate foreground counts.
+    let _dispatch = server.sync_coordinator.pause_dispatch_for_test().await;
+    server
+        .sync_coordinator
+        .await_until(
+            || server.sync_coordinator.diag_tasks_live() == 0,
+            || panic!("{provider_label}: the last dispatched diagnostics must finish"),
+        )
+        .await;
+    // The provider drain and the edit-debounced import driver are not the
+    // coordinator. Stop the drain, then hold every case lane across the
+    // completion snapshot (same as a direct contract-miss completion) so a
+    // trailing pass cannot project or compile between the count and the
+    // assertion. Foreground projection still increments the counter.
+    drop(drain);
+    let mut publication_lanes = Vec::new();
+    for case in &cases {
+        let mut paths = vec![case.app_path.clone(), case.child_path.clone()];
+        if case.route == "barrel" {
+            paths.push(case.app_path.replace("App.svelte", "components.ts"));
+        }
+        for path in paths {
+            let uri = workspace_uri(&workspace_id, &path);
+            if let Some(canonical_id) = server.documents.get_canonical_id(&uri) {
+                publication_lanes.push(server.import_sync.lock_for(&canonical_id));
+            }
+        }
+    }
+    let mut publication_guards = Vec::new();
+    for lane in &publication_lanes {
+        publication_guards.push(lane.lock().await);
+    }
+    // A drain pass already inside `ensure_ide_compiled` still bumps the host
+    // counter after abort. Snapshot only once that pass, and any projection
+    // it owed, has landed.
+    let mut quiet_since = tokio::time::Instant::now();
+    let quiet_deadline = quiet_since + std::time::Duration::from_secs(5);
+    let mut compile_seen = server.documents.host().metrics_snapshot().compile_requests;
+    let mut projection_seen = server.child_public_contract_projection_count_for_test();
+    while quiet_since.elapsed() < std::time::Duration::from_millis(200) {
+        if tokio::time::Instant::now() >= quiet_deadline {
+            panic!("{provider_label}: background compile/projection did not go quiet before completion");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let compile_now = server.documents.host().metrics_snapshot().compile_requests;
+        let projection_now = server.child_public_contract_projection_count_for_test();
+        let background_idle = server.pending_snapshot_provider_sync.is_empty()
+            && !server.sync_coordinator.workspace_scan_in_progress();
+        if compile_now != compile_seen || projection_now != projection_seen || !background_idle {
+            compile_seen = compile_now;
+            projection_seen = projection_now;
+            quiet_since = tokio::time::Instant::now();
+        }
+    }
+    for case in &cases {
+        let (label, route, child_state) = (case.label, case.route, case.child_state);
+        let app_uri = workspace_uri(&workspace_id, &case.app_path);
+        let changed = &case.changed;
+        let provider_calls_for_completion = provider.file_sync_calls().len();
+        let projection_count = server.child_public_contract_projection_count_for_test();
+        let compile_requests = server.documents.host().metrics_snapshot().compile_requests;
+        let workspace = server
+            .vfs_workspace
+            .read()
+            .clone()
+            .expect("published test workspace");
+        let workspace_reads = workspace.vfs_provenance_snapshot();
+        let cursor = changed.find("<DraftCard un").expect("component") + "<DraftCard un".len();
+        let position = LineIndex::new_utf16(changed)
+            .offset_to_position(cursor as u32)
+            .expect("completion position");
+        let labels = completion_labels(
+            server
+                .completion(completion_params(&app_uri, position, None))
+                .await
+                .expect("completion request"),
+        );
+        assert!(
                 labels.contains(&"unusedOnly".to_string()),
                 "{provider_label}/{label}/{route}/{child_state}: committed declared child prop must survive the incomplete \
                  parent edit: {labels:?}"
             );
-            assert_eq!(
+        assert_eq!(
                 server.child_public_contract_projection_count_for_test(),
                 projection_count,
                 "{provider_label}/{label}/{route}/{child_state}: completion must not invoke the contract projector"
             );
-            assert_eq!(
+        assert_eq!(
                 server.documents.host().metrics_snapshot().compile_requests,
                 compile_requests,
                 "{provider_label}/{label}/{route}/{child_state}: completion must not start a host compile"
             );
-            let workspace_reads_after = workspace.vfs_provenance_snapshot();
-            assert_eq!(
+        let workspace_reads_after = workspace.vfs_provenance_snapshot();
+        assert_eq!(
                 (
                     workspace_reads_after.native_fs_read_file_miss_count,
                     workspace_reads_after.native_fs_read_dir_count,
@@ -2475,18 +2545,49 @@ async fn svelte_progressive_component_completion_uses_committed_child_contract()
                 ),
                 "{provider_label}/{label}/{route}/{child_state}: completion must not perform filesystem/evidence reads"
             );
-            assert_eq!(
+        assert_eq!(
                 provider.file_sync_calls().len(),
                 provider_calls_for_completion,
                 "{provider_label}/{label}/{route}/{child_state}: native completion must not publish provider buffers"
             );
+    }
+    drop(publication_guards);
+}
 
-            drain_handle.abort();
-            drop(service);
-        }
-        }
-    }
-    }
+#[tokio::test(flavor = "multi_thread")]
+async fn svelte_progressive_component_completion_uses_committed_child_contract_none() {
+    svelte_progressive_component_completion_uses_committed_child_contract_for(
+        "none",
+        crate::TypeProviderKind::None,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn svelte_progressive_component_completion_uses_committed_child_contract_tsgo() {
+    svelte_progressive_component_completion_uses_committed_child_contract_for(
+        "tsgo",
+        crate::TypeProviderKind::Tsgo,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn svelte_progressive_component_completion_uses_committed_child_contract_tsserver() {
+    svelte_progressive_component_completion_uses_committed_child_contract_for(
+        "tsserver",
+        crate::TypeProviderKind::Tsserver,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn svelte_progressive_component_completion_uses_committed_child_contract_editor_tsserver() {
+    svelte_progressive_component_completion_uses_committed_child_contract_for(
+        "editor-tsserver",
+        crate::TypeProviderKind::EditorTsserver,
+    )
+    .await;
 }
 
 #[tokio::test]

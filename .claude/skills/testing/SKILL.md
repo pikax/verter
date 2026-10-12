@@ -112,6 +112,24 @@ mod tests;
 
 Extracted file contains module contents directly — `use super::*;`, helpers, and `#[test]` fns. No wrapping `mod tests { }` block.
 
+### Repository guard scans
+
+Repository source guards reuse immutable source inventories or indexes within
+each test process. A necessary-condition filter may avoid parsing or scanning
+content only when every possible violation still reaches the original rule;
+retain each rule's path scope, integrity checks, and discriminating fixtures.
+Nextest isolates tests in separate processes, so a once-cell alone does not
+share a scan between nextest tests: the cold scan must also be efficient.
+
+The observation-feature guard resolves each production root and dev closure
+independently for host and wasm targets. Cargo remains the activation authority;
+metadata declarations only bound which seed activations can affect those
+closures. Cache default closures within that target/configuration and fixture
+metadata within the immutable fixture. Keep package identity (including source
+and version), weak edges, dependency defaults, and dev unification controls.
+The bounded repository guards are held to the standard nextest speed gate and
+are not on its known-slow list.
+
 ### TDD Workflow
 
 Behavioral code changes use TDD. Documentation, generated projections, formatting, and mechanical metadata changes use their owning freshness/validation evidence unless they also change executable behavior.
@@ -141,6 +159,20 @@ Tests are evidence, not a quota. At preflight, map each changed contract to the 
 - New features and bug fixes still require adequate regression evidence. Refactors must keep applicable existing coverage green; they do not earn new tests merely by changing structure.
 
 ### LSP request barriers
+
+Reuse one server for read-only fixture matrices. Batch independent edit cases
+with distinct canonical paths through one workspace per provider so their real
+quiet windows overlap; settle every case's diagnostic receipt before measuring
+foreground work. The coordinator's `block_in_place` path requires a multithreaded
+runtime, which cannot use Tokio's paused clock. After proving the edit publications
+finished, its test-only dispatch barrier can hold subsequent background revalidation
+while foreground counters are sampled; already-dispatched diagnostics must finish
+before sampling. For queued-waiter cancellation, poll the acquire future to
+`Pending`, assert participant registration, then drop the future; a zero-duration
+timeout still pays a timer turn. Concurrency regressions
+should force the relevant orders and observe lock ownership at the decision
+boundary rather than rely on repeated probabilistic races. Fixture drain tasks
+must abort on assertion failure as well as success.
 
 LSP mock foreign-target checks settle after both `ProviderDispatch` and
 `ProviderDecode` barrier waits. Capture the held target bytes before the
@@ -224,10 +256,9 @@ jobs below that, always capped by available CPUs. This keeps the documented
 measured 12-job peak was 11.60 GiB and is too close to call portable there.
 Explicit positive overrides remain exact. Windows uses full nextest capacity;
 the provider-free core has no provider-specific `max-threads = 1` groups.
-The three wide reversed-union checker-boundary rows share the
-`relation-comparison-envelope` group: only one retains its full pair evidence
-at a time, with the same answers, comparison allowances and watchdogs. Other
-core tests and the BF2 inventory keep their normal nextest concurrency.
+Core tests and the BF2 inventory keep their normal nextest concurrency; no test
+group serialises slow rows (serialised, the three reversed-union rows alone
+outran the 30-minute core step).
 Real-provider tests run through dedicated serial libtest jobs, while compile-fail
 fixtures run through standalone Cargo binaries rather than nextest test targets.
 
@@ -422,6 +453,17 @@ Use a reversible mutation recipe only when preflight identifies a plausible crit
 Canonical in-tree examples of fully self-contained recipes (in-memory plant → expected verdict → trivial restore + GREEN control): the Vue structural-conformance discriminator `crates/verter_vue_conformance/tests/cases/conformance_discriminator.rs` (cosmetic-PASS vs behavioral-FAIL mutations on committed goldens, each plant proven applied) and the Svelte oracle discriminator in `crates/verter_compiler/tests/cases/svelte_client_emit_topology.rs`.
 
 ### Timeout Is Never a Pass
+
+When shortening a process-harness integrity test's injected deadline, arm it
+after an explicit fixture readiness check; startup scheduling must not prevent
+creation of the grandchild whose teardown the test proves. That readiness wait
+ends when the child has already exited, and the post-kill liveness check keeps
+a reap backstop long enough for a loaded host to drop the pid. Keep ordinary
+invocation deadlines unchanged. A transport read failure must kill the live driver before waiting
+for its exit, retain the harness-failure classification, and stop later probes.
+The broken-stream and wedged-child-tree tests stay on each profile's ordinary
+slow-timeout (no new per-test entry) and retain their classification and
+descendant liveness assertions.
 
 A timeout or incomplete run is never green and never presumed environmental. Rerun the timed-out test in isolation with an adequate timeout and no co-resident heavy work: if it clears → environmental (retain both artifacts); if it repeats → collect hang diagnostics; if classification stays ambiguous → HARD FAIL. The advertised slow-timeout must match the configured one — `.config/nextest.toml` advertises ~60s but configures 5s×3, killing valid tests around 15s on an 8GB host; fix that mismatch rather than tolerating false timeouts. Genuinely long tests get explicit per-test overrides.
 
