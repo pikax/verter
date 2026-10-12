@@ -2883,6 +2883,7 @@ fn a_hang_after_the_compile_frame_is_a_reference_failure_not_a_compiler_timeout(
 /// too.
 #[test]
 fn a_broken_stdout_stream_is_a_harness_failure_not_a_compiler_crash() {
+    let started = std::time::Instant::now();
     let manifest = vue_manifest();
     let (script, driver) = synthetic_driver(
         "driver-broken-stream",
@@ -2904,6 +2905,11 @@ fn a_broken_stdout_stream_is_a_harness_failure_not_a_compiler_crash() {
     .unwrap_or_else(|error| panic!("the synthetic driver could not be run: {error}"));
     let _ = std::fs::remove_file(&script);
 
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "a broken transport must stop the live driver rather than wait for its sleep",
+    );
+    assert_eq!(results.len(), cases.len());
     for (position, result) in results.iter().enumerate() {
         let observation = result
             .observation
