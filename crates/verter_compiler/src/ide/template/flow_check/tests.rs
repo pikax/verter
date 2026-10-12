@@ -3,7 +3,7 @@
 //! the same fixtures runs in `verter_lsp`'s paired real-provider lanes.
 
 use super::builder::{build_plan, BuildError, PlanContext};
-use super::fixtures::{self, Fixture, Root, MATRIX_SIZES};
+use super::fixtures::{self, Fixture, Root, GROWTH_SIZES, MATRIX_SIZES};
 use super::generator::{generate, generate_with, GuardStrategy, HELPERS};
 use super::oracle::check_mappings;
 use super::seam::{
@@ -531,7 +531,7 @@ fn chains_and_nested_scopes_grow_linearly() {
     with_stack(|| {
         for shape in ["flat", "nested"] {
             let mut samples = Vec::new();
-            for &n in &MATRIX_SIZES {
+            for &n in &GROWTH_SIZES {
                 let fixture = match shape {
                     "flat" => fixtures::flat_matrix(n, 1, false),
                     _ => fixtures::nested_matrix(n, false),
@@ -539,6 +539,22 @@ fn chains_and_nested_scopes_grow_linearly() {
                 let (sample, plan, check) = sample(&fixture, n, GuardStrategy::Snapshot);
                 assert_eq!(check.layout.callbacks.len(), n, "{}", fixture.name);
                 assert_eq!(sample.callbacks, n as u64, "{}", fixture.name);
+                let conditions = if shape == "flat" {
+                    n - 1
+                } else {
+                    1 + 3 * (n / 4)
+                };
+                assert_eq!(sample.conditions, conditions as u64, "{}", fixture.name);
+                assert_eq!(
+                    sample.resolved_conditions, conditions as u64,
+                    "{}",
+                    fixture.name
+                );
+                assert_eq!(
+                    sample.predecessor_links,
+                    (n + usize::from(shape == "nested")) as u64
+                );
+                assert_eq!(check.work.replayed_terms, 0, "snapshots never replay paths");
                 assert!(
                     check
                         .layout
@@ -562,6 +578,7 @@ fn chains_and_nested_scopes_grow_linearly() {
                 growth(&samples, metric, 2.2)
                     .unwrap_or_else(|e| panic!("{shape} {name}: {e}\n{samples:#?}"));
             }
+            println!("{shape}: {samples:#?}");
         }
     });
 }
@@ -570,9 +587,16 @@ fn chains_and_nested_scopes_grow_linearly() {
 fn callback_count_scales_without_path_expansion() {
     with_stack(|| {
         let mut samples = Vec::new();
+        let branches = GROWTH_SIZES[2];
         for (index, callbacks) in [1, 2, 4, 8].into_iter().enumerate() {
-            let fixture = fixtures::flat_matrix(256, callbacks, false);
+            let fixture = fixtures::flat_matrix(branches, callbacks, false);
             let (mut sample, _, check) = sample(&fixture, 1 << index, GuardStrategy::Snapshot);
+            assert_eq!(check.layout.callbacks.len(), branches * callbacks);
+            assert_eq!(sample.callbacks, (branches * callbacks) as u64);
+            assert_eq!(sample.conditions, (branches - 1) as u64);
+            assert_eq!(sample.resolved_conditions, (branches - 1) as u64);
+            assert_eq!(sample.predecessor_links, branches as u64);
+            assert_eq!(check.work.replayed_terms, 0, "fan-out never replays paths");
             sample.bytes -= sample.helper_and_declaration_bytes;
             // A callback costs the same at the second branch as at the last:
             // no byte of a callback depends on how many branches precede it.
@@ -592,6 +616,7 @@ fn callback_count_scales_without_path_expansion() {
         }
         growth(&samples, |s| s.bytes, 2.2).unwrap();
         growth(&samples, |s| s.outer_refs, 2.2).unwrap();
+        println!("callback fan-out: {samples:#?}");
     });
 }
 

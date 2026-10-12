@@ -2503,6 +2503,132 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             .optional_member_read(value, optional, declaring_file)
     }
 
+    /// The shared known-member read for a single projection and a finite
+    /// batch. A batch supplies one index over the surface; visibility,
+    /// accessor, overload and optional-property rules are identical.
+    fn known_member_read(
+        &self,
+        object: SemanticNodeId,
+        surface: &SurfaceView,
+        key: &crate::semantic_query::PropertyKey,
+        index: Option<&crate::semantic_query::SurfaceKeyIndex<'_>>,
+        index_read: bool,
+    ) -> Option<SemanticNodeId> {
+        let overloads = match index {
+            Some(index) => index.project_known_key_overload_group(key),
+            None => surface.project_known_key_overload_group(key),
+        };
+        if let Some(signatures) = overloads {
+            return Some(self.graph().intern_node(SemanticNodeData::Object(
+                crate::semantic_query::surface_view! {
+                    members: Arc::from([]),
+                    call_signatures: Arc::from(signatures.into_boxed_slice()),
+                    construct_signatures: Arc::from([]),
+                    index_signatures: Arc::from([]),
+                    keyspace: None,
+                    has_index_signature: false,
+                },
+            )));
+        }
+        let accessor = match index {
+            Some(index) => index.project_known_key_accessor(key),
+            None => surface.project_known_key_accessor(key),
+        };
+        if let Some(accessor) = accessor {
+            return accessor.read_value(self.graph());
+        }
+        let member = match index {
+            Some(index) => index.project_known_key(key),
+            None => surface.project_known_key(key),
+        };
+        match member {
+            crate::semantic_query::SurfaceKeyProjection::Exact(member)
+                if member.visibility.is_public() =>
+            {
+                let object_scope = self
+                    .graph()
+                    .node_scope(object)
+                    .and_then(|scope| scope.canonical_file());
+                Some(if index_read {
+                    self.index_read(
+                        member.value,
+                        member.optional,
+                        member
+                            .declaration_origin
+                            .as_deref()
+                            .or(object_scope.as_deref()),
+                    )
+                } else {
+                    member.value
+                })
+            }
+            _ => None,
+        }
+    }
+
+    /// Project a finite key set from an already reduced object in one pass.
+    /// Unknown keys retain the ordinary walker path (including index signatures).
+    pub(super) fn finite_object_index_values(
+        &mut self,
+        subject: SemanticNodeId,
+        object: SemanticNodeId,
+        surface: &SurfaceView,
+        keys: &[IndexKey],
+    ) -> Option<Vec<SemanticNodeId>> {
+        self.original_path_non_empty = true;
+        self.origin_file = self
+            .graph()
+            .node_scope(subject)
+            .and_then(|scope| scope.canonical_file());
+        let index = surface.key_index();
+        let mut values = Vec::with_capacity(keys.len());
+        for key in keys {
+            if let Err(reasons) = self.dispatch.charge_connected_work() {
+                self.mark_partial_with(reasons);
+                return None;
+            }
+            let known = match key {
+                IndexKey::String(value) => {
+                    crate::semantic_query::PropertyKey::String(Arc::clone(value))
+                }
+                IndexKey::Number(value) => crate::semantic_query::PropertyKey::Number(*value),
+                IndexKey::UniqueSymbol(value) => {
+                    crate::semantic_query::PropertyKey::UniqueSymbol(value.clone())
+                }
+                IndexKey::Computed(_) => return None,
+            };
+            values.push(self.known_member_read(object, surface, &known, Some(&index), true)?);
+        }
+        for (key, value) in keys.iter().zip(&values) {
+            self.graph().record_origin_edge(
+                *value,
+                OriginEdgeKind::ProjectIndex,
+                Arc::from([object]),
+                OriginMeta::Index(key.clone()),
+                Arc::clone(self.fence),
+            );
+        }
+        let values: Vec<_> = values
+            .into_iter()
+            .map(|value| {
+                // Each key is an independent path. A declaration expanded
+                // for another key is not a recursive edge on this one.
+                self.visited_aliases.clear();
+                self.visited_nodes.clear();
+                self.finish_path_terminal(value)
+            })
+            .collect();
+        if values.iter().any(|value| {
+            matches!(
+                self.graph().node_data(*value).as_deref(),
+                Some(SemanticNodeData::Opaque(QueryError::Miss))
+            )
+        }) {
+            return None;
+        }
+        Some(values)
+    }
+
     /// The apparent wrapper surface a primitive, an array or a tuple reads
     /// its non-index keys from
     /// ([`ProjectSemanticDispatch::apparent_wrapper_of`]); `None` when the
@@ -3110,72 +3236,10 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     // type plus `undefined` (`index_read`); a property
                     // navigation step reads the declared type alone.
                     let index_read = matches!(segment, PathSegment::Index(_));
-                    let object_scope = self
-                        .graph()
-                        .node_scope(current)
-                        .and_then(|scope| scope.canonical_file());
-                    // An ACCESSOR is a property: its read is the accessor's
-                    // VALUE type (the getter's return, else the setter's
-                    // parameter), whichever of a get/set pair came first.
-                    let graph = self.dispatch.graph();
-                    let first_wins = |needle: &crate::semantic_query::PropertyKey| {
-                        if let Some(accessor) = surface.project_known_key_accessor(needle) {
-                            return accessor.read_value(graph);
-                        }
-                        match surface.project_known_key(needle) {
-                            crate::semantic_query::SurfaceKeyProjection::Exact(member)
-                                if member.visibility.is_public() =>
-                            {
-                                Some(if index_read {
-                                    self.index_read(
-                                        member.value,
-                                        member.optional,
-                                        member
-                                            .declaration_origin
-                                            .as_deref()
-                                            .or(object_scope.as_deref()),
-                                    )
-                                } else {
-                                    member.value
-                                })
-                            }
-                            _ => None,
-                        }
-                    };
-                    // Element access coerces a numeric key to its canonical
-                    // string spelling and vice versa (JS property identity);
-                    // `keyof` keeps the authored variant. Both projections
-                    // retry through the equivalent spelling.
-                    let equivalent = known_key.element_access_equivalent();
-                    let overload_group = surface
-                        .project_known_key_overload_group(&known_key)
-                        .or_else(|| {
-                            equivalent.as_ref().and_then(|equivalent| {
-                                surface.project_known_key_overload_group(equivalent)
-                            })
-                        });
-                    let member = match overload_group {
-                        Some(signatures) => Some(self.dispatch.graph().intern_node(
-                            crate::semantic_query::SemanticNodeData::Object(
-                                crate::semantic_query::surface_view! {
-                                    members: std::sync::Arc::from(Vec::new().into_boxed_slice()),
-                                    call_signatures: std::sync::Arc::from(
-                                        signatures.into_boxed_slice(),
-                                    ),
-                                    construct_signatures: std::sync::Arc::from(
-                                        Vec::new().into_boxed_slice(),
-                                    ),
-                                    index_signatures: std::sync::Arc::from(
-                                        Vec::new().into_boxed_slice(),
-                                    ),
-                                    keyspace: None,
-                                    has_index_signature: false,
-                                },
-                            ),
-                        )),
-                        None => first_wins(&known_key)
-                            .or_else(|| equivalent.as_ref().and_then(first_wins)),
-                    };
+                    let member = self.known_member_read(current, surface, &known_key, None, index_read)
+                        .or_else(|| known_key.element_access_equivalent().as_ref().and_then(|equivalent| {
+                            self.known_member_read(current, surface, equivalent, None, index_read)
+                        }));
                     match member {
                         Some(member_value) => {
                             let meta = match segment {
@@ -4967,6 +5031,10 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 }
             }
         }
+        results.push(self.finish_path_terminal(current));
+    }
+
+    fn finish_path_terminal(&mut self, mut current: SemanticNodeId) -> SemanticNodeId {
         // A projected member that is its declaration's self-reference
         // (`Chain['next']`) is the application it records, under every
         // mode — the terminal rules below then treat it like any other
@@ -5051,7 +5119,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             // execution, and carrier-preserving on failure.
             current = self.resolve_navigate_terminal_reference_identity(current);
         }
-        results.push(current);
+        current
     }
 
     /// Resolve a NON-EMPTY-path terminal carrier under `Expanded`.
