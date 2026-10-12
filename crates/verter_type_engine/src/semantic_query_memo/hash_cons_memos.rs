@@ -15,44 +15,26 @@
 //! lock-free on the hot read path — only publishes pay the FIFO
 //! lock cost.
 //!
-//! Both memos collapse identical structural keys reaching the
-//! underlying helpers
-//! (`substitute_semantic_type_param`,
-//! `evaluate_deferred_semantic_node_with_context`) to one cached
-//! result. Reads are lock-free `DashMap::get`; writes use
-//! first-writer-wins via the entry API (concurrent publishers for the
-//! same key resolve to structurally identical results because both
-//! helpers are pure functions of their inputs).
-//!
-//! Cache scoping: the store is per `(project_identity, parse_env_hash,
-//! resolve_env_hash, type_env_hash, lib_env_hash)`. Semantic-node ids
-//! inside one store's arena are content-addressed integers, so a
-//! tuple of ids is a complete identity for the cached RESULT shape,
-//! but the cached id's structural meaning may transitively depend
-//! on file content the helpers walked through during their compute
-//! (e.g. `TypeOf` evaluation routes through a `ValueRootKey` whose
-//! resolved structure depends on the owning file). A canonical-
-//! content edit therefore invalidates not only the structural data
-//! but any cached `(key → result_id)` mapping that was computed by
-//! walking through that canonical.
-//!
-//! Invalidation: both memos are cleared on `invalidate_all` (project-
-//! content-generation bump) AND on every `invalidate_canonical`
-//! (per-canonical edit). The per-canonical clear is currently a
-//! sledgehammer: any single file edit drops both memos in full
-//! rather than tracking a reverse-index from canonical → memo
-//! entry. The trade-off is admission correctness over routine
-//! warm-hit rate: a stale `(node_id, ctx) → result_id` mapping
-//! produced by a now-invalidated cross-file walk would survive
-//! under the previous `invalidate_all`-only clear policy and
-//! poison every subsequent caller asking for the same key. A
-//! future refinement may install a reverse-index (canonical →
-//! memo entries) so per-canonical edits invalidate only the memo
-//! entries whose compute touched that canonical; the structural
-//! plumbing for that is plan-level follow-up work and is not
-//! required for correctness.
+//! Both memos share completed structural work. Deferred evaluation also
+//! reads current declaration and augmentation inputs, so its entries retain
+//! fact signatures. Every read validates those facts outside the map lock
+//! and replays them into active tracers; a stale candidate is retired only
+//! if it is still the candidate that failed validation. Explicit store
+//! invalidation remains a retirement path, while ordinary content edits
+//! are observed through facts. Results, receipts and signatures share the
+//! store's aggregate retention account.
 
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
+
+pub(crate) struct DeferredMemoEntry {
+    value: SemanticNodeId,
+    receipt: Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
+    lease: super::delivery_lease::SemanticDeliveryLease,
+    signature: verter_session_query::facts::fact_cache::ReadSetSignature,
+    self_roots: Arc<[Arc<str>]>,
+    _charge: verter_session_query::retention::RetentionCharge,
+}
 
 use dashmap::mapref::entry::Entry;
 
@@ -67,7 +49,7 @@ use crate::semantic_query::{ProjectionReductionContext, SemanticNodeId};
 /// observed working set on the bench corpus (per-K materialiser
 /// loops, repeated `Pick<T, K>` projections) plus headroom for
 /// long-running LSP sessions. 100_000 entries at ~32 bytes each
-/// caps each memo at ~3 MB of resident memory.
+/// bounds key count; the aggregate account separately bounds retained bytes.
 pub(super) const HASH_CONS_MEMO_RETENTION_CAP: usize = 100_000;
 
 impl SemanticGraphStore {
@@ -159,27 +141,37 @@ impl SemanticGraphStore {
         &self,
         node: SemanticNodeId,
         context: ProjectionReductionContext,
+        ctx: &dyn crate::resolver_core::fact_validation_port::FactValidation,
     ) -> Option<crate::semantic_query::CacheRead<SemanticNodeId>> {
         let hit = self
             .evaluate_deferred_memo
             .get(&(node, context))
-            .map(|entry| {
-                let (read, receipt, lease) = entry.value();
-                // A deferred evaluation is a pure function of interned
-                // nodes: it records no dependency facts, and only complete
-                // evaluations enter the memo.
-                crate::semantic_query::CacheRead {
-                    lease: lease.clone(),
-                    value: *read,
-                    dep_signature: super::empty_signature(),
-                    walker_diagnostics: std::sync::Arc::from([]),
-                    cache_suppress: false,
-                    result_is_partial: false,
-                    partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
-                    receipt: crate::semantic_query::ReadReceipt::Priced(std::sync::Arc::clone(
-                        receipt,
-                    )),
+            .map(|entry| Arc::clone(entry.value()))
+            .filter(|entry| {
+                use crate::fact_signature_helpers::ReadSetSignatureExt as _;
+                if entry
+                    .signature
+                    .validate_with_self_roots(ctx, &entry.self_roots)
+                {
+                    entry.signature.bubble(ctx);
+                    true
+                } else {
+                    self.evaluate_deferred_memo
+                        .remove_if(&(node, context), |_, current| Arc::ptr_eq(current, entry));
+                    false
                 }
+            })
+            .map(|entry| crate::semantic_query::CacheRead {
+                lease: entry.lease.clone(),
+                value: entry.value,
+                dep_signature: super::empty_signature(),
+                walker_diagnostics: std::sync::Arc::from([]),
+                cache_suppress: false,
+                result_is_partial: false,
+                partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
+                receipt: crate::semantic_query::ReadReceipt::Priced(std::sync::Arc::clone(
+                    &entry.receipt,
+                )),
             });
         if hit.is_some() {
             self.stats
@@ -203,6 +195,7 @@ impl SemanticGraphStore {
         context: ProjectionReductionContext,
         result: SemanticNodeId,
         receipt: std::sync::Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
+        signature: verter_session_query::facts::fact_cache::ReadSetSignature,
     ) {
         // The receipt lives as long as the entry: it is charged to the
         // retention account like every retained receipt, and an entry the
@@ -220,11 +213,36 @@ impl SemanticGraphStore {
                 let Ok(roots) = self.root_existing_nodes(vec![node, result]) else {
                     return;
                 };
-                slot.insert((
-                    result,
+                let mut seen = rustc_hash::FxHashSet::default();
+                let self_roots: Arc<[Arc<str>]> = signature.entries().filter_map(|fact| match fact {
+                    verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash { canonical_id, .. }
+                        if seen.insert(canonical_id.as_str()) => Some(Arc::from(canonical_id.as_str())),
+                    _ => None,
+                }).collect();
+                let own_bytes = std::mem::size_of::<DeferredMemoEntry>()
+                    + verter_session_query::retention::ENTRY_OVERHEAD_BYTES
+                    + signature.facts.len() * 64
+                    + self_roots
+                        .iter()
+                        .map(|root| root.len() + std::mem::size_of::<Arc<str>>())
+                        .sum::<usize>();
+                let verter_session_query::retention::RetentionAdmission::Admitted(charge) =
+                    verter_session_query::facts::receipt::reserve_retained_with_evidence(
+                        self.retention_account(),
+                        own_bytes,
+                        &[&signature.facts],
+                    )
+                else {
+                    return;
+                };
+                slot.insert(Arc::new(DeferredMemoEntry {
+                    value: result,
                     receipt,
-                    super::delivery_lease::SemanticDeliveryLease::from_roots(roots),
-                ));
+                    lease: super::delivery_lease::SemanticDeliveryLease::from_roots(roots),
+                    signature,
+                    self_roots,
+                    _charge: charge,
+                }));
                 let mut fifo = self.evaluate_deferred_memo_fifo.lock();
                 fifo.push_back(key);
                 while fifo.len() > HASH_CONS_MEMO_RETENTION_CAP {
@@ -238,6 +256,18 @@ impl SemanticGraphStore {
                 }
             }
         }
+    }
+
+    /// Admission inspection for tests; production reads always validate facts.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn peek_evaluate_deferred_memo_for_tests(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+    ) -> Option<()> {
+        self.evaluate_deferred_memo
+            .contains_key(&(node, context))
+            .then_some(())
     }
 
     /// Internal: drop both hash-cons memos on a workspace-content-
