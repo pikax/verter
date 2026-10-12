@@ -448,6 +448,24 @@ export function allScenarios() {
     ),
   );
 
+  for (const n of [128, 512, 1000, 2048]) {
+    out.push(
+      scenario(
+        `switch-discriminated-${n}`,
+        "flow",
+        `${n} discriminated members, one returning case per member, no default`,
+        `type U = ${union(range(n).map((i) => `{ kind: "k${i}"; v${i}: ${i} }`))};\n` +
+          `function f(x: U) { switch (x.kind) {\n` +
+          range(n)
+            .map((i) => `case "k${i}": return x.v${i};\n`)
+            .join("") +
+          `} }\n`,
+        "ReturnType<typeof f>",
+        { beyond: union(range(n)) },
+      ),
+    );
+  }
+
   return out;
 }
 
@@ -493,6 +511,10 @@ export const SCENARIO_TIERS = {
   "mapped-index-tags-3000": "standard",
   "mapped-index-tags-10000": "stress",
   "baseline-empty": "quick",
+  "switch-discriminated-128": "quick",
+  "switch-discriminated-512": "standard",
+  "switch-discriminated-1000": "standard",
+  "switch-discriminated-2048": "stress",
   "relation-aligned-200": "quick",
   "relation-aligned-false-200": "quick",
   "relation-reversed-200": "quick",

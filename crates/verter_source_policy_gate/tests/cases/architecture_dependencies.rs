@@ -1561,6 +1561,11 @@ mod cosmetic_reprinter_guard {
     /// `parentcanonicalid` (the char after `paren` is `t`, never `c`) so it can never collide with
     /// a `paren` + `c…` canonicalizer needle.
     fn normalize(line: &str) -> String {
+        if line.is_ascii() {
+            let mut folded = line.to_ascii_lowercase();
+            folded.retain(|c| c != '_');
+            return folded;
+        }
         line.chars()
             .filter(|&c| c != '_')
             .flat_map(char::to_lowercase)
@@ -1689,6 +1694,11 @@ mod cosmetic_reprinter_guard {
                     return Some(needle);
                 }
             }
+        }
+        // Every remaining import form requires this token. Avoid allocating
+        // collapsed whitespace on the overwhelmingly common non-import line.
+        if !norm.contains("esrap") {
+            return None;
         }
         // esrap re-printer use-path: a `::esrap` / `esrap::` reference, an `extern crate esrap …`
         // declaration, or a `use` statement importing it under any visibility. The normalized form

@@ -532,6 +532,7 @@ fn resolve_component_meta_parts_fallthrough_skips_imported_define_emits_when_eva
                             macro_index: 0,
                             result: verter_session_query::analysis::type_expand::ExpansionResult::exact_symbolic(
                                 verter_session_query::analysis::type_expand::ExpandedObjectShape {
+                                    domain_guarantee: None,
                                     properties: vec![
                                         verter_session_query::analysis::type_expand::ExpandedProperty {
                                             name: "save".to_string(),
@@ -1053,6 +1054,7 @@ type Props = Pick<ImportedBase, 'href'>
                         macro_index: 0,
                         result: verter_session_query::analysis::type_expand::ExpansionResult::exact_symbolic(
                             verter_session_query::analysis::type_expand::ExpandedObjectShape {
+                                domain_guarantee: None,
                                 properties: vec![
                                     verter_session_query::analysis::type_expand::ExpandedProperty {
                                         name: "href".to_string(),

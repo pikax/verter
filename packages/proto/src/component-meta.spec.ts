@@ -5,9 +5,12 @@
 import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
 import { describe, expect, it } from "vitest";
 
-import { ComponentMetaPayloadSchema, createTestComponentMetaPayload } from "./component-meta.js";
 import {
-  ComponentMetaBodySchema,
+  LegacyComponentMetaPayloadSchema as ComponentMetaPayloadSchema,
+  createLegacyTestComponentMetaPayload as createTestComponentMetaPayload,
+} from "./component-meta.js";
+import {
+  LegacyComponentMetaBodySchema as ComponentMetaBodySchema,
   MacroExpansionDiagnosticEntrySchema,
   ExpansionExactness,
   ExpansionExecutionStatus,

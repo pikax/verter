@@ -8,7 +8,8 @@
 //! touch <path>                       create <path> (proves the child ran)
 //! sleep <ms>                         sleep, then exit 0
 //! cpu-tree <depth> <ms>             (macOS) burn CPU in each generation,
-//!                                    reap descendants and report tree usage
+//!                                    reap each descendant with wait as soon
+//!                                    as it exits, and report tree usage
 //! alloc <chunk-mb>                   commit and touch <chunk-mb> chunks until
 //!                                    an allocation is refused, then wait to be
 //!                                    killed (never exits on its own)
@@ -93,6 +94,7 @@ fn cpu(duration_ms: u64) {
 fn cpu_tree(depth: u32, duration_ms: u64) {
     burn_cpu(duration_ms);
     if depth > 0 {
+        // Same reap as a parent blocked in waitpid: no pause, no sampler handshake.
         let child = Command::new(std::env::current_exe().expect("fixture path"))
             .args([
                 "cpu-tree",
@@ -100,8 +102,11 @@ fn cpu_tree(depth: u32, duration_ms: u64) {
                 &duration_ms.to_string(),
             ])
             .stdin(Stdio::null())
-            .output()
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
             .expect("run CPU descendant");
+        let child = child.wait_with_output().expect("reap CPU descendant");
         assert!(child.status.success(), "CPU descendant failed: {child:?}");
     }
     report_cpu(true);

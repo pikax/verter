@@ -63,6 +63,7 @@ fn upsert_ts(host: &VerterHost, id: &str, source: &str) {
 
 fn empty_meta() -> ComponentMetaAnalysis {
     ComponentMetaAnalysis {
+        domain_guarantees: Default::default(),
         props: vec![],
         events: vec![],
         slots: vec![],

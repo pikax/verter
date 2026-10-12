@@ -1,6 +1,8 @@
+import type { FactResult, FactCauses } from "./facts.js";
 import { fromBinary } from "@bufbuild/protobuf";
 import {
   ComponentMetaPayloadSchema,
+  LegacyComponentMetaPayloadSchema,
   SurfacePartialReason,
   type ComponentMetaPayload,
   type ProtoRecord,
@@ -55,6 +57,8 @@ import {
   NODE_INDEXED_ACCESS,
   NODE_INFER,
   NODE_INTERSECTION,
+  LITERAL_BIG_INT,
+  LITERAL_STRING,
   NODE_KEY_OF,
   NODE_LITERAL,
   NODE_MAPPED,
@@ -262,11 +266,15 @@ export function decodeTypedComponentMetaPayload(
   payload: ArrayBuffer | ArrayBufferView,
 ): NativeComponentMetaResult {
   const message = fromBinary(ComponentMetaPayloadSchema, toBytes(payload));
+  if (message.schemaVersion === 12) {
+    const legacy = fromBinary(LegacyComponentMetaPayloadSchema, toBytes(payload));
+    return decodeLegacyPayload(legacy as unknown as ComponentMetaPayload);
+  }
   return decodeTypedPayload(message);
 }
 
-function decodeTypedPayload(message: ComponentMetaPayload): NativeComponentMetaResult {
-  if (message.schemaVersion !== GRAPH_FORMAT_VERSION) {
+function decodeLegacyPayload(message: ComponentMetaPayload): NativeComponentMetaResult {
+  if (message.schemaVersion !== 12) {
     throw graphError(
       `component-meta protobuf payload version mismatch: expected ${GRAPH_FORMAT_VERSION}, found ${message.schemaVersion}`,
     );
@@ -275,22 +283,308 @@ function decodeTypedPayload(message: ComponentMetaPayload): NativeComponentMetaR
     throw graphError("component-meta protobuf payload is missing a required section");
   }
 
-  const graph = decodeTypeGraph(message.typeGraph);
-  const typeRegistry = message.typeRegistry.map((entry) => decodeTypeRegistryEntry(entry, graph));
+  // Localize invalid nodes without turning schema-12 bool fields into fact records.
+  const graph = decodeTypeGraph(message.typeGraph, true);
+  graph.factMode = false;
+  const typeRegistry = ((message as ProtoRecord).typeRegistry as ProtoRecord[]).map((entry) =>
+    decodeTypeRegistryEntry(entry, graph),
+  );
   const body = decodeComponentMetaBody(message.body, graph);
   const origin = decodeOptionalOriginGraph(message);
-  return {
+  const result = {
     ...body,
     typeRegistry,
     ...(origin !== undefined ? { origin } : {}),
   } as unknown as NativeComponentMetaResult;
+  stampLegacyMemberFacts(result);
+  result.facts = adaptLegacyFacts(result);
+  return result;
 }
 
-function decodeTypeGraph(typeGraph: ProtoRecord): DecodedTypeGraph {
+function decodeTypedPayload(message: ComponentMetaPayload): NativeComponentMetaResult {
+  if (message.schemaVersion !== GRAPH_FORMAT_VERSION)
+    throw graphError(
+      `component-meta protobuf payload version mismatch: expected ${GRAPH_FORMAT_VERSION}, found ${message.schemaVersion}`,
+    );
+  if (!message.typeGraph || !message.body || !message.body.facts)
+    throw graphError("component-meta protobuf payload is missing facts or graph");
+  const graph = decodeTypeGraph(message.typeGraph, true);
+  const body = message.body;
+  const raw = body.facts as ProtoRecord;
+  const facts = {
+    delivery: decodeFact(
+      raw.delivery ? { guarantee: raw.delivery, absent: raw.delivery.kind === 1 } : undefined,
+      () => undefined,
+      false,
+    ),
+    props: decodeFact(
+      raw.props,
+      (value) => ((value.entries ?? []) as ProtoRecord[]).map((entry) => decodeProp(entry, graph)),
+      true,
+    ),
+    events: decodeFact(
+      raw.events,
+      (value) => ((value.entries ?? []) as ProtoRecord[]).map((entry) => decodeEvent(entry, graph)),
+      true,
+    ),
+    slots: decodeFact(
+      raw.slots,
+      (value) => ((value.entries ?? []) as ProtoRecord[]).map((entry) => decodeSlot(entry, graph)),
+      true,
+    ),
+    models: decodeFact(
+      raw.models,
+      (value) => ((value.entries ?? []) as ProtoRecord[]).map((entry) => decodeModel(entry, graph)),
+      true,
+    ),
+    exposed: decodeFact(
+      raw.exposed,
+      (value) =>
+        ((value.entries ?? []) as ProtoRecord[]).map((entry) => decodeExposed(entry, graph)),
+      true,
+    ),
+    acceptedProps: decodeFact(
+      raw.acceptedProps,
+      (value) =>
+        ((value.entries ?? []) as ProtoRecord[]).map((entry) => decodeAcceptedProp(entry, graph)),
+      true,
+    ),
+    acceptedEvents: decodeFact(
+      raw.acceptedEvents,
+      (value) =>
+        ((value.entries ?? []) as ProtoRecord[]).map((entry) => decodeAcceptedEvent(entry, graph)),
+      true,
+    ),
+    rootReachability: decodeFact(
+      raw.rootReachability,
+      (value) => decodeRootReachability(value, graph),
+      false,
+    ),
+    fallthroughSurface: decodeFact(
+      raw.fallthroughSurface,
+      (value) => decodeFallthroughSurface(value, graph),
+      false,
+    ),
+    publicInstance: decodeFact(
+      raw.publicInstance,
+      (value) => decodeOptionalPublicInstance(value, graph),
+      false,
+    ),
+    componentPublicContract: decodeFact(
+      raw.componentPublicContract,
+      (value) => decodeSupportedComponentContract(value, graph),
+      false,
+    ),
+    typeRegistry: decodeFact(
+      raw.typeRegistry,
+      (value) =>
+        ((value.entries ?? []) as ProtoRecord[]).map((entry) =>
+          decodeTypeRegistryEntry(entry, graph),
+        ),
+      true,
+    ),
+  };
+  const value = (fact: FactResult<unknown>, fallback: unknown) =>
+    fact.kind === "unavailable" ? fallback : fact.value;
+  // Only authored/scalar positions reach this shared decoder. Semantic lanes
+  // are decoded independently above and compatibility arrays derive from them.
+  const authored = decodeAuthoredBody(body as ProtoRecord, graph);
+  const result = {
+    ...authored,
+    facts,
+    props: value(facts.props, []),
+    events: value(facts.events, []),
+    slots: value(facts.slots, []),
+    models: value(facts.models, []),
+    exposed: value(facts.exposed, []),
+    acceptedProps: value(facts.acceptedProps, []),
+    acceptedEvents: value(facts.acceptedEvents, []),
+    rootReachability: value(facts.rootReachability, {
+      kind: "noFallthrough",
+      reason: "noTemplate",
+    }),
+    fallthroughSurface: value(facts.fallthroughSurface, { kind: "none", reason: "noTemplate" }),
+    publicInstance: value(facts.publicInstance, undefined),
+    componentPublicContract:
+      facts.componentPublicContract.kind === "unavailable"
+        ? {
+            kind: "unsupported",
+            adapterId: "",
+            reason: {
+              kind: facts.componentPublicContract.causes.includes(106)
+                ? "adapterUnavailable"
+                : "componentMetaUnavailable",
+            },
+            diagnostics: [],
+          }
+        : { kind: "supported", contract: facts.componentPublicContract.value },
+    typeRegistry: value(facts.typeRegistry, []),
+    acceptedSurfaceCompleteness:
+      facts.acceptedProps.kind === "complete" &&
+      !facts.acceptedProps.open &&
+      facts.acceptedEvents.kind === "complete" &&
+      !facts.acceptedEvents.open
+        ? "exact"
+        : "lowerBound",
+    resultCompleteness: summarizeFacts(facts),
+    ...maybe(
+      "rootInfo",
+      facts.rootReachability.kind === "unavailable"
+        ? undefined
+        : deriveRootInfo(facts.rootReachability.value),
+    ),
+    ...maybe("origin", decodeOptionalOriginGraph(message)),
+  } as unknown as NativeComponentMetaResult;
+  return result;
+}
+
+function decodeFact<T>(
+  raw: Record<string, any> | undefined,
+  decode: (value: ProtoRecord) => T,
+  domain: boolean,
+): FactResult<T> {
+  try {
+    if (!raw?.guarantee) throw graphError("missing fact guarantee");
+    const kind = Number(raw.guarantee.kind);
+    const causes = numberList(raw.guarantee.causes);
+    if (kind === 3) {
+      if (raw.value !== undefined || raw.absent || causes.length === 0)
+        throw graphError("unavailable fact carries value or lacks causes");
+      return { kind: "unavailable", causes: causes as unknown as FactCauses };
+    }
+    if (kind !== 1 && kind !== 2) throw graphError("unknown fact status");
+    if ((kind === 1 && causes.length !== 0) || (kind === 2 && causes.length === 0))
+      throw graphError("contradictory fact causes");
+    if ((raw.value === undefined) === !raw.absent || (domain && raw.absent))
+      throw graphError("fact value presence is invalid");
+    const value = raw.absent ? (undefined as T) : decode(raw.value as ProtoRecord);
+    const open = domain ? { open: Boolean(raw.value?.open) } : {};
+    return kind === 1
+      ? { kind: "complete", value, ...open }
+      : { kind: "approximate", value, causes: causes as unknown as FactCauses, ...open };
+  } catch {
+    return { kind: "unavailable", causes: [100] };
+  }
+}
+
+function summarizeFacts(facts: Record<string, FactResult<unknown>>): NativeResultCompleteness {
+  const causes = new Set<number>();
+  function visit(value: unknown): void {
+    if (!value || typeof value !== "object") return;
+    if (
+      "kind" in value &&
+      (value.kind === "unavailable" || value.kind === "approximate") &&
+      "causes" in value
+    ) {
+      for (const cause of value.causes as number[]) causes.add(cause);
+    }
+    // Graph references own a shared graph; traversal stops at the typed handle.
+    if ("graph" in value && "nodeId" in value) return;
+    for (const item of Object.values(value)) visit(item);
+  }
+  visit(facts);
+  const reasons = [...causes].map(
+    (cause) => SURFACE_PARTIAL_REASON_BY_WIRE[cause as SurfacePartialReason] ?? "propagated",
+  );
+  return reasons.length === 0
+    ? { kind: "complete" }
+    : { kind: "partial", reasons: [...new Set(reasons)] };
+}
+
+function legacyPublicationFact(
+  publication: { kind: string; exactness?: string },
+  type: unknown,
+): FactResult<unknown> {
+  if (publication.kind === "failed" || (type === undefined && publication.kind !== "absent")) {
+    return { kind: "unavailable", causes: [102] };
+  }
+  if (publication.kind === "absent") return { kind: "complete", value: undefined };
+  if (publication.kind === "published" && publication.exactness === "incomplete") {
+    return { kind: "approximate", value: type, causes: [101] };
+  }
+  return { kind: "complete", value: type };
+}
+
+function stampLegacyMemberFacts(result: NativeComponentMetaResult): void {
+  for (const prop of result.props) {
+    prop.typeFact ??= legacyPublicationFact(prop.publication, prop.type) as NonNullable<
+      typeof prop.typeFact
+    >;
+  }
+  for (const event of result.events) {
+    event.typeFact ??= legacyPublicationFact(event.publication, event.payload) as NonNullable<
+      typeof event.typeFact
+    >;
+  }
+  for (const slot of result.slots) {
+    for (const binding of slot.bindings) {
+      binding.typeFact ??= legacyPublicationFact(binding.publication, binding.type) as NonNullable<
+        typeof binding.typeFact
+      >;
+    }
+  }
+  for (const prop of result.acceptedProps) {
+    prop.typeFact ??= legacyPublicationFact(prop.publication, prop.type) as NonNullable<
+      typeof prop.typeFact
+    >;
+  }
+  if (result.fallthroughSurface.kind === "branches") {
+    for (const branch of result.fallthroughSurface.branches) {
+      for (const prop of branch.props) {
+        prop.typeFact ??= legacyPublicationFact(prop.publication, prop.type) as NonNullable<
+          typeof prop.typeFact
+        >;
+      }
+    }
+  }
+}
+
+function adaptLegacyFacts(result: NativeComponentMetaResult): NativeComponentMetaResult["facts"] {
+  const summary = result.resultCompleteness;
+  const causes: FactCauses = [101];
+  const fact = <T>(value: T): FactResult<T> =>
+    summary.kind === "complete"
+      ? { kind: "complete", value, ...(Array.isArray(value) ? { open: true } : {}) }
+      : value === undefined
+        ? { kind: "unavailable", causes }
+        : { kind: "approximate", value, causes, open: Array.isArray(value) };
+  return {
+    delivery:
+      summary.kind === "complete"
+        ? { kind: "complete", value: undefined }
+        : { kind: "unavailable", causes },
+    props: fact(result.props),
+    events: fact(result.events),
+    slots: fact(result.slots),
+    models: fact(result.models),
+    exposed: fact(result.exposed),
+    acceptedProps: fact(result.acceptedProps),
+    acceptedEvents: fact(result.acceptedEvents),
+    rootReachability: fact(result.rootReachability),
+    fallthroughSurface: fact(result.fallthroughSurface),
+    publicInstance: fact(result.publicInstance),
+    componentPublicContract:
+      result.componentPublicContract.kind === "supported"
+        ? fact(result.componentPublicContract.contract)
+        : { kind: "unavailable", causes: [101] },
+    typeRegistry: fact(result.typeRegistry),
+  };
+}
+
+function decodeTypeGraph(typeGraph: ProtoRecord, localFailures = false): DecodedTypeGraph {
   const strings = [...((typeGraph.strings as string[] | undefined) ?? [])];
-  const nodes = ((typeGraph.nodes as ProtoTypeNode[] | undefined) ?? []).map(decodeTypeNode);
+  const nodes = ((typeGraph.nodes as ProtoTypeNode[] | undefined) ?? []).map((node) => {
+    try {
+      return decodeTypeNode(node);
+    } catch (error) {
+      if (!localFailures) throw error;
+      return { kind: NODE_UNKNOWN, rawId: 0 } as GraphNodeRecord;
+    }
+  });
   const graph = new DecodedTypeGraph(strings, nodes);
-  validateNodeTable(graph);
+  graph.factMode = localFailures;
+  graph.localizeFailures = localFailures;
+  validateNodeTable(graph, localFailures);
   return graph;
 }
 
@@ -465,7 +759,11 @@ function decodeTypeNode(node: ProtoTypeNode): GraphNodeRecord {
     case "unknown":
       return { kind: NODE_UNKNOWN, rawId: Number(value?.rawId ?? 0) };
     case "infer":
-      return { kind: NODE_INFER, nameId: Number(value?.nameId ?? 0) };
+      return {
+        kind: NODE_INFER,
+        nameId: Number(value?.nameId ?? 0),
+        constraintNodeId: Number(value?.constraintNodeId ?? 0),
+      };
     case "rest":
       return { kind: NODE_REST, innerNodeId: Number(value?.innerNodeId ?? 0) };
     case "recursiveRef":
@@ -496,150 +794,193 @@ function decodeTypeNode(node: ProtoTypeNode): GraphNodeRecord {
   }
 }
 
-function validateNodeTable(graph: DecodedTypeGraph): void {
-  for (const node of graph.nodes) {
-    switch (node.kind) {
-      case NODE_LITERAL:
-        if (node.stringId) {
-          graph.getString(node.stringId);
-        }
-        break;
-      case NODE_UNION:
-      case NODE_INTERSECTION:
-        node.typeNodeIds.forEach((id) => graph.getNode(id));
-        break;
-      case NODE_ARRAY:
-        graph.getNode(node.elementNodeId);
-        break;
-      case NODE_TUPLE:
-        node.elements.forEach((element) => {
-          if (element.labelId) {
-            graph.getString(element.labelId);
+function validateNodeTable(graph: DecodedTypeGraph, localFailures = false): void {
+  const invalid = new Set<number>();
+  for (const [index, node] of graph.nodes.entries()) {
+    try {
+      switch (node.kind) {
+        case NODE_PRIMITIVE:
+          if (node.primitive < 1 || node.primitive > 12) throw graphError("unknown primitive tag");
+          break;
+        case NODE_LITERAL:
+          if (node.literalKind === LITERAL_STRING || node.literalKind === LITERAL_BIG_INT) {
+            graph.getString(node.stringId ?? 0);
+          } else if (node.stringId) {
+            graph.getString(node.stringId);
           }
-          graph.getNode(element.typeNodeId);
-        });
-        break;
-      case NODE_OBJECT:
-        node.members.forEach((member) => {
-          switch (member.kind) {
-            case MEMBER_PROPERTY:
-              touchPropertyKeyStrings(graph, member.key);
-              graph.getNode(member.typeNodeId);
-              break;
-            case MEMBER_INDEX_SIGNATURE:
-              if (member.keyNameId) {
-                graph.getString(member.keyNameId);
-              }
-              graph.getNode(member.keyTypeNodeId);
-              graph.getNode(member.valueTypeNodeId);
-              break;
-            case MEMBER_CALL_SIGNATURE:
-            case MEMBER_CONSTRUCT_SIGNATURE:
-            case MEMBER_METHOD:
-              touchPropertyKeyStrings(graph, member.key);
-              graph.getNode(member.functionNodeId);
-              break;
-            case MEMBER_SPREAD:
-              // Pre-fold spread entry: the operand rides the type slot.
-              graph.getNode(member.typeNodeId);
-              break;
-            default:
-              throw graphError(
-                `component-meta graph payload has unknown object member kind ${member.kind}`,
-              );
+          break;
+        case NODE_UNION:
+        case NODE_INTERSECTION:
+          node.typeNodeIds.forEach((id) => graph.getNode(id));
+          break;
+        case NODE_ARRAY:
+          graph.getNode(node.elementNodeId);
+          break;
+        case NODE_TUPLE:
+          node.elements.forEach((element) => {
+            if (element.labelId) {
+              graph.getString(element.labelId);
+            }
+            graph.getNode(element.typeNodeId);
+          });
+          break;
+        case NODE_OBJECT:
+          node.members.forEach((member) => {
+            switch (member.kind) {
+              case MEMBER_PROPERTY:
+                touchPropertyKeyStrings(graph, member.key);
+                graph.getNode(member.typeNodeId);
+                break;
+              case MEMBER_INDEX_SIGNATURE:
+                if (member.keyNameId) {
+                  graph.getString(member.keyNameId);
+                }
+                graph.getNode(member.keyTypeNodeId);
+                graph.getNode(member.valueTypeNodeId);
+                break;
+              case MEMBER_CALL_SIGNATURE:
+              case MEMBER_CONSTRUCT_SIGNATURE:
+              case MEMBER_METHOD:
+                touchPropertyKeyStrings(graph, member.key);
+                graph.getNode(member.functionNodeId);
+                break;
+              case MEMBER_SPREAD:
+                // Pre-fold spread entry: the operand rides the type slot.
+                graph.getNode(member.typeNodeId);
+                break;
+              default:
+                throw graphError(
+                  `component-meta graph payload has unknown object member kind ${member.kind}`,
+                );
+            }
+          });
+          break;
+        case NODE_FUNCTION:
+          node.parameters.forEach((parameter) => {
+            if (parameter.nameId) {
+              graph.getString(parameter.nameId);
+            }
+            graph.getNode(parameter.typeNodeId);
+          });
+          if (node.returnTypeNodeId) {
+            graph.getNode(node.returnTypeNodeId);
           }
-        });
-        break;
-      case NODE_FUNCTION:
-        node.parameters.forEach((parameter) => {
-          if (parameter.nameId) {
-            graph.getString(parameter.nameId);
+          node.typeParameterNodeIds.forEach((id) => graph.getNode(id));
+          break;
+        case NODE_REF:
+          graph.getString(node.nameId);
+          node.typeArgumentNodeIds.forEach((id) => graph.getNode(id));
+          break;
+        // No `getString`: the op is a closed enum, not a string-table entry.
+        case NODE_INTRINSIC_APPLICATION:
+          node.argumentNodeIds.forEach((id) => graph.getNode(id));
+          break;
+        case NODE_TYPE_PARAMETER:
+          graph.getString(node.nameId);
+          if (node.constraintNodeId) {
+            graph.getNode(node.constraintNodeId);
           }
-          graph.getNode(parameter.typeNodeId);
-        });
-        if (node.returnTypeNodeId) {
-          graph.getNode(node.returnTypeNodeId);
-        }
-        node.typeParameterNodeIds.forEach((id) => graph.getNode(id));
-        break;
-      case NODE_REF:
-        graph.getString(node.nameId);
-        node.typeArgumentNodeIds.forEach((id) => graph.getNode(id));
-        break;
-      // No `getString`: the op is a closed enum, not a string-table entry.
-      case NODE_INTRINSIC_APPLICATION:
-        node.argumentNodeIds.forEach((id) => graph.getNode(id));
-        break;
-      case NODE_TYPE_PARAMETER:
-        graph.getString(node.nameId);
-        if (node.constraintNodeId) {
-          graph.getNode(node.constraintNodeId);
-        }
-        if (node.defaultNodeId) {
-          graph.getNode(node.defaultNodeId);
-        }
-        break;
-      case NODE_KEY_OF:
-        graph.getNode(node.operandNodeId);
-        break;
-      case NODE_TYPE_OF:
-        node.pathIds.forEach((id) => graph.getString(id));
-        break;
-      case NODE_INDEXED_ACCESS:
-        graph.getNode(node.objectNodeId);
-        graph.getNode(node.indexNodeId);
-        break;
-      case NODE_CONDITIONAL:
-        graph.getNode(node.checkNodeId);
-        graph.getNode(node.extendsNodeId);
-        graph.getNode(node.trueTypeNodeId);
-        graph.getNode(node.falseTypeNodeId);
-        break;
-      case NODE_MAPPED:
-        graph.getString(node.parameterId);
-        graph.getNode(node.sourceNodeId);
-        graph.getNode(node.valueNodeId);
-        if (node.nameTypeNodeId) {
-          graph.getNode(node.nameTypeNodeId);
-        }
-        break;
-      case NODE_TEMPLATE_LITERAL:
-        node.quasiIds.forEach((id) => graph.getString(id));
-        node.expressionNodeIds.forEach((id) => graph.getNode(id));
-        break;
-      case NODE_PARENTHESIZED:
-        graph.getNode(node.innerNodeId);
-        break;
-      case NODE_UNKNOWN:
-        graph.getString(node.rawId);
-        break;
-      case NODE_INFER:
-        graph.getString(node.nameId);
-        break;
-      case NODE_REST:
-        graph.getNode(node.innerNodeId);
-        break;
-      case NODE_RECURSIVE_REF:
-        graph.getString(node.nameId);
-        node.typeArgumentNodeIds.forEach((id) => graph.getNode(id));
-        node.conditionalContext.forEach((frame) => {
-          graph.getNode(frame.checkNodeId);
-          graph.getNode(frame.extendsNodeId);
-        });
-        break;
-      case NODE_SYNTHETIC_SLOT_BINDING:
-        // Synthetic carriers are inert: no node references, only interned
-        // string ids. Validate that the required string-table indices resolve;
-        // `slotNameId === 0` is a sentinel meaning "absent".
-        graph.getString(node.scopeCanonicalId);
-        graph.getString(node.bindingNameId);
-        if (node.slotNameId) {
-          graph.getString(node.slotNameId);
-        }
-        break;
-      default:
-        break;
+          if (node.defaultNodeId) {
+            graph.getNode(node.defaultNodeId);
+          }
+          break;
+        case NODE_KEY_OF:
+          graph.getNode(node.operandNodeId);
+          break;
+        case NODE_TYPE_OF:
+          node.pathIds.forEach((id) => graph.getString(id));
+          break;
+        case NODE_INDEXED_ACCESS:
+          graph.getNode(node.objectNodeId);
+          graph.getNode(node.indexNodeId);
+          break;
+        case NODE_CONDITIONAL:
+          graph.getNode(node.checkNodeId);
+          graph.getNode(node.extendsNodeId);
+          graph.getNode(node.trueTypeNodeId);
+          graph.getNode(node.falseTypeNodeId);
+          break;
+        case NODE_MAPPED:
+          graph.getString(node.parameterId);
+          graph.getNode(node.sourceNodeId);
+          graph.getNode(node.valueNodeId);
+          if (node.nameTypeNodeId) {
+            graph.getNode(node.nameTypeNodeId);
+          }
+          break;
+        case NODE_TEMPLATE_LITERAL:
+          node.quasiIds.forEach((id) => graph.getString(id));
+          node.expressionNodeIds.forEach((id) => graph.getNode(id));
+          break;
+        case NODE_PARENTHESIZED:
+          graph.getNode(node.innerNodeId);
+          break;
+        case NODE_UNKNOWN:
+          graph.getString(node.rawId);
+          break;
+        case NODE_INFER:
+          graph.getString(node.nameId);
+          if (node.constraintNodeId) graph.getNode(node.constraintNodeId);
+          break;
+        case NODE_REST:
+          graph.getNode(node.innerNodeId);
+          break;
+        case NODE_RECURSIVE_REF:
+          graph.getString(node.nameId);
+          node.typeArgumentNodeIds.forEach((id) => graph.getNode(id));
+          node.conditionalContext.forEach((frame) => {
+            graph.getNode(frame.checkNodeId);
+            graph.getNode(frame.extendsNodeId);
+          });
+          break;
+        case NODE_SYNTHETIC_SLOT_BINDING:
+          // Synthetic carriers are inert: no node references, only interned
+          // string ids. Validate that the required string-table indices resolve;
+          // `slotNameId === 0` is a sentinel meaning "absent".
+          graph.getString(node.scopeCanonicalId);
+          graph.getString(node.bindingNameId);
+          if (node.slotNameId) {
+            graph.getString(node.slotNameId);
+          }
+          break;
+        default:
+          break;
+      }
+    } catch (error) {
+      if (!localFailures) throw error;
+      invalid.add(index + 1);
     }
+  }
+  if (localFailures) {
+    const consumers = new Map<number, number[]>();
+    function references(value: unknown, owner: number): void {
+      if (!value || typeof value !== "object") return;
+      for (const [key, child] of Object.entries(value)) {
+        if (key.endsWith("NodeId") || key === "nodeId") {
+          if (typeof child === "number" && child !== 0) {
+            const ids = consumers.get(child) ?? [];
+            ids.push(owner);
+            consumers.set(child, ids);
+          }
+        } else if (key.endsWith("NodeIds") && Array.isArray(child)) {
+          for (const id of child) {
+            const ids = consumers.get(id) ?? [];
+            ids.push(owner);
+            consumers.set(id, ids);
+          }
+        } else if (child && typeof child === "object") references(child, owner);
+      }
+    }
+    graph.nodes.forEach((node, index) => references(node, index + 1));
+    const queue = [...invalid];
+    for (let index = 0; index < queue.length; index++) {
+      for (const consumer of consumers.get(queue[index]) ?? [])
+        if (!invalid.has(consumer)) {
+          invalid.add(consumer);
+          queue.push(consumer);
+        }
+    }
+    for (const id of invalid) graph.invalidNodeIds.add(id);
   }
 }
 
@@ -649,7 +990,7 @@ function decodeTypeRegistryEntry(
 ): Record<string, unknown> {
   return {
     name: graph.getString(readRequiredId(entry.nameId, "registry name")),
-    type: createGraphTypeExprRef(graph, readRequiredId(entry.typeNodeId, "registry type")),
+    ...decodeTypedRef(graph, entry.typeNodeId, "registry type"),
     ...maybe(
       "typeExpansion",
       decodeOptionalExpansionMetadata(entry.typeExpansion as ProtoRecord | undefined, graph),
@@ -659,6 +1000,44 @@ function decodeTypeRegistryEntry(
       "declaration",
       decodeOptionalResolvedTypeDeclaration(entry.declaration as ProtoRecord | undefined, graph),
     ),
+  };
+}
+
+function decodeAuthoredBody(body: ProtoRecord, graph: DecodedTypeGraph): Record<string, unknown> {
+  return {
+    filePath: graph.getString(readRequiredId(body.filePathId, "file path")),
+    componentName: "",
+    optionsApi: Boolean(body.optionsApi),
+    orderedSfcStructure: decodeOrderedStructure(
+      requireProtoMessage(
+        body.orderedSfcStructure as ProtoRecord | undefined,
+        "ordered SFC structure",
+      ),
+    ),
+    components: ((body.components as ProtoRecord[] | undefined) ?? []).map((row) =>
+      decodeComponentUsage(row, graph),
+    ),
+    templateRefs: ((body.templateRefs as ProtoRecord[] | undefined) ?? []).map((row) =>
+      decodeTemplateRef(row, graph),
+    ),
+    imports: ((body.imports as ProtoRecord[] | undefined) ?? []).map((row) =>
+      decodeImport(row, graph),
+    ),
+    bindings: ((body.bindings as ProtoRecord[] | undefined) ?? []).map((row) =>
+      decodeBinding(row, graph),
+    ),
+    vueApiCalls: ((body.vueApiCalls as ProtoRecord[] | undefined) ?? []).map((row) =>
+      decodeVueApiCall(row, graph),
+    ),
+    styles: ((body.styles as ProtoRecord[] | undefined) ?? []).map((row) =>
+      decodeStyle(row, graph),
+    ),
+    flags: decodeComponentFlags(body.flags as ProtoRecord | undefined),
+    ...maybe(
+      "resolution",
+      decodeOptionalResolution(body.resolution as ProtoRecord | undefined, graph),
+    ),
+    ...decodeMacroExpansionDiagnostics(body, graph),
   };
 }
 
@@ -1146,10 +1525,7 @@ function decodeOptionalPublicInstance(
           : Number(member.kind ?? 0) === 2
             ? "slotContainer"
             : "exposed",
-      type: createGraphTypeExprRef(
-        graph,
-        readRequiredId(member.typeNodeId, "public instance member type"),
-      ),
+      ...decodeTypedRef(graph, member.typeNodeId, "public instance member type"),
       ...maybe(
         "typeExpansion",
         decodeOptionalExpansionMetadata(member.typeExpansion as ProtoRecord | undefined, graph),
@@ -1396,34 +1772,88 @@ function decodePublishedTypeFields(
   graph: DecodedTypeGraph,
   label: string,
 ): Record<string, unknown> {
-  const publication = decodeTypePublication(
-    requireProtoMessage(row.publication as ProtoRecord | undefined, `${label} publication`),
-  );
-  const terminalDisplay = decodeTerminalTypeDisplay(
-    requireProtoMessage(
-      row.terminalDisplay as ProtoRecord | undefined,
-      `${label} terminal display`,
-    ),
-    graph,
-  );
-  const typeNodeId = Number(row.typeNodeId ?? 0);
-  if (publication.kind === "failed") {
-    if (typeNodeId !== 0 || terminalDisplay.text !== undefined) {
-      throw graphError(`component-meta ${label} Failed publication carries success output`);
+  try {
+    const publication = decodeTypePublication(
+      requireProtoMessage(row.publication as ProtoRecord | undefined, `${label} publication`),
+    );
+    const terminalDisplay = decodeTerminalTypeDisplay(
+      requireProtoMessage(
+        row.terminalDisplay as ProtoRecord | undefined,
+        `${label} terminal display`,
+      ),
+      graph,
+    );
+    const typeNodeId = Number(row.typeNodeId ?? 0);
+    if (publication.kind === "failed") {
+      if (typeNodeId !== 0 || terminalDisplay.text !== undefined) {
+        throw graphError(`component-meta ${label} Failed publication carries success output`);
+      }
+      return {
+        publication,
+        terminalDisplay,
+        ...(graph.factMode
+          ? {
+              typeFact: {
+                kind: "unavailable",
+                causes: numberList(row.publication?.factCauses).length
+                  ? numberList(row.publication?.factCauses)
+                  : [102],
+              },
+            }
+          : {}),
+      };
     }
-    return { publication, terminalDisplay };
+    if (publication.kind === "published" && typeNodeId === 0) {
+      throw graphError(`component-meta ${label} Published publication is missing its type`);
+    }
+    const type = typeNodeId !== 0 ? createGraphTypeExprRef(graph, typeNodeId) : undefined;
+    const causes = numberList(row.publication?.factCauses);
+    if (
+      graph.factMode &&
+      publication.kind === "published" &&
+      (publication.exactness === "incomplete" ? causes.length === 0 : causes.length !== 0)
+    )
+      throw graphError("contradictory member fact causes");
+    const typeFact: FactResult<typeof type> =
+      publication.kind === "absent"
+        ? { kind: "complete", value: undefined }
+        : publication.kind === "published" && publication.exactness === "incomplete"
+          ? {
+              kind: "approximate",
+              value: type,
+              causes: (causes.length ? causes : [103]) as unknown as FactCauses,
+            }
+          : { kind: "complete", value: type };
+    return {
+      ...maybe("type", type),
+      publication,
+      terminalDisplay,
+      ...(graph.factMode ? { typeFact } : {}),
+    };
+  } catch (error) {
+    if (!graph.factMode && !(graph.localizeFailures && isLocalizedGraphFailure(error))) {
+      throw error;
+    }
+    return {
+      publication: {
+        kind: "failed",
+        failure: "unrepresentableRequiredMemberValue",
+        provenance: "schema",
+      },
+      terminalDisplay: {},
+      ...(graph.factMode ? { typeFact: { kind: "unavailable", causes: [100] } } : {}),
+    };
   }
-  if (publication.kind === "published" && typeNodeId === 0) {
-    throw graphError(`component-meta ${label} Published publication is missing its type`);
-  }
-  return {
-    ...(typeNodeId !== 0 ? { type: createGraphTypeExprRef(graph, typeNodeId) } : {}),
-    publication,
-    terminalDisplay,
-  };
+}
+
+function isLocalizedGraphFailure(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /graph node \d+ is invalid/.test(message) || message.includes("missing node id");
 }
 
 function decodeProp(prop: ProtoRecord, graph: DecodedTypeGraph): Record<string, unknown> {
+  const requiredFact = graph.factMode ? decodeBooleanFact(prop.requiredFact) : undefined;
+  const hasDefaultFact = graph.factMode ? decodeBooleanFact(prop.hasDefaultFact) : undefined;
   return {
     name: graph.getString(readRequiredId(prop.nameId, "prop name")),
     ...decodePublishedTypeFields(prop, graph, "prop"),
@@ -1431,8 +1861,17 @@ function decodeProp(prop: ProtoRecord, graph: DecodedTypeGraph): Record<string, 
       "typeExpansion",
       decodeOptionalExpansionMetadata(prop.typeExpansion as ProtoRecord | undefined, graph),
     ),
-    required: Boolean(prop.required),
-    hasDefault: Boolean(prop.hasDefault),
+    required: requiredFact
+      ? requiredFact.kind === "unavailable"
+        ? undefined
+        : requiredFact.value
+      : Boolean(prop.required),
+    hasDefault: hasDefaultFact
+      ? hasDefaultFact.kind === "unavailable"
+        ? undefined
+        : hasDefaultFact.value
+      : Boolean(prop.hasDefault),
+    ...(graph.factMode ? { requiredFact, hasDefaultFact } : {}),
     ...maybe("defaultValue", graph.getStringMaybe(Number(prop.defaultValueId ?? 0))),
     ...maybe("description", graph.getStringMaybe(Number(prop.descriptionId ?? 0))),
     ...maybeArray("tags", decodeJsdocTags((prop.tags as ProtoRecord[] | undefined) ?? [], graph)),
@@ -1463,6 +1902,7 @@ function decodeEvent(event: ProtoRecord, graph: DecodedTypeGraph): Record<string
     payload: published.type,
     publication: published.publication,
     terminalDisplay: published.terminalDisplay,
+    ...maybe("typeFact", published.typeFact),
     ...maybe(
       "payloadExpansion",
       decodeOptionalExpansionMetadata(event.payloadExpansion as ProtoRecord | undefined, graph),
@@ -1497,6 +1937,7 @@ function decodeSlot(slot: ProtoRecord, graph: DecodedTypeGraph): Record<string, 
         decodeOptionalExpansionMetadata(binding.typeExpansion as ProtoRecord | undefined, graph),
       ),
     })),
+    ...maybe("returnFact", typedReturn.typeFact),
     isRequired: Boolean(slot.isRequired),
     // Field 8 (`declared_in_macro_type_arg`) — proto3 bool defaults make
     // the coercion read `false` when the field is absent.
@@ -1517,14 +1958,14 @@ function decodeSlot(slot: ProtoRecord, graph: DecodedTypeGraph): Record<string, 
 function decodeModel(model: ProtoRecord, graph: DecodedTypeGraph): Record<string, unknown> {
   return {
     name: graph.getString(readRequiredId(model.nameId, "model name")),
-    type: createGraphTypeExprRef(graph, readRequiredId(model.typeNodeId, "model type")),
+    ...decodeTypedRef(graph, model.typeNodeId, "model type"),
   };
 }
 
 function decodeExposed(exposed: ProtoRecord, graph: DecodedTypeGraph): Record<string, unknown> {
   return {
     name: graph.getString(readRequiredId(exposed.nameId, "exposed name")),
-    type: createGraphTypeExprRef(graph, readRequiredId(exposed.typeNodeId, "exposed type")),
+    ...decodeTypedRef(graph, exposed.typeNodeId, "exposed type"),
     ...maybe(
       "typeExpansion",
       decodeOptionalExpansionMetadata(exposed.typeExpansion as ProtoRecord | undefined, graph),
@@ -1690,10 +2131,7 @@ function decodeAcceptedProp(prop: ProtoRecord, graph: DecodedTypeGraph): Record<
 function decodeAcceptedEvent(event: ProtoRecord, graph: DecodedTypeGraph): Record<string, unknown> {
   return {
     name: graph.getString(readRequiredId(event.nameId, "accepted event name")),
-    payload: createGraphTypeExprRef(
-      graph,
-      readRequiredId(event.payloadNodeId, "accepted event payload"),
-    ),
+    ...decodeTypedRef(graph, event.payloadNodeId, "accepted event payload", "payload"),
     ...maybe("rawSignature", graph.getStringMaybe(Number(event.rawSignatureId ?? 0))),
     provenance: decodeMemberProvenance(
       requireProtoMessage(event.provenance as ProtoRecord | undefined, "member provenance"),
@@ -1931,10 +2369,7 @@ function decodeFallthroughBranch(
     })),
     events: ((branch.events as ProtoRecord[] | undefined) ?? []).map((event) => ({
       name: graph.getString(readRequiredId(event.nameId, "fallthrough event name")),
-      payload: createGraphTypeExprRef(
-        graph,
-        readRequiredId(event.payloadNodeId, "fallthrough event payload"),
-      ),
+      ...decodeTypedRef(graph, event.payloadNodeId, "fallthrough event payload", "payload"),
       ...maybe("rawSignature", graph.getStringMaybe(Number(event.rawSignatureId ?? 0))),
       sources: decodeInheritedSources((event.sources as ProtoRecord[] | undefined) ?? [], graph),
     })),
@@ -2474,6 +2909,28 @@ function decodeGenericResolutionFailure(
   }
 }
 
+function decodeTypedRef(
+  graph: DecodedTypeGraph,
+  nodeId: unknown,
+  label: string,
+  key = "type",
+): Record<string, unknown> {
+  if (!graph.factMode && !graph.localizeFailures) {
+    return { [key]: createGraphTypeExprRef(graph, readRequiredId(nodeId, label)) };
+  }
+  try {
+    const type = createGraphTypeExprRef(graph, readRequiredId(nodeId, label));
+    return graph.factMode
+      ? { [key]: type, typeFact: { kind: "complete", value: type } }
+      : { [key]: type };
+  } catch (error) {
+    if (!graph.factMode && !(graph.localizeFailures && isLocalizedGraphFailure(error))) {
+      throw error;
+    }
+    return graph.factMode ? { typeFact: { kind: "unavailable", causes: [100] } } : {};
+  }
+}
+
 function createOptionalGraphRef(graph: DecodedTypeGraph, nodeId: number) {
   if (nodeId === 0) {
     return undefined;
@@ -2520,4 +2977,17 @@ function toBytes(payload: ArrayBuffer | ArrayBufferView): Uint8Array {
 
 function graphError(message: string): Error {
   return new Error(message);
+}
+
+function decodeBooleanFact(raw: ProtoRecord | undefined): FactResult<boolean> {
+  return decodeFact(
+    raw
+      ? ({
+          guarantee: raw.guarantee,
+          value: raw.value !== undefined ? { value: raw.value } : undefined,
+        } as unknown as ProtoRecord)
+      : undefined,
+    (value) => Boolean(value.value),
+    false,
+  );
 }

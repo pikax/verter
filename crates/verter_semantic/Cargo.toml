@@ -73,10 +73,6 @@ web-time = "1.1"
 verter_resolution = { workspace = true }
 verter_session_query = { workspace = true, features = ["test-support"] }
 static_assertions = "1.1.0"
-# The C2 privacy-rail UI harness (tests/cases/type_info_privacy.rs) compiles its
-# fixtures through trybuild, mirroring the workspace's compile-contract
-# runner; it is a dev-only edge and never enters the production closure.
-trybuild = "1.0"
 verter_test_support = { path = "../verter_test_support" }
 # Activates the `test-support` feature on `verter_css_syntax` for
 # `cargo test --package verter_semantic` (and example/bench) builds only —

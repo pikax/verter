@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
 import { spawn, spawnSync } from "node:child_process";
-import { readFileSync, readdirSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { StringDecoder } from "node:string_decoder";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -278,27 +279,129 @@ export function providerCargoInvocations(lane) {
   );
 }
 
-function runProviderLane(lane) {
+// Stable libtest has no per-test timing format. In serial pretty output it
+// flushes the test name before running the body and prints its status afterward.
+// These stream-edge durations are advisory: pipe delivery can batch very short
+// tests. Cargo setup and captured failure output are outside the measured span.
+export function providerTestTimer(record, now = () => performance.now()) {
+  let buffer = "";
+  let inSuite = false;
+  let active = null;
+  function begin() {
+    if (!inSuite || active) return;
+    const header = /^test (.+?)(?: - should panic)? \.\.\. /.exec(buffer);
+    if (header) active = { name: header[1], started: now() };
+  }
+  return {
+    push(text) {
+      buffer += text;
+      let newline;
+      while ((newline = buffer.indexOf("\n")) !== -1) {
+        begin();
+        const line = buffer.slice(0, newline).replace(/\r$/, "");
+        buffer = buffer.slice(newline + 1);
+        if (/^running \d+ tests?$/.test(line)) inSuite = true;
+        if (/^(?:failures:|test result:)/.test(line)) inSuite = false;
+        const result = /^test (.+?)(?: - should panic)? \.\.\. (ok|FAILED|ignored)(?:, .*)?$/.exec(
+          line,
+        );
+        // Libtest's long-running notice inserts a newline between the name
+        // and the terminal status. Serial execution still identifies its owner.
+        const status = result?.[1] === active?.name ? result?.[2] : /^(ok|FAILED)$/.exec(line)?.[1];
+        if (inSuite && active && status) {
+          record({ name: active.name, status, elapsedMs: now() - active.started });
+          active = null;
+        }
+        if (!inSuite) active = null;
+      }
+      begin();
+    },
+    finish() {
+      if (active)
+        record({ name: active.name, status: "incomplete", elapsedMs: now() - active.started });
+      active = null;
+    },
+  };
+}
+
+export async function runProviderLane(
+  lane,
+  {
+    spawnCargo = spawn,
+    stopChild = (child) => {
+      killListingTree(child);
+      child.kill();
+    },
+    writeStdout = (chunk) => process.stdout.write(chunk),
+    writeStderr = (text) => process.stderr.write(text),
+    saveTimings = (timings) => {
+      const directory = resolve(process.env.CARGO_TARGET_DIR || "target", "provider-timings");
+      mkdirSync(directory, { recursive: true });
+      writeFileSync(resolve(directory, `${lane}.json`), JSON.stringify({ lane, timings }, null, 2));
+    },
+  } = {},
+) {
   let failed = false;
+  let interrupted = false;
+  const timings = [];
   for (const invocation of providerCargoInvocations(lane)) {
-    process.stderr.write(`\nPROVIDER CI (${lane}): ${invocation.label}\n`);
-    const result = spawnSync("cargo", invocation.args, {
-      stdio: "inherit",
-      windowsHide: true,
+    writeStderr(`\nPROVIDER CI (${lane}): ${invocation.label}\n`);
+    const timer = providerTestTimer((row) => {
+      timings.push({ invocation: invocation.label, ...row });
+      writeStderr(
+        `PROVIDER TEST TIME (${lane}): ${row.name} ${row.status} ${(row.elapsedMs / 1000).toFixed(3)}s\n`,
+      );
+    });
+    const result = await new Promise((settle) => {
+      const child = spawnCargo("cargo", [...invocation.args, "--format=pretty", "--color=never"], {
+        stdio: ["inherit", "pipe", "inherit"],
+        windowsHide: true,
+      });
+      const decoder = new StringDecoder("utf8");
+      let spawnError;
+      const forward = () => {
+        interrupted = true;
+        stopChild(child);
+      };
+      process.once("SIGINT", forward);
+      process.once("SIGTERM", forward);
+      child.stdout.on("data", (chunk) => {
+        writeStdout(chunk);
+        timer.push(decoder.write(chunk));
+      });
+      child.on("error", (error) => {
+        spawnError = error;
+      });
+      child.on("close", (status, signal) => {
+        process.off("SIGINT", forward);
+        process.off("SIGTERM", forward);
+        timer.push(decoder.end());
+        timer.finish();
+        settle({ status, signal, error: spawnError });
+      });
     });
     if (result.error) {
-      process.stderr.write(`PROVIDER CI: could not start cargo: ${result.error.message}\n`);
+      writeStderr(`PROVIDER CI: could not start cargo: ${result.error.message}\n`);
       failed = true;
+      if (interrupted) break;
       continue;
     }
     if (result.signal) {
-      process.stderr.write(`PROVIDER CI: cargo was killed by ${result.signal}\n`);
+      writeStderr(`PROVIDER CI: cargo was killed by ${result.signal}\n`);
       failed = true;
+      if (interrupted) break;
       continue;
     }
     if (result.status !== 0) failed = true;
+    if (interrupted) break;
   }
-  return failed ? 1 : 0;
+  // Timing persistence cannot change the test verdict.
+  try {
+    saveTimings(timings);
+  } catch (error) {
+    writeStderr(`PROVIDER TEST TIME unavailable: ${error.message}\n`);
+  }
+  return failed || interrupted ? 1 : 0;
 }
 
 export function main(args = process.argv.slice(2)) {
@@ -309,7 +412,7 @@ export function main(args = process.argv.slice(2)) {
   }
   if (args[0] === "run" && args.length === 2) {
     try {
-      return runProviderLane(args[1]);
+      return runProviderLane(args[1]).catch((error) => fail(`${error.message}\n${usage()}`));
     } catch (error) {
       return fail(`${error.message}\n${usage()}`);
     }

@@ -121,6 +121,9 @@ pub struct SyncCoordinatorHandle {
 #[cfg(test)]
 #[derive(Clone, Default)]
 pub(crate) struct CoordinatorReceipts {
+    /// Pause dispatch between complete sync passes to isolate foreground work
+    /// counters from independently re-armed background revalidation.
+    pub(crate) dispatch_barrier: Arc<tokio::sync::Mutex<()>>,
     /// One notify after each coordinator select-arm, so paused-time tests
     /// wait for an exact loop tick instead of a yield-count flush.
     pub(crate) loop_tick: Arc<tokio::sync::Notify>,
@@ -184,6 +187,13 @@ struct PendingSignal {
 }
 
 impl SyncCoordinatorHandle {
+    #[cfg(test)]
+    pub(crate) async fn pause_dispatch_for_test(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        Arc::clone(&self.receipts.dispatch_barrier)
+            .lock_owned()
+            .await
+    }
+
     /// Signal that a file has changed and needs a debounced sync.
     ///
     /// `received_at` is when the change REACHED the server — the caller's own
@@ -1167,6 +1177,9 @@ async fn coordinator_loop(
                     None => std::future::pending::<()>().await,
                 }
             } => {
+                #[cfg(test)]
+                let _dispatch = receipts.dispatch_barrier.lock().await;
+
                 // Find files that have been quiet for >= debounce_ms. A file
                 // whose change is still in flight is NOT quiet however old its
                 // last receipt is: without this gate, receipt-time stamping
@@ -1678,6 +1691,13 @@ async fn sync_file(
     let Some(project_sync) = deps.project_sync.as_ref() else {
         return SyncFileOutcome::Settled;
     };
+    // Kind None is provider-neutral even when an embedder or a test injects a
+    // provider object (feature queries still reach it). The debounced carrier
+    // delivery must not open or update that object's buffers; diagnostics are
+    // published by the caller after this returns.
+    if matches!(deps.type_provider_kind, crate::TypeProviderKind::None) {
+        return SyncFileOutcome::Settled;
+    }
     // ONE lane per open document, shared with the interactive repair and every
     // other background writer. Asked at the point of DELIVERY, so a transaction
     // that started while the document was closed and finds it open now serializes

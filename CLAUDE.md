@@ -501,6 +501,15 @@ Negative assertions must discriminate a plausible forbidden public outcome not a
 
 **Rust test file organization**: When inline `#[cfg(test)]` exceeds ~400 lines, extract to a sibling `*_tests.rs` file.
 
+### Test Speed (MANDATORY)
+
+A test aims at under 2s and must stay under 10s in the **debug** build, even on a loaded machine. Nextest flags a test at 10s and **fails it at 20s** on CI (`.config/nextest.toml`); the local profile, which also runs the agents' gate on loaded worker machines, fails at 60s until the "Known slow tests" list is empty, then at 20s too. A test that needs that long is an architecture or code problem, not a slow runner: the engine must answer in well under a second in release and production, and a slow debug path is where that slowness shows first. Fix the cause, optimising the debug path where it makes sense; release gets faster with it.
+
+- **Never loosen a time limit to land a change.** Raising `slow-timeout`/`terminate-after`, adding a nextest override, a test group or `#[ignore]`, lengthening an in-test deadline or sleep, or moving a test to another lane, so that a slow test passes, is a review blocker, not a fix. The "Known slow tests" list in `.config/nextest.toml` only shrinks: entries leave as their fixes land, and nothing is added to it.
+- **A scale or linearity test proves growth with work counters**, at sizes that run in milliseconds, not with wall-clock at sizes that take minutes. Wall-clock limits belong in benchmarks.
+- **A test that proves a timeout or a kill takes an injected deadline** of milliseconds, never the production one.
+- **Reviewers time the tests a change adds or touches.** A new or changed test over 10s in the debug build is a finding against the change, whatever its assertions prove.
+
 ### Verification Must Prove Execution (MANDATORY)
 
 A required gate passes only on fresh, input-bound evidence that: every applicable required job was eligible and ran; the intended tree-derived surface was owned and independently discovered; selectors matched non-zero work; required source, build, and fixture prerequisites matched the tested tree; executed work was non-zero; unexpected prerequisite skips were zero; child deadlines were strictly below their parent killer; and a terminal summary completed. **Exit status 0 alone, a self-declared test universe, or a missing required-job result is FAIL.** Every tracked test or guard has exactly one declared primary gate; a hand-maintained filename list may not define the primary universe unless generated from independent discovery and parity-checked.

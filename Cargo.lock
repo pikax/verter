@@ -3509,6 +3509,7 @@ name = "verter_ffi"
 version = "0.0.1-beta.6"
 dependencies = [
  "log",
+ "prost",
  "serde_json",
  "verter_actions",
  "verter_compiler",
@@ -3861,7 +3862,6 @@ dependencies = [
  "serde_json",
  "sha2",
  "static_assertions",
- "trybuild",
  "verter_analyzer_mint",
  "verter_audit",
  "verter_css_syntax",
@@ -4087,6 +4087,10 @@ dependencies = [
 [[package]]
 name = "verter_test_support"
 version = "0.0.1-beta.6"
+dependencies = [
+ "serde_json",
+ "sha2",
+]
 
 [[package]]
 name = "verter_tsc"

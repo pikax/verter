@@ -2,6 +2,15 @@ use super::*;
 use crate::type_provider::traits::ProviderQuery;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// Keep a fixture's outbound drain alive, and abort it even if an assertion fails.
+struct AbortTaskOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortTaskOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
 use std::sync::Arc;
 
 use futures_util::StreamExt;
@@ -4118,6 +4127,7 @@ mod formatting;
 mod general;
 mod hover;
 mod navigation;
+mod nextest_policy;
 mod synchronization;
 mod transport;
 mod workspace;
