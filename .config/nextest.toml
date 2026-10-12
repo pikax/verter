@@ -1,22 +1,106 @@
 # Nextest configuration
 # https://nexte.st/docs/configuration/
 
+# Each provider kind is its own test. Running the four together makes the
+# provider-neutral diagnostics receipt go stale and lets a host compile land
+# inside a completion that must not compile. They still run in the normal
+# lane; they just do not overlap each other.
+[test-groups.progressive-child-contract-completion]
+max-threads = 1
+
 [profile.default]
-# Hang protection only. A test still running after `period` is flagged slow,
-# and TERMINATED after `terminate-after` periods (5 minutes), so a genuinely
-# wedged test or subprocess (e.g. a deadlocked tsgo/tsserver child) is killed
-# and reported instead of stalling the whole `--workspace` run. It is not a
-# speed gate: a test aims at under 2s and should stay under 10s, which is
-# measured and worked on, never enforced by killing a slow but healthy test on
-# a slower runner. Every test's own in-test deadlines sit below it (the live
-# shared-provider composite tests declare up to 230s), so the in-test watchdog
-# is the deadline that fires and reports its diagnostic, and this one the
-# backstop. Compile-fail contracts live in a standalone executable rather
-# than the test inventory.
+# A speed gate, on the debug build: a test aims at under 2s and must stay
+# under 10s even on a loaded machine. Past 10s it is flagged slow, and at 20s
+# (`terminate-after` periods) it is TERMINATED and fails. A test that needs
+# 20s in a debug build is an architecture or code problem, not a slow runner:
+# fix the code (optimising the debug path where it makes sense), never raise
+# this limit for one test. The tests below that predate the gate are listed
+# with the old 5-minute backstop until their fixes land.
+#
+# This profile also runs the agents' gate on worker machines that carry
+# several builds at once, so until the "Known slow tests" list below is empty
+# it terminates at 60s (six periods), not 20s: load alone must not fail an
+# unrelated change there. CI (`[profile.ci]`) holds the 20s line now, and
+# this one tightens to `terminate-after = 2` when the list empties.
+slow-timeout = { period = "10s", terminate-after = 6 }
+
+# Live provider tests drive a real tsgo/tsserver child and carry their own
+# in-test deadlines (up to 230s); CI runs them in their own lanes with cargo
+# test. Locally they keep the 5-minute hang backstop.
+[[profile.default.overrides]]
+filter = 'test(/tsserver|tsgo/) & (package(verter_lsp) | package(verter_type_runtime))'
 slow-timeout = { period = "60s", terminate-after = 5 }
 
-[profile.ci]
+# Known slow tests (CI, 2026-10-12): over 10s each, so over the speed target.
+# Each has a fix task; a test leaves this list when its fix lands. Never add to it.
+[[profile.default.overrides]]
+filter = '''
+  (package(verter_session) & test(=cases::corpus_audit_tests::chunk_003::corpus_audit_chunk_003_produces_audit_records_or_documents_skips)) |
+  (package(verter_compiler) & test(=ide::template::flow_tests::the_growth_check_rejects_predecessor_replay)) |
+  (package(verter_session) & test(=cases::corpus_audit_tests::chunk_002::corpus_audit_chunk_002_produces_audit_records_or_documents_skips)) |
+  (package(verter_session) & test(=cases::corpus_audit_tests::chunk_000::corpus_audit_chunk_000_produces_audit_records_or_documents_skips)) |
+  (package(verter_session) & test(=cases::corpus_audit_tests::chunk_001::corpus_audit_chunk_001_produces_audit_records_or_documents_skips)) |
+  (package(verter_session) & test(=cases::corpus_audit_tests::chunk_005::corpus_audit_chunk_005_produces_audit_records_or_documents_skips)) |
+  (package(verter_session) & test(=cases::corpus_audit_tests::chunk_004::corpus_audit_chunk_004_produces_audit_records_or_documents_skips)) |
+  (package(verter_compiler) & test(=ide::template::flow_check::tests::chains_and_nested_scopes_grow_linearly)) |
+  (package(verter_session) & test(=cases::sts0_profile_gate::publication_surfaces_publish_and_survive_renames_on_both_claimed_engines)) |
+  (package(verter_session) & test(=global_contributors::ac3_tests::configured_project_opening_classifies_linear_members)) |
+  (package(verter_compiler) & test(=ide::template::flow_check::tests::callback_count_scales_without_path_expansion)) |
+  (package(verter_compiler) & test(=ide::template::flow_tests::component_functions_read_one_flow_of_every_branch)) |
+  (package(verter_session) & test(=cases::g_block::semantic_determinism_matrix::det_05_partial_resident_cache)) |
+  (package(verter_session) & test(=cases::sts0_profile_gate::backend_projection_checks_clean_on_both_claimed_engines)) |
+  (package(verter_session) & test(=cache_runtime_tests::node_tests::query_retention_refusal_preserves_delivery_validation_and_lowering)) |
+  (package(verter_session) & test(=cases::sts0_profile_gate::projected_carrier_corruption_is_caught_on_both_claimed_engines)) |
+  (package(verter_session) & test(=project_semantic_dispatch_tests::flow_return_coverage_tests::lib_awaited_tail_runs_answer_past_the_checker_limit_and_stop_at_verters_budget)) |
+  (package(verter_session) & test(=project_semantic_dispatch_tests::augmentation_scale_tests::merged_interface_indexed_access_work_is_linear)) |
+  (package(verter_session) & test(=project_semantic_dispatch_tests::augmentation_scale_tests::merged_interface_indexed_access_keeps_every_contributor)) |
+  (package(verter_session) & test(=project_semantic_dispatch_tests::differential_depth_tests::an_800_guard_narrowing_chain_answers_without_strict_null_checks)) |
+  (package(verter_session) & test(=project_semantic_dispatch_tests::differential_depth_tests::an_800_guard_narrowing_chain_answers_strict)) |
+  (package(verter_session) & test(=project_semantic_dispatch_tests::template_complexity_tests::two_spans_meet_the_limit_at_one_hundred_thousand))
+'''
 slow-timeout = { period = "60s", terminate-after = 5 }
+
+[[profile.default.overrides]]
+filter = 'test(svelte_progressive_component_completion_uses_committed_child_contract_)'
+test-group = 'progressive-child-contract-completion'
+
+[profile.ci]
+# The speed gate (see [profile.default]): flagged at 10s, failed at 20s.
+slow-timeout = { period = "10s", terminate-after = 2 }
+
+# Known slow tests (CI, 2026-10-12): over 10s each, so over the speed target.
+# Each has a fix task; a test leaves this list when its fix lands. Never add to it.
+[[profile.ci.overrides]]
+filter = '''
+  (package(verter_session) & test(=cases::corpus_audit_tests::chunk_003::corpus_audit_chunk_003_produces_audit_records_or_documents_skips)) |
+  (package(verter_compiler) & test(=ide::template::flow_tests::the_growth_check_rejects_predecessor_replay)) |
+  (package(verter_session) & test(=cases::corpus_audit_tests::chunk_002::corpus_audit_chunk_002_produces_audit_records_or_documents_skips)) |
+  (package(verter_session) & test(=cases::corpus_audit_tests::chunk_000::corpus_audit_chunk_000_produces_audit_records_or_documents_skips)) |
+  (package(verter_session) & test(=cases::corpus_audit_tests::chunk_001::corpus_audit_chunk_001_produces_audit_records_or_documents_skips)) |
+  (package(verter_session) & test(=cases::corpus_audit_tests::chunk_005::corpus_audit_chunk_005_produces_audit_records_or_documents_skips)) |
+  (package(verter_session) & test(=cases::corpus_audit_tests::chunk_004::corpus_audit_chunk_004_produces_audit_records_or_documents_skips)) |
+  (package(verter_compiler) & test(=ide::template::flow_check::tests::chains_and_nested_scopes_grow_linearly)) |
+  (package(verter_session) & test(=cases::sts0_profile_gate::publication_surfaces_publish_and_survive_renames_on_both_claimed_engines)) |
+  (package(verter_session) & test(=global_contributors::ac3_tests::configured_project_opening_classifies_linear_members)) |
+  (package(verter_compiler) & test(=ide::template::flow_check::tests::callback_count_scales_without_path_expansion)) |
+  (package(verter_compiler) & test(=ide::template::flow_tests::component_functions_read_one_flow_of_every_branch)) |
+  (package(verter_session) & test(=cases::g_block::semantic_determinism_matrix::det_05_partial_resident_cache)) |
+  (package(verter_session) & test(=cases::sts0_profile_gate::backend_projection_checks_clean_on_both_claimed_engines)) |
+  (package(verter_session) & test(=cache_runtime_tests::node_tests::query_retention_refusal_preserves_delivery_validation_and_lowering)) |
+  (package(verter_session) & test(=cases::sts0_profile_gate::projected_carrier_corruption_is_caught_on_both_claimed_engines)) |
+  (package(verter_session) & test(=project_semantic_dispatch_tests::flow_return_coverage_tests::lib_awaited_tail_runs_answer_past_the_checker_limit_and_stop_at_verters_budget)) |
+  (package(verter_session) & test(=project_semantic_dispatch_tests::augmentation_scale_tests::merged_interface_indexed_access_work_is_linear)) |
+  (package(verter_session) & test(=project_semantic_dispatch_tests::augmentation_scale_tests::merged_interface_indexed_access_keeps_every_contributor)) |
+  (package(verter_session) & test(=project_semantic_dispatch_tests::differential_depth_tests::an_800_guard_narrowing_chain_answers_without_strict_null_checks)) |
+  (package(verter_session) & test(=project_semantic_dispatch_tests::differential_depth_tests::an_800_guard_narrowing_chain_answers_strict)) |
+  (package(verter_session) & test(=project_semantic_dispatch_tests::template_complexity_tests::two_spans_meet_the_limit_at_one_hundred_thousand))
+'''
+slow-timeout = { period = "60s", terminate-after = 5 }
+
+[[profile.ci.overrides]]
+filter = 'test(svelte_progressive_component_completion_uses_committed_child_contract_)'
+test-group = 'progressive-child-contract-completion'
+
 # Produce JUnit XML for dorny/test-reporter in CI
 [profile.ci.junit]
 path = "junit.xml"
@@ -44,6 +128,7 @@ path = "junit.xml"
 # on an addon that is not beside it rather than rebuilding one.
 [profile.default.archive]
 include = [
+  { path = "compile-fixtures", relative-to = "target", on-missing = "ignore" },
   { path = "debug/deps/libverter_napi_request_fixture.dylib", relative-to = "target", on-missing = "ignore" },
   { path = "debug/deps/libverter_napi_request_fixture.so", relative-to = "target", on-missing = "ignore" },
   { path = "debug/deps/verter_napi_request_fixture.dll", relative-to = "target", on-missing = "ignore" },

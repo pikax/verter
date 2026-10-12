@@ -593,13 +593,13 @@ pub struct HostConfig {
     /// observe the same cap.
     ///
     /// Constructor-time per §0.6.5: callers may NOT mutate this on
-    /// an existing host. Default: `2000` (the legacy
+    /// an existing host. Default: `16,384` (the
     /// `FuseBudgets::projection_op_count` default).
     ///
     /// When `0`, the legacy `FuseBudgets::default()` value is used as
     /// a fall-back so existing tests that construct a `HostConfig`
     /// without setting this field continue to observe the documented
-    /// 2000-op cap.
+    /// finite default cap.
     pub projection_op_budget: usize,
     /// Eviction-policy tunables for the project-global cache cluster.
     ///
@@ -1193,7 +1193,7 @@ impl Default for HostConfig {
             max_derivation_edges: 10_000,
             audit_caps: verter_audit::AuditCaps::default(),
             depth_budget: verter_type_engine::project_semantic_dispatch::MAX_DEPTH,
-            projection_op_budget: 2000,
+            projection_op_budget: verter_type_engine::request_budget::DEFAULT_PROJECTION_OP_BUDGET,
             eviction_policy: EvictionPolicyConfig::default(),
             lsp_method_timeouts: LspMethodTimeoutsConfig::default(),
             external_resolution_step_budget: None,

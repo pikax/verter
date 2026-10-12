@@ -22,7 +22,7 @@ use crate::project_semantic_dispatch::cost_receipt::CostIdentity;
 /// utility / projection / generic-expansion recursion before the call
 /// stack exhausts. The cap is constructor-time on
 /// `HostConfig::projection_op_budget`; a value of `0` preserves the
-/// legacy default of 2000.
+/// default of 16,384.
 ///
 /// The set of `SemanticQueryKey` kinds that count is the aggregate
 /// work-budget gate
@@ -36,14 +36,15 @@ use crate::project_semantic_dispatch::cost_receipt::CostIdentity;
 ///
 /// # Default rationale
 ///
-/// The default `2000` is a **fuse threshold**, not a correctness
+/// The default `16,384` is a **fuse threshold**, not a correctness
 /// boundary. It is sized so legitimate component-meta resolutions on
 /// representative corpora (nuxt-ui, element-plus, primevue, etc.)
-/// complete well under the cap with substantial headroom, while
-/// pathological projections — recursive `Pick<...>` chains over
+/// complete well under the cap with substantial headroom. Wide, finite
+/// switch unions also project each discriminant and return member.
+/// Pathological projections — recursive `Pick<...>` chains over
 /// untyped barrels, deep `Surface[K1][K2]...[Kn]` walks with missing
-/// types, generic-helper instantiation storms — exhaust within a
-/// few seconds and surface a partial.
+/// types, generic-helper instantiation storms — still exhaust the finite
+/// allowance and surface a partial.
 ///
 /// **Semantic contract on exhaustion**: a request that trips the cap
 /// returns a *partial* `ComponentMeta` with the same structural
@@ -82,6 +83,10 @@ pub struct RequestBudget {
     /// in it, or replayed into it.
     operations_paid: Mutex<PaidOperations>,
 }
+
+/// Default finite headroom for projection operations, shared by host
+/// configuration and the zero-config fallback.
+pub const DEFAULT_PROJECTION_OP_BUDGET: usize = 16_384;
 
 /// The computations a request has paid the operations of, in the order it
 /// paid them, with an order-independent digest of the set: a demand's entry
@@ -502,7 +507,7 @@ impl RequestBudget {
     #[must_use]
     pub fn effective_projection_op_budget(&self) -> usize {
         if self.projection_op_budget == 0 {
-            2000
+            DEFAULT_PROJECTION_OP_BUDGET
         } else {
             self.projection_op_budget
         }
@@ -547,7 +552,7 @@ impl RequestBudget {
 
 #[cfg(test)]
 mod tests {
-    use super::RequestBudget;
+    use super::{RequestBudget, DEFAULT_PROJECTION_OP_BUDGET};
 
     #[test]
     fn request_budget_check_increments_until_cap_then_returns_true() {
@@ -564,15 +569,15 @@ mod tests {
     }
 
     #[test]
-    fn request_budget_zero_cap_falls_back_to_default_2000() {
+    fn request_budget_zero_cap_falls_back_to_finite_default() {
         let budget = RequestBudget::new(0);
-        for _ in 0..1999 {
+        for _ in 0..DEFAULT_PROJECTION_OP_BUDGET - 1 {
             assert!(!budget.check_projection_op_count());
         }
-        assert!(!budget.check_projection_op_count(), "2000th call at cap");
+        assert!(!budget.check_projection_op_count(), "last call at cap");
         assert!(
             budget.check_projection_op_count(),
-            "2001st call exceeds default"
+            "next call exceeds default"
         );
     }
 

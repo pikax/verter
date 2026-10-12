@@ -350,9 +350,9 @@ jobs:
           # act has no GitHub Actions cache service. Compile the same archive
           # directly there; GitHub keeps the telemetry-enforced sccache path.
           if [ "${ACT:-}" = "true" ]; then
-            cargo nextest archive --workspace --archive-file artifacts/rust-nextest-archive.tar.zst
+            node scripts/compile-fixture-artifacts.mjs archive --workspace --archive-file artifacts/rust-nextest-archive.tar.zst
           else
-            node scripts/run-cached.mjs -- 'cargo nextest archive --workspace --archive-file artifacts/rust-nextest-archive.tar.zst'
+            node scripts/run-cached.mjs -- 'node scripts/compile-fixture-artifacts.mjs archive --workspace --archive-file artifacts/rust-nextest-archive.tar.zst'
           fi
       # Fail closed before upload if a selector has gone stale, overlaps another
       # lane, or would leave a provider lane empty. The script bounds the

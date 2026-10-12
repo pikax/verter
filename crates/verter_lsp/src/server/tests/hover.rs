@@ -1527,6 +1527,11 @@ async fn hover_serves_provider_result_from_stable_captured_surface() {
 
 #[tokio::test]
 async fn contract_builtin_directive_names_hover_shows_documentation() {
+    let (_temp, service, drain_handle, _provider, workspace_id) =
+        make_definition_test_server(&[("src/App.vue", "vue", D6_PARENT_SOURCE)]).await;
+    let _drain = AbortTaskOnDrop(drain_handle);
+    let server = service.inner();
+    let uri = workspace_uri(&workspace_id, "src/App.vue");
     // Every built-in with a doc-table entry hovers on its NAME token — including
     // `v-pre`, whose directive fact the parser records even though the subtree
     // stays uncompiled.
@@ -1543,18 +1548,12 @@ async fn contract_builtin_directive_names_hover_shows_documentation() {
         ("v-memo", ["v-memo", "memo"]),
         ("v-cloak", ["v-cloak", "cloak"]),
     ] {
-        let (_temp, service, drain_handle, _provider, workspace_id) =
-            make_definition_test_server(&[("src/App.vue", "vue", D6_PARENT_SOURCE)]).await;
-        let server = service.inner();
-        let uri = workspace_uri(&workspace_id, "src/App.vue");
         let position = find_document_position(server, &uri, needle, 1);
         let hover = server
             .hover(hover_params(&uri, position))
             .await
             .expect("hover request should succeed");
         let text = hover.map(|h| hover_text(Some(h)));
-        drain_handle.abort();
-        drop(service);
         let text = text.unwrap_or_else(|| panic!("{needle} name must produce a doc hover"));
         for fragment in expected_fragments {
             assert!(
