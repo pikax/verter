@@ -417,6 +417,13 @@ sites and require every callback and condition plus ≤2.2× growth per doubling
 control. Run these native proofs alongside the live leg when changing its size
 range; a smaller provider corpus alone is not growth evidence.
 
+Provider-free LSP flow growth and semantic-suite coverage tests live in
+`crates/verter_lsp/src/flow_fixture_tests.rs`, alongside the partition builder
+shared by the live semantic tests. Keep `real_provider_tests::` reserved for
+paired live-provider variants: archive partition verification rejects tests
+there without an explicit tsserver or tsgo selector. Native guards remain on
+the provider-free core lane.
+
 **Conformance-harness preflight — real work, before Cargo.** Before the archive
 build, the core gate runs only the harness-owned
 `packages/framework-conformance-harness/bin/gate-smoke.mjs typescript`. The separate required BF2 lane
