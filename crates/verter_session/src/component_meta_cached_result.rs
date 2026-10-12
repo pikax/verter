@@ -81,6 +81,8 @@ pub struct ResolutionTemplate {
     /// this template as recovery, not as a successful candidate, and its
     /// ledger entry carries the merged status separately.
     pub completeness: verter_type_engine::semantic_query::ResultCompleteness,
+    /// Resolve-phase suppression, independent of extraction completeness.
+    pub synthesis_should_suppress: bool,
 }
 
 /// Cached component-meta payload AND its sanitized
@@ -119,6 +121,7 @@ impl ResolutionTemplate {
             surface_identities: resolved.surface_identities.clone(),
             origin_graph: resolved.origin_graph.clone(),
             completeness: resolved.completeness,
+            synthesis_should_suppress: resolved.synthesis_should_suppress,
         }
     }
 
@@ -155,13 +158,10 @@ impl ResolutionTemplate {
             // already applied at publish time. Synthesis diagnostics live
             // on the cached `ComponentMetaAnalysis.macro_expansion_diagnostics`.
             synthesis_diagnostics: Vec::new(),
-            // Preserve the cached completeness; do NOT independently reset
-            // suppression to `false`. `synthesis_should_suppress` is the bool
-            // projection of `completeness` (a cached template is `Complete` in
-            // production — only complete results admit — but rehydrate stays
-            // honest to the stored value rather than fabricating one).
+            // Extraction can be partial after a complete resolve. Preserve
+            // both the result status and the original synthesis decision.
             completeness: self.completeness,
-            synthesis_should_suppress: self.completeness.is_partial(),
+            synthesis_should_suppress: self.synthesis_should_suppress,
         }
     }
 }
