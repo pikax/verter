@@ -1097,7 +1097,22 @@ describe("independent component facts", () => {
     payload.body!.facts!.delivery!.causes = [20];
     const result = decode(payload);
     expect(result.facts!.delivery).toEqual({ kind: "unavailable", causes: [20] });
-    expect(result.resultCompleteness).toEqual({ kind: "partial", reasons: ["budgetExceeded"] });
+    expect(result.resultCompleteness).toEqual({ kind: "partial", reasons: ["operationBudget"] });
+    expect(result.facts!.props.kind).toBe("complete");
+  });
+
+  it("keeps an unavailable adapter distinct from component-meta absence", () => {
+    const payload = fixture();
+    payload.body!.facts!.componentPublicContract = {
+      $typeName: "verter.v1.ComponentContractFact",
+      guarantee: { $typeName: "verter.v1.FactGuarantee", kind: 3, causes: [106] },
+      absent: false,
+    };
+    const result = decode(payload);
+    expect(result.componentPublicContract).toMatchObject({
+      kind: "unsupported",
+      reason: { kind: "adapterUnavailable" },
+    });
     expect(result.facts!.props.kind).toBe("complete");
   });
 });

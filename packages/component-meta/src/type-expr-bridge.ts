@@ -2844,8 +2844,39 @@ function nativeTypeExprToString(expr: NativeTypeExpr): string {
       return `keyof ${nativeTypeExprToString(expr.operand)}`;
     case "typeOf":
       return `typeof ${expr.path.join(".")}`;
+    case "union":
+      return expr.types.map(nativeTypeExprToString).join(" | ");
+    case "intersection":
+      return expr.types.map(nativeTypeExprToString).join(" & ");
+    case "array": {
+      const element = nativeTypeExprToString(expr.element);
+      return `${expr.readonly ? "readonly " : ""}${element}[]`;
+    }
+    case "tuple": {
+      const elements = expr.elements.map((element) => {
+        const label = element.label ? `${element.label}${element.optional ? "?" : ""}: ` : "";
+        const rest = element.rest ? "..." : "";
+        return `${rest}${label}${nativeTypeExprToString(element.ty)}`;
+      });
+      return `${expr.readonly ? "readonly " : ""}[${elements.join(", ")}]`;
+    }
+    case "object": {
+      const members = expr.properties.flatMap((member) => {
+        if (
+          member.memberKind !== "property" ||
+          member.name === undefined ||
+          member.ty === undefined
+        ) {
+          return [];
+        }
+        return [
+          `${member.name}${member.optional ? "?" : ""}: ${nativeTypeExprToString(member.ty)}`,
+        ];
+      });
+      return `{ ${members.join("; ")} }`;
+    }
     case "infer":
-      return `infer ${expr.name}${expr.constraint ? ` extends ${nativeTypeExprToString(expr.constraint as NativeTypeExpr)}` : ""}`;
+      return `infer ${expr.name}${expr.constraint ? ` extends ${nativeTypeExprLikeToString(expr.constraint)}` : ""}`;
     case "unknown":
       return expr.raw;
     case "syntheticSlotBinding":
@@ -2855,4 +2886,8 @@ function nativeTypeExprToString(expr: NativeTypeExpr): string {
     default:
       return expr.kind;
   }
+}
+
+function nativeTypeExprLikeToString(expr: NativeTypeExprLike): string {
+  return isGraphTypeExprRef(expr) ? graphTypeExprToString(expr) : nativeTypeExprToString(expr);
 }

@@ -169,6 +169,25 @@ describe("ProjectSession", () => {
       expect(win32).toBe(normalized);
     });
 
+    it("writes and reads overlays with one canonical path", () => {
+      const upsert = vi.fn();
+      const nativeProject = createMockNativeProject();
+      const nativeSession = createMockNativeSession({
+        upsert,
+        getEffectiveSource(id: string) {
+          return id === "c:/project/src/Button.vue" ? "overlay" : null;
+        },
+      });
+      const engine = new ProjectEngine("engine", "c:/project", nativeProject as any);
+      const session = new ProjectSession(engine, "lease-1", nativeSession as any);
+
+      session.upsert("C:\\project\\src\\Button.vue", "overlay");
+
+      expect(upsert).toHaveBeenCalledWith("c:/project/src/Button.vue", "overlay");
+      expect(session.getEffectiveSource("c:/project/src/Button.vue")).toBe("overlay");
+      expect(session.hasFile("C:\\project\\src\\Button.vue")).toBe(true);
+    });
+
     it("refreshBaseFile bumps baseGeneration and forces re-decode", () => {
       const payload = encodeTestComponentMetaPayload({
         filePath: "/project/src/Button.vue",

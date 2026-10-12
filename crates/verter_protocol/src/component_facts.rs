@@ -511,9 +511,9 @@ impl FfiComponentMeta {
                 15 => FfiSurfacePartialReason::FlowReturnUninferred,
                 16 => FfiSurfacePartialReason::FlowReturnUnverified,
                 17 => FfiSurfacePartialReason::FlowReturnNoSurface,
-                18 => FfiSurfacePartialReason::Propagated,
-                19 => FfiSurfacePartialReason::ProjectionWorkLimit,
-                20 => FfiSurfacePartialReason::BudgetExceeded,
+                18 => FfiSurfacePartialReason::UndecidedConditional,
+                19 => FfiSurfacePartialReason::ConnectedMemoryLimit,
+                20 => FfiSurfacePartialReason::OperationBudget,
                 _ => FfiSurfacePartialReason::Propagated,
             };
             if !reasons.contains(&reason) {

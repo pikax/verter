@@ -77,35 +77,38 @@ export class ProjectSession {
 
   upsert(canonicalId: string, source: string): void {
     this.ensureOpen();
-    this._overlays.set(canonicalId, { kind: "upsert", source });
+    const canonical = normalizePath(canonicalId);
+    this._overlays.set(canonical, { kind: "upsert", source });
     this._overlayGeneration++;
     this._localMemo.clear();
     this._decodedMemo.clear();
-    this._nativeSession.upsert(canonicalId, source);
+    this._nativeSession.upsert(canonical, source);
     this.engine.markActivity();
   }
 
   delete(canonicalId: string): void {
     this.ensureOpen();
-    this._overlays.set(canonicalId, { kind: "delete" });
+    const canonical = normalizePath(canonicalId);
+    this._overlays.set(canonical, { kind: "delete" });
     this._overlayGeneration++;
     this._localMemo.clear();
     this._decodedMemo.clear();
-    this._nativeSession.delete(canonicalId);
+    this._nativeSession.delete(canonical);
     this.engine.markActivity();
   }
 
   restoreBaseFile(canonicalId: string): void {
     this.ensureOpen();
-    const hadOverlay = this._overlays.delete(canonicalId);
+    const canonical = normalizePath(canonicalId);
+    const hadOverlay = this._overlays.delete(canonical);
     if (hadOverlay) {
       this._overlayGeneration++;
     }
     this._localMemo.clear();
     this._decodedMemo.clear();
-    this._nativeSession.reset(canonicalId);
-    if (this._nativeSession.getEffectiveSource(canonicalId) === null) {
-      const loaded = this.engine.nativeProject.ensureLoaded(canonicalId);
+    this._nativeSession.reset(canonical);
+    if (this._nativeSession.getEffectiveSource(canonical) === null) {
+      const loaded = this.engine.nativeProject.ensureLoaded(canonical);
       if (loaded) {
         this.engine.baseGeneration++;
       }
@@ -115,22 +118,24 @@ export class ProjectSession {
 
   getEffectiveSource(canonicalId: string): string | undefined {
     this.ensureOpen();
+    const canonical = normalizePath(canonicalId);
     // Check session overlay first (in-memory)
-    const overlay = this._overlays.get(canonicalId);
+    const overlay = this._overlays.get(canonical);
     if (overlay) {
       return overlay.kind === "upsert" ? overlay.source : undefined;
     }
     // Fall back to native session (which checks base)
-    return this._nativeSession.getEffectiveSource(canonicalId) ?? undefined;
+    return this._nativeSession.getEffectiveSource(canonical) ?? undefined;
   }
 
   hasFile(canonicalId: string): boolean {
     this.ensureOpen();
-    const overlay = this._overlays.get(canonicalId);
+    const canonical = normalizePath(canonicalId);
+    const overlay = this._overlays.get(canonical);
     if (overlay) {
       return overlay.kind === "upsert";
     }
-    return this._nativeSession.hasFile(canonicalId);
+    return this._nativeSession.hasFile(canonical);
   }
 
   trackedFileIds(): string[] {

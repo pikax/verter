@@ -319,13 +319,21 @@ impl TypeInfoSurface {
                 }
             })
             .collect();
-        Self::from_ordered_entries(entries, view.keyspace, view.has_known_index_signature())
+        Self::from_ordered_entries(
+            entries,
+            view.keyspace,
+            view.has_known_index_signature(),
+            None,
+        )
     }
 
     fn from_ordered_entries(
         entries: Vec<TypeInfoSurfaceEntry>,
         keyspace: Option<SemanticNodeId>,
         has_index_signature: bool,
+        domain_guarantee: Option<
+            verter_session_query::analysis::component_meta::MetadataFactGuarantee,
+        >,
     ) -> Self {
         let mut members = Vec::new();
         let mut call_signatures = Vec::new();
@@ -346,10 +354,11 @@ impl TypeInfoSurface {
             }
         }
         Self {
-            domain_guarantee:
+            domain_guarantee: domain_guarantee.unwrap_or_else(|| {
                 verter_session_query::analysis::component_meta::MetadataFactGuarantee::complete(
                     has_index_signature || keyspace.is_some(),
-                ),
+                )
+            }),
             entries: Arc::from(entries.into_boxed_slice()),
             members: Arc::from(members.into_boxed_slice()),
             call_signatures: Arc::from(call_signatures.into_boxed_slice()),
@@ -388,7 +397,12 @@ impl TypeInfoSurface {
                 }
             })
             .collect();
-        Self::from_ordered_entries(entries, surface.keyspace(), surface.has_index_signature())
+        Self::from_ordered_entries(
+            entries,
+            surface.keyspace(),
+            surface.has_index_signature(),
+            None,
+        )
     }
 
     /// Enrich each member AND each call / construct signature with its
@@ -485,7 +499,12 @@ impl TypeInfoSurface {
             entries.push(enriched);
         }
 
-        Self::from_ordered_entries(entries, self.keyspace, self.has_index_signature)
+        Self::from_ordered_entries(
+            entries,
+            self.keyspace,
+            self.has_index_signature,
+            Some(self.domain_guarantee),
+        )
     }
 }
 

@@ -244,48 +244,53 @@ impl<'a> OutputSourceMemo<'a> {
                         ) {
                             Ok(value) => value,
                             Err(failure) => {
-                                // An execution abort still fails the envelope.
-                                // Any other miss stays on this lane: partial
-                                // SEMANTIC_QUERY_FAULT, Failed publication, no
-                                // value. One unavailable slot must not sink
-                                // the component or publish as Unknown.
+                                // A projected member-path with no live member is
+                                // a localized graph miss: Failed publication, no
+                                // value, SEMANTIC_QUERY_FAULT. It must not
+                                // publish Unknown or sink an exact sibling.
+                                // Every other miss, and any execution abort,
+                                // still fails the output with the typed lane.
                                 if verter_type_engine::request_context::current_execution_abort()
-                                    .is_some()
+                                    .is_none()
+                                    && localized_member_path_miss(
+                                        selected_source.as_ref(),
+                                        &failure,
+                                    )
                                 {
-                                    return Err(crate::meta_resolve::ComponentMetaOutputError {
-                                        lane,
-                                        index,
-                                        inner_index,
-                                        position: Box::new(
-                                            verter_type_expr::facts::SourcePosition::Present(
-                                                selected_source.as_ref().clone(),
-                                            ),
+                                    verter_type_engine::request_context::fold_result_completeness(
+                                        verter_type_engine::semantic_query::ResultCompleteness::partial(
+                                            verter_type_engine::semantic_query::PartialReasonSet::SEMANTIC_QUERY_FAULT,
                                         ),
-                                        failure,
-                                    });
+                                    );
+                                    return Ok(
+                                        crate::meta_resolve::MaterializedTypePublication::from_parts(
+                                            cap,
+                                            PublicationResult::Failed {
+                                                failure: verter_type_expr::TypedResolutionFailure::SourceConstruction(
+                                                    verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredMemberValue,
+                                                ),
+                                                provenance:
+                                                    verter_type_expr::ResolutionProvenance::SessionProjector,
+                                            },
+                                            None,
+                                            crate::meta_resolve::TerminalTypeDisplay::from_text(
+                                                cap, None,
+                                            ),
+                                            std::sync::Arc::from([]),
+                                        ),
+                                    );
                                 }
-                                verter_type_engine::request_context::fold_result_completeness(
-                                    verter_type_engine::semantic_query::ResultCompleteness::partial(
-                                        verter_type_engine::semantic_query::PartialReasonSet::SEMANTIC_QUERY_FAULT,
-                                    ),
-                                );
-                                return Ok(
-                                    crate::meta_resolve::MaterializedTypePublication::from_parts(
-                                        cap,
-                                        PublicationResult::Failed {
-                                            failure: verter_type_expr::TypedResolutionFailure::SourceConstruction(
-                                                verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredMemberValue,
-                                            ),
-                                            provenance:
-                                                verter_type_expr::ResolutionProvenance::SessionProjector,
-                                        },
-                                        None,
-                                        crate::meta_resolve::TerminalTypeDisplay::from_text(
-                                            cap, None,
+                                return Err(crate::meta_resolve::ComponentMetaOutputError {
+                                    lane,
+                                    index,
+                                    inner_index,
+                                    position: Box::new(
+                                        verter_type_expr::facts::SourcePosition::Present(
+                                            selected_source.as_ref().clone(),
                                         ),
-                                        std::sync::Arc::from([]),
                                     ),
-                                );
+                                    failure,
+                                });
                             }
                         };
                         slot.insert(value.clone());
@@ -350,7 +355,9 @@ impl<'a> OutputSourceMemo<'a> {
 /// - `Present(source)` → [`materialize_output_source`]; a failure FAILS the
 ///   whole output with a typed [`ComponentMetaOutputError`] carrying the
 ///   lane, the positional indices, and the failed position (fail-closed —
-///   never a silent `Unknown`).
+///   never a silent `Unknown`). The one exception is an unraisable projected
+///   member-path: that graph miss stays on its lane as a Failed publication
+///   with no value, so one unavailable member does not sink its siblings.
 /// - `Failed(_)` → an immediate typed [`ComponentMetaOutputError`]: the
 ///   REQUIRED position's producer-typed failure fails the output.
 ///
@@ -614,6 +621,24 @@ fn materialize_component_meta_output_types<'a>(
 /// producers correctly materializes per producer.
 fn effective_output_scope<'a>(owner: &'a str, row_scope: Option<&'a str>) -> &'a str {
     row_scope.unwrap_or(owner)
+}
+
+/// A projected member-path that the live view cannot raise is a graph miss
+/// on that member, not an unrepresentable authored position. Keep it on the
+/// lane. Authored, closed, and interior failures stay fail-closed.
+fn localized_member_path_miss(
+    source: &verter_type_expr::facts::SemanticTypeSource,
+    failure: &crate::meta_resolve::ComponentMetaOutputFailure,
+) -> bool {
+    matches!(
+        failure,
+        crate::meta_resolve::ComponentMetaOutputFailure::UnraisableSource
+    ) && matches!(
+        source,
+        verter_type_expr::facts::SemanticTypeSource::Projected(
+            verter_type_expr::facts::ProjectedTypeFact::MemberPath { .. }
+        )
+    )
 }
 
 /// The session-owned resolved type-registry name-overlay finalize: fold the

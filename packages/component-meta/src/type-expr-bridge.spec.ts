@@ -23,6 +23,29 @@ import {
 // =============================================================================
 
 describe("typeExprToDescriptor", () => {
+  it("renders an array constraint on an unreduced infer", () => {
+    const result = typeExprToDescriptor({
+      kind: "infer",
+      name: "U",
+      constraint: {
+        kind: "array",
+        readonly: false,
+        element: { kind: "primitive", name: "string" },
+      },
+    });
+    expect(result).toEqual({ kind: "unknown", rawType: "infer U extends string[]" });
+  });
+
+  it("renders a graph constraint on an unreduced infer", () => {
+    const graph = new DecodedTypeGraph([], [{ kind: NODE_PRIMITIVE, primitive: 1 }]);
+    const result = typeExprToDescriptor({
+      kind: "infer",
+      name: "U",
+      constraint: createGraphTypeExprRef(graph, 1),
+    });
+    expect(result).toEqual({ kind: "unknown", rawType: "infer U extends string" });
+  });
+
   it("converts primitive types", () => {
     const result = typeExprToDescriptor({ kind: "primitive", name: "string" });
     expect(result).toEqual({ kind: "primitive", name: "string" });

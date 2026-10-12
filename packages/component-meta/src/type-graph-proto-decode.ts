@@ -410,7 +410,11 @@ function decodeTypedPayload(message: ComponentMetaPayload): NativeComponentMetaR
         ? {
             kind: "unsupported",
             adapterId: "",
-            reason: { kind: "componentMetaUnavailable" },
+            reason: {
+              kind: facts.componentPublicContract.causes.includes(106)
+                ? "adapterUnavailable"
+                : "componentMetaUnavailable",
+            },
             diagnostics: [],
           }
         : { kind: "supported", contract: facts.componentPublicContract.value },
@@ -480,10 +484,7 @@ function summarizeFacts(facts: Record<string, FactResult<unknown>>): NativeResul
   }
   visit(facts);
   const reasons = [...causes].map(
-    (cause) =>
-      SURFACE_PARTIAL_REASON_BY_WIRE[
-        (cause === 18 ? 7 : cause === 19 ? 12 : cause === 20 ? 1 : cause) as SurfacePartialReason
-      ] ?? "propagated",
+    (cause) => SURFACE_PARTIAL_REASON_BY_WIRE[cause as SurfacePartialReason] ?? "propagated",
   );
   return reasons.length === 0
     ? { kind: "complete" }
