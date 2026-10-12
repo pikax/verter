@@ -292,6 +292,14 @@ pub trait IndexedInputs {
 }
 
 pub trait RouteLookup {
+    /// The module's terminal value exports, with the complete route proof.
+    /// Consumers observe `facts` once, rather than resolving every member
+    /// independently through the barrel graph.
+    fn module_export_table(
+        &self,
+        canonical: &str,
+    ) -> Option<Arc<verter_session_query::declarations::module_exports::ModuleExportTable>>;
+
     fn reverse_dependency_canonicals(&self, canonical: &str) -> Vec<String>;
     fn observe_owner_import_route_witness(&self, canonical: &str);
     // -------- Symbol / route resolution ----------------------------

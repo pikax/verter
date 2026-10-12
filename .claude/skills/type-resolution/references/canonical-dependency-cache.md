@@ -148,6 +148,44 @@ singleflight walk, validation and admission in their original order.
 
 Full normative text: `docs/contributing/path-precise-resolution-currency.md`.
 
+### Whole-module namespace exports
+
+A whole-module value demand uses `RouteDb.module_exports`, keyed by the
+provider's content-free `BarrelSurfaceKey` (project, resolve env and lib env).
+`RouteLookup::module_export_table` serves terminal value bindings and their
+complete fact signature. It is distinct from a symbol-directed route demand:
+only requesting the whole namespace enumerates all reachable export names.
+
+Tables mask star bindings with explicit exports, omit type-only bindings and
+star-forwarded `default`, and retain an ambiguous binding so later barrels do
+not accidentally resurrect it. Two paths to the same defining declaration are
+one binding. Authored wildcard facts distinguish ordinary stars, type-only
+stars and namespace re-exports. Iterative discovery and a finite binding
+worklist close cycles before publication. Cached child tables are shared.
+Cold graph construction is serialized across overlapping namespace roots so
+shared modules are not built twice. Validated warm reads bypass that lock;
+singleflight followers revalidate the published candidate in their own view.
+
+Each table validates the served whole hashes and demand-time resolution facts
+of its dependency closure against the caller's store view. Singleflight joins
+share admitted tables only; fenced, unstable and otherwise unrootable reads
+remain return-only. Namespace object construction observes the table proof
+once and sends terminal roots through the shared `TypeOf` rail, without a
+second barrel search per property. Namespace re-exports remain scoped
+`ImportType` carriers until demanded, so a namespace can re-export itself
+without recursively constructing nested module objects.
+
+Deferred evaluation of a declaration or operator observes export routes too.
+The shared deferred-evaluation memo retains a complete fact signature and
+strict self roots alongside its cost receipt and node leases. Each heap
+continuation traces its steps; completed operands replay their proof into the
+parent. A warm read validates and bubbles that exact candidate's proof against
+the request view. Interned node identity alone cannot validate an evaluated
+`typeof` answer when the declaring source is unchanged and a barrel changes.
+Stale evaluations are replaced under the content-free key; return-only or
+partial evaluations are not published. Proof pages and entry storage reserve
+the shared retention account.
+
 ### Module-resolution keying (split env)
 
 Import probing distinguishes recognized source extensions from dotted filename stems. Imports such as `./types.d` and `./Button.types` still probe appended script/declaration extensions; registered carrier suffixes retain literal carrier ownership. Literal SFC `src` attributes do not gain this dotted-stem import fallback.
@@ -163,4 +201,3 @@ orthogonal dimensions). The module-resolution SHAPE vocabulary
 (`ModuleResolutionMode`, `SpecifierKind`, `ConditionSet`) lives in
 `verter_workspace::module_resolution`; the FORK-C resolution matrix walker
 that consumes it is U0 `verter_session::resolver_core`.
-

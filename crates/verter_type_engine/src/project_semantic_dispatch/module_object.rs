@@ -19,6 +19,7 @@
 use std::sync::Arc;
 
 use rustc_hash::FxHashSet;
+use verter_session_query::declarations::module_exports::ModuleExportBinding;
 
 use super::build::AmbientModuleBlock;
 use super::ProjectSemanticDispatch;
@@ -144,32 +145,59 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<ModuleObject> {
         let indexed = self.ctx.ensure_indexed_ready_serve(module)?.indexed;
-        let mut roots: Vec<ObservedGraphSelfRoot> = vec![(Arc::from(module), indexed.whole_hash)];
-        let mut names: Vec<String> = Vec::new();
-        let mut visited: FxHashSet<String> = FxHashSet::default();
-        visited.insert(module.to_owned());
-        self.collect_module_export_names(module, true, &mut names, &mut visited, &mut roots);
-        names.sort();
-        names.dedup();
-        let mut members = Vec::with_capacity(names.len());
-        for name in names {
-            let (resolved, route_facts) = self
-                .ctx
-                .resolve_imported_type_root_with_facts(module, &name);
-            self.ctx.observe_borrowed_signature(&route_facts);
-            let root = match resolved {
-                Some(identity) => file_root(
-                    identity.canonical_id.as_ref(),
-                    identity.owner,
-                    identity.symbol_name.as_ref(),
-                ),
-                None => file_root(
-                    module,
-                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    &name,
-                ),
+        let table = self.ctx.module_export_table(module)?;
+        self.ctx.observe_borrowed_signature(&table.facts);
+        let roots = verter_session_query::facts::fact_cache::signature_entries(&table.facts)
+            .filter_map(|fact| match fact {
+                verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+                    canonical_id,
+                    hash,
+                } => Some((Arc::from(canonical_id.as_str()), *hash)),
+                _ => None,
+            })
+            .collect();
+        let mut bindings: Vec<_> = table.bindings.iter().collect();
+        bindings.sort_unstable_by_key(|(name, _)| *name);
+        let mut members = Vec::with_capacity(bindings.len());
+        for (name, binding) in bindings {
+            let node = match binding {
+                Some(ModuleExportBinding::Value(identity)) => {
+                    let root = file_root(
+                        identity.canonical_id.as_ref(),
+                        identity.owner,
+                        identity.symbol_name.as_ref(),
+                    );
+                    match self.execute_read(self.typeof_key_for(root, context)).value {
+                        QueryResult::Value(node)
+                            if !matches!(
+                                self.graph().node_data(node).as_deref(),
+                                Some(SemanticNodeData::Opaque(_)) | None
+                            ) =>
+                        {
+                            node
+                        }
+                        _ => continue,
+                    }
+                }
+                Some(ModuleExportBinding::Namespace(dependency)) => {
+                    self.graph().intern_node_with_scope(
+                        SemanticNodeData::new_import_type(
+                            Arc::clone(dependency),
+                            Arc::from([]),
+                            Arc::from([]),
+                            true,
+                        ),
+                        NodeScopeId::File {
+                            canonical_id: Arc::from(module),
+                            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                            whole_hash: indexed.whole_hash,
+                            local_scope: None,
+                        },
+                    )
+                }
+                None => continue,
             };
-            members.push((Arc::from(name.as_str()), root));
+            members.push(Self::module_member(Arc::clone(name), node, module));
         }
         let scope = NodeScopeId::File {
             canonical_id: Arc::from(module),
@@ -177,51 +205,13 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             whole_hash: indexed.whole_hash,
             local_scope: None,
         };
-        Some((self.value_object(members, scope, module, context), roots))
-    }
-
-    /// The export names of `module`: its own exports (`default` among them
-    /// only when `own`), then the names each `export * from` target exports.
-    fn collect_module_export_names(
-        &self,
-        module: &str,
-        own: bool,
-        names: &mut Vec<String>,
-        visited: &mut FxHashSet<String>,
-        roots: &mut Vec<ObservedGraphSelfRoot>,
-    ) {
-        use verter_session_query::inputs::shallow::ExportTarget;
-        let Some(indexed) = self
-            .ctx
-            .ensure_indexed_ready_serve(module)
-            .map(|serve| serve.indexed)
-        else {
-            return;
-        };
-        push_root(roots, (Arc::from(module), indexed.whole_hash));
-        let shallow = &indexed.shallow_state;
-        for (name, target) in &shallow.exports {
-            let type_only = matches!(target, ExportTarget::Reexport { is_type: true, .. });
-            if type_only || (!own && name == "default") {
-                continue;
-            }
-            names.push(name.clone());
-        }
-        let ordinary = verter_type_expr::TopLevelOwnerId::ordinary_file();
-        for wildcard in &shallow.wildcard_reexports {
-            if wildcard.owner != ordinary {
-                continue;
-            }
-            let Some(source) = self
-                .ctx
-                .resolve_type_dependency_canonical(module, &wildcard.source_specifier)
-            else {
-                continue;
-            };
-            if visited.insert(source.clone()) {
-                self.collect_module_export_names(&source, false, names, visited, roots);
-            }
-        }
+        Some((
+            self.graph().intern_node_with_scope(
+                SemanticNodeData::Object(SurfaceView::from_members(members, None)),
+                scope,
+            ),
+            roots,
+        ))
     }
 
     /// The object an ambient module's `declare module` blocks declare: the

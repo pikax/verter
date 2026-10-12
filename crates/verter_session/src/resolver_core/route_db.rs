@@ -197,9 +197,30 @@ pub(crate) struct RouteFlightOutcome {
     pub(crate) admitted: bool,
 }
 
+#[derive(Debug)]
+pub(crate) struct ExportTableFlight {
+    pub(crate) table: Arc<verter_session_query::declarations::module_exports::ModuleExportTable>,
+    pub(crate) admitted: bool,
+}
+
 /// Shared DB for canonical export routing facts.
 #[derive(Debug)]
 pub struct RouteDb {
+    /// Full value export tables, validated by their transitive route facts.
+    /// Storage shares child bindings; namespace consumers never populate one
+    /// named-route cache entry per property.
+    pub(crate) module_exports: ValidatedFactCache<
+        BarrelSurfaceKey,
+        verter_session_query::declarations::module_exports::ModuleExportTable,
+    >,
+    pub(crate) module_export_singleflight:
+        SingleflightGroup<BarrelSurfaceKey, ExportTableFlight, ()>,
+    /// Different namespace roots can share a cold dependency closure.
+    /// Serialize discovery/folding so each module revision is built once;
+    /// warm reads bypass this lock, and cyclic builds never nest it.
+    pub(crate) module_export_build_lock: parking_lot::Mutex<()>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) module_export_work: std::sync::atomic::AtomicU64,
     /// [`RouteNameKey`] → route result. The key carries the split env
     /// axes (R21) so a route resolved under one project/env never
     /// satisfies a lookup under another; value-side fact validation
@@ -235,6 +256,11 @@ pub struct RouteDb {
 impl RouteDb {
     pub fn new() -> Self {
         Self {
+            module_exports: ValidatedFactCache::default(),
+            module_export_singleflight: SingleflightGroup::default(),
+            module_export_build_lock: parking_lot::Mutex::new(()),
+            #[cfg(any(test, feature = "test-support"))]
+            module_export_work: std::sync::atomic::AtomicU64::new(0),
             routes: ValidatedFactCache::default(),
             route_singleflight: SingleflightGroup::default(),
             barrel_surfaces: ValidatedFactCache::default(),
@@ -645,7 +671,9 @@ impl RouteDb {
     /// `insert_arc_with_kind` advance it.
     #[must_use]
     pub fn admission_refused_count(&self) -> u64 {
-        self.routes.admission_refused_count() + self.barrel_surfaces.admission_refused_count()
+        self.routes.admission_refused_count()
+            + self.barrel_surfaces.admission_refused_count()
+            + self.module_exports.admission_refused_count()
     }
 
     // -----------------------------------------------------------------------
@@ -654,6 +682,8 @@ impl RouteDb {
 
     /// Clear all cached routes and barrel surfaces.
     pub fn clear(&self) {
+        self.module_exports.clear();
+        self.module_export_singleflight.clear();
         self.routes.clear();
         self.route_singleflight.clear();
         self.barrel_surfaces.clear();
@@ -662,6 +692,8 @@ impl RouteDb {
         // test sees a clean baseline after a host-wide clear.
         #[cfg(any(test, feature = "test-support"))]
         {
+            self.module_export_work
+                .store(0, std::sync::atomic::Ordering::Relaxed);
             self.route_warm_fact_bubble_emissions
                 .store(0, std::sync::atomic::Ordering::Relaxed);
             self.route_cold_fact_bubble_emissions
