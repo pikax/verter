@@ -720,6 +720,10 @@ pub fn semantic_suite() -> Vec<SfcFixture> {
     fixtures.push(deep_positives(40, true));
     fixtures.push(component_ref_narrowing(40, false));
     fixtures.push(component_ref_narrowing(40, true));
+    fixtures.push(sibling_component_chains(16, false));
+    fixtures.push(sibling_component_chains(16, true));
+    fixtures.push(shared_component_slot_frames(false));
+    fixtures.push(shared_component_slot_frames(true));
     fixtures.push(mutation_and_nested_closure());
     fixtures.push(mapping());
     fixtures.push(javascript());
@@ -922,12 +926,29 @@ const LEVEL_VALUES: [&str; NESTED_BRANCHES] = ["a", "b", "c", "d", "e", "f", "g"
 /// TypeScript's binder exhausts the Node stack near 2k nested syntax levels,
 /// and the language server's IDE template walk recurses once per element level.
 pub fn nested_matrix(n: usize, broken: bool) -> SfcFixture {
+    build_nested_matrix(n, broken, false)
+}
+
+/// The nested matrix with a script-defined component and template ref at
+/// every callback: tag lookup must stay linear as lexical depth grows.
+pub fn nested_component_matrix(n: usize, broken: bool) -> SfcFixture {
+    build_nested_matrix(n, broken, true)
+}
+
+fn build_nested_matrix(n: usize, broken: bool, components: bool) -> SfcFixture {
     assert!(n.is_multiple_of(NESTED_BRANCHES) && n >= 2 * NESTED_BRANCHES);
     let levels = n / NESTED_BRANCHES;
     let mut d = Draft::new(
-        format!("NestedMatrix{n}{}", if broken { "Broken" } else { "" }),
+        format!(
+            "Nested{}Matrix{n}{}",
+            if components { "Component" } else { "" },
+            if broken { "Broken" } else { "" }
+        ),
         true,
         |s| {
+            if components {
+                s.push("const Leaf = defineComponent({ emits: ['click'] });\n");
+            }
             let values: Vec<String> = LEVEL_VALUES.iter().map(|v| format!("'{v}'")).collect();
             s.push(&format!("type S = {};\n", values.join(" | ")));
             s.push("function takeOpening(top: 'on', own: 'a', row: number): void {}\n");
@@ -962,9 +983,14 @@ pub fn nested_matrix(n: usize, broken: bool) -> SfcFixture {
             d.sfc.push(&format!("<template v-for=\"r{i} in rows\">"));
             row = format!("r{i}");
         }
-        d.sfc.push("<i @click=\"() => takeOpening(state.top, ");
+        d.sfc.push(if components {
+            "<Leaf ref=\"leaves\" @click=\"() => takeOpening(state.top, "
+        } else {
+            "<i @click=\"() => takeOpening(state.top, "
+        });
         read(&mut d, i);
-        d.sfc.push(&format!(", {row})\"></i>\n"));
+        d.sfc.push(&format!(", {row})\""));
+        d.sfc.push(if components { " />\n" } else { "></i>\n" });
     }
     for i in (0..levels).rev() {
         if i % 4 == 3 {
@@ -980,12 +1006,104 @@ pub fn nested_matrix(n: usize, broken: bool) -> SfcFixture {
                     .push(&format!("<div v-else-if=\"state.s{i} === '{value}'\">"));
                 d.conditions += 1;
             }
-            d.sfc.push("<i @click=\"() => take(state.top, ");
+            d.sfc.push(if components {
+                "<Leaf ref=\"leaves\" @click=\"() => take(state.top, "
+            } else {
+                "<i @click=\"() => take(state.top, "
+            });
             read(&mut d, i);
-            d.sfc.push(&format!(", '{value}')\"></i></div>\n"));
+            d.sfc.push(&format!(", '{value}')\""));
+            d.sfc.push(if components {
+                " /></div>\n"
+            } else {
+                "></i></div>\n"
+            });
         }
     }
     d.sfc.push("</main>\n");
+    d.finish()
+}
+
+/// Independent conditional components sharing deep lexical ancestry.
+pub fn sibling_component_chains(n: usize, broken: bool) -> SfcFixture {
+    let depth = (n / 8).max(1);
+    let mut d = Draft::new(
+        format!(
+            "SiblingComponentChains{n}{}",
+            if broken { "Broken" } else { "" }
+        ),
+        true,
+        |s| {
+            s.push("const Leaf = defineComponent({ props: { top: { type: String as PropType<'on'>, required: true } }, emits: { click: (value: number) => true } });\n");
+            s.push("const rows = [] as number[];\n");
+            s.push("const state = reactive({ top: 'on' as 'on' | 'off', other: 'on' as 'on' | 'off' });\n");
+            s.push("function take(top: 'on', row: number, value: number): void {}\n");
+        },
+    );
+    for i in 0..depth {
+        d.sfc.push(&format!("<template v-for=\"r{i} in rows\">\n"));
+    }
+    for i in 0..n {
+        d.sfc
+            .push("<Leaf v-if=\"state.top === 'on'\" :top=\"state.top\" ref=\"leaves\" @click=\"");
+        let value = d.sfc.mark("value");
+        if i == 0 && !broken {
+            d.hovers.push(HoverExpectation {
+                authored: value,
+                contains: "number",
+            });
+        }
+        d.sfc.push(" => take(");
+        d.mark_if(
+            broken,
+            TS2345,
+            if broken { "state.other" } else { "state.top" },
+        );
+        d.sfc.push(&format!(", r{}, value)\" />\n", depth - 1));
+        d.guarded_callbacks += 1;
+        d.conditions += 1;
+    }
+    for _ in 0..depth {
+        d.sfc.push("</template>\n");
+    }
+    d.finish()
+}
+
+/// Shared slot and shadowed loop bindings under a conditional parent.
+pub fn shared_component_slot_frames(broken: bool) -> SfcFixture {
+    let (mut d, planted) = Draft::new_with(
+        format!(
+            "SharedComponentSlotFrames{}",
+            if broken { "Broken" } else { "" }
+        ),
+        true,
+        |s| {
+            s.push(ROW);
+            s.push("const Leaf = defineComponent({ props: { top: { type: String as PropType<'on'>, required: true }, note: { type: String, required: true } }, emits: ['click'] });\n");
+            s.push("const state = reactive({ top: 'on' as 'on' | 'off' });\n");
+            s.push("const row = { note: 'outer', children: [] as { note: string }[] };\n");
+            s.push(TAKE);
+            s.push("import { useTemplateRef } from 'vue';\nconst leaves = useTemplateRef('leaves');\nfunction readLeaves(): void { const ");
+            let planted = s.mark("leafTop");
+            s.push(": 'off' = leaves.value![0]!.$props.top; }\n");
+            planted
+        },
+    );
+    d.expect(TS2322, planted);
+    d.sfc.push("<main v-if=\"state.top === 'on'\">\n");
+    d.sfc.push("<template v-for=\"row in row.children\">\n");
+    d.sfc.push("<Leaf v-if=\"row.note\" :top=\"state.top\" :note=\"row.note\" ref=\"leaves\" @click=\"() => take(row.note)\" />\n");
+    d.sfc.push("<Row v-slot=\"{ row }\">\n");
+    for _ in 0..2 {
+        d.sfc.push("<Leaf v-if=\"row.note\" :top=\"state.top\" :note=\"row.note\" ref=\"leaves\" @click=\"() => take(row.");
+        d.mark_if(broken, TS2339, if broken { "missing" } else { "note" });
+        d.sfc.push(")\" />\n");
+    }
+    d.sfc.push("</Row>\n");
+    d.sfc.push("<Leaf v-if=\"row.note\" :top=\"state.top\" :note=\"row.note\" ref=\"leaves\" @click=\"() => take(row.note)\" />\n");
+    d.sfc.push("</template>\n</main>\n");
+    d.conditions = 5;
+    d.guarded_callbacks = 4;
     d.finish()
 }
 
