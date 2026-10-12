@@ -731,8 +731,23 @@ enum ConstructiveValue {
 }
 
 fn closed_type_operand(ty: &verter_type_expr::TypeExpr, env: Option<&FlowBinderEnv>) -> bool {
+    closed_type_operand_with_bindings(ty, env.map(|env| &env.exact_binders), |_| {})
+}
+
+#[cfg(test)]
+thread_local! {
+    static CLOSED_OPERAND_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn closed_type_operand_with_bindings(
+    ty: &verter_type_expr::TypeExpr,
+    binders: Option<&rustc_hash::FxHashSet<String>>,
+    mut observe_binder: impl FnMut(&str),
+) -> bool {
     let mut pending = vec![ty];
     while let Some(ty) = pending.pop() {
+        #[cfg(test)]
+        CLOSED_OPERAND_VISITS.with(|work| work.set(work.get() + 1));
         match ty {
             verter_type_expr::TypeExpr::Primitive(_) | verter_type_expr::TypeExpr::Literal(_) => {}
             verter_type_expr::TypeExpr::Union(arms) if !arms.is_empty() => {
@@ -742,13 +757,60 @@ fn closed_type_operand(ty: &verter_type_expr::TypeExpr, env: Option<&FlowBinderE
                 name,
                 type_arguments,
             } if type_arguments.is_empty()
-                && env.is_some_and(|env| env.exact_binders.contains(name.as_ref())) => {}
+                && binders.is_some_and(|binders| binders.contains(name.as_ref())) =>
+            {
+                observe_binder(name);
+            }
             verter_type_expr::TypeExpr::TypeParameter(parameter)
-                if env.is_some_and(|env| env.exact_binders.contains(parameter.name.as_str())) => {}
+                if binders.is_some_and(|binders| binders.contains(parameter.name.as_str())) =>
+            {
+                observe_binder(&parameter.name);
+            }
             _ => return false,
         }
     }
     true
+}
+
+/// Keep the existing closed-source grammar and propagate unsupported sibling
+/// capabilities through indexed dependencies. Each source is walked once.
+fn retain_closed_binder_sources<'t>(
+    sources: impl IntoIterator<
+        Item = (
+            &'t str,
+            Option<&'t verter_type_expr::TypeExpr>,
+            Option<&'t verter_type_expr::TypeExpr>,
+        ),
+    >,
+    exact_binders: &mut rustc_hash::FxHashSet<String>,
+) {
+    let mut dependents: rustc_hash::FxHashMap<String, Vec<String>> =
+        rustc_hash::FxHashMap::default();
+    let mut unsupported = Vec::new();
+    for (name, constraint, default) in sources {
+        if !exact_binders.contains(name) {
+            continue;
+        }
+        let closed = constraint.into_iter().chain(default).all(|bound| {
+            closed_type_operand_with_bindings(bound, Some(exact_binders), |dependency| {
+                dependents
+                    .entry(dependency.to_string())
+                    .or_default()
+                    .push(name.to_string());
+            })
+        });
+        if !closed {
+            unsupported.push(name.to_string());
+        }
+    }
+    while let Some(name) = unsupported.pop() {
+        if !exact_binders.remove(&name) {
+            continue;
+        }
+        if let Some(readers) = dependents.remove(&name) {
+            unsupported.extend(readers);
+        }
+    }
 }
 
 /// The shared demand-site of one flow demand — derived ONCE by
@@ -5650,33 +5712,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             type_param_decls,
             exact_binders,
         };
-        // Clause names are provisional capabilities, including closed bounds
-        // and mutually referring siblings. One source predicate decides which
-        // survive; a served sibling name is a binding, but its source capability
-        // still depends on the sibling's own bound/default construction.
-        // Remove unsupported dependencies transitively without re-evaluating
-        // any annotation or changing the established binder identities.
-        loop {
-            let unsupported: Vec<_> = type_parameters
-                .iter()
-                .filter(|parameter| binder_env.exact_binders.contains(parameter.name.as_ref()))
-                .filter(|parameter| {
-                    parameter
-                        .constraint
-                        .as_ref()
-                        .into_iter()
-                        .chain(parameter.default.as_ref())
-                        .any(|bound| !closed_type_operand(bound.ty(), Some(&binder_env)))
-                })
-                .map(|parameter| parameter.name.clone())
-                .collect();
-            if unsupported.is_empty() {
-                break;
-            }
-            for name in unsupported {
-                binder_env.exact_binders.remove(name.as_ref());
-            }
-        }
+        retain_closed_binder_sources(
+            type_parameters.iter().map(|parameter| {
+                (
+                    parameter.name.as_ref(),
+                    parameter.constraint.as_ref().map(|bound| bound.ty()),
+                    parameter.default.as_ref().map(|bound| bound.ty()),
+                )
+            }),
+            &mut binder_env.exact_binders,
+        );
         binder_env
     }
 
@@ -27935,6 +27980,68 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
 #[cfg(test)]
 mod plan_refusal_class_tests {
     use super::*;
+
+    #[test]
+    fn unsupported_clause_bounds_propagate_in_linear_source_work() {
+        use verter_type_expr::{PrimitiveName, TypeExpr};
+        let reference = |name: &str| TypeExpr::Ref {
+            name: Arc::from(name),
+            type_arguments: Arc::from([]),
+        };
+        let work = |size: usize| {
+            let mut sources = (0..size)
+                .map(|i| {
+                    (
+                        format!("T{i}"),
+                        if i + 1 == size {
+                            TypeExpr::Array {
+                                element: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
+                                readonly: false,
+                            }
+                        } else {
+                            reference(&format!("T{}", i + 1))
+                        },
+                    )
+                })
+                .collect::<Vec<_>>();
+            sources.extend([
+                (
+                    "Closed".into(),
+                    TypeExpr::Union(Arc::from([
+                        TypeExpr::Primitive(PrimitiveName::Number),
+                        reference("Outer"),
+                    ])),
+                ),
+                ("CycleA".into(), reference("CycleB")),
+                ("CycleB".into(), reference("CycleA")),
+                ("Empty".into(), TypeExpr::Union(Arc::from([]))),
+            ]);
+            let mut exact = sources
+                .iter()
+                .map(|(name, _)| name.clone())
+                .collect::<rustc_hash::FxHashSet<_>>();
+            exact.insert("Outer".into());
+            CLOSED_OPERAND_VISITS.with(|visits| visits.set(0));
+            retain_closed_binder_sources(
+                sources
+                    .iter()
+                    .map(|(name, bound)| (name.as_str(), Some(bound), None)),
+                &mut exact,
+            );
+            assert_eq!(
+                exact,
+                rustc_hash::FxHashSet::from_iter(
+                    ["Closed", "Outer", "CycleA", "CycleB"].map(String::from)
+                )
+            );
+            CLOSED_OPERAND_VISITS.with(std::cell::Cell::get)
+        };
+        let (small, large) = (work(64), work(128));
+        assert!(
+            large <= 3 * small,
+            "doubling a dependency chain must not repeat earlier source walks: {small} -> {large}"
+        );
+    }
 
     /// The three preparation-refusal causes map onto three
     /// consumer-distinct partial classes, and the split is load-bearing:

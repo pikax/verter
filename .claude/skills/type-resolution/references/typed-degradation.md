@@ -232,7 +232,10 @@ the served function and produced signature; each new attempt withdraws its
 previous certificate. Equal signature nodes from another body supply no proof.
 Unknown, computed, held and unmodeled positions cannot seal this evidence. Sibling bound/default
 source capabilities compose transitively: a served name alone cannot certify
-a binder whose referenced sibling is unsupported. The existing call executor
+a binder whose referenced sibling is unsupported. Each authored bound/default
+is inspected once; indexed reverse dependencies propagate refusal without
+repeated clause scans. Mutually closed sibling sources keep their capabilities.
+The existing call executor
 supplies a result witness only from an actually completed selected
 declared recipe; a provisional seed is insufficient. Its actual substituted
 constructor and result must match the sealed class source. Closed tuples

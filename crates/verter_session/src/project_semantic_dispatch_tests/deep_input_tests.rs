@@ -451,6 +451,11 @@ fn blocks_nested_deep_answer_on_a_small_stack() {
 fn an_independent_return_type_is_exact_beside_its_refused_flow_proof() {
     let host = default_probe_host();
     let source = blocks(DEPTH);
+    // Deep blocks can now complete preparation. Refuse the proof explicitly
+    // so this control continues to distinguish it from the exact return value.
+    let refusal = super::flow_return::flow_admission_fault_injection::Guard::arm(
+        &host.flow_fault_injection.zero_obligation_budget,
+    );
     let public = flow_return_audited_on_host(&host, &source, "pf");
     assert!(
         matches!(
@@ -459,6 +464,7 @@ fn an_independent_return_type_is_exact_beside_its_refused_flow_proof() {
         ),
         "the public flow retains its unfinished preparation proof"
     );
+    drop(refusal);
     super::checker_probe_lane_tests::with_probe_outcome_on_host(
         &host,
         super::checker_probe_lane_tests::ProbeProject::default(),
