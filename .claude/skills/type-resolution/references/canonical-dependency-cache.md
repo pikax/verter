@@ -186,7 +186,10 @@ of its dependency closure against the caller's store view. Singleflight joins
 share admitted tables only; fenced, unstable and otherwise unrootable reads
 remain return-only. Namespace object construction observes the table proof
 once and sends terminal roots through the shared `TypeOf` rail, without a
-second barrel search per property. Namespace re-exports remain scoped
+second barrel search per property. Its shared construction boundary joins the
+connected demand, including eager import-type lowering outside a query. Ordering
+charges and initial refusals preserve the active budget and fold typed partiality
+into the enclosing build. Namespace re-exports remain scoped
 `ImportType` carriers until demanded, so a namespace can re-export itself
 without recursively constructing nested module objects.
 

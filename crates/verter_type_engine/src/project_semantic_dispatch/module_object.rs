@@ -144,6 +144,13 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         module: &str,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<ModuleObject> {
+        // Eager import-type lowering also enters here, outside a query.
+        // Join an existing demand so nested reads keep its budget and trips.
+        let (_connected_guard, initial_trip) = self.enter_connected_demand(false);
+        if let Some(reasons) = initial_trip {
+            self.fold_local_partial_completeness(reasons);
+            return None;
+        }
         let indexed = self.ctx.ensure_indexed_ready_serve(module)?.indexed;
         let table = self.ctx.module_export_table(module)?;
         self.ctx.observe_borrowed_signature(&table.facts);
@@ -173,7 +180,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             }
         }
         let (bindings, ordering_work) = table.ordered_bindings();
-        self.connected_demand().charge_units(ordering_work).ok()?;
+        if let Err(reasons) = self.connected_demand().charge_units(ordering_work) {
+            self.fold_local_partial_completeness(reasons);
+            return None;
+        }
         let mut members = Vec::with_capacity(bindings.len());
         for (name, binding) in bindings {
             let node = match binding {
