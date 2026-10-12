@@ -19,6 +19,8 @@ use super::ProjectSemanticDispatch;
 
 #[path = "call_resolve_context.rs"]
 mod context;
+#[path = "call_resolve_contextual.rs"]
+mod contextual;
 use crate::semantic_query::{
     ArgumentLiteralMode, CallArgKey, CallKind, CanonicalTypeSubstitution, ConstParamPolicy,
     ContextualInferenceMode, FreshnessKey, FunctionParam, InferenceCandidatePriority,
@@ -27,6 +29,7 @@ use crate::semantic_query::{
     SemanticNodeId, SemanticQueryKey, SemanticQueryValue, SignatureKind, SignatureRef,
     SignatureReturnCarrier, VariancePhase,
 };
+pub(super) use contextual::ContextualCallState;
 
 /// Whether a fresh-literal deposit's binder occurs at the top level of a
 /// binder-bearing structure ([`ProjectSemanticDispatch::deposit_binder_reach`]).
@@ -145,7 +148,7 @@ impl<'l> CallResolutionBudget<'l> {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 struct CallArgument {
     node: SemanticNodeId,
     freshness_origin: SemanticNodeId,
@@ -1215,9 +1218,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             &[crate::semantic_query::RelationKind::Assignable]
         };
         let outer_applicability = self.dispatch_txn.borrow().call.applicability;
+        let resume_at = self
+            .dispatch_txn
+            .borrow()
+            .call
+            .contextual
+            .as_ref()
+            .and_then(|state| state.resume_at);
+        let mut resuming = resume_at.is_some();
         let mut only_candidate = None;
         for &applicability in passes {
             for (position, candidate) in visible.iter().enumerate() {
+                if resuming {
+                    if resume_at != Some((applicability, candidate.node)) {
+                        continue;
+                    }
+                    resuming = false;
+                }
                 let Some(kind) = bucket_kind(candidate.node) else {
                     return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);
                 };
@@ -1247,15 +1264,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);
                 };
                 self.dispatch_txn.borrow_mut().call.applicability = applicability;
-                let verdict = self.check_call_candidate(
-                    key,
-                    candidate,
-                    raw_candidate,
-                    &arguments,
-                    &mut budget,
-                    false,
-                    visible.len() == 1,
-                );
+                let prepared = if self.dispatch_txn.borrow().call.contextual.is_some() {
+                    self.prepare_contextual_candidate(key, candidate, &arguments, &mut budget)
+                } else {
+                    Ok(arguments.clone())
+                };
+                let verdict = match prepared {
+                    Ok(arguments) => self.check_call_candidate(
+                        key,
+                        candidate,
+                        raw_candidate,
+                        &arguments,
+                        &mut budget,
+                        false,
+                        visible.len() == 1,
+                    ),
+                    Err(verdict) => verdict.into(),
+                };
                 self.dispatch_txn.borrow_mut().call.applicability = outer_applicability;
                 match verdict {
                     CandidateVerdict::Selected(result) => {
@@ -1266,10 +1291,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         if failure == ResolveCallFailure::Budget {
                             self.abandon_call_sessions_since(session_watermark);
                         }
-                        // The first candidate that asks types a context-sensitive
-                        // argument: the checker assigns a function's contextual
-                        // parameter types once, under the first candidate that
-                        // reaches it, and later candidates read them.
+                        // A contextual request suspends this candidate. Its
+                        // collector is inactive while the callback body runs.
                         return CandidateVerdict::Degraded(failure);
                     }
                 }
@@ -1308,7 +1331,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
         }
-        CandidateVerdict::Degraded(ResolveCallFailure::NoApplicableOverload)
+        let failure = self
+            .dispatch_txn
+            .borrow()
+            .call
+            .contextual
+            .as_ref()
+            .and_then(|state| state.failure())
+            .unwrap_or(ResolveCallFailure::NoApplicableOverload);
+        CandidateVerdict::Degraded(failure)
     }
 
     /// Whether an eager argument is a GENERIC function value. The checker's
@@ -2396,7 +2427,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         crate::semantic_query::CheckerDiagnosticCode::ArgumentNotAssignable,
                     );
                 }
-                Ok(Some(false)) => return self.reject_call_candidate(session_id, &checkpoint),
+                Ok(Some(false)) => {
+                    if self
+                        .dispatch_txn
+                        .borrow()
+                        .call
+                        .contextual
+                        .as_ref()
+                        .is_some_and(|state| state.was_context_sensitive(index))
+                    {
+                        let code = self.contextual_argument_failure(source, target, budget);
+                        if let Some(state) = self.dispatch_txn.borrow_mut().call.contextual.as_mut()
+                        {
+                            state.diagnostic = Some(code);
+                        }
+                    }
+                    return self.reject_call_candidate(session_id, &checkpoint);
+                }
                 Ok(None) => deferred_for_relation_scc = true,
                 Err(failure) => {
                     self.abandon_session(session_id);
@@ -2453,32 +2500,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         if !uninferred_params.contains(param) {
                             return (*param, *bound);
                         }
-                        let constrained =
-                            constraints
-                                .get(param)
-                                .copied()
-                                .flatten()
-                                .and_then(|constraint| {
-                                    let data = graph.node_data(*param)?;
-                                    let SemanticNodeData::TypeParam {
-                                        decl,
-                                        param_index,
-                                        default,
-                                        display_name,
-                                        constraint: None,
-                                    } = &*data
-                                    else {
-                                        return None;
-                                    };
-                                    Some(graph.intern_node(SemanticNodeData::TypeParam {
-                                        decl: decl.clone(),
-                                        param_index: *param_index,
-                                        constraint: Some(constraint),
-                                        default: *default,
-                                        display_name: Arc::clone(display_name),
-                                    }))
-                                });
-                        (*param, constrained.unwrap_or(*param))
+                        (
+                            *param,
+                            self.contextual_uninferred_parameter(
+                                *param,
+                                constraints.get(param).copied().flatten(),
+                            ),
+                        )
                     })
                     .collect(),
             );

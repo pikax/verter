@@ -9070,7 +9070,11 @@ pub(super) trait FlowDemandDriver {
         scope_canonical_id: &str,
     ) -> FunctionReturnNode;
     fn execute_relate_pair(&self, source: SemanticNodeId, target: SemanticNodeId) -> RelationStep;
-    fn execute_resolve_call(&self, key: ResolveCallKey) -> ResolveCallStep;
+    fn execute_contextual_call(
+        &self,
+        key: ResolveCallKey,
+        state: &mut super::call_resolve::ContextualCallState,
+    ) -> ResolveCallStep;
     fn demand_type_node(
         &self,
         key: SemanticQueryKey,
@@ -9483,8 +9487,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
     fn execute_relate_pair(&self, source: SemanticNodeId, target: SemanticNodeId) -> RelationStep {
         ProjectSemanticDispatch::execute_relate_pair(self, source, target)
     }
-    fn execute_resolve_call(&self, key: ResolveCallKey) -> ResolveCallStep {
-        ProjectSemanticDispatch::execute_resolve_call(self, key)
+    fn execute_contextual_call(
+        &self,
+        key: ResolveCallKey,
+        state: &mut super::call_resolve::ContextualCallState,
+    ) -> ResolveCallStep {
+        ProjectSemanticDispatch::execute_contextual_call(self, key, state)
     }
     fn demand_type_node(
         &self,
@@ -10089,8 +10097,12 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     fn execute_relate_pair(&self, source: SemanticNodeId, target: SemanticNodeId) -> RelationStep {
         self.driver.execute_relate_pair(source, target)
     }
-    fn execute_resolve_call(&self, key: ResolveCallKey) -> ResolveCallStep {
-        self.driver.execute_resolve_call(key)
+    fn execute_contextual_call(
+        &self,
+        key: ResolveCallKey,
+        state: &mut super::call_resolve::ContextualCallState,
+    ) -> ResolveCallStep {
+        self.driver.execute_contextual_call(key, state)
     }
     fn demand_type_node(
         &self,
@@ -26225,6 +26237,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             // An SCC back-edge through the executor: the close discharges
             // it on the component's admitted results.
             super::call_resolve::ResolveCallStep::Hold(_) => Some(Positional::Hold),
+            super::call_resolve::ResolveCallStep::Degraded(
+                crate::semantic_query::ResolveCallFailure::Diagnosed(diagnostic),
+            ) => {
+                self.record_checker_diagnostic(diagnostic);
+                Some(self.degraded_unrepresentable_callee())
+            }
             // A PROVEN refusal — the callee is not callable, or no
             // overload accepts the authored arguments — is the typed
             // `UnrepresentableCallee` degradation this rail already

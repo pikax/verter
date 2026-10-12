@@ -48,7 +48,9 @@ impl CheckerDiagnostic {
             | CheckerDiagnosticCode::RecursiveFulfillmentCallback
             | CheckerDiagnosticCode::UnionTooComplex
             | CheckerDiagnosticCode::TupleTooLarge => Some(PrimitiveKind::Any),
-            CheckerDiagnosticCode::ArgumentNotAssignable
+            CheckerDiagnosticCode::TypeNotAssignable
+            | CheckerDiagnosticCode::NoMatchingOverload
+            | CheckerDiagnosticCode::ArgumentNotAssignable
             | CheckerDiagnosticCode::ArgumentCount
             | CheckerDiagnosticCode::ArgumentCountAtLeast
             | CheckerDiagnosticCode::RelationTooComplex => None,
@@ -59,6 +61,11 @@ impl CheckerDiagnostic {
 /// The checker diagnostics an operation here can raise.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CheckerDiagnosticCode {
+    /// TS2769: several arity-fitting overloads reject the call.
+    NoMatchingOverload,
+    /// TS2322: a contextually typed callback's return is not assignable to
+    /// the return its contextual signature requires.
+    TypeNotAssignable,
     /// TS2589: an instantiation nested deeper than the checker's
     /// instantiation depth, or a conditional tail run longer than its tail
     /// limit ([`checker_policy`](super::checker_policy)) — including the lib
@@ -116,6 +123,8 @@ impl CheckerDiagnosticCode {
             | Self::TupleTooLarge
             | Self::RelationTooComplex => true,
             Self::CircularTypeAlias
+            | Self::NoMatchingOverload
+            | Self::TypeNotAssignable
             | Self::RecursiveFulfillmentCallback
             | Self::ArgumentNotAssignable
             | Self::ArgumentCount
@@ -127,6 +136,8 @@ impl CheckerDiagnosticCode {
     #[must_use]
     pub const fn code(self) -> u32 {
         match self {
+            Self::NoMatchingOverload => 2769,
+            Self::TypeNotAssignable => 2322,
             Self::ExcessivelyDeepInstantiation => 2589,
             Self::CircularTypeAlias => 2456,
             Self::UnionTooComplex => 2590,
@@ -143,6 +154,8 @@ impl CheckerDiagnosticCode {
     #[must_use]
     pub const fn message(self) -> &'static str {
         match self {
+            Self::NoMatchingOverload => "No overload matches this call.",
+            Self::TypeNotAssignable => "Type '{0}' is not assignable to type '{1}'.",
             Self::ExcessivelyDeepInstantiation => {
                 "Type instantiation is excessively deep and possibly infinite."
             }

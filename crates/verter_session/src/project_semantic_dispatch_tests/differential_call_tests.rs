@@ -16,6 +16,145 @@
 
 use super::differential_harness_tests::{Matrix, Read};
 
+fn pipe_declaration(stages: usize, name: &str) -> String {
+    let binders = (0..=stages)
+        .map(|i| format!("T{i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let callbacks = (0..stages)
+        .map(|i| format!("f{i}: (x: T{i}) => T{}", i + 1))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("declare function {name}<{binders}>(a: T0, {callbacks}): T{stages};\n")
+}
+
+#[test]
+fn overloaded_contextual_chains_infer_each_stage_from_the_previous_return() {
+    let mut source = (1..=20)
+        .map(|stages| pipe_declaration(stages, "pipe"))
+        .collect::<String>();
+    let mut expected = Vec::new();
+    for stages in [5, 12, 20] {
+        let callbacks = (0..stages)
+            .map(|i| format!("(x) => ({{ v{i}: x }})"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        source.push_str(&format!("export function chain{stages}() {{ const r = pipe(0 as const, {callbacks}); return r; }}\n"));
+        expected.push((
+            format!("chain{stages}"),
+            (0..stages).fold("0".to_owned(), |nested, i| format!("{{ v{i}: {nested}; }}")),
+        ));
+    }
+    let rows = expected
+        .iter()
+        .map(|(name, answer)| (name.as_str(), answer.as_str()))
+        .collect::<Vec<_>>();
+    let matrix = Matrix::new(&source);
+    let mut failures = matrix.returns(&rows);
+    failures
+        .extend(matrix.unproven_returns(&rows.iter().map(|(name, _)| *name).collect::<Vec<_>>()));
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn contextual_chains_keep_fixed_generic_and_rejected_candidate_controls() {
+    let source = format!(
+        "{}{}{}{}",
+        pipe_declaration(1, "pipe"),
+        pipe_declaration(2, "pipe"),
+        pipe_declaration(2, "fixed"),
+        r#"
+export function nonOverloaded() { return fixed(0 as const, (x) => ({ v0: x }), (x) => ({ v1: x })); }
+export function genericStage() { return pipe(0 as const, (x) => <U>(y: U) => ({ input: x, value: y }), (f) => f('ok' as const)); }
+declare function alternatives<A, B, C>(a: A, f: (x: A) => B, g: (x: B) => never): 'rejected';
+declare function alternatives<A, B, C>(a: A, f: (x: A) => B, g: (x: B) => C): C;
+export function isolated() { return alternatives(0 as const, (x) => ({ v0: x }), (x) => ({ v1: x })); }
+"#
+    );
+    let matrix = Matrix::new(&source);
+    let failures = matrix.returns(&[
+        ("nonOverloaded", "{ v1: { v0: 0; }; }"),
+        ("genericStage", "{ input: 0; value: \"ok\"; }"),
+        ("isolated", "{ v1: { v0: 0; }; }"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn contextual_chains_report_annotation_and_excess_argument_diagnostics() {
+    let source = (1..=3)
+        .map(|stages| pipe_declaration(stages, "pipe"))
+        .collect::<String>()
+        + r#"
+export function conflictingMiddle() { return pipe(0 as const, (x) => ({ v0: x }), (x: string) => ({ v1: x }), (x) => ({ v2: x })); }
+export function tooMany() { return pipe(0 as const, (x) => x, (x) => x, (x) => x, (x) => x); }
+"#;
+    let matrix = Matrix::new(&source).settings(&super::differential_harness_tests::ALL[..1]);
+    let verdicts = matrix.verdicts(&[
+        (Read::Return("conflictingMiddle"), vec!["unknown"]),
+        (Read::Return("tooMany"), vec!["unknown"]),
+    ]);
+    assert_eq!(
+        verdicts[0][0].diagnostics,
+        [2322],
+        "{}",
+        verdicts[0][0].lane
+    );
+    assert_eq!(
+        verdicts[1][0].diagnostics,
+        [2554],
+        "{}",
+        verdicts[1][0].lane
+    );
+}
+
+#[test]
+fn callback_parameter_context_survives_rejected_overload_inference() {
+    let source = r#"
+declare function alternatives<A, B, C>(a: A, f: (x: string) => B, g: (x: B) => never): 'rejected';
+declare function alternatives<A, B, C>(a: A, f: (x: A) => B, g: (x: B) => C): C;
+export function isolated() { return alternatives(0 as const, (x) => ({ v0: x }), (x) => ({ v1: x })); }
+"#;
+    let matrix = Matrix::new(source).settings(&super::differential_harness_tests::ALL[..1]);
+    let verdicts = matrix.verdicts(&[(Read::Return("isolated"), vec!["{ v1: { v0: 0; }; }"])]);
+    assert!(
+        !verdicts[0][0].matched,
+        "retyping a cached parameter context fabricates an applicable overload"
+    );
+    assert_eq!(
+        verdicts[0][0].diagnostics,
+        [2769],
+        "{}",
+        verdicts[0][0].lane
+    );
+}
+
+#[test]
+fn contextual_chain_inference_work_grows_linearly() {
+    let work = |stages| {
+        let mut source = (1..=20)
+            .map(|arity| pipe_declaration(arity, "pipe"))
+            .collect::<String>();
+        let callbacks = (0..stages)
+            .map(|i| format!("(x) => ({{ v{i}: x }})"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        source.push_str(&format!(
+            "export function chain() {{ return pipe(0 as const, {callbacks}); }}"
+        ));
+        Matrix::new(&source)
+            .settings(&super::differential_harness_tests::ALL[..1])
+            .return_relation_work("chain")
+    };
+    let (small, medium, large) = (work(5), work(10), work(20));
+    eprintln!("contextual relation work: 5={small}, 10={medium}, 20={large}");
+    assert!(small > 0);
+    assert!(
+        large - medium <= 3 * (medium - small),
+        "doubling stages repeats earlier inference: {small}, {medium}, {large}"
+    );
+}
+
 /// Overloaded declarations by type, arity, literal and generic parameters.
 const OVERLOADS: &str = r##"
 declare function ov(a: string): "S";
