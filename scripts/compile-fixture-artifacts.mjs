@@ -1,9 +1,33 @@
 import { spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const EXTERNS = ["verter_semantic", "verter_session_query", "verter_macro_dto"];
+
+export function fixtureBuildArgs(args) {
+  const buildArgs = [];
+  for (let index = 0; index < args.length; index++) {
+    const [option] = args[index].split("=", 1);
+    if (["--archive-file", "--archive-format", "--zstd-level"].includes(option)) {
+      if (args[index] === option) index++;
+    } else buildArgs.push(args[index]);
+  }
+  return buildArgs;
+}
+
+function fileDigest(path) {
+  return createHash("sha256").update(readFileSync(path)).digest("hex");
+}
 
 // Select from Cargo's fresh artifact stream, never from a target-directory glob:
 // shared caches can hold several incompatible revisions and feature sets.
@@ -83,10 +107,27 @@ export function stageFixtureArtifacts(messages) {
   mkdirSync(staging, { recursive: true });
   try {
     for (const [name, source] of files) copyFileSync(source, join(staging, name));
+    const testDigests = Object.fromEntries(
+      tests.map((test) => [
+        relative(targetDir, test.executable).replaceAll("\\", "/"),
+        fileDigest(test.executable),
+      ]),
+    );
+    const metadataArtifacts = Object.fromEntries(
+      Object.values(externs).map((name) => [
+        name,
+        {
+          sha256: fileDigest(join(staging, name)),
+          build_path: relative(targetDir, files.get(name)).replaceAll("\\", "/"),
+        },
+      ]),
+    );
     writeFileSync(
       join(staging, "manifest.json"),
       JSON.stringify({
         tests: tests.map((test) => relative(targetDir, test.executable).replaceAll("\\", "/")),
+        test_digests: testDigests,
+        artifacts: metadataArtifacts,
         externs,
         sources,
       }),
@@ -123,11 +164,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         "usage: compile-fixture-artifacts.mjs archive|prepare [nextest build options]",
       );
     }
-    const buildArgs = [];
-    for (let index = 0; index < args.length; index++) {
-      if (["--archive-file", "--archive-format", "--zstd-level"].includes(args[index])) index++;
-      else buildArgs.push(args[index]);
-    }
+    const buildArgs = fixtureBuildArgs(args);
     const output = runCargo(
       [
         "nextest",

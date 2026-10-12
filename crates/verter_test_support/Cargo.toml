@@ -18,5 +18,6 @@ publish = false
 # "nothing may depend on a harness" firewall.
 [dependencies]
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 
 [dev-dependencies]

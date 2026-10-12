@@ -240,7 +240,11 @@ build plus the sources backing imported diagnostic excerpts, then archives the
 warm binaries and metadata. Both CI and the canonical
 gate use this builder. Metadata comes from Cargo artifact messages, never a
 glob over a potentially stale target directory. The manifest binds the bundle
-to the test binary and uses relative paths so extraction relocates it.
+to the test binary and external metadata by SHA-256 content, and uses relative
+paths so extraction relocates it. Local consumers also compare available build
+metadata, catching metadata-only rebuilds; validation runs once per test process.
+The rail discovers every `tests/ui/fixtures/*.rs` file at runtime and requires
+its diagnostic snapshot rather than maintaining a filename inventory.
 
 For a focused local run, prepare metadata with the same package/target/feature
 options before running nextest:

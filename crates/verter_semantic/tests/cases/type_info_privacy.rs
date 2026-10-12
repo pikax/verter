@@ -1,6 +1,7 @@
 //! Foreign crates cannot implement the sealed observation contract, mint
 //! private kernel payloads, or enter the gateway through an alternate API.
 
+use std::fs;
 use verter_test_support::compile_fixture;
 
 #[test]
@@ -14,24 +15,20 @@ fn type_info_privacy_rails() {
         "the sanctioned gateway must compile against the packaged metadata:\n{}",
         String::from_utf8_lossy(&control.stderr)
     );
-    for (name, source, expected) in [
-        (
-            "alternate_entry.rs",
-            include_str!("../ui/fixtures/alternate_entry.rs"),
-            include_str!("../ui/fixtures/alternate_entry.stderr"),
-        ),
-        (
-            "foreign_impl.rs",
-            include_str!("../ui/fixtures/foreign_impl.rs"),
-            include_str!("../ui/fixtures/foreign_impl.stderr"),
-        ),
-        (
-            "private_fields.rs",
-            include_str!("../ui/fixtures/private_fields.rs"),
-            include_str!("../ui/fixtures/private_fields.stderr"),
-        ),
-    ] {
-        let output = compile_fixture(name, source);
+    // nextest remaps the crate's working directory for archive consumers.
+    let mut fixtures: Vec<_> = fs::read_dir("tests/ui/fixtures")
+        .expect("discover the privacy fixture inventory")
+        .map(|entry| entry.expect("read a privacy fixture entry").path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "rs"))
+        .collect();
+    fixtures.sort();
+    assert!(!fixtures.is_empty(), "privacy fixtures must be nonempty");
+    for path in fixtures {
+        let name = path.file_name().unwrap().to_str().unwrap();
+        let source = fs::read_to_string(&path).expect("read the privacy fixture");
+        let expected = fs::read_to_string(path.with_extension("stderr"))
+            .expect("each privacy fixture has a diagnostic snapshot");
+        let output = compile_fixture(name, &source);
         assert!(!output.status.success(), "{name} must fail to compile");
         let diagnostics: Vec<serde_json::Value> = String::from_utf8(output.stderr)
             .expect("rustc emits UTF-8 JSON diagnostics")
@@ -46,7 +43,7 @@ fn type_info_privacy_rails() {
             .join("");
         assert_eq!(
             normalize_diagnostics(&rendered),
-            normalize_diagnostics(expected),
+            normalize_diagnostics(&expected),
             "{name}: preserve the complete privacy diagnostic snapshot"
         );
     }
