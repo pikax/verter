@@ -464,6 +464,38 @@ it observes on any machine, labelled with that machine's provenance, for
 local investigation; those figures are evidence about that machine only.
 An evidence run will apply the rule to its summary's cells (see below).
 
+### Discriminated switches
+
+`switch-discriminated` measures exhaustive switches over 128, 512, 1,000
+and 2,048 object-union members. Each case reads a distinct sibling property;
+the return must contain every member's numeric literal and no `undefined`.
+The existing production release probe and TypeScript API arm read the same
+source and `ReturnType<typeof f>` demand, cold and warm:
+
+```bash
+node scripts/benchmark/evidence-run.mjs --run switch-discriminated
+```
+
+The 1,000-case cold latency and OS peak-memory cells provide the benchmark
+machine's evidence for the 20 ms / 40 MB budget. These absolute figures are
+advisory for landing under the measurement rule above; off `bench-m3`, the
+summary marks them unavailable. The raw harness records retain the worker's
+actual measurements and distinguish request latency from first-type latency.
+
+The machine-independent regression runs in the ordinary session unit-test
+lane:
+
+```bash
+cargo nextest run -p verter_session --lib discriminated_switch_narrowing_work_grows_linearly
+```
+
+It checks complete, reusable answers at 128 / 512 / 2,048 cases under
+production budgets and bounds growth in both connected work and union-leaf
+visits. Leaf visits count the shared flow enumeration boundary, including
+repeated traversal in relation narrowing, so memo hits cannot hide a
+per-clause full-union scan. That counter exists only in test-support builds;
+the production release probe carries no instrumentation overhead from it.
+
 ## Tiers
 
 `--tier` chooses what a run covers; every tier keeps the fairness

@@ -11019,6 +11019,20 @@ pub fn guard_applications_for_tests() -> usize {
 
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
+    /// Leaves visited by flow union enumeration, including repeated visits.
+    static UNION_LEAF_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Leaves visited by flow union enumeration on this thread (test-only).
+/// Count at the shared enumeration boundary so both switch partitions and
+/// per-clause relation narrowing contribute their actual traversal work.
+#[cfg(any(test, feature = "test-support"))]
+pub fn union_leaf_visits_for_tests() -> usize {
+    UNION_LEAF_VISITS.with(std::cell::Cell::get)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
     /// How many nodes this thread's object-literal recursion checks
     /// ([`FlowEvaluator::value_mentions_receiver`]) walked; test-only.
     static RECEIVER_WALK_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -16546,8 +16560,14 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             {
                 self.collect_enumerated_arms(concrete, arms, expanded, gapped);
             }
-            super::relation::IdentityCarrierUnwrap::Concrete(_) => arms.push(node),
+            super::relation::IdentityCarrierUnwrap::Concrete(_) => {
+                #[cfg(any(test, feature = "test-support"))]
+                UNION_LEAF_VISITS.with(|visits| visits.set(visits.get() + 1));
+                arms.push(node);
+            }
             super::relation::IdentityCarrierUnwrap::Unresolvable => {
+                #[cfg(any(test, feature = "test-support"))]
+                UNION_LEAF_VISITS.with(|visits| visits.set(visits.get() + 1));
                 arms.push(node);
                 *gapped = true;
             }
