@@ -208,7 +208,6 @@ impl VerterHost {
                 // The retained refusal's status rides on the resolution.
                 // Rehydrate must not present the recovery as a complete hit.
                 resolution.completeness = status_completeness;
-                resolution.synthesis_should_suppress = status_completeness.is_partial();
                 return Ok(Some((cached.analysis.clone(), resolution)));
             }
         }
@@ -674,7 +673,6 @@ impl VerterHost {
                 // The retained refusal's status rides on the resolution.
                 // Rehydrate must not present the recovery as a complete hit.
                 resolution.completeness = status_completeness;
-                resolution.synthesis_should_suppress = status_completeness.is_partial();
                 return Ok(Some((cached.analysis.clone(), resolution)));
             }
         }

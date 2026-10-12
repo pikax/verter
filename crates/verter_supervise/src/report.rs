@@ -177,8 +177,10 @@ pub struct Report {
     /// Descendants still alive when the child exited, killed by teardown.
     #[serde(rename = "descendantsKilled")]
     pub descendants_killed: Option<u64>,
+    /// Process-tree CPU; unavailable when counters cannot be attributed.
     #[serde(rename = "cpuUserMs")]
     pub cpu_user_ms: Option<f64>,
+    /// Kernel CPU has the same availability as user CPU.
     #[serde(rename = "cpuKernelMs")]
     pub cpu_kernel_ms: Option<f64>,
     #[serde(rename = "stdoutPath")]
