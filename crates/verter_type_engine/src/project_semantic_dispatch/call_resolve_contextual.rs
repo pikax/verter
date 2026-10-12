@@ -168,6 +168,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         result
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn resolve_contextual_call_for_tests(&self, key: ResolveCallKey) -> ResolveCallStep {
+        self.execute_contextual_call(key, &mut ContextualCallState::default())
+    }
+
     pub(super) fn contextual_argument_failure(
         &self,
         source: SemanticNodeId,
@@ -387,6 +392,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 param,
                 shape: self.rest_shape(param.ty),
             });
+        let generic_rest = rest.as_ref().and_then(|rest| match rest.shape {
+            RestShape::GenericTuple(param) => Some((param, ordinary.len() - 1)),
+            _ => None,
+        });
         if resumed.is_none() {
             let (required, maximum, _) = call_candidate_arity(ordinary, rest.as_ref());
             if original.len() < required || maximum.is_some_and(|max| original.len() > max) {
@@ -394,6 +403,17 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             }
             state.arity_fit = true;
             state.arity_candidates.insert(candidate.node);
+            // A callback in the generic tail has no positional template yet.
+            // Keep the ordinary executor's contextual recheck for that shape.
+            if generic_rest.is_some_and(|(_, start)| {
+                original
+                    .get(start..)
+                    .unwrap_or(&[])
+                    .iter()
+                    .any(|arg| arg.context_sensitive)
+            }) {
+                return Ok(arguments.to_vec());
+            }
         }
         let (mut progress, session_id) = if let Some(progress) = resumed {
             verter_debug_assert_eq!(progress.signature.node, candidate.node);
@@ -488,23 +508,54 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             } else {
                 // Eager arguments infer before a context-sensitive callback is
                 // visited. Annotated callbacks participate in this pass too.
+                let own_return_function = match &candidate.return_carrier {
+                    SignatureReturnCarrier::Function(
+                        verter_type_expr::facts::FunctionReturnSource::Flow(identity),
+                    ) => Some(self.flow_return_key_for(identity).function),
+                    _ => None,
+                };
+                if let Some((param, start)) = generic_rest {
+                    self.dispatch_txn
+                        .borrow_mut()
+                        .active_session_mut()
+                        .expect("contextual collector")
+                        .set_implied_arity(param, original.len().saturating_sub(start));
+                }
                 if let Some(receiver) = receiver {
                     let source = key.receiver.unwrap_or_else(|| {
                         graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Void))
                     });
-                    let step = self.call_receiver_relation(source, receiver.ty, source, budget);
-                    if matches!(step, RelationStep::NotAssignable) {
+                    let before = self.accepted_inference_deposits();
+                    let relation_source = self.receiver_relation_source(source, receiver.ty);
+                    let step =
+                        self.call_receiver_relation(relation_source, receiver.ty, source, budget);
+                    if !budget.charge_accepted_deposits(self.accepted_inference_deposits() - before)
+                    {
+                        return Err(ContextualCandidateFailure::Degraded(
+                            ResolveCallFailure::Budget,
+                        ));
+                    }
+                    if decided_call_relation(step, own_return_function.as_ref())
+                        .map_err(ContextualCandidateFailure::Degraded)?
+                        == Some(false)
+                    {
                         return Err(ContextualCandidateFailure::Mismatch);
                     }
-                    if matches!(
-                        step,
-                        RelationStep::Unknown
-                            | RelationStep::BudgetExceeded(_)
-                            | RelationStep::Assumed(_)
-                    ) {
+                }
+                if let Some((param, start)) = generic_rest {
+                    let before = self.accepted_inference_deposits();
+                    let step = self.generic_rest_relation(original, start, param, budget, true);
+                    if !budget.charge_accepted_deposits(self.accepted_inference_deposits() - before)
+                    {
                         return Err(ContextualCandidateFailure::Degraded(
-                            ResolveCallFailure::Undecidable,
+                            ResolveCallFailure::Budget,
                         ));
+                    }
+                    if decided_call_relation(step, own_return_function.as_ref())
+                        .map_err(ContextualCandidateFailure::Degraded)?
+                        == Some(false)
+                    {
+                        return Err(ContextualCandidateFailure::Mismatch);
                     }
                 }
                 let const_params: Vec<_> = progress
@@ -515,6 +566,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     .collect();
                 let mut generic_arguments = Vec::new();
                 for (position, argument) in original.iter().enumerate() {
+                    if generic_rest.is_some_and(|(_, start)| position >= start) {
+                        continue;
+                    }
                     let mut evidence =
                         super::super::canonical_algebra::CanonicalEvidence::default();
                     let target = mapped_parameter_type(

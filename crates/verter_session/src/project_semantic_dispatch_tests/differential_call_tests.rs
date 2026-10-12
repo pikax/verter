@@ -267,6 +267,58 @@ export function discriminant() { return generic('n', 0 as const, x => ({value: x
 }
 
 #[test]
+fn contextual_callbacks_infer_from_a_generic_rest_tail() {
+    let source = r#"
+declare function collect<A extends unknown[], B>(cb: (...args: A) => B, ...args: A): B;
+declare function optional<A extends unknown[], B>(cb: (...args: A) => B, extra?: number, ...args: A): B;
+declare function tuple<B>(cb: (...args: [number, string]) => B): B;
+declare function array<B>(cb: (...args: number[]) => B): B;
+declare function choose<A extends unknown[], B>(kind: 'bad', cb: (...args: A) => B, ...args: A): 'bad';
+declare function choose<A extends unknown[], B>(kind: 'ok', cb: (...args: A) => B, ...args: A): B;
+export function inferred() { return collect(x => ({ value: x }), 1); }
+export function empty() { return collect(() => 'empty' as const); }
+export function later() { return choose('ok', (x, y) => ({ x, y }), 1, 's'); }
+export function annotated() { return collect((x: number) => ({ value: x }), 1); }
+export function omittedOptional() { return optional(() => 'optional' as const); }
+export function fixedTuple() { return tuple((x, y) => ({ x, y })); }
+export function arrayRest() { return array(x => ({ value: x })); }
+"#;
+    let failures = Matrix::new(source).returns(&[
+        ("inferred", "{ value: number; }"),
+        ("empty", "\"empty\""),
+        ("later", "{ x: number; y: string; }"),
+        ("annotated", "{ value: number; }"),
+        ("omittedOptional", "\"optional\""),
+        ("fixedTuple", "{ x: number; y: string; }"),
+        ("arrayRest", "{ value: number; }"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn contextual_callbacks_read_a_generic_receivers_base_signature() {
+    let source = r#"
+interface Mapper {
+  <T>(x: T): T;
+  map<R, B>(this: (x: unknown) => R, cb: (x: R) => B): B;
+}
+interface Plain {
+  (x: unknown): number;
+  map<R, B>(this: (x: unknown) => R, cb: (x: R) => B): B;
+}
+declare const generic: Mapper;
+declare const plain: Plain;
+export function genericReceiver() { return generic.map(x => ({ value: x })); }
+export function plainReceiver() { return plain.map(x => ({ value: x })); }
+"#;
+    let failures = Matrix::new(source).returns(&[
+        ("genericReceiver", "{ value: unknown; }"),
+        ("plainReceiver", "{ value: number; }"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
 fn contextual_callback_returns_infer_through_object_and_tuple_wrappers() {
     let source = r#"
 declare function wrapped<A,B>(a:A,f:{run:(x:A)=>B}):B;
