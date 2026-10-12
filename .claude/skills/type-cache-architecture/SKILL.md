@@ -1076,6 +1076,15 @@ stack. A member closed inside a larger component keeps no receipt of its own:
 the component root's receipt, whose evaluation covered every member, is the
 sealed component receipt.
 
+Whole-module export proofs use `ResultReceipt::retained_signature` for an
+already-canonical producer signature and `retained_join` for its dependency
+receipts. Joins radix-order receipt digests, retaining exact comparison for
+equal digests, and never copy a child's transitive facts. These result-evidence
+allocations use the same pin-to-retained reservation transfer as evidence
+pages, so their charges remain attached when an enclosing cache retains the
+proof after the export table is evicted. Canonical summaries are persistent
+hash tries; their public iteration stays lexical through a byte radix walk.
+
 ## Typed SignatureAdmission gate (CRITICAL)
 
 Producers convert their finalised fact tracer into a typed admission verdict via

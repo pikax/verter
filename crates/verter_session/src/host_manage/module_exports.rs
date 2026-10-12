@@ -6,9 +6,11 @@ use std::sync::Arc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_session_query::analysis::route_inventory::RouteCapability;
-use verter_session_query::declarations::module_exports::{ModuleExportBinding, ModuleExportTable};
-use verter_session_query::facts::fact_cache::{signature_entries, FactVersionRef};
-use verter_session_query::facts::fact_read_set::{seal_canonical_signature, FactReadSetFinalise};
+use verter_session_query::declarations::module_exports::{
+    ModuleExportBinding, ModuleExportBindings, ModuleExportRetention, ModuleExportTable,
+};
+use verter_session_query::facts::fact_cache::{signature_entries, FactVersionRef, ResultReceipt};
+use verter_session_query::facts::fact_read_set::FactReadSetFinalise;
 use verter_session_query::facts::store_view::StoreView;
 use verter_session_query::inputs::shallow::{ExportTarget, LexicalValueBinding};
 use verter_session_query::type_solver::ResolvedRootIdentity;
@@ -22,7 +24,7 @@ use crate::resolver_core::{HostCapabilities, SingleflightRole};
 use crate::VerterHost;
 
 type Context<'a> = &'a dyn ResolverContext<HostCapabilities>;
-type Bindings = FxHashMap<Arc<str>, Option<ModuleExportBinding>>;
+type Bindings = ModuleExportBindings;
 
 #[derive(Default)]
 struct ModuleInputs {
@@ -32,6 +34,62 @@ struct ModuleInputs {
     stars: Vec<String>,
     facts: FxHashSet<FactVersionRef>,
     evidence: Option<FactReadSetFinalise>,
+}
+
+impl ModuleInputs {
+    fn dependencies(&self) -> FxHashSet<&String> {
+        self.stars
+            .iter()
+            .chain(self.named.iter().map(|(_, module, _)| module))
+            .collect()
+    }
+}
+
+/// Iterative Kosaraju decomposition. The result is dependency-first, so
+/// proofs can share already-complete children without cyclic Arc ownership.
+fn export_components(
+    inputs: &FxHashMap<String, ModuleInputs>,
+    parents: &FxHashMap<String, Vec<String>>,
+) -> Vec<Vec<String>> {
+    let mut visited = FxHashSet::default();
+    let mut finished = Vec::new();
+    for module in inputs.keys() {
+        let mut pending = vec![(module.clone(), false)];
+        while let Some((module, finish)) = pending.pop() {
+            if finish {
+                finished.push(module);
+                continue;
+            }
+            if !visited.insert(module.clone()) {
+                continue;
+            }
+            pending.push((module.clone(), true));
+            for dependency in inputs[&module].dependencies() {
+                if inputs.contains_key(dependency) {
+                    pending.push((dependency.clone(), false));
+                }
+            }
+        }
+    }
+    visited.clear();
+    let mut components = Vec::new();
+    for module in finished.into_iter().rev() {
+        if visited.contains(&module) {
+            continue;
+        }
+        let mut component = Vec::new();
+        let mut pending = vec![module];
+        while let Some(module) = pending.pop() {
+            if !visited.insert(module.clone()) {
+                continue;
+            }
+            pending.extend(parents.get(&module).into_iter().flatten().cloned());
+            component.push(module);
+        }
+        components.push(component);
+    }
+    components.reverse();
+    components
 }
 
 fn table_key(ctx: Context<'_>, canonical: &str) -> BarrelSurfaceKey {
@@ -71,15 +129,17 @@ impl VerterHost {
                     return Ok(ExportTableFlight {
                         table,
                         admitted: true,
+                        rootable: true,
                     });
                 }
-                let (table, cacheable) =
+                let (table, admitted, rootable) =
                     self.build_module_export_tables(ctx, view, &canonical, || {
                         !probe.non_cacheable()
                     })?;
                 Ok(ExportTableFlight {
                     table,
-                    admitted: cacheable && !probe.non_cacheable(),
+                    admitted: admitted && !probe.non_cacheable(),
+                    rootable: rootable && !probe.non_cacheable(),
                 })
             };
             let run = db
@@ -98,9 +158,11 @@ impl VerterHost {
             }
             // A follower cannot adopt an unrootable leader's answer: compute
             // it from its own snapshot and carry non-admission to its caller.
-            verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
-                verter_session_query::facts::reuse::NonCacheableReadReason::UnrootableRoute,
-            );
+            if !run.value.rootable {
+                verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
+                    verter_session_query::facts::reuse::NonCacheableReadReason::UnrootableRoute,
+                );
+            }
             if matches!(run.role, SingleflightRole::Leader) {
                 Some(Arc::clone(&run.value.table))
             } else {
@@ -177,6 +239,10 @@ impl VerterHost {
                                         name,
                                         Some(ModuleExportBinding::Namespace(Arc::from(dependency))),
                                     );
+                                } else {
+                                    inputs
+                                        .local
+                                        .insert(name, Some(ModuleExportBinding::Value(root)));
                                 }
                             }
                             Some(LexicalValueBinding::Import(import)) if !import.is_namespace => {
@@ -189,6 +255,12 @@ impl VerterHost {
                                         dependency,
                                         Arc::from(import.imported_name.as_str()),
                                     ));
+                                } else {
+                                    // Ambient imports resolve through TypeOf's
+                                    // ambient owner, not a file export route.
+                                    inputs
+                                        .local
+                                        .insert(name, Some(ModuleExportBinding::Value(root)));
                                 }
                             }
                             Some(_) => {
@@ -271,14 +343,12 @@ impl VerterHost {
         view: &dyn StoreView,
         canonical: &str,
         can_admit: impl Fn() -> bool,
-    ) -> Result<(Arc<ModuleExportTable>, bool), ()> {
+    ) -> Result<(Arc<ModuleExportTable>, bool, bool), ()> {
         let db = &self.resolver.runtime.routes;
         let mut inputs: FxHashMap<String, ModuleInputs> = FxHashMap::default();
         let mut tables: FxHashMap<String, Arc<ModuleExportTable>> = FxHashMap::default();
         let mut parents: FxHashMap<String, Vec<String>> = FxHashMap::default();
-        let mut order = Vec::new();
         let mut pending = vec![canonical.to_owned()];
-        // Iterative discovery reads each module once, sharing cached children.
         while let Some(module) = pending.pop() {
             if inputs.contains_key(&module) || tables.contains_key(&module) {
                 continue;
@@ -294,105 +364,212 @@ impl VerterHost {
             }
             let input = self.read_module_export_inputs(ctx, &module).ok_or(())?;
             self.count_module_export_work(1);
-            let dependencies: FxHashSet<_> = input
-                .stars
-                .iter()
-                .chain(input.named.iter().map(|(_, module, _)| module))
-                .collect();
-            for dependency in dependencies {
+            for dependency in input.dependencies() {
                 parents
                     .entry(dependency.clone())
                     .or_default()
                     .push(module.clone());
                 pending.push(dependency.clone());
             }
-            tables.insert(
-                module.clone(),
-                Arc::new(ModuleExportTable {
-                    bindings: input.local.clone(),
-                    facts: seal_canonical_signature(input.facts.iter().cloned().collect()),
-                }),
-            );
-            order.push(module.clone());
             inputs.insert(module, input);
         }
-        let mut queue: VecDeque<String> = order.iter().rev().cloned().collect();
-        let mut queued: FxHashSet<String> = queue.iter().cloned().collect();
-        // Acyclic barrels fold once in postorder. Cycles converge over the
-        // finite binding lattice: absent -> one identity -> ambiguous. No
-        // recursive descent or partially-built cyclic table is published.
-        while let Some(module) = queue.pop_front() {
-            queued.remove(&module);
-            let input = &inputs[&module];
-            let mut bindings = input.local.clone();
-            let mut facts = input.facts.clone();
-            let mut observed_dependencies = FxHashSet::default();
-            for (name, dependency, original) in &input.named {
-                self.count_module_export_work(1);
-                let table = &tables[dependency];
-                if observed_dependencies.insert(dependency) {
-                    facts.extend(signature_entries(&table.facts).cloned());
+        // Dependency-first SCCs permit one fold per acyclic module. Only
+        // cyclic components need the finite absent/binding/ambiguous worklist.
+        let components = export_components(&inputs, &parents);
+        let rootable = inputs
+            .values()
+            .all(|input| matches!(input.evidence, Some(FactReadSetFinalise::Ok(_))));
+        let cacheable = rootable && can_admit();
+        let mut admitted = false;
+        for component in components {
+            let component_set: FxHashSet<_> = component.iter().cloned().collect();
+            let mut bindings: FxHashMap<String, Bindings> = component
+                .iter()
+                .map(|module| (module.clone(), inputs[module].local.clone()))
+                .collect();
+            let mut writes: FxHashMap<String, usize> = FxHashMap::default();
+            let mut queue: VecDeque<_> = component.iter().cloned().collect();
+            let mut queued: FxHashSet<_> = component.iter().cloned().collect();
+            let mut folded = FxHashSet::default();
+            while let Some(module) = queue.pop_front() {
+                queued.remove(&module);
+                let input = &inputs[&module];
+                let child = |dependency: &String| {
+                    bindings
+                        .get(dependency)
+                        .unwrap_or_else(|| &tables[dependency].bindings)
+                };
+                // Start with the largest star's HAMT instead of copying its
+                // entire suffix. Only authored masks and additions change it.
+                let largest = input
+                    .stars
+                    .iter()
+                    .max_by_key(|dependency| child(dependency).len());
+                let mut next =
+                    largest.map_or_else(Bindings::default, |dependency| child(dependency).clone());
+                let mut owned = 0;
+                if next.remove("default").is_some() {
+                    owned += 1;
                 }
-                if let Some(binding) = table.bindings.get(original) {
-                    bindings.insert(Arc::clone(name), binding.clone());
-                }
-            }
-            for dependency in &input.stars {
-                let table = &tables[dependency];
-                if observed_dependencies.insert(dependency) {
-                    facts.extend(signature_entries(&table.facts).cloned());
-                }
-                for (name, binding) in &table.bindings {
+                for name in &input.masked {
                     self.count_module_export_work(1);
-                    if name.as_ref() == "default" || input.masked.contains(name) {
+                    if next.remove(name).is_some() {
+                        owned += 1;
+                    }
+                }
+                for dependency in &input.stars {
+                    self.count_module_export_work(1);
+                    if Some(dependency) == largest {
                         continue;
                     }
-                    bindings
-                        .entry(Arc::clone(name))
-                        .and_modify(|existing| {
-                            if existing != binding {
-                                *existing = None;
+                    for (name, binding) in child(dependency) {
+                        self.count_module_export_work(1);
+                        if name.as_ref() == "default" || input.masked.contains(name) {
+                            continue;
+                        }
+                        match next.get(name) {
+                            Some(existing) if existing != binding && existing.is_some() => {
+                                next.insert(Arc::clone(name), None);
+                                owned += 1;
                             }
-                        })
-                        .or_insert_with(|| binding.clone());
+                            None => {
+                                next.insert(Arc::clone(name), binding.clone());
+                                owned += 1;
+                            }
+                            _ => {}
+                        }
+                    }
                 }
-            }
-            let facts = seal_canonical_signature(facts.into_iter().collect());
-            let old = &tables[&module];
-            if bindings != old.bindings || facts != old.facts {
-                tables.insert(
-                    module.clone(),
-                    Arc::new(ModuleExportTable { bindings, facts }),
-                );
-                for parent in parents.get(&module).into_iter().flatten() {
-                    if queued.insert(parent.clone()) {
-                        queue.push_back(parent.clone());
+                for (name, binding) in &input.local {
+                    self.count_module_export_work(1);
+                    next.insert(Arc::clone(name), binding.clone());
+                    owned += 1;
+                }
+                for (name, dependency, original) in &input.named {
+                    self.count_module_export_work(1);
+                    if let Some(binding) = child(dependency).get(original) {
+                        next.insert(Arc::clone(name), binding.clone());
+                        owned += 1;
+                    }
+                }
+                // A first acyclic fold needs no whole-map equality scan.
+                let first = folded.insert(module.clone());
+                if first || next != bindings[&module] {
+                    bindings.insert(module.clone(), next);
+                    writes.insert(module.clone(), owned);
+                    if component.len() > 1 {
+                        for parent in parents.get(&module).into_iter().flatten() {
+                            if component_set.contains(parent) && queued.insert(parent.clone()) {
+                                queue.push_back(parent.clone());
+                            }
+                        }
                     }
                 }
             }
-        }
-        // A refused child makes every derived table return-only. Sampling the
-        // outer scope also closes fences raised during dependency resolution.
-        let cacheable = inputs
-            .values()
-            .all(|input| matches!(input.evidence, Some(FactReadSetFinalise::Ok(_))))
-            && can_admit();
-        let mut admitted = false;
-        if cacheable {
-            for module in &order {
-                let table = Arc::clone(&tables[module]);
-                let stored = db.module_exports.insert_arc_with_kind(
-                    table_key(ctx, module),
-                    Arc::clone(&table),
-                    table.facts.to_vec(),
-                    "route_db.module_exports",
+            // One shared proof for the component: own observations plus a
+            // reference to each consumed component, never expanded suffixes.
+            let mut receipts = Vec::new();
+            let mut dependencies = FxHashSet::default();
+            for module in &component {
+                let input = &inputs[module];
+                let receipt = match input.evidence.as_ref() {
+                    Some(
+                        FactReadSetFinalise::Ok(facts) | FactReadSetFinalise::NonCacheable(facts),
+                    ) => ResultReceipt::retained_signature(facts, db.module_export_account.get()),
+                    _ => ResultReceipt::new(input.facts.iter().cloned().collect()),
+                };
+                receipts.push(receipt);
+                dependencies.extend(
+                    inputs[module]
+                        .dependencies()
+                        .into_iter()
+                        .filter(|dependency| !component_set.contains(*dependency))
+                        .cloned(),
                 );
-                if module == canonical {
-                    admitted = stored.is_some();
+            }
+            let mut dependency_charges = Vec::new();
+            let mut dependencies_charged = true;
+            for dependency in dependencies {
+                let table = &tables[&dependency];
+                receipts.extend(table.facts.iter().filter_map(|fact| match fact {
+                    FactVersionRef::Receipt(receipt) => Some(receipt.clone()),
+                    _ => None,
+                }));
+                if let Some(charge) = &table.retention {
+                    dependency_charges.push(Arc::clone(charge));
+                } else {
+                    dependencies_charged = false;
                 }
             }
+            let receipt = ResultReceipt::retained_join(receipts, db.module_export_account.get());
+            let facts: Arc<[FactVersionRef]> = Arc::from([FactVersionRef::Receipt(receipt)]);
+            let mut own_bytes = std::mem::size_of::<ModuleExportRetention>()
+                + dependency_charges.len() * std::mem::size_of::<Arc<ModuleExportRetention>>();
+            for module in &component {
+                let input = &inputs[module];
+                let map = &bindings[module];
+                let owned = writes.get(module).copied().unwrap_or(0);
+                // A 64-bit HAMT has at most 13 levels of 32 slots. Bound
+                // copied paths by either those paths or the entire map.
+                let slots = (map.len() * 2 + 32).min(owned * 13 * 32);
+                own_bytes += std::mem::size_of::<ModuleExportTable>()
+                    + 8 * std::mem::size_of::<usize>()
+                    + 2 * std::mem::size_of::<FactVersionRef>()
+                    + 2 * module.len()
+                    + slots * std::mem::size_of::<(Arc<str>, Option<ModuleExportBinding>)>()
+                    + input
+                        .local
+                        .iter()
+                        .map(|(name, binding)| {
+                            name.len()
+                                + match binding {
+                                    Some(ModuleExportBinding::Value(root)) => {
+                                        root.canonical_id.len() + root.symbol_name.len()
+                                    }
+                                    Some(ModuleExportBinding::Namespace(module)) => module.len(),
+                                    None => 0,
+                                }
+                        })
+                        .sum::<usize>();
+            }
+            let retention = if cacheable && dependencies_charged {
+                verter_session_query::facts::receipt::reserve_retained_with_evidence(
+                    db.module_export_account.get(),
+                    own_bytes,
+                    &[&facts],
+                )
+                .admitted()
+                .map(|charge| {
+                    Arc::new(ModuleExportRetention {
+                        charge,
+                        dependencies: dependency_charges,
+                    })
+                })
+            } else {
+                None
+            };
+            for module in component {
+                let table = Arc::new(ModuleExportTable {
+                    bindings: bindings.remove(&module).expect("folded component member"),
+                    facts: Arc::clone(&facts),
+                    retention: retention.clone(),
+                    owned_binding_slots: writes.get(&module).copied().unwrap_or(0),
+                });
+                if table.retention.is_some() {
+                    let stored = db.module_exports.insert_arc_with_kind(
+                        table_key(ctx, &module),
+                        Arc::clone(&table),
+                        table.facts.to_vec(),
+                        "route_db.module_exports",
+                    );
+                    if module == canonical {
+                        admitted = stored.is_some();
+                    }
+                }
+                tables.insert(module, table);
+            }
         }
-        Ok((Arc::clone(&tables[canonical]), admitted))
+        Ok((Arc::clone(&tables[canonical]), admitted, rootable))
     }
 
     fn count_module_export_work(&self, units: u64) {

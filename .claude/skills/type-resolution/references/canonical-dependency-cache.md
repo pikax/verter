@@ -156,12 +156,22 @@ provider's content-free `BarrelSurfaceKey` (project, resolve env and lib env).
 complete fact signature. It is distinct from a symbol-directed route demand:
 only requesting the whole namespace enumerates all reachable export names.
 
+Tables use persistent hash tries: an acyclic barrel starts from its largest
+star child's bindings and writes only masks, additions and conflicts. A linear
+barrel chain therefore shares suffix storage instead of retaining a copied
+map per suffix. Dependency-first strongly connected components close binding
+cycles before publication and keep one shared hierarchical proof per component.
+
 Tables mask star bindings with explicit exports, omit type-only bindings and
 star-forwarded `default`, and retain an ambiguous binding so later barrels do
 not accidentally resurrect it. Two paths to the same defining declaration are
 one binding. Authored wildcard facts distinguish ordinary stars, type-only
 stars and namespace re-exports. Iterative discovery and a finite binding
 worklist close cycles before publication. Cached child tables are shared.
+Imported ambient values keep their lexical value root and resolve through the
+existing ambient `TypeOf` owner. Direct namespace member reads and indexed
+namespace projections both consume this export-table authority; neither may
+recover a binding the table excludes.
 Cold graph construction is serialized across overlapping namespace roots so
 shared modules are not built twice. Validated warm reads bypass that lock;
 singleflight followers revalidate the published candidate in their own view.
@@ -174,6 +184,16 @@ once and sends terminal roots through the shared `TypeOf` rail, without a
 second barrel search per property. Namespace re-exports remain scoped
 `ImportType` carriers until demanded, so a namespace can re-export itself
 without recursively constructing nested module objects.
+
+Namespace member order uses a byte radix walk, preserving lexical order
+without comparison sorting all exports. Work evidence counts those visits
+alongside proof ordering, summaries and evidence walks. Proof joins hold
+dependency receipts instead of expanding their facts. Table payloads, copied
+hash-trie paths, strings and signature storage reserve the process-local
+retention account. Their shared RAII owner keeps dependency reservations alive
+after child cache eviction; proof allocations carry their own charges.
+Retention refusal returns the complete table without caching it or retaining
+its singleflight rendezvous, and does not taint an enclosing derivation.
 
 Deferred evaluation of a declaration or operator observes export routes too.
 The shared deferred-evaluation memo retains a complete fact signature and

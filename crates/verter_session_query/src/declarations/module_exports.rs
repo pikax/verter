@@ -2,21 +2,150 @@
 
 use std::sync::Arc;
 
-use rustc_hash::FxHashMap;
-
 use crate::facts::fact_cache::FactVersionRef;
+use crate::retention::RetentionCharge;
 use crate::type_solver::ResolvedRootIdentity;
+
+pub type ModuleExportBindings = imbl::GenericHashMap<
+    Arc<str>,
+    Option<ModuleExportBinding>,
+    rustc_hash::FxBuildHasher,
+    imbl::shared_ptr::DefaultSharedPtr,
+>;
+
+pub type ModuleExportBindingRef<'a> = (&'a Arc<str>, &'a Option<ModuleExportBinding>);
 
 #[derive(Debug, Clone)]
 pub struct ModuleExportTable {
     /// `None` is an ambiguous star binding. Retaining it makes ambiguity
     /// propagate through later barrels; absence alone would lose that fact.
-    pub bindings: FxHashMap<Arc<str>, Option<ModuleExportBinding>>,
+    pub bindings: ModuleExportBindings,
     pub facts: Arc<[FactVersionRef]>,
+    /// The charge follows the shared HAMT nodes, including nodes inherited
+    /// from dependency tables after their cache entries have been evicted.
+    pub retention: Option<Arc<ModuleExportRetention>>,
+    /// Writes to this table's persistent binding structure, excluding the
+    /// child structure shared unchanged. Used for footprint/work evidence.
+    pub owned_binding_slots: usize,
+}
+
+#[derive(Debug)]
+pub struct ModuleExportRetention {
+    pub charge: RetentionCharge,
+    pub dependencies: Vec<Arc<ModuleExportRetention>>,
+}
+
+impl Drop for ModuleExportRetention {
+    fn drop(&mut self) {
+        let mut pending = std::mem::take(&mut self.dependencies);
+        while let Some(dependency) = pending.pop() {
+            if let Ok(mut owned) = Arc::try_unwrap(dependency) {
+                pending.append(&mut owned.dependencies);
+            }
+        }
+    }
+}
+
+impl ModuleExportTable {
+    /// Lexical export order in linear byte work, independent of hash-map
+    /// insertion order. The returned count includes every radix visit.
+    pub fn ordered_bindings(&self) -> (Vec<ModuleExportBindingRef<'_>>, usize) {
+        let mut bindings: Vec<_> = self.bindings.iter().collect();
+        let work = sort_bytes(&mut bindings, |(name, _)| name.as_bytes());
+        (bindings, work)
+    }
+}
+
+/// MSD radix order over UTF-8 bytes, with zero terminating a name. Small
+/// terminal buckets use bounded insertion work; no whole-input comparison
+/// sort runs. The explicit stack bounds native stack use for long names.
+pub(crate) fn sort_bytes<T>(items: &mut [T], key: impl Fn(&T) -> &[u8]) -> usize {
+    const SMALL_BUCKET: usize = 16;
+    let mut pending = vec![(0, items.len(), 0)];
+    let mut work = 0;
+    while let Some((start, end, byte)) = pending.pop() {
+        if end - start < 2 {
+            continue;
+        }
+        if end - start <= SMALL_BUCKET {
+            for at in start + 1..end {
+                let mut at = at;
+                while at > start {
+                    let left = &key(&items[at - 1])[byte..];
+                    let right = &key(&items[at])[byte..];
+                    let mut order = left.len().cmp(&right.len());
+                    for (a, b) in left.iter().zip(right) {
+                        work += 1;
+                        if a != b {
+                            order = a.cmp(b);
+                            break;
+                        }
+                    }
+                    work += 1;
+                    if order != std::cmp::Ordering::Greater {
+                        break;
+                    }
+                    items.swap(at - 1, at);
+                    at -= 1;
+                }
+            }
+            continue;
+        }
+        let symbol = |item: &T| key(item).get(byte).map_or(0, |b| usize::from(*b) + 1);
+        let mut counts = [0usize; 257];
+        for item in &items[start..end] {
+            counts[symbol(item)] += 1;
+            work += 1;
+        }
+        let mut starts = [0usize; 258];
+        starts[0] = start;
+        for bucket in 0..257 {
+            starts[bucket + 1] = starts[bucket] + counts[bucket];
+            work += 1;
+        }
+        let mut next = starts;
+        for bucket in 0..257 {
+            work += 1;
+            while next[bucket] < starts[bucket + 1] {
+                let destination = symbol(&items[next[bucket]]);
+                work += 1;
+                if destination == bucket {
+                    next[bucket] += 1;
+                } else {
+                    items.swap(next[bucket], next[destination]);
+                    next[destination] += 1;
+                }
+            }
+            if bucket > 0 && counts[bucket] > 1 {
+                pending.push((starts[bucket], starts[bucket + 1], byte + 1));
+            }
+        }
+    }
+    work
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModuleExportBinding {
     Value(ResolvedRootIdentity),
     Namespace(Arc<str>),
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn byte_order_keeps_prefixes_terminators_and_unicode() {
+        let mut names = [
+            "中", "a\0b", "aa", "é", "b", "a", "", "a\0", "a", "e", "zz", "000", "00", "0", "AAA",
+            "Aa", "z", "😀", "😀a", "中a", "aé",
+        ];
+        let visits = super::sort_bytes(&mut names, |name| name.as_bytes());
+        assert_eq!(
+            names,
+            [
+                "", "0", "00", "000", "AAA", "Aa", "a", "a", "a\0", "a\0b", "aa", "aé", "b", "e",
+                "z", "zz", "é", "中", "中a", "😀", "😀a"
+            ]
+        );
+        assert!(visits > 0);
+    }
 }

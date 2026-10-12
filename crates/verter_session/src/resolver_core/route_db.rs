@@ -201,11 +201,13 @@ pub(crate) struct RouteFlightOutcome {
 pub(crate) struct ExportTableFlight {
     pub(crate) table: Arc<verter_session_query::declarations::module_exports::ModuleExportTable>,
     pub(crate) admitted: bool,
+    pub(crate) rootable: bool,
 }
 
 /// Shared DB for canonical export routing facts.
 #[derive(Debug)]
 pub struct RouteDb {
+    pub(crate) module_export_account: verter_session_query::retention::StoreAccount,
     /// Full value export tables, validated by their transitive route facts.
     /// Storage shares child bindings; namespace consumers never populate one
     /// named-route cache entry per property.
@@ -256,6 +258,7 @@ pub struct RouteDb {
 impl RouteDb {
     pub fn new() -> Self {
         Self {
+            module_export_account: verter_session_query::retention::StoreAccount::default(),
             module_exports: ValidatedFactCache::default(),
             module_export_singleflight: SingleflightGroup::default(),
             module_export_build_lock: parking_lot::Mutex::new(()),

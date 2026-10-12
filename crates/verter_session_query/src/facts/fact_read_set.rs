@@ -900,7 +900,28 @@ pub fn seal_canonical_signature(mut facts: Vec<FactVersionRef>) -> Arc<[FactVers
 ///   same fact set emit byte-identical signatures.
 #[inline]
 fn compare_fact_refs(a: &FactVersionRef, b: &FactVersionRef) -> std::cmp::Ordering {
+    record_signature_work(1);
     a.cmp(b)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static SIGNATURE_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Actual proof ordering, summary and visitation work, independent of the
+/// solver's query-step counter. No observability state exists in production.
+#[inline]
+pub(crate) fn record_signature_work(units: usize) {
+    #[cfg(any(test, feature = "test-support"))]
+    SIGNATURE_WORK.with(|work| work.set(work.get().saturating_add(units)));
+    #[cfg(not(any(test, feature = "test-support")))]
+    let _ = units;
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn signature_work_for_tests() -> usize {
+    SIGNATURE_WORK.with(std::cell::Cell::get)
 }
 
 /// TRUE when `run` is strictly increasing under [`compare_fact_refs`] —

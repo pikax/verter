@@ -147,17 +147,33 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let indexed = self.ctx.ensure_indexed_ready_serve(module)?.indexed;
         let table = self.ctx.module_export_table(module)?;
         self.ctx.observe_borrowed_signature(&table.facts);
-        let roots = verter_session_query::facts::fact_cache::signature_entries(&table.facts)
-            .filter_map(|fact| match fact {
+        let mut roots = Vec::new();
+        let mut seen = FxHashSet::default();
+        let mut walk = verter_session_query::facts::fact_cache::ReceiptWalk::default();
+        let mut observe = |fact: &verter_session_query::facts::fact_cache::FactVersionRef| {
+            match fact {
                 verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
                     canonical_id,
                     hash,
-                } => Some((Arc::from(canonical_id.as_str()), *hash)),
-                _ => None,
-            })
-            .collect();
-        let mut bindings: Vec<_> = table.bindings.iter().collect();
-        bindings.sort_unstable_by_key(|(name, _)| *name);
+                } if seen.insert((canonical_id.clone(), *hash)) => {
+                    roots.push((Arc::from(canonical_id.as_str()), *hash));
+                }
+                _ => {}
+            }
+            true
+        };
+        for fact in table.facts.iter() {
+            match fact {
+                verter_session_query::facts::fact_cache::FactVersionRef::Receipt(receipt) => {
+                    walk.leaves(receipt, &mut observe);
+                }
+                fact => {
+                    observe(fact);
+                }
+            }
+        }
+        let (bindings, ordering_work) = table.ordered_bindings();
+        self.connected_demand().charge_units(ordering_work).ok()?;
         let mut members = Vec::with_capacity(bindings.len());
         for (name, binding) in bindings {
             let node = match binding {
