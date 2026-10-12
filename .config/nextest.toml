@@ -41,7 +41,6 @@ slow-timeout = { period = "60s", terminate-after = 15 }
 # Each has a fix task; a test leaves this list when its fix lands. Never add to it.
 [[profile.default.overrides]]
 filter = '''
-  (package(verter_semantic) & test(=cases::type_info_privacy::type_info_privacy_rails)) |
   (package(verter_session) & test(=cases::corpus_audit_tests::chunk_003::corpus_audit_chunk_003_produces_audit_records_or_documents_skips)) |
   (package(verter_compiler) & test(=ide::template::flow_tests::the_growth_check_rejects_predecessor_replay)) |
   (package(verter_session) & test(=cases::corpus_audit_tests::chunk_002::corpus_audit_chunk_002_produces_audit_records_or_documents_skips)) |
@@ -84,7 +83,6 @@ slow-timeout = { period = "60s", terminate-after = 15 }
 # Each has a fix task; a test leaves this list when its fix lands. Never add to it.
 [[profile.ci.overrides]]
 filter = '''
-  (package(verter_semantic) & test(=cases::type_info_privacy::type_info_privacy_rails)) |
   (package(verter_session) & test(=cases::corpus_audit_tests::chunk_003::corpus_audit_chunk_003_produces_audit_records_or_documents_skips)) |
   (package(verter_compiler) & test(=ide::template::flow_tests::the_growth_check_rejects_predecessor_replay)) |
   (package(verter_session) & test(=cases::corpus_audit_tests::chunk_002::corpus_audit_chunk_002_produces_audit_records_or_documents_skips)) |
@@ -142,6 +140,7 @@ path = "junit.xml"
 # on an addon that is not beside it rather than rebuilding one.
 [profile.default.archive]
 include = [
+  { path = "compile-fixtures", relative-to = "target", on-missing = "ignore" },
   { path = "debug/deps/libverter_napi_request_fixture.dylib", relative-to = "target", on-missing = "ignore" },
   { path = "debug/deps/libverter_napi_request_fixture.so", relative-to = "target", on-missing = "ignore" },
   { path = "debug/deps/verter_napi_request_fixture.dll", relative-to = "target", on-missing = "ignore" },

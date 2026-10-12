@@ -55,6 +55,25 @@ Real tsserver/tsgo provider suites and Svelte conformance run in dedicated CI
 jobs, outside the canonical nextest surface. Provider jobs use serial libtest
 execution so each third-party engine has one managed lifecycle.
 
+The semantic gateway privacy test uses compiler metadata packaged with the
+shared archive, avoiding a dependency build during test execution. For a
+focused local run, prepare that metadata with the same build options:
+
+```bash
+node scripts/compile-fixture-artifacts.mjs prepare -p verter_semantic --test main
+cargo nextest run -p verter_semantic --test main type_info_privacy_rails
+```
+
+Build archives through `node scripts/compile-fixture-artifacts.mjs archive`
+with the usual nextest archive options. This captures the current build's
+metadata and preserves it when nextest extracts the test binaries elsewhere.
+The bundle records SHA-256 content identities for its test executable and
+external metadata. Rebuilding at the same filenames invalidates the bundle;
+rerun `prepare` before testing. Local runs also compare available build metadata
+to detect metadata-only changes. Each test process validates the bundle once.
+The privacy rail discovers every `.rs` fixture in `tests/ui/fixtures` and
+requires its complete `.stderr` snapshot, including newly added fixtures.
+
 ### Test File Organization
 
 When a Rust source file's inline `#[cfg(test)] mod tests` block exceeds ~400 lines, extract tests to a separate sibling file to keep source files focused on production code.
