@@ -231,6 +231,36 @@ core tests and the BF2 inventory keep their normal nextest concurrency.
 Real-provider tests run through dedicated serial libtest jobs, while compile-fail
 fixtures run through standalone Cargo binaries rather than nextest test targets.
 
+The semantic gateway privacy rails remain in the core nextest inventory. They
+type-check their foreign-crate fixtures directly with rustc, preserving the
+diagnostic snapshots and checking a sanctioned gateway positive control first.
+`scripts/compile-fixture-artifacts.mjs archive` builds/lists the test binaries,
+stages compiler metadata and proc-macro libraries reported by that Cargo
+build plus the sources backing imported diagnostic excerpts, then archives the
+warm binaries and metadata. Both CI and the canonical
+gate use this builder. Metadata comes from Cargo artifact messages, never a
+glob over a potentially stale target directory. The manifest binds the bundle
+to the test binary and uses relative paths so extraction relocates it.
+
+For a focused local run, prepare metadata with the same package/target/feature
+options before running nextest:
+
+```bash
+node scripts/compile-fixture-artifacts.mjs prepare -p verter_semantic --test main
+cargo nextest run -p verter_semantic --test main type_info_privacy_rails
+```
+
+To build a reusable archive directly:
+
+```bash
+node scripts/compile-fixture-artifacts.mjs archive --workspace --archive-file artifacts/rust-nextest-archive.tar.zst
+```
+
+The archive includes `compile-fixtures` under the target directory, independently
+of the Cargo profile and target triple. Missing or
+mismatched metadata fails the privacy test instead of rebuilding dependencies
+inside it. Other compile contracts continue to use their standalone lane.
+
 On Windows, `--prepare` still warm-lists every archived suite and accepts only
 an exact status 0. Proc-macro suites are real test suites, not filterable
 compiler artifacts; their direct first launch prepends the suite's listed

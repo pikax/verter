@@ -170,7 +170,7 @@ test("CI builds one provider-free archive and runs providers serially in their o
   const providers = yamlJob(workflow, "rust-providers-live");
   const success = yamlJob(workflow, "ci-success");
 
-  assert.match(build, /cargo nextest archive --workspace/);
+  assert.match(build, /node scripts\/compile-fixture-artifacts\.mjs archive --workspace/);
   assert.match(build, /node scripts\/provider-ci\.mjs verify --archive-file/);
   // Each step that lists the archive carries its own bound below the job's.
   assert.match(

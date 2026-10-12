@@ -17,5 +17,6 @@ publish = false
 # closure, so this crate being widely dev-depended-on does not violate the
 # "nothing may depend on a harness" firewall.
 [dependencies]
+serde_json = { workspace = true }
 
 [dev-dependencies]
