@@ -19,24 +19,44 @@ use crate::semantic_query::{RelateMemoKey, ResolveCallKey};
 
 /// Interned `RelateMemoKey` handle.
 #[derive(Clone, PartialEq, Eq, Hash)]
-pub struct InternedRelateKey(Interned<RelateMemoKey>);
+pub struct InternedRelateKey(
+    Interned<RelateMemoKey>,
+    super::node_roots::IdentityNodeRoots,
+);
 
 /// Interned `ResolveCallKey` handle.
 #[derive(Clone, PartialEq, Eq, Hash)]
-pub struct InternedResolveCallKey(Interned<ResolveCallKey>);
+pub struct InternedResolveCallKey(
+    Interned<ResolveCallKey>,
+    super::node_roots::IdentityNodeRoots,
+);
 
 intern_domain!(RelateMemoKey);
 intern_domain!(ResolveCallKey);
 
 impl InternedRelateKey {
     pub(super) fn intern(key: RelateMemoKey) -> Self {
-        Self(Interned::new(key))
+        let mut handle = Self(Interned::new_scoped(key), Default::default());
+        let mut nodes = Vec::new();
+        super::family::FamilyKey::Relate {
+            key: handle.clone(),
+        }
+        .for_each_node_id(|node| nodes.push(node));
+        handle.1 = super::node_roots::IdentityNodeRoots::scoped(nodes);
+        handle
     }
 }
 
 impl InternedResolveCallKey {
     pub(super) fn intern(key: ResolveCallKey) -> Self {
-        Self(Interned::new(key))
+        let mut handle = Self(Interned::new_scoped(key), Default::default());
+        let mut nodes = Vec::new();
+        super::family::FamilyKey::ResolveCall {
+            key: handle.clone(),
+        }
+        .for_each_node_id(|node| nodes.push(node));
+        handle.1 = super::node_roots::IdentityNodeRoots::scoped(nodes);
+        handle
     }
 }
 

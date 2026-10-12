@@ -427,8 +427,11 @@ impl SemanticGraphStore {
             return false;
         }
 
-        let mut to_complete: Vec<(InlineMemberFlight, QueryResult<SemanticQueryValue>)> =
-            Vec::with_capacity(staged.len());
+        let mut to_complete: Vec<(
+            InlineMemberFlight,
+            QueryResult<SemanticQueryValue>,
+            super::delivery_lease::SemanticDeliveryLease,
+        )> = Vec::with_capacity(staged.len());
         // Every member family the batch touches, whether or not its write
         // newly keyed it — an ALREADY-resident member family still carries
         // an older ledger record the batch's own admissions must not
@@ -447,6 +450,7 @@ impl SemanticGraphStore {
         component.insert(required_root.family.clone());
         let mut newly_keyed: Vec<FamilyKey> = Vec::with_capacity(staged.len());
         for member in staged {
+            let lease = member.entry.lease.clone();
             let NewlyKeyedFamily(is_new) = self.publish_staged_locked(
                 &mut entries,
                 &member.family,
@@ -460,7 +464,7 @@ impl SemanticGraphStore {
                 newly_keyed.push(member.family.clone());
             }
             component.insert(member.family);
-            to_complete.push((member.flight, member.completed));
+            to_complete.push((member.flight, member.completed, lease));
         }
         // ONE budget step for the whole component, with the root and every
         // member family exempt from victim selection. The footprint gate
@@ -471,7 +475,7 @@ impl SemanticGraphStore {
         });
         drop(entries);
 
-        for (flight, completed) in to_complete {
+        for (flight, completed, lease) in to_complete {
             {
                 let state_lock = flight.state();
                 let mut state = state_lock.lock();
@@ -480,6 +484,7 @@ impl SemanticGraphStore {
                     self.abort_inline_member_flight(&flight);
                     continue;
                 }
+                state.lease = lease;
                 state.completed = Some(completed);
                 state.dep_signature = Some(empty_signature());
                 state.graph_carrier = Some(Box::new(carrier.clone()));
@@ -507,8 +512,12 @@ impl SemanticGraphStore {
         validated_at_generation: u64,
         cost_receipt: &Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
     ) -> MemoEntry {
+        let result = QueryResult::Value(value);
         MemoEntry {
-            result: QueryResult::Value(value),
+            lease: self
+                .lease_delivery(&result, &[])
+                .expect("staged component operands are live"),
+            result,
             read_set_signature: carrier.clone(),
             dispatch_dep_signature: Arc::clone(dispatch_dep_signature),
             self_root_canonicals: Arc::clone(self_root_canonicals),
@@ -585,6 +594,9 @@ impl SemanticGraphStore {
         flight: InlineMemberFlight,
         ctx: Option<&dyn crate::resolver_core::ResolverContext<C>>,
     ) -> StagedMember {
+        entry.lease = self
+            .lease_candidate(&family, &entry.result, &entry.walker_diagnostics)
+            .expect("component candidate operands are live");
         let admission_seq = self.alloc_candidate_admission_seq();
         entry.admission_seq = admission_seq;
         let QueryResult::Value(value) = &entry.result else {

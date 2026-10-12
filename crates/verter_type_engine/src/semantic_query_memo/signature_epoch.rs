@@ -26,7 +26,7 @@ use crate::signature_kernel::GraphEpoch;
 
 /// The kernel epoch whose handles a memo value carries; `None` for a value
 /// with no kernel handle (every other value tag, and the empty set).
-fn value_kernel_epoch(result: &QueryResult<SemanticQueryValue>) -> Option<GraphEpoch> {
+pub(super) fn value_kernel_epoch(result: &QueryResult<SemanticQueryValue>) -> Option<GraphEpoch> {
     match result {
         QueryResult::Value(SemanticQueryValue::SignatureSet(value)) => value.set.epoch(),
         QueryResult::Value(SemanticQueryValue::SignatureResult(value)) => {

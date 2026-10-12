@@ -5,7 +5,24 @@
 
 use super::*;
 
+/// Current graph ownership, independent of optional observation histories.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NodeOwnershipCounts {
+    /// Slots currently holding payloads.
+    pub live_nodes: usize,
+    /// Retained child occurrences, including repeated operands.
+    pub internal_edges: usize,
+    /// Independently acquired roots (shared clones count once).
+    pub roots: usize,
+    /// Global primitive vocabulary slots.
+    pub permanent_nodes: usize,
+}
+
 impl SemanticGraphStore {
+    /// Snapshot required current counts under the arena lock.
+    pub fn node_ownership_counts(&self) -> NodeOwnershipCounts {
+        self.arena.ownership_counts()
+    }
     /// Number of LIVE interned semantic nodes — the slots that still hold
     /// a payload. A slot [`Self::release_canonical`] tombstoned is not
     /// counted; [`Self::node_slot_count`] is the append-only id space.

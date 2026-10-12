@@ -102,6 +102,7 @@ pub(crate) fn lower_and_project_to_expanded_node(
     scope_owner: verter_type_expr::TopLevelOwnerId,
     expr: &TypeExpr,
 ) -> Option<AdmittedRouteProjectionNode> {
+    let _scope = dispatch.graph().enter_node_root_scope();
     use verter_type_engine::project_semantic_dispatch::raise::node_raised_shape_for_eq_with_dispatch;
 
     use verter_type_engine::semantic_query::{
@@ -130,7 +131,7 @@ pub(crate) fn lower_and_project_to_expanded_node(
     // where `changed = !shape.eq_to_expr` is the node-domain shape inequality
     // against `expr`) is encoded in `admit_expanded_surface_changed`.
     let shape = node_raised_shape_for_eq_with_dispatch(dispatch, result_node, expr)?;
-    admit_expanded_surface_changed(&shape)
+    admit_expanded_surface_changed(dispatch.graph(), &shape)
 }
 
 /// Demand-bound NODE adapter for the Class-A path-precise projection (the
@@ -151,6 +152,7 @@ pub(crate) fn project_class_a_terminal_node(
     scope_owner: verter_type_expr::TopLevelOwnerId,
     expr: &TypeExpr,
 ) -> Option<AdmittedRouteProjectionNode> {
+    let _scope = dispatch.graph().enter_node_root_scope();
     use verter_type_engine::project_semantic_dispatch::raise::node_raised_shape_facts_with_dispatch;
 
     use verter_type_engine::semantic_query::{
@@ -204,7 +206,7 @@ pub(crate) fn project_class_a_terminal_node(
     }
     // Facts-only gate — reuses the dispatch above; no structural key interned.
     let witness = node_raised_shape_facts_with_dispatch(dispatch, result_node)?;
-    admit_expanded_surface(&witness)
+    admit_expanded_surface(dispatch.graph(), &witness)
 }
 
 /// Publication wrapper over the FULL node-domain Class-A projection

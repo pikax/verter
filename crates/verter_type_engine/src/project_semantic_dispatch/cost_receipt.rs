@@ -48,6 +48,7 @@ pub const COST_MODEL_REVISION: u32 = 2;
 /// and the common inequality.
 #[derive(Clone)]
 pub struct CostIdentity {
+    roots: crate::semantic_query_memo::node_roots::NodeRootSet,
     hash: u64,
     key: Arc<dyn ProducerIdentity>,
 }
@@ -77,9 +78,18 @@ impl CostIdentity {
     /// prepared query identity, shared rather than copied.
     pub(crate) fn of_producer(key: Arc<dyn ProducerIdentity>) -> Self {
         Self {
+            roots: Default::default(),
             hash: key.producer_hash(),
             key,
         }
+    }
+
+    pub(crate) fn with_roots(
+        mut self,
+        roots: crate::semantic_query_memo::node_roots::NodeRootSet,
+    ) -> Self {
+        self.roots = roots;
+        self
     }
 }
 

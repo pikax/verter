@@ -752,6 +752,18 @@ impl<'g> Drop for RelationEnvironmentScope<'g> {
 }
 
 impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
+    /// Bind the controlled counted fixture to real dispatch without an
+    /// enclosing construction scope. Unavailable in production builds.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_ownership_harness(
+        ctx: &'a dyn ResolverContext<C>,
+        harness: crate::semantic_query_memo::ownership_harness::CountedOwnershipHarness,
+    ) -> Self {
+        let mut dispatch = Self::new(ctx);
+        dispatch.binding.graph = Arc::new(harness.into_graph());
+        dispatch
+    }
+
     /// Create a dispatcher bound to a sealed request context.
     ///
     /// Production construction paths supply `HostResolverContext` or
@@ -1036,22 +1048,34 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         key: &SemanticQueryKey,
         reasons: crate::semantic_query::PartialReasonSet,
     ) -> CacheRead<QueryResult<SemanticNodeId>> {
+        let _scope = self.graph().enter_node_root_scope();
         let cancelled = reasons.contains(crate::semantic_query::PartialReasonSet::CANCELLED);
         let projection = (!cancelled).then(|| self.connected_limit_projection(key, reasons));
         let carrier = projection.map(|(carrier, _)| carrier);
         self.fold_local_partial_completeness(reasons);
+        let value = match projection {
+            Some((carrier, Some(_))) => QueryResult::Value(carrier),
+            Some((_, None)) => {
+                QueryResult::Error(QueryError::IncompleteSemanticOperand { reasons })
+            }
+            None => QueryResult::Error(QueryError::Cancelled),
+        };
+        let walker_diagnostics = carrier
+            .map(|carrier| self.connected_limit_diagnostics(carrier, reasons))
+            .unwrap_or_else(|| Arc::from([]));
+        let owned_value = match &value {
+            QueryResult::Value(node) => QueryResult::Value(SemanticQueryValue::TypeNode(*node)),
+            QueryResult::Error(error) => QueryResult::Error(error.clone()),
+            QueryResult::Recursive(node) => QueryResult::Recursive(*node),
+        };
         CacheRead {
-            value: match projection {
-                Some((carrier, Some(_))) => QueryResult::Value(carrier),
-                Some((_, None)) => {
-                    QueryResult::Error(QueryError::IncompleteSemanticOperand { reasons })
-                }
-                None => QueryResult::Error(QueryError::Cancelled),
-            },
+            lease: self
+                .graph()
+                .lease_delivery(&owned_value, &walker_diagnostics)
+                .expect("connected refusal operands are live"),
+            value,
             dep_signature: empty_signature(),
-            walker_diagnostics: carrier
-                .map(|carrier| self.connected_limit_diagnostics(carrier, reasons))
-                .unwrap_or_else(|| Arc::from([])),
+            walker_diagnostics,
             cache_suppress: true,
             fact_status: if projection.is_some_and(|(_, interpretation)| interpretation.is_some()) {
                 crate::semantic_query::FactStatus::approximate(reasons)
@@ -2790,6 +2814,7 @@ fn widen_node_cache_read(
         QueryResult::Error(error) => QueryResult::Error(error),
     };
     CacheRead {
+        lease: read.lease,
         value,
         dep_signature: read.dep_signature,
         walker_diagnostics: read.walker_diagnostics,
@@ -2797,6 +2822,30 @@ fn widen_node_cache_read(
         fact_status: read.fact_status,
         receipt: read.receipt,
     }
+}
+
+#[cfg(test)]
+#[test]
+fn counted_value_domain_conversion_preserves_delivery_ownership() {
+    use crate::semantic_query::LiteralValue;
+    use crate::semantic_query_memo::ownership_harness::CountedOwnershipHarness;
+    let harness = CountedOwnershipHarness::new();
+    let read = harness.run(|graph| {
+        let node = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+            "converted result".into(),
+        )));
+        let mut read = CacheRead::from_value_and_signature(
+            QueryResult::Value(node),
+            crate::semantic_query_memo::empty_signature(),
+        );
+        read.lease = graph
+            .lease_delivery(&QueryResult::Value(SemanticQueryValue::TypeNode(node)), &[])
+            .unwrap();
+        narrow_value_cache_read(widen_node_cache_read(read))
+    });
+    assert_eq!(harness.live_nodes(), 1);
+    drop(read);
+    assert_eq!(harness.live_nodes(), 0);
 }
 
 fn narrow_value_cache_read(
@@ -2812,6 +2861,7 @@ fn narrow_value_cache_read(
         QueryResult::Error(error) => QueryResult::Error(error),
     };
     CacheRead {
+        lease: read.lease,
         value,
         dep_signature: read.dep_signature,
         walker_diagnostics: read.walker_diagnostics,
@@ -3540,10 +3590,28 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             &mut Option<crate::semantic_query::operand::SemanticOperandEvidence>,
         >,
     ) -> CacheRead<QueryResult<SemanticQueryValue>> {
+        let _scope = self.graph().enter_node_root_scope();
+        let mut read = self.execute_via_cold_build_helper_owned(key, publication, operand_evidence);
+        read.lease = self
+            .graph()
+            .lease_delivery(&read.value, &read.walker_diagnostics)
+            .expect("dispatch delivery operands are live");
+        read
+    }
+
+    fn execute_via_cold_build_helper_owned(
+        &self,
+        key: SemanticQueryKey,
+        publication: Option<&mut Option<crate::semantic_query_memo::PublishedMemoCandidate>>,
+        operand_evidence: Option<
+            &mut Option<crate::semantic_query::operand::SemanticOperandEvidence>,
+        >,
+    ) -> CacheRead<QueryResult<SemanticQueryValue>> {
         // THE shared dispatch choke point: both `execute` and `execute_read`
         // funnel here, so this scope's inclusive time and heap traffic cover
         // every query-time type resolution in the request.
         verter_audit::attribute_scope!(SemanticDispatch);
+        let _node_scope = self.graph().enter_node_root_scope();
         let _validity = crate::request_context::ExecutionValidityScope::enter();
         #[cfg(feature = "test-support")]
         let _family = crate::cancel_trace::enter_family(key.tag());
@@ -3551,6 +3619,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let relate = crate::semantic_query::RelateMemoKey::from_query_key(&key);
             if !self.relation_raw_key_has_exact_inference_context(&relate) {
                 return CacheRead {
+                    lease: Default::default(),
                     value: QueryResult::Error(QueryError::Miss),
                     dep_signature: empty_signature(),
                     walker_diagnostics: Arc::from([]),
@@ -4131,7 +4200,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     } else {
                         self.connected_demand.note_divergence_certificate();
                     }
-                    SemanticGraphStore::recursion_read(
+                    self.graph().recursion_read(
                         recursion,
                         (sentinel.take().expect("the claim ends once"))(),
                     )
@@ -4872,6 +4941,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             QueryResult::Value(id) => id,
             QueryResult::Recursive(id) => {
                 return CacheRead {
+                    lease: slot_read.lease,
                     value: QueryResult::Recursive(id),
                     dep_signature: slot_read.dep_signature,
                     walker_diagnostics: slot_read.walker_diagnostics,
@@ -4882,6 +4952,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             QueryResult::Error(e) => {
                 return CacheRead {
+                    lease: slot_read.lease,
                     value: QueryResult::Error(e),
                     dep_signature: slot_read.dep_signature,
                     walker_diagnostics: slot_read.walker_diagnostics,
@@ -4903,6 +4974,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 Some(param) => param.ty,
                 None => {
                     return CacheRead {
+                        lease: slot_read.lease,
                         value: QueryResult::Error(QueryError::Miss),
                         dep_signature: slot_read.dep_signature,
                         walker_diagnostics: slot_read.walker_diagnostics,
@@ -4914,6 +4986,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             },
             _ => {
                 return CacheRead {
+                    lease: slot_read.lease,
                     value: QueryResult::Error(QueryError::Miss),
                     dep_signature: slot_read.dep_signature,
                     walker_diagnostics: slot_read.walker_diagnostics,
@@ -4959,6 +5032,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             QueryResult::Error(e) => QueryResult::Error(e),
         };
         CacheRead {
+            lease: binding_read.lease,
             value,
             dep_signature: Arc::from(merged.into_boxed_slice()),
             walker_diagnostics: binding_read.walker_diagnostics,

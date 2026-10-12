@@ -351,13 +351,7 @@ impl SemanticNodeData {
             }
         }
         match self {
-            Self::Opaque(super::QueryError::RecursiveRef { args, .. }) => {
-                args.iter().copied().for_each(visit);
-            }
-            Self::Opaque(super::QueryError::CheckerRecovery {
-                origin: Some(origin),
-                ..
-            }) => visit(*origin),
+            Self::Opaque(error) => error.for_each_retained_node(visit),
             Self::ClassExpressionInstance { identity, .. } => {
                 identity.prototype.into_iter().for_each(visit);
             }
@@ -372,6 +366,7 @@ impl SemanticNodeData {
                         .map(|&(parameter, _)| parameter)
                         .for_each(&mut visit);
                 }
+                pending.distribution.into_iter().for_each(visit);
             }
             _ => {}
         }

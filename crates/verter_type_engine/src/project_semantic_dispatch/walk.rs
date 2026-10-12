@@ -1577,7 +1577,9 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             ),
         };
         let identity = crate::project_semantic_dispatch::cost_receipt::CostIdentity::of_producer(
-            crate::semantic_query_memo::prepared::PreparedKeyHandle::prepare(key)
+            self.dispatch
+                .graph()
+                .prepare_rooted_key(key)
                 .as_task_producer(),
         );
         let request = crate::request_context::current_request_budget();

@@ -8056,7 +8056,7 @@ defineEmits<ConditionalEmits>()
     );
     let members =
         verter_type_engine::project_semantic_dispatch::one_level_surface::read_positive_surface_members(
-            host, &dispatch, surface,
+            host, &dispatch, surface.id(),
         )
         .resolved_for_tests()
         .expect("a resolvable branch-merge surface reads its members");
@@ -8209,7 +8209,7 @@ fn emit_branch_merge_with_one_unresolvable_branch_records_partiality() {
         // side effect.
         let names = surface.recorded().map(|surface| {
             verter_type_engine::project_semantic_dispatch::one_level_surface::read_positive_surface_members(
-                host, &dispatch, surface,
+                host, &dispatch, surface.id(),
             )
             .resolved_for_tests()
             .unwrap_or_default()
@@ -8370,11 +8370,11 @@ fn emit_branch_merge_with_open_program_branch_keeps_the_conditional_carrier() {
     .resolved_for_tests()
     .expect("the open-branch merge still returns a surface");
     assert_eq!(
-        surface,
+        surface.id(),
         conditional,
         "an open branch keeps the conditional carrier — no closed Object is interned from \
          presence-only evidence; observed {:?}",
-        graph.node_data(surface)
+        graph.node_data(surface.id())
     );
 
     // The emit READ is presence-complete over the carrier: both branches'
@@ -8383,7 +8383,7 @@ fn emit_branch_merge_with_open_program_branch_keeps_the_conditional_carrier() {
     // the diagnostic envelope.
     let members =
         verter_type_engine::project_semantic_dispatch::one_level_surface::read_positive_surface_members(
-            &host, &dispatch, surface,
+            &host, &dispatch, surface.id(),
         )
         .resolved_for_tests()
         .expect("a resolvable branch-merge surface reads its members");
@@ -8534,7 +8534,7 @@ defineEmits<EmitChain0>()
     );
     let members =
         verter_type_engine::project_semantic_dispatch::one_level_surface::read_positive_surface_members(
-            host, &dispatch, surface,
+            host, &dispatch, surface.id(),
         )
         .resolved_for_tests()
         .expect("a resolvable branch-merge surface reads its members");

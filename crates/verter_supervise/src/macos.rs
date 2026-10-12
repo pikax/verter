@@ -344,11 +344,11 @@ pub(crate) fn supervise(launch: Launch<'_>, report: &mut Report) {
         }
     }
     report.killed_by = cause;
-    if exited
-        .as_ref()
-        .is_some_and(|exited| exited.cpu.iter().any(|r| r.pid == pid))
-    {
-        let (user, kernel) = cpu.totals();
+    if let Some((user, kernel)) = cpu.totals().filter(|_| {
+        exited
+            .as_ref()
+            .is_some_and(|exited| exited.cpu.iter().any(|r| r.pid == pid))
+    }) {
         report.cpu_user_ms = Some(ns_to_ms(user));
         report.cpu_kernel_ms = Some(ns_to_ms(kernel));
     }

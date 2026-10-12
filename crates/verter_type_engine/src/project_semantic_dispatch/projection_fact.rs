@@ -121,6 +121,12 @@ pub(crate) fn adopt_projection_result(
 }
 
 impl<T> QueryBuildOutput<T> {
+    /// Construct a completed positional source in controlled producer fixtures.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_positional_guarantee_for_tests(self) -> Self {
+        self.with_positional_guarantee()
+    }
+
     pub(crate) fn with_positional_guarantee(mut self) -> Self {
         self.approximation = Some(ProjectionInterpretation::Positional);
         self

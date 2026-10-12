@@ -1677,13 +1677,16 @@ impl FlowFunctionSlotIdentity {
 /// definitions NEVER enter this map — only type parameters bound by the
 /// demanding instantiation.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
-pub struct CanonicalTypeSubstitution(Arc<[(SemanticNodeId, SemanticNodeId)]>);
+pub struct CanonicalTypeSubstitution(
+    Arc<[(SemanticNodeId, SemanticNodeId)]>,
+    crate::semantic_query_memo::node_roots::IdentityNodeRoots,
+);
 
 impl CanonicalTypeSubstitution {
     /// The empty substitution.
     #[must_use]
     pub fn empty() -> Self {
-        Self(Arc::from(Vec::new().into_boxed_slice()))
+        Self(Arc::from(Vec::new().into_boxed_slice()), Default::default())
     }
 
     /// Canonicalize `(type_parameter, bound)` pairs: sorted and
@@ -1692,7 +1695,12 @@ impl CanonicalTypeSubstitution {
     pub fn new(mut bindings: Vec<(SemanticNodeId, SemanticNodeId)>) -> Self {
         bindings.sort_by_key(|(param, _)| param.0);
         bindings.dedup_by_key(|(param, _)| param.0);
-        Self(Arc::from(bindings.into_boxed_slice()))
+        let roots = crate::semantic_query_memo::node_roots::IdentityNodeRoots::scoped(
+            bindings
+                .iter()
+                .flat_map(|&(parameter, value)| [parameter, value]),
+        );
+        Self(Arc::from(bindings.into_boxed_slice()), roots)
     }
 
     /// The canonical bindings.
@@ -5297,6 +5305,9 @@ pub use crate::project_semantic_dispatch::cost_receipt::ReadReceipt;
 /// `QueryError`. Warm reads replay both fields transparently.
 #[derive(Debug, Clone)]
 pub struct CacheRead<T> {
+    /// Internal graph and signature-version ownership, independent of cache
+    /// admission. Production canonical close can still revoke graph slots.
+    pub lease: crate::semantic_query_memo::delivery_lease::SemanticDeliveryLease,
     pub value: T,
     pub dep_signature: DepSignature,
     /// Walker diagnostics produced during this query's computation.
@@ -5334,6 +5345,7 @@ impl<T> CacheRead<T> {
     #[must_use]
     pub fn from_value_and_signature(value: T, dep_signature: DepSignature) -> Self {
         Self {
+            lease: Default::default(),
             value,
             dep_signature,
             walker_diagnostics: Arc::from([]),
@@ -5349,6 +5361,7 @@ impl<T> CacheRead<T> {
     #[must_use]
     pub fn map_value<U>(self, f: impl FnOnce(T) -> U) -> CacheRead<U> {
         CacheRead {
+            lease: self.lease,
             value: f(self.value),
             dep_signature: self.dep_signature,
             walker_diagnostics: self.walker_diagnostics,
@@ -5373,6 +5386,8 @@ impl<T> CacheRead<T> {
         self.partial_reasons()
     }
 }
+
+mod retained_nodes;
 
 // ──────────────────────────────────────────────────────────────────────────
 // Derivation / origin layer (plan B2 + Derivation/Origin Layer Contract)
@@ -7347,13 +7362,19 @@ pub struct ProgramAnalysisContext {
 /// space the call / flow-return / program-analysis keys all key on (there is
 /// one flow/narrowing axis space).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct FlowNarrowingKey(Arc<[SemanticNodeId]>);
+pub struct FlowNarrowingKey(
+    Arc<[SemanticNodeId]>,
+    crate::semantic_query_memo::node_roots::IdentityNodeRoots,
+);
 
 impl FlowNarrowingKey {
     /// The empty flow-narrowing demand (no narrowing in scope).
     #[must_use]
     pub fn empty() -> Self {
-        Self(Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()))
+        Self(
+            Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            Default::default(),
+        )
     }
 
     /// Construct from a set of interned antecedent guard / narrowing node ids.
@@ -7366,7 +7387,11 @@ impl FlowNarrowingKey {
     /// axes.
     #[must_use]
     pub fn new(facts: Arc<[SemanticNodeId]>) -> Self {
-        Self(canonical_node_set(facts))
+        let facts = canonical_node_set(facts);
+        let roots = crate::semantic_query_memo::node_roots::IdentityNodeRoots::scoped(
+            facts.iter().copied(),
+        );
+        Self(facts, roots)
     }
 
     /// The canonical (sorted, deduplicated) node-id set.
@@ -7398,13 +7423,19 @@ impl Default for FlowNarrowingKey {
 /// flow-return / program-analysis keys all key on (there is one contextual-
 /// typing axis space).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ContextualTypingKey(Arc<[SemanticNodeId]>);
+pub struct ContextualTypingKey(
+    Arc<[SemanticNodeId]>,
+    crate::semantic_query_memo::node_roots::IdentityNodeRoots,
+);
 
 impl ContextualTypingKey {
     /// The empty contextual-typing demand (no contextual target in scope).
     #[must_use]
     pub fn empty() -> Self {
-        Self(Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()))
+        Self(
+            Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            Default::default(),
+        )
     }
 
     /// Construct from a set of interned contextual-target node ids.
@@ -7415,7 +7446,11 @@ impl ContextualTypingKey {
     /// (the §2.58 "canonicalize before key construction" contract).
     #[must_use]
     pub fn new(targets: Arc<[SemanticNodeId]>) -> Self {
-        Self(canonical_node_set(targets))
+        let targets = canonical_node_set(targets);
+        let roots = crate::semantic_query_memo::node_roots::IdentityNodeRoots::scoped(
+            targets.iter().copied(),
+        );
+        Self(targets, roots)
     }
 
     /// The canonical (sorted, deduplicated) node-id set.
@@ -7643,13 +7678,19 @@ pub enum InferencePassKind {
 /// parameters). SHAPE only: the interning substrate is the relation-inference
 /// reducer (not yet implemented).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct InferableParamSetId(Arc<[SemanticNodeId]>);
+pub struct InferableParamSetId(
+    Arc<[SemanticNodeId]>,
+    crate::semantic_query_memo::node_roots::IdentityNodeRoots,
+);
 
 impl InferableParamSetId {
     /// The empty inferable-parameter set (no open type parameters).
     #[must_use]
     pub fn empty() -> Self {
-        Self(Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()))
+        Self(
+            Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            Default::default(),
+        )
     }
 
     /// Construct from a set of interned type-parameter node ids.
@@ -7660,7 +7701,11 @@ impl InferableParamSetId {
     /// §2.58 "canonicalize before key construction" contract).
     #[must_use]
     pub fn new(params: Arc<[SemanticNodeId]>) -> Self {
-        Self(canonical_node_set(params))
+        let params = canonical_node_set(params);
+        let roots = crate::semantic_query_memo::node_roots::IdentityNodeRoots::scoped(
+            params.iter().copied(),
+        );
+        Self(params, roots)
     }
 
     /// The canonical (sorted, deduplicated) node-id set.
@@ -8090,6 +8135,20 @@ pub struct ConditionalPendingSubstitution {
 }
 
 impl ConditionalPendingSubstitution {
+    /// The retained field multiset, including binders and the distribution
+    /// parameter. This is ownership topology, separate from semantic descent.
+    pub fn for_each_retained_node(&self, mut visit: impl FnMut(SemanticNodeId)) {
+        for &(parameter, argument) in self
+            .true_branch
+            .pairs()
+            .iter()
+            .chain(self.false_branch.pairs())
+        {
+            visit(parameter);
+            visit(argument);
+        }
+        self.distribution.into_iter().for_each(visit);
+    }
     /// Materialized arguments retained by this frame, without applying it or
     /// evaluating either branch. Structural reachability readers include these
     /// children when inspecting the suspended carrier.

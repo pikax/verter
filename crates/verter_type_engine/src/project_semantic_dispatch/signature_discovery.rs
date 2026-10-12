@@ -910,12 +910,17 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     constituents: Arc::from(nodes.into_boxed_slice()),
                 });
             }
-            drop(view);
-            Ok((set_from_candidates(store, list)?, nodes_of))
+            let set = set_from_candidates(store, list)?;
+            Ok((
+                set,
+                nodes_of,
+                crate::signature_kernel::SignatureVersion(Some(view.lease())),
+            ))
         });
         match published {
-            Ok((set, nodes_of)) => QueryOutcome::Ready(Ready {
+            Ok((set, nodes_of, version)) => QueryOutcome::Ready(Ready {
                 value: crate::signature_kernel::SignatureSetValue {
+                    version,
                     set,
                     nodes: Arc::from(nodes_of.into_boxed_slice()),
                 },
@@ -2442,6 +2447,17 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         use crate::semantic_query::{QueryError, QueryResult, SemanticQueryValue};
         let fence = self.project_generation_signature();
         let store = self.graph().signature_store();
+        let version = match store.lease_epoch(key.descriptor.epoch()) {
+            Ok(lease) => crate::signature_kernel::SignatureVersion(Some(lease)),
+            Err(_) => {
+                return incomplete_output(
+                    fence,
+                    DiscoveryError::Store(crate::signature_kernel::StoreError::StaleHandle)
+                        .incomplete_reason(),
+                    QueryError::Miss,
+                )
+            }
+        };
         match self.read_signature_result(
             store,
             key.descriptor,
@@ -2459,7 +2475,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 let roots = self.observed_self_roots_from_nodes(return_node);
                 let mut output = super::walk::QueryBuildOutput::from((
                     QueryResult::Value(SemanticQueryValue::SignatureResult(
-                        crate::signature_kernel::SignatureResultValue { result: value },
+                        crate::signature_kernel::SignatureResultValue {
+                            result: value,
+                            version,
+                        },
                     )),
                     fence,
                 ))

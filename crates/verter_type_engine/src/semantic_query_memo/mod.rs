@@ -48,6 +48,7 @@ use crate::semantic_query::{
 };
 
 pub mod arena;
+pub mod delivery_lease;
 pub mod derivation;
 pub mod family;
 mod family_intern;
@@ -58,9 +59,14 @@ pub mod inflight;
 pub(crate) mod intern_table;
 pub mod interner;
 pub(crate) mod member_index;
+pub mod node_data_lease;
+pub mod node_roots;
 pub(crate) mod nodes;
+#[cfg(any(test, feature = "test-support"))]
+pub mod ownership_harness;
 pub use nodes::AliasChainEnd;
 mod observability;
+pub use observability::NodeOwnershipCounts;
 mod origin_edges;
 pub mod prepared;
 pub mod refusal_summary;
@@ -172,6 +178,7 @@ fn narrow_cache_read(
     read: CacheRead<QueryResult<SemanticQueryValue>>,
 ) -> CacheRead<QueryResult<SemanticNodeId>> {
     CacheRead {
+        lease: read.lease,
         value: narrow_value_result(read.value),
         dep_signature: read.dep_signature,
         walker_diagnostics: read.walker_diagnostics,
@@ -184,6 +191,7 @@ fn narrow_cache_read(
 pub(crate) fn cancelled_cache_read() -> CacheRead<QueryResult<SemanticQueryValue>> {
     crate::request_context::mark_request_result_cancelled();
     CacheRead {
+        lease: Default::default(),
         value: QueryResult::Error(QueryError::Cancelled),
         dep_signature: empty_signature(),
         walker_diagnostics: Arc::from([]),
@@ -240,7 +248,6 @@ impl Default for SemanticGraphIdentity {
     }
 }
 
-#[derive(Default)]
 pub struct SemanticGraphStore {
     /// Process-local identity used only to confine opaque runtime operands to
     /// the store that issued them.
@@ -647,8 +654,10 @@ pub struct SemanticGraphStore {
     // sidecar deque) so a long-running workspace cannot grow either
     // memo without bound; see `hash_cons_memos.rs` for the
     // eviction contract.
-    pub(super) substitute_memo:
-        DashMap<(SemanticNodeId, SemanticNodeId, SemanticNodeId), SemanticNodeId>,
+    pub(super) substitute_memo: DashMap<
+        (SemanticNodeId, SemanticNodeId, SemanticNodeId),
+        (SemanticNodeId, node_roots::NodeRootSet),
+    >,
     pub(super) substitute_memo_fifo: parking_lot::Mutex<
         std::collections::VecDeque<(SemanticNodeId, SemanticNodeId, SemanticNodeId)>,
     >,
@@ -660,6 +669,7 @@ pub struct SemanticGraphStore {
         (
             SemanticNodeId,
             std::sync::Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
+            delivery_lease::SemanticDeliveryLease,
         ),
     >,
     pub(super) evaluate_deferred_memo_fifo: parking_lot::Mutex<
@@ -690,6 +700,82 @@ pub struct SemanticGraphStore {
     #[cfg(any(test, feature = "test-support"))]
     exhausted_join_abort:
         parking_lot::Mutex<Option<(SemanticQueryKey, test_support::ExhaustedJoinAbortForTests)>>,
+}
+
+impl Default for SemanticGraphStore {
+    fn default() -> Self {
+        Self::with_arena(Default::default())
+    }
+}
+
+impl SemanticGraphStore {
+    /// Bind signature-token ownership to the final arena before publishing
+    /// the store, including the controlled counted fixture constructor.
+    fn with_arena(arena: NodeArena) -> Self {
+        let signatures = crate::signature_kernel::SignatureStore::default();
+        signatures.bind_graph(&arena.core);
+        Self {
+            operand_identity: Default::default(),
+            arena,
+            signatures,
+            entries: Default::default(),
+            inflight: Default::default(),
+            task_registry: Default::default(),
+            independent_inflight: Default::default(),
+            derivation: Default::default(),
+            stats: Default::default(),
+            provenance: Default::default(),
+            retention_account: Default::default(),
+            force_cold_abort_sweep: Default::default(),
+            unresolved_reach: Default::default(),
+            released_any: Default::default(),
+            union_views: Default::default(),
+            key_classes: Default::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            union_order_reversed_for_tests: Default::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            invalidate_all_post_entries_clear_gate: Default::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            invalidate_all_pre_memo_budget_clear_gate: Default::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            publish_post_memo_budget_record_gate: Default::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            cold_winner_pre_backfill_gate: Default::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            cold_winner_post_admission_gate: Default::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            cancellation_abort_pre_retire_gate: Default::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            invalidate_all_pre_reverse_index_clear_gate: Default::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            publish_post_reverse_index_prune_gate: Default::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            relation_member_pre_entries_gate: Default::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            relation_root_pre_member_drain_gate: Default::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            invalidate_all_inflight_abort_gate: Default::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            invalidate_canonical_inflight_abort_gate: Default::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            joiner_on_condvar_count: Default::default(),
+            canonical_to_entries: Default::default(),
+            dep_signature_interner: Default::default(),
+            memo_budget: Default::default(),
+            candidate_admission_seq: Default::default(),
+            substitute_memo: Default::default(),
+            substitute_memo_fifo: Default::default(),
+            evaluate_deferred_memo: Default::default(),
+            evaluate_deferred_memo_fifo: Default::default(),
+            member_ordinal_index_memo: Default::default(),
+            member_ordinal_index_fifo: Default::default(),
+            refusal_summaries: Default::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            produce_hook: Default::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            exhausted_join_abort: Default::default(),
+        }
+    }
 }
 
 /// Exact memo candidate admitted by one cold-winner publication.
@@ -849,9 +935,7 @@ impl SemanticGraphStore {
     ) -> T {
         use tasks::SemanticProducers as _;
         let execution = self.enter_execution();
-        let _open = execution
-            .task()
-            .open_producer(PreparedKeyHandle::prepare(key));
+        let _open = execution.task().open_producer(self.prepare_rooted_key(key));
         body()
     }
 
@@ -1779,6 +1863,7 @@ impl SemanticGraphStore {
                 entry.read_set_signature.bubble_via_tls();
                 let dep_signature = Arc::clone(&entry.dispatch_dep_signature);
                 CacheRead {
+                    lease: entry.lease,
                     value: entry.result,
                     dep_signature,
                     walker_diagnostics: entry.walker_diagnostics,
@@ -1936,6 +2021,7 @@ impl SemanticGraphStore {
             }
             let dep_signature = Arc::clone(&entry.dispatch_dep_signature);
             CacheRead {
+                lease: entry.lease,
                 value: entry.result,
                 dep_signature,
                 walker_diagnostics: entry.walker_diagnostics,
@@ -2084,6 +2170,7 @@ impl SemanticGraphStore {
             None => entry.read_set_signature.bubble_via_tls(),
         }
         let hit = CacheRead {
+            lease: entry.lease,
             value: entry.result,
             dep_signature: Arc::clone(&entry.dispatch_dep_signature),
             walker_diagnostics: entry.walker_diagnostics,
@@ -2279,6 +2366,10 @@ impl SemanticGraphStore {
         let validated_at_generation = flags.current_project_generation();
         let admission_seq = self.alloc_candidate_admission_seq();
         let mut entry = MemoEntry {
+            lease: match self.lease_candidate(family, result, walker_diagnostics) {
+                Ok(lease) => lease,
+                Err(_) => return WarmPublishOutcome::Skipped,
+            },
             result: result.clone(),
             read_set_signature: read_set_signature.clone(),
             dispatch_dep_signature: Arc::clone(&dispatch_dep_signature),
@@ -2476,7 +2567,7 @@ impl SemanticGraphStore {
         // Prepare the backfill key's token once — the same
         // family/slot/path/point projection the by-key helpers ran
         // separately, plus the hash the in-flight probe needs.
-        let prepared = PreparedKeyHandle::prepare(key);
+        let prepared = self.prepare_rooted_key(key);
         let family = prepared.family();
         let slot = prepared.slot();
         let requested_path = prepared.requested_path();
@@ -2522,6 +2613,7 @@ impl SemanticGraphStore {
         let validated_at_generation = flags.current_project_generation();
         let admission_seq = self.alloc_candidate_admission_seq();
         let mut entry = MemoEntry {
+            lease: Default::default(),
             result: match result {
                 QueryResult::Value(node) => QueryResult::Value(SemanticQueryValue::TypeNode(node)),
                 QueryResult::Recursive(node) => QueryResult::Recursive(node),
@@ -2536,6 +2628,10 @@ impl SemanticGraphStore {
             validated_at_generation,
             admission_seq,
             cost_receipt,
+        };
+        entry.lease = match self.lease_candidate(family, &entry.result, &entry.walker_diagnostics) {
+            Ok(lease) => lease,
+            Err(_) => return false,
         };
         // A narrower sibling slot is a fresh candidate with its own
         // carriers, so it is charged like any other publish. Under

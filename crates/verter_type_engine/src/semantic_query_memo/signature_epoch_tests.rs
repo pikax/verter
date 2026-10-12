@@ -13,6 +13,7 @@ use crate::signature_kernel::{
 
 fn set_value(set: SignatureSetRef) -> QueryResult<SemanticQueryValue> {
     QueryResult::Value(SemanticQueryValue::SignatureSet(SignatureSetValue {
+        version: Default::default(),
         set,
         nodes: Arc::from([]),
     }))

@@ -682,6 +682,128 @@ fn semantic_misses(host: &VerterHost) -> u64 {
         .misses
 }
 
+/// The benchmark request envelope reaches the checker comparison limit,
+/// including its resource recovery, rather than stopping at construction bytes.
+fn assert_reversed_checker_answer(count: usize, expected: u8) {
+    use verter_type_engine::semantic_query::PartialReasonSet;
+    let full = super::connected_demand::MAX_CONNECTED_PROJECTION_WORK;
+    {
+        let host = bench_host(1_000_000, &reversed_unions(count));
+        let (key, [source, target]) = reversed_conditional_key(&host, count);
+        let read = || {
+            let _request = fresh_request(100);
+            root_read(&host, &key, full)
+        };
+        let cold = read();
+        assert_eq!(
+            cold.answer,
+            format!("literal Number({expected}.0)"),
+            "{count} arms: checker answer and charged envelope: {cold:?}"
+        );
+        let recovered = count >= 2100;
+        assert_eq!(
+            cold.partial, recovered,
+            "{count} arms: resource recovery class"
+        );
+        assert_eq!(
+            cold.reasons,
+            if recovered {
+                PartialReasonSet::OPERATION_BUDGET
+            } else {
+                PartialReasonSet::empty()
+            }
+        );
+        assert_eq!(
+            cold.refusals,
+            if recovered {
+                vec![super::walk::ShallowDiagnostic::RelationTooComplex { source, target }]
+            } else {
+                Vec::new()
+            },
+            "{count} arms: TS2859 subjects"
+        );
+        let before_repeat = semantic_misses(&host);
+        assert_eq!(read(), cold, "{count} arms: exact repeat");
+        assert_eq!(
+            semantic_misses(&host),
+            before_repeat,
+            "{count} arms: no recomputation"
+        );
+        println!(
+            "reversed-{count}: {} partial={} work={} bytes={} repeat_misses=0",
+            cold.answer, cold.partial, cold.work, cold.bytes
+        );
+    }
+}
+
+#[test]
+fn reversed_object_unions_reach_the_checker_answer_200() {
+    assert_reversed_checker_answer(200, 1);
+}
+#[test]
+fn reversed_object_unions_reach_the_checker_answer_600() {
+    assert_reversed_checker_answer(600, 1);
+}
+#[test]
+fn reversed_object_unions_reach_the_checker_answer_1800() {
+    assert_reversed_checker_answer(1800, 1);
+}
+#[test]
+fn reversed_object_unions_reach_the_checker_answer_2100() {
+    assert_reversed_checker_answer(2100, 2);
+}
+#[test]
+fn reversed_object_unions_reach_the_checker_answer_3200() {
+    assert_reversed_checker_answer(3200, 2);
+}
+
+#[test]
+fn cold_query_entries_fit_within_the_checker_relation_envelope() {
+    use verter_type_engine::semantic_query::checker_policy::with_relation_comparisons_for_tests;
+    use verter_type_engine::semantic_query::PartialReasonSet;
+    let host = bench_host(1_000_000, &reversed_unions(200));
+    let (key, [source, target]) = reversed_conditional_key(&host, 200);
+    let comparisons = 20_000;
+    let reducer_only =
+        comparisons as usize * super::connected_demand::RELATION_UNITS_PER_COMPARISON;
+    // One hundredth of the pinned checker's comparison allowance and
+    // production work envelope keeps this rail discriminator small.
+    let mapped = super::connected_demand::MAX_CONNECTED_PROJECTION_WORK / 100;
+    let read = |work| {
+        let _request = fresh_request(100);
+        with_relation_comparisons_for_tests(comparisons, || root_read(&host, &key, work))
+    };
+    let premature = read(reducer_only);
+    let recovered = read(mapped);
+    println!("reduced checker envelope: reducer={premature:?}; mapped={recovered:?}");
+    assert_eq!(premature.work, reducer_only, "the work rail was spent");
+    assert!(premature.partial);
+    assert_eq!(premature.answer, "refusal carrier TypeNode");
+    // The raw conditional exposes its undecided shell at this operational
+    // stop, without attributing the stop to the checker's comparison budget.
+    assert_eq!(premature.reasons, PartialReasonSet::UNDECIDED_CONDITIONAL);
+    assert!(
+        premature.refusals.is_empty(),
+        "the checker was never reached"
+    );
+    assert_eq!(recovered.answer, "literal Number(2.0)", "{recovered:?}");
+    assert_eq!(recovered.reasons, PartialReasonSet::OPERATION_BUDGET);
+    assert!(recovered.partial);
+    assert_eq!(
+        recovered.refusals,
+        vec![super::walk::ShallowDiagnostic::RelationTooComplex { source, target }]
+    );
+    let before_repeat = semantic_misses(&host);
+    let before_reductions = ProjectSemanticDispatch::<crate::resolver_core::HostCapabilities>::relation_reductions_for_tests();
+    assert_eq!(read(mapped), recovered);
+    assert_eq!(semantic_misses(&host), before_repeat);
+    assert_eq!(
+        ProjectSemanticDispatch::<crate::resolver_core::HostCapabilities>::relation_reductions_for_tests(),
+        before_reductions,
+        "the sealed operation refusal performs no structural comparisons"
+    );
+}
+
 /// A request repeated warm answers exactly as it answered cold. Its
 /// sub-results were charged to the request as they were computed; served
 /// warm, their receipts charge the same, and a result the cold request
@@ -1001,14 +1123,36 @@ fn root_read(
     key: &verter_type_engine::semantic_query::SemanticQueryKey,
     work: usize,
 ) -> RootAnswer {
+    root_read_with_context(host, key, work, 24, 0)
+}
+
+fn root_read_with_context(
+    host: &Arc<VerterHost>,
+    key: &verter_type_engine::semantic_query::SemanticQueryKey,
+    work: usize,
+    depth: u16,
+    preceding: usize,
+) -> RootAnswer {
     use verter_type_engine::semantic_query::{QueryResult, SemanticQueryValue};
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&ctx);
-    dispatch.set_connected_limits_for_tests(work, 24);
+    dispatch.set_connected_limits_for_tests(work, depth);
+    let _connected = (preceding != 0).then(|| dispatch.enter_connected_demand(false).0);
+    if preceding != 0 {
+        dispatch.connected_demand().charge_units(preceding).unwrap();
+    }
     let read = dispatch.execute_via_cold_build_helper(key.clone());
     let answer = match &read.value {
+        QueryResult::Value(SemanticQueryValue::TypeNode(node)) => {
+            match dispatch.graph().node_data(*node).as_deref() {
+                Some(verter_type_engine::semantic_query::SemanticNodeData::Literal(literal)) => {
+                    format!("literal {literal:?}")
+                }
+                _ => "refusal carrier TypeNode".to_owned(),
+            }
+        }
         QueryResult::Value(SemanticQueryValue::Relation(payload)) => {
             format!("{:?}", payload.outcome)
         }
@@ -1029,6 +1173,54 @@ fn root_read(
             .cloned()
             .collect(),
     }
+}
+
+#[test]
+fn operation_refusal_isolates_depth_and_preceding_connected_work() {
+    use super::connected_demand::InstantiationBudgetForTests;
+    use verter_type_engine::semantic_query::checker_policy::with_relation_comparisons_for_tests;
+    let host = super::checker_probe_lane_tests::default_probe_host();
+    let key = reversed_relation_key(&host, 40, false);
+    let full = super::connected_demand::MAX_CONNECTED_PROJECTION_WORK;
+    with_relation_comparisons_for_tests(50, || {
+        let solo = root_read(&host, &key, full);
+        assert!(solo.partial);
+        let before = semantic_misses(&host);
+        assert_eq!(root_read(&host, &key, full), solo);
+        assert_eq!(
+            semantic_misses(&host),
+            before,
+            "the exact isolated repeat is sealed"
+        );
+        for (depth, preceding) in [(23, 0), (24, 1)] {
+            let before = semantic_misses(&host);
+            let altered = root_read_with_context(&host, &key, full, depth, preceding);
+            assert_eq!(
+                (altered.answer, altered.partial, altered.reasons),
+                (solo.answer.clone(), solo.partial, solo.reasons)
+            );
+            assert!(
+                semantic_misses(&host) > before,
+                "a different depth or non-isolated ledger must evaluate the check"
+            );
+        }
+        let before = semantic_misses(&host);
+        {
+            let _depth = InstantiationBudgetForTests::install(9999);
+            assert!(root_read(&host, &key, full).partial);
+        }
+        assert!(
+            semantic_misses(&host) > before,
+            "checker depth participates in refusal identity"
+        );
+        let before = semantic_misses(&host);
+        assert_eq!(root_read(&host, &key, full), solo);
+        assert_eq!(
+            semantic_misses(&host),
+            before,
+            "the original isolated profile remains usable"
+        );
+    });
 }
 
 /// Install a fresh request with an operation fuse no relation here reaches.
@@ -1258,10 +1450,16 @@ fn a_relation_refusal_names_its_subjects_through_its_consumer() {
         refused.refusals, named,
         "the refusal names the check's pair"
     );
+    let before_repeat = semantic_misses(&host);
     assert_eq!(
         limited(&relation),
         refused,
         "its sealed repeat reports it too"
+    );
+    assert_eq!(
+        semantic_misses(&host),
+        before_repeat,
+        "no comparisons recomputed"
     );
     assert!(
         root_read(&host, &relation, full).refusals.is_empty(),
@@ -1270,6 +1468,10 @@ fn a_relation_refusal_names_its_subjects_through_its_consumer() {
 
     let (conditional, [check, extends]) = reversed_conditional_key(&host, 40);
     let consumed = limited(&conditional);
+    assert_eq!(
+        consumed.answer, "literal Number(2.0)",
+        "the conditional recovers the checker refusal as false: {consumed:?}"
+    );
     assert_eq!(
         (consumed.partial, consumed.reasons),
         (true, PartialReasonSet::OPERATION_BUDGET),
@@ -1283,7 +1485,13 @@ fn a_relation_refusal_names_its_subjects_through_its_consumer() {
         }],
         "the conditional reports the refusal of its check"
     );
+    let before_repeat = semantic_misses(&host);
     assert_eq!(limited(&conditional), consumed, "cold and repeat agree");
+    assert_eq!(
+        semantic_misses(&host),
+        before_repeat,
+        "the consumer refusal is replayed"
+    );
     let decided = root_read(&host, &conditional, full);
     assert!(
         !decided.partial && decided.refusals.is_empty(),
@@ -1763,6 +1971,7 @@ fn the_refusal_table_keeps_the_newest_and_refuses_torn_evaluations() {
         })
     };
     let refusal = || CacheRead {
+        lease: Default::default(),
         value: QueryResult::<SemanticQueryValue>::Error(
             verter_type_engine::semantic_query::QueryError::Miss,
         ),

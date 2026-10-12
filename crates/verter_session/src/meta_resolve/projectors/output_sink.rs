@@ -1027,6 +1027,8 @@ pub(crate) fn project_model(
     diag_sink: &mut Vec<MacroExpansionDiagnostics>,
     cursor: crate::meta_resolve::projection_demand::ProjectionCursor<'_>,
 ) -> Option<ExpandedField> {
+    let graph = std::sync::Arc::clone(query_engine.dispatch.graph());
+    let _scope = graph.enter_node_root_scope();
     if !mac.is_type_based {
         return None;
     }
@@ -1061,7 +1063,7 @@ pub(crate) fn project_model(
         verter_type_engine::semantic_query::PropertyKey::identifier(model_name.as_str());
     let _member_cursor = cursor.descend_published_member(&model_key)?;
 
-    let (payload_node, presence_outcome, exactness, contains_reducible) = {
+    let (payload_owner, presence_outcome, exactness, contains_reducible) = {
         let dispatch = query_engine.dispatch;
         // `project_model` is a ROOT publication path that keeps a root cursor
         // (the `descend_published_member` gate above). It resolves + admits the
@@ -1106,14 +1108,10 @@ pub(crate) fn project_model(
         // `project_model` makes no decision on any materialised value.
         let contains_reducible = super::classify_node_reduction_gates(dispatch, payload_node)
             .contains_reducible_operator;
-        (
-            payload_node,
-            presence_outcome,
-            exactness,
-            contains_reducible,
-        )
+        (payload, presence_outcome, exactness, contains_reducible)
     };
 
+    let payload_node = payload_owner.node();
     if let SemanticOutcome::Degraded(reason) = presence_outcome {
         // Record the degradation so the consumer observes the missing
         // payload through the diagnostic stream rather than as a silent

@@ -541,6 +541,19 @@ malformed answers remain decoding errors.
 
 On macOS, CPU columns sum sampled user and kernel counters across process
 lifetimes, with reaped-child accounting deduplicated against those samples.
+When a child disappears while its parent is still sampled, cumulative child
+counters retain unsampled tails without adding the child's sampled usage twice.
+Live reparented descendants remain independent, and reused PIDs are separate
+lifetimes. If a descendant and its parent both disappear before the descendant's
+reaping or reparenting was observed, both CPU columns are unavailable (`null`)
+for the rest of the run. Aggregate child counters cannot attribute that usage:
+sampled root/parent/grandchild user counters of 10/20/100 followed by root user
+20 and child-user 150 can represent nested reaping (total 170) or a parent that
+used 150 without reaping its child (retained total 270). An unseen reaped sibling
+can produce the same ambiguity. Neither counter magnitude nor later samples
+resolve it. When an intermediate sample observes the parent accounting for the
+missing grandchild before the parent disappears, the nested subtree remains
+attributable and its CPU is counted once.
 The watchdog reads the exited leader before reaping it: Apple's
 [proc_pid_rusage API](https://github.com/apple-oss-distributions/xnu/blob/main/libsyscall/wrappers/libproc/libproc.h)
 supports zombies. CPU units are milliseconds. Descendants that exit between

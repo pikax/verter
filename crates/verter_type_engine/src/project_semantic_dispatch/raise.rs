@@ -56,6 +56,7 @@ pub use shape_engine::{DegradedLeaf, MaterializedTypeExpr};
 /// Graph-native result of reducing one output demand before the terminal sink
 /// performs its single display materialization.
 pub struct ReducedOutputNode {
+    _roots: crate::semantic_query_memo::node_roots::IdentityNodeRoots,
     node_id: SemanticNodeId,
     dep_signature: DepSignature,
     result_is_partial: bool,
@@ -460,6 +461,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         node: SemanticNodeId,
         context: ProjectionReductionContext,
     ) -> MaterializedOutputTypeExpr {
+        let _scope = self.graph().enter_node_root_scope();
         let reduced = self.reduce_output_node_with_context(node, context);
         // A raise failure after a successful reduction is PRESENT-BUT-
         // UNRAISABLE, never a genuine absence: degrade as the TYPED
@@ -486,10 +488,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         node: SemanticNodeId,
         context: ProjectionReductionContext,
     ) -> ReducedOutputNode {
+        let _scope = self.graph().enter_node_root_scope();
         let mut state = ReduceState::default();
         let node_id = self.reduce_graph_node_iterative(node, context, &mut state);
         let result_is_partial = state.result_is_partial;
         ReducedOutputNode {
+            _roots: crate::semantic_query_memo::node_roots::IdentityNodeRoots::scoped([node_id]),
             node_id,
             dep_signature: state.into_dep_signature(),
             result_is_partial,

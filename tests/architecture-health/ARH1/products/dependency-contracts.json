@@ -1267,6 +1267,7 @@
           "crates/verter_session/src/meta_resolve/projectors/published_reducer.rs",
           "crates/verter_session/src/meta_resolve/projectors/published_source.rs",
           "crates/verter_session/src/meta_resolve/projectors/slots.rs",
+          "crates/verter_session/src/meta_resolve/projectors_silent_miss_tests.rs",
           "crates/verter_session/src/meta_resolve/resolved_state.rs",
           "crates/verter_session/src/meta_resolve/scoring.rs",
           "crates/verter_session/src/meta_resolve/slot_binding_graph.rs",
@@ -1542,7 +1543,7 @@
           "crates/verter_wasm/src/lib.rs",
           "crates/verter_wasm/src/typeinfo.rs"
         ],
-        "ownerCratePopulation": "semantic_query lives in verter_type_engine, so every file outside the engine's src tree that names it through verter_type_engine paths is a cross-crate importer; the importers array is the complete cross-crate population (359 files: the verter_session sources, benches, examples and integration tests, plus the bench/ffi/napi/wasm/source-policy-gate files) and the verifier enforces it exactly in both directions; population re-derivation is ARH2's recorded obligation",
+        "ownerCratePopulation": "semantic_query lives in verter_type_engine, so every file outside the engine's src tree that names it through verter_type_engine paths is a cross-crate importer; the importers array is the complete cross-crate population (the verter_session sources, benches, examples and integration tests, plus the bench/ffi/napi/wasm/source-policy-gate files) and the verifier enforces it exactly in both directions; population re-derivation is ARH2's recorded obligation",
         "internalNote": [
           "locator_identity",
           "project_semantic_dispatch",
@@ -1680,6 +1681,7 @@
               "crates/verter_session/src/meta_resolve/projectors/published_reducer.rs",
               "crates/verter_session/src/meta_resolve/projectors/published_source.rs",
               "crates/verter_session/src/meta_resolve/projectors/slots.rs",
+              "crates/verter_session/src/meta_resolve/projectors_silent_miss_tests.rs",
               "crates/verter_session/src/meta_resolve/resolved_state.rs",
               "crates/verter_session/src/meta_resolve/scoring.rs",
               "crates/verter_session/src/meta_resolve/slot_binding_graph.rs",
@@ -1775,6 +1777,7 @@
               "crates/verter_session/src/resolver_core/component_meta_query_engine/mod.rs",
               "crates/verter_session/src/resolver_core/component_meta_query_engine/node_materialize.rs",
               "crates/verter_session/src/resolver_core/component_meta_query_engine/registry_decl.rs",
+              "crates/verter_session/src/resolver_core/component_meta_query_engine/route_admission.rs",
               "crates/verter_session/src/resolver_core/component_meta_query_engine/registry_route_scoped.rs",
               "crates/verter_session/src/resolver_core/component_meta_query_engine/shallow_preserve.rs",
               "crates/verter_session/src/resolver_core/component_meta_query_engine/shallow_preserve_depth_tests.rs",

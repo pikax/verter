@@ -50,32 +50,47 @@ pub const RELATION_PAIR_BYTES: usize = 2_048;
 
 /// The construction bytes interning one derived node reserves: its payload
 /// record, held twice (the arena slot and the dedup index's key), a fixed
-/// index entry, and the `payload_bytes` of text and children it owns.
+/// index entry, the construction root and arena ownership slots, and the
+/// `payload_bytes` of text and children it owns.
 pub(crate) fn derived_node_bytes(payload_bytes: usize) -> usize {
-    2 * std::mem::size_of::<crate::semantic_query::SemanticNodeData>() + 32 + payload_bytes
+    2 * std::mem::size_of::<crate::semantic_query::SemanticNodeData>()
+        + 32
+        + crate::semantic_query_memo::node_roots::construction_root_bytes()
+        + std::mem::size_of::<usize>()
+        + std::mem::size_of::<bool>()
+        + payload_bytes
 }
 
 /// Work-unit cap for one connected semantic demand: the operational
 /// backstop, sized from the checker's relation-complexity envelope
 /// ([`checker_policy::RELATION_COMPARISONS`] structured comparisons at
-/// [`RELATION_UNITS_PER_COMPARISON`] units each). Work units do not bound
+/// [`RELATION_UNITS_PER_COMPARISON`] reducer units plus one cold query-entry
+/// unit each). The reducer mapping alone excludes the enclosing dispatch
+/// entries and would stop the reversed-object conditional construction
+/// before its comparison allowance. This maps that construction's footprint,
+/// not every arbitrary projection surrounding a relation.
+/// Work units do not bound
 /// memory; the construction-byte rail
-/// ([`MAX_CONNECTED_CONSTRUCTION_BYTES`]) does, and on a relation it binds
-/// first: at [`RELATION_PAIR_BYTES`] per comparison it stops a relation
-/// near 262,000 comparisons as typed incompleteness, until the per-pair
-/// footprint shrinks.
+/// ([`MAX_CONNECTED_CONSTRUCTION_BYTES`]) does. Both operational rails
+/// include the checker's full relation envelope, so neither substitutes an
+/// unevaluated conditional for the checker's answer.
 ///
 /// [`checker_policy::RELATION_COMPARISONS`]: crate::semantic_query::checker_policy::RELATION_COMPARISONS
 pub const MAX_CONNECTED_PROJECTION_WORK: usize =
     crate::semantic_query::checker_policy::RELATION_COMPARISONS as usize
-        * RELATION_UNITS_PER_COMPARISON;
+        * (RELATION_UNITS_PER_COMPARISON + 1);
 /// Nested query-boundary cap for one connected semantic demand.
 pub const MAX_CONNECTED_QUERY_DEPTH: u16 = 24;
 /// Construction-byte allowance for one connected semantic demand: the bytes
 /// it reserves before it builds, never refunded within the demand, so the
-/// allowance bounds what the demand holds at its peak. Provisional: sized
-/// with the per-unit footprint in the combined performance phase.
-pub(super) const MAX_CONNECTED_CONSTRUCTION_BYTES: usize = 512 << 20;
+/// allowance bounds what the demand holds at its peak. The comparison mapping
+/// covers the full checker relation envelope, with the non-relation allowance
+/// left for operand construction and the consuming projection. This is logical
+/// construction accounting, not an allocation or a retained-memory quota.
+pub(super) const MAX_CONNECTED_CONSTRUCTION_BYTES: usize =
+    (crate::semantic_query::checker_policy::RELATION_COMPARISONS as usize)
+        .saturating_mul(RELATION_PAIR_BYTES)
+        .saturating_add(512 << 20);
 
 /// What one connected demand has charged so far: its work units and its
 /// construction bytes.
@@ -1380,4 +1395,54 @@ pub fn note_component_meta_divergence_for_test() {
 #[cfg(any(test, feature = "test-support"))]
 pub fn note_component_meta_schedule_cut_for_test() {
     remember_schedule_cut();
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+    use crate::semantic_query::{LiteralValue, SemanticNodeData, SemanticQueryKey};
+    use crate::semantic_query_memo::ownership_harness::CountedOwnershipHarness;
+
+    #[test]
+    fn counted_failed_prefix_receipt_retains_its_materialized_operand() {
+        let harness = CountedOwnershipHarness::new();
+        let receipt = harness.run(|graph| {
+            let flags = crate::resolver_core::resolver_context::RequestFlags::new(
+                crate::resolver_core::resolver_context::ProjectGenerationClock::new(Arc::new(
+                    std::sync::atomic::AtomicU64::new(0),
+                )),
+            );
+            let ledger = ConnectedDemandLedger::new(DemandCancellation::from_flags(&flags));
+            ledger.set_limits_for_tests(1, 8);
+            let (guard, trip) = ledger.enter(false);
+            assert!(trip.is_none());
+            ledger.open_cost_scope(CostIdentity::new(Arc::<[u8]>::from([1])));
+            let prefixes = ledger.record_prefixes(1).unwrap();
+            ledger.charge().unwrap();
+            let node = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+                "materialized prefix".into(),
+            )));
+            let identity = graph
+                .prepare_rooted_key(SemanticQueryKey::ClassifyTruthinessDomain { subject: node });
+            let receipt = prefixes
+                .seal_prefix(CostIdentity::of_producer(identity.as_task_producer()), None)
+                .unwrap();
+            assert_eq!(receipt.exclusive().work, 1);
+            assert!(ledger
+                .charge()
+                .unwrap_err()
+                .contains(PartialReasonSet::PROJECTION_WORK_LIMIT));
+            drop(prefixes);
+            ledger.abandon_cost_scope();
+            drop(guard);
+            receipt
+        });
+        assert_eq!(
+            harness.live_nodes(),
+            1,
+            "only the failed evaluation's returned prefix receipt remains"
+        );
+        drop(receipt);
+        assert_eq!(harness.live_nodes(), 0);
+    }
 }

@@ -1008,6 +1008,7 @@ impl ShapeDemand {
 /// PERSISTED artifact layouts, not in-memory DashMap key identity).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ShapeCacheKey {
+    roots: crate::semantic_query_memo::node_roots::IdentityNodeRoots,
     /// Module-private so no other module (in-crate or downstream) can
     /// build a `ShapeCacheKey { subject, demand }` struct-literal that
     /// bypasses the classifying `*_whole*` constructors. Sibling modules
@@ -1049,6 +1050,7 @@ impl ShapeCacheKey {
                 scope,
                 node: MemberShapeNodeSubject::from_semantic_node_for_test(node),
             },
+            roots: crate::semantic_query_memo::node_roots::IdentityNodeRoots::scoped([node]),
             demand: ShapeDemand::whole_subject_with_context(
                 crate::semantic_query::ProjectionReductionContext::published(mode),
             ),
@@ -1073,6 +1075,7 @@ impl ShapeCacheKey {
                 scope,
                 node: MemberShapeNodeSubject::from_surface_member(authority, member),
             },
+            roots: authority.root_nodes([member.value]),
             demand: ShapeDemand::whole_subject_with_context(terminal_context),
         }
     }
@@ -1103,6 +1106,9 @@ impl ShapeCacheKey {
                 scope,
                 node: MemberShapeNodeSubject::from_surface_member_raw(member),
             },
+            roots: crate::semantic_query_memo::node_roots::IdentityNodeRoots::scoped(
+                [member.value],
+            ),
             demand: ShapeDemand::whole_subject_with_context(terminal_context),
         }
     }
@@ -1145,6 +1151,7 @@ impl ShapeCacheKey {
                 id,
                 _seal: ConstructionSeal,
             },
+            roots: Default::default(),
             demand: ShapeDemand::whole_subject_with_context(terminal_context),
         }
     }

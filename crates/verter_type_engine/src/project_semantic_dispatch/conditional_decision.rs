@@ -872,6 +872,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         selected_output
             .unwrap_or_else(|| {
                 super::walk::QueryBuildOutput::from((QueryResult::Value(result), fence))
+                    // Selection already required exact operands and the relation
+                    // authority's verdict (including its typed checker recovery).
+                    // The completed winner retains its authored value positions.
+                    .with_positional_guarantee()
             })
             .with_observed_self_roots(
                 self.observed_self_roots_from_nodes([check, extends, winner, result]),

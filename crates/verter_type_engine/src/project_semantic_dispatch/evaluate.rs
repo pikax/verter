@@ -2153,11 +2153,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             reduction_context,
             self.operation_budget_epoch.get(),
         );
-        self.connected_demand
-            .open_cost_scope(super::cost_receipt::CostIdentity::of_key((
-                node,
-                reduction_context,
-            )));
+        self.connected_demand.open_cost_scope(
+            super::cost_receipt::CostIdentity::of_key((node, reduction_context)).with_roots(
+                self.graph()
+                    .root_existing_nodes(vec![node])
+                    .expect("evaluation operand is live"),
+            ),
+        );
         root.memo_checked = true;
         root.recording = true;
         let mut frames = vec![root];
@@ -2255,7 +2257,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 if check_memo && memo_hit.is_none() {
                     // The frame evaluates: its charges are its own.
                     self.connected_demand.open_cost_scope(
-                        super::cost_receipt::CostIdentity::of_key((entry_node, context)),
+                        super::cost_receipt::CostIdentity::of_key((entry_node, context))
+                            .with_roots(
+                                self.graph()
+                                    .root_existing_nodes(vec![entry_node])
+                                    .expect("evaluation operand is live"),
+                            ),
                     );
                     frames
                         .last_mut()

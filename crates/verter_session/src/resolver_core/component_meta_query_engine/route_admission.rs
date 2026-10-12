@@ -20,8 +20,8 @@
 //!    false, .. }`) struct literal to drive an `admit_*` helper past its gate: the
 //!    literal is `error[E0451]: field … is private`. The facts read by the helpers
 //!    can only be the legitimate output of the shared fold.
-//! 3. NODE-BOUND input — every `admit_*` helper takes ONLY the node-bound
-//!    witness (no separate `SemanticNodeId` parameter) and mints from
+//! 3. NODE-BOUND input — every `admit_*` helper takes the node-bound
+//!    witness and issuing graph (no separate `SemanticNodeId` parameter), and mints from
 //!    `witness.node()` / `shape.node()` ALONE. The witness pairs a node with the
 //!    facts computed FOR THAT NODE, so a "node A's facts, node B's carrier"
 //!    mispair is UNREPRESENTABLE through the safe API — the terminal carrier proof
@@ -36,6 +36,8 @@
 //! ALREADY-COMPUTED (and now sealed, node-bound) [`RaisedNodeShapeFacts`] /
 //! [`NodeShapeEq`] witness (the route/surface adapters fold it for their own
 //! decision anyway), so confining the mint here adds no extra hot-path fold.
+//! The admitted carrier acquires its node root before orchestration releases
+//! its intermediates and retains it through the terminal publication sink.
 //!
 //! The type itself is `pub(crate)` ON PURPOSE so the cross-subtree
 //! `meta_resolve::dispatch_helpers` host-threaded wrappers and the route fixpoint
@@ -46,6 +48,7 @@
 
 use verter_type_engine::project_semantic_dispatch::raise::{NodeShapeEq, RaisedNodeShapeFacts};
 use verter_type_engine::semantic_query::SemanticNodeId;
+use verter_type_engine::semantic_query_memo::{node_roots::NodeRoot, SemanticGraphStore};
 
 /// A node-domain route-projection result: the admitted [`SemanticNodeId`] a
 /// route/surface adapter produced AFTER its node-domain acceptance gate, held in
@@ -74,9 +77,9 @@ use verter_type_engine::semantic_query::SemanticNodeId;
 /// node a carrier holds is ALWAYS the node whose own gate the witness facts
 /// passed — neither the carrier nor a passing-gate node-mispair can be forged
 /// outside the legitimate fold + gated helper.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct AdmittedRouteProjectionNode {
-    node: SemanticNodeId,
+    node: NodeRoot,
 }
 
 impl AdmittedRouteProjectionNode {
@@ -84,7 +87,7 @@ impl AdmittedRouteProjectionNode {
     /// gated `admit_*` helpers in this module; a sibling cannot name it (alias
     /// laundering included), so no un-gated / forged carrier can exist.
     #[must_use]
-    fn new(node: SemanticNodeId) -> Self {
+    fn new(node: NodeRoot) -> Self {
         Self { node }
     }
 
@@ -92,7 +95,7 @@ impl AdmittedRouteProjectionNode {
     /// compare helpers read it; the materialisation it feeds stays cap-gated.
     #[must_use]
     pub(in crate::resolver_core::component_meta_query_engine) fn node(&self) -> SemanticNodeId {
-        self.node
+        self.node.id()
     }
 }
 
@@ -101,10 +104,13 @@ impl AdmittedRouteProjectionNode {
 /// and class-A terminal arms admit on this gate.
 #[must_use]
 pub(in crate::resolver_core::component_meta_query_engine) fn admit_expanded_surface(
+    graph: &SemanticGraphStore,
     witness: &RaisedNodeShapeFacts,
 ) -> Option<AdmittedRouteProjectionNode> {
     (witness.materialized() && witness.expanded_surface())
-        .then(|| AdmittedRouteProjectionNode::new(witness.node()))
+        .then(|| graph.lease_node_data(witness.node()).ok())
+        .flatten()
+        .map(|lease| AdmittedRouteProjectionNode::new(lease.root().clone()))
 }
 
 /// Gate: `materialized && expanded_surface && changed`, where
@@ -114,10 +120,13 @@ pub(in crate::resolver_core::component_meta_query_engine) fn admit_expanded_surf
 /// re-admitted.
 #[must_use]
 pub(in crate::resolver_core::component_meta_query_engine) fn admit_expanded_surface_changed(
+    graph: &SemanticGraphStore,
     shape: &NodeShapeEq,
 ) -> Option<AdmittedRouteProjectionNode> {
     (shape.facts().materialized() && shape.facts().expanded_surface() && shape.changed())
-        .then(|| AdmittedRouteProjectionNode::new(shape.node()))
+        .then(|| graph.lease_node_data(shape.node()).ok())
+        .flatten()
+        .map(|lease| AdmittedRouteProjectionNode::new(lease.root().clone()))
 }
 
 /// Gate: `materialized` only — the registry route arms (`MemberPath` / `Pick` /
@@ -128,9 +137,47 @@ pub(in crate::resolver_core::component_meta_query_engine) fn admit_expanded_surf
 /// decision on the result).
 #[must_use]
 pub(in crate::resolver_core::component_meta_query_engine) fn admit_materialized(
+    graph: &SemanticGraphStore,
     witness: &RaisedNodeShapeFacts,
 ) -> Option<AdmittedRouteProjectionNode> {
     witness
         .materialized()
-        .then(|| AdmittedRouteProjectionNode::new(witness.node()))
+        .then(|| graph.lease_node_data(witness.node()).ok())
+        .flatten()
+        .map(|lease| AdmittedRouteProjectionNode::new(lease.root().clone()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use verter_type_engine::project_semantic_dispatch::{
+        raise::node_raised_shape_facts_with_dispatch, ProjectSemanticDispatch,
+    };
+    use verter_type_engine::semantic_query::{LiteralValue, SemanticNodeData};
+    use verter_type_engine::semantic_query_memo::ownership_harness::CountedOwnershipHarness;
+
+    #[test]
+    fn counted_route_admission_owns_node_after_orchestration_scope_closes() {
+        let host = crate::VerterHost::new_standalone(Default::default());
+        let dispatch =
+            ProjectSemanticDispatch::with_ownership_harness(&host, CountedOwnershipHarness::new());
+        let graph = dispatch.graph();
+        let admitted = {
+            let _scope = graph.enter_node_root_scope();
+            let node = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+                "route".into(),
+            )));
+            let witness = node_raised_shape_facts_with_dispatch(&dispatch, node).unwrap();
+            admit_materialized(graph, &witness).unwrap()
+        };
+        graph.invalidate_all();
+        let node = admitted.node();
+        assert!(graph.node_is_live(node));
+        drop(admitted);
+        assert!(!graph.node_is_live(node));
+        assert_eq!(
+            graph.node_count(),
+            graph.node_ownership_counts().permanent_nodes
+        );
+    }
 }
