@@ -58,12 +58,24 @@ result envelope (`TR06`, `TR14`, `TR18`–`TR26`).
 
 Every type-bearing field refers to its exact TypeInfo observation. A role
 identifies, for example, input value, event signature/parameter/return, slot
-input/binding/return, model value, options member, exposed member or
-accepted/inherited member.
+input/binding/return, model value, options member, exposed member,
+accepted/inherited member or resolved JSDoc tag type.
 The role path uses typed structural segments and positions within the owning
 signature or tuple; it is not a string parsed from a type display. Member
 occurrences include their producer's declaration/occurrence slot, so duplicate
 event names and overloaded signatures are never collapsed by name alone.
+
+A resolved JSDoc tag's `resolvedType` belongs to the TypeInfo child that
+publishes the macro/declaration's resolved documentation fact. Its role selects
+that declaration/occurrence slot, the macro occurrence and tag occurrence,
+then the tag's resolved-type root; nested type arguments use structural
+positions beneath that root. The reference carries that child's exact
+`QueryIdentity` and `InputBasisId`, including the producing declaration's
+scope and dependencies. `name`, `text`, `rawType` and `subjectName` retain
+authored documentation separately; none substitutes for the resolved graph
+or establishes its role by a name match. An absent resolved value claims no
+resolved type, and a failed resolution retains the owning fact's status and
+causes rather than synthesizing a graph from the authored text.
 
 A reference resolves only in that fact's basis and observed profile. It cannot
 name the composed container, reinterpret a node id from another graph, or
@@ -126,8 +138,8 @@ key. Fact/member order uses canonical subject/role/occurrence encoding;
 union/intersection ordering remains `VerterStableV1`. Signature parameter,
 tuple and structural path positions keep their semantic order. No load,
 interning, hash-map or thread order changes equality. Source occurrence order,
-overload presentation, root-target display order, JSDoc and formatting ride a
-separate presentation projection; reordering that projection cannot change a
+overload presentation, root-target display order, authored JSDoc and formatting
+ride a separate presentation projection; reordering that projection cannot change a
 semantic key or discard a duplicate occurrence. A framework rule whose
 authored ordering changes meaning must record that ordering in the semantic
 observation, rather than treating it as cosmetic.
@@ -206,7 +218,7 @@ ownership of the upstream parser, CSS analyzer or type solver.
 | F14 | `componentPublicContract`: supported/unsupported, adapter id, exactness, degradation, provenance, output lane/index/inner index, publication/output failures, diagnostics; public props optional/default/type; events source overloads, handler shapes, parameter names/type/optional/rest and return; slots optional/input bindings/type/return | A projection of the same fact/role references, not `ComponentContractEnvelope` or another type graph; unsupported/error context preserved | TIF1; `TIF1-AC2` |
 | F15 | Every type lane's `publication`, `terminalDisplay`, `typeExpansion` / `payloadExpansion`: kind, failure/absence, semantic authority, provenance, exactness, reason, policy reason, symbolic proof, causes; expansion execution status and diagnostic reason/context/property; `rawType`, `typeAnnotation`, `rawSignature` | Guarantee/diagnostic provenance on the owning observation; terminal/raw text remains presentation or authored syntax, never resolved type truth | TIF1; `TIF1-AC2` |
 | F16 | `facts`: props/events/slots/models/exposed/acceptedProps/acceptedEvents/rootReachability/fallthroughSurface/publicInstance/componentPublicContract/typeRegistry, plus `delivery`; `domain_guarantees` kind/causes/open; `required_fact`, `has_default_fact`; `resultCompleteness` kind/reasons | Current per-domain/member/boolean guarantees retained independently; summaries derived | TIF1; `TIF1-AC2` |
-| F17 | `resolution`, `resolutionStatus`: mode, resolved/unavailable cause, macros (`macroIndex`, `macroKind`, `typeName`, `importSource`, declaration, nativeProps, jsdoc); native prop `name`, optionality, annotation, visibility, spans; resolved JSDoc description/tags and tag params | Observation/provenance links and authored documentation; no separate resolution authority, guessed spans or text recovery | TIF1; `TIF1-AC2` |
+| F17 | `resolution`, `resolutionStatus`: mode, resolved/unavailable cause, macros (`macroIndex`, `macroKind`, `typeName`, `importSource`, declaration, nativeProps, jsdoc); native prop `name`, optionality, annotation, visibility, spans; resolved JSDoc block `description`, `tags`; tag `name`, `text`, `rawType`, `subjectName`, `resolvedType` (Rust `resolved_type`, sealed graph/display; protobuf `resolved_type_node_id`) | Authored block/tag text remains documentation; `resolvedType` is the owning macro/declaration child's resolved-JSDoc type role with exact basis, scope and tag occurrence, not a metadata-owned graph or a type parsed from `rawType`; wire node ids remain serialization-local | TIF1; `TIF1-AC2` |
 | F18 | `macroExpansionDiagnostics`: macroKind/index, exactness, executionStatus, diagnostics; `origin` nodes id/kind/label, edges source/target/kind/meta, meta strings; request/audit id and compute counters | Required diagnostic status separate from optional captured trace/audit presentation; capture off preserves correctness | TIF1; `TIF1-AC2` |
 | F19 | `orderedSfcStructure`: schemaVersion, artifactToken, blocks, markupNodes; nested section/markup oneofs, sealed block/node/attribute/source-space/content-basis tokens, authored names, ranges, termination, attributes and insertion anchors | Links to registered carrier inventory, not a copied parse or ordinal fallback; preserve the existing nested schema | TIF1; `TIF1-AC2` |
 | F20 | `components`: name/importSource/isDynamic/props/hasSpread/slotsUsed/staticClasses/hasDynamicClass/vModels/vModelEntries/bindings/events; prop name/isBound/constness/expression/referencedBindings/fromSpread/isShorthand; model bindingName; binding name/modifiers; event name/handlerExpression/isInline/modifiers | Usage facet links to existing authored analysis; callback-event classification requires the child's semantic facet, not an `on*` name guess | TIF1; `TIF1-AC2` |
@@ -249,14 +261,18 @@ current consumer.
 | C12 | LSP provider synchronization, background declaration closure, workspace scan, carrier sync and rename/sync mapping readers of `get_public_api*` | Declaration presentation and authored mappings from the semantic view; provider readiness and edit safety remain with their current owners | TIF1; `TIF1-AC2`, `TIF1-AC3` |
 | C13 | LSP `server/nav_features_hover_provenance.rs`, NAPI/WASM audited bundles, `packages/native/audit.ts` and `packages/wasm/src/audit.ts` | Optional inspection presentation plus required observation provenance; audit queries do not recompute meaning | TIF1; `TIF1-AC2` |
 | C14 | MCP framework-surface tool (`tools/framework_surface.rs`, server/tools routing) and `packages/typeinfo/src/framework-surface.ts` | Semantic kinds/member roles with status/origin, then JSON presentation; missing support is explicit | TIF1; `TIF1-AC2` |
-| C15 | Benchmark component-meta runners, corpus traces, audit-validator and dx-harness churn scenario | Semantic/compat answer comparisons and optional work inspection; preserve separate rails, never gate type correctness on display/timing | TIF1; `TIF1-AC2`, `TIF1-AC4` |
+| C15 | Benchmark component-meta runners, corpus traces, audit-validator, dx-harness churn scenario, `verter_bench/examples/profile_public_api_batch.rs` and `verter_dx_baseline/src/materialize.rs` public-API twin materialization | Semantic/compat answer comparisons, declaration presentation and optional work inspection; preserve artifact parity and typed projection errors, separate rails, never gate type correctness on display/timing | TIF1; `TIF1-AC2`, `TIF1-AC4` |
 | C16 | Playground `componentMeta` output-mode alias and unconnected audit Why tab | Existing analysis presentation only; these are not live component-meta query consumers. Preserve the alias; no new producer/UI is promised here | TIF1; `TIF1-AC2` |
+| C17 | CLI `crates/verter_tsc/src/checker.rs`: `generate_public_api_stubs`, `generate_all_tsc` call `get_public_api_batch` for cross-component checking and declaration generation | Semantic roles projected into declaration presentation; preserve one fixed batch basis, input order, per-file absent/failed/value outcomes, import rewriting, dialect-labelled stubs and TS-labelled declaration carriers; downstream TypeScript checking remains its own authority | TIF1; `TIF1-AC2`, `TIF1-AC3`, `TIF1-AC-R1` |
+| C18 | TypeScript mirror build `packages/typescript-plugin/src/tsc/mirrorHost.ts`: `getPublicApi(canonical, 'public')` for API roots and IDE sibling carriers | Declaration presentation and source mappings from semantic roles; preserve project grouping, API-root vs sibling dependency placement, mapped diagnostics, per-source absence/projectionFailure and healthy siblings after a failure | TIF1; `TIF1-AC2`, `TIF1-AC-R1` |
+| C19 | MCP `crates/verter_mcp/src/server.rs`: `get_component_api` calls `get_public_api` before rendering macro/template analysis | Semantic public-API availability/failure demand plus separate authored analysis JSON presentation; preserve genuine absence as null, ingestion/projection failure as error, audit context and props/emits/slots/models/expose plus template/runtime fields; the JSON does not claim to be a resolved type graph | TIF1; `TIF1-AC2`, `TIF1-AC-R1` |
+| C20 | Playground `packages/playground/src/core/compiler.ts`: `applyPublicApiOutputs` calls public and declaration modes during carrier compilation; `packages/playground/src/editor/carrierStore.ts` serves the resulting carriers | Declaration presentation and mappings from semantic roles; preserve separate public/declaration value/absent/projectionFailure outcomes, `tscCode`, `declCode`, `declSourceMap`, cleared failed output and structured diagnostics, and browser carrier/editor synchronization within current host capability | TIF1; `TIF1-AC2`, `TIF1-AC-R1` |
 
 IDX0/IDX0D receive this contract for index identity and contributions: entries
 name the view's existing query identity and observations, and serve candidates,
 not types (`TIF0 TR10`). CEF0, PUB0, CWB0, LRA0 and NCK0 consume the view or
 its status/provenance law for their own contracts. These are future contract
-consumers, not extra current call sites or second owners of `C01`–`C16`.
+consumers, not extra current call sites or second owners of `C01`–`C20`.
 Workbench interactivity, capability promotion, diagnostic algorithms and
 accessibility/runtime/style producers remain their own chartered outcomes.
 
@@ -341,7 +357,7 @@ describe the durable regression, not the case/plan identifiers.
 
 | Case | Input/control | Required outcome / discriminating refusal | Existing evidence to reuse; receiving owner |
 | ---- | ------------- | ------------------------------------------ | ----------------------------------------- |
-| V01 | Every type lane in `F03`–`F09`, `F13`–`F15`, `F27`, including event/slot returns, nested parameters, registry, options/index signatures and public instance | Each resolves through the exact child/decl-slot/role; wrong child basis, composed-parent NodeRef and metadata-owned graph are refused | TypeInfo request/graph contract tests in `verter_protocol`; session output and framework transport equivalence tests; TIF1 |
+| V01 | Every type lane in `F03`–`F09`, `F13`–`F15`, `F17`, `F27`, including event/slot returns, nested parameters, registry, options/index signatures, public instance and a populated resolved JSDoc tag type | Each resolves through the exact child/decl-slot/role; wrong child basis, composed-parent NodeRef and metadata-owned graph are refused, including for the resolved-JSDoc type root and nested arguments | TypeInfo request/graph contract tests in `verter_protocol`; session output and framework transport equivalence tests; TIF1 |
 | V02 | Same request under changed display/compat policy, schema/string-table layout, capture or requester encoding | Equal semantic query identity/facts/cache behavior; presentation bytes may differ. Compat performs no follow-up solving | `compat_one_napi_call_audit`, `packages/component-meta/src/compat/checker.spec.ts`, native projection specs; TIF1 |
 | V03 | Healthy member beside failed member; independent required/default boolean and authored syntax | Preserve known membership, exact sibling and authored splice; failed value unavailable with original causes, not `unknown`/false/empty | Native facts/graph decoder specs and receiving fact contract; TIF1 |
 | V04 | Complete empty, Complete open, Approximate open, optional absence and Unavailable with unknown cause | Closed empty alone proves absence; open domains prove positives; unfamiliar codes survive and never choose status | `component_facts.rs`, native-eval independent-domain case, schema-12/current decoding tests; TIF1 |
@@ -356,21 +372,23 @@ describe the durable regression, not the case/plan identifiers.
 | V13 | CSS custom-property/part link, absent runtime/accessibility observation, style edit with unchanged input type | Link status/basis explicit; external observation cannot change type truth; style link invalidates on its own producer basis | Current style/structure facts for existing names; additional producer cases belong to their own consumers; TIF1 verifies view link isolation |
 | V14 | Single, concurrent scalar and batch full/selective/audited requests on NAPI/WASM/LSP/MCP; genuine absence vs failed publication | Same facts and typed failures; batch order/per-item behavior retained; one view/authority, no null/error conflation | `framework/transport_route_equivalence_tests.rs`, component-meta batch/native specs, custom LSP tests; TIF1 |
 | V15 | Multi-payload emits, nested full-API payload and PropType factory defaults | Parameter optionality, second-parameter structural members and nested value/size/filters/pagination/scope types survive; no display-string oracle | `native-eval.spec.ts`: nested/optional multi-payload and PropType factory-default cases; TIF1 |
-| V16 | Old entrypoints/schema paths after atomic adoption of `C01`–`C16` | Thin projections only where retained; no independent resolver/store/schema/type-graph authority or arbitrary new raw cache access | Retirement rows `D01`–`D07`; TIF1 |
+| V16 | Old entrypoints/schema paths after atomic adoption of `C01`–`C20` | Thin projections only where retained; no independent resolver/store/schema/type-graph authority or arbitrary new raw cache access | Retirement rows `D01`–`D07`; TIF1 |
+| V17 | Macro/declaration JSDoc tag with a populated resolved `Record<string, Foo>` type, duplicate tag names and an imported `Foo`; absent/failed resolved value controls; edit `Foo` while authored `rawType` stays unchanged | Preserve authored description/name/text/rawType/subjectName independently of the resolved graph; exact owning child/basis/decl-slot/tag occurrence and nested roles survive full transport/decoding; reject wrong-child and composed-parent references, retain absent/failure status without text recovery; dependency edit equals fresh | `crates/verter_protocol/src/component_meta.rs`: `resolved_jsdoc_tag_snapshot_conversion_matches_legacy_direct_walk` supplies populated/nested and absent graph controls; `packages/component-meta/src/type-graph-proto-decode.ts` supplies the current decoder boundary; TIF1 adds role/basis/failure/invalidation proof at `TIF1-AC-R1`, `TIF1-AC3` |
+| V18 | CLI stub/declaration batch, mirror API root/IDE sibling, MCP component API, and playground public/declaration modes (`C17`–`C20`), with value, genuine absence and typed projection-failure controls | Preserve each row's declaration/dialect, import, mapping, placement and diagnostic contract at the actual consumer; failure cannot become null/empty success or erase healthy siblings, and consumers cannot acquire a separate semantic authority | `crates/verter_tsc/src/checker.rs`: `public_api_batch_preserves_sibling_success_and_typed_failure`; `packages/typescript-plugin/src/tsc/mirrorHost.spec.ts`; `crates/verter_mcp/src/server.rs`: `component_api_projection_failure_is_structured_and_missing_is_absence`; `packages/playground/src/core/compilerSvelte.spec.ts` and `packages/playground/src/editor/tsServiceProtocol.spec.ts`; TIF1, `TIF1-AC-R1` (CLI batch basis also `TIF1-AC3`) |
 
 ## Acceptance and evidence selection
 
-- **TIF1D-AC1:** `F01`–`F27`, `C01`–`C16` and `D01`–`D07` give each populated
+- **TIF1D-AC1:** `F01`–`F27`, `C01`–`C20` and `D01`–`D07` give each populated
   boundary one production adoption/deletion owner and receiving acceptance.
   UAO0's validator (`UAO0-AC-R1`) receives these tables; it must reject an
   omitted field/consumer/route, conflicting owners, non-production deletion
   owner, or missing acceptance. No validator ships here.
 - **TIF1D-AC2:** the logical schema binds OP10/NodeRef/child bases, provenance,
   independent guarantees and canonical ordering to TIF0 and the current
-  per-fact transport. `V01`–`V08`, `V14`–`V16` carry the concrete cutover proof,
+  per-fact transport. `V01`–`V08`, `V14`–`V18` carry the concrete cutover proof,
   including the three inherited regressions. Existing tests are cited, not
   certified as passes by this document.
-- **TIF1D-AC3:** the invalidation/admission section and `V09`–`V11` specify
+- **TIF1D-AC3:** the invalidation/admission section, `V09`–`V11` and `V17` specify
   incremental equivalence; TIF1 supplies executable proof. This document
   changes no cache or publication path.
 - **TIF1D-AC4:** runtime work, allocation and latency measurement are not
