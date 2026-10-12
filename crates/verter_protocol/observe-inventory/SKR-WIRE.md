@@ -1,5 +1,11 @@
 # Native metadata transport inventory
 
+## verter_type_engine
+
+| item (field, store, hook, counter, trace) | production consumer | classification | lifetime | owner module | gate |
+| --- | --- | --- | --- | --- | --- |
+| Macro argument surface claim | Session normalization preserves closed/open/approximate/unavailable domains before Option adoption | REQUIRED | Existing demand and DTO production scope | project_semantic_dispatch/one_level_surface.rs | always |
+
 ## verter_protocol
 
 | item (field, store, hook, counter, trace) | production consumer | classification | lifetime | owner module | gate |
@@ -20,7 +26,7 @@
 | item (field, store, hook, counter, trace) | production consumer | classification | lifetime | owner module | gate |
 | --- | --- | --- | --- | --- | --- |
 | TypeInfoSurface and MacroSurfaceDtos domain guarantees | Normalization and terminal publication preserve closed/open membership and missing evidence | REQUIRED | Existing surface and request/result owners | typeinfo/surface.rs, typeinfo/surface_resolution.rs, typeinfo/framework_surface | always |
-| Membership and terminal materialization completeness scopes | Publication and encoded-payload admission distinguish independent demands and refuse partial success caching | REQUIRED | Request-local scopes | meta_resolve/projectors/define_shapes.rs, meta_resolve/projectors/output_sink/envelope.rs | always |
+| Terminal materialization completeness scope | Encoded-payload admission refuses partial success caching; domain guarantees come directly from the producer claim | REQUIRED | Request-local scope | meta_resolve/projectors/output_sink/envelope.rs | always |
 | Materialized publication failures and envelope completeness accessor | FFI conversion and payload cache admission preserve unavailable values and execution aborts | REQUIRED | Consumed terminal envelope | meta_resolve/output.rs, meta/output_api.rs | always |
 
 ## verter_ffi

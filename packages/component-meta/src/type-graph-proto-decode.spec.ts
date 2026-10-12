@@ -719,7 +719,7 @@ describe("independent component facts", () => {
     },
   );
 
-  it("propagates an invalid shared node only to dependent value facts", () => {
+  it("propagates an invalid shared node only to dependent value facts", async () => {
     const payload = fixture();
     payload.typeGraph!.nodes[0].kind = {
       case: "array",
@@ -734,6 +734,11 @@ describe("independent component facts", () => {
     expect(result.props[1]?.typeFact?.kind).toBe("complete");
     expect(result.slots[0]?.bindings[0]?.typeFact?.kind).toBe("unavailable");
     expect(result.facts!.events.kind).toBe("complete");
+    const { nativeComponentMetaToComponentMeta } = await import("./native-component-meta.js");
+    const projected = nativeComponentMetaToComponentMeta(result);
+    expect(projected.props.map((prop) => prop.name)).toEqual([result.props[1].name]);
+    expect(projected.slots[0].bindings).toEqual([]);
+    expect(projected.facts!.props.kind).toBe("complete");
   });
 
   it("keeps constrained binders distinct and renders their constraints", async () => {

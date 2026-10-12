@@ -4120,6 +4120,114 @@ fn ffi_component_meta_distinguishes_unresolved_import_from_empty_surface() {
 }
 
 #[test]
+fn native_member_domains_preserve_producer_guarantees() {
+    use prost::Message;
+    for (source, kind, open, names) in [
+        (
+            r#"<script setup lang="ts" generic="T extends { known: string }">defineProps<T>(); defineEmits<{saved: []}>()</script><template><div/></template>"#,
+            1,
+            true,
+            vec!["known"],
+        ),
+        (
+            r#"<script setup lang="ts">import type { Missing } from './absent'; defineProps<Missing>(); defineEmits<{saved: []}>()</script><template><div/></template>"#,
+            3,
+            true,
+            vec![],
+        ),
+        (
+            r#"<script setup lang="ts">import type { Missing } from './absent'; defineProps<{known:string} & Missing>(); defineEmits<{saved: []}>()</script><template><div/></template>"#,
+            2,
+            true,
+            vec!["known"],
+        ),
+        (
+            r#"<script setup lang="ts">defineProps<string>(); defineEmits<{saved: []}>()</script><template><div/></template>"#,
+            1,
+            false,
+            vec![],
+        ),
+    ] {
+        let canonical = "/Domain.vue";
+        let project =
+            host::meta::MetaProject::new(host::VerterHost::new_standalone(Default::default()));
+        project.upsert_base(canonical, source).unwrap();
+        let session = project.open_session().unwrap();
+        let bytes = session
+            .get_component_meta_payload(canonical, |output| {
+                let ffi = super::component_meta_output_to_ffi(output);
+                let json = serde_json::to_value(&ffi).unwrap();
+                assert_eq!(
+                    json["facts"]["props"]["kind"],
+                    match kind {
+                        3 => "unavailable",
+                        2 => "approximate",
+                        _ => "complete",
+                    }
+                );
+                let prop_fact = &json["facts"]["props"];
+                if kind == 3 {
+                    assert!(prop_fact.get("value").is_none());
+                    assert!(!prop_fact["causes"].as_array().unwrap().is_empty());
+                } else {
+                    assert_eq!(prop_fact["open"], open);
+                    assert_eq!(
+                        prop_fact["value"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|entry| entry["name"].as_str().unwrap())
+                            .collect::<Vec<_>>(),
+                        names
+                    );
+                    if !names.is_empty() {
+                        assert_eq!(
+                            prop_fact["value"][0]["hasDefaultFact"],
+                            serde_json::json!({"kind":"complete", "value":false, "open":false})
+                        );
+                    }
+                }
+                assert_eq!(json["facts"]["events"]["kind"], "complete");
+                assert_eq!(json["facts"]["events"]["value"][0]["name"], "saved");
+                verter_protocol::component_meta::encode_component_meta_payload(&ffi)
+            })
+            .unwrap()
+            .unwrap();
+        let payload =
+            verter_protocol::verter::v1::ComponentMetaPayload::decode(bytes.as_slice()).unwrap();
+        let facts = payload.body.unwrap().facts.unwrap();
+        let props = facts.props.unwrap();
+        assert_eq!(props.guarantee.as_ref().unwrap().kind, kind, "{source}");
+        let entries = match props.value {
+            Some(value) => {
+                assert_eq!(value.open, open, "producer owns openness: {source}");
+                value.entries
+            }
+            None => {
+                assert_eq!(kind, 3);
+                assert!(!props.guarantee.unwrap().causes.is_empty());
+                Vec::new()
+            }
+        };
+        let strings = payload.type_graph.unwrap().strings;
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| strings[entry.name_id as usize - 1].as_str())
+                .collect::<Vec<_>>(),
+            names
+        );
+        let events = facts.events.unwrap();
+        assert_eq!(
+            events.guarantee.unwrap().kind,
+            1,
+            "unrelated event domain stays exact: {source}"
+        );
+        assert_eq!(events.value.unwrap().entries.len(), 1);
+    }
+}
+
+#[test]
 fn native_fact_refusal_replay_heals_and_invalidates() {
     use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
     let canonical = "/FactBudget.vue";

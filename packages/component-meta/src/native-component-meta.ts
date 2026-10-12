@@ -835,52 +835,60 @@ export function nativeComponentMetaToComponentMeta(meta: NativeComponentMetaResu
     componentPublicContract: meta.componentPublicContract,
     resultCompleteness: meta.resultCompleteness,
     facts: meta.facts,
-    props: meta.props.map((prop) => ({
-      name: prop.name,
-      type: publishedTypeExprToDescriptor(prop, `prop ${prop.name}`, publicationRegistry),
-      ...(prop.typeExpansion !== undefined ? { typeExpansion: prop.typeExpansion } : {}),
-      required: prop.required,
-      hasDefault: prop.hasDefault,
-      ...compatRawType(prop.terminalDisplay),
-      ...(prop.defaultValue !== undefined ? { default: prop.defaultValue } : {}),
-      ...(prop.description !== undefined ? { description: prop.description } : {}),
-      ...(prop.tags?.length ? { tags: prop.tags } : {}),
-      // Forward-compat coerce — see `NativePropMeta.declaredInMacroTypeArg`
-      // JSDoc above. The field is optional on the native sidecar type
-      // because older native builds (predating the producer fact on
-      // `PropMeta` proto field 10) emit payloads without it; missing is
-      // correctly `false` (matching the "drop unless explicitly
-      // declared" semantics that the Refined policy enforces). This is
-      // legitimate forward-compat.
-      declaredInMacroTypeArg: Boolean(prop.declaredInMacroTypeArg),
-    })),
-    events: meta.events.map((event) => ({
-      name: event.name,
-      payload: publishedTypeExprToDescriptor(
-        { type: event.payload, publication: event.publication },
-        `event ${event.name}`,
-        publicationRegistry,
-      ),
-      ...(event.payloadExpansion !== undefined ? { payloadExpansion: event.payloadExpansion } : {}),
-      hasValidator: false,
-      isDeclared: true,
-      ...(event.rawSignature !== undefined ? { rawSignature: event.rawSignature } : {}),
-      ...(event.description !== undefined ? { description: event.description } : {}),
-      ...(event.tags?.length ? { tags: event.tags } : {}),
-    })),
+    props: meta.props
+      .filter((prop) => prop.typeFact?.kind !== "unavailable")
+      .map((prop) => ({
+        name: prop.name,
+        type: publishedTypeExprToDescriptor(prop, `prop ${prop.name}`, publicationRegistry),
+        ...(prop.typeExpansion !== undefined ? { typeExpansion: prop.typeExpansion } : {}),
+        required: prop.required,
+        hasDefault: prop.hasDefault,
+        ...compatRawType(prop.terminalDisplay),
+        ...(prop.defaultValue !== undefined ? { default: prop.defaultValue } : {}),
+        ...(prop.description !== undefined ? { description: prop.description } : {}),
+        ...(prop.tags?.length ? { tags: prop.tags } : {}),
+        // Forward-compat coerce — see `NativePropMeta.declaredInMacroTypeArg`
+        // JSDoc above. The field is optional on the native sidecar type
+        // because older native builds (predating the producer fact on
+        // `PropMeta` proto field 10) emit payloads without it; missing is
+        // correctly `false` (matching the "drop unless explicitly
+        // declared" semantics that the Refined policy enforces). This is
+        // legitimate forward-compat.
+        declaredInMacroTypeArg: Boolean(prop.declaredInMacroTypeArg),
+      })),
+    events: meta.events
+      .filter((event) => event.typeFact?.kind !== "unavailable")
+      .map((event) => ({
+        name: event.name,
+        payload: publishedTypeExprToDescriptor(
+          { type: event.payload, publication: event.publication },
+          `event ${event.name}`,
+          publicationRegistry,
+        ),
+        ...(event.payloadExpansion !== undefined
+          ? { payloadExpansion: event.payloadExpansion }
+          : {}),
+        hasValidator: false,
+        isDeclared: true,
+        ...(event.rawSignature !== undefined ? { rawSignature: event.rawSignature } : {}),
+        ...(event.description !== undefined ? { description: event.description } : {}),
+        ...(event.tags?.length ? { tags: event.tags } : {}),
+      })),
     slots: meta.slots.map((slot) => ({
       name: slot.name,
       isScoped: slot.isScoped,
-      bindings: slot.bindings.map((binding) => ({
-        name: binding.name,
-        type: publishedTypeExprToDescriptor(
-          binding,
-          `slot binding ${slot.name}.${binding.name}`,
-          publicationRegistry,
-        ),
-        ...(binding.typeExpansion !== undefined ? { typeExpansion: binding.typeExpansion } : {}),
-        ...compatRawType(binding.terminalDisplay),
-      })),
+      bindings: slot.bindings
+        .filter((binding) => binding.typeFact?.kind !== "unavailable")
+        .map((binding) => ({
+          name: binding.name,
+          type: publishedTypeExprToDescriptor(
+            binding,
+            `slot binding ${slot.name}.${binding.name}`,
+            publicationRegistry,
+          ),
+          ...(binding.typeExpansion !== undefined ? { typeExpansion: binding.typeExpansion } : {}),
+          ...compatRawType(binding.terminalDisplay),
+        })),
       isRequired: slot.isRequired,
       ...(slot.returnType !== undefined ? { returnType: slot.returnType } : {}),
       ...(slot.description !== undefined ? { description: slot.description } : {}),
