@@ -1,5 +1,67 @@
 use super::*;
 
+#[tokio::test]
+async fn foreground_sampling_observes_and_excludes_snapshot_drains() {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let documents = Arc::new(crate::documents::DocumentRegistry::new(host));
+    let arrived = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    *documents.snapshot_drain_pause.lock() = Some((arrived.clone(), release.clone()));
+    let pending = Arc::new(DashSet::new());
+    pending.insert("/workspace/App.svelte".to_string());
+    let background_documents = documents.clone();
+    let background_pending = pending.clone();
+    let mut background = AbortTaskOnDrop(tokio::spawn(async move {
+        drain_pending_snapshot_provider_sync(
+            None,
+            &background_documents,
+            &Arc::new(parking_lot::RwLock::new(None)),
+            &DashMap::new(),
+            &background_pending,
+            false,
+            None,
+            None,
+            &crate::external_ts::CarrierTransactionCoordinator::new(),
+        )
+        .await;
+    }));
+    tokio::time::timeout(std::time::Duration::from_secs(1), arrived.notified())
+        .await
+        .expect("the drain must enter its execution barrier");
+    let sampling = documents.snapshot_drain_barrier.write();
+    tokio::pin!(sampling);
+    assert!(futures_util::poll!(&mut sampling).is_pending());
+    assert!(!pending.is_empty(), "the held producer has not finished");
+    release.notify_one();
+    let sampling = sampling.await;
+    (&mut background.0)
+        .await
+        .expect("background drain finished");
+    assert!(pending.is_empty(), "sampling follows producer completion");
+
+    pending.insert("/workspace/App.svelte".to_string());
+    let workspace = Arc::new(parking_lot::RwLock::new(None));
+    let states = DashMap::new();
+    let coordinator = crate::external_ts::CarrierTransactionCoordinator::new();
+    let next_drain = drain_pending_snapshot_provider_sync(
+        None,
+        &documents,
+        &workspace,
+        &states,
+        &pending,
+        false,
+        None,
+        None,
+        &coordinator,
+    );
+    tokio::pin!(next_drain);
+    assert!(futures_util::poll!(&mut next_drain).is_pending());
+    assert!(!pending.is_empty(), "sampling excludes later producers");
+    drop(sampling);
+    next_drain.await;
+    assert!(pending.is_empty());
+}
+
 #[test]
 fn child_contract_completion_adapter_preserves_event_and_slot_order() {
     use verter_session::framework::{
@@ -2448,8 +2510,8 @@ async fn svelte_progressive_component_completion_uses_committed_child_contract_f
             || panic!("{provider_label}: the last dispatched diagnostics must finish"),
         )
         .await;
-    // The provider drain and the edit-debounced import driver are not the
-    // coordinator. Stop the drain, then hold every case lane across the
+    // The outbound writer and the edit-debounced import driver are not the
+    // coordinator. Stop the writer, then hold every case lane across the
     // completion snapshot (same as a direct contract-miss completion) so a
     // trailing pass cannot project or compile between the count and the
     // assertion. Foreground projection still increments the counter.
@@ -2471,28 +2533,10 @@ async fn svelte_progressive_component_completion_uses_committed_child_contract_f
     for lane in &publication_lanes {
         publication_guards.push(lane.lock().await);
     }
-    // A drain pass already inside `ensure_ide_compiled` still bumps the host
-    // counter after abort. Snapshot only once that pass, and any projection
-    // it owed, has landed.
-    let mut quiet_since = tokio::time::Instant::now();
-    let quiet_deadline = quiet_since + std::time::Duration::from_secs(5);
-    let mut compile_seen = server.documents.host().metrics_snapshot().compile_requests;
-    let mut projection_seen = server.child_public_contract_projection_count_for_test();
-    while quiet_since.elapsed() < std::time::Duration::from_millis(200) {
-        if tokio::time::Instant::now() >= quiet_deadline {
-            panic!("{provider_label}: background compile/projection did not go quiet before completion");
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        let compile_now = server.documents.host().metrics_snapshot().compile_requests;
-        let projection_now = server.child_public_contract_projection_count_for_test();
-        let background_idle = server.pending_snapshot_provider_sync.is_empty()
-            && !server.sync_coordinator.workspace_scan_in_progress();
-        if compile_now != compile_seen || projection_now != projection_seen || !background_idle {
-            compile_seen = compile_now;
-            projection_seen = projection_now;
-            quiet_since = tokio::time::Instant::now();
-        }
-    }
+    // Observe every running snapshot drain finish, then exclude successor
+    // drains until all foreground samples are complete. This also fences
+    // synchronous block-in-place compilation that task abort cannot stop.
+    let _snapshot_drains = server.documents.snapshot_drain_barrier.write().await;
     for case in &cases {
         let (label, route, child_state) = (case.label, case.route, case.child_state);
         let app_uri = workspace_uri(&workspace_id, &case.app_path);

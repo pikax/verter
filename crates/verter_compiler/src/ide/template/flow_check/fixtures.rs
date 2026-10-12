@@ -845,6 +845,8 @@ pub fn semantic_suite() -> Vec<Fixture> {
 }
 
 /// The chain lengths and nesting depths of the linear-representation matrix.
+/// Live provider tests publish every entry and require exact diagnostics.
+/// Operation counters in [`super::growth`] prove those sizes stay linear.
 pub const MATRIX_SIZES: [usize; 4] = [128, 256, 512, 1024];
 
 /// Counter-based growth probes retain three doublings, nested chains and

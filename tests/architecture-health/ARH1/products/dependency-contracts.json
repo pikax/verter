@@ -1260,6 +1260,7 @@
           "crates/verter_session/src/meta_resolve/projectors/mod.rs",
           "crates/verter_session/src/meta_resolve/projectors/options.rs",
           "crates/verter_session/src/meta_resolve/projectors/output_sink.rs",
+          "crates/verter_session/src/meta_resolve/projectors/output_sink/envelope.rs",
           "crates/verter_session/src/meta_resolve/projectors/output_sink/published_finalize.rs",
           "crates/verter_session/src/meta_resolve/projectors/output_sink_tests.rs",
           "crates/verter_session/src/meta_resolve/projectors/props.rs",

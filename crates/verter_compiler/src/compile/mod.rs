@@ -2436,7 +2436,7 @@ fn compile_inner(
 /// production `CodegenOptions`/`VerterCompileOptions`/`compile` names
 /// with these via an explicit `use ... as` import (Rust's ordinary
 /// glob-shadowing rule), so individual test bodies need no changes.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[allow(dead_code)] // compatibility-shape fields/methods not every test file exercises
 pub(crate) mod legacy_test_support {
     use super::*;

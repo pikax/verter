@@ -106,6 +106,7 @@ pub enum GraphNode {
     },
     Infer {
         name: u32,
+        constraint: u32,
     },
     Rest {
         inner: u32,
@@ -1047,26 +1048,13 @@ impl GraphBuilder {
                     raw: self.string_id(&raw),
                 }
             }
-            TypeExpr::Infer {
-                name,
-                constraint: None,
-            } => GraphNode::Infer {
+            TypeExpr::Infer { name, constraint } => GraphNode::Infer {
                 name: self.string_id(name),
+                constraint: constraint
+                    .as_ref()
+                    .map(|value| self.node_id(value))
+                    .unwrap_or(0),
             },
-            // The component-meta graph's infer node carries no constraint;
-            // a constrained declaration is the opaque `Unknown` wire node
-            // with its display text (never an unconstrained `infer`).
-            TypeExpr::Infer {
-                constraint: Some(_),
-                ..
-            } => {
-                let raw = verter_type_expr::render_type_expr_display(expr)
-                    .map(|rendered| rendered.text)
-                    .unwrap_or_else(|_| String::from("infer"));
-                GraphNode::Unknown {
-                    raw: self.string_id(&raw),
-                }
-            }
             TypeExpr::Rest(inner) => GraphNode::Rest {
                 inner: self.node_id(inner),
             },
@@ -1517,7 +1505,10 @@ fn remap_snapshot_node(
             GraphNode::Parenthesized { inner: nid(*inner) }
         }
         PersistedGraphNode::Unknown { raw } => GraphNode::Unknown { raw: sid(*raw) },
-        PersistedGraphNode::Infer { name } => GraphNode::Infer { name: sid(*name) },
+        PersistedGraphNode::Infer { name, constraint } => GraphNode::Infer {
+            name: sid(*name),
+            constraint: nid(*constraint),
+        },
         PersistedGraphNode::Rest { inner } => GraphNode::Rest { inner: nid(*inner) },
         PersistedGraphNode::RecursiveRef {
             name,

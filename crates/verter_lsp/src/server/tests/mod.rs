@@ -4127,6 +4127,7 @@ mod formatting;
 mod general;
 mod hover;
 mod navigation;
+mod nextest_policy;
 mod synchronization;
 mod transport;
 mod workspace;

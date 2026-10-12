@@ -601,12 +601,26 @@ impl<'a> ConnectedDemandLedger<'a> {
     /// any: a comparison the computation on top recorded itself.
     #[inline(always)]
     pub(crate) fn accrue_comparison(&self) {
+        self.accrue_comparisons(1);
+    }
+
+    /// Record a batch of proven structured comparisons without opening a
+    /// query or allocating a receipt for each rejected alternative.
+    pub(crate) fn accrue_comparisons(&self, comparisons: u32) {
         if !self.scope_open.get() {
             return;
         }
         if let Some(scope) = self.scopes.borrow_mut().last_mut() {
-            scope.exclusive.comparisons = scope.exclusive.comparisons.saturating_add(1);
+            scope.exclusive.comparisons = scope
+                .exclusive
+                .comparisons
+                .saturating_add(u64::from(comparisons));
         }
+    }
+
+    /// Construction room for a batch, before committing any reservation.
+    pub(crate) fn construction_bytes_available(&self) -> usize {
+        self.bytes_limit.get().saturating_sub(self.bytes_used.get())
     }
 
     /// Add `work` units and `bytes` to the open recording, if any: the cost

@@ -1,3 +1,4 @@
+import type { NativeComponentFacts } from "./native-component-meta.js";
 /**
  * Component metadata types extracted from Vue SFCs.
  */
@@ -23,10 +24,11 @@ export interface ComponentMeta {
    * Whether this metadata is the component's FULL surface, or a partial one
    * whose resolution degraded. An empty-because-degraded result is otherwise
    * indistinguishable from an empty-because-nothing-is-declared result. A
-   * `partial` result never carries `componentPublicContract.exactness ===
-   * "exact"`.
+   * summary does not determine the guarantee of an independently published fact.
    */
   resultCompleteness: NativeResultCompleteness;
+  /** Typed native facts; compatibility arrays below are derived projections. */
+  facts?: NativeComponentFacts;
   /** Props declared via `defineProps` or Options API `props`. */
   props: PropMeta[];
   /** Events declared via `defineEmits` or Options API `emits`. */
@@ -135,10 +137,16 @@ export interface PropMeta {
   type: TypeDescriptor;
   /** Native expansion exactness/status for the prop type, when available. */
   typeExpansion?: TypeExpansionMeta;
-  /** Whether the prop is required (no default, no `?`). */
-  required: boolean;
-  /** Whether the prop has a default value (via `withDefaults` or Options API). */
-  hasDefault: boolean;
+  /**
+   * Whether the prop is required (no default, no `?`).
+   * `undefined` means the producer published no boolean; it is not false.
+   */
+  required: boolean | undefined;
+  /**
+   * Whether the prop has a default value (via `withDefaults` or Options API).
+   * `undefined` means the producer published no boolean; it is not false.
+   */
+  hasDefault: boolean | undefined;
   /** Original TS type annotation string (e.g. `"string | number"`). */
   rawType?: string;
   /** Vue runtime constructor names (e.g. `["String", "Number"]`). */

@@ -453,6 +453,7 @@ const CHECKER_DEEPLY_NESTED_DEPTH: usize = 3;
 thread_local! {
     /// How many relations this thread reduced structurally; test-only.
     static RELATION_REDUCTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static RELATION_UNION_ARM_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// The most obligation frames this thread held open at once; test-only.
     static MOST_OPEN_FRAMES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
@@ -1320,6 +1321,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         RELATION_REDUCTIONS.with(std::cell::Cell::get)
     }
 
+    /// Union arm reads during flattening and property-index preparation.
+    /// Separate from logical work: memoized queries can hide repeated scans.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn relation_union_arm_visits_for_tests() -> usize {
+        RELATION_UNION_ARM_VISITS.with(std::cell::Cell::get)
+    }
+
     /// Whether relating `key` enters the checker's `recursiveTypeRelatedTo`
     /// and so counts toward its recursion depth: a pair of simple types
     /// (primitives, literals, enum literals) is decided by
@@ -1426,6 +1434,25 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         RelationStep::NotAssignable
     }
 
+    /// Refuse a comparison check, retaining its root subjects and resource
+    /// partiality rather than publishing an ordinary negative relation.
+    fn refuse_relation_comparisons(
+        &self,
+        chain: &super::dispatch_txn::RelationChainPosition,
+    ) -> RelationResult {
+        let subjects = self.relation_check_subjects(chain.base);
+        self.overflow_relation_chain(chain);
+        self.fold_local_partial_completeness(
+            crate::semantic_query::PartialReasonSet::OPERATION_BUDGET,
+        );
+        if let Some((source, target)) = subjects {
+            self.deposit_operation_refusals([
+                &super::walk::ShallowDiagnostic::RelationTooComplex { source, target },
+            ]);
+        }
+        RelationResult::NotAssignable
+    }
+
     /// The checker's `recursiveTypeRelatedTo` entry for the frame on top of
     /// the stack, once its operands are unwrapped to `concrete`: a pair of
     /// simple types is not an entry. A structured pair counts toward the
@@ -1488,17 +1515,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     == crate::semantic_query::CheckerDiagnosticCode::RelationTooComplex,
                 "a relation check is refused only for its comparisons"
             );
-            let subjects = self.relation_check_subjects(chain.base);
-            self.overflow_relation_chain(&chain);
-            self.fold_local_partial_completeness(
-                crate::semantic_query::PartialReasonSet::OPERATION_BUDGET,
-            );
-            if let Some((source, target)) = subjects {
-                self.deposit_operation_refusals([
-                    &super::walk::ShallowDiagnostic::RelationTooComplex { source, target },
-                ]);
-            }
-            return Some(RelationResult::NotAssignable);
+            return Some(self.refuse_relation_comparisons(&chain));
         }
         self.connected_demand.accrue_comparison();
         // The pair's frame, memo entry and proof are reserved before the
@@ -1735,6 +1752,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let mut pending: Vec<SemanticNodeId> = members.iter().rev().copied().collect();
         let mut kept: Vec<SemanticNodeId> = Vec::with_capacity(members.len());
         while let Some(member) = pending.pop() {
+            #[cfg(any(test, feature = "test-support"))]
+            RELATION_UNION_ARM_VISITS.with(|count| count.set(count.get() + 1));
             if let Some(inner) = names_union_alias(member) {
                 flattened.get_or_insert_with(Vec::new);
                 pending.extend(inner.iter().rev().copied());
@@ -8622,6 +8641,423 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
+    /// Relate closed, single-property scalar object unions through a property
+    /// index. Only missing-property negatives are batched; matching keys still
+    /// enter the normal member authority, in authored order. Inference,
+    /// freshness, signatures, index signatures and deferred values retain the
+    /// general relation path.
+    fn relate_indexed_object_unions(
+        &self,
+        sources: &[SemanticNodeId],
+        target: SemanticNodeId,
+        bindings: &mut Vec<InferBinding>,
+    ) -> Option<RelationResult> {
+        if self.relation_session_active()
+            || self.current_relation_kind() != RelationKind::Assignable
+        {
+            return None;
+        }
+        if self
+            .dispatch_txn
+            .borrow()
+            .reentry()
+            .nearest_relate()
+            .is_some_and(|(key, _)| {
+                key.source_freshness != crate::semantic_query::FreshnessKey::Regular
+            })
+        {
+            return None;
+        }
+        let graph = self.graph();
+        let key_of = |node, target_arm| {
+            #[cfg(any(test, feature = "test-support"))]
+            RELATION_UNION_ARM_VISITS.with(|count| count.set(count.get() + 1));
+            let data = graph.node_data(node)?;
+            let SemanticNodeData::Object(surface) = data.as_ref() else {
+                return None;
+            };
+            let [member] = surface.positive_members() else {
+                return None;
+            };
+            if member.optional
+                || member.method_kind.is_some()
+                || !member.visibility.is_public()
+                || !surface.index_signatures.is_empty()
+                || surface.closed().has_index_signature()
+                || !surface.call_signatures.is_empty()
+                || !surface.construct_signatures.is_empty()
+                || !matches!(
+                    graph.node_data(member.value).as_deref(),
+                    Some(
+                        SemanticNodeData::Literal(_)
+                            | SemanticNodeData::Primitive(
+                                PrimitiveKind::String
+                                    | PrimitiveKind::Number
+                                    | PrimitiveKind::Boolean
+                                    | PrimitiveKind::BigInt
+                                    | PrimitiveKind::Symbol
+                            )
+                    )
+                )
+            {
+                return None;
+            }
+            // Unit-valued targets can collectively cover a broad scalar
+            // source through discriminant splitting, even when no arm takes
+            // it whole. That proof remains with the general union path.
+            if target_arm
+                && matches!(
+                    graph.node_data(member.value).as_deref(),
+                    Some(SemanticNodeData::Literal(_))
+                )
+            {
+                return None;
+            }
+            let key = member.key.cloned_known()?;
+            Some(match key.element_access_equivalent() {
+                Some(numeric @ crate::semantic_query::PropertyKey::Number(_))
+                    if matches!(key, crate::semantic_query::PropertyKey::String(_)) =>
+                {
+                    numeric
+                }
+                _ => key,
+            })
+        };
+        let target_members = match graph.node_data(target)?.as_ref() {
+            SemanticNodeData::Union(members) => members.members_arc(),
+            _ => return None,
+        };
+        let targets = self.relation_union_members(&target_members);
+        // Preparing the index spends work ahead of authored alternatives.
+        // When that work could compete with a checker refusal, let the
+        // ordinary worklist preserve the order of both boundaries (including
+        // recovery after a refused alternative). Require room for preparation,
+        // source/matching visits and the remaining pairs' work before reading
+        // the apparent Object surface or charging any index preparation.
+        let chain = self.current_relation_chain()?;
+        let comparison_room = self
+            .dispatch_txn
+            .borrow()
+            .relation
+            .chain_comparisons
+            .iter()
+            .find(|(base, _)| *base == chain.base)
+            .map(|(_, comparisons)| comparisons.remaining())?;
+        // Each source tries at most every target plus its scalar value.
+        // If those comparisons cannot reach a checker refusal, keep the
+        // index's existing work accounting even under a tight work allowance;
+        // changing paths there can change a partly warm cost receipt.
+        let possible_comparisons = sources
+            .len()
+            .saturating_mul(targets.len().saturating_add(1));
+        if comparison_room as usize <= possible_comparisons {
+            let preparation_room = sources
+                .len()
+                .saturating_mul(3)
+                .saturating_add(targets.len())
+                .saturating_add(
+                    (comparison_room as usize)
+                        .saturating_add(1)
+                        .saturating_mul(2),
+                );
+            if self.connected_demand.work_available().ok()? < preparation_room {
+                return None;
+            }
+        }
+        let source_keys = sources
+            .iter()
+            .copied()
+            .map(|node| key_of(node, false))
+            .collect::<Option<Vec<_>>>()?;
+        let target_keys = targets
+            .iter()
+            .copied()
+            .map(|node| key_of(node, true))
+            .collect::<Option<Vec<_>>>()?;
+        // Repeated nodes can serve already-paid pair receipts. Leave their
+        // accounting to the ordinary path rather than count them twice.
+        if sources.iter().copied().collect::<FxHashSet<_>>().len() != sources.len()
+            || targets.iter().copied().collect::<FxHashSet<_>>().len() != targets.len()
+            || targets.is_empty()
+        {
+            return None;
+        }
+        let positional =
+            sources.len() >= targets.len() && sources.len().is_multiple_of(targets.len());
+        if positional
+            && source_keys
+                .iter()
+                .enumerate()
+                .all(|(position, key)| *key == target_keys[position % targets.len()])
+        {
+            return None;
+        }
+        // Missing own properties may be supplied by the project's apparent
+        // Object interface. Read it once per canonical context, and keep any
+        // such target on the ordinary property authority.
+        // An absent global returns before any query entry; a published global
+        // costs one query-entry unit per negative pair. Mixed contexts keep
+        // the general path so a batch never charges the wrong entry cost.
+        let default_canonical = self.wrapper_demand_canonical();
+        let mut apparent_keys: FxHashMap<
+            Arc<str>,
+            (FxHashSet<crate::semantic_query::PropertyKey>, usize),
+        > = FxHashMap::default();
+        let mut pair_units = None;
+        for (&target, key) in targets.iter().zip(&target_keys) {
+            #[cfg(any(test, feature = "test-support"))]
+            RELATION_UNION_ARM_VISITS.with(|count| count.set(count.get() + 1));
+            let data = graph.node_data(target)?;
+            let SemanticNodeData::Object(surface) = data.as_ref() else {
+                return None;
+            };
+            let canonical = default_canonical
+                .clone()
+                .or_else(|| surface.positive_members()[0].declaration_origin.clone());
+            let Some(canonical) = canonical else {
+                if pair_units.is_some_and(|units| units != 1) {
+                    return None;
+                }
+                pair_units = Some(1);
+                continue;
+            };
+            if !apparent_keys.contains_key(&canonical) {
+                let keys = match self.global_wrapper_surface("Object", &[], canonical.as_ref()) {
+                    super::apparent_type::GlobalWrapper::Absent => (FxHashSet::default(), 1),
+                    super::apparent_type::GlobalWrapper::Unsettled => return None,
+                    super::apparent_type::GlobalWrapper::Surface(node) => {
+                        let data = graph.node_data(node)?;
+                        let SemanticNodeData::Object(view) = data.as_ref() else {
+                            return None;
+                        };
+                        let keys = view
+                            .positive_members()
+                            .iter()
+                            .filter_map(|member| member.key.cloned_known())
+                            .map(|key| match key.element_access_equivalent() {
+                                Some(numeric @ crate::semantic_query::PropertyKey::Number(_))
+                                    if matches!(
+                                        key,
+                                        crate::semantic_query::PropertyKey::String(_)
+                                    ) =>
+                                {
+                                    numeric
+                                }
+                                _ => key,
+                            })
+                            .collect();
+                        (keys, 2)
+                    }
+                };
+                apparent_keys.insert(canonical.clone(), keys);
+            }
+            let (keys, units) = apparent_keys.get(&canonical)?;
+            if keys.contains(key) || pair_units.is_some_and(|previous| previous != *units) {
+                return None;
+            }
+            pair_units = Some(*units);
+        }
+        let pair_units = pair_units?;
+        if !self.charge_relation_work((sources.len() + targets.len()) as u64) {
+            return Some(RelationResult::Unknown);
+        }
+        let mut index: FxHashMap<_, Vec<usize>> = FxHashMap::default();
+        for (position, key) in target_keys.iter().enumerate() {
+            index.entry(key).or_default().push(position);
+        }
+        for (source_position, (&source, key)) in sources.iter().zip(&source_keys).enumerate() {
+            if !self.charge_relation_work(1) {
+                return Some(RelationResult::Unknown);
+            }
+            let mut already_rejected = None;
+            if positional {
+                let position = source_position % targets.len();
+                match self.relate_member(
+                    source,
+                    targets[position],
+                    bindings,
+                    InferPosition::Covariant,
+                ) {
+                    RelationResult::Assignable { .. } => continue,
+                    RelationResult::NotAssignable if target_keys[position] != *key => {
+                        already_rejected = Some(position)
+                    }
+                    _ => {}
+                }
+            }
+            let mut next = 0;
+            let mut held = false;
+            let mut unknown = false;
+            for &position in index.get(key).into_iter().flatten() {
+                if let Some(result) =
+                    self.reject_missing_property_range(next, position, already_rejected, pair_units)
+                {
+                    return Some(result);
+                }
+                if !self.charge_relation_work(1) {
+                    return Some(RelationResult::Unknown);
+                }
+                match self.relate_union_arm_after_excess_prepass(
+                    source,
+                    targets[position],
+                    bindings,
+                    InferPosition::Covariant,
+                ) {
+                    RelationResult::Assignable { .. } => {
+                        held = true;
+                        break;
+                    }
+                    RelationResult::Unknown => unknown = true,
+                    RelationResult::NotAssignable => {}
+                }
+                next = position + 1;
+            }
+            if !held {
+                if let Some(result) = self.reject_missing_property_range(
+                    next,
+                    targets.len(),
+                    already_rejected,
+                    pair_units,
+                ) {
+                    return Some(result);
+                }
+                return Some(if unknown {
+                    RelationResult::Unknown
+                } else {
+                    RelationResult::NotAssignable
+                });
+            }
+        }
+        Some(assignable(bindings))
+    }
+
+    /// Account for an authored run of missing-property alternatives. A pair
+    /// already tried positionally only pays the alternative visit; all others
+    /// retain their logical query-entry, comparison and construction charges.
+    fn reject_missing_property_range(
+        &self,
+        start: usize,
+        end: usize,
+        positional: Option<usize>,
+        pair_units: usize,
+    ) -> Option<RelationResult> {
+        if let Some(position) = positional.filter(|position| (start..end).contains(position)) {
+            if let Some(result) = self.reject_missing_property_pairs(position - start, pair_units) {
+                return Some(result);
+            }
+            if !self.charge_relation_work(1) {
+                return Some(RelationResult::Unknown);
+            }
+            return self.reject_missing_property_pairs(end - position - 1, pair_units);
+        }
+        self.reject_missing_property_pairs(end - start, pair_units)
+    }
+
+    /// Batch a proven negative without allocating per-pair query state. Stop
+    /// at the first operational or checker boundary, with its original typed
+    /// refusal. The parent's receipt owns the batched comparison footprint.
+    fn reject_missing_property_pairs(
+        &self,
+        count: usize,
+        pair_units: usize,
+    ) -> Option<RelationResult> {
+        if count == 0 {
+            return None;
+        }
+        let chain = self
+            .current_relation_chain()
+            .expect("a union comparison belongs to an open relation chain");
+        if chain.overflowed || chain.depth >= CHECKER_RELATION_DEPTH_LIMIT {
+            self.overflow_relation_chain(&chain);
+            return Some(RelationResult::NotAssignable);
+        }
+        let comparison_room = self
+            .dispatch_txn
+            .borrow()
+            .relation
+            .chain_comparisons
+            .iter()
+            .find(|(base, _)| *base == chain.base)
+            .map(|(_, comparisons)| comparisons.remaining())
+            .expect("the open relation chain owns a comparison ledger");
+        let work_room = match self.connected_demand.work_available() {
+            Ok(room) => room,
+            Err(_) => {
+                self.note_relation_budget_exceeded(u64::from(self.connected_trip_limit()));
+                return Some(RelationResult::Unknown);
+            }
+        };
+        let pair_bytes = super::connected_demand::RELATION_PAIR_BYTES;
+        let admitted = count
+            .min(comparison_room as usize)
+            .min(work_room / pair_units)
+            .min(self.connected_demand.construction_bytes_available() / pair_bytes);
+        if !self.charge_relation_work((pair_units * admitted) as u64) {
+            return Some(RelationResult::Unknown);
+        }
+        {
+            let mut txn = self.dispatch_txn.borrow_mut();
+            if let Some((_, comparisons)) = txn
+                .relation
+                .chain_comparisons
+                .iter_mut()
+                .find(|(base, _)| *base == chain.base)
+            {
+                comparisons.record_replayed(admitted as u32);
+            }
+            if let Some(top) = txn
+                .reentry()
+                .depth()
+                .checked_sub(1)
+                .and_then(|top| txn.reentry_mut().frame_mut_for_update(top))
+                .and_then(super::dispatch_txn::ObligationFrame::relation_mut)
+            {
+                top.chain.recursion.reached = top.chain.recursion.reached.max(chain.depth + 1);
+                top.chain.recursion.frames =
+                    top.chain.recursion.frames.saturating_add(admitted as u32);
+            }
+        }
+        self.connected_demand.accrue_comparisons(admitted as u32);
+        if self
+            .connected_demand
+            .reserve_bytes(admitted * pair_bytes)
+            .is_err()
+        {
+            self.note_relation_budget_exceeded(u64::from(self.connected_trip_limit()));
+            return Some(RelationResult::Unknown);
+        }
+        if admitted == count {
+            return None;
+        }
+        // The next alternative enters before comparison admission; its
+        // apparent Object read enters only after that pair is admitted.
+        if !self.charge_relation_work(1) {
+            return Some(RelationResult::Unknown);
+        }
+        if admitted == comparison_room as usize {
+            return Some(self.refuse_relation_comparisons(&chain));
+        }
+        self.connected_demand.accrue_comparison();
+        if let Some((_, comparisons)) = self
+            .dispatch_txn
+            .borrow_mut()
+            .relation
+            .chain_comparisons
+            .iter_mut()
+            .find(|(base, _)| *base == chain.base)
+        {
+            comparisons.record_replayed(1);
+        }
+        if self.connected_demand.reserve_bytes(pair_bytes).is_err() {
+            self.note_relation_budget_exceeded(u64::from(self.connected_trip_limit()));
+            return Some(RelationResult::Unknown);
+        }
+        if pair_units == 2 && !self.charge_relation_work(1) {
+            return Some(RelationResult::Unknown);
+        }
+        unreachable!("a partial batch must stop at its work, bytes or comparison boundary")
+    }
+
     /// A source against a union target: some member takes it whole, or an
     /// object source splits on its discriminants
     /// (`typeRelatedToDiscriminatedType`).
@@ -12344,6 +12780,12 @@ trait RelationDemandDriver {
         target_data: &SemanticNodeData,
         bindings: &[InferBinding],
     ) -> Option<RelationResult>;
+    fn relate_indexed_object_unions(
+        &self,
+        sources: &[SemanticNodeId],
+        target: SemanticNodeId,
+        bindings: &mut Vec<InferBinding>,
+    ) -> Option<RelationResult>;
     fn relate_intersection_source(
         &self,
         source: SemanticNodeId,
@@ -12618,6 +13060,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> RelationDemandDriver
             target_data,
             bindings,
         )
+    }
+    fn relate_indexed_object_unions(
+        &self,
+        sources: &[SemanticNodeId],
+        target: SemanticNodeId,
+        bindings: &mut Vec<InferBinding>,
+    ) -> Option<RelationResult> {
+        ProjectSemanticDispatch::relate_indexed_object_unions(self, sources, target, bindings)
     }
     fn relate_intersection_source(
         &self,
@@ -13008,6 +13458,15 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
     ) -> Option<RelationResult> {
         self.driver
             .relate_global_function_carrier(source_data, target_data, bindings)
+    }
+    fn relate_indexed_object_unions(
+        &self,
+        sources: &[SemanticNodeId],
+        target: SemanticNodeId,
+        bindings: &mut Vec<InferBinding>,
+    ) -> Option<RelationResult> {
+        self.driver
+            .relate_indexed_object_unions(sources, target, bindings)
     }
     fn relate_intersection_source(
         &self,
@@ -14406,6 +14865,11 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
             // entry of its own; against any other target each member is
             // an `isRelatedTo` of its own (`eachTypeRelatedToType`).
             if target_is_union {
+                if let Some(result) = self.relate_indexed_object_unions(&members, target, bindings)
+                {
+                    results.push(result);
+                    return;
+                }
                 if let Some(positions) = self.positional_union_targets(&members, target) {
                     distribute_positionally(work, results, &members, &positions, target);
                     return;

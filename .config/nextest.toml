@@ -32,15 +32,28 @@ slow-timeout = { period = "10s", terminate-after = 2 }
 # Live provider tests drive a real tsgo/tsserver child and carry their own
 # in-test deadlines (up to 230s); CI runs them in their own lanes with cargo
 # test. Locally they keep the 5-minute hang backstop.
+# Use the structural provider CI selectors for these two packages, checked by
+# the compiled LSP nextest policy test. A mock's configured engine kind is not
+# live provider ownership; mock child-contract completions keep the base watchdog.
 [[profile.default.overrides]]
-filter = 'test(/tsserver|tsgo/) & (package(verter_lsp) | package(verter_type_runtime))'
+filter = '''
+  test(/tsserver|tsgo/) & (
+  (package(verter_lsp) & test(/^real_provider_tests::.*_tsserver$/)) |
+  (package(verter_lsp) & test(/^tsserver::/)) |
+  (package(verter_lsp) & test(/^cases::tsserver_e2e_generated_outputs::/)) |
+  (package(verter_lsp) & (test(=cases::quoted_prop_consumer_mistype_live::quoted_prop_consumer_mistype_surfaces_ts2322_tsserver) | test(=server::server_tests::completion::completion_with_real_tsserver_returns_fixture_vfor_member_access_properties) | test(=server::server_tests::completion::completion_with_real_tsserver_recovers_fixture_vfor_member_access_immediately_after_open) | test(=server::server_tests::completion::completion_with_real_tsserver_recovers_fixture_vfor_member_access_on_dot_trigger_immediately_after_open) | test(=server::server_tests::completion::completion_with_real_tsserver_recovers_when_current_file_sync_was_missed) | test(=server::server_tests::synchronization::real_tsserver_slot_member_access_stays_typed_after_opening_child_and_parent) | test(=type_provider::lazy_managed_tests::failed_activation_replays_real_vue_and_svelte_carriers_before_typed_queries))) |
+  (package(verter_type_runtime) & test(/^tsserver::/)) |
+  (package(verter_type_runtime) & (test(=provider_hub::hub_tests::failed_respawn_retries_within_budget_and_recovers))) |
+  (package(verter_lsp) & test(/^real_provider_tests::.*_tsgo$/)) |
+  (package(verter_lsp) & test(/^tsgo::/)) |
+  (package(verter_lsp) & test(/^cases::tsgo_virtual_membership::/)) |
+  (package(verter_lsp) & (test(=cases::quoted_prop_consumer_mistype_live::quoted_prop_consumer_mistype_surfaces_ts2322_tsgo) | test(=type_provider::lazy_managed_tests::lazy_real_tsgo_quick_info_matches_the_eager_file_lifecycle))) |
+  (package(verter_type_runtime) & test(/^tsgo::/)) |
+  (package(verter_type_runtime) & test(/^cases::owned_provider_live::/)) |
+  (package(verter_type_runtime) & test(/^cases::owned_provider_carrier_resolution::/))
+  )
+'''
 slow-timeout = { period = "60s", terminate-after = 5 }
-
-# Predates the gate: these rows exercise the full checker comparison allowance
-# and take minutes in a debug build. Their fix makes reversed unions linear.
-[[profile.default.overrides]]
-filter = 'test(reversed_object_unions_reach_the_checker_answer_)'
-slow-timeout = { period = "60s", terminate-after = 15 }
 
 # Known slow tests (CI, 2026-10-12): over 10s each, so over the speed target.
 # Each has a fix task; a test leaves this list when its fix lands. Never add to it.
@@ -55,7 +68,6 @@ filter = '''
   (package(verter_session) & test(=cases::corpus_audit_tests::chunk_004::corpus_audit_chunk_004_produces_audit_records_or_documents_skips)) |
   (package(verter_compiler) & test(=ide::template::flow_check::tests::chains_and_nested_scopes_grow_linearly)) |
   (package(verter_compiler) & test(=ide::template::flow_check::tests::callback_count_scales_without_path_expansion)) |
-  (package(verter_session) & test(=project_semantic_dispatch_tests::cost_receipt_tests::cold_query_entries_fit_within_the_checker_relation_envelope)) |
   (package(verter_compiler) & test(=ide::template::flow_tests::component_functions_read_one_flow_of_every_branch)) |
   (package(verter_session) & test(=project_semantic_dispatch_tests::augmentation_scale_tests::merged_interface_indexed_access_work_is_linear)) |
   (package(verter_session) & test(=project_semantic_dispatch_tests::augmentation_scale_tests::merged_interface_indexed_access_keeps_every_contributor)) |
@@ -78,10 +90,6 @@ slow-timeout = { period = "10s", terminate-after = 2 }
 filter = 'package(verter_session) & (test(publication_surfaces_publish_and_survive_renames_on_both_claimed_engines) | test(configured_project_opening_classifies_linear_members) | test(det_05_partial_resident_cache) | test(backend_projection_checks_clean_on_both_claimed_engines) | test(query_retention_refusal_preserves_delivery_validation_and_lowering) | test(projected_carrier_corruption_is_caught_on_both_claimed_engines) | test(lib_awaited_tail_runs_answer_past_the_checker_limit_and_stop_at_verters_budget))'
 slow-timeout = { period = "10s", terminate-after = 2 }
 
-[[profile.ci.overrides]]
-filter = 'test(reversed_object_unions_reach_the_checker_answer_)'
-slow-timeout = { period = "60s", terminate-after = 15 }
-
 # Known slow tests (CI, 2026-10-12): over 10s each, so over the speed target.
 # Each has a fix task; a test leaves this list when its fix lands. Never add to it.
 [[profile.ci.overrides]]
@@ -95,7 +103,6 @@ filter = '''
   (package(verter_session) & test(=cases::corpus_audit_tests::chunk_004::corpus_audit_chunk_004_produces_audit_records_or_documents_skips)) |
   (package(verter_compiler) & test(=ide::template::flow_check::tests::chains_and_nested_scopes_grow_linearly)) |
   (package(verter_compiler) & test(=ide::template::flow_check::tests::callback_count_scales_without_path_expansion)) |
-  (package(verter_session) & test(=project_semantic_dispatch_tests::cost_receipt_tests::cold_query_entries_fit_within_the_checker_relation_envelope)) |
   (package(verter_compiler) & test(=ide::template::flow_tests::component_functions_read_one_flow_of_every_branch)) |
   (package(verter_session) & test(=project_semantic_dispatch_tests::augmentation_scale_tests::merged_interface_indexed_access_work_is_linear)) |
   (package(verter_session) & test(=project_semantic_dispatch_tests::augmentation_scale_tests::merged_interface_indexed_access_keeps_every_contributor)) |

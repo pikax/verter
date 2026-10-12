@@ -781,20 +781,18 @@ pub struct MacroArgumentSurface {
 /// - a typed failure carrier (`Opaque`), which names its own class through the
 ///   shared query-error classification;
 /// - no interned node at all under the resolved id.
-fn unresolved_macro_root_partiality(
-    base: Option<&SemanticNodeData>,
-) -> Option<crate::semantic_query::PartialReasonSet> {
-    use crate::semantic_query::PartialReasonSet;
+fn unresolved_macro_root_partiality(base: Option<&SemanticNodeData>) -> Option<NonEmptyReasons> {
+    use crate::semantic_query::PartialReason;
 
     match base {
-        None => Some(PartialReasonSet::MISSING_SEMANTIC_NODE_DATA),
+        None => Some(NonEmptyReasons::of(PartialReason::MissingSemanticNodeData)),
         Some(SemanticNodeData::BareRef(_) | SemanticNodeData::ImportType(_)) => {
-            Some(PartialReasonSet::MISSING_DEPENDENCY)
+            Some(NonEmptyReasons::of(PartialReason::MissingDependency))
         }
-        Some(SemanticNodeData::RawFallback { .. }) => Some(PartialReasonSet::SEMANTIC_QUERY_FAULT),
-        Some(SemanticNodeData::Opaque(error)) => {
-            Some(super::symbol_identity::query_error_partial_reasons(error))
+        Some(SemanticNodeData::RawFallback { .. }) => {
+            Some(NonEmptyReasons::of(PartialReason::SemanticQueryFault))
         }
+        Some(SemanticNodeData::Opaque(error)) => Some(NonEmptyReasons::from_query_error(error)),
         Some(_) => None,
     }
 }
@@ -849,14 +847,34 @@ pub fn project_macro_argument_surface<C: crate::resolver_core::ResolverCapabilit
     macro_index: usize,
     macro_kind: AnalyzedMacroKind,
 ) -> Option<MacroArgumentSurface> {
+    project_macro_argument_surface_claim(ctx, dispatch, owner_canonical, macro_index, macro_kind)
+        .recorded()
+}
+
+/// The producer-owned membership claim, including unavailable and no-surface answers.
+/// Consumers that publish independent facts must retain this claim through normalization.
+pub fn project_macro_argument_surface_claim<C: crate::resolver_core::ResolverCapabilities>(
+    ctx: &dyn crate::resolver_core::ResolverContext<C>,
+    dispatch: &ProjectSemanticDispatch<'_, C>,
+    owner_canonical: &Arc<str>,
+    macro_index: usize,
+    macro_kind: AnalyzedMacroKind,
+) -> SurfaceResolution<MacroArgumentSurface> {
     use crate::semantic_query::SurfaceProvenanceContext;
 
     // Structurally read-only: surface resolution runs inside the
     // DTO producer's traced scope; fenced-ness gates admission there.
-    let indexed = ctx
-        .ensure_indexed_ready_serve(owner_canonical.as_ref())?
-        .indexed;
-    let mac = indexed.snapshot.macros.get(macro_index)?;
+    let Some(indexed) = ctx
+        .ensure_indexed_ready_serve(owner_canonical.as_ref())
+        .map(|serve| serve.indexed)
+    else {
+        return SurfaceResolution::incomplete(NonEmptyReasons::of(
+            crate::semantic_query::PartialReason::MissingDependency,
+        ));
+    };
+    let Some(mac) = indexed.snapshot.macros.get(macro_index) else {
+        return SurfaceResolution::no_surface();
+    };
     if !mac.is_type_based {
         // A runtime-object `defineExpose({...})` / `defineProps({...})`
         // has no type argument to lower, but the analyzer already
@@ -868,7 +886,10 @@ pub fn project_macro_argument_surface<C: crate::resolver_core::ResolverCapabilit
         // `runtime_object_macro_surface` for the structural (not
         // name-string) kind dispatch and the honest-unknown member
         // value policy.
-        return runtime_object_macro_surface(ctx, dispatch, owner_canonical, macro_kind, mac);
+        return match runtime_object_macro_surface(ctx, dispatch, owner_canonical, macro_kind, mac) {
+            Some(surface) => SurfaceResolution::resolved(surface),
+            None => SurfaceResolution::no_surface(),
+        };
     }
 
     // `defineModel` does NOT carry a props OBJECT type argument — its type
@@ -877,7 +898,7 @@ pub fn project_macro_argument_surface<C: crate::resolver_core::ResolverCapabilit
     // synthesized model prop (`AnalyzedMacro.prop_fields`), so the macro
     // surface is the EMPTY object surface.
     if macro_kind == AnalyzedMacroKind::DefineModel {
-        return Some(MacroArgumentSurface {
+        return SurfaceResolution::resolved(MacroArgumentSurface {
             surface: OneLevelSurface::empty(),
             macro_call_span: mac.span,
             // The empty model surface projects nothing — no arms.
@@ -885,7 +906,9 @@ pub fn project_macro_argument_surface<C: crate::resolver_core::ResolverCapabilit
         });
     }
 
-    let _ = mac.parsed_type_argument.as_ref()?;
+    if mac.parsed_type_argument.is_none() {
+        return SurfaceResolution::no_surface();
+    }
 
     // Provenance per macro axis. Props request the macro-T own-body
     // provenance on the terminal surface synthesis so the author-declared
@@ -928,7 +951,12 @@ pub fn project_macro_argument_surface<C: crate::resolver_core::ResolverCapabilit
     // shared path walker runs intermediate hops in `Navigate` and the
     // TERMINAL hop under `terminal_context` (Shallow). A non-indexed type
     // argument decomposes to `(handle_node, [])`.
-    let product = dispatch.macro_type_arg_hot_ref(owner_canonical.as_ref(), macro_index)?;
+    let Some(product) = dispatch.macro_type_arg_hot_ref(owner_canonical.as_ref(), macro_index)
+    else {
+        return SurfaceResolution::incomplete(NonEmptyReasons::of(
+            crate::semantic_query::PartialReason::MissingDependency,
+        ));
+    };
     let (base_carrier, path) = decompose_indexed_access_chain_node(dispatch, product.hot.node());
     // Resolve the carrier base ONE Navigate hop through the shared dispatch
     // (carrier head resolution — a `BareRef` head routes to its `DeclRef`,
@@ -955,10 +983,7 @@ pub fn project_macro_argument_surface<C: crate::resolver_core::ResolverCapabilit
     let unresolved_root =
         unresolved_macro_root_partiality(super::node_data_for(dispatch.graph(), base).as_deref());
     if let Some(reasons) = unresolved_root {
-        crate::request_context::fold_result_completeness(
-            crate::semantic_query::ResultCompleteness::partial(reasons),
-        );
-        return None;
+        return SurfaceResolution::incomplete(reasons);
     }
 
     // Collect the walker's side-band diagnostics so unresolvable
@@ -980,22 +1005,18 @@ pub fn project_macro_argument_surface<C: crate::resolver_core::ResolverCapabilit
         path,
         terminal_context,
         Some(&mut walker_diagnostics),
-    )
-    .recorded()?;
+    );
     let unresolved_surface_arms = unresolved_surface_arms_from_diags(&walker_diagnostics);
     // An unresolvable SURFACE-COMPOSITION arm (a heritage / intersection /
     // union contributor the shallow synthesis dropped) makes the published
     // METADATA surface partial: the members behind that arm are missing,
     // so the surface must never publish (or warm) as the complete answer.
     // The codegen lanes keep their own diagnostic channel for these arms.
-    if !unresolved_surface_arms.is_empty() {
-        crate::request_context::fold_result_completeness(
-            crate::semantic_query::ResultCompleteness::partial(
-                crate::semantic_query::PartialReasonSet::MISSING_DEPENDENCY,
-            ),
-        );
-    }
-    Some(MacroArgumentSurface {
+    let surface = surface.with_read_partiality(
+        (!unresolved_surface_arms.is_empty())
+            .then(|| NonEmptyReasons::of(crate::semantic_query::PartialReason::MissingDependency)),
+    );
+    surface.map(|surface| MacroArgumentSurface {
         surface,
         macro_call_span: mac.span,
         unresolved_surface_arms,

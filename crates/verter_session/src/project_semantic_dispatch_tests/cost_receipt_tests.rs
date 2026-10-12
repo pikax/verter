@@ -705,7 +705,19 @@ fn assert_reversed_checker_answer(count: usize, expected: u8) {
             let _request = fresh_request(100);
             root_read(&host, &key, full)
         };
+        let before_reductions = ProjectSemanticDispatch::<crate::resolver_core::HostCapabilities>::relation_reductions_for_tests();
+        let before_visits = ProjectSemanticDispatch::<crate::resolver_core::HostCapabilities>::relation_union_arm_visits_for_tests();
         let cold = read();
+        let reductions = ProjectSemanticDispatch::<crate::resolver_core::HostCapabilities>::relation_reductions_for_tests() - before_reductions;
+        let visits = ProjectSemanticDispatch::<crate::resolver_core::HostCapabilities>::relation_union_arm_visits_for_tests() - before_visits;
+        assert!(
+            visits <= 12 * count + 32,
+            "{count} arms: linear union traversal, got {visits}"
+        );
+        assert!(
+            reductions <= 4 * count + 8,
+            "{count} arms: linear structural queries, got {reductions}"
+        );
         assert_eq!(
             cold.answer,
             format!("literal Number({expected}.0)"),
@@ -741,7 +753,7 @@ fn assert_reversed_checker_answer(count: usize, expected: u8) {
             "{count} arms: no recomputation"
         );
         println!(
-            "reversed-{count}: {} partial={} work={} bytes={} repeat_misses=0",
+            "reversed-{count}: {} partial={} work={} bytes={} reductions={reductions} visits={visits} repeat_misses=0",
             cold.answer, cold.partial, cold.work, cold.bytes
         );
     }
@@ -756,7 +768,6 @@ fn reversed_object_unions_reach_the_checker_answer_600() {
     assert_reversed_checker_answer(600, 1);
 }
 #[test]
-#[ignore = "operator exception 2026-10-12: about 10 minutes in a debug build, past the 30-minute core step with its siblings; TEST-SPEED-REVERSED-UNIONS makes the relation linear and removes this attribute (the 2100 row keeps the TS2859 recovery path covered)"]
 fn reversed_object_unions_reach_the_checker_answer_1800() {
     assert_reversed_checker_answer(1800, 1);
 }
@@ -765,7 +776,6 @@ fn reversed_object_unions_reach_the_checker_answer_2100() {
     assert_reversed_checker_answer(2100, 2);
 }
 #[test]
-#[ignore = "operator exception 2026-10-12: about 10 minutes in a debug build, past the 30-minute core step with its siblings; TEST-SPEED-REVERSED-UNIONS makes the relation linear and removes this attribute (the 2100 row keeps the TS2859 recovery path covered)"]
 fn reversed_object_unions_reach_the_checker_answer_3200() {
     assert_reversed_checker_answer(3200, 2);
 }
@@ -1258,6 +1268,128 @@ fn operation_refusal_isolates_depth_and_preceding_connected_work() {
             "the original isolated profile remains usable"
         );
     });
+}
+
+/// An exhausted comparison refuses before its apparent Object query enters,
+/// even when index preparation would exhaust work before the first alternative
+/// or the next alternative fits the last unit of connected work. Preserve the
+/// recovery outcome as well as partiality, named subjects and exact repeats.
+#[test]
+fn object_union_comparison_refusal_precedes_apparent_read() {
+    use super::checker_probe_lane_tests::{
+        probe_host, with_probe_on_host, ProbeProject, PROBE_FILE,
+    };
+    use verter_type_engine::semantic_query::checker_policy::with_relation_comparisons_for_tests;
+    use verter_type_engine::semantic_query::{
+        PartialReasonSet, ProjectionMode, ProjectionReductionContext, SemanticNodeData,
+        SemanticQueryKey,
+    };
+
+    let observe = |aliased, ambient, comparisons, work| {
+        let project = ProbeProject {
+            compiler_options: Some(r#"{"strict": true, "noLib": true}"#),
+            files: if ambient {
+                &[("lib.object.d.ts", "interface Object { z: number; }")]
+            } else {
+                &[]
+            },
+            ..Default::default()
+        };
+        let host = probe_host(project);
+        // Missing keys never read these values. Aliases disable the index
+        // without changing which structured comparisons the relation enters.
+        let source = if aliased {
+            "type V0 = 0; type V1 = 1; type V2 = 2; type V3 = 3; \
+             type S = {p0: V0} | {p1: V1} | {p2: V2} | {p3: V3};"
+        } else {
+            "type S = {p0: 0} | {p1: 1} | {p2: 2} | {p3: 3};"
+        };
+        let source = format!("{source} type T = {{q2: number}} | {{q1: number}} | {{q0: number}};");
+        let key = with_probe_on_host(&host, project, &source, "[S, T]", |dispatch, node| {
+            assert_eq!(
+                matches!(
+                    dispatch.global_wrapper_surface("Object", &[], PROBE_FILE),
+                    super::apparent_type::GlobalWrapper::Surface(_)
+                ),
+                ambient,
+                "the apparent Object interface matches the control"
+            );
+            let data = dispatch.graph().node_data(node).expect("the tuple exists");
+            let SemanticNodeData::Tuple { elements, .. } = data.as_ref() else {
+                panic!("the probe reads [S, T]: {data:?}");
+            };
+            let normalize = |node| {
+                dispatch
+                    .normalize_node_for_structural_fact_demand(
+                        node,
+                        ProjectionReductionContext::published(ProjectionMode::Expanded),
+                    )
+                    .into_complete_node()
+                    .expect("the union is prepared")
+            };
+            dispatch
+                .relate_key_for(normalize(elements[0].value), normalize(elements[1].value))
+                .to_query_key()
+        });
+        let SemanticQueryKey::Relate { source, target, .. } = &key else {
+            unreachable!("a relation key")
+        };
+        with_relation_comparisons_for_tests(comparisons, || {
+            let read = || {
+                let _request = verter_type_engine::request_context::RequestContextGuard::install(
+                    verter_type_engine::request_context::RequestContext::with_kind_timing_and_projection_budget(
+                        1, Arc::from(PROBE_FILE), verter_audit::RequestKind::ComponentMeta, false, false, None, 1_000_000));
+                root_read(&host, &key, work)
+            };
+            let cold = read();
+            assert_eq!(read(), cold, "exact repeat, aliased={aliased}");
+            let expected_refusals = if comparisons == 100 {
+                vec![]
+            } else {
+                vec![super::walk::ShallowDiagnostic::RelationTooComplex {
+                    source: *source,
+                    target: *target,
+                }]
+            };
+            assert_eq!(
+                cold.refusals, expected_refusals,
+                "TS2859 subjects: {cold:?}"
+            );
+            (cold.answer, cold.partial, cold.reasons)
+        })
+    };
+    for (ambient, comparisons, work) in [
+        (false, 1, 5),
+        (true, 2, 12),
+        (true, 3, 20),
+        (false, 100, 1_000),
+        (true, 100, 1_000),
+    ] {
+        let ordinary = observe(true, ambient, comparisons, work);
+        assert_eq!(
+            ordinary.0,
+            if comparisons <= 2 {
+                "BudgetExceeded(RelationBudget)"
+            } else {
+                "NotAssignable"
+            },
+            "the ordinary path's recovery outcome"
+        );
+        if comparisons == 100 {
+            assert_eq!(
+                ordinary,
+                ("NotAssignable".to_owned(), false, PartialReasonSet::empty())
+            );
+        } else {
+            assert!(ordinary.1, "the checker refusal is partial");
+            assert_eq!(ordinary.2, PartialReasonSet::OPERATION_BUDGET);
+        }
+        assert_eq!(
+            observe(false, ambient, comparisons, work),
+            ordinary,
+            "indexed and ordinary refusal classes: ambient={ambient}, comparisons={comparisons}, work={work}"
+        );
+    }
 }
 
 /// Install a fresh request with an operation fuse no relation here reaches.

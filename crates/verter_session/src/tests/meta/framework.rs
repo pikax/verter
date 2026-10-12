@@ -1218,6 +1218,7 @@ fn component_meta_budget_error_detects_symbolic_budget_exceeded() {
 #[test]
 fn symbolic_budget_is_not_fatal_when_component_surface_exists() {
     let analysis = verter_session_query::analysis::component_meta::ComponentMetaAnalysis {
+        domain_guarantees: Default::default(),
         props: vec![
             verter_session_query::analysis::component_meta::PropAnalysis {
                 name: "label".to_string(),

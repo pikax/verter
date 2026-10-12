@@ -200,4 +200,44 @@ describe("propsToJsonSchema", () => {
     // Optional prop should not be required
     expect(schema.required).not.toContain("count");
   });
+
+  it("keeps a prop whose requiredness is unavailable", () => {
+    const meta: ComponentMeta = {
+      filePath: "Comp.vue",
+      componentName: "Comp",
+      optionsApi: false,
+      props: [
+        {
+          name: "label",
+          type: { kind: "primitive", name: "string" },
+          required: undefined,
+          hasDefault: undefined,
+        },
+      ],
+      events: [],
+      slots: [],
+      models: [],
+      exposed: [],
+      components: [],
+      templateRefs: [],
+      imports: [],
+      bindings: [],
+      vueApiCalls: [],
+      styles: [],
+      flags: {
+        asyncSetup: false,
+        hasReactiveState: false,
+        hasComputed: false,
+        hasWatchers: false,
+        hasLifecycleHooks: false,
+        hasProvide: false,
+        hasInject: false,
+        hasInheritAttrsFalse: false,
+        hasStoreUsage: false,
+      },
+    };
+    const schema = propsToJsonSchema(meta);
+    expect(schema.properties?.label).toEqual({ type: "string" });
+    expect(schema.required ?? []).not.toContain("label");
+  });
 });

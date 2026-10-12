@@ -323,6 +323,16 @@ pub(crate) async fn drain_pending_snapshot_provider_sync(
     carrier_publish_coordinator: Option<&crate::external_ts::CarrierPublishCoordinator>,
     carrier_coordinator: &crate::external_ts::CarrierTransactionCoordinator,
 ) {
+    #[cfg(test)]
+    let _execution = documents.snapshot_drain_barrier.read().await;
+    #[cfg(test)]
+    {
+        let pause = documents.snapshot_drain_pause.lock().take();
+        if let Some((arrived, release)) = pause {
+            arrived.notify_one();
+            release.notified().await;
+        }
+    }
     if project_sync.is_none() && carrier_publish_coordinator.is_none() {
         pending_snapshot_provider_sync.clear();
         carrier_coordinator.note_pending_sync_progress();

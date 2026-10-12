@@ -534,6 +534,9 @@ pub struct NamedTypeMember {
 /// the same six-surface shapes.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct MacroSurfaceDtos {
+    /// Output projection of this macro membership demand, independent of its fields.
+    pub domain_guarantee:
+        Option<verter_session_query::analysis::component_meta::MetadataFactGuarantee>,
     /// The resolved props surface.
     pub props: Option<PropsSurface>,
     /// The resolved emits surface.
@@ -677,7 +680,12 @@ impl MacroDtosRefusal {
     #[must_use]
     pub fn into_partial_read(self) -> MacroDtosRead {
         MacroDtosRead {
-            dtos: std::sync::Arc::new(MacroSurfaceDtos::default()),
+            dtos: std::sync::Arc::new(MacroSurfaceDtos {
+                domain_guarantee: Some(
+                    crate::typeinfo::surface_resolution::unavailable_query_fault_guarantee(),
+                ),
+                ..MacroSurfaceDtos::default()
+            }),
             completeness: verter_type_engine::semantic_query::ResultCompleteness::partial(
                 verter_type_engine::semantic_query::PartialReasonSet::SEMANTIC_QUERY_FAULT,
             ),
@@ -862,6 +870,7 @@ mod tests {
         // future surface addition forces this test to acknowledge it.
         let dtos = MacroSurfaceDtos::default();
         let MacroSurfaceDtos {
+            domain_guarantee: _,
             props,
             emits,
             slots,
