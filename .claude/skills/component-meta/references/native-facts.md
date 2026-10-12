@@ -34,9 +34,10 @@ no parallel member store. Refusal delivery carries its original machine causes
 independently of recovery facets. Same-profile replay does not become complete;
 a larger profile or an edit can recompute and heal.
 
-Schema-12 decoding uses a separate legacy carrier. A partial legacy summary
-cannot prove a closed domain: its arrays adapt conservatively with a legacy
-partiality cause. Current decoding ignores an inconsistent legacy summary and
+Schema-12 decoding uses a separate legacy carrier. Its summary cannot prove a
+closed domain: arrays retain open membership even when the summary is complete.
+Partial arrays adapt conservatively with a legacy partiality cause.
+Current decoding ignores an inconsistent legacy summary and
 derives the summary from published facts. Graph validation marks invalid nodes
 and their reverse dependency closure once; a bad member value does not erase
 an independently decoded sibling or the known member domain.

@@ -20,6 +20,24 @@ describe("decodeTypedComponentMetaPayload", () => {
       facts: { props: { kind: "complete" }, events: { kind: "complete" } },
     });
   });
+  it.each([1, 2])("does not infer domain closure from legacy summary %d", (kind) => {
+    const current = createTestComponentMetaPayload();
+    const payload = create(ComponentMetaPayloadSchema, {
+      ...current,
+      body: {
+        ...current.body!,
+        props: [],
+        resultCompleteness: { kind, partialReasons: kind === 2 ? [14] : [] },
+      },
+    });
+    const result = decodeTypedComponentMetaPayload(toBinary(ComponentMetaPayloadSchema, payload));
+    expect(result.facts!.props).toMatchObject({
+      kind: kind === 1 ? "complete" : "approximate",
+      open: true,
+      value: [],
+    });
+    expect(result.facts!.events).toMatchObject({ open: true });
+  });
   it("accepts the current schema version and rejects an older response", () => {
     const current = createTestComponentMetaPayload();
     expect(current.schemaVersion).toBe(12);

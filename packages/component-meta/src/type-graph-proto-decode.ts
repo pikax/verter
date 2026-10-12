@@ -490,7 +490,7 @@ function adaptLegacyFacts(result: NativeComponentMetaResult): NativeComponentMet
   const causes: FactCauses = [101];
   const fact = <T>(value: T): FactResult<T> =>
     summary.kind === "complete"
-      ? { kind: "complete", value }
+      ? { kind: "complete", value, ...(Array.isArray(value) ? { open: true } : {}) }
       : value === undefined
         ? { kind: "unavailable", causes }
         : { kind: "approximate", value, causes, open: Array.isArray(value) };
