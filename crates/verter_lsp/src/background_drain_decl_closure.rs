@@ -397,6 +397,18 @@ impl DeclOverlayOwner {
     /// slot removal; the slot is GC'd by the guarded close once the provider close
     /// confirms it is still empty-and-unchanged.
     pub(crate) fn release_root(&self, root_canonical: &str) -> Vec<DeclCloseTarget> {
+        self.release_root_inner(
+            root_canonical,
+            #[cfg(test)]
+            None,
+        )
+    }
+
+    fn release_root_inner(
+        &self,
+        root_canonical: &str,
+        #[cfg(test)] after_drain: Option<&dyn Fn(&str)>,
+    ) -> Vec<DeclCloseTarget> {
         let mut now_unreferenced = Vec::new();
         // Snapshot the keys so we don't hold shard guards across the loop; the
         // per-key mutate+check below is a SINGLE synchronous critical section.
@@ -420,6 +432,10 @@ impl DeclOverlayOwner {
                 // this same held entry lock as the close baseline. The guarded close
                 // GCs the slot on a confirmed close.
                 if removed && slot.roots.is_empty() {
+                    #[cfg(test)]
+                    if let Some(after_drain) = after_drain {
+                        after_drain(&decl_path);
+                    }
                     now_unreferenced.push(DeclCloseTarget {
                         decl_path,
                         close_generation: slot.generation,
@@ -429,6 +445,21 @@ impl DeclOverlayOwner {
             }
         }
         now_unreferenced
+    }
+
+    /// Observe the drain decision before its entry guard is released.
+    #[cfg(test)]
+    pub(crate) fn test_release_root_observed(
+        &self,
+        root: &str,
+        after_drain: &dyn Fn(&str),
+    ) -> Vec<DeclCloseTarget> {
+        self.release_root_inner(root, Some(after_drain))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_slot_write_locked(&self, decl_path: &str) -> bool {
+        self.slots.try_get_mut(decl_path).is_locked()
     }
 
     /// Make a single root's reachability edges EQUAL its CURRENT closure UNDER CLOSURE

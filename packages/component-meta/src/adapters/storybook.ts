@@ -41,7 +41,10 @@ export function toArgTypes(meta: ComponentMeta): Record<string, StorybookArgType
 
 function propToArgType(prop: PropMeta): StorybookArgType {
   return {
-    type: { name: typeToStorybookName(prop.type), required: prop.required },
+    type: {
+      name: typeToStorybookName(prop.type),
+      ...(typeof prop.required === "boolean" ? { required: prop.required } : {}),
+    },
     control: typeToControl(prop.type),
     table: {
       type: { summary: prop.rawType ?? typeToSummary(prop.type) },

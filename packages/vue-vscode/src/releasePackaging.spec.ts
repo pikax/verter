@@ -510,10 +510,10 @@ describe("CI Rust path eligibility", () => {
       'SCCACHE_GHA_VERSION: "verter-rust-test-v1"',
     );
     expect(build, "the archive build must use the repository's telemetry wrapper").toContain(
-      "node scripts/run-cached.mjs -- 'cargo nextest archive --workspace",
+      "node scripts/run-cached.mjs -- 'node scripts/compile-fixture-artifacts.mjs archive --workspace --archive-file artifacts/rust-nextest-archive.tar.zst'",
     );
     expect(build, "act must bypass the unavailable GHA cache service").toMatch(
-      /if \[ "\$\{ACT:-\}" = "true" \]; then[\s\S]*cargo nextest archive --workspace/,
+      /if \[ "\$\{ACT:-\}" = "true" \]; then\s+node scripts\/compile-fixture-artifacts\.mjs archive --workspace --archive-file artifacts\/rust-nextest-archive\.tar\.zst\s+else\s+node scripts\/run-cached\.mjs --/,
     );
     expect(build, "the archive must be verified before it is uploaded").toContain(
       "node scripts/provider-ci.mjs verify --archive-file",

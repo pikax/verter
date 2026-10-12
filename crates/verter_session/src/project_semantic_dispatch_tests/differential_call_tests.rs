@@ -16,6 +16,328 @@
 
 use super::differential_harness_tests::{Matrix, Read};
 
+fn pipe_declaration(stages: usize, name: &str) -> String {
+    let binders = (0..=stages)
+        .map(|i| format!("T{i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let callbacks = (0..stages)
+        .map(|i| format!("f{i}: (x: T{i}) => T{}", i + 1))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("declare function {name}<{binders}>(a: T0, {callbacks}): T{stages};\n")
+}
+
+#[test]
+fn overloaded_contextual_chains_infer_each_stage_from_the_previous_return() {
+    let mut source = (1..=20)
+        .map(|stages| pipe_declaration(stages, "pipe"))
+        .collect::<String>();
+    let mut expected = Vec::new();
+    for stages in [5, 12, 20] {
+        let callbacks = (0..stages)
+            .map(|i| format!("(x) => ({{ v{i}: x }})"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        source.push_str(&format!("export function chain{stages}() {{ const r = pipe(0 as const, {callbacks}); return r; }}\n"));
+        source.push_str(&format!(
+            "const r{stages} = pipe(0 as const, {callbacks});\n"
+        ));
+        expected.push((
+            format!("chain{stages}"),
+            (0..stages).fold("0".to_owned(), |nested, i| format!("{{ v{i}: {nested}; }}")),
+        ));
+    }
+    let rows = expected
+        .iter()
+        .map(|(name, answer)| (name.as_str(), answer.as_str()))
+        .collect::<Vec<_>>();
+    let matrix = Matrix::new(&source);
+    let mut failures = matrix.returns(&rows);
+    let types = expected
+        .iter()
+        .map(|(name, answer)| {
+            (
+                format!("typeof r{}", name.trim_start_matches("chain")),
+                answer.as_str(),
+            )
+        })
+        .collect::<Vec<_>>();
+    failures.extend(
+        matrix.types(
+            &types
+                .iter()
+                .map(|(name, answer)| (name.as_str(), *answer))
+                .collect::<Vec<_>>(),
+        ),
+    );
+    failures
+        .extend(matrix.unproven_returns(&rows.iter().map(|(name, _)| *name).collect::<Vec<_>>()));
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn contextual_chains_keep_fixed_generic_and_rejected_candidate_controls() {
+    let source = format!(
+        "{}{}{}{}",
+        pipe_declaration(1, "pipe"),
+        pipe_declaration(2, "pipe"),
+        pipe_declaration(2, "fixed"),
+        r#"
+export function nonOverloaded() { return fixed(0 as const, (x) => ({ v0: x }), (x) => ({ v1: x })); }
+export function genericStage() { return pipe(0 as const, (x) => <U>(y: U) => ({ input: x, value: y }), (f) => f('ok' as const)); }
+declare function alternatives<A, B, C>(a: A, f: (x: A) => B, g: (x: B) => never): 'rejected';
+declare function alternatives<A, B, C>(a: A, f: (x: A) => B, g: (x: B) => C): C;
+export function isolated() { return alternatives(0 as const, (x) => ({ v0: x }), (x) => ({ v1: x })); }
+const scalar = pipe(0 as const, x => x);
+let mutable = pipe(0 as const, x => x);
+const topFixed = fixed(0 as const, x => ({v0:x}), x => ({v1:x}));
+"#
+    );
+    let matrix = Matrix::new(&source);
+    let mut failures = matrix.types(&[
+        ("typeof scalar", "0"),
+        ("typeof mutable", "0"),
+        ("typeof topFixed", "{ v1: { v0: 0; }; }"),
+    ]);
+    failures.extend(matrix.returns(&[
+        ("nonOverloaded", "{ v1: { v0: 0; }; }"),
+        ("genericStage", "{ input: 0; value: \"ok\"; }"),
+        ("isolated", "{ v1: { v0: 0; }; }"),
+    ]));
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn contextual_chains_report_annotation_and_excess_argument_diagnostics() {
+    let source = (1..=3)
+        .map(|stages| pipe_declaration(stages, "pipe"))
+        .collect::<String>()
+        + r#"
+export function conflictingMiddle() { return pipe(0 as const, (x) => ({ v0: x }), (x: string) => ({ v1: x }), (x) => ({ v2: x })); }
+export function tooMany() { return pipe(0 as const, (x) => x, (x) => x, (x) => x, (x) => x); }
+"#;
+    let matrix = Matrix::new(&source).settings(&super::differential_harness_tests::ALL[..1]);
+    let verdicts = matrix.verdicts(&[
+        (Read::Return("conflictingMiddle"), vec!["unknown"]),
+        (Read::Return("tooMany"), vec!["unknown"]),
+    ]);
+    assert_eq!(
+        verdicts[0][0].diagnostics,
+        [2322],
+        "{}",
+        verdicts[0][0].lane
+    );
+    assert_eq!(
+        verdicts[1][0].diagnostics,
+        [2554],
+        "{}",
+        verdicts[1][0].lane
+    );
+}
+
+#[test]
+fn contextual_fixation_reads_constrained_sibling_candidates() {
+    let source = r#"
+declare function dependent<A,B extends A,C>(a:A,b:B,contra:(x:A)=>void,f:(x:A)=>C):C;
+declare function dependent<A,B extends A,C,D>(a:A,b:B,contra:(x:A)=>void,f:(x:A)=>C,g:(x:C)=>D):D;
+declare function independent<A,B,C>(a:A,b:B,contra:(x:A)=>void,f:(x:A)=>C):C;
+declare function independent<A,B,C,D>(a:A,b:B,contra:(x:A)=>void,f:(x:A)=>C,g:(x:C)=>D):D;
+export function constrained() { return dependent('s',1,(x:string|number)=>{},x=>({value:x})); }
+export function control() { return independent('s',1,(x:string|number)=>{},x=>({value:x})); }
+"#;
+    let matrix = Matrix::new(source);
+    let failures = matrix.returns(&[
+        ("constrained", "{ value: string | number; }"),
+        ("control", "{ value: string; }"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn contextual_recovery_preserves_fixed_types_and_return_diagnostics() {
+    let source = pipe_declaration(3, "fixed")
+        + r#"
+export function conflicting() { return fixed(0 as const,x=>({v0:x}),(x:string)=>({v1:x}),x=>({v2:x})); }
+export function control() { return fixed(0 as const,x=>({v0:x}),x=>({v1:x}),x=>({v2:x})); }
+declare function same<T>(a:T,f:(x:T)=>T):T;
+export function rejectedReturn() { return same(0 as const,x=>x?1 as const:1 as const); }
+"#;
+    let matrix = Matrix::new(&source);
+    let verdicts = matrix.verdicts(&[
+        (Read::Return("conflicting"), vec!["unknown"]),
+        (
+            Read::Return("control"),
+            vec!["{ v2: { v1: { v0: 0; }; }; }"],
+        ),
+        (Read::Return("rejectedReturn"), vec!["0"]),
+    ]);
+    for (index, codes) in [(0, vec![2322]), (1, vec![]), (2, vec![2322])] {
+        for verdict in &verdicts[index] {
+            assert_eq!(verdict.diagnostics, codes, "{}", verdict.lane);
+            assert!(verdict.matched, "{}", verdict.lane);
+        }
+    }
+}
+
+#[test]
+fn callback_parameter_context_survives_rejected_overload_inference() {
+    let source = r#"
+declare function alternatives<A, B, C>(a: A, f: (x: string) => B, g: (x: B) => never): 'rejected';
+declare function alternatives<A, B, C>(a: A, f: (x: A) => B, g: (x: B) => C): C;
+export function isolated() { return alternatives(0 as const, (x) => ({ v0: x }), (x) => ({ v1: x })); }
+"#;
+    let matrix = Matrix::new(source).settings(&super::differential_harness_tests::ALL[..1]);
+    let verdicts = matrix.verdicts(&[(Read::Return("isolated"), vec!["{ v1: { v0: 0; }; }"])]);
+    assert!(
+        !verdicts[0][0].matched,
+        "retyping a cached parameter context fabricates an applicable overload"
+    );
+    assert_eq!(
+        verdicts[0][0].diagnostics,
+        [2769],
+        "{}",
+        verdicts[0][0].lane
+    );
+}
+
+#[test]
+fn contextual_chain_inference_work_grows_linearly() {
+    let work = |stages, overloaded| {
+        let mut source = if overloaded {
+            (1..=20)
+                .map(|arity| pipe_declaration(arity, "pipe"))
+                .collect::<String>()
+        } else {
+            pipe_declaration(stages, "pipe")
+        };
+        let callbacks = (0..stages)
+            .map(|i| format!("(x) => ({{ v{i}: x }})"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        source.push_str(&format!(
+            "export function chain() {{ return pipe(0 as const, {callbacks}); }}"
+        ));
+        Matrix::new(&source)
+            .settings(&super::differential_harness_tests::ALL[..1])
+            .return_relation_work("chain")
+    };
+    for overloaded in [false, true] {
+        let (small, medium, large) = (
+            work(5, overloaded),
+            work(10, overloaded),
+            work(20, overloaded),
+        );
+        eprintln!("contextual (relation, argument/parameter, binding) work (overloaded={overloaded}): 5={small:?}, 10={medium:?}, 20={large:?}");
+        assert!(small.0 > 0 && small.1 > 0 && small.2 > 0);
+        for (small, medium, large) in [
+            (small.0, medium.0, large.0),
+            (small.1 as u64, medium.1 as u64, large.1 as u64),
+            (small.2 as u64, medium.2 as u64, large.2 as u64),
+        ] {
+            assert!(
+                small <= medium && medium <= large,
+                "work counts must be monotonic: {small}, {medium}, {large}"
+            );
+            assert!(
+                large - medium <= 3 * (medium - small),
+                "doubling stages repeats earlier work: {small}, {medium}, {large}"
+            );
+        }
+    }
+}
+
+#[test]
+fn contextual_candidates_reject_eager_mismatches_before_typing_callbacks() {
+    let source = r#"
+declare function pick(a: string, f: (x: string) => string): 'S';
+declare function pick(a: number, f: (x: number) => number): 'N';
+export function first() { return pick('s', x => x); }
+export function later() { return pick(1, x => x); }
+declare function generic<A, B>(a: 's', seed: A, f: (x: string) => B): 'bad';
+declare function generic<A, B>(a: 'n', seed: A, f: (x: A) => B): B;
+export function discriminant() { return generic('n', 0 as const, x => ({value: x})); }
+"#;
+    let failures = Matrix::new(source).returns(&[
+        ("first", "\"S\""),
+        ("later", "\"N\""),
+        ("discriminant", "{ value: 0; }"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn contextual_callbacks_infer_from_a_generic_rest_tail() {
+    let source = r#"
+declare function collect<A extends unknown[], B>(cb: (...args: A) => B, ...args: A): B;
+declare function optional<A extends unknown[], B>(cb: (...args: A) => B, extra?: number, ...args: A): B;
+declare function tuple<B>(cb: (...args: [number, string]) => B): B;
+declare function array<B>(cb: (...args: number[]) => B): B;
+declare function choose<A extends unknown[], B>(kind: 'bad', cb: (...args: A) => B, ...args: A): 'bad';
+declare function choose<A extends unknown[], B>(kind: 'ok', cb: (...args: A) => B, ...args: A): B;
+export function inferred() { return collect(x => ({ value: x }), 1); }
+export function empty() { return collect(() => 'empty' as const); }
+export function later() { return choose('ok', (x, y) => ({ x, y }), 1, 's'); }
+export function annotated() { return collect((x: number) => ({ value: x }), 1); }
+export function omittedOptional() { return optional(() => 'optional' as const); }
+export function fixedTuple() { return tuple((x, y) => ({ x, y })); }
+export function arrayRest() { return array(x => ({ value: x })); }
+"#;
+    let failures = Matrix::new(source).returns(&[
+        ("inferred", "{ value: number; }"),
+        ("empty", "\"empty\""),
+        ("later", "{ x: number; y: string; }"),
+        ("annotated", "{ value: number; }"),
+        ("omittedOptional", "\"optional\""),
+        ("fixedTuple", "{ x: number; y: string; }"),
+        ("arrayRest", "{ value: number; }"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn contextual_callbacks_read_a_generic_receivers_base_signature() {
+    let source = r#"
+interface Mapper {
+  <T>(x: T): T;
+  map<R, B>(this: (x: unknown) => R, cb: (x: R) => B): B;
+}
+interface Plain {
+  (x: unknown): number;
+  map<R, B>(this: (x: unknown) => R, cb: (x: R) => B): B;
+}
+declare const generic: Mapper;
+declare const plain: Plain;
+export function genericReceiver() { return generic.map(x => ({ value: x })); }
+export function plainReceiver() { return plain.map(x => ({ value: x })); }
+"#;
+    let failures = Matrix::new(source).returns(&[
+        ("genericReceiver", "{ value: unknown; }"),
+        ("plainReceiver", "{ value: number; }"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn contextual_callback_returns_infer_through_object_and_tuple_wrappers() {
+    let source = r#"
+declare function wrapped<A,B>(a:A,f:{run:(x:A)=>B}):B;
+declare function wrapped<A,B,C>(a:A,f:{run:(x:A)=>B},g:(x:B)=>C):C;
+declare function tuple<A,B>(a:A,f:[(x:A)=>B]):B;
+declare function tuple<A,B,C>(a:A,f:[(x:A)=>B],g:(x:B)=>C):C;
+declare function plain<A,B,C>(a:A,f:(x:A)=>B,g:(x:B)=>C):C;
+export function object() { return wrapped(0 as const,{run:x=>({v:x})},x=>({w:x})); }
+export function array() { return tuple(0 as const,[x=>({v:x})],x=>({w:x})); }
+export function control() { return plain(0 as const,x=>({v:x}),x=>({w:x})); }
+"#;
+    let failures = Matrix::new(source).returns(&[
+        ("object", "{ w: { v: 0; }; }"),
+        ("array", "{ w: { v: 0; }; }"),
+        ("control", "{ w: { v: 0; }; }"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// Overloaded declarations by type, arity, literal and generic parameters.
 const OVERLOADS: &str = r##"
 declare function ov(a: string): "S";

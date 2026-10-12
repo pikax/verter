@@ -65,6 +65,11 @@ extern "C" {
         actions: *mut libc::posix_spawn_file_actions_t,
         path: *const c_char,
     ) -> c_int;
+    /// `QOS_CLASS_USER_INTERACTIVE` is `0x21`. Relative priority must be 0.
+    fn pthread_set_qos_class_self_np(
+        class: libc::c_uint,
+        relative_priority: libc::c_int,
+    ) -> libc::c_int;
 }
 
 pub(crate) fn supervise(launch: Launch<'_>, report: &mut Report) {
@@ -179,6 +184,9 @@ pub(crate) fn supervise(launch: Launch<'_>, report: &mut Report) {
         }
     };
     report.launched = true;
+    // The kernel wakes a parent blocked in waitpid after NOTE_EXIT. This
+    // thread has to read the cached exit rusage, or that parent, first.
+    prefer_sampling_ahead_of_waiters();
     let started = Instant::now();
 
     let deadline = started + spec.timeout;
@@ -239,18 +247,15 @@ pub(crate) fn supervise(launch: Launch<'_>, report: &mut Report) {
             report.sampling.count += 1;
             let injected = launch.fault == Some(Fault::TelemetryMidrun)
                 && report.sampling.count == MIDRUN_FAULT_OBSERVATION;
-            match sweep(pgid, &mut known, injected) {
+            match sweep(pgid, &mut known, injected, Some(&queue)) {
                 Ok(outcome) => {
-                    cpu.observe(outcome.cpu);
+                    cpu.observe(outcome.cpu, parent_after_disappearance);
                     let done = Instant::now();
                     for gone in &outcome.gone {
                         known.remove(gone);
                     }
                     for &new in &outcome.discovered {
                         tree_ever.insert(new);
-                        // Registration only speeds up fork wakeups; a pid
-                        // that is already gone needs none.
-                        queue.watch_process(new).ok();
                     }
                     peak = peak.max(outcome.footprint);
                     series.push(Sample {
@@ -316,7 +321,32 @@ pub(crate) fn supervise(launch: Launch<'_>, report: &mut Report) {
         };
         match queue.wait(until.saturating_duration_since(now)) {
             Ok(events) => {
-                if events.forked {
+                if !events.exited.is_empty() {
+                    // Read NOTE_EXIT identities first, before enumeration or
+                    // consuming the watchdog's completion on the next turn.
+                    // `ri_proc_exit_abstime` is published before the process
+                    // is marked a zombie and before the parent is woken, so
+                    // SZOMB is a later, racier signal. A live replacement
+                    // has exit time 0.
+                    for reading in events.exited.iter().filter_map(|&pid| exit_reading(pid)) {
+                        cpu.record_exit(reading, current_cpu_reading);
+                    }
+                    // Snapshot every known pid before the slower enumeration.
+                    // A parent blocked in waitpid may already have reaped the
+                    // exited child; if that parent is still alive, its
+                    // child counters are the attribution.
+                    if let Some(early) = snapshot_known(&known) {
+                        cpu.observe(early, parent_after_disappearance);
+                    }
+                    let (members, discovered) = enumerate_tree(pgid, &mut known, Some(&queue));
+                    let readings: Vec<_> = members
+                        .into_iter()
+                        .filter_map(|pid| usage(pid).ok().map(|r| cpu_reading(pid, &r)))
+                        .collect();
+                    cpu.observe(readings, parent_after_disappearance);
+                    tree_ever.extend(discovered);
+                }
+                if events.forked || !events.exited.is_empty() {
                     sweep_now = true;
                 }
             }
@@ -329,7 +359,7 @@ pub(crate) fn supervise(launch: Launch<'_>, report: &mut Report) {
     };
 
     if let Some(exited) = &exited {
-        cpu.observe(exited.cpu.clone());
+        cpu.observe(exited.cpu.clone(), parent_after_disappearance);
         report.wall_ms = Some(ns_to_ms(exited.exit_ns.saturating_sub(start_ns)));
         report.termination_latency_ms =
             kill_ns.map(|at| ns_to_ms(exited.exit_ns.saturating_sub(at)));
@@ -352,6 +382,7 @@ pub(crate) fn supervise(launch: Launch<'_>, report: &mut Report) {
         report.cpu_user_ms = Some(ns_to_ms(user));
         report.cpu_kernel_ms = Some(ns_to_ms(kernel));
     }
+    cpu.publish_bounds(report);
     report.peak_bytes = Some(peak);
     report.process_count = Some(tree_ever.len() as u64);
     report.samples = series.into_vec();
@@ -544,23 +575,12 @@ fn sweep(
     pgid: libc::pid_t,
     known: &mut BTreeSet<libc::pid_t>,
     injected_failure: bool,
+    queue: Option<&Queue>,
 ) -> Result<SweepOutcome, String> {
     if injected_failure {
         return Err("injected fault".to_owned());
     }
-    let mut discovered = Vec::new();
-    let mut frontier: Vec<libc::pid_t> = group_members(pgid);
-    frontier.extend(known.iter().copied());
-    let mut seen: BTreeSet<libc::pid_t> = BTreeSet::new();
-    while let Some(member) = frontier.pop() {
-        if !seen.insert(member) {
-            continue;
-        }
-        if known.insert(member) {
-            discovered.push(member);
-        }
-        frontier.extend(children(member));
-    }
+    let (seen, discovered) = enumerate_tree(pgid, known, queue);
     let mut total = 0u64;
     let mut cpu = Vec::new();
     let mut escaped = None;
@@ -608,20 +628,109 @@ fn sweep(
     })
 }
 
+fn enumerate_tree(
+    pgid: libc::pid_t,
+    known: &mut BTreeSet<libc::pid_t>,
+    queue: Option<&Queue>,
+) -> (BTreeSet<libc::pid_t>, Vec<libc::pid_t>) {
+    let mut discovered = Vec::new();
+    let mut frontier: Vec<libc::pid_t> = group_members(pgid);
+    frontier.extend(known.iter().copied());
+    let mut seen: BTreeSet<libc::pid_t> = BTreeSet::new();
+    while let Some(member) = frontier.pop() {
+        if !seen.insert(member) {
+            continue;
+        }
+        if known.insert(member) {
+            discovered.push(member);
+            // Arm exit observation at discovery, before enumerating further
+            // descendants or reading telemetry. ESRCH means it already exited.
+            if let Some(queue) = queue {
+                queue.watch_process(member).ok();
+            }
+        }
+        frontier.extend(children(member));
+    }
+    (seen, discovered)
+}
+
+fn current_cpu_reading(pid: libc::pid_t) -> Option<CpuReading> {
+    usage(pid).ok().map(|info| cpu_reading(pid, &info))
+}
+
+/// A missing CPU sample alone can also mean an unreadable zombie. Confirm
+/// lifetime disappearance before acquiring the parent's living-identity read.
+fn parent_after_disappearance(child: &CpuReading, parent: libc::pid_t) -> Option<CpuReading> {
+    match usage(child.pid) {
+        Ok(info) if info.ri_proc_start_abstime != child.started => {}
+        Err(error) if error.raw_os_error() == Some(libc::ESRCH) && !exists(child.pid) => {}
+        _ => return None,
+    }
+    current_cpu_reading(parent)
+}
+
+fn exit_reading(pid: libc::pid_t) -> Option<CpuReading> {
+    let info = usage(pid).ok()?;
+    if info.ri_proc_exit_abstime == 0 {
+        return None;
+    }
+    Some(cpu_reading(pid, &info))
+}
+
+/// Readings for members that still exist. `None` if any read failed for a
+/// reason other than ESRCH, so a partial snapshot is not applied.
+fn snapshot_known(known: &BTreeSet<libc::pid_t>) -> Option<Vec<CpuReading>> {
+    let mut readings = Vec::with_capacity(known.len());
+    for &pid in known {
+        match usage(pid) {
+            Ok(info) => readings.push(cpu_reading(pid, &info)),
+            Err(error) if error.raw_os_error() == Some(libc::ESRCH) => {}
+            Err(_) => return None,
+        }
+    }
+    Some(readings)
+}
+
+fn prefer_sampling_ahead_of_waiters() {
+    // SAFETY: 0x21 is QOS_CLASS_USER_INTERACTIVE. Relative priority 0 is the
+    // only legal offset for that class. Failure leaves the default class.
+    unsafe {
+        pthread_set_qos_class_self_np(0x21, 0);
+    }
+}
+
 fn footprint(pid: libc::pid_t) -> Result<u64, std::io::Error> {
     usage(pid).map(|info| info.ri_phys_footprint)
 }
 
 fn cpu_reading(pid: libc::pid_t, info: &libc::rusage_info_v4) -> CpuReading {
-    CpuReading {
+    static TIMEBASE: std::sync::OnceLock<(u32, u32)> = std::sync::OnceLock::new();
+    let &(numer, denom) = TIMEBASE.get_or_init(|| {
+        // libc redirects Mach bindings to a separate crate; the system ABI
+        // remains supported. Keep that compatibility allowance at this call.
+        #[allow(deprecated)]
+        {
+            let mut info = libc::mach_timebase_info { numer: 0, denom: 0 };
+            // SAFETY: a valid local out-parameter. Darwin's fixed machine
+            // timebase is shared by own and reaped-child rusage counters.
+            let status = unsafe { libc::mach_timebase_info(&mut info) };
+            assert_eq!(status, libc::KERN_SUCCESS, "mach_timebase_info");
+            assert!(info.numer > 0 && info.denom > 0, "invalid Mach timebase");
+            (info.numer, info.denom)
+        }
+    });
+    let mut reading = CpuReading {
         pid,
         parent: bsd_info(pid).map_or(-1, |bsd| bsd.pbi_ppid as i32),
         started: info.ri_proc_start_abstime,
+        exited: info.ri_proc_exit_abstime != 0,
         user: info.ri_user_time,
         kernel: info.ri_system_time,
         child_user: info.ri_child_user_time,
         child_kernel: info.ri_child_system_time,
-    }
+    };
+    reading.normalize_timebase(numer, denom);
+    reading
 }
 
 fn usage(pid: libc::pid_t) -> Result<libc::rusage_info_v4, std::io::Error> {
@@ -924,8 +1033,10 @@ fn spawn_suspended(request: &SpawnRequest) -> Result<libc::pid_t, String> {
 }
 
 /// What woke the supervisor.
+#[derive(Default)]
 struct Events {
     forked: bool,
+    exited: Vec<libc::pid_t>,
 }
 
 /// A kqueue watching the tree's processes and the wakeup descriptors.
@@ -1006,14 +1117,17 @@ impl Queue {
         if count < 0 {
             let error = std::io::Error::last_os_error();
             if error.kind() == std::io::ErrorKind::Interrupted {
-                return Ok(Events { forked: false });
+                return Ok(Events::default());
             }
             return Err(error);
         }
-        let mut result = Events { forked: false };
+        let mut result = Events::default();
         for event in &events[..count as usize] {
             if event.filter == libc::EVFILT_PROC && event.fflags & libc::NOTE_FORK != 0 {
                 result.forked = true;
+            }
+            if event.filter == libc::EVFILT_PROC && event.fflags & libc::NOTE_EXIT != 0 {
+                result.exited.push(event.ident as libc::pid_t);
             }
         }
         Ok(result)
@@ -1025,6 +1139,25 @@ mod tests {
     use super::*;
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
+
+    #[test]
+    fn note_exit_reports_the_unreaped_identity_and_its_cpu() {
+        let queue = Queue::new().unwrap();
+        let mut child = spawn_in_own_group("/bin/sleep", &["30"]);
+        let pid = child.id() as libc::pid_t;
+        let armed = queue.watch_process(pid);
+        child.kill().ok();
+        let events = queue.wait(Duration::from_secs(1));
+        let final_usage = usage(pid);
+        child.wait().ok();
+        armed.unwrap();
+        assert_eq!(events.unwrap().exited, vec![pid]);
+        assert!(
+            final_usage.is_ok(),
+            "zombie counters: {:?}",
+            final_usage.err()
+        );
+    }
 
     fn spawn_in_own_group(program: &str, args: &[&str]) -> std::process::Child {
         Command::new(program)
@@ -1105,7 +1238,7 @@ mod tests {
         let pid = child.id() as libc::pid_t;
         wait_for_zombie(pid);
         let mut known = BTreeSet::from([pid]);
-        let outcome = sweep(pid, &mut known, false);
+        let outcome = sweep(pid, &mut known, false, None);
         let still_alive = alive_not_zombie(pid);
         child.wait().ok();
         let outcome = outcome.expect("a zombie leader is exited, not unreadable");

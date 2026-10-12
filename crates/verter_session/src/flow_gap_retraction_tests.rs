@@ -1053,13 +1053,25 @@ fn checker_correct_unannotated_same_closure_write_remains_complete_and_warm() {
 
 #[test]
 fn flow_gap_default_parameter_budget_failure_is_no_value_and_cold() {
+    let host = make_audit_host();
+    host.project_type_store().flow_slice().set_budget_for_test(
+        verter_session_query::flow::peeker::FlowSliceBudget {
+            max_selected_nodes: 4096,
+            ..Default::default()
+        },
+    );
     // A default the inference's work budget cannot visit: 5,000 elements.
     let default = format!("[{}]", vec!["0"; 5_000].join(", "));
-    let trace = run(
-        "default_budget",
-        &format!("function makeProps(value = {default}) {{ return value }}"),
-        "makeProps",
+    let canonical = "/flow-gap-retraction/default_budget.ts";
+    upsert(
+        &host,
+        canonical,
+        &super::module_script(&format!(
+            "function makeProps(value = {default}) {{ return value }}"
+        )),
+        FileLanguage::script_ts(),
     );
+    let trace = run_on(&host, canonical, "makeProps");
     record_trace("default_budget", &trace);
     let expected = Some(FlowReturnError::Failure(FlowReturnFailure::Budget(
         verter_type_expr::facts::InferenceUnavailableReason::WorkBudgetExceeded,

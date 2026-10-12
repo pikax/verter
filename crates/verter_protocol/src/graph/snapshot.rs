@@ -152,6 +152,7 @@ pub(crate) enum PersistedGraphNode {
     },
     Infer {
         name: u32,
+        constraint: u32,
     },
     Rest {
         inner: u32,
@@ -276,7 +277,7 @@ fn try_persist(node: GraphNode) -> Result<PersistedGraphNode, SnapshotCaptureErr
         },
         GraphNode::Parenthesized { inner } => PersistedGraphNode::Parenthesized { inner },
         GraphNode::Unknown { raw } => PersistedGraphNode::Unknown { raw },
-        GraphNode::Infer { name } => PersistedGraphNode::Infer { name },
+        GraphNode::Infer { name, constraint } => PersistedGraphNode::Infer { name, constraint },
         GraphNode::Rest { inner } => PersistedGraphNode::Rest { inner },
         GraphNode::RecursiveRef {
             name,
@@ -589,7 +590,13 @@ fn validate_node_refs(
             nid(*inner)
         }
         PersistedGraphNode::Unknown { raw } => sid(*raw),
-        PersistedGraphNode::Infer { name } => sid(*name),
+        PersistedGraphNode::Infer { name, constraint } => {
+            sid(*name)?;
+            if *constraint != 0 {
+                nid(*constraint)?;
+            }
+            Ok(())
+        }
         PersistedGraphNode::RecursiveRef {
             name,
             type_arguments,
@@ -900,8 +907,14 @@ mod tests {
                 PersistedGraphNode::Unknown { raw: 1 },
             ),
             (
-                GraphNode::Infer { name: 1 },
-                PersistedGraphNode::Infer { name: 1 },
+                GraphNode::Infer {
+                    name: 1,
+                    constraint: 0,
+                },
+                PersistedGraphNode::Infer {
+                    name: 1,
+                    constraint: 0,
+                },
             ),
             (
                 GraphNode::Rest { inner: 1 },

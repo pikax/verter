@@ -9,6 +9,8 @@ use verter_type_expr::{TypeExprScope, TypePublication};
 /// Converted to `FfiComponentMeta` at the NAPI/WASM boundary.
 #[derive(Debug, Clone)]
 pub struct ComponentMetaAnalysis {
+    /// Producer-owned membership guarantees, retained separately from member values.
+    pub domain_guarantees: ComponentDomainGuarantees,
     pub props: Vec<PropAnalysis>,
     pub events: Vec<EventAnalysis>,
     pub slots: Vec<SlotAnalysis>,
@@ -43,6 +45,71 @@ pub struct ComponentMetaAnalysis {
     pub macro_expansion_diagnostics: Vec<MacroExpansionDiagnostics>,
     pub options_api: bool,
     pub file_path: String,
+}
+
+/// Output-only projection of a producer fact guarantee. Never an input to evaluation.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_no_typeexpr::NoTypeExpr,
+)]
+pub struct MetadataFactGuarantee {
+    pub kind: u32,
+    pub causes: Vec<u32>,
+    pub open: bool,
+}
+impl MetadataFactGuarantee {
+    pub fn complete(open: bool) -> Self {
+        Self {
+            kind: 1,
+            causes: Vec::new(),
+            open,
+        }
+    }
+
+    /// Join another producer claim into this one. Unavailable outranks
+    /// approximate, which outranks complete. Openness and causes accumulate.
+    pub fn absorb(&mut self, next: &Self) {
+        self.kind = self.kind.max(next.kind);
+        self.open |= next.open;
+        for cause in &next.causes {
+            if !self.causes.contains(cause) {
+                self.causes.push(*cause);
+            }
+        }
+    }
+
+    /// Join an optional claim. `None` is not a claim and leaves `slot` unchanged.
+    pub fn absorb_option(slot: &mut Option<Self>, next: Option<Self>) {
+        let Some(next) = next else {
+            return;
+        };
+        match slot {
+            None => *slot = Some(next),
+            Some(current) => current.absorb(&next),
+        }
+    }
+}
+impl Default for MetadataFactGuarantee {
+    fn default() -> Self {
+        Self {
+            kind: 3,
+            causes: vec![104],
+            open: true,
+        }
+    }
+}
+/// Independent membership guarantees of the declared semantic lanes.
+#[derive(Debug, Clone, Default)]
+pub struct ComponentDomainGuarantees {
+    pub props: MetadataFactGuarantee,
+    pub events: MetadataFactGuarantee,
+    pub slots: MetadataFactGuarantee,
 }
 
 /// Which macro kind produced the expansion diagnostics.

@@ -1,5 +1,29 @@
 ## Semantic Dispatch (current authority)
 
+Closed single-property scalar object unions use a request-local property index
+inside the relation authority. Matching properties still enter the ordinary
+member relation in authored order, including the positional first attempt.
+The index proves absence from both the own surface and the project's apparent
+`Object` interface, read once per canonical context. Aligned property keys keep
+the ordinary positional path.
+Runs whose required property is absent are rejected in batches: their logical
+checker comparisons, work, construction charges and recursion footprint stay
+in the parent cost receipt, preserving TS2859 subjects and cold/warm budget
+behavior without allocating a query and obligation for each negative pair.
+At a partial batch boundary, charge the next alternative, admit its checker
+comparison and reserve its pair bytes before charging an apparent `Object`
+read. An exhausted comparison reports TS2859 without paying for that read.
+When the union's possible target and scalar-value comparisons can reach a
+checker refusal, require connected work for index preparation, source/matching
+visits and the remaining checker pairs (including the refused next alternative)
+before preparing the index or reading apparent `Object`. Tight work allowances
+retain the ordinary worklist so speculative preparation cannot mask its checker
+refusal, partiality or subsequent recovery budget outcome. Unions too small to
+reach that refusal keep their existing cold/partly warm cost accounting.
+Inference sessions, fresh sources, optional properties, signatures, index
+signatures, deferred values and unit-valued targets retain the general path;
+unit targets may need the existing discriminant-splitting proof.
+
 The request boundary is the sealed, method-free `ResolverContext` marker over
 six services. Its implementations select the captured request view privately;
 engine consumers receive owned observations and typed demands, never a host,
@@ -141,4 +165,3 @@ resolved type surfaces.
 - A second `fn shallow_lower_type_expr` — FORBIDDEN (besides `project_semantic_dispatch::lower`).
 - A second struct owning a `RelationMemo` field — FORBIDDEN (besides `SemanticGraphStore`).
 - A second struct owning the semantic node map — FORBIDDEN (besides `SemanticGraphStore`).
-

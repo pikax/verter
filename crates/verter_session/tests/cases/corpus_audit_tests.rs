@@ -17,5 +17,173 @@ mod chunk_003;
 mod chunk_004;
 #[path = "component_meta_audit_corpus/chunk_005.rs"]
 mod chunk_005;
+#[path = "component_meta_audit_corpus/chunk_006.rs"]
+mod chunk_006;
+#[path = "component_meta_audit_corpus/chunk_007.rs"]
+mod chunk_007;
+#[path = "component_meta_audit_corpus/chunk_008.rs"]
+mod chunk_008;
+#[path = "component_meta_audit_corpus/chunk_009.rs"]
+mod chunk_009;
+#[path = "component_meta_audit_corpus/chunk_010.rs"]
+mod chunk_010;
+#[path = "component_meta_audit_corpus/chunk_011.rs"]
+mod chunk_011;
+#[path = "component_meta_audit_corpus/chunk_012.rs"]
+mod chunk_012;
+#[path = "component_meta_audit_corpus/chunk_013.rs"]
+mod chunk_013;
+#[path = "component_meta_audit_corpus/chunk_014.rs"]
+mod chunk_014;
+#[path = "component_meta_audit_corpus/chunk_015.rs"]
+mod chunk_015;
+#[path = "component_meta_audit_corpus/chunk_016.rs"]
+mod chunk_016;
+#[path = "component_meta_audit_corpus/chunk_017.rs"]
+mod chunk_017;
+#[path = "component_meta_audit_corpus/chunk_018.rs"]
+mod chunk_018;
+#[path = "component_meta_audit_corpus/chunk_019.rs"]
+mod chunk_019;
+#[path = "component_meta_audit_corpus/chunk_020.rs"]
+mod chunk_020;
+#[path = "component_meta_audit_corpus/chunk_021.rs"]
+mod chunk_021;
+#[path = "component_meta_audit_corpus/chunk_022.rs"]
+mod chunk_022;
+#[path = "component_meta_audit_corpus/chunk_023.rs"]
+mod chunk_023;
+#[path = "component_meta_audit_corpus/chunk_024.rs"]
+mod chunk_024;
+#[path = "component_meta_audit_corpus/chunk_025.rs"]
+mod chunk_025;
+#[path = "component_meta_audit_corpus/chunk_026.rs"]
+mod chunk_026;
+#[path = "component_meta_audit_corpus/chunk_027.rs"]
+mod chunk_027;
+#[path = "component_meta_audit_corpus/chunk_028.rs"]
+mod chunk_028;
+#[path = "component_meta_audit_corpus/chunk_029.rs"]
+mod chunk_029;
+#[path = "component_meta_audit_corpus/chunk_030.rs"]
+mod chunk_030;
+#[path = "component_meta_audit_corpus/chunk_031.rs"]
+mod chunk_031;
+#[path = "component_meta_audit_corpus/chunk_032.rs"]
+mod chunk_032;
+#[path = "component_meta_audit_corpus/chunk_033.rs"]
+mod chunk_033;
+#[path = "component_meta_audit_corpus/chunk_034.rs"]
+mod chunk_034;
+#[path = "component_meta_audit_corpus/chunk_035.rs"]
+mod chunk_035;
+#[path = "component_meta_audit_corpus/chunk_036.rs"]
+mod chunk_036;
+#[path = "component_meta_audit_corpus/chunk_037.rs"]
+mod chunk_037;
+#[path = "component_meta_audit_corpus/chunk_038.rs"]
+mod chunk_038;
+#[path = "component_meta_audit_corpus/chunk_039.rs"]
+mod chunk_039;
+#[path = "component_meta_audit_corpus/chunk_040.rs"]
+mod chunk_040;
+#[path = "component_meta_audit_corpus/chunk_041.rs"]
+mod chunk_041;
+#[path = "component_meta_audit_corpus/chunk_042.rs"]
+mod chunk_042;
+#[path = "component_meta_audit_corpus/chunk_043.rs"]
+mod chunk_043;
+#[path = "component_meta_audit_corpus/chunk_044.rs"]
+mod chunk_044;
+#[path = "component_meta_audit_corpus/chunk_045.rs"]
+mod chunk_045;
+#[path = "component_meta_audit_corpus/chunk_046.rs"]
+mod chunk_046;
+#[path = "component_meta_audit_corpus/chunk_047.rs"]
+mod chunk_047;
+#[path = "component_meta_audit_corpus/chunk_048.rs"]
+mod chunk_048;
+#[path = "component_meta_audit_corpus/chunk_049.rs"]
+mod chunk_049;
+#[path = "component_meta_audit_corpus/chunk_050.rs"]
+mod chunk_050;
+#[path = "component_meta_audit_corpus/chunk_051.rs"]
+mod chunk_051;
+#[path = "component_meta_audit_corpus/chunk_052.rs"]
+mod chunk_052;
+#[path = "component_meta_audit_corpus/chunk_053.rs"]
+mod chunk_053;
+#[path = "component_meta_audit_corpus/chunk_054.rs"]
+mod chunk_054;
+#[path = "component_meta_audit_corpus/chunk_055.rs"]
+mod chunk_055;
+#[path = "component_meta_audit_corpus/chunk_056.rs"]
+mod chunk_056;
+#[path = "component_meta_audit_corpus/chunk_057.rs"]
+mod chunk_057;
+#[path = "component_meta_audit_corpus/chunk_058.rs"]
+mod chunk_058;
+#[path = "component_meta_audit_corpus/chunk_059.rs"]
+mod chunk_059;
+#[path = "component_meta_audit_corpus/chunk_060.rs"]
+mod chunk_060;
+#[path = "component_meta_audit_corpus/chunk_061.rs"]
+mod chunk_061;
+#[path = "component_meta_audit_corpus/chunk_062.rs"]
+mod chunk_062;
+#[path = "component_meta_audit_corpus/chunk_063.rs"]
+mod chunk_063;
+#[path = "component_meta_audit_corpus/chunk_064.rs"]
+mod chunk_064;
+#[path = "component_meta_audit_corpus/chunk_065.rs"]
+mod chunk_065;
+#[path = "component_meta_audit_corpus/chunk_066.rs"]
+mod chunk_066;
+#[path = "component_meta_audit_corpus/chunk_067.rs"]
+mod chunk_067;
+#[path = "component_meta_audit_corpus/chunk_068.rs"]
+mod chunk_068;
+#[path = "component_meta_audit_corpus/chunk_069.rs"]
+mod chunk_069;
+#[path = "component_meta_audit_corpus/chunk_070.rs"]
+mod chunk_070;
+#[path = "component_meta_audit_corpus/chunk_071.rs"]
+mod chunk_071;
+#[path = "component_meta_audit_corpus/chunk_072.rs"]
+mod chunk_072;
+#[path = "component_meta_audit_corpus/chunk_073.rs"]
+mod chunk_073;
+#[path = "component_meta_audit_corpus/chunk_074.rs"]
+mod chunk_074;
+#[path = "component_meta_audit_corpus/chunk_075.rs"]
+mod chunk_075;
+#[path = "component_meta_audit_corpus/chunk_076.rs"]
+mod chunk_076;
+#[path = "component_meta_audit_corpus/chunk_077.rs"]
+mod chunk_077;
+#[path = "component_meta_audit_corpus/chunk_078.rs"]
+mod chunk_078;
+#[path = "component_meta_audit_corpus/chunk_079.rs"]
+mod chunk_079;
+#[path = "component_meta_audit_corpus/chunk_080.rs"]
+mod chunk_080;
+#[path = "component_meta_audit_corpus/chunk_081.rs"]
+mod chunk_081;
+#[path = "component_meta_audit_corpus/chunk_082.rs"]
+mod chunk_082;
+#[path = "component_meta_audit_corpus/chunk_083.rs"]
+mod chunk_083;
+#[path = "component_meta_audit_corpus/chunk_084.rs"]
+mod chunk_084;
+#[path = "component_meta_audit_corpus/chunk_085.rs"]
+mod chunk_085;
+#[path = "component_meta_audit_corpus/chunk_086.rs"]
+mod chunk_086;
+#[path = "component_meta_audit_corpus/chunk_087.rs"]
+mod chunk_087;
+#[path = "component_meta_audit_corpus/chunk_088.rs"]
+mod chunk_088;
+#[path = "component_meta_audit_corpus/chunk_089.rs"]
+mod chunk_089;
 #[path = "component_meta_audit_corpus/chunk_harness.rs"]
 mod chunk_harness;

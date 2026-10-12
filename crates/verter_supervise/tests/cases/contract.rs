@@ -9,6 +9,37 @@ const LIMITS: &[&str] = &["--mem-mb", "512", "--timeout-ms", "30000"];
 
 #[test]
 #[cfg(target_os = "macos")]
+fn exit_notifications_preserve_exact_three_generation_cpu() {
+    let dir = scratch("exit-sampled-cpu");
+    let mut limits = LIMITS.to_vec();
+    // Longer than the run deadline: exits must be observed without a
+    // periodic sweep, independently of this worker's scheduling speed.
+    // cpu-tree reaps with wait as soon as each child exits.
+    limits.extend(["--sample-ms", "60000"]);
+    let run = supervise_in(&dir, &limits, &["cpu-tree", "2", "50"], &[]);
+    assert_eq!(run.code, Some(0), "stderr: {}", run.stderr);
+    assert_eq!(run.result["errors"], serde_json::json!([]));
+    let measured: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(run.dir.join("result.stdout.log")).unwrap())
+            .unwrap();
+    let user = run.result["cpuUserMs"]
+        .as_f64()
+        .expect("exit-sampled user CPU");
+    let actual = measured["userMs"].as_f64().unwrap();
+    assert!(actual > 0.0);
+    assert!(
+        (user - actual).abs() / actual <= 0.10,
+        "sampled {user}, reaped tree {actual}"
+    );
+    assert!(run.result["cpuKernelMs"]
+        .as_f64()
+        .is_some_and(|kernel| kernel >= measured["kernelMs"].as_f64().unwrap()));
+    assert!(run.result.get("cpuUserMsBounds").is_none());
+    assert!(run.result.get("cpuKernelMsBounds").is_none());
+}
+
+#[test]
+#[cfg(target_os = "macos")]
 fn cpu_bound_child_accounting_matches_its_own_resource_usage() {
     let run = supervise("cpu-time", LIMITS, &["cpu", "1000"]);
     assert_eq!(run.code, Some(0), "stderr: {}", run.stderr);

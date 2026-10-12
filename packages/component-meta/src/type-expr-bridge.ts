@@ -237,7 +237,7 @@ export type NativeTypeExpr =
   | { kind: "templateLiteral"; quasis: string[]; expressions: NativeTypeExpr[] }
   | { kind: "parenthesized"; inner: NativeTypeExpr }
   | { kind: "unknown"; raw: string }
-  | { kind: "infer"; name: string }
+  | { kind: "infer"; name: string; constraint?: NativeTypeExprLike }
   | { kind: "rest"; inner: NativeTypeExpr }
   | {
       kind: "syntheticSlotBinding";
@@ -2730,8 +2730,10 @@ function graphTypeExprToString(expr: GraphTypeExprRef): string {
         .map((id) => graphTypeExprToString(createGraphTypeExprRef(expr.graph, id)))
         .join(" & ");
     case NODE_ARRAY: {
+      const elementNode = expr.graph.getNode(node.elementNodeId);
       const element = graphTypeExprToString(createGraphTypeExprRef(expr.graph, node.elementNodeId));
-      return node.readonly ? `readonly ${element}[]` : `${element}[]`;
+      const rendered = graphArrayElementNeedsParens(elementNode.kind) ? `(${element})` : element;
+      return node.readonly ? `readonly ${rendered}[]` : `${rendered}[]`;
     }
     case NODE_TUPLE: {
       const items = node.elements
@@ -2741,8 +2743,19 @@ function graphTypeExprToString(expr: GraphTypeExprRef): string {
     }
     case NODE_OBJECT:
       return "object";
-    case NODE_FUNCTION:
-      return "function";
+    case NODE_FUNCTION: {
+      const params = node.parameters.map((parameter) => {
+        const name = expr.graph.getStringMaybe(parameter.nameId);
+        const label = name ? `${name}${parameter.optional ? "?" : ""}: ` : "";
+        const rest = parameter.rest ? "..." : "";
+        const ty = graphTypeExprToString(createGraphTypeExprRef(expr.graph, parameter.typeNodeId));
+        return `${rest}${label}${ty}`;
+      });
+      const renderedReturn = node.returnTypeNodeId
+        ? graphTypeExprToString(createGraphTypeExprRef(expr.graph, node.returnTypeNodeId))
+        : "unknown";
+      return `(${params.join(", ")}) => ${renderedReturn}`;
+    }
     case NODE_KEY_OF:
       return `keyof ${graphTypeExprToString(createGraphTypeExprRef(expr.graph, node.operandNodeId))}`;
     case NODE_TYPE_OF:
@@ -2779,7 +2792,7 @@ function graphTypeExprToString(expr: GraphTypeExprRef): string {
     case NODE_PARENTHESIZED:
       return `(${graphTypeExprToString(createGraphTypeExprRef(expr.graph, node.innerNodeId))})`;
     case NODE_INFER:
-      return `infer ${expr.graph.getString(node.nameId)}`;
+      return `infer ${expr.graph.getString(node.nameId)}${node.constraintNodeId ? ` extends ${graphTypeExprToString(createGraphTypeExprRef(expr.graph, node.constraintNodeId))}` : ""}`;
     case NODE_REST:
       return `...${graphTypeExprToString(createGraphTypeExprRef(expr.graph, node.innerNodeId))}`;
     case NODE_RECURSIVE_REF:
@@ -2844,6 +2857,44 @@ function nativeTypeExprToString(expr: NativeTypeExpr): string {
       return `keyof ${nativeTypeExprToString(expr.operand)}`;
     case "typeOf":
       return `typeof ${expr.path.join(".")}`;
+    case "union":
+      return expr.types.map(nativeTypeExprToString).join(" | ");
+    case "intersection":
+      return expr.types.map(nativeTypeExprToString).join(" & ");
+    case "array": {
+      const element = nativeTypeExprToString(expr.element);
+      const rendered = nativeArrayElementNeedsParens(expr.element.kind) ? `(${element})` : element;
+      return `${expr.readonly ? "readonly " : ""}${rendered}[]`;
+    }
+    case "tuple": {
+      const elements = expr.elements.map((element) => {
+        const label = element.label ? `${element.label}${element.optional ? "?" : ""}: ` : "";
+        const rest = element.rest ? "..." : "";
+        return `${rest}${label}${nativeTypeExprToString(element.ty)}`;
+      });
+      return `${expr.readonly ? "readonly " : ""}[${elements.join(", ")}]`;
+    }
+    case "object": {
+      const members = expr.properties.flatMap((member) => {
+        if (
+          member.memberKind !== "property" ||
+          member.name === undefined ||
+          member.ty === undefined
+        ) {
+          return [];
+        }
+        return [
+          `${member.name}${member.optional ? "?" : ""}: ${nativeTypeExprToString(member.ty)}`,
+        ];
+      });
+      return `{ ${members.join("; ")} }`;
+    }
+    case "infer":
+      return `infer ${expr.name}${expr.constraint ? ` extends ${nativeTypeExprLikeToString(expr.constraint)}` : ""}`;
+    case "function":
+      return nativeCallableToString("", expr.parameters, expr.returnType);
+    case "constructorType":
+      return nativeCallableToString("new ", expr.parameters, expr.returnType);
     case "unknown":
       return expr.raw;
     case "syntheticSlotBinding":
@@ -2853,4 +2904,49 @@ function nativeTypeExprToString(expr: NativeTypeExpr): string {
     default:
       return expr.kind;
   }
+}
+
+function nativeTypeExprLikeToString(expr: NativeTypeExprLike): string {
+  return isGraphTypeExprRef(expr) ? graphTypeExprToString(expr) : nativeTypeExprToString(expr);
+}
+
+function nativeCallableToString(
+  prefix: "" | "new ",
+  parameters: NativeFunctionParam[],
+  returnType: NativeTypeExpr | undefined,
+): string {
+  const params = parameters
+    .map((parameter) => {
+      const rest = parameter.rest ? "..." : "";
+      const name = parameter.name ? `${parameter.name}${parameter.optional ? "?" : ""}: ` : "";
+      return `${rest}${name}${nativeTypeExprToString(parameter.ty)}`;
+    })
+    .join(", ");
+  const renderedReturn = returnType ? nativeTypeExprToString(returnType) : "unknown";
+  return `${prefix}(${params}) => ${renderedReturn}`;
+}
+
+/** `[]` binds tighter than these forms, so an array element needs parentheses. */
+function nativeArrayElementNeedsParens(kind: NativeTypeExpr["kind"]): boolean {
+  switch (kind) {
+    case "union":
+    case "intersection":
+    case "function":
+    case "constructorType":
+    case "conditional":
+    case "infer":
+      return true;
+    default:
+      return false;
+  }
+}
+
+function graphArrayElementNeedsParens(kind: number): boolean {
+  return (
+    kind === NODE_UNION ||
+    kind === NODE_INTERSECTION ||
+    kind === NODE_FUNCTION ||
+    kind === NODE_CONDITIONAL ||
+    kind === NODE_INFER
+  );
 }
