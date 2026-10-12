@@ -541,6 +541,12 @@ malformed answers remain decoding errors.
 
 On macOS, CPU columns sum sampled user and kernel counters across process
 lifetimes, with reaped-child accounting deduplicated against those samples.
+The kqueue watcher reports each `NOTE_EXIT`; the supervisor reads the exited
+identity immediately and sweeps before consuming watchdog completion. Newly
+discovered descendants are watched during enumeration. A successful exit read
+with the parent still present preserves the final descendant counters even when
+no periodic sweep falls between nested exits. If the kernel notification or
+zombie read arrives too late, the supervisor retains the ambiguity instead.
 When a child disappears while its parent is still sampled, cumulative child
 counters retain unsampled tails without adding the child's sampled usage twice.
 Live reparented descendants remain independent, and reused PIDs are separate
@@ -554,6 +560,13 @@ can produce the same ambiguity. Neither counter magnitude nor later samples
 resolve it. When an intermediate sample observes the parent accounting for the
 missing grandchild before the parent disappears, the nested subtree remains
 attributable and its CPU is counted once.
+Ambiguous reports retain `cpuUserMs: null` and `cpuKernelMs: null` (the benchmark
+shows `n/a` with its existing warning) and include `cpuUserMsBounds` and
+`cpuKernelMsBounds`, each with `lower` and `upper` in milliseconds. These bound
+the attribution of observed counters, not unobserved CPU after the last read.
+The example above has user bounds 170..270 and, with kernel counters half the
+user counters, kernel bounds 85..135. No point in the interval is published as
+an exact total.
 The watchdog reads the exited leader before reaping it: Apple's
 [proc_pid_rusage API](https://github.com/apple-oss-distributions/xnu/blob/main/libsyscall/wrappers/libproc/libproc.h)
 supports zombies. CPU units are milliseconds. Descendants that exit between

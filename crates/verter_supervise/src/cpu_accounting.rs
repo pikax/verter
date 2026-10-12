@@ -33,10 +33,39 @@ struct PendingEntry {
 pub(crate) struct TreeCpu {
     entries: BTreeMap<Identity, Entry>,
     total: (u64, u64),
+    upper: (u64, u64),
     ambiguous: bool,
 }
 
 impl TreeCpu {
+    pub fn record_exit(&mut self, reading: CpuReading) {
+        // Update only this lifetime. A later full snapshot decides whether
+        // the parent reaped it; retaining a zombie in that snapshot after it
+        // was reaped would mix two instants and hide the attribution evidence.
+        if let Some(entry) = self.entries.get_mut(&(reading.pid, reading.started)) {
+            entry.reading = reading;
+        }
+    }
+
+    pub fn bounds(&self) -> ((u64, u64), (u64, u64)) {
+        ((self.total.0, self.upper.0), (self.total.1, self.upper.1))
+    }
+
+    pub fn publish_bounds(&self, report: &mut crate::report::Report) {
+        if self.totals().is_none() {
+            let ((user_lower, user_upper), (kernel_lower, kernel_upper)) = self.bounds();
+            let ms = |ns: u64| ns as f64 / 1_000_000.0;
+            report.cpu_user_ms_bounds = Some(crate::report::CpuBounds {
+                lower: ms(user_lower),
+                upper: ms(user_upper),
+            });
+            report.cpu_kernel_ms_bounds = Some(crate::report::CpuBounds {
+                lower: ms(kernel_lower),
+                upper: ms(kernel_upper),
+            });
+        }
+    }
+
     pub fn observe(&mut self, readings: Vec<CpuReading>) {
         let present: BTreeMap<_, _> = readings
             .iter()
@@ -83,16 +112,23 @@ impl TreeCpu {
             .entries
             .values()
             .any(|entry| entry.missing && !entry.reaped && entry.parent.is_some());
-        if !self.ambiguous {
-            self.total = self.reconcile_missing();
-        }
+        self.total = self.reconcile_missing(false);
+        self.upper = self.reconcile_missing(true);
     }
 
     pub fn totals(&self) -> Option<(u64, u64)> {
         (!self.ambiguous).then_some(self.total)
     }
 
-    fn reconcile_missing(&mut self) -> (u64, u64) {
+    fn reconcile_missing(&self, upper: bool) -> (u64, u64) {
+        // An unresolved edge may overlap the parent's child counter (lower)
+        // or remain independent after orphaning (upper). Never pick a total
+        // from that interval. Evidenced reaped edges deduplicate in both folds.
+        let folded_parent = |entry: &Entry| {
+            entry
+                .parent
+                .filter(|_| entry.missing && (!upper || entry.reaped))
+        };
         // Fold leaves upward without recursion or repeated descendant scans.
         let mut pending: BTreeMap<_, _> = self
             .entries
@@ -100,7 +136,7 @@ impl TreeCpu {
             .map(|id| (*id, PendingEntry::default()))
             .collect();
         for entry in self.entries.values() {
-            if let Some(parent) = entry.parent.filter(|_| entry.missing) {
+            if let Some(parent) = folded_parent(entry) {
                 if let Some(parent) = pending.get_mut(&parent) {
                     parent.children += 1;
                 }
@@ -119,7 +155,7 @@ impl TreeCpu {
             let kernel = r
                 .kernel
                 .saturating_add(r.child_kernel.max(folded.sampled.1));
-            let parent = entry.parent.filter(|_| entry.missing);
+            let parent = folded_parent(entry);
             if let Some(parent) = parent {
                 if let Some(folded) = pending.get_mut(&parent) {
                     folded.sampled.0 = folded.sampled.0.saturating_add(user);
@@ -185,6 +221,110 @@ mod tests {
             tree.observe(vec![reading(1, 0, 30, 150)]);
             assert_eq!(tree.totals(), intermediate_sample.then_some((180, 90)));
         }
+    }
+
+    #[test]
+    fn exit_samples_preserve_three_generation_cpu_without_periodic_sweeps() {
+        let mut tree = TreeCpu::default();
+        tree.observe(vec![
+            reading(1, 0, 10, 0),
+            reading(2, 1, 20, 0),
+            reading(3, 2, 100, 0),
+        ]);
+        tree.record_exit(reading(3, 2, 110, 0));
+        // The next exit snapshot observes the parent's reaped-child counters.
+        tree.observe(vec![reading(1, 0, 10, 0), reading(2, 1, 40, 110)]);
+        tree.observe(vec![reading(1, 0, 20, 150)]);
+        assert_eq!(tree.totals(), Some((170, 85)));
+        tree.observe(vec![]);
+        assert_eq!(tree.totals(), Some((170, 85)));
+    }
+
+    #[test]
+    fn exit_counter_retains_tail_without_inventing_reaping_or_reusing_pid() {
+        let mut tree = TreeCpu::default();
+        tree.observe(vec![
+            reading(1, 0, 10, 0),
+            reading(2, 1, 20, 0),
+            reading(3, 2, 100, 0),
+        ]);
+        let mut reused = reading(3, 2, 900, 0);
+        reused.started = 99;
+        tree.record_exit(reused);
+        tree.record_exit(reading(3, 2, 110, 0));
+        // The root's aggregate could include the grandchild or an unrelated
+        // parent tail. A final child counter cannot settle that distinction.
+        tree.observe(vec![reading(1, 0, 20, 150)]);
+        assert_eq!(tree.totals(), None);
+        assert_eq!(tree.bounds(), ((170, 280), (85, 140)));
+    }
+
+    #[test]
+    fn indistinguishable_nested_reaping_and_orphan_tail_have_bounds() {
+        let mut tree = TreeCpu::default();
+        tree.observe(vec![
+            reading(1, 0, 10, 0),
+            reading(2, 1, 20, 0),
+            reading(3, 2, 100, 0),
+        ]);
+        tree.observe(vec![reading(1, 0, 20, 150)]);
+        assert_eq!(tree.totals(), None);
+        assert_eq!(tree.bounds(), ((170, 270), (85, 135)));
+        tree.observe(vec![reading(1, 0, 30, 150)]);
+        assert_eq!(tree.totals(), None);
+        assert_eq!(tree.bounds(), ((180, 280), (90, 140)));
+    }
+
+    #[test]
+    fn ambiguous_bounds_are_serialized_in_milliseconds_without_cpu_totals() {
+        let spec = crate::cli::parse(
+            [
+                "run",
+                "--mem-mb",
+                "512",
+                "--timeout-ms",
+                "1000",
+                "--out",
+                "result.json",
+                "--",
+                "fixture",
+            ]
+            .map(Into::into)
+            .to_vec(),
+        )
+        .unwrap();
+        let mut report = crate::report::Report::new(&spec, "macos-phys-footprint");
+        let mut tree = TreeCpu::default();
+        let scaled = |pid, parent, user, children| {
+            let mut r = reading(pid, parent, user, children);
+            r.user *= 1_000_000;
+            r.kernel *= 1_000_000;
+            r.child_user *= 1_000_000;
+            r.child_kernel *= 1_000_000;
+            r
+        };
+        tree.observe(vec![
+            scaled(1, 0, 10, 0),
+            scaled(2, 1, 20, 0),
+            scaled(3, 2, 100, 0),
+        ]);
+        tree.publish_bounds(&mut report);
+        let exact = serde_json::to_value(&report).unwrap();
+        assert!(exact.get("cpuUserMsBounds").is_none());
+        assert!(exact.get("cpuKernelMsBounds").is_none());
+        tree.observe(vec![scaled(1, 0, 20, 150)]);
+        tree.publish_bounds(&mut report);
+        let ambiguous = serde_json::to_value(&report).unwrap();
+        assert!(ambiguous["cpuUserMs"].is_null());
+        assert!(ambiguous["cpuKernelMs"].is_null());
+        assert_eq!(
+            ambiguous["cpuUserMsBounds"],
+            serde_json::json!({"lower":170.0,"upper":270.0})
+        );
+        assert_eq!(
+            ambiguous["cpuKernelMsBounds"],
+            serde_json::json!({"lower":85.0,"upper":135.0})
+        );
     }
 
     #[test]

@@ -9,6 +9,8 @@
 //! sleep <ms>                         sleep, then exit 0
 //! cpu-tree <depth> <ms>             (macOS) burn CPU in each generation,
 //!                                    reap descendants and report tree usage
+//! cpu-exit-tree <depth> <ms>        (macOS) hold each exited descendant
+//!                                    briefly for NOTE_EXIT sampling
 //! alloc <chunk-mb>                   commit and touch <chunk-mb> chunks until
 //!                                    an allocation is refused, then wait to be
 //!                                    killed (never exits on its own)
@@ -59,6 +61,13 @@ fn main() {
         "cpu-tree" => cpu_tree(
             rest[0].parse().expect("depth"),
             rest[1].parse().expect("CPU duration ms"),
+            false,
+        ),
+        #[cfg(target_os = "macos")]
+        "cpu-exit-tree" => cpu_tree(
+            rest[0].parse().expect("depth"),
+            rest[1].parse().expect("CPU duration ms"),
+            true,
         ),
         "spawn-wait" => {
             let mut child = spawn_grandchild(&rest[0], &rest[1..], Launch::Plain);
@@ -90,18 +99,49 @@ fn cpu(duration_ms: u64) {
 }
 
 #[cfg(target_os = "macos")]
-fn cpu_tree(depth: u32, duration_ms: u64) {
+fn cpu_tree(depth: u32, duration_ms: u64, hold_exit: bool) {
     burn_cpu(duration_ms);
     if depth > 0 {
         let child = Command::new(std::env::current_exe().expect("fixture path"))
             .args([
-                "cpu-tree",
+                if hold_exit {
+                    "cpu-exit-tree"
+                } else {
+                    "cpu-tree"
+                },
                 &(depth - 1).to_string(),
                 &duration_ms.to_string(),
             ])
             .stdin(Stdio::null())
-            .output()
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
             .expect("run CPU descendant");
+        if hold_exit {
+            // Keep the zombie readable while the supervisor handles NOTE_EXIT;
+            // no periodic sample is needed between these nested exits.
+            let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+            loop {
+                // SAFETY: child is ours; WNOWAIT leaves it for wait_with_output.
+                let result = unsafe {
+                    libc::waitid(
+                        libc::P_PID,
+                        child.id(),
+                        &mut info,
+                        libc::WEXITED | libc::WNOWAIT,
+                    )
+                };
+                if result == 0 {
+                    break;
+                }
+                assert_eq!(
+                    std::io::Error::last_os_error().kind(),
+                    std::io::ErrorKind::Interrupted
+                );
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let child = child.wait_with_output().expect("reap CPU descendant");
         assert!(child.status.success(), "CPU descendant failed: {child:?}");
     }
     report_cpu(true);
