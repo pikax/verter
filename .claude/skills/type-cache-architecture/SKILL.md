@@ -951,6 +951,13 @@ Concrete substrate (the per-domain target form):
 - Admission writes use RCU; write contention serialised by
   `StoreViewCompatToken`-keyed singleflight.
 
+Live observation storage: `FactReadSet::observe` and
+`observe_borrowed_signature` suppress exact duplicates in a bounded recent
+window before cloning or appending them. Replaying a small warm witness must
+not grow the outer tracer per read. The window bounds insertion work; it
+does not bound the answer or replace final canonicalization. Distinct versions
+of the same fact remain distinct observations.
+
 Paged signature evidence: a `fact_dep_signature` is never refused for its
 width. `FactReadSet::finalise` (and `seal_canonical_signature` for a signature
 a producer assembles by hand) cuts a canonical set wider than

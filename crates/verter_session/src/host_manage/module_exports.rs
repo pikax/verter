@@ -5,14 +5,18 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
+use verter_audit::NonAdmissionReason;
 use verter_session_query::analysis::route_inventory::RouteCapability;
 use verter_session_query::declarations::module_exports::{
     ModuleExportBinding, ModuleExportBindings, ModuleExportRetention, ModuleExportTable,
 };
-use verter_session_query::facts::fact_cache::{signature_entries, FactVersionRef, ResultReceipt};
+use verter_session_query::facts::fact_cache::{
+    signature_entries, FactVersionRef, ResultReceipt, SignatureAdmission,
+};
 use verter_session_query::facts::fact_read_set::FactReadSetFinalise;
 use verter_session_query::facts::store_view::StoreView;
 use verter_session_query::inputs::shallow::{ExportTarget, LexicalValueBinding};
+use verter_session_query::retention::RetentionAdmission;
 use verter_session_query::type_solver::ResolvedRootIdentity;
 use verter_type_engine::fact_signature_helpers::{
     install_fact_tracer, with_cacheability_scope, FactTracerBasisSource,
@@ -128,27 +132,20 @@ impl VerterHost {
                 {
                     return Ok(ExportTableFlight {
                         table,
-                        admitted: true,
-                        rootable: true,
+                        admission: Ok(()),
                     });
                 }
-                let (table, admitted, rootable) =
-                    self.build_module_export_tables(ctx, view, &canonical, || {
-                        !probe.non_cacheable()
-                    })?;
-                Ok(ExportTableFlight {
-                    table,
-                    admitted: admitted && !probe.non_cacheable(),
-                    rootable: rootable && !probe.non_cacheable(),
+                self.build_module_export_tables(ctx, view, &canonical, || {
+                    probe.non_admission_reason().map_or(Ok(()), Err)
                 })
             };
             let run = db
                 .module_export_singleflight
                 .run_retaining(key.clone(), view.compat_token(), build, |outcome| {
-                    outcome.admitted
+                    outcome.admission.is_ok()
                 })
                 .ok()?;
-            if run.value.admitted {
+            if run.value.admission.is_ok() {
                 if let Some(table) =
                     db.module_exports
                         .get_if_valid_self_rooted(&key, view, &[canonical.as_str()])
@@ -158,18 +155,23 @@ impl VerterHost {
             }
             // A follower cannot adopt an unrootable leader's answer: compute
             // it from its own snapshot and carry non-admission to its caller.
-            if !run.value.rootable {
-                verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
-                    verter_session_query::facts::reuse::NonCacheableReadReason::UnrootableRoute,
-                );
+            if let Err(reason) = run.value.admission {
+                verter_type_engine::cache_runtime::propagate_non_admission(reason);
             }
             if matches!(run.role, SingleflightRole::Leader) {
                 Some(Arc::clone(&run.value.table))
             } else {
                 let _build = db.module_export_build_lock.lock();
-                self.build_module_export_tables(ctx, view, &canonical, || false)
-                    .ok()
-                    .map(|result| result.0)
+                self.build_module_export_tables(ctx, view, &canonical, || {
+                    probe.non_admission_reason().map_or(Ok(()), Err)
+                })
+                .ok()
+                .map(|result| {
+                    if let Err(reason) = result.admission {
+                        verter_type_engine::cache_runtime::propagate_non_admission(reason);
+                    }
+                    result.table
+                })
             }
         })
         .0
@@ -182,6 +184,7 @@ impl VerterHost {
             let shallow = &indexed.shallow_state;
             let witness = crate::host_manage::import_route_witness::ResolutionWitnessScope::enter();
             let mut inputs = ModuleInputs::default();
+            let mut ambient_dispatch = None;
             let whole = FactVersionRef::FileWholeHash {
                 canonical_id: canonical.to_owned(),
                 hash: indexed.whole_hash,
@@ -294,6 +297,13 @@ impl VerterHost {
                                 dependency,
                                 Arc::from(original_name.as_str()),
                             ));
+                        } else if let Some(root) = ambient_dispatch
+                            .get_or_insert_with(|| {
+                                verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx)
+                            })
+                            .ambient_value_export_root(source_specifier, original_name)
+                        {
+                            inputs.local.insert(name, Some(ModuleExportBinding::Value(root)));
                         }
                     }
                     ExportTarget::Reexport { is_type: true, .. } => {}
@@ -342,8 +352,8 @@ impl VerterHost {
         ctx: Context<'_>,
         view: &dyn StoreView,
         canonical: &str,
-        can_admit: impl Fn() -> bool,
-    ) -> Result<(Arc<ModuleExportTable>, bool, bool), ()> {
+        can_admit: impl Fn() -> Result<(), NonAdmissionReason>,
+    ) -> Result<ExportTableFlight, ()> {
         let db = &self.resolver.runtime.routes;
         let mut inputs: FxHashMap<String, ModuleInputs> = FxHashMap::default();
         let mut tables: FxHashMap<String, Arc<ModuleExportTable>> = FxHashMap::default();
@@ -376,11 +386,15 @@ impl VerterHost {
         // Dependency-first SCCs permit one fold per acyclic module. Only
         // cyclic components need the finite absent/binding/ambiguous worklist.
         let components = export_components(&inputs, &parents);
-        let rootable = inputs
-            .values()
-            .all(|input| matches!(input.evidence, Some(FactReadSetFinalise::Ok(_))));
-        let cacheable = rootable && can_admit();
-        let mut admitted = false;
+        let signature_admission = inputs.values().try_for_each(|input| {
+            match SignatureAdmission::from_finalise(
+                input.evidence.clone().expect("discovered input evidence"),
+            ) {
+                SignatureAdmission::Cacheable(_) => Ok(()),
+                SignatureAdmission::NonCacheable(reason) => Err(reason),
+            }
+        });
+        let mut admissions = FxHashMap::default();
         for component in components {
             let component_set: FxHashSet<_> = component.iter().cloned().collect();
             let mut bindings: FxHashMap<String, Bindings> = component
@@ -457,11 +471,9 @@ impl VerterHost {
                 if first || next != bindings[&module] {
                     bindings.insert(module.clone(), next);
                     writes.insert(module.clone(), owned);
-                    if component.len() > 1 {
-                        for parent in parents.get(&module).into_iter().flatten() {
-                            if component_set.contains(parent) && queued.insert(parent.clone()) {
-                                queue.push_back(parent.clone());
-                            }
+                    for parent in parents.get(&module).into_iter().flatten() {
+                        if component_set.contains(parent) && queued.insert(parent.clone()) {
+                            queue.push_back(parent.clone());
                         }
                     }
                 }
@@ -488,7 +500,7 @@ impl VerterHost {
                 );
             }
             let mut dependency_charges = Vec::new();
-            let mut dependencies_charged = true;
+            let mut admission = signature_admission.and_then(|()| can_admit());
             for dependency in dependencies {
                 let table = &tables[&dependency];
                 receipts.extend(table.facts.iter().filter_map(|fact| match fact {
@@ -497,9 +509,8 @@ impl VerterHost {
                 }));
                 if let Some(charge) = &table.retention {
                     dependency_charges.push(Arc::clone(charge));
-                } else {
-                    dependencies_charged = false;
                 }
+                admission = admission.and(admissions.get(&dependency).copied().unwrap_or(Ok(())));
             }
             let receipt = ResultReceipt::retained_join(receipts, db.module_export_account.get());
             let facts: Arc<[FactVersionRef]> = Arc::from([FactVersionRef::Receipt(receipt)]);
@@ -532,21 +543,26 @@ impl VerterHost {
                         })
                         .sum::<usize>();
             }
-            let retention = if cacheable && dependencies_charged {
-                verter_session_query::facts::receipt::reserve_retained_with_evidence(
-                    db.module_export_account.get(),
-                    own_bytes,
-                    &[&facts],
-                )
-                .admitted()
-                .map(|charge| {
-                    Arc::new(ModuleExportRetention {
-                        charge,
-                        dependencies: dependency_charges,
-                    })
-                })
-            } else {
-                None
+            let retention = match admission {
+                Ok(()) => {
+                    match verter_session_query::facts::receipt::reserve_retained_with_evidence(
+                        db.module_export_account.get(),
+                        own_bytes,
+                        &[&facts],
+                    ) {
+                        RetentionAdmission::Admitted(charge) => {
+                            Some(Arc::new(ModuleExportRetention {
+                                charge,
+                                dependencies: dependency_charges,
+                            }))
+                        }
+                        RetentionAdmission::Refused(_) => {
+                            admission = Err(NonAdmissionReason::RetentionPressure);
+                            None
+                        }
+                    }
+                }
+                Err(_) => None,
             };
             for module in component {
                 let table = Arc::new(ModuleExportTable {
@@ -555,21 +571,25 @@ impl VerterHost {
                     retention: retention.clone(),
                     owned_binding_slots: writes.get(&module).copied().unwrap_or(0),
                 });
-                if table.retention.is_some() {
+                if admission.is_ok() {
                     let stored = db.module_exports.insert_arc_with_kind(
                         table_key(ctx, &module),
                         Arc::clone(&table),
                         table.facts.to_vec(),
                         "route_db.module_exports",
                     );
-                    if module == canonical {
-                        admitted = stored.is_some();
+                    if stored.is_none() {
+                        admission = Err(NonAdmissionReason::RetentionPressure);
                     }
                 }
+                admissions.insert(module.clone(), admission);
                 tables.insert(module, table);
             }
         }
-        Ok((Arc::clone(&tables[canonical]), admitted, rootable))
+        Ok(ExportTableFlight {
+            table: Arc::clone(&tables[canonical]),
+            admission: admissions.get(canonical).copied().unwrap_or(Ok(())),
+        })
     }
 
     fn count_module_export_work(&self, units: u64) {
@@ -581,5 +601,90 @@ impl VerterHost {
             .fetch_add(units, std::sync::atomic::Ordering::Relaxed);
         #[cfg(not(any(test, feature = "test-support")))]
         let _ = units;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use verter_session_query::retention::{
+        RetentionLimits, SemanticRetentionAccount, StoreAccount,
+    };
+
+    #[test]
+    fn export_table_refusals_keep_the_complete_answer_and_typed_reason() {
+        for reason in [
+            None,
+            Some(NonAdmissionReason::MutationUnstable),
+            Some(NonAdmissionReason::UnresolvedProvenance),
+            Some(NonAdmissionReason::RetentionPressure),
+        ] {
+            let mut host = VerterHost::new_standalone(crate::HostConfig::default());
+            for (canonical, source) in [
+                ("/leaf.ts", "export const x = 1 as const;"),
+                (
+                    "/index.ts",
+                    "export * from './leaf'; export const y = 2 as const;",
+                ),
+            ] {
+                let _ = host
+                    .upsert(crate::UpsertRequest {
+                        canonical_id: Some(canonical.into()),
+                        input_id: canonical.into(),
+                        source: Arc::from(source),
+                        file_language: crate::FileLanguage::script_ts(),
+                        aliases: vec![],
+                    })
+                    .unwrap();
+            }
+            if reason == Some(NonAdmissionReason::RetentionPressure) {
+                let account = SemanticRetentionAccount::new(RetentionLimits {
+                    aggregate_ceiling_bytes: 1,
+                    max_entry_bytes: 1,
+                    active_ceiling_bytes: 1,
+                    pin_threshold_bytes: 1,
+                });
+                let mut routes = crate::resolver_core::route_db::RouteDb::new();
+                routes.module_export_account = StoreAccount::new(account);
+                host.resolver.runtime.routes = Arc::new(routes);
+            }
+            let view = host.resolver_store_view_read().into_owned_view();
+            let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+            let ctx = crate::resolver_core::HostResolverContext::new(&host, &view, overlay);
+            let flight = host
+                .build_module_export_tables(&ctx, &view, "/index.ts", || match reason {
+                    Some(NonAdmissionReason::MutationUnstable) => {
+                        match SignatureAdmission::from_finalise(
+                            FactReadSetFinalise::MutationUnstable,
+                        ) {
+                            SignatureAdmission::NonCacheable(reason) => Err(reason),
+                            _ => panic!("mutation instability cannot admit"),
+                        }
+                    }
+                    Some(NonAdmissionReason::UnresolvedProvenance) => {
+                        match SignatureAdmission::from_finalise(FactReadSetFinalise::NonCacheable(
+                            Arc::from([]),
+                        )) {
+                            SignatureAdmission::NonCacheable(reason) => Err(reason),
+                            _ => panic!("non-cacheable provenance cannot admit"),
+                        }
+                    }
+                    _ => Ok(()),
+                })
+                .unwrap();
+            assert_eq!(flight.admission, reason.map_or(Ok(()), Err));
+            assert_eq!(flight.table.bindings.len(), 2);
+            for name in ["x", "y"] {
+                assert!(matches!(
+                    flight.table.bindings.get(name),
+                    Some(Some(ModuleExportBinding::Value(_)))
+                ));
+            }
+            assert_eq!(flight.table.retention.is_some(), reason.is_none());
+            assert_eq!(
+                host.resolver.runtime.routes.module_exports.len(),
+                if reason.is_none() { 2 } else { 0 }
+            );
+        }
     }
 }

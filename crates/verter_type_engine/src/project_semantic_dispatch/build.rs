@@ -6409,6 +6409,26 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         })
     }
 
+    /// Resolve a named ambient value export through the import value owner.
+    /// Contributor-set and declaration observations join the active fact tracer.
+    pub fn ambient_value_export_root(
+        &self,
+        specifier: &str,
+        name: &str,
+    ) -> Option<ResolvedRootIdentity> {
+        let target = verter_session_query::inputs::shallow::ImportTarget {
+            source_specifier: specifier.to_owned(),
+            imported_name: name.to_owned(),
+            is_namespace: false,
+        };
+        let (root, _) = self.ambient_import_member_root(&target, &[])?;
+        Some(ResolvedRootIdentity::new_in_owner(
+            root.scope.canonical_id,
+            root.scope.owner,
+            root.name,
+        ))
+    }
+
     /// The declaration an import of an AMBIENT module names through `path`
     /// (see [`Self::qualified_value_member_root`]), and how many path
     /// segments it consumes: the binding's member of the first

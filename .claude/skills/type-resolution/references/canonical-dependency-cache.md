@@ -168,8 +168,13 @@ not accidentally resurrect it. Two paths to the same defining declaration are
 one binding. Authored wildcard facts distinguish ordinary stars, type-only
 stars and namespace re-exports. Iterative discovery and a finite binding
 worklist close cycles before publication. Cached child tables are shared.
+Singleton components with self edges run the same closure worklist as
+multi-module cycles; chained named self re-exports must reach a fixed point.
 Imported ambient values keep their lexical value root and resolve through the
-existing ambient `TypeOf` owner. Direct namespace member reads and indexed
+existing ambient `TypeOf` owner. Named ambient re-exports resolve to the same
+ambient value declaration through `ambient_value_export_root`, retaining the
+augmenter-set and contributor observations in the table proof.
+Direct namespace member reads and indexed
 namespace projections both consume this export-table authority; neither may
 recover a binding the table excludes.
 Cold graph construction is serialized across overlapping namespace roots so
@@ -194,6 +199,11 @@ retention account. Their shared RAII owner keeps dependency reservations alive
 after child cache eviction; proof allocations carry their own charges.
 Retention refusal returns the complete table without caching it or retaining
 its singleflight rendezvous, and does not taint an enclosing derivation.
+Construction, publication and singleflight carry a typed admission result:
+`SignatureAdmission` preserves mutation and provenance refusals, the live
+`CacheabilityProbe::non_admission_reason` rechecks before reservation, and
+retention refusal is `NonAdmissionReason::RetentionPressure`. Transitive
+refusals propagate to enclosing tracers; retention pressure stays local.
 
 Deferred evaluation of a declaration or operator observes export routes too.
 The shared deferred-evaluation memo retains a complete fact signature and

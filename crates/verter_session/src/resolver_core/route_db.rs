@@ -200,8 +200,7 @@ pub(crate) struct RouteFlightOutcome {
 #[derive(Debug)]
 pub(crate) struct ExportTableFlight {
     pub(crate) table: Arc<verter_session_query::declarations::module_exports::ModuleExportTable>,
-    pub(crate) admitted: bool,
-    pub(crate) rootable: bool,
+    pub(crate) admission: Result<(), verter_audit::NonAdmissionReason>,
 }
 
 /// Shared DB for canonical export routing facts.

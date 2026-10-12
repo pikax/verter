@@ -88,6 +88,103 @@ fn namespace_barrel_probes_keep_every_literal_at_scale() {
 }
 
 #[test]
+fn singleton_reexport_cycles_close_before_namespace_publication() {
+    let files = [
+        ("self.ts", "export const x = 1 as const; export { x as y } from './self'; export { y as z } from './self';"),
+        ("index.ts", "export * from './self';"),
+    ];
+    for module in ["self", "index"] {
+        let failures = mismatches_in(
+            ProbeProject {
+                files: &files,
+                ..ProbeProject::default()
+            },
+            &format!("import * as ns from './{module}';"),
+            &[
+                ("keyof typeof ns", "\"x\" | \"y\" | \"z\""),
+                ("typeof ns.z", "1"),
+                ("(typeof ns)['z']", "1"),
+            ],
+        );
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+}
+
+#[test]
+fn ambient_named_reexports_match_import_then_export_values() {
+    for export in [
+        "export { x as renamed, x } from 'ambient';",
+        "import { x } from 'ambient'; export { x as renamed, x };",
+    ] {
+        let index = format!("{export} export const control = 2 as const;");
+        let files = [
+            (
+                "ambient.d.ts",
+                "declare module 'ambient' { export const x: 1; export interface TypeOnly {} }",
+            ),
+            ("index.ts", index.as_str()),
+        ];
+        let failures = mismatches_in(
+            ProbeProject {
+                files: &files,
+                ..ProbeProject::default()
+            },
+            "import * as ns from './index';",
+            &[
+                ("keyof typeof ns", "\"control\" | \"renamed\" | \"x\""),
+                ("typeof ns.x", "1"),
+                ("(typeof ns)['x']", "1"),
+                ("typeof ns.renamed", "1"),
+                ("(typeof ns)['renamed']", "1"),
+            ],
+        );
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+}
+
+#[test]
+fn ambient_named_reexports_invalidate_with_their_contributor() {
+    let files = [
+        (
+            "ambient.d.ts",
+            "declare module 'ambient' { export const x: 1; }",
+        ),
+        ("index.ts", "export { x } from 'ambient';"),
+    ];
+    let project = ProbeProject {
+        files: &files,
+        ..ProbeProject::default()
+    };
+    let host = probe_host(project);
+    for value in [1, 7] {
+        if value == 7 {
+            crate::u6_flow_shape_corpus_tests::upsert(
+                &host,
+                "/wb/ambient.d.ts",
+                "declare module 'ambient' { export const x: 7; }",
+                crate::FileLanguage::script_ts(),
+            );
+        }
+        for probe in ["typeof ns.x", "(typeof ns)['x']"] {
+            with_probe_on_host(
+                &host,
+                project,
+                "import * as ns from './index';",
+                probe,
+                |dispatch, node| {
+                    assert_eq!(
+                        dispatch.graph().node_data(node).as_deref(),
+                        Some(&SemanticNodeData::Literal(LiteralValue::Number(f64::from(
+                            value
+                        ))))
+                    );
+                },
+            );
+        }
+    }
+}
+
+#[test]
 fn exported_ambient_imports_keep_their_namespace_values() {
     let files = [
         (
