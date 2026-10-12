@@ -1678,6 +1678,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
+    /// An optional semantic probe contributes quality only when its answer
+    /// is selected. The fallback must establish its answer on its own reads.
+    fn probe_optional<T>(&self, probe: impl FnOnce() -> Option<T>) -> Option<T> {
+        let read = self.observe_read(probe);
+        if read.value().is_some() {
+            read.adopt(self).ok().flatten()
+        } else {
+            read.discard().ok().flatten()
+        }
+    }
+
     /// Fold a returning `CacheRead`'s rails into BOTH propagation channels —
     /// the per-request partial sticky AND the active build-local taint frame.
     /// This is the SINGLE fold funnel `execute_via_cold_build_helper` invokes
@@ -1693,17 +1704,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ///
     /// A top-level read with no active build frame naturally no-ops the
     /// build-local fold (the stack is empty); the sticky mark still fires.
-    /// An optional semantic probe contributes quality only when its answer
-    /// is selected. The fallback must establish its answer on its own reads.
-    fn probe_optional<T>(&self, probe: impl FnOnce() -> Option<T>) -> Option<T> {
-        let read = self.observe_read(probe);
-        if read.value().is_some() {
-            read.adopt(self).ok().flatten()
-        } else {
-            read.discard().ok().flatten()
-        }
-    }
-
     pub(super) fn fold_cache_read_rails(
         &self,
         result_is_partial: bool,

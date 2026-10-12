@@ -5619,37 +5619,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let mut exact_binders = outer
             .map(|outer| outer.exact_binders.clone())
             .unwrap_or_default();
-        let names: rustc_hash::FxHashSet<&str> = type_parameters
-            .iter()
-            .map(|param| param.name.as_ref())
-            .collect();
-        for parameter in type_parameters {
-            exact_binders.remove(parameter.name.as_ref());
-            let closed = |ty: &verter_session_query::flow::slice::GatedType| {
-                let mut types = vec![ty.ty()];
-                while let Some(ty) = types.pop() {
-                    match ty {
-                        TypeExpr::Primitive(_) | TypeExpr::Literal(_) => {}
-                        TypeExpr::Union(arms) if !arms.is_empty() => types.extend(arms.iter()),
-                        TypeExpr::Ref {
-                            name,
-                            type_arguments,
-                        } if type_arguments.is_empty()
-                            && (names.contains(name.as_ref())
-                                || outer.is_some_and(|outer| {
-                                    outer.exact_binders.contains(name.as_ref())
-                                })) => {}
-                        _ => return false,
-                    }
-                }
-                true
-            };
-            if parameter.constraint.as_ref().is_none_or(closed)
-                && parameter.default.as_ref().is_none_or(closed)
-            {
-                exact_binders.insert(parameter.name.to_string());
-            }
-        }
+        exact_binders.extend(
+            type_parameters
+                .iter()
+                .map(|parameter| parameter.name.to_string()),
+        );
         let mut binder_env = FlowBinderEnv {
             scope,
             scope_payload,
@@ -5659,7 +5633,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             type_param_decls,
             exact_binders,
         };
-        // A served sibling name is a binding, but its source capability
+        // Clause names are provisional capabilities, including closed bounds
+        // and mutually referring siblings. One source predicate decides which
+        // survive; a served sibling name is a binding, but its source capability
         // still depends on the sibling's own bound/default construction.
         // Remove unsupported dependencies transitively without re-evaluating
         // any annotation or changing the established binder identities.
@@ -6393,6 +6369,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             independent_members: Some(0),
             independent_returns: Some(0),
             constructive_values: rustc_hash::FxHashMap::default(),
+            constructive_signatures: rustc_hash::FxHashMap::default(),
             holds: Vec::new(),
             yield_contributions: Vec::new(),
             degradation: unapplied_write_effect
@@ -10999,6 +10976,13 @@ struct FlowEvaluator<'d, 'b, D: FlowDemandDriver> {
     independent_members: Option<usize>,
     independent_returns: Option<usize>,
     constructive_values: rustc_hash::FxHashMap<SemanticNodeId, ConstructiveValue>,
+    /// Completed parameter-free nested headers, bound to their actual served
+    /// function source as well as the produced signature. An equal signature
+    /// from another body cannot borrow this evidence.
+    constructive_signatures: rustc_hash::FxHashMap<
+        verter_session_query::function_program::FunctionProgramKey,
+        SemanticNodeId,
+    >,
     /// The coinductive hold targets this evaluation met (in-flight direct
     /// callees and direct self-calls) — the SCC close discharges an
     /// empty-cycle outcome on its targets' admitted returns.

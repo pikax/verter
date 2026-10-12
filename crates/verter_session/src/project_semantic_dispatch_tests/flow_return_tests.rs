@@ -148,8 +148,14 @@ export function subConstructedUnknown() { class C { field = notDeclared(); } ret
 export function subConstructedComputed(key: string) { class C { [key] = 1; } return new C(); }
 export function subConstructedBase() { class C extends notDeclared() { field = 1; } return new C(); }
 export function subConstructedClause<T>() { class C { field!: T; } return C; }
+export function subConstructedClosedClause<T extends number = 1>() { class C { field!: T; } return C; }
+export function subConstructedClosedSiblingClause<U extends V, V extends number>() { class C { field!: U; } return C; }
+export function subConstructedMethod() { return class { m() { return class { field = 1; }; } }; }
+export function subConstructedMethodNamed(value: number) { return class { m() { return class { field = value; }; } }; }
+export function subConstructedMethodUnknown() { return class { m() { return notDeclared(); } }; }
 export function subConstructedUnknownClause<T extends NotDeclared>() { class C { field!: T; } return C; }
 export function subConstructedForwardUnknownClause<U extends V, V extends NotDeclared>() { class C { field!: U; } return C; }
+export function subNestedConstructed(value: number) { return () => class { constructor(input: number = value) {} field = 1; }; }
 export class StaticDemandSource { static bad = notDeclared(); value = 1; }
 export function subStaticConstruct() { return new StaticDemandSource(); }
 export function subStaticAddressed() { return StaticDemandSource.bad; }
@@ -3461,6 +3467,9 @@ fn constructed_value_evidence_preserves_capture_refusal_and_its_roots() {
         "subConstructed",
         "subConstructedTuple",
         "subConstructedClause",
+        "subConstructedClosedClause",
+        "subConstructedClosedSiblingClause",
+        "subConstructedMethod",
     ] {
         let host = make_host();
         with_dispatch(&host, |dispatch| {
@@ -3512,6 +3521,34 @@ fn constructed_value_evidence_preserves_capture_refusal_and_its_roots() {
 }
 
 #[test]
+fn incomplete_nested_products_cannot_retain_constructive_evidence() {
+    use super::flow_return::flow_admission_fault_injection as inject;
+    use verter_type_engine::semantic_query::{FlowReturnDegradation, FlowReturnStep};
+    for incomplete in [false, true] {
+        let host = make_host();
+        with_dispatch(&host, |dispatch| {
+            let _missing = incomplete.then(|| {
+                inject::Guard::arm(&host.flow_fault_injection.drop_binding_domain_product)
+            });
+            let key = flow_key(
+                dispatch,
+                "subNestedConstructed",
+                FunctionPartIdentity::DeclarationBody,
+                0,
+            );
+            let FlowReturnStep::Complete(result) = dispatch.execute_flow_return(key) else {
+                panic!("the nested signature preserves its evaluated positions")
+            };
+            assert_eq!(
+                result.degradation(),
+                incomplete.then_some(FlowReturnDegradation::UnresolvedValue),
+                "missing nested products cannot certify an independently constructed return"
+            );
+        });
+    }
+}
+
+#[test]
 fn constructor_source_navigation_preserves_unread_static_value_sources() {
     use verter_type_engine::semantic_query::FlowReturnStep;
     let host = make_host();
@@ -3544,6 +3581,8 @@ fn constructed_value_evidence_withholds_unsupported_source_operands_and_executio
         "subConstructedBase",
         "subConstructedUnknownClause",
         "subConstructedForwardUnknownClause",
+        "subConstructedMethodNamed",
+        "subConstructedMethodUnknown",
     ] {
         let host = make_host();
         with_dispatch(&host, |dispatch| {
@@ -3654,7 +3693,7 @@ fn an_independent_member_value_keeps_the_whole_return_refusal() {
 }
 
 #[test]
-fn independent_member_evidence_withholds_named_controlled_and_overridden_values() {
+fn independent_member_evidence_consumes_parameter_and_control_but_withholds_call_and_override() {
     use super::flow_return::flow_admission_fault_injection as inject;
     use verter_type_engine::request_context::{
         current_cold_compute_completeness, ColdComputeCompletenessScope,

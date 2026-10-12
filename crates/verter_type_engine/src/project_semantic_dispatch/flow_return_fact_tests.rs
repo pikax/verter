@@ -21,6 +21,51 @@ fn evaluated(degradation: Option<FlowReturnDegradation>) -> FlowReturnStep {
     ))
 }
 
+#[test]
+fn abandoned_read_observations_restore_the_degraded_counter() {
+    use crate::request_context::{
+        ColdComputeCompletenessScope, DeferredPartialStickyScope, ExecutionValidityScope,
+    };
+    let degraded = std::cell::Cell::new(3);
+    let frames = std::cell::RefCell::new(smallvec::SmallVec::new());
+    let scope = || super::ReadObservationScope {
+        validity: ExecutionValidityScope::enter(),
+        sticky: DeferredPartialStickyScope::enter(),
+        completeness: ColdComputeCompletenessScope::enter(),
+        frame: super::BuildLocalTaintGuard::push(&frames),
+        degraded: super::DegradedCounterScope {
+            counter: &degraded,
+            before: degraded.get(),
+        },
+    };
+    {
+        let _read = scope();
+        degraded.set(5);
+    }
+    assert_eq!(
+        degraded.get(),
+        3,
+        "an abandoned probe cannot taint its parent"
+    );
+    let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _read = scope();
+        degraded.set(7);
+        panic!("abandon the probe during unwinding");
+    }));
+    assert!(unwind.is_err());
+    assert_eq!(degraded.get(), 3);
+    let read = scope();
+    degraded.set(8);
+    let observed = read.finish(());
+    assert_eq!(observed.degraded_member_reads, 5);
+    assert_eq!(
+        degraded.get(),
+        3,
+        "finishing retains only the private delta"
+    );
+    assert!(frames.borrow().is_empty());
+}
+
 fn status(step: &FlowReturnStep, observed: ResultCompleteness) -> FactStatus {
     flow_return_fact(step, observed)
         .expect("a read without cancellation or a torn view is a fact")

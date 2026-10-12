@@ -55,15 +55,12 @@ fn presence_projection_keeps_its_subset_without_offering_exact_values() {
         path: Arc::from([]),
         context: ProjectionReductionContext::published(ProjectionMode::Shallow),
     };
-    host.test_force
-        .engine
-        .force_result_partial_for_tests
-        .store(true, std::sync::atomic::Ordering::Relaxed);
-    let read = ProjectSemanticDispatch::new(&host).execute_read(key.clone());
-    host.test_force
-        .engine
-        .force_result_partial_for_tests
-        .store(false, std::sync::atomic::Ordering::Relaxed);
+    let read = {
+        let _partial = super::flow_return::flow_admission_fault_injection::Guard::arm(
+            &host.test_force.engine.force_result_partial_for_tests,
+        );
+        ProjectSemanticDispatch::new(&host).execute_read(key.clone())
+    };
     assert!(matches!(read.fact_status, FactStatus::Approximate(_)));
     let FactResult::Approximate { value, .. } = read.into_fact().unwrap() else {
         panic!("a proven presence subset must remain usable")
@@ -88,15 +85,12 @@ fn unsupported_unfinished_projection_withholds_its_value_at_dispatch() {
         path: Arc::from([]),
         context: ProjectionReductionContext::published(ProjectionMode::Expanded),
     };
-    host.test_force
-        .engine
-        .force_result_partial_for_tests
-        .store(true, std::sync::atomic::Ordering::Relaxed);
-    let read = ProjectSemanticDispatch::new(&host).execute_read(key.clone());
-    host.test_force
-        .engine
-        .force_result_partial_for_tests
-        .store(false, std::sync::atomic::Ordering::Relaxed);
+    let read = {
+        let _partial = super::flow_return::flow_admission_fault_injection::Guard::arm(
+            &host.test_force.engine.force_result_partial_for_tests,
+        );
+        ProjectSemanticDispatch::new(&host).execute_read(key.clone())
+    };
     assert!(matches!(
         read.fact_status,
         verter_type_engine::semantic_query::FactStatus::Unavailable(_)

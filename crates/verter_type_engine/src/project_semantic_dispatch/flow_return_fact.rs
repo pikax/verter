@@ -70,20 +70,34 @@ pub(super) struct ReadObservationScope<'a> {
     sticky: crate::request_context::DeferredPartialStickyScope,
     completeness: crate::request_context::ColdComputeCompletenessScope,
     frame: BuildLocalTaintGuard<'a>,
-    degraded: &'a std::cell::Cell<u32>,
-    degraded_before: u32,
+    degraded: DegradedCounterScope<'a>,
+}
+
+struct DegradedCounterScope<'a> {
+    counter: &'a std::cell::Cell<u32>,
+    before: u32,
+}
+
+impl Drop for DegradedCounterScope<'_> {
+    fn drop(&mut self) {
+        self.counter.set(self.before);
+    }
 }
 
 impl ReadObservationScope<'_> {
     pub(super) fn finish<T>(self, value: T) -> ObservedRead<T> {
-        let degraded_member_reads = self.degraded.get().saturating_sub(self.degraded_before);
-        self.degraded.set(self.degraded_before);
+        let degraded_member_reads = self
+            .degraded
+            .counter
+            .get()
+            .saturating_sub(self.degraded.before);
         let abort = crate::request_context::current_execution_abort();
         let frame = self.frame.finish();
         let completeness = crate::request_context::current_cold_compute_completeness();
         self.completeness.discard();
         drop(self.sticky);
         drop(self.validity);
+        drop(self.degraded);
         ObservedRead {
             value,
             abort,
@@ -104,6 +118,14 @@ pub struct DeferredFlowReturnSource {
 }
 
 impl DeferredFlowReturnSource {
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn bindings_for_tests(
+        &self,
+    ) -> &[(std::sync::Arc<str>, crate::semantic_query::SemanticNodeId)] {
+        &self.bindings
+    }
+
     pub(crate) fn bindings(
         &self,
     ) -> &[(std::sync::Arc<str>, crate::semantic_query::SemanticNodeId)] {
@@ -393,8 +415,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             sticky: crate::request_context::DeferredPartialStickyScope::enter(),
             completeness: crate::request_context::ColdComputeCompletenessScope::enter(),
             frame: BuildLocalTaintGuard::push(&self.build_local_taint),
-            degraded: &self.degraded_member_reads,
-            degraded_before: self.degraded_member_reads.get(),
+            degraded: DegradedCounterScope {
+                counter: &self.degraded_member_reads,
+                before: self.degraded_member_reads.get(),
+            },
         }
     }
 }

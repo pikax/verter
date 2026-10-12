@@ -2704,11 +2704,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         .pending()
                         .pending_len()
                         != pending_before;
-                    let declined = provisional
+                    let declined = (provisional
                         && matches!(
                             read.value(),
                             crate::semantic_query::FlowReturnStep::Complete(_)
-                        )
+                        ))
                         || matches!(
                             read.value(),
                             crate::semantic_query::FlowReturnStep::Hold(_)
@@ -2743,13 +2743,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             // class method returning `this`) is the receiver
                             // the call reads the method through.
                             let seed = self.receiver_bound_return(
-                                self.substitute_canonical(
-                                    self.apply_signature_return_source(
-                                        &candidate.return_carrier,
-                                        result.return_type(),
-                                    ),
-                                    &substitution,
-                                ),
+                                self.substitute_canonical(result.return_type(), &substitution),
                                 key.receiver,
                             );
                             // Per-binder freshness at the call boundary,

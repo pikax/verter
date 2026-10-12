@@ -2989,7 +2989,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                     super::flow_return_fact::SignatureReturnProbe::Deferred(
                                         source,
                                     ) => {
-                                        carrier = crate::semantic_query::SignatureReturnCarrier::DeferredFlow(source.with_bindings(env.iter().map(|(name, node)| (Arc::from(name.as_str()), *node))));
+                                        carrier = crate::semantic_query::SignatureReturnCarrier::DeferredFlow(source.with_bindings(
+                                            env.iter()
+                                                .filter(|(name, _)| !func.type_parameters.iter().any(|tp| tp.name == name.as_str()))
+                                                .map(|(name, node)| (Arc::from(name.as_str()), *node)),
+                                        ));
                                         self.opaque(QueryError::Miss)
                                     }
                                 };

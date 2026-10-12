@@ -20,6 +20,157 @@ use verter_type_engine::signature_kernel::{
 const CANONICAL: &str = "/ws/signature-discovery.ts";
 
 #[test]
+fn deferred_signature_sources_capture_outer_binders_and_exclude_their_own_clause() {
+    use super::locator_shape::{LocatorBinderFrame, LocatorShapeCtx};
+    use verter_type_engine::resolver_core::scope_shadowing::ScopeShadowing;
+    use verter_type_engine::semantic_query::{NodeScopeId, ProjectionReductionContext};
+    use verter_type_expr::{FunctionExpr, TypeExpr, TypeParam};
+    let host = host();
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(CANONICAL.into()), input_id: CANONICAL.into(),
+        source: Arc::from("export function generic<T>(input: T) { return input; } export class Lexical<U, V> { get() { return null as unknown as U; } }"),
+        file_language: crate::FileLanguage::script_ts(), aliases: Vec::new(),
+    }).unwrap();
+    let d = ProjectSemanticDispatch::new(host.as_ref());
+    let number = prim(&d, PrimitiveKind::Number);
+    let string = prim(&d, PrimitiveKind::String);
+    let v = d.graph().intern_node(SemanticNodeData::TypeParam {
+        decl: verter_type_engine::semantic_query::DeclIdentity {
+            canonical_id: Arc::from(CANONICAL),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            whole_hash: host.shallow_file_state(CANONICAL).unwrap().whole_hash,
+            decl_name: Arc::from("V"),
+        },
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("V"),
+    });
+    let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
+        anchor: verter_type_expr::locators::AuthoredAnchor {
+            canonical_id: Arc::from(CANONICAL),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            symbol: Arc::from("generic"),
+            space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+        },
+        function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
+        overload_ordinal: 0,
+    };
+    let mut function = FunctionExpr::synthetic(
+        vec![verter_type_expr::FunctionParam::synthetic(
+            Some("input".into()),
+            TypeExpr::Ref {
+                name: Arc::from("T"),
+                type_arguments: Arc::from([]),
+            },
+            false,
+            false,
+        )],
+        None,
+        vec![TypeParam {
+            name: "T".into(),
+            constraint: None,
+            default: None,
+            is_const: false,
+        }],
+    );
+    function.flow_return = Some(Box::new(identity.clone()));
+    let expr = TypeExpr::Function(Arc::new(function));
+    let scope = NodeScopeId::File {
+        canonical_id: Arc::from(CANONICAL),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        whole_hash: host.shallow_file_state(CANONICAL).unwrap().whole_hash,
+        local_scope: None,
+    };
+    let env = rustc_hash::FxHashMap::from_iter([
+        ("T".into(), string),
+        ("U".into(), v),
+        ("V".into(), number),
+    ]);
+    let mut outer = LocatorBinderFrame::default();
+    outer.bind(Arc::from("T"), string);
+    outer.bind(Arc::from("U"), v);
+    outer.bind(Arc::from("V"), number);
+    let frames = [outer];
+    let names = rustc_hash::FxHashMap::default();
+    let _refusal = super::flow_return::flow_admission_fault_injection::Guard::arm(
+        &host.flow_fault_injection.zero_obligation_budget,
+    );
+    let locator = d.lower_type_expr_for_locator_shape(
+        &expr,
+        &LocatorShapeCtx::new(&scope, &frames, Some(&names), None),
+    );
+    let reducing = d.shallow_lower_type_expr_with_context_for_tests(
+        &expr,
+        &env,
+        &scope,
+        &names,
+        None,
+        &ScopeShadowing::empty(),
+        &mut Vec::new(),
+        ProjectionReductionContext::structural_transit(),
+    );
+    for node in [locator, reducing] {
+        let data = d.graph().node_data(node).unwrap();
+        let SemanticNodeData::Signature {
+            return_carrier: SignatureReturnCarrier::DeferredFlow(source),
+            ..
+        } = data.as_ref()
+        else {
+            panic!("the refused eager probe must retain its return source: {data:?}")
+        };
+        assert_eq!(
+            source.bindings_for_tests(),
+            &[(Arc::from("U"), v), (Arc::from("V"), number)],
+            "the signature owns T; only lexical U and V belong in the deferred substitution"
+        );
+    }
+    let mut lexical = FunctionExpr::synthetic(Vec::new(), None, Vec::new());
+    let mut lexical_identity = identity;
+    lexical_identity.anchor.symbol = Arc::from("Lexical");
+    lexical_identity.function_part = verter_type_expr::facts::FunctionPartIdentity::Member {
+        member_path: Arc::from([0]),
+    };
+    lexical.flow_return = Some(Box::new(lexical_identity));
+    let callee = d.shallow_lower_type_expr_with_context_for_tests(
+        &TypeExpr::Function(Arc::new(lexical)),
+        &env,
+        &scope,
+        &names,
+        None,
+        &ScopeShadowing::empty(),
+        &mut Vec::new(),
+        ProjectionReductionContext::structural_transit(),
+    );
+    assert!(matches!(
+        d.graph().node_data(callee).as_deref(),
+        Some(SemanticNodeData::Signature {
+            return_carrier: SignatureReturnCarrier::DeferredFlow(_),
+            ..
+        })
+    ));
+    drop(_refusal);
+    let key = super::call_resolve_tests::call_key_at(
+        &d,
+        CANONICAL,
+        callee,
+        verter_type_engine::semantic_query::CallKind::Call,
+        None,
+        Vec::new(),
+    );
+    let super::call_resolve::ResolveCallStep::Complete(
+        verter_type_engine::semantic_query::ResolvedCallResult::Selected { return_type, .. },
+    ) = d.execute_resolve_call(key)
+    else {
+        panic!("the deferred member's evaluated return must complete")
+    };
+    assert_eq!(
+        return_type, v,
+        "U -> V and V -> number are simultaneous lexical images, applied once"
+    );
+}
+
+#[test]
 fn receiver_utilities_distinguish_incomplete_signatures_from_exact_absence() {
     use super::signature_utility::SignatureUtility;
     let host = host();

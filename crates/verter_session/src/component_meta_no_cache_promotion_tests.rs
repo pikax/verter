@@ -1607,12 +1607,11 @@ fn projectpath_over_instantiationref_budget_trip_withholds_value_and_does_not_wa
         .contains(verter_type_engine::semantic_query::PartialReasonSet::PROJECTION_WORK_LIMIT));
     assert!(
         read.result_is_partial(),
-        "the nested Instantiate budget trip MUST fold result_is_partial=true onto the surfaced \
-         Value — reverting the walker fatal-path fold makes this a complete Value with \
-         result_is_partial=false (the A2 reachability hole)"
+        "the withheld IncompleteSemanticOperand must retain the nested Instantiate budget \
+         partiality so an unsupported member cannot appear complete"
     );
 
-    // The Value-partial MUST raise the warm-gate suppression flag — i.e. it
+    // The withheld incomplete operand MUST raise the warm-gate suppression flag — i.e. it
     // does NOT warm `ComponentMetaResultDb`. The shared read boundary marks
     // the request sticky directly on `result_is_partial`, so the flag is
     // already set after the partial read; `observe_component_meta_read_suppress`
@@ -1620,7 +1619,7 @@ fn projectpath_over_instantiationref_budget_trip_withholds_value_and_does_not_wa
     verter_type_engine::request_context::observe_component_meta_read_suppress(&read);
     assert!(
         current_request_result_is_partial(),
-        "the Value-partial from the budget-tripped ProjectPath-over-InstantiationRef MUST raise the \
+        "the withheld incomplete operand from the budget-tripped ProjectPath-over-InstantiationRef MUST raise the \
          warm-gate suppress flag so the partial is NOT promoted into ComponentMetaResultDb"
     );
 
@@ -1632,8 +1631,7 @@ fn projectpath_over_instantiationref_budget_trip_withholds_value_and_does_not_wa
     assert!(
         graph.get_unvalidated(&projectpath_key).is_none(),
         "the partial ProjectPath-over-InstantiationRef MUST NOT be admitted to the family memo \
-         (reverting the walker fold makes this a complete result_is_partial=false Value that warms \
-         the memo)"
+         because its demanded member value is unavailable"
     );
 }
 

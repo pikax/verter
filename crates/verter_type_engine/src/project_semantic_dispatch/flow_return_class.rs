@@ -241,6 +241,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 SliceClassMemberValue::Initializer { value, .. } => super::independent_member_expression(value)
                     || matches!(&**value, SliceExpr::Type(ty) if super::closed_type_operand(ty.ty(), Some(env))),
                 SliceClassMemberValue::Declared(ty) => super::closed_type_operand(ty.ty(), Some(env)),
+                SliceClassMemberValue::Method(_) => true,
                 _ => false,
             })
             && class.index_signatures.iter().all(|signature| super::closed_type_operand(signature.key.ty(), Some(env)) && super::closed_type_operand(signature.value.ty(), Some(env)))
@@ -520,6 +521,15 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let graph = self.dispatch.graph();
         let frame_env = self.binder_env;
         let env: &FlowBinderEnv = class_env.as_deref().unwrap_or(frame_env);
+        let methods_complete = class.members.iter().zip(&values).all(|(member, value)| {
+            let SliceClassMemberValue::Method(expr) = &member.value else {
+                return true;
+            };
+            let SliceExpr::NestedFunctionValue { function, .. } = expr.as_ref() else {
+                return false;
+            };
+            self.constructive_signatures.get(function) == Some(value)
+        });
         let mut instance_side = MemberSide::default();
         let mut static_side = MemberSide::default();
         for (member, value) in class.members.iter().zip(values) {
@@ -747,6 +757,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             None => constructor,
         };
         if frame.source_plan
+            && methods_complete
             && exact_base
             && !crate::request_context::current_cold_compute_completeness().is_partial()
             && crate::request_context::current_execution_abort().is_none()

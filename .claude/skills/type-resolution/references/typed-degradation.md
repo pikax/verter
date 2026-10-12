@@ -100,6 +100,12 @@ Conditional selection, runtime classification and other proof consumers accept
 only `Complete`. Discarded probes contribute no quality to an independently
 derived answer; adopted incomplete dependencies degrade it. Execution validity
 is non-discardable and supersedes every approximation.
+
+An abandoned read-observation scope restores every quality rail, including its
+degraded-member counter, on normal drop and unwind. Finishing the scope captures
+the private counter delta before restoration. Missing graph nodes supply no
+positional source: root and child projection failures are unavailable, never
+inserted into the exact projection memo. Repeated visits retain that disposition.
 Composite absorption, exhaustive union distribution, template constraint
 capture and flow key-presence/absence proofs also require complete operands.
 A producer's explicit root checker recovery may propagate unchanged through
@@ -189,6 +195,10 @@ unsupported expressions, later spreads/computed overrides and truncated walks
 cannot certify. Consuming it retains roots and reuse suppression; it never
 promotes the original `FlowReturnResult::fact()` or its admission proof.
 
+Nested constructive evidence also requires successful product finalization.
+A missing product degrades the nested value and cannot supply a certificate to
+its enclosing evaluator, even when the return's authored type source is closed.
+
 A whole return can separately certify closed primitive/literal operands,
 their unions, and finite arrays without spreads or holes. Every consumed
 return contribution must carry that source eligibility, and the actual
@@ -211,8 +221,14 @@ Class composition can separately seal its finite type source when every
 authored key, field operand, constructor parameter and heritage source has
 positive typed construction evidence. The bounded operand vocabulary is
 primitive/literal/Union syntax or a reference to an actually served clause
-binder with a completed closed bound source. Unknown, computed, method-body,
-held and unmodeled positions cannot seal this evidence. Sibling bound/default
+binder with a completed closed bound source. A non-generic, parameter-free
+plain method header can compose only after its nested producer finishes its
+products and independently certifies the actual constructed return or completes
+the existing nameless primitive/literal/Union/finite-array return grammar.
+That evidence binds
+the served function and produced signature; each new attempt withdraws its
+previous certificate. Equal signature nodes from another body supply no proof.
+Unknown, computed, held and unmodeled positions cannot seal this evidence. Sibling bound/default
 source capabilities compose transitively: a served name alone cannot certify
 a binder whose referenced sibling is unsupported. The existing call executor
 supplies a result witness only from an actually completed selected

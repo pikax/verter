@@ -2361,30 +2361,39 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // demand for its value. An eager exact result is reusable;
                 // a refused/unfinished probe is declined and the carrier
                 // remains the authority when a consumer demands the return.
-                let return_type =
-                    match self.probe_signature_flow_return(&identity, scope_canonical.as_ref()) {
-                        super::flow_return_fact::SignatureReturnProbe::Evaluated(result) => {
-                            inferred_predicate = result.inferred_predicate();
-                            result.return_type()
-                        }
-                        super::flow_return_fact::SignatureReturnProbe::Deferred(source) => {
-                            let mut images = FxHashMap::default();
-                            for frame in inner_ctx.binders.innermost_first() {
-                                for (name, slot) in &frame.names {
-                                    images.entry(Arc::clone(name)).or_insert(*slot);
-                                }
+                let return_type = match self
+                    .probe_signature_flow_return(&identity, scope_canonical.as_ref())
+                {
+                    super::flow_return_fact::SignatureReturnProbe::Evaluated(result) => {
+                        inferred_predicate = result.inferred_predicate();
+                        result.return_type()
+                    }
+                    super::flow_return_fact::SignatureReturnProbe::Deferred(source) => {
+                        let mut images = FxHashMap::default();
+                        for frame in inner_ctx.binders.innermost_first() {
+                            for (name, slot) in &frame.names {
+                                images.entry(Arc::clone(name)).or_insert(*slot);
                             }
-                            let source = source.with_bindings(images.into_iter().filter_map(
-                                |(name, slot)| match slot {
-                                    BinderSlot::Usable(node) => Some((name, node)),
-                                    BinderSlot::ShadowOnly => None,
-                                },
-                            ));
-                            carrier =
-                                crate::semantic_query::SignatureReturnCarrier::DeferredFlow(source);
-                            graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss))
                         }
-                    };
+                        let source =
+                            source.with_bindings(images.into_iter().filter_map(|(name, slot)| {
+                                match slot {
+                                    BinderSlot::Usable(node)
+                                        if !func
+                                            .type_parameters
+                                            .iter()
+                                            .any(|tp| tp.name == name.as_ref()) =>
+                                    {
+                                        Some((name, node))
+                                    }
+                                    _ => None,
+                                }
+                            }));
+                        carrier =
+                            crate::semantic_query::SignatureReturnCarrier::DeferredFlow(source);
+                        graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss))
+                    }
+                };
                 // An enclosing parameter the body reads rebinds to
                 // this lowering's binder for it, so the receiver's
                 // instantiation reaches the return (see
