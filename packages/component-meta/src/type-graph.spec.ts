@@ -457,7 +457,7 @@ describe("decodeComponentMetaPayload", () => {
     expect(typeExprToDescriptor(propType, registry)).toEqual({ kind: "primitive", name: "string" });
   });
 
-  it("hard-fails on version mismatches and bad node ids", () => {
+  it("hard-fails on version mismatches and localizes a dangling node id", () => {
     const payload = encodeTestComponentMetaPayload({
       filePath: "/project/src/Button.vue",
       props: [{ name: "label", type: { kind: "primitive", name: "string" } }],
@@ -467,17 +467,29 @@ describe("decodeComponentMetaPayload", () => {
     wrongVersion[1] = 99;
     expect(() => decodeComponentMetaPayload(wrongVersion)).toThrow(/version/i);
 
+    // A dangling type node stays on its prop as a failed publication.
+    // Schema-12 adaptation must not abort the payload or invent an exact type.
     const badNodePayload = buildTestComponentMetaProtoPayload({
       filePath: "/project/src/Button.vue",
       props: [{ name: "label", type: { kind: "primitive", name: "string" } }],
     });
     badNodePayload.body!.props[0]!.typeNodeId = 999;
 
-    expect(() =>
-      decodeComponentMetaPayload(
-        toBinary(ComponentMetaPayloadSchema, create(ComponentMetaPayloadSchema, badNodePayload)),
-      ),
-    ).toThrow(/node id/i);
+    const decoded = decodeComponentMetaPayload(
+      toBinary(ComponentMetaPayloadSchema, create(ComponentMetaPayloadSchema, badNodePayload)),
+    );
+    expect(decoded.props).toHaveLength(1);
+    expect(decoded.props[0]).toMatchObject({
+      name: "label",
+      publication: {
+        kind: "failed",
+        failure: "unrepresentableRequiredMemberValue",
+        provenance: "schema",
+      },
+      typeFact: { kind: "unavailable", causes: [102] },
+    });
+    expect(decoded.props[0]?.type).toBeUndefined();
+    expect(nativeComponentMetaToComponentMeta(decoded).props).toEqual([]);
   });
 
   it("decodes macroExpansionDiagnostics correctly from protobuf", () => {
