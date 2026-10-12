@@ -612,6 +612,54 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         ) {
             return None;
         }
+        // Equal closed template patterns admit the entire index without
+        // enumerating their infinite literal domain. Open interpolants retain
+        // the deferred access, just like any other unbound generic domain.
+        let pattern_index = if matches!(
+            self.graph().node_data(node).as_deref(),
+            Some(
+                SemanticNodeData::DeclRef { .. }
+                    | SemanticNodeData::InstantiationRef { .. }
+                    | SemanticNodeData::BareRef(_)
+                    | SemanticNodeData::ImportType(_)
+            )
+        ) {
+            self.resolve_signature_source_carrier(
+                node,
+                crate::semantic_query::ProjectionReductionContext::structural_transit(),
+            )
+        } else {
+            node
+        };
+        if matches!(
+            self.graph().node_data(pattern_index).as_deref(),
+            Some(SemanticNodeData::TemplateLiteral { .. })
+        ) && !super::raise::builtin_lowering_argument_is_open(self, pattern_index)
+        {
+            let pattern_constraint = self.resolve_signature_source_carrier(
+                key_space,
+                crate::semantic_query::ProjectionReductionContext::structural_transit(),
+            );
+            if !matches!(
+                self.graph().node_data(pattern_constraint).as_deref(),
+                Some(SemanticNodeData::TemplateLiteral { .. })
+            ) {
+                return None;
+            }
+            let mut evidence = super::canonical_algebra::CanonicalEvidence::default();
+            let mut budget = super::canonical_algebra::COMPARE_WORK_BUDGET;
+            let equal = super::canonical_algebra::compare_structural(
+                self.graph(),
+                pattern_index,
+                pattern_constraint,
+                &mut evidence,
+                &mut budget,
+            ) == super::canonical_algebra::StructuralIdentity::Equal;
+            self.deposit_canonical_evidence(evidence);
+            if equal {
+                return Some(pattern_index);
+            }
+        }
         let requested = self.key_space_domain(node)?;
         if requested.broad.is_empty()
             && !matches!(

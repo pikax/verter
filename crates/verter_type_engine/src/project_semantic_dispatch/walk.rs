@@ -1666,6 +1666,11 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
     }
 
     fn preserve_deferred_path(&self, base: SemanticNodeId, path: &[PathSegment]) -> SemanticNodeId {
+        // Member navigation carrier-stops on an open surface. Authored indexed
+        // accesses retain their operation and every subsequent path segment.
+        if !matches!(path.first(), Some(PathSegment::Index(_))) {
+            return base;
+        }
         path.iter().fold(base, |object, segment| {
             let index = match segment {
                 PathSegment::Index(key) => key.clone(),
@@ -3991,7 +3996,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     // bound) — fall back to the coarse path which
                     // produces a deferred shell re-dispatched once the
                     // domain becomes enumerable.
-                    let key_admission: MappedKeyAdmission =
+                    let mut key_admission: MappedKeyAdmission =
                         literal_key.as_ref().map_or(MappedKeyAdmission::Undecided, |key| {
                             // For Tier 1/2 enumerable lookups, both string
                             // and numeric segments compare against textual
@@ -4167,6 +4172,28 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                                 MappedKeyAdmission::Undecided
                             }
                         });
+                    // A named member of a homomorphic dictionary still belongs
+                    // to its constraint. Resolve only the source's shallow
+                    // surface when non-emitting admission cannot decide it.
+                    if matches!(key_admission, MappedKeyAdmission::Undecided)
+                        && mapper.name_remap.is_none()
+                        && matches!(self.graph().node_data(mapper.key_space).as_deref(),
+                            Some(SemanticNodeData::KeyOf { base }) if *base == *source)
+                    {
+                        if let Some(literal_key) = literal_key.as_ref() {
+                        let subject = self.dispatch.resolve_signature_source_carrier(
+                            *source,
+                            self.context.into_structural_transit_with_mode(ProjectionMode::Shallow),
+                        );
+                        let needle = match literal_key {
+                            LiteralKey::String(name) => PropertyKey::string_literal(name.as_ref()),
+                            LiteralKey::Number(number) => PropertyKey::from_js_number(*number),
+                        };
+                        if self.dispatch.base_member_admission_non_emitting(subject, &needle) == Some(true) {
+                            key_admission = MappedKeyAdmission::Admitted;
+                        }
+                        }
+                    }
                     // A CLOSED key domain that provably does not contain the
                     // demanded literal has already answered the demand: the
                     // member is absent, and the key-absent sentinel is the

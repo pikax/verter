@@ -79,11 +79,51 @@ fn mapped_index_broad_domains_read_dictionary_values() {
 }
 
 #[test]
+fn mapped_index_named_dictionary_keeps_signature_values() {
+    let host = make_host_with_footprint();
+    upsert_ts(&host, "/indices.ts", "interface Strings { [key: string]: 1 | 2; named: 2 } interface Numbers { [key: number]: 1; named: 2 } export type StringValues = { [K in keyof Strings]: Strings[K] }[keyof Strings]; export type NumberValues = { [K in keyof Numbers]: Numbers[K] }[keyof Numbers]; export type Constant = { [K in keyof Strings]: 3 }[keyof Strings];");
+    for _ in 0..2 {
+        for name in ["StringValues", "NumberValues"] {
+            assert_number_literal_union(&mapped_index_wire_answer(&host, name, &[]), &[1.0, 2.0]);
+        }
+        assert_eq!(
+            mapped_index_wire_answer(&host, "Constant", &[]),
+            TypeExpr::Literal(verter_type_expr::LiteralValue::Number(3.0))
+        );
+    }
+}
+
+#[test]
+fn mapped_index_equal_template_pattern_binds_the_value() {
+    let host = make_host_with_footprint();
+    upsert_ts(&host, "/indices.ts", "export type Pattern = `a${string}`; export type Constant = { [K in `a${string}`]: 1 }[`a${string}`]; export type Identity = { [K in `a${string}`]: K }[`a${string}`]; export type LiteralControl = { [K in `a${string}`]: 1 }['abc']; export type Aliased = { [K in Pattern]: 1 }[Pattern];");
+    for _ in 0..2 {
+        for name in ["Constant", "LiteralControl", "Aliased"] {
+            assert_eq!(
+                mapped_index_wire_answer(&host, name, &[]),
+                TypeExpr::Literal(verter_type_expr::LiteralValue::Number(1.0)),
+                "{name}"
+            );
+        }
+        assert_eq!(
+            mapped_index_wire_answer(&host, "Identity", &[]),
+            mapped_index_wire_answer(&host, "Pattern", &[])
+        );
+    }
+}
+
+#[test]
 fn mapped_index_empty_filtered_domains_are_never() {
     let host = make_host_with_footprint();
-    upsert_ts(&host, "/indices.ts", "interface Numeric { 0: 1 } interface Empty {} export type NumericOnly = { [K in keyof Numeric & string]: Numeric[K] }[keyof Numeric & string]; export type NoKeys = { [K in keyof Empty & string]: Empty[K] }[keyof Empty & string]; export type Disjoint = { [K in string & number]: K }[string & number];");
+    upsert_ts(&host, "/indices.ts", "interface Numeric { 0: 1 } interface Empty {} export type NumericOnly = { [K in keyof Numeric & string]: Numeric[K] }[keyof Numeric & string]; export type NoKeys = { [K in keyof Empty & string]: Empty[K] }[keyof Empty & string]; export type Disjoint = { [K in string & number]: K }[string & number]; export type FilteredHop = { [K in keyof Numeric & string]: { value: 1 } }[keyof Numeric & string]['value']; export type NeverHop = { [K in never]: { value: 1 } }[never]['value'];");
     for _ in 0..2 {
-        for name in ["NumericOnly", "NoKeys", "Disjoint"] {
+        for name in [
+            "NumericOnly",
+            "NoKeys",
+            "Disjoint",
+            "FilteredHop",
+            "NeverHop",
+        ] {
             assert_primitive(
                 &mapped_index_wire_answer(&host, name, &[]),
                 PrimitiveName::Never,

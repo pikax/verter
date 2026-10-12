@@ -708,7 +708,9 @@ fn row_remap_dropped_value() -> MatrixRow {
             Vec::new()
         },
         expected_cold_classes: &[
-            ("Conditional", 5),
+            // Each original key drives one remap decision. The unbound
+            // declaration's K stays deferred and must not add probes.
+            ("Conditional", 3),
             ("Instantiate", 2),
             ("KeyOf", 1),
             ("LowerLocator", 2),
@@ -723,14 +725,16 @@ fn row_remap_dropped_value() -> MatrixRow {
             // value materialisation — the two dropped keys' values are
             // never forced.
             (Counter::MappedPerK, 1),
-            (Counter::OriginEdges, 9),
+            // The unbound condition stays an authored carrier, so it emits no
+            // evaluated-query origin or deferred-evaluation miss.
+            (Counter::OriginEdges, 8),
             // The remap key domain and the survivor's value body
             // substitute their binders — the DROPPED keys' value bodies
             // contribute none of these substitutions.
             (Counter::SubstituteMisses, 19),
             (Counter::Instantiations, 2),
             // One memo probe per deferred evaluation that misses.
-            (Counter::DeferredMisses, 6),
+            (Counter::DeferredMisses, 5),
             (Counter::ConditionalDecided, 3),
             (Counter::BranchTrue, 1),
             (Counter::BranchFalse, 2),

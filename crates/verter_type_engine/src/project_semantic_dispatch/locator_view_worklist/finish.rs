@@ -683,11 +683,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 .unwrap_or_else(|| self.normalized_index_key_node(projected))
                         }),
                 };
-                let should_defer = matches!(index, IndexKey::Computed(_))
+                // Intermediate computed accesses usually retain their carrier.
+                // A proven empty domain must still reduce before a following
+                // hop, and that hop must preserve the absorbing never result.
+                let empty_index = matches!(&index, IndexKey::Computed(node)
+                    if self.index_keys_from_keyspace_node(*node).is_some_and(|keys| keys.is_empty()));
+                let never_object = matches!(
+                    graph.node_data(object_id).as_deref(),
+                    Some(SemanticNodeData::Primitive(PrimitiveKind::Never))
+                );
+                let should_defer = !empty_index && !never_object && (matches!(index, IndexKey::Computed(_))
                     || !matches!(
                         graph.node_data(object_id).as_deref(),
                         Some(SemanticNodeData::Object(_))
-                    );
+                    ));
                 if should_defer {
                     graph.intern_preserving_scope(
                         node,
