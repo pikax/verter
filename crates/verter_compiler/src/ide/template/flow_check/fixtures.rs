@@ -846,3 +846,9 @@ pub fn semantic_suite() -> Vec<Fixture> {
 
 /// The chain lengths and nesting depths of the linear-representation matrix.
 pub const MATRIX_SIZES: [usize; 4] = [128, 256, 512, 1024];
+
+/// Counter-based growth probes retain three doublings, nested chains and
+/// multiple lexical frames without materialising the large provider matrices.
+/// The same sizes must distinguish linear snapshots from quadratic path replay.
+#[cfg(test)]
+pub(crate) const GROWTH_SIZES: [usize; 4] = [16, 32, 64, 128];
