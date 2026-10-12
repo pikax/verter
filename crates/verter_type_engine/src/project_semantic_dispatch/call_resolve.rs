@@ -34,12 +34,26 @@ pub(super) use contextual::ContextualCallState;
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static ARGUMENT_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static BINDING_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Argument acquisition/copy positions and candidate arity parameter visits.
 #[cfg(any(test, feature = "test-support"))]
 pub fn argument_work_for_tests() -> usize {
     ARGUMENT_WORK.with(std::cell::Cell::get)
+}
+
+/// Binding entries inspected while indexing or looking up final call bindings.
+#[cfg(any(test, feature = "test-support"))]
+pub fn binding_work_for_tests() -> usize {
+    BINDING_WORK.with(std::cell::Cell::get)
+}
+
+fn record_binding_work(count: usize) {
+    #[cfg(any(test, feature = "test-support"))]
+    BINDING_WORK.with(|work| work.set(work.get() + count));
+    #[cfg(not(any(test, feature = "test-support")))]
+    let _ = count;
 }
 
 pub(in crate::project_semantic_dispatch) fn record_argument_work(count: usize) {
@@ -1807,6 +1821,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> CandidateVerdict {
         let graph = self.graph();
         let consumer = crate::semantic_query::ResolveCallConsumer::witness();
+        let (contextual_fixed, contextual_diagnostic) = self
+            .dispatch_txn
+            .borrow()
+            .call
+            .contextual
+            .as_ref()
+            .and_then(|state| state.completed.as_ref())
+            .filter(|completed| completed.signature == candidate.node)
+            .map(|completed| (completed.fixed.clone(), completed.diagnostic))
+            .unwrap_or_default();
+        let contextual_substitution = CanonicalTypeSubstitution::new(
+            contextual_fixed.iter().map(|(&p, &b)| (p, b)).collect(),
+        );
         let (params, visible_type_params) = match graph.node_data(candidate.node).as_deref() {
             Some(SemanticNodeData::Signature {
                 params,
@@ -1827,6 +1854,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .cloned()
                 .map(|mut param| {
                     param.ty = self.substitute_canonical(param.ty, &key.context.substitution);
+                    param.ty = self.substitute_canonical(param.ty, &contextual_substitution);
                     param
                 })
                 .collect::<Vec<_>>()
@@ -1890,7 +1918,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // The diagnostic the checker reports for this candidate when it is
         // the call's error-recovery candidate (`recovery`): the first
         // failure applicability meets. An applicable candidate has none.
-        let mut failure: Option<crate::semantic_query::CheckerDiagnosticCode> = None;
+        let mut failure = if recovery {
+            contextual_diagnostic
+        } else {
+            None
+        };
         if too_few || too_many {
             // Only a non-generic candidate recovers past an argument-count
             // mismatch: it infers nothing from the arguments applicability
@@ -1915,7 +1947,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 crate::semantic_query::CheckerDiagnosticCode::ArgumentCount
             });
         }
-        let arguments = if failure.is_some() {
+        let arguments = if too_few || too_many {
             &arguments[..0]
         } else {
             arguments
@@ -2169,7 +2201,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 RelationStep::Assignable { .. } => {}
                 // A non-generic candidate infers nothing here, so its
                 // error-recovery reading needs no complete relation pass.
-                RelationStep::NotAssignable if recovery && visible_type_params.is_empty() => {
+                RelationStep::NotAssignable
+                    if recovery
+                        && (visible_type_params.is_empty() || contextual_diagnostic.is_some()) =>
+                {
                     failure.get_or_insert(
                         crate::semantic_query::CheckerDiagnosticCode::ArgumentNotAssignable,
                     );
@@ -2290,19 +2325,41 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             self.abandon_session(session_id);
             return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);
         };
-        let fixation = self.fix_inference_inputs(inputs, &raw_type_params, |this, from, to| {
+        let fixation_params: Vec<_> = raw_type_params
+            .iter()
+            .cloned()
+            .map(|mut decl| {
+                decl.constraint = decl
+                    .constraint
+                    .map(|node| self.substitute_canonical(node, &contextual_substitution));
+                decl.default = decl
+                    .default
+                    .map(|node| self.substitute_canonical(node, &contextual_substitution));
+                decl
+            })
+            .collect();
+        let fixation = self.fix_inference_inputs(inputs, &fixation_params, |this, from, to| {
             decided_call_relation(
                 this.call_relation(from, to, from, budget, false, false),
                 own_return_function.as_ref(),
             )
         });
-        let (fixed, uninferred_positions) = match fixation {
+        let (mut fixed, mut uninferred_positions) = match fixation {
             Ok(fixation) => fixation,
             Err(failure) => {
                 self.abandon_session(session_id);
                 return CandidateVerdict::Degraded(failure);
             }
         };
+        // A callback parameter has already observed these types. Later
+        // arguments and error recovery cannot infer them again.
+        for binding in &mut fixed {
+            if let Some(&bound) = contextual_fixed.get(&binding.param) {
+                binding.bound = bound;
+            }
+        }
+        uninferred_positions
+            .retain(|&position| !contextual_fixed.contains_key(&fixed[position].param));
         let uninferred_params: Vec<SemanticNodeId> = uninferred_positions
             .iter()
             .map(|&position| fixed[position].param)
@@ -2371,16 +2428,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // arguments then fail against it. Applicability rejects the
         // candidate outright; its error-recovery reading takes the
         // replacement.
+        record_binding_work(substitution.bindings().len());
+        let mut bound_by_param: FxHashMap<_, _> = substitution.bindings().iter().copied().collect();
         let mut clamped: Vec<(SemanticNodeId, SemanticNodeId)> = Vec::new();
         for decl in raw_type_params.iter() {
-            let Some(bound) = substitution
-                .bindings()
-                .iter()
-                .find_map(|(param, bound)| (*param == decl.param).then_some(*bound))
-            else {
+            let Some(constraint) = decl.constraint else {
                 continue;
             };
-            if let Some(constraint) = decl.constraint {
+            record_binding_work(1);
+            let Some(&bound) = bound_by_param.get(&decl.param) else {
+                continue;
+            };
+            {
                 let constraint = self.substitute_canonical(constraint, &substitution);
                 match decided_call_relation(
                     self.call_relation(bound, constraint, bound, budget, false, false),
@@ -2437,13 +2496,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     })
                     .collect(),
             );
-            CanonicalTypeSubstitution::new(
+            let substitution = CanonicalTypeSubstitution::new(
                 rebound
                     .bindings()
                     .iter()
                     .map(|(param, bound)| (*param, self.substitute_canonical(*bound, &rebound)))
                     .collect(),
-            )
+            );
+            record_binding_work(substitution.bindings().len());
+            bound_by_param = substitution.bindings().iter().copied().collect();
+            substitution
         };
 
         if let (Some(receiver_param), Some(receiver)) = (receiver_param, call_receiver) {
@@ -2521,7 +2583,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // the callee's type parameters is typed under that type and
             // checked on the next request, never as the untyped function it
             // is here.
-            if argument.context_sensitive && key.explicit_type_args.is_empty() {
+            if argument.context_sensitive
+                && key.explicit_type_args.is_empty()
+                && !(recovery && contextual_diagnostic.is_some())
+            {
                 let reads_inference = (!uninferred_params.is_empty()
                     && self.contextual_return_mentions(target, &uninferred_params))
                     || (sole_candidate
@@ -2645,11 +2710,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let ordered_args = raw_type_params
             .iter()
             .map(|decl| {
-                substitution
-                    .bindings()
-                    .iter()
-                    .find_map(|(param, bound)| (*param == decl.param).then_some(*bound))
-                    .unwrap_or(unknown)
+                record_binding_work(1);
+                bound_by_param.get(&decl.param).copied().unwrap_or(unknown)
             })
             .collect::<Vec<_>>();
         let selected_node = if ordered_args.is_empty() {

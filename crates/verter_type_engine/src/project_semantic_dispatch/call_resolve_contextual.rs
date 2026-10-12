@@ -32,10 +32,20 @@ pub(in crate::project_semantic_dispatch) struct ContextualCallState {
     active: Option<ContextualCandidate>,
     delivery: Option<CallArgument>,
     ready: Option<(SemanticNodeId, Vec<CallArgument>)>,
+    /// Parameter contexts remain fixed through final applicability and the
+    /// sole candidate's error recovery, even after its collector is abandoned.
+    pub(super) completed: Option<ContextualCandidateBindings>,
     arity_fit: bool,
     diagnostics_enabled: bool,
     pub(super) diagnostic: Option<crate::semantic_query::CheckerDiagnosticCode>,
     pub(in crate::project_semantic_dispatch) resume_at: Option<(RelationKind, SemanticNodeId)>,
+}
+
+#[derive(Debug)]
+pub(super) struct ContextualCandidateBindings {
+    pub(super) signature: SemanticNodeId,
+    pub(super) fixed: FxHashMap<SemanticNodeId, SemanticNodeId>,
+    pub(super) diagnostic: Option<crate::semantic_query::CheckerDiagnosticCode>,
 }
 
 impl ContextualCallState {
@@ -84,6 +94,9 @@ struct ContextualCandidate {
     session: Option<InferenceSession>,
     parameters: Arc<[TypeParamDecl]>,
     positions: FxHashMap<SemanticNodeId, usize>,
+    /// A parameter's inference can depend on covariant candidates from a
+    /// sibling constrained to it. Build these reverse edges once per candidate.
+    constrained_siblings: FxHashMap<SemanticNodeId, Vec<SemanticNodeId>>,
     fixed: FxHashMap<SemanticNodeId, SemanticNodeId>,
     pending_target: Option<SemanticNodeId>,
 }
@@ -320,6 +333,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             let id = progress.session.as_ref().expect("suspended collector").id;
             (progress, id)
         } else {
+            state.completed = None;
+            state.diagnostic = None;
             let setup = InferenceSessionSetup::new(
                 type_parameters
                     .iter()
@@ -363,6 +378,17 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         .enumerate()
                         .map(|(i, decl)| (decl.param, i))
                         .collect(),
+                    constrained_siblings: {
+                        let mut siblings: FxHashMap<_, Vec<_>> = FxHashMap::default();
+                        for decl in type_parameters.iter() {
+                            if let Some(constraint) =
+                                decl.constraint.filter(|&node| node != decl.param)
+                            {
+                                siblings.entry(constraint).or_default().push(decl.param);
+                            }
+                        }
+                        siblings
+                    },
                     parameters: type_parameters,
                     fixed: FxHashMap::default(),
                     pending_target: None,
@@ -500,6 +526,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     .map_err(ContextualCandidateFailure::Degraded)?;
                 if let Some(typed) = state.typed_arguments.get(&position) {
                     if !self.collect_contextual_argument(typed, inference_target, budget)? {
+                        state.diagnostic = Some(self.contextual_argument_failure(
+                            typed.node,
+                            inference_target,
+                            budget,
+                        ));
                         state.resume_at = None;
                         return Err(ContextualCandidateFailure::Mismatch);
                     }
@@ -534,6 +565,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         ) {
             state.active = Some(progress);
         } else {
+            state.completed = Some(ContextualCandidateBindings {
+                signature: candidate.node,
+                fixed: progress.fixed,
+                diagnostic: state.diagnostic,
+            });
             progress.session.as_mut().expect("collector").abandon();
         }
         result
@@ -614,6 +650,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             if let Some(&position) = progress.positions.get(&node) {
                 positions.push(position);
                 let decl = &progress.parameters[position];
+                if let Some(siblings) = progress.constrained_siblings.get(&node) {
+                    stack.extend(siblings);
+                }
                 stack.extend(decl.constraint);
                 stack.extend(decl.default);
                 continue;

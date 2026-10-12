@@ -137,6 +137,50 @@ export function tooMany() { return pipe(0 as const, (x) => x, (x) => x, (x) => x
 }
 
 #[test]
+fn contextual_fixation_reads_constrained_sibling_candidates() {
+    let source = r#"
+declare function dependent<A,B extends A,C>(a:A,b:B,contra:(x:A)=>void,f:(x:A)=>C):C;
+declare function dependent<A,B extends A,C,D>(a:A,b:B,contra:(x:A)=>void,f:(x:A)=>C,g:(x:C)=>D):D;
+declare function independent<A,B,C>(a:A,b:B,contra:(x:A)=>void,f:(x:A)=>C):C;
+declare function independent<A,B,C,D>(a:A,b:B,contra:(x:A)=>void,f:(x:A)=>C,g:(x:C)=>D):D;
+export function constrained() { return dependent('s',1,(x:string|number)=>{},x=>({value:x})); }
+export function control() { return independent('s',1,(x:string|number)=>{},x=>({value:x})); }
+"#;
+    let matrix = Matrix::new(source);
+    let failures = matrix.returns(&[
+        ("constrained", "{ value: string | number; }"),
+        ("control", "{ value: string; }"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn contextual_recovery_preserves_fixed_types_and_return_diagnostics() {
+    let source = pipe_declaration(3, "fixed")
+        + r#"
+export function conflicting() { return fixed(0 as const,x=>({v0:x}),(x:string)=>({v1:x}),x=>({v2:x})); }
+export function control() { return fixed(0 as const,x=>({v0:x}),x=>({v1:x}),x=>({v2:x})); }
+declare function same<T>(a:T,f:(x:T)=>T):T;
+export function rejectedReturn() { return same(0 as const,x=>x?1 as const:1 as const); }
+"#;
+    let matrix = Matrix::new(&source);
+    let verdicts = matrix.verdicts(&[
+        (Read::Return("conflicting"), vec!["unknown"]),
+        (
+            Read::Return("control"),
+            vec!["{ v2: { v1: { v0: 0; }; }; }"],
+        ),
+        (Read::Return("rejectedReturn"), vec!["0"]),
+    ]);
+    for (index, codes) in [(0, vec![2322]), (1, vec![]), (2, vec![2322])] {
+        for verdict in &verdicts[index] {
+            assert_eq!(verdict.diagnostics, codes, "{}", verdict.lane);
+            assert!(verdict.matched, "{}", verdict.lane);
+        }
+    }
+}
+
+#[test]
 fn callback_parameter_context_survives_rejected_overload_inference() {
     let source = r#"
 declare function alternatives<A, B, C>(a: A, f: (x: string) => B, g: (x: B) => never): 'rejected';
@@ -184,11 +228,12 @@ fn contextual_chain_inference_work_grows_linearly() {
             work(10, overloaded),
             work(20, overloaded),
         );
-        eprintln!("contextual (relation, argument/parameter) work (overloaded={overloaded}): 5={small:?}, 10={medium:?}, 20={large:?}");
-        assert!(small.0 > 0 && small.1 > 0);
+        eprintln!("contextual (relation, argument/parameter, binding) work (overloaded={overloaded}): 5={small:?}, 10={medium:?}, 20={large:?}");
+        assert!(small.0 > 0 && small.1 > 0 && small.2 > 0);
         for (small, medium, large) in [
             (small.0, medium.0, large.0),
             (small.1 as u64, medium.1 as u64, large.1 as u64),
+            (small.2 as u64, medium.2 as u64, large.2 as u64),
         ] {
             assert!(
                 large - medium <= 3 * (medium - small),
