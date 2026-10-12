@@ -21,6 +21,10 @@ struct Entry {
     parent: Option<Identity>,
     missing: bool,
     reaped: bool,
+    /// `NOTE_EXIT` sample taken while this identity's parent was still present.
+    /// A later snapshot where both are gone does not make that history ambiguous,
+    /// and these counters are the floor for the lifetime.
+    exit_evidenced: bool,
 }
 
 #[derive(Default)]
@@ -39,12 +43,45 @@ pub(crate) struct TreeCpu {
 
 impl TreeCpu {
     pub fn record_exit(&mut self, reading: CpuReading) {
-        // Update only this lifetime. A later full snapshot decides whether
-        // the parent reaped it; retaining a zombie in that snapshot after it
-        // was reaped would mix two instants and hide the attribution evidence.
-        if let Some(entry) = self.entries.get_mut(&(reading.pid, reading.started)) {
-            entry.reading = reading;
+        // A read while the parent is still in the tree is the attribution.
+        // It has to survive a later snapshot that finds both gone, and it has
+        // to move the total: the parent's child counter does not include a
+        // zombie that has not been reaped yet. An identity this tree has
+        // never seen counts only as the child of a parent that is still
+        // present; a stray pid is not a member.
+        let identity = (reading.pid, reading.started);
+        let parent_now = self.live_parent(reading.parent);
+        if let Some(entry) = self.entries.get_mut(&identity) {
+            raise_floor(&mut entry.reading, &reading);
+            if parent_now.is_some() {
+                entry.exit_evidenced = true;
+                if entry.parent.is_none() {
+                    entry.parent = parent_now;
+                }
+            }
+        } else if let Some(parent) = parent_now {
+            self.entries.insert(
+                identity,
+                Entry {
+                    reading,
+                    parent: Some(parent),
+                    missing: true,
+                    reaped: false,
+                    exit_evidenced: true,
+                },
+            );
         }
+        self.total = self.reconcile_missing(false);
+        self.upper = self.reconcile_missing(true);
+    }
+
+    fn live_parent(&self, parent_pid: i32) -> Option<Identity> {
+        if parent_pid <= 0 {
+            return None;
+        }
+        self.entries
+            .iter()
+            .find_map(|(id, entry)| (id.0 == parent_pid && !entry.missing).then_some(*id))
     }
 
     pub fn bounds(&self) -> ((u64, u64), (u64, u64)) {
@@ -84,15 +121,26 @@ impl TreeCpu {
                 parent,
                 missing: false,
                 reaped: false,
+                exit_evidenced: false,
             });
             // Reparented live descendants were orphaned, not reaped into
-            // the old parent. Keep their usage independently.
-            if reading.parent >= 0 && entry.reading.parent != reading.parent {
+            // the old parent. An exit read already attributed this lifetime
+            // to the parent that was present; a later ppid must not drop it.
+            if reading.parent >= 0
+                && entry.reading.parent != reading.parent
+                && !entry.exit_evidenced
+            {
                 entry.parent = parent;
             }
             entry.missing = false;
             entry.reaped = false;
-            entry.reading = reading;
+            if entry.exit_evidenced {
+                let floor = entry.reading.clone();
+                entry.reading = reading;
+                raise_floor(&mut entry.reading, &floor);
+            } else {
+                entry.reading = reading;
+            }
         }
         for entry in self.entries.values_mut() {
             if entry.missing
@@ -108,10 +156,9 @@ impl TreeCpu {
         // counters cannot distinguish nested reaping from an orphan plus an
         // independent parent/sibling tail. Later samples cannot repair this
         // missing attribution, so never publish a numeric total again.
-        self.ambiguous |= self
-            .entries
-            .values()
-            .any(|entry| entry.missing && !entry.reaped && entry.parent.is_some());
+        self.ambiguous |= self.entries.values().any(|entry| {
+            entry.missing && !entry.reaped && !entry.exit_evidenced && entry.parent.is_some()
+        });
         self.total = self.reconcile_missing(false);
         self.upper = self.reconcile_missing(true);
     }
@@ -127,7 +174,7 @@ impl TreeCpu {
         let folded_parent = |entry: &Entry| {
             entry
                 .parent
-                .filter(|_| entry.missing && (!upper || entry.reaped))
+                .filter(|_| entry.missing && (!upper || entry.reaped || entry.exit_evidenced))
         };
         // Fold leaves upward without recursion or repeated descendant scans.
         let mut pending: BTreeMap<_, _> = self
@@ -172,6 +219,13 @@ impl TreeCpu {
         }
         total
     }
+}
+
+fn raise_floor(reading: &mut CpuReading, floor: &CpuReading) {
+    reading.user = reading.user.max(floor.user);
+    reading.kernel = reading.kernel.max(floor.kernel);
+    reading.child_user = reading.child_user.max(floor.child_user);
+    reading.child_kernel = reading.child_kernel.max(floor.child_kernel);
 }
 
 #[cfg(test)]
@@ -241,21 +295,103 @@ mod tests {
     }
 
     #[test]
-    fn exit_counter_retains_tail_without_inventing_reaping_or_reusing_pid() {
+    fn exit_read_with_parent_present_survives_both_generations_vanishing() {
         let mut tree = TreeCpu::default();
         tree.observe(vec![
             reading(1, 0, 10, 0),
             reading(2, 1, 20, 0),
             reading(3, 2, 100, 0),
         ]);
+        tree.record_exit(reading(3, 2, 110, 0));
+        // The zombie is still in the next snapshot, so nothing is missing yet.
+        // The parent then reaps and exits before any snapshot sees it alone.
+        let mut zombie = reading(3, 2, 110, 0);
+        tree.observe(vec![
+            reading(1, 0, 10, 0),
+            reading(2, 1, 20, 0),
+            zombie.clone(),
+        ]);
+        assert_eq!(tree.totals(), Some((140, 70)));
+        tree.observe(vec![reading(1, 0, 20, 150)]);
+        assert_eq!(tree.totals(), Some((170, 85)));
+        assert!(!tree.ambiguous);
+        // A lower later read of the same lifetime must not drop the exit floor.
+        zombie.user = 100;
+        zombie.kernel = 50;
+        tree.observe(vec![reading(1, 0, 20, 150), zombie]);
+        tree.observe(vec![reading(1, 0, 20, 150)]);
+        assert_eq!(tree.totals(), Some((170, 85)));
+    }
+
+    #[test]
+    fn exit_reads_between_sweeps_stay_exact_when_only_the_root_remains() {
+        let mut tree = TreeCpu::default();
+        tree.observe(vec![
+            reading(1, 0, 10, 0),
+            reading(2, 1, 20, 0),
+            reading(3, 2, 100, 0),
+        ]);
+        tree.record_exit(reading(3, 2, 110, 0));
+        tree.record_exit(reading(2, 1, 40, 110));
+        tree.observe(vec![reading(1, 0, 20, 150)]);
+        assert_eq!(tree.totals(), Some((170, 85)));
+    }
+
+    #[test]
+    fn unseen_child_exit_while_parent_lives_is_in_the_total() {
+        let mut tree = TreeCpu::default();
+        tree.observe(vec![reading(1, 0, 10, 0), reading(2, 1, 20, 0)]);
+        assert_eq!(tree.totals(), Some((30, 15)));
+        // Forked and exited between sweeps. The parent has not reaped it, so
+        // the parent's child counter is still 0; the exit sample is the total.
+        tree.record_exit(reading(3, 2, 100, 0));
+        assert_eq!(tree.totals(), Some((130, 65)));
+        tree.observe(vec![reading(1, 0, 10, 0), reading(2, 1, 20, 0)]);
+        assert_eq!(tree.totals(), Some((130, 65)));
+        // The root's child counter (40) is less than the exit sample folded
+        // through the parent (120). The published total follows the sample.
+        tree.observe(vec![reading(1, 0, 20, 40)]);
+        assert_eq!(tree.totals(), Some((140, 70)));
+    }
+
+    #[test]
+    fn stray_exit_and_reused_pid_do_not_replace_a_tracked_lifetime() {
+        let mut tree = TreeCpu::default();
+        tree.observe(vec![
+            reading(1, 0, 10, 0),
+            reading(2, 1, 20, 0),
+            reading(3, 2, 100, 0),
+        ]);
+        let mut stray = reading(9, 8, 500, 0);
+        stray.started = 9;
+        tree.record_exit(stray);
+        assert_eq!(tree.totals(), Some((130, 65)));
         let mut reused = reading(3, 2, 900, 0);
         reused.started = 99;
         tree.record_exit(reused);
-        tree.record_exit(reading(3, 2, 110, 0));
-        // The root's aggregate could include the grandchild or an unrelated
-        // parent tail. A final child counter cannot settle that distinction.
+        // The new lifetime is its own exit, folded beside the original 100,
+        // not a replacement of it (that would total 930).
+        tree.observe(vec![
+            reading(1, 0, 10, 0),
+            reading(2, 1, 20, 0),
+            reading(3, 2, 100, 0),
+        ]);
+        assert_eq!(tree.totals(), Some((1030, 515)));
+    }
+
+    #[test]
+    fn exit_after_the_parent_is_already_gone_does_not_invent_attribution() {
+        let mut tree = TreeCpu::default();
+        tree.observe(vec![
+            reading(1, 0, 10, 0),
+            reading(2, 1, 20, 0),
+            reading(3, 2, 100, 0),
+        ]);
         tree.observe(vec![reading(1, 0, 20, 150)]);
         assert_eq!(tree.totals(), None);
+        tree.record_exit(reading(3, 2, 110, 0));
+        assert_eq!(tree.totals(), None);
+        // The floor moves the upper bound. It does not make the total exact.
         assert_eq!(tree.bounds(), ((170, 280), (85, 140)));
     }
 

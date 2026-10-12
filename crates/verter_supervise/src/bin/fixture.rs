@@ -9,8 +9,9 @@
 //! sleep <ms>                         sleep, then exit 0
 //! cpu-tree <depth> <ms>             (macOS) burn CPU in each generation,
 //!                                    reap descendants and report tree usage
-//! cpu-exit-tree <depth> <ms>        (macOS) hold each exited descendant
-//!                                    briefly for NOTE_EXIT sampling
+//! cpu-exit-tree <depth> <ms>        (macOS) reap each descendant after its
+//!                                    NOTE_EXIT sample, or at once if no
+//!                                    sample directory is set
 //! alloc <chunk-mb>                   commit and touch <chunk-mb> chunks until
 //!                                    an allocation is refused, then wait to be
 //!                                    killed (never exits on its own)
@@ -118,8 +119,10 @@ fn cpu_tree(depth: u32, duration_ms: u64, hold_exit: bool) {
             .spawn()
             .expect("run CPU descendant");
         if hold_exit {
-            // Keep the zombie readable while the supervisor handles NOTE_EXIT;
-            // no periodic sample is needed between these nested exits.
+            // Observed exit, zombie still held. Reap when the supervisor has
+            // recorded the NOTE_EXIT sample, not after a fixed sleep. With no
+            // sample directory, reap on the next call — the same wait as
+            // cpu-tree, once the exit itself has been observed.
             let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
             loop {
                 // SAFETY: child is ours; WNOWAIT leaves it for wait_with_output.
@@ -139,12 +142,27 @@ fn cpu_tree(depth: u32, duration_ms: u64, hold_exit: bool) {
                     std::io::ErrorKind::Interrupted
                 );
             }
-            std::thread::sleep(Duration::from_millis(50));
+            wait_for_exit_sample(child.id());
         }
         let child = child.wait_with_output().expect("reap CPU descendant");
         assert!(child.status.success(), "CPU descendant failed: {child:?}");
     }
     report_cpu(true);
+}
+
+#[cfg(target_os = "macos")]
+fn wait_for_exit_sample(pid: u32) {
+    let Ok(dir) = std::env::var(verter_supervise::EXIT_SAMPLE_DIR_ENV) else {
+        return;
+    };
+    if dir.is_empty() {
+        return;
+    }
+    let marker = std::path::Path::new(&dir).join(pid.to_string());
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !marker.exists() && std::time::Instant::now() < deadline {
+        std::thread::yield_now();
+    }
 }
 
 #[cfg(target_os = "macos")]

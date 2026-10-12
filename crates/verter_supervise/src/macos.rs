@@ -332,6 +332,8 @@ pub(crate) fn supervise(launch: Launch<'_>, report: &mut Report) {
                             Some(reading)
                         })
                         .collect();
+                    let sampled_pids: Vec<_> =
+                        final_readings.iter().map(|reading| reading.pid).collect();
                     for reading in final_readings {
                         cpu.record_exit(reading);
                     }
@@ -341,6 +343,12 @@ pub(crate) fn supervise(launch: Launch<'_>, report: &mut Report) {
                         .filter_map(|pid| usage(pid).ok().map(|r| cpu_reading(pid, &r)))
                         .collect();
                     cpu.observe(readings);
+                    // Signal only after the sample and the sweep, so a fixture
+                    // waiting on this directory reaps a zombie the read already
+                    // took. Unset in production.
+                    for pid in sampled_pids {
+                        note_exit_sampled(pid);
+                    }
                     tree_ever.extend(discovered);
                 }
                 if events.forked || !events.exited.is_empty() {
@@ -649,6 +657,16 @@ fn enumerate_tree(
         frontier.extend(children(member));
     }
     (seen, discovered)
+}
+
+fn note_exit_sampled(pid: libc::pid_t) {
+    let Ok(dir) = std::env::var(crate::EXIT_SAMPLE_DIR_ENV) else {
+        return;
+    };
+    if dir.is_empty() {
+        return;
+    }
+    let _ = std::fs::write(std::path::Path::new(&dir).join(pid.to_string()), b"");
 }
 
 fn footprint(pid: libc::pid_t) -> Result<u64, std::io::Error> {
