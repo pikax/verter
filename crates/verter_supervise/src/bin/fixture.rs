@@ -7,6 +7,8 @@
 //! env <KEY>                          print the working directory and $KEY
 //! touch <path>                       create <path> (proves the child ran)
 //! sleep <ms>                         sleep, then exit 0
+//! cpu-tree <depth> <ms>             (macOS) burn CPU in each generation,
+//!                                    reap descendants and report tree usage
 //! alloc <chunk-mb>                   commit and touch <chunk-mb> chunks until
 //!                                    an allocation is refused, then wait to be
 //!                                    killed (never exits on its own)
@@ -53,6 +55,11 @@ fn main() {
         "alloc" => alloc(rest[0].parse().expect("chunk MiB")),
         #[cfg(target_os = "macos")]
         "cpu" => cpu(rest[0].parse().expect("CPU duration ms")),
+        #[cfg(target_os = "macos")]
+        "cpu-tree" => cpu_tree(
+            rest[0].parse().expect("depth"),
+            rest[1].parse().expect("CPU duration ms"),
+        ),
         "spawn-wait" => {
             let mut child = spawn_grandchild(&rest[0], &rest[1..], Launch::Plain);
             child.wait().ok();
@@ -78,6 +85,30 @@ fn main() {
 
 #[cfg(target_os = "macos")]
 fn cpu(duration_ms: u64) {
+    burn_cpu(duration_ms);
+    report_cpu(false);
+}
+
+#[cfg(target_os = "macos")]
+fn cpu_tree(depth: u32, duration_ms: u64) {
+    burn_cpu(duration_ms);
+    if depth > 0 {
+        let child = Command::new(std::env::current_exe().expect("fixture path"))
+            .args([
+                "cpu-tree",
+                &(depth - 1).to_string(),
+                &duration_ms.to_string(),
+            ])
+            .stdin(Stdio::null())
+            .output()
+            .expect("run CPU descendant");
+        assert!(child.status.success(), "CPU descendant failed: {child:?}");
+    }
+    report_cpu(true);
+}
+
+#[cfg(target_os = "macos")]
+fn burn_cpu(duration_ms: u64) {
     let until = std::time::Instant::now() + Duration::from_millis(duration_ms);
     let mut value = 0u64;
     while std::time::Instant::now() < until {
@@ -85,14 +116,29 @@ fn cpu(duration_ms: u64) {
             value = std::hint::black_box(value.wrapping_add(i));
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+fn report_cpu(include_children: bool) {
     // SAFETY: the output is a correctly sized rusage; RUSAGE_SELF is our
     // own process, including its startup before this fixture's work.
     let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
     assert_eq!(unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) }, 0);
+    let mut children: libc::rusage = unsafe { std::mem::zeroed() };
+    if include_children {
+        // SAFETY: same output contract, for children already reaped here.
+        assert_eq!(
+            unsafe { libc::getrusage(libc::RUSAGE_CHILDREN, &mut children) },
+            0
+        );
+    }
     let ms = |t: libc::timeval| t.tv_sec as f64 * 1_000.0 + t.tv_usec as f64 / 1_000.0;
     println!(
         "{}",
-        serde_json::json!({ "userMs": ms(usage.ru_utime), "kernelMs": ms(usage.ru_stime) })
+        serde_json::json!({
+            "userMs": ms(usage.ru_utime) + ms(children.ru_utime),
+            "kernelMs": ms(usage.ru_stime) + ms(children.ru_stime)
+        })
     );
 }
 
