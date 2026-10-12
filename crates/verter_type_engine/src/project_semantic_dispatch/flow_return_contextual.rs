@@ -5,13 +5,42 @@
 //! unannotated parameters, and its body return is read under them.
 
 use super::{FlowDemandDriver, FlowEvaluator, Positional};
-use crate::semantic_query::{SemanticNodeData, SemanticNodeId, SignatureKind};
+use crate::semantic_query::{SemanticNodeData, SemanticNodeId, SemanticQueryApi, SignatureKind};
 use verter_session_query::flow::slice::SliceExpr;
 
 impl<C: crate::resolver_core::ResolverCapabilities> super::super::ProjectSemanticDispatch<'_, C> {
+    /// Expand a contextual alias without erasing marker applications in its body.
+    pub(in crate::project_semantic_dispatch) fn contextual_carrier_view(
+        &self,
+        node: SemanticNodeId,
+    ) -> SemanticNodeId {
+        let data = self.graph().node_data(node);
+        let Some(SemanticNodeData::InstantiationRef { base, args }) = data.as_deref() else {
+            return self.resolved_reduction_view(node);
+        };
+        let context =
+            crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                crate::semantic_query::ProjectionMode::Skeleton,
+            );
+        match self.execute_type_node(crate::semantic_query::SemanticQueryKey::Instantiate(
+            crate::semantic_query::InstantiateKey::new(
+                self.type_slot_for(
+                    std::sync::Arc::clone(&base.canonical_id),
+                    base.owner,
+                    std::sync::Arc::clone(&base.decl_name),
+                ),
+                std::sync::Arc::clone(args),
+                self.instantiate_context_for(&base.canonical_id, context),
+            ),
+        )) {
+            crate::semantic_query::QueryResult::Value(output) => output.value,
+            _ => node,
+        }
+    }
+
     /// Find the global marker through contextual intersections and aliases,
     /// before its empty interface is reduced to a structural object.
-    pub(super) fn contextual_object_this_type(
+    pub(in crate::project_semantic_dispatch) fn contextual_object_this_type(
         &self,
         contextual: SemanticNodeId,
         canonical: &str,
@@ -38,8 +67,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::super::ProjectSemanti
                 Some(SemanticNodeData::Intersection(members)) => {
                     pending.extend(members.iter().copied())
                 }
+                Some(SemanticNodeData::Union(members)) => pending.extend(members.iter().copied()),
                 _ => {
-                    let resolved = self.resolved_reduction_view(node);
+                    let resolved = self.contextual_carrier_view(node);
                     if resolved != node {
                         pending.push(resolved);
                     }

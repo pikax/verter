@@ -29,6 +29,8 @@ pub(super) struct ClassReceiver {
     pub(super) declared: rustc_hash::FxHashSet<Arc<str>>,
     /// The base instance, when the class extends one.
     pub(super) base: Option<SemanticNodeId>,
+    /// Literal members supply only the contextual receiver's inferred part.
+    pub(super) infer_literal_members: bool,
     /// Set when a member body read a declared member not evaluated yet.
     pub(super) forward_read: std::cell::Cell<bool>,
 }
@@ -363,6 +365,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 })
                 .collect(),
             base: frame.base.as_ref().and_then(|base| base.instance),
+            infer_literal_members: true,
             forward_read: std::cell::Cell::new(false),
         });
         frame.enclosing_receiver = Some(self.receiver.replace(receiver.clone()));
@@ -789,7 +792,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     .graph()
                     .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any)),
             ),
-            verter_session_query::flow::slice::SliceThis::Receiver => match &self.receiver {
+            verter_session_query::flow::slice::SliceThis::Receiver
+            | verter_session_query::flow::slice::SliceThis::Explicit => match &self.receiver {
                 Some(receiver) => Positional::Value(receiver.binder),
                 None => {
                     self.record_degradation(
@@ -844,7 +848,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         {
             // A contextual object receiver is the supplied type itself.
             // Literal members cannot replace that type's declared members.
-            if bound.base == Some(bound.binder) {
+            if bound.base == Some(bound.binder)
+                && (!bound.infer_literal_members
+                    || self.contextual_property_type(bound.binder, name).is_some())
+            {
                 return bound.base;
             }
             // A class expression's own member reads the value its class

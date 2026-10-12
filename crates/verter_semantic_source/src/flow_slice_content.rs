@@ -1011,6 +1011,7 @@ pub(crate) fn build_flow_slice_content(
         Ok(params) => params,
         Err(reason) => {
             return Some(SliceContent {
+                declared_this: None,
                 bindings,
                 declared_return,
                 declared_predicate,
@@ -1095,7 +1096,17 @@ pub(crate) fn build_flow_slice_content(
             FunctionNode::Function(function)
                 if function.is_declaration() && function.this_param.is_none()
         );
-    let this = match context {
+    let declared_this = match &node {
+        FunctionNode::Function(function) => function
+            .this_param
+            .as_ref()
+            .and_then(|param| param.type_annotation.as_ref())
+            .map(|annotation| {
+                signature_scope.gate(lower_ts_type(&annotation.type_annotation, source))
+            }),
+        _ => None,
+    };
+    let this = declared_this.as_ref().map(|_| SliceThis::Explicit).or_else(|| match context {
         Some(context) => context.this().cloned(),
         None if untyped_declaration_this => Some(SliceThis::Untyped),
         None => resolved.enclosing_this.and_then(|this| {
@@ -1134,7 +1145,7 @@ pub(crate) fn build_flow_slice_content(
                 }
             })
         }),
-    };
+    });
     let mut lowerer = Lowerer {
         frame_gate,
         bindings: &bindings,
@@ -1347,6 +1358,7 @@ pub(crate) fn build_flow_slice_content(
     let decided_above_call_spans = lowerer.decided_above_call_spans;
     let call_arguments = lowerer.call_arguments;
     Some(SliceContent {
+        declared_this,
         bindings,
         declared_return,
         declared_predicate,
@@ -13675,7 +13687,7 @@ impl<'a> Lowerer<'a> {
         // function value (its return evaluates inline through
         // the same flow machinery); a method without a body
         // keeps the whole-literal leaf lowering.
-        if method_kind.is_some() {
+        if method_kind.is_some() || matches!(value_expression, Expression::FunctionExpression(_)) {
             let accessor_annotated = match (method_kind, value_expression) {
                 (
                     Some(verter_type_expr::ObjectMethodKind::Get),
@@ -13722,7 +13734,7 @@ impl<'a> Lowerer<'a> {
                     // A method / accessor member is never `readonly`,
                     // under `as const` or otherwise: the modifier applies
                     // to data properties.
-                    readonly: false,
+                    readonly: method_kind.is_none() && policy.readonly(),
                     spans,
                     accessor_annotated,
                     infer_return_eagerly: method_return_is_context_independent(value_expression),

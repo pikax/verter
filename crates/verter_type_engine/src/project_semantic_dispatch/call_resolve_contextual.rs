@@ -116,6 +116,121 @@ struct ContextualCandidate {
 }
 
 impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
+    /// Type properties that produce a marker's receiver binders before the
+    /// properties consuming them. Source order breaks ties and cycles.
+    pub(in crate::project_semantic_dispatch) fn contextual_object_order(
+        &self,
+        state: &ContextualCallState,
+        names: &[Arc<str>],
+        canonical: &str,
+    ) -> Vec<usize> {
+        let source_order = || (0..names.len()).collect::<Vec<_>>();
+        let Some(progress) = state.active.as_ref() else {
+            return source_order();
+        };
+        let (_, target) = progress.deferred[progress.cursor];
+        let Some(surface) = self.resolve_typeinfo_surface_view(
+            target,
+            ProjectionReductionContext::structural_transit(),
+        ) else {
+            return source_order();
+        };
+        let parameters: FxHashSet<_> = progress.parameters.iter().map(|decl| decl.param).collect();
+        if parameters.is_empty() {
+            return source_order();
+        }
+        let mut producers: FxHashMap<SemanticNodeId, Vec<usize>> = FxHashMap::default();
+        let mut consumers = vec![FxHashSet::default(); names.len()];
+        for (index, name) in names.iter().enumerate() {
+            let crate::semantic_query::SurfaceKeyProjection::Exact(member) = surface
+                .project_known_key(&crate::semantic_query::PropertyKey::identifier(
+                    name.as_ref(),
+                ))
+            else {
+                continue;
+            };
+            let mut pending = vec![member.value];
+            let mut seen = FxHashSet::default();
+            while let Some(node) = pending.pop() {
+                if !seen.insert(node) {
+                    continue;
+                }
+                if parameters.contains(&node) {
+                    producers.entry(node).or_default().push(index);
+                    continue;
+                }
+                let Some(data) = self.graph().node_data(node) else {
+                    continue;
+                };
+                if matches!(&*data, SemanticNodeData::InstantiationRef { base, .. } if base.decl_name.as_ref() == "ThisType")
+                {
+                    if let Some(receiver) = self.contextual_object_this_type(node, canonical) {
+                        consumers[index].extend(
+                            parameters
+                                .iter()
+                                .copied()
+                                .filter(|param| self.mentions_node(receiver, *param)),
+                        );
+                        continue;
+                    }
+                }
+                if matches!(
+                    &*data,
+                    SemanticNodeData::InstantiationRef { .. } | SemanticNodeData::DeclRef { .. }
+                ) {
+                    let resolved = self.contextual_carrier_view(node);
+                    if resolved != node {
+                        pending.push(resolved);
+                        continue;
+                    }
+                }
+                if data.for_each_child(|child| pending.push(child))
+                    == crate::semantic_query::ChildWalk::Sealed
+                {
+                    return source_order();
+                }
+            }
+        }
+        let dependencies: Vec<FxHashSet<usize>> = consumers
+            .iter()
+            .enumerate()
+            .map(|(index, params)| {
+                params
+                    .iter()
+                    .filter_map(|param| producers.get(param))
+                    .flatten()
+                    .copied()
+                    .filter(|producer| *producer != index)
+                    .collect()
+            })
+            .collect();
+        let mut remaining: Vec<_> = dependencies.iter().map(FxHashSet::len).collect();
+        let mut followers = vec![Vec::new(); names.len()];
+        let mut ready = std::collections::BinaryHeap::new();
+        for (index, dependencies) in dependencies.iter().enumerate() {
+            if dependencies.is_empty() {
+                ready.push(std::cmp::Reverse(index));
+            }
+            for &dependency in dependencies {
+                followers[dependency].push(index);
+            }
+        }
+        let mut ordered = Vec::with_capacity(names.len());
+        let mut completed = vec![false; names.len()];
+        while let Some(std::cmp::Reverse(next)) = ready.pop() {
+            completed[next] = true;
+            ordered.push(next);
+            for &follower in &followers[next] {
+                remaining[follower] -= 1;
+                if remaining[follower] == 0 {
+                    ready.push(std::cmp::Reverse(follower));
+                }
+            }
+        }
+        ordered.extend((0..names.len()).filter(|index| !completed[*index]));
+        ordered
+    }
+
     /// A checked property advances the suspended call's own collector. The
     /// collector is installed only for inference, never while a body runs.
     pub(in crate::project_semantic_dispatch) fn contextual_object_member(

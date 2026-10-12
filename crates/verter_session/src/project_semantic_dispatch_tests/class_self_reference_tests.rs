@@ -13,6 +13,132 @@
 
 use super::checker_probe_lane_tests::mismatches;
 
+fn assert_contextual_receiver(source: &str, probe: &str, expected: &str) {
+    let source = format!("export {{}}; declare global {{ interface ThisType<T> {{}} }}\n{source}");
+    let failures = super::checker_probe_lane_tests::mismatches_in_one_host_observing(
+        &source,
+        &[(probe, expected), (probe, expected)],
+        |_| {},
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn contextual_this_marker_preserves_inferred_sibling_methods() {
+    for methods in [
+        "m(){return this.n}, q(){return this.m()}",
+        "q(){return this.m()}, m(){return this.n}",
+    ] {
+        assert_contextual_receiver(
+            &format!("declare function defineComponent<D,M>(o:{{data():D;methods:M & ThisType<D & M>}}):{{[K in keyof M]:M[K] extends ()=>infer R?R:never}};
+const comp=defineComponent({{data(){{return {{n:3 as const}}}},methods:{{{methods}}}}});"),
+            "typeof comp",
+            "{ m: 3; q: 3; }",
+        );
+    }
+}
+
+#[test]
+fn contextual_this_marker_preserves_inferred_siblings_through_aliases() {
+    assert_contextual_receiver(
+        "type Methods<D,M>=M & ThisType<D & M>;
+declare function defineComponent<D,M>(o:{data():D;methods:Methods<D,M>}):{[K in keyof M]:M[K] extends ()=>infer R?R:never};
+const comp=defineComponent({data(){return {n:3 as const}},methods:{m(){return this.n},q(){return this.m()}}});",
+        "typeof comp",
+        "{ m: 3; q: 3; }",
+    );
+}
+
+#[test]
+fn contextual_this_marker_is_inherited_by_nested_literals() {
+    assert_contextual_receiver(
+        "function obj(){return {nested:{m(){return this.n}}} satisfies {nested:{m():3}} & ThisType<{n:3}>;}",
+        "ReturnType<ReturnType<typeof obj>['nested']['m']>",
+        "3",
+    );
+}
+
+#[test]
+fn contextual_this_marker_survives_object_spreads() {
+    for spread in ["{}", "extra"] {
+        assert_contextual_receiver(
+            &format!("const extra={{a:1}};function obj(){{return {{...{spread},m(){{return this.n}}}} satisfies ThisType<{{n:3}}>;}}"),
+            "ReturnType<ReturnType<typeof obj>['m']>",
+            "3",
+        );
+    }
+    assert_contextual_receiver(
+        "const extra={a:1};function obj(){return {m(){return this.n},...extra} satisfies ThisType<{n:3}>;}",
+        "ReturnType<ReturnType<typeof obj>['m']>",
+        "3",
+    );
+    assert_contextual_receiver(
+        "function obj(){return {m(){return this.n},...{m(){return 5 as const}}} satisfies ThisType<{n:3}>;}",
+        "ReturnType<ReturnType<typeof obj>['m']>",
+        "5",
+    );
+}
+
+#[test]
+fn contextual_this_marker_is_found_in_union_contexts() {
+    assert_contextual_receiver(
+        "function obj(){return {m(){return this.n}} satisfies (ThisType<{n:3}> | {m():3});}",
+        "ReturnType<ReturnType<typeof obj>['m']>",
+        "3",
+    );
+}
+
+#[test]
+fn contextual_this_marker_yields_to_an_explicit_receiver() {
+    assert_contextual_receiver(
+        "function obj(){return {m(this:{n:5}){return this.n}} satisfies ThisType<{n:3}>;}",
+        "ReturnType<ReturnType<typeof obj>['m']>",
+        "5",
+    );
+    assert_contextual_receiver(
+        "function obj(){return {m(this:{n:5}){return ()=>this.n}} satisfies ThisType<{n:3}>;}",
+        "ReturnType<ReturnType<ReturnType<typeof obj>['m']>>",
+        "5",
+    );
+}
+
+#[test]
+fn contextual_this_marker_types_top_level_literals() {
+    assert_contextual_receiver(
+        "const top={m(){return this.n}} satisfies ThisType<{n:3}>;",
+        "ReturnType<typeof top.m>",
+        "3",
+    );
+}
+
+#[test]
+fn contextual_this_marker_types_function_properties() {
+    assert_contextual_receiver(
+        "function obj(){return {m:function(){return this.n}} satisfies ThisType<{n:3}>;}",
+        "ReturnType<ReturnType<typeof obj>['m']>",
+        "3",
+    );
+}
+
+#[test]
+fn contextual_this_marker_survives_generic_aliases() {
+    assert_contextual_receiver(
+        "type Marker<T>=ThisType<T>;function obj(){return {m(){return this.n}} satisfies Marker<{n:3}>;}",
+        "ReturnType<ReturnType<typeof obj>['m']>",
+        "3",
+    );
+}
+
+#[test]
+fn contextual_this_marker_infers_getters_before_earlier_actions() {
+    assert_contextual_receiver(
+        "declare function defineStore<S,G,A>(o:{state():S;getters:G & ThisType<S>;actions:A & ThisType<S & A & {[K in keyof G]:G[K] extends ()=>infer R?R:never}>}):S & A;
+const store=defineStore({actions:{read(){return this.double}},getters:{double(){return this.count}},state(){return {count:1 as const}}});",
+        "ReturnType<typeof store.read>",
+        "1",
+    );
+}
+
 #[test]
 fn contextual_this_marker_returning_this_preserves_the_marker_argument() {
     let source = "export {}; declare global { interface ThisType<T> {} }

@@ -1631,7 +1631,8 @@ fn discover_variable_declaration<'ast>(
                 || matches!(unwrap_program_expression(init), Expression::CallExpression(call)
                     if call.arguments.iter().any(|argument|
                         super::type_eval_build::indexed_context_sensitive(argument.as_expression())));
-            if contextual_call {
+            let contextual_literal = super::type_eval_build::contextual_object_initializer(init);
+            if contextual_call || contextual_literal {
                 // The initializer is a served expression body. Its callbacks
                 // use the same flow evaluator and call continuation as bodies.
                 discover_initializer_inner(
@@ -1642,23 +1643,24 @@ fn discover_variable_declaration<'ast>(
                     base_descent.clone(),
                     ctx,
                 );
-                if let ProgramExpressionSource::SemanticCall { initializer, .. } = &mut source {
-                    *initializer = Some(
-                        verter_session_query::function_program::ProgramInitializerSource {
-                            function: FlowFunctionReturnIdentity {
-                                anchor: AuthoredAnchor {
-                                    canonical_id: Arc::clone(&ctx.canonical_id),
-                                    owner: anchor.owner,
-                                    symbol: Arc::from(name.as_str()),
-                                    space: LocatorSymbolSpace::Value,
-                                },
-                                function_part: FunctionPartIdentity::Initializer,
-                                overload_ordinal: 0,
-                            },
-                            preserve_literals: var_decl.kind
-                                == oxc_ast::ast::VariableDeclarationKind::Const,
+                let served = verter_session_query::function_program::ProgramInitializerSource {
+                    function: FlowFunctionReturnIdentity {
+                        anchor: AuthoredAnchor {
+                            canonical_id: Arc::clone(&ctx.canonical_id),
+                            owner: anchor.owner,
+                            symbol: Arc::from(name.as_str()),
+                            space: LocatorSymbolSpace::Value,
                         },
-                    );
+                        function_part: FunctionPartIdentity::Initializer,
+                        overload_ordinal: 0,
+                    },
+                    preserve_literals: var_decl.kind
+                        == oxc_ast::ast::VariableDeclarationKind::Const,
+                };
+                if let ProgramExpressionSource::SemanticCall { initializer, .. } = &mut source {
+                    *initializer = Some(served);
+                } else {
+                    source = ProgramExpressionSource::VariableInitializer(served);
                 }
             }
             ctx.expressions.push(ProgramExpressionRecord {
@@ -1673,7 +1675,7 @@ fn discover_variable_declaration<'ast>(
                 },
                 source,
             });
-            if !contextual_call {
+            if !contextual_call && !contextual_literal {
                 discover_top_level_call_arg_positions(init, &name, anchor, &base_descent, ctx);
             }
         }

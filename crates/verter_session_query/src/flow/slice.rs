@@ -93,6 +93,8 @@ impl FlowSliceSelection {
 pub struct SliceContent {
     pub bindings: Arc<crate::flow::binding::FlowBindingMap>,
     pub declared_return: Option<GatedType>,
+    /// The receiver annotation belongs to this demanded body, not its lexical context.
+    pub declared_this: Option<GatedType>,
     /// The authored return's type predicate (`x is T`, `asserts x`, …),
     /// beside the `boolean` / `void` [`Self::declared_return`].
     pub declared_predicate: Option<SlicePredicate>,
@@ -3369,6 +3371,8 @@ impl CapturedFrame {
 /// receiver for the member (`checkThisExpression`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SliceThis {
+    /// An authored receiver annotation, which precedes contextual typing.
+    Explicit,
     /// An instance member of the class `class` (its registered
     /// declaration name) declaring `type_parameters`: the class's
     /// polymorphic `this` type, whose constraint is the class instance.

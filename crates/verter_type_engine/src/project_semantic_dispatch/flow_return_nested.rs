@@ -563,6 +563,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             no_implicit_any: self.no_implicit_any,
             use_unknown_in_catch_variables: self.use_unknown_in_catch_variables,
             no_implicit_this: self.no_implicit_this,
+            contextual_object_this: None,
             params: &owned.params,
             param_names: &owned.content.params,
             binder_env: &owned.binder_env,
@@ -618,12 +619,16 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             // against the receiver the class binds.
             receiver: matches!(
                 capture_context.this(),
-                Some(verter_session_query::flow::slice::SliceThis::Receiver)
+                Some(
+                    verter_session_query::flow::slice::SliceThis::Receiver
+                        | verter_session_query::flow::slice::SliceThis::Explicit
+                )
             )
             .then(|| self.receiver.clone())
             .flatten(),
         });
         let body = &owned.content.body;
+        evaluator.bind_explicit_this(owned.content.declared_this.as_ref());
         evaluator.seed_hoisted_var_declarations(body);
         let run = evaluator.start_region_run(body);
         NestedPrepared::Child(Box::new(NestedActivation {

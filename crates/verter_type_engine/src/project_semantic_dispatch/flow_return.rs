@@ -1938,7 +1938,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     }
                     verter_session_query::function_program::ProgramExpressionSource::SemanticCall {
                         initializer: Some(initializer), ..
-                    } => {
+                    }
+                    | verter_session_query::function_program::ProgramExpressionSource::VariableInitializer(initializer) => {
                         let node = self.initializer_value(&initializer.function, initializer.preserve_literals);
                         // An unresolved call has no inferred declaration value.
                         // Keep the ordinary call-source refusal instead of
@@ -6151,7 +6152,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             dead_written: rustc_hash::FxHashSet::default(),
             dead_written_log: Vec::new(),
             receiver: None,
+            contextual_object_this: None,
         };
+        evaluator.bind_explicit_this(ir.declared_this.as_ref());
         let holds;
         let yield_contributions;
         let degradation;
@@ -9306,12 +9309,19 @@ pub(super) trait FlowDemandDriver {
         node: SemanticNodeId,
         canonical: &str,
     ) -> Option<SemanticNodeId>;
+    fn contextual_carrier_view(&self, node: SemanticNodeId) -> SemanticNodeId;
     fn contextual_object_member(
         &self,
         state: &mut super::call_resolve::ContextualCallState,
         name: &str,
         value: Option<SemanticNodeId>,
     ) -> Result<Option<SemanticNodeId>, ResolveCallFailure>;
+    fn contextual_object_order(
+        &self,
+        state: &super::call_resolve::ContextualCallState,
+        names: &[Arc<str>],
+        canonical: &str,
+    ) -> Vec<usize>;
     fn reduce_arms_to_supertypes(
         &self,
         arms: &[ReductionArm],
@@ -9835,6 +9845,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
     ) -> Option<SemanticNodeId> {
         ProjectSemanticDispatch::contextual_object_this_type(self, node, canonical)
     }
+    fn contextual_carrier_view(&self, node: SemanticNodeId) -> SemanticNodeId {
+        ProjectSemanticDispatch::contextual_carrier_view(self, node)
+    }
     fn contextual_object_member(
         &self,
         state: &mut super::call_resolve::ContextualCallState,
@@ -9842,6 +9855,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         value: Option<SemanticNodeId>,
     ) -> Result<Option<SemanticNodeId>, ResolveCallFailure> {
         ProjectSemanticDispatch::contextual_object_member(self, state, name, value)
+    }
+    fn contextual_object_order(
+        &self,
+        state: &super::call_resolve::ContextualCallState,
+        names: &[Arc<str>],
+        canonical: &str,
+    ) -> Vec<usize> {
+        ProjectSemanticDispatch::contextual_object_order(self, state, names, canonical)
     }
     fn reduce_arms_to_supertypes(
         &self,
@@ -10451,6 +10472,9 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     ) -> Option<SemanticNodeId> {
         self.driver.contextual_object_this_type(node, canonical)
     }
+    fn contextual_carrier_view(&self, node: SemanticNodeId) -> SemanticNodeId {
+        self.driver.contextual_carrier_view(node)
+    }
     fn contextual_object_member(
         &self,
         state: &mut super::call_resolve::ContextualCallState,
@@ -10458,6 +10482,14 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
         value: Option<SemanticNodeId>,
     ) -> Result<Option<SemanticNodeId>, ResolveCallFailure> {
         self.driver.contextual_object_member(state, name, value)
+    }
+    fn contextual_object_order(
+        &self,
+        state: &super::call_resolve::ContextualCallState,
+        names: &[Arc<str>],
+        canonical: &str,
+    ) -> Vec<usize> {
+        self.driver.contextual_object_order(state, names, canonical)
     }
     fn reduce_arms_to_supertypes(
         &self,
@@ -10947,6 +10979,8 @@ struct FlowEvaluator<'d, 'b, D: FlowDemandDriver> {
     /// The class-expression instance `this` reads while the class's members
     /// evaluate (see [`class_expression::ClassReceiver`]).
     receiver: Option<std::rc::Rc<class_expression::ClassReceiver>>,
+    /// The marker in the enclosing contextual object, separate from lexical `this`.
+    contextual_object_this: Option<SemanticNodeId>,
 }
 
 /// The evaluator-recorded structural execution ledger of one run: how
@@ -11969,9 +12003,12 @@ struct ObjectEvalFrame<'e> {
     first_pass_contributes: bool,
     inference: Option<&'e mut super::call_resolve::ContextualCallState>,
     entries: &'e [verter_session_query::flow::slice::SliceObjectEntry],
+    entry_order: Vec<usize>,
+    surface_ordinals: Vec<usize>,
     offset: u32,
     assignment_fresh: bool,
     contextual: Option<SemanticNodeId>,
+    enclosing_contextual_this: Option<SemanticNodeId>,
     /// Each context-sensitive member reads as the non-inferring `any`
     /// (a call's first inference pass, `SkipContextSensitive`).
     skips_context_sensitive: bool,
@@ -11980,6 +12017,8 @@ struct ObjectEvalFrame<'e> {
     unwidened_differs: bool,
     effects: Vec<crate::semantic_query::ObjectConstructionEffect>,
     spread_seen: bool,
+    flushed_members: usize,
+    member_effect_positions: rustc_hash::FxHashMap<usize, usize>,
     late_bound: class_expression::ComputedIndexKinds,
     receiver: Option<std::rc::Rc<class_expression::ClassReceiver>>,
     /// The frame's receiver before the literal's, given back when the
@@ -12072,6 +12111,29 @@ enum NullishStrip {
 }
 
 impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
+    fn bind_explicit_this(
+        &mut self,
+        declared: Option<&verter_session_query::flow::slice::GatedType>,
+    ) {
+        let Some(declared) = declared else {
+            return;
+        };
+        let binder = if signature_answer_is_frame_shadowed(self.dispatch, self.binder_env, declared)
+        {
+            self.unmodeled_position()
+        } else {
+            self.lower_body_type(declared.ty())
+        };
+        self.receiver = Some(std::rc::Rc::new(class_expression::ClassReceiver {
+            binder,
+            base: Some(binder),
+            infer_literal_members: false,
+            members: std::cell::RefCell::new(Vec::new()),
+            declared: rustc_hash::FxHashSet::default(),
+            forward_read: std::cell::Cell::new(false),
+        }));
+    }
+
     /// The canonical union of `members` under this frame's null algebra —
     /// the one union construction of the evaluation.
     fn union(&self, members: &[SemanticNodeId]) -> SemanticNodeId {
@@ -12210,6 +12272,25 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     ) -> Positional<SemanticNodeId> {
         if let verter_session_query::flow::slice::SliceExpr::Object { entries, offset } = expr {
             let mut frame = self.object_eval_frame(entries, *offset, false, Some(contextual));
+            let names: Option<Vec<_>> = entries
+                .iter()
+                .map(|entry| match entry {
+                    verter_session_query::flow::slice::SliceObjectEntry::Member(member) => {
+                        match &member.key {
+                            verter_session_query::flow::slice::SliceObjectKey::Static(name) => {
+                                Some(Arc::clone(name))
+                            }
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                })
+                .collect();
+            if let Some(names) = names {
+                frame.entry_order =
+                    self.dispatch
+                        .contextual_object_order(state, &names, self.canonical);
+            }
             frame.inference = Some(state);
             self.drive_object_literal(&mut frame)
         } else {
@@ -12262,84 +12343,130 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         assignment_fresh: bool,
         contextual: Option<SemanticNodeId>,
     ) -> ObjectEvalFrame<'e> {
+        let enclosing_contextual_this = self.contextual_object_this;
+        self.contextual_object_this = contextual
+            .and_then(|context| {
+                self.dispatch
+                    .contextual_object_this_type(context, self.canonical)
+            })
+            .or(enclosing_contextual_this);
         let contextual_this = self
             .no_implicit_this
             .then(|| {
-                contextual.and_then(|context| {
-                    self.dispatch
-                        .contextual_object_this_type(context, self.canonical)
-                        .or_else(|| {
-                            let context = self.dispatch.resolved_reduction_view(context);
-                            (!matches!(
-                                self.dispatch.graph().node_data(context).as_deref(),
-                                Some(
-                                    SemanticNodeData::TypeParam { .. }
-                                        | SemanticNodeData::Primitive(
-                                            PrimitiveKind::Any | PrimitiveKind::Unknown
-                                        )
-                                )
-                            ))
-                            .then_some(context)
-                        })
+                self.contextual_object_this.or_else(|| {
+                    contextual.and_then(|context| {
+                        self.dispatch
+                            .contextual_object_this_type(context, self.canonical)
+                            .or_else(|| {
+                                let context = self.dispatch.resolved_reduction_view(context);
+                                (!matches!(
+                                    self.dispatch.graph().node_data(context).as_deref(),
+                                    Some(
+                                        SemanticNodeData::TypeParam { .. }
+                                            | SemanticNodeData::Primitive(
+                                                PrimitiveKind::Any | PrimitiveKind::Unknown
+                                            )
+                                    )
+                                ))
+                                .then_some(context)
+                            })
+                    })
                 })
             })
             .flatten();
+        let infer_literal_members = contextual_this.is_none()
+            || contextual.is_some_and(|context| {
+                let mut pending = vec![context];
+                let mut seen = rustc_hash::FxHashSet::default();
+                while let Some(node) = pending.pop() {
+                    if !seen.insert(node) {
+                        continue;
+                    }
+                    match self.dispatch.graph().node_data(node).as_deref() {
+                        Some(SemanticNodeData::TypeParam { .. })
+                            if contextual_this.is_some_and(|receiver| {
+                                self.dispatch.mentions_node(receiver, node)
+                            }) =>
+                        {
+                            return true
+                        }
+                        Some(SemanticNodeData::Intersection(members)) => {
+                            pending.extend(members.iter().copied())
+                        }
+                        Some(SemanticNodeData::Union(members)) => {
+                            pending.extend(members.iter().copied())
+                        }
+                        _ => {
+                            let resolved = self.dispatch.contextual_carrier_view(node);
+                            if resolved != node {
+                                pending.push(resolved);
+                            }
+                        }
+                    }
+                }
+                false
+            });
         // A literal's methods and accessors run against the object it
         // builds: their bodies read its other members through `this`, so
         // they evaluate after every other member (and once more after a
-        // read of a sibling not evaluated yet). A literal with a spread is
-        // a construction program whose members this rail does not order.
-        let receiver = entries
-            .iter()
-            .all(|entry| {
+        // read of a sibling not evaluated yet). Spreads retain their
+        // construction-effect order while deferred members acquire values.
+        let receiver = (contextual_this.is_some()
+            || entries.iter().all(|entry| {
                 matches!(
                     entry,
                     verter_session_query::flow::slice::SliceObjectEntry::Member(_)
                 )
-            })
-            .then(|| {
-                std::rc::Rc::new(class_expression::ClassReceiver {
-                    binder: contextual_this.unwrap_or_else(|| {
-                        self.dispatch.this_binder(
-                            self.canonical,
-                            self.owner,
-                            &Arc::from(super::substitute::object_literal_this_name(offset)),
-                            None,
-                        )
-                    }),
-                    members: std::cell::RefCell::new(Vec::new()),
-                    declared: entries
-                        .iter()
-                        .filter_map(|entry| match entry {
-                            verter_session_query::flow::slice::SliceObjectEntry::Member(member) => {
-                                match &member.key {
-                                    verter_session_query::flow::slice::SliceObjectKey::Static(
-                                        name,
-                                    ) => Some(Arc::clone(name)),
-                                    _ => None,
+            }))
+        .then(|| {
+            std::rc::Rc::new(class_expression::ClassReceiver {
+                binder: contextual_this.unwrap_or_else(|| {
+                    self.dispatch.this_binder(
+                        self.canonical,
+                        self.owner,
+                        &Arc::from(super::substitute::object_literal_this_name(offset)),
+                        None,
+                    )
+                }),
+                members: std::cell::RefCell::new(Vec::new()),
+                declared: entries
+                    .iter()
+                    .filter_map(|entry| match entry {
+                        verter_session_query::flow::slice::SliceObjectEntry::Member(member) => {
+                            match &member.key {
+                                verter_session_query::flow::slice::SliceObjectKey::Static(name) => {
+                                    Some(Arc::clone(name))
                                 }
+                                _ => None,
                             }
-                            _ => None,
-                        })
-                        .collect(),
-                    base: contextual_this,
-                    forward_read: std::cell::Cell::new(false),
-                })
-            });
+                        }
+                        _ => None,
+                    })
+                    .collect(),
+                base: contextual_this,
+                infer_literal_members,
+                forward_read: std::cell::Cell::new(false),
+            })
+        });
         let enclosing_receiver = self.receiver.clone();
         ObjectEvalFrame {
             first_pass_contributes: false,
             inference: None,
             skips_context_sensitive: false,
             entries,
+            entry_order: (0..entries.len()).collect(),
+            surface_ordinals: Vec::with_capacity(entries.len()),
             offset,
             assignment_fresh,
             contextual,
+            enclosing_contextual_this,
             surface_members: Vec::with_capacity(entries.len()),
             unwidened_members: Vec::with_capacity(entries.len()),
             unwidened_differs: false,
             effects: Vec::new(),
             spread_seen: false,
+            flushed_members: 0,
+            member_effect_positions: rustc_hash::FxHashMap::default(),
             late_bound: class_expression::ComputedIndexKinds::default(),
             receiver,
             enclosing_receiver: Some(enclosing_receiver),
@@ -12372,13 +12499,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         return self.object_eval_abandon(frame);
                     };
                     frame.spread_seen = true;
-                    frame.effects.extend(frame.surface_members.drain(..).map(
-                        |member: crate::semantic_query::SurfaceMember| {
-                            super::object_spread_program_lowering::direct_effect_from_member(
-                                &member,
-                            )
-                        },
-                    ));
+                    self.object_eval_flush_effects(frame);
                     // A const context copies the source's properties
                     // `readonly`, which a spread's own copy drops: they enter
                     // as the literal's own readonly properties.
@@ -12454,12 +12575,19 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                             .members
                             .borrow_mut()
                             .push(frame.surface_members[position].clone());
+                        if let Some(&effect) = frame.member_effect_positions.get(&position) {
+                            frame.effects[effect] =
+                                super::object_spread_program_lowering::direct_effect_from_member(
+                                    &frame.surface_members[position],
+                                );
+                        }
                     }
                     return self.object_eval_methods(frame);
                 }
             }
         }
-        while let Some(entry) = frame.entries.get(frame.next) {
+        while let Some(&ordinal) = frame.entry_order.get(frame.next) {
+            let entry = &frame.entries[ordinal];
             frame.next += 1;
             if let verter_session_query::flow::slice::SliceObjectEntry::Member(member) = entry {
                 if frame.skips_context_sensitive
@@ -12499,7 +12627,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             if let (Some(_), verter_session_query::flow::slice::SliceObjectEntry::Member(member)) =
                 (frame.receiver.as_ref(), entry)
             {
-                let deferred = member.method_kind.is_some()
+                let deferred = matches!(&member.value,
+                    verter_session_query::flow::slice::SliceExpr::NestedFunctionValue { context, .. }
+                        if matches!(context.this(), Some(verter_session_query::flow::slice::SliceThis::Receiver)))
+                    || member.method_kind.is_some();
+                let deferred = deferred
                     && matches!(
                         member.key,
                         verter_session_query::flow::slice::SliceObjectKey::Static(_)
@@ -12532,6 +12664,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     };
                     frame.unwidened_members.push(placeholder.clone());
                     frame.surface_members.push(placeholder);
+                    frame.surface_ordinals.push(ordinal);
                     continue;
                 }
             }
@@ -12782,6 +12915,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             receiver.members.borrow_mut().push(surface_member.clone());
         }
         frame.surface_members.push(surface_member);
+        frame
+            .surface_ordinals
+            .push(frame.entry_order[frame.next - 1]);
     }
 
     /// An object literal failing closed: its receiver given back, and the
@@ -12837,6 +12973,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     }
 
     fn object_eval_abandon<'e>(&mut self, frame: &mut ObjectEvalFrame<'e>) -> ObjectEvalStep<'e> {
+        self.contextual_object_this = frame.enclosing_contextual_this;
         self.receiver = frame
             .enclosing_receiver
             .take()
@@ -12888,18 +13025,48 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         false
     }
 
+    fn object_eval_flush_effects(&self, frame: &mut ObjectEvalFrame<'_>) {
+        for position in frame.flushed_members..frame.surface_members.len() {
+            frame
+                .member_effect_positions
+                .insert(position, frame.effects.len());
+            frame.effects.push(
+                super::object_spread_program_lowering::direct_effect_from_member(
+                    &frame.surface_members[position],
+                ),
+            );
+        }
+        frame.flushed_members = frame.surface_members.len();
+    }
+
     /// An object literal whose members, methods and accessors all
     /// evaluated: its surface built.
     fn object_eval_finish(
         &mut self,
         frame: &mut ObjectEvalFrame<'_>,
     ) -> Positional<SemanticNodeId> {
+        self.contextual_object_this = frame.enclosing_contextual_this;
+        if frame.inference.is_some() {
+            let mut members: Vec<_> = std::mem::take(&mut frame.surface_ordinals)
+                .into_iter()
+                .zip(std::mem::take(&mut frame.surface_members))
+                .zip(std::mem::take(&mut frame.unwidened_members))
+                .collect();
+            members.sort_by_key(|((ordinal, _), _)| *ordinal);
+            for ((_, member), unwidened) in members {
+                frame.surface_members.push(member);
+                frame.unwidened_members.push(unwidened);
+            }
+        }
+        if frame.spread_seen {
+            self.object_eval_flush_effects(frame);
+        }
         let entries = frame.entries;
         let offset = frame.offset;
         let mut surface_members = std::mem::take(&mut frame.surface_members);
         let mut unwidened_members = std::mem::take(&mut frame.unwidened_members);
         let unwidened_differs = frame.unwidened_differs;
-        let mut effects = std::mem::take(&mut frame.effects);
+        let effects = std::mem::take(&mut frame.effects);
         let spread_seen = frame.spread_seen;
         let late_bound = std::mem::take(&mut frame.late_bound);
         let receiver = frame.receiver.take();
@@ -12934,9 +13101,6 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             if late_bound.any() {
                 return Positional::Unmodeled;
             }
-            effects.extend(surface_members.drain(..).map(|member| {
-                super::object_spread_program_lowering::direct_effect_from_member(&member)
-            }));
             return Positional::Value(self.dispatch.graph().intern_node_with_scope(
                 SemanticNodeData::ObjectSpreadProgram(crate::semantic_query::ObjectSpreadProgram {
                     effects: Arc::from(effects.into_boxed_slice()),
@@ -25741,7 +25905,19 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     self.record_degradation(FlowReturnDegradation::UnmodeledPosition);
                     return self.eval_expr(operand);
                 }
-                let contextual = self.lower_body_type(target.ty());
+                let mut substitutions = Vec::new();
+                let contextual = self.dispatch.shallow_lower_type_expr_with_context(
+                    target.ty(),
+                    &self.binder_env.env,
+                    &self.binder_env.scope,
+                    &self.binder_env.name_resolution,
+                    self.binder_env.scope_payload.as_ref(),
+                    &self.binder_env.shadowing,
+                    &mut substitutions,
+                    crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                        crate::semantic_query::ProjectionMode::Skeleton,
+                    ),
+                );
                 self.eval_in_context(operand, None, contextual)
             }
             verter_session_query::flow::slice::SliceExpr::Assignment {
