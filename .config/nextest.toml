@@ -65,7 +65,11 @@ filter = '''
   (package(verter_session) & test(=cases::sts0_profile_gate::projected_carrier_corruption_is_caught_on_both_claimed_engines)) |
   (package(verter_audit) & test(=cases::member_edge_provenance_arch_guard::projected_member_construction_never_uses_default_rest_spread)) |
   (package(verter_session) & test(=project_semantic_dispatch_tests::flow_return_coverage_tests::lib_awaited_tail_runs_answer_past_the_checker_limit_and_stop_at_verters_budget)) |
-  (package(verter_session) & test(=project_semantic_dispatch_tests::augmentation_scale_tests::merged_interface_indexed_access_work_is_linear))
+  (package(verter_session) & test(=project_semantic_dispatch_tests::augmentation_scale_tests::merged_interface_indexed_access_work_is_linear)) |
+  (package(verter_session) & test(=project_semantic_dispatch_tests::augmentation_scale_tests::merged_interface_indexed_access_keeps_every_contributor)) |
+  (package(verter_session) & test(=project_semantic_dispatch_tests::differential_depth_tests::an_800_guard_narrowing_chain_answers_without_strict_null_checks)) |
+  (package(verter_session) & test(=project_semantic_dispatch_tests::differential_depth_tests::an_800_guard_narrowing_chain_answers_strict)) |
+  (package(verter_session) & test(=project_semantic_dispatch_tests::template_complexity_tests::two_spans_meet_the_limit_at_one_hundred_thousand))
 '''
 slow-timeout = { period = "60s", terminate-after = 5 }
 
@@ -112,7 +116,11 @@ filter = '''
   (package(verter_session) & test(=cases::sts0_profile_gate::projected_carrier_corruption_is_caught_on_both_claimed_engines)) |
   (package(verter_audit) & test(=cases::member_edge_provenance_arch_guard::projected_member_construction_never_uses_default_rest_spread)) |
   (package(verter_session) & test(=project_semantic_dispatch_tests::flow_return_coverage_tests::lib_awaited_tail_runs_answer_past_the_checker_limit_and_stop_at_verters_budget)) |
-  (package(verter_session) & test(=project_semantic_dispatch_tests::augmentation_scale_tests::merged_interface_indexed_access_work_is_linear))
+  (package(verter_session) & test(=project_semantic_dispatch_tests::augmentation_scale_tests::merged_interface_indexed_access_work_is_linear)) |
+  (package(verter_session) & test(=project_semantic_dispatch_tests::augmentation_scale_tests::merged_interface_indexed_access_keeps_every_contributor)) |
+  (package(verter_session) & test(=project_semantic_dispatch_tests::differential_depth_tests::an_800_guard_narrowing_chain_answers_without_strict_null_checks)) |
+  (package(verter_session) & test(=project_semantic_dispatch_tests::differential_depth_tests::an_800_guard_narrowing_chain_answers_strict)) |
+  (package(verter_session) & test(=project_semantic_dispatch_tests::template_complexity_tests::two_spans_meet_the_limit_at_one_hundred_thousand))
 '''
 slow-timeout = { period = "60s", terminate-after = 5 }
 
