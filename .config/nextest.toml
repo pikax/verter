@@ -6,6 +6,13 @@
 [test-groups.relation-comparison-envelope]
 max-threads = 1
 
+# Each provider kind is its own test. Running the four together makes the
+# provider-neutral diagnostics receipt go stale and lets a host compile land
+# inside a completion that must not compile. They still run in the normal
+# lane; they just do not overlap each other.
+[test-groups.progressive-child-contract-completion]
+max-threads = 1
+
 [profile.default]
 # Hang protection only. A test still running after `period` is flagged slow,
 # and TERMINATED after `terminate-after` periods (5 minutes), so a genuinely
@@ -31,6 +38,10 @@ slow-timeout = { period = "60s", terminate-after = 15 }
 filter = 'test(reversed_object_unions_reach_the_checker_answer_1800) | test(reversed_object_unions_reach_the_checker_answer_2100) | test(reversed_object_unions_reach_the_checker_answer_3200)'
 test-group = 'relation-comparison-envelope'
 
+[[profile.default.overrides]]
+filter = 'test(svelte_progressive_component_completion_uses_committed_child_contract_)'
+test-group = 'progressive-child-contract-completion'
+
 [profile.ci]
 slow-timeout = { period = "60s", terminate-after = 5 }
 [[profile.ci.overrides]]
@@ -40,6 +51,10 @@ slow-timeout = { period = "60s", terminate-after = 15 }
 [[profile.ci.overrides]]
 filter = 'test(reversed_object_unions_reach_the_checker_answer_1800) | test(reversed_object_unions_reach_the_checker_answer_2100) | test(reversed_object_unions_reach_the_checker_answer_3200)'
 test-group = 'relation-comparison-envelope'
+
+[[profile.ci.overrides]]
+filter = 'test(svelte_progressive_component_completion_uses_committed_child_contract_)'
+test-group = 'progressive-child-contract-completion'
 
 # Produce JUnit XML for dorny/test-reporter in CI
 [profile.ci.junit]

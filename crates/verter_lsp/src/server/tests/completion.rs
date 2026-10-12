@@ -2370,7 +2370,7 @@ async fn svelte_progressive_component_completion_uses_committed_child_contract_f
             false,
         )
         .await;
-    let _drain = AbortTaskOnDrop(drain_handle);
+    let drain = AbortTaskOnDrop(drain_handle);
     let server = service.inner();
     let dispatch_before = server.sync_coordinator.dispatch_ticks();
     let publications_before = server.sync_coordinator.diags_published_count();
@@ -2448,6 +2448,51 @@ async fn svelte_progressive_component_completion_uses_committed_child_contract_f
             || panic!("{provider_label}: the last dispatched diagnostics must finish"),
         )
         .await;
+    // The provider drain and the edit-debounced import driver are not the
+    // coordinator. Stop the drain, then hold every case lane across the
+    // completion snapshot (same as a direct contract-miss completion) so a
+    // trailing pass cannot project or compile between the count and the
+    // assertion. Foreground projection still increments the counter.
+    drop(drain);
+    let mut publication_lanes = Vec::new();
+    for case in &cases {
+        let mut paths = vec![case.app_path.clone(), case.child_path.clone()];
+        if case.route == "barrel" {
+            paths.push(case.app_path.replace("App.svelte", "components.ts"));
+        }
+        for path in paths {
+            let uri = workspace_uri(&workspace_id, &path);
+            if let Some(canonical_id) = server.documents.get_canonical_id(&uri) {
+                publication_lanes.push(server.import_sync.lock_for(&canonical_id));
+            }
+        }
+    }
+    let mut publication_guards = Vec::new();
+    for lane in &publication_lanes {
+        publication_guards.push(lane.lock().await);
+    }
+    // A drain pass already inside `ensure_ide_compiled` still bumps the host
+    // counter after abort. Snapshot only once that pass, and any projection
+    // it owed, has landed.
+    let mut quiet_since = tokio::time::Instant::now();
+    let quiet_deadline = quiet_since + std::time::Duration::from_secs(5);
+    let mut compile_seen = server.documents.host().metrics_snapshot().compile_requests;
+    let mut projection_seen = server.child_public_contract_projection_count_for_test();
+    while quiet_since.elapsed() < std::time::Duration::from_millis(200) {
+        if tokio::time::Instant::now() >= quiet_deadline {
+            panic!("{provider_label}: background compile/projection did not go quiet before completion");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let compile_now = server.documents.host().metrics_snapshot().compile_requests;
+        let projection_now = server.child_public_contract_projection_count_for_test();
+        let background_idle = server.pending_snapshot_provider_sync.is_empty()
+            && !server.sync_coordinator.workspace_scan_in_progress();
+        if compile_now != compile_seen || projection_now != projection_seen || !background_idle {
+            compile_seen = compile_now;
+            projection_seen = projection_now;
+            quiet_since = tokio::time::Instant::now();
+        }
+    }
     for case in &cases {
         let (label, route, child_state) = (case.label, case.route, case.child_state);
         let app_uri = workspace_uri(&workspace_id, &case.app_path);
@@ -2506,6 +2551,7 @@ async fn svelte_progressive_component_completion_uses_committed_child_contract_f
                 "{provider_label}/{label}/{route}/{child_state}: native completion must not publish provider buffers"
             );
     }
+    drop(publication_guards);
 }
 
 #[tokio::test(flavor = "multi_thread")]
