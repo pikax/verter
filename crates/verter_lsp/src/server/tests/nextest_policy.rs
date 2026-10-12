@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::Command;
 
@@ -14,48 +13,28 @@ fn output(command: &mut Command) -> String {
     String::from_utf8(result.stdout).expect("UTF-8 policy output")
 }
 
-#[derive(Default)]
-struct TestModule {
-    children: BTreeMap<String, TestModule>,
-    tests: Vec<String>,
+fn lists_test(groups: &str, name: &str) -> bool {
+    // Override descriptions echo filter expressions, including excluded names.
+    // Only a test row has the complete test name as its first whitespace token.
+    groups
+        .lines()
+        .any(|line| line.split_whitespace().next() == Some(name))
 }
 
-impl TestModule {
-    fn insert(&mut self, name: &str) {
-        if let Some((module, rest)) = name.split_once("::") {
-            self.children
-                .entry(module.to_string())
-                .or_default()
-                .insert(rest);
-        } else {
-            self.tests.push(name.to_string());
-        }
-    }
-
-    fn source(&self) -> String {
-        let mut source = String::new();
-        for name in &self.tests {
-            source.push_str(&format!(
-                "#[test] fn {name}() {{ panic!(\"listing fixture must never execute\") }}\n"
-            ));
-        }
-        for (name, module) in &self.children {
-            source.push_str(&format!("mod {name} {{ {} }}\n", module.source()));
-        }
-        source
-    }
-}
-
-fn nextest(root: &Path, profile: &str, config: &Path, args: &[&str]) -> String {
+fn nextest(repo: &Path, metadata: &Path, profile: &str, config: &Path, args: &[&str]) -> String {
     output(
-        Command::new("cargo")
-            .current_dir(root)
+        Command::new("cargo-nextest")
+            .current_dir(repo)
             .args(["nextest", "--color", "never", "--manifest-path"])
-            .arg(root.join("Cargo.toml"))
+            .arg(repo.join("Cargo.toml"))
             .args(["--config-file"])
             .arg(config)
-            .args(["--profile", profile])
-            .args(args),
+            .args(["--user-config-file", "none", "--profile", profile])
+            .args(args)
+            .arg("--cargo-metadata")
+            .arg(metadata.join("cargo.json"))
+            .arg("--binaries-metadata")
+            .arg(metadata.join("binaries.json")),
     )
 }
 
@@ -105,45 +84,64 @@ fn mock_completion_inventory_and_effective_nextest_policy() {
     ]));
     let core_mocks = format!("({}) & test({PREFIX})", core.trim());
 
-    // Small compiled listing fixtures retain the discovered package and test
-    // identities. They exercise nextest's real parser and override resolution
-    // without rebuilding this library recursively from inside its own test.
-    let temp = tempfile::tempdir().expect("policy workspace");
+    // Reuse this already-compiled libtest binary for native discovery. Supplying
+    // listing-only build metadata avoids recursive Cargo builds and repeated
+    // workspace metadata queries; nextest still discovers the tests itself.
+    let temp = tempfile::tempdir().expect("policy metadata");
     let root = temp.path();
-    std::fs::write(
-        root.join("Cargo.toml"),
-        "[package]\nname = 'verter_lsp'\nversion = '0.0.0'\nedition = '2024'\n[workspace]\nmembers = ['packages/*']\ndefault-members = ['.']\n",
-    )
-    .unwrap();
-    std::fs::create_dir(root.join("src")).unwrap();
     let metadata = output(Command::new("cargo").current_dir(&repo).args([
         "metadata",
-        "--no-deps",
+        "--locked",
+        "--offline",
         "--format-version",
         "1",
     ]));
-    let metadata: serde_json::Value = serde_json::from_str(&metadata).unwrap();
-    // Nextest validates package selectors against Cargo's entire workspace
-    // graph, including packages whose binaries this probe does not select.
-    for package in metadata["packages"].as_array().unwrap() {
-        let name = package["name"].as_str().unwrap();
-        if name == "verter_lsp" {
-            continue;
-        }
-        let package_root = root.join("packages").join(name);
-        std::fs::create_dir_all(package_root.join("src")).unwrap();
-        std::fs::write(
-            package_root.join("Cargo.toml"),
-            format!("[package]\nname = '{name}'\nversion = '0.0.0'\nedition = '2024'\n"),
-        )
-        .unwrap();
-        std::fs::write(package_root.join("src/lib.rs"), "").unwrap();
-    }
-    let mut module = TestModule::default();
-    for name in mocks.iter().chain(controls.iter()) {
-        module.insert(name);
-    }
-    std::fs::write(root.join("src/lib.rs"), module.source()).unwrap();
+    let cargo: serde_json::Value = serde_json::from_str(&metadata).unwrap();
+    let package = cargo["packages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|package| package["name"] == env!("CARGO_PKG_NAME"))
+        .expect("compiled test package");
+    let deps = binary.parent().expect("Cargo deps directory");
+    let build_dir = deps.parent().expect("Cargo profile directory");
+    let target_dir = build_dir.parent().expect("Cargo target directory");
+    let platform = output(Command::new("rustc").current_dir(&repo).args([
+        "--print",
+        "target-libdir",
+        "--print",
+        "host-tuple",
+    ]));
+    let mut platform = platform.lines();
+    let libdir = platform.next().expect("Rust library directory");
+    let triple = platform.next().expect("Rust host triple");
+    let binaries = serde_json::json!({
+        "rust-build-meta": {
+            "target-directory": target_dir,
+            "base-output-directories": [build_dir.file_name().unwrap().to_str().unwrap()],
+            "non-test-binaries": {},
+            "linked-paths": [],
+            "platforms": {
+                "host": {
+                    "platform": { "triple": triple, "target-features": "unknown" },
+                    "libdir": { "status": "available", "path": libdir },
+                },
+                "targets": [],
+            },
+        },
+        "rust-binaries": {
+            "verter_lsp": {
+                "binary-id": "verter_lsp",
+                "binary-name": "verter_lsp",
+                "package-id": package["id"],
+                "kind": "lib",
+                "binary-path": binary,
+                "build-platform": "target",
+            },
+        },
+    });
+    std::fs::write(root.join("cargo.json"), metadata).unwrap();
+    std::fs::write(root.join("binaries.json"), binaries.to_string()).unwrap();
     let original = root.join("original.toml");
     std::fs::write(&original, &config_text).unwrap();
 
@@ -176,32 +174,10 @@ fn mock_completion_inventory_and_effective_nextest_policy() {
     std::fs::write(&projected, toml::to_string(&probe).unwrap()).unwrap();
 
     for profile in ["default", "ci"] {
-        let listing = nextest(
-            root,
-            profile,
-            &original,
-            &[
-                "list",
-                "--message-format",
-                "json",
-                "--run-ignored",
-                "all",
-                "-E",
-                &core_mocks,
-            ],
-        );
-        let listing: serde_json::Value =
-            serde_json::from_str(&listing).expect("nextest discovery JSON");
-        let selected: Vec<_> = listing["rust-suites"]
-            .as_object()
-            .unwrap()
-            .values()
-            .flat_map(|suite| suite["testcases"].as_object().unwrap().iter())
-            .filter(|(_, test)| test["filter-match"]["status"] == "matches")
-            .map(|(name, _)| name.as_str())
-            .collect();
-        assert_eq!(selected, mocks, "{profile}: every mock stays in Core");
+        // A group listing filtered through Core proves both selection and
+        // serialization in one native probe. Every compiled mock must appear.
         let groups = nextest(
+            &repo,
             root,
             profile,
             &original,
@@ -211,7 +187,7 @@ fn mock_completion_inventory_and_effective_nextest_policy() {
                 "--groups",
                 "progressive-child-contract-completion",
                 "-E",
-                &format!("test({PREFIX})"),
+                &core_mocks,
             ],
         );
         assert!(
@@ -220,11 +196,12 @@ fn mock_completion_inventory_and_effective_nextest_policy() {
         );
         for name in &mocks {
             assert!(
-                groups.contains(name),
-                "{profile}: {name} must remain serialized: {groups}"
+                lists_test(&groups, name),
+                "{profile}: {name} must remain serialized in Core: {groups}"
             );
         }
         let groups = nextest(
+            &repo,
             root,
             profile,
             &projected,
@@ -233,17 +210,24 @@ fn mock_completion_inventory_and_effective_nextest_policy() {
                 "test-groups",
                 "--groups",
                 "timeout-policy-probe",
+                "--run-ignored",
+                "all",
+                "-E",
+                &format!(
+                    "test({PREFIX}) | test(={}) | test(={})",
+                    controls[0], controls[1]
+                ),
             ],
         );
         for name in &mocks {
             assert!(
-                !groups.contains(name),
+                !lists_test(&groups, name),
                 "{profile}: {name} must inherit the base watchdog: {groups}"
             );
         }
         for name in &controls {
             assert!(
-                groups.contains(name),
+                lists_test(&groups, name),
                 "{profile}: {name} retains its live-provider watchdog: {groups}"
             );
         }

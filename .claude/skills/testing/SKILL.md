@@ -269,8 +269,11 @@ The local live-provider timeout override uses the structural CI ownership
 selectors for LSP and type-runtime tests. The LSP
 `mock_completion_inventory_and_effective_nextest_policy` test reads compiled
 libtest discovery and checks Core selection and serial groups with nextest
-under both profiles. It projects every timeout-bearing override onto a test
-group in a temporary configuration so nextest's own precedence and inheritance
+under both profiles. The native probes reuse the running test binary through
+nextest's build-metadata inputs and one Cargo workspace metadata query; they
+never compile a synthetic workspace. One Core-filtered group listing per
+profile proves both selection and serialization. It projects every
+timeout-bearing override onto a test group in a temporary configuration so nextest's own precedence and inheritance
 expose any exemption matching a mock, including package-wide overrides. Original
 timeout values remain present for native validation, and compiled live-provider
 controls must retain their exemption. Mock child-contract completion variants
