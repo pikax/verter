@@ -1187,12 +1187,15 @@ const items = [{ ok: true }]
   </div>
 </template>"#;
     let (code, _, _tc) = gen_tsx_script_full(source);
-    let chain = tag_offset(source, "Child");
+    assert_comp_condition_bindings(
+        &code,
+        tag_offset(source, "Child"),
+        "item.ok && index > 0",
+        &["item", "index"],
+    );
     assert!(
-        code.contains(&format!(
-            "function ___VERTER___Flow{chain}() {{\n  const [item, index] = ___VERTER___flowEach2((items));\n  if (item.ok && index > 0) {{"
-        )),
-        "the flow function declares the v-for aliases before the condition reads them, got:\n{code}"
+        code.contains("const [item, index] = ___VERTER___flowEach2("),
+        "both loop aliases retain their iterable-derived types:\n{code}"
     );
 }
 
@@ -1208,12 +1211,79 @@ import Child from './Child.vue'
   </Parent>
 </template>"#;
     let (code, _, _tc) = gen_tsx_script_full(source);
-    let chain = tag_offset(source, "Child");
     let parent = tag_offset(source, "Parent");
+    assert_comp_condition_bindings(&code, tag_offset(source, "Child"), "shown", &["shown"]);
     assert!(
         code.contains(&format!(
-            "function ___VERTER___Flow{chain}() {{\n  type __Parent0 = ReturnType<typeof ___VERTER___Comp{parent}>;"
-        )) && code.contains("const { shown } = {} as __SlotProps0;\n  if (shown) {"),
-        "the flow function declares the v-slot bindings before the condition reads them, got:\n{code}"
+            "type __Parent0 = ReturnType<typeof ___VERTER___Comp{parent}>;"
+        )) && code.contains("const { shown } = {} as __SlotProps0;"),
+        "the slot binding retains its parent component's slot type:\n{code}"
+    );
+}
+
+/// Check the lexical contract independently of whether a conditional chain
+/// owns its declarations or shares an enclosing frame with sibling chains.
+fn assert_comp_condition_bindings(code: &str, component: usize, condition: &str, names: &[&str]) {
+    use oxc_ast::AstKind;
+
+    let allocator = oxc_allocator::Allocator::new();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&allocator, code, oxc_span::SourceType::tsx())
+            .parse();
+    assert!(parsed.diagnostics.is_empty(), "invalid TSX:\n{code}");
+    let built = oxc_semantic::SemanticBuilder::new_compiler()
+        .with_build_nodes(true)
+        .build(&parsed.program);
+    assert!(built.diagnostics.is_empty(), "invalid scopes:\n{code}");
+    let semantic = built.semantic;
+    let scoping = semantic.scoping();
+    let capture = format!("const ___VERTER___s{component} =");
+    let mut checked = 0;
+    for node in semantic.nodes().iter() {
+        let AstKind::IfStatement(statement) = node.kind() else {
+            continue;
+        };
+        let test = statement.test.span();
+        let body = statement.consequent.span();
+        if &code[test.start as usize..test.end as usize] != condition
+            || !code[body.start as usize..body.end as usize].contains(&capture)
+        {
+            continue;
+        }
+        checked += 1;
+        for name in names {
+            let mut references = 0;
+            for node in semantic.nodes().iter() {
+                let AstKind::IdentifierReference(identifier) = node.kind() else {
+                    continue;
+                };
+                if identifier.name != *name
+                    || identifier.span.start < test.start
+                    || identifier.span.end > test.end
+                {
+                    continue;
+                }
+                references += 1;
+                let reference = scoping.get_reference(identifier.reference_id());
+                let symbol = reference.symbol_id().unwrap_or_else(|| {
+                    panic!("component condition reads unbound `{name}`:\n{code}")
+                });
+                assert!(
+                    scoping.symbol_span(symbol).end <= test.start,
+                    "`{name}` must be declared before the component condition:\n{code}"
+                );
+                assert!(
+                    scoping
+                        .scope_ancestors(reference.scope_id())
+                        .any(|scope| scope == scoping.symbol_scope_id(symbol)),
+                    "`{name}` must be visible in the component condition:\n{code}"
+                );
+            }
+            assert_eq!(references, 1, "condition must read `{name}`:\n{code}");
+        }
+    }
+    assert_eq!(
+        checked, 1,
+        "component must capture its narrowed branch:\n{code}"
     );
 }
