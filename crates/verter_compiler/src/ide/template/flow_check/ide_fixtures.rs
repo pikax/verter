@@ -720,6 +720,10 @@ pub fn semantic_suite() -> Vec<SfcFixture> {
     fixtures.push(deep_positives(40, true));
     fixtures.push(component_ref_narrowing(40, false));
     fixtures.push(component_ref_narrowing(40, true));
+    fixtures.push(sibling_component_chains(16, false));
+    fixtures.push(sibling_component_chains(16, true));
+    fixtures.push(shared_component_slot_frames(false));
+    fixtures.push(shared_component_slot_frames(true));
     fixtures.push(mutation_and_nested_closure());
     fixtures.push(mapping());
     fixtures.push(javascript());
@@ -1017,6 +1021,89 @@ fn build_nested_matrix(n: usize, broken: bool, components: bool) -> SfcFixture {
         }
     }
     d.sfc.push("</main>\n");
+    d.finish()
+}
+
+/// Independent conditional components sharing deep lexical ancestry.
+pub fn sibling_component_chains(n: usize, broken: bool) -> SfcFixture {
+    let depth = (n / 8).max(1);
+    let mut d = Draft::new(
+        format!(
+            "SiblingComponentChains{n}{}",
+            if broken { "Broken" } else { "" }
+        ),
+        true,
+        |s| {
+            s.push("const Leaf = defineComponent({ props: { top: { type: String as PropType<'on'>, required: true } }, emits: { click: (value: number) => true } });\n");
+            s.push("const rows = [] as number[];\n");
+            s.push("const state = reactive({ top: 'on' as 'on' | 'off', other: 'on' as 'on' | 'off' });\n");
+            s.push("function take(top: 'on', row: number, value: number): void {}\n");
+        },
+    );
+    for i in 0..depth {
+        d.sfc.push(&format!("<template v-for=\"r{i} in rows\">\n"));
+    }
+    for i in 0..n {
+        d.sfc
+            .push("<Leaf v-if=\"state.top === 'on'\" :top=\"state.top\" ref=\"leaves\" @click=\"");
+        let value = d.sfc.mark("value");
+        if i == 0 && !broken {
+            d.hovers.push(HoverExpectation {
+                authored: value,
+                contains: "number",
+            });
+        }
+        d.sfc.push(" => take(");
+        d.mark_if(
+            broken,
+            TS2345,
+            if broken { "state.other" } else { "state.top" },
+        );
+        d.sfc.push(&format!(", r{}, value)\" />\n", depth - 1));
+        d.guarded_callbacks += 1;
+        d.conditions += 1;
+    }
+    for _ in 0..depth {
+        d.sfc.push("</template>\n");
+    }
+    d.finish()
+}
+
+/// Shared slot and shadowed loop bindings under a conditional parent.
+pub fn shared_component_slot_frames(broken: bool) -> SfcFixture {
+    let (mut d, planted) = Draft::new_with(
+        format!(
+            "SharedComponentSlotFrames{}",
+            if broken { "Broken" } else { "" }
+        ),
+        true,
+        |s| {
+            s.push(ROW);
+            s.push("const Leaf = defineComponent({ props: { top: { type: String as PropType<'on'>, required: true }, note: { type: String, required: true } }, emits: ['click'] });\n");
+            s.push("const state = reactive({ top: 'on' as 'on' | 'off' });\n");
+            s.push("const row = { note: 'outer', children: [] as { note: string }[] };\n");
+            s.push(TAKE);
+            s.push("import { useTemplateRef } from 'vue';\nconst leaves = useTemplateRef('leaves');\nfunction readLeaves(): void { const ");
+            let planted = s.mark("leafTop");
+            s.push(": 'off' = leaves.value![0]!.$props.top; }\n");
+            planted
+        },
+    );
+    d.expect(TS2322, planted);
+    d.sfc.push("<main v-if=\"state.top === 'on'\">\n");
+    d.sfc.push("<template v-for=\"row in row.children\">\n");
+    d.sfc.push("<Leaf v-if=\"row.note\" :top=\"state.top\" :note=\"row.note\" ref=\"leaves\" @click=\"() => take(row.note)\" />\n");
+    d.sfc.push("<Row v-slot=\"{ row }\">\n");
+    for _ in 0..2 {
+        d.sfc.push("<Leaf v-if=\"row.note\" :top=\"state.top\" :note=\"row.note\" ref=\"leaves\" @click=\"() => take(row.");
+        d.mark_if(broken, TS2339, if broken { "missing" } else { "note" });
+        d.sfc.push(")\" />\n");
+    }
+    d.sfc.push("</Row>\n");
+    d.sfc.push("<Leaf v-if=\"row.note\" :top=\"state.top\" :note=\"row.note\" ref=\"leaves\" @click=\"() => take(row.note)\" />\n");
+    d.sfc.push("</template>\n</main>\n");
+    d.conditions = 5;
+    d.guarded_callbacks = 4;
     d.finish()
 }
 

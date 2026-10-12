@@ -362,10 +362,18 @@ impl CompScopes {
         })
     }
 
-    fn push(&mut self, parent: CompScopeId, scope: CompScope) -> CompScopeId {
+    fn push(
+        &mut self,
+        parent: CompScopeId,
+        scope: CompScope,
+        region: Option<FlowRegionRef>,
+        flow: &mut ComponentFlow,
+        prop_names: &rustc_hash::FxHashSet<&str>,
+    ) -> CompScopeId {
         verter_debug_assert::verter_debug_assert_eq!(self.active, parent);
         crate::ide::template::flow::record(|work| work.scope_links += 1);
         let id = self.nodes.len();
+        flow.open_scope(flow.container(region, parent, self), id, &scope, prop_names);
         self.nodes.push(CompScopeLink {
             parent,
             depth: self.depth(parent) + 1,
@@ -499,18 +507,32 @@ struct FlowRegionRef {
 #[derive(Default)]
 struct ComponentFlow {
     chains: Vec<FlowChain>,
+    scopes: Vec<FlowScope>,
 }
 
 struct FlowChain {
-    parent: Option<FlowRegionRef>,
+    parent: Option<FlowContainer>,
     branches: Vec<FlowBranch>,
     /// Some branch holds a component function, directly or nested.
     live: bool,
-    /// Declarations of the `v-for` / `v-slot` bindings this chain's
-    /// conditions read that its parent region does not already declare.
-    scope_decls: String,
-    /// How many enclosing scopes are declared at this chain, its own included.
+    /// Lexical depth at the opening condition, before its element's frames.
     scope_len: usize,
+}
+
+/// The immediate lexical or conditional owner of a flow item.
+#[derive(Clone, Copy)]
+enum FlowContainer {
+    Branch(FlowRegionRef),
+    Scope(usize),
+}
+
+struct FlowScope {
+    parent: Option<FlowContainer>,
+    /// Evaluate a loop source outside the block declaring its aliases.
+    source: String,
+    declaration: String,
+    items: Vec<FlowItem>,
+    live: bool,
 }
 
 struct FlowBranch {
@@ -527,6 +549,8 @@ enum FlowItem {
     Component { offset: u32, capture: String },
     /// A chain nested in the branch.
     Chain(usize),
+    /// A shared lexical frame nested in this owner.
+    Scope(usize),
 }
 
 /// Statements declaring the bindings `scope` introduces, typed the way the
@@ -536,19 +560,19 @@ fn scope_declaration(
     index: usize,
     scope: &CompScope,
     prop_names: &rustc_hash::FxHashSet<&str>,
-) -> String {
+) -> (String, String) {
     match scope {
         CompScope::VSlot {
             parent_comp_offset,
             slot_name,
             params_expr,
             ..
-        } if !params_expr.is_empty() => format!(
+        } if !params_expr.is_empty() => (String::new(), format!(
             "\n  type __Parent{index} = ReturnType<typeof {PREFIX}Comp{parent_comp_offset}>;\
              \n  type __SlotProps{index} = NonNullable<__Parent{index}['$slots']['{slot_name}']> extends (...args: infer A) => any ? A[0] : {{}};\
              \n  const {params_expr} = {{}} as __SlotProps{index};"
-        ),
-        CompScope::VSlot { .. } => String::new(),
+        )),
+        CompScope::VSlot { .. } => (String::new(), String::new()),
         CompScope::VFor {
             iterable_expr,
             params_expr,
@@ -563,56 +587,78 @@ fn scope_declaration(
             } else {
                 params_expr.clone()
             };
-            format!("\n  const {pattern} = {helper}(({iterable}));")
+            (
+                format!("\n  const {PREFIX}source{index} = ({iterable});"),
+                format!("\n  const {pattern} = {helper}({PREFIX}source{index});"),
+            )
         }
     }
 }
 
 impl ComponentFlow {
-    /// Open a chain inside `parent` (or at the top level).
-    ///
-    /// `scopes` are the template scopes enclosing the chain; those the parent
-    /// region does not already declare are declared ahead of its first
-    /// condition, since conditions evaluate in the flow function's own scope.
+    /// The innermost owner, found without walking shared lexical ancestry.
+    fn container(
+        &self,
+        region: Option<FlowRegionRef>,
+        scope: CompScopeId,
+        scopes: &CompScopes,
+    ) -> Option<FlowContainer> {
+        if let Some(region) = region {
+            if scopes.depth(scope) <= self.chains[region.chain].scope_len {
+                return Some(FlowContainer::Branch(region));
+            }
+        }
+        scope.map(FlowContainer::Scope)
+    }
+
+    fn items_mut(&mut self, container: FlowContainer) -> &mut Vec<FlowItem> {
+        match container {
+            FlowContainer::Branch(region) => {
+                &mut self.chains[region.chain].branches[region.branch].items
+            }
+            FlowContainer::Scope(scope) => &mut self.scopes[scope].items,
+        }
+    }
+
+    /// Register one frame; every independent chain in it shares its emission.
+    fn open_scope(
+        &mut self,
+        parent: Option<FlowContainer>,
+        id: usize,
+        scope: &CompScope,
+        prop_names: &rustc_hash::FxHashSet<&str>,
+    ) {
+        verter_debug_assert::verter_debug_assert_eq!(id, self.scopes.len());
+        let (source, declaration) = scope_declaration(id, scope, prop_names);
+        self.scopes.push(FlowScope {
+            parent,
+            source,
+            declaration,
+            items: Vec::new(),
+            live: false,
+        });
+        if let Some(parent) = parent {
+            self.items_mut(parent).push(FlowItem::Scope(id));
+        }
+    }
+
+    /// Open a chain in its immediate conditional or lexical owner.
     fn open_chain(
         &mut self,
         parent: Option<FlowRegionRef>,
         scopes: &CompScopes,
         scope: CompScopeId,
-        prop_names: &rustc_hash::FxHashSet<&str>,
     ) -> usize {
         let chain = self.chains.len();
-        let inherited = parent.map_or(0, |parent| self.chains[parent.chain].scope_len);
-        let mut pending = Vec::new();
-        let mut cursor = scope;
-        while let Some(id) = cursor {
-            crate::ide::template::flow::record(|work| work.scope_links += 1);
-            let link = &scopes.nodes[id];
-            if link.depth <= inherited {
-                break;
-            }
-            pending.push(id);
-            cursor = link.parent;
-        }
-        let scope_decls = pending
-            .into_iter()
-            .rev()
-            .map(|id| {
-                let link = &scopes.nodes[id];
-                scope_declaration(link.depth - 1, &link.scope, prop_names)
-            })
-            .collect();
+        let parent = self.container(parent, scope, scopes);
         self.chains.push(FlowChain {
             parent,
             branches: Vec::new(),
             live: false,
-            scope_decls,
             scope_len: scopes.depth(scope),
         });
         if let Some(parent) = parent {
-            self.chains[parent.chain].branches[parent.branch]
-                .items
-                .push(FlowItem::Chain(chain));
+            self.items_mut(parent).push(FlowItem::Chain(chain));
         }
         chain
     }
@@ -634,10 +680,9 @@ impl ComponentFlow {
     }
 
     /// Capture a component function's tag and props in `region`'s flow.
-    /// `bindings` are statements binding names the tag and props read.
     fn add_component(
         &mut self,
-        region: FlowRegionRef,
+        region: FlowContainer,
         offset: u32,
         bindings: &str,
         tag: &str,
@@ -648,20 +693,32 @@ impl ComponentFlow {
         } else {
             format!("(() => {{{bindings}\n  return {{ t: {tag}, p: {props} }};\n  }})()")
         };
-        self.chains[region.chain].branches[region.branch]
-            .items
+        self.items_mut(region)
             .push(FlowItem::Component { offset, capture });
         // Mark the branch and its ancestors live, stopping at one already live.
         let mut current = Some(region);
-        while let Some(region) = current {
-            let chain = &mut self.chains[region.chain];
-            let branch = &mut chain.branches[region.branch];
-            if branch.live {
-                break;
-            }
-            branch.live = true;
-            chain.live = true;
-            current = chain.parent;
+        while let Some(container) = current {
+            crate::ide::template::flow::record(|work| work.scope_links += 1);
+            current = match container {
+                FlowContainer::Branch(region) => {
+                    let chain = &mut self.chains[region.chain];
+                    let branch = &mut chain.branches[region.branch];
+                    if branch.live {
+                        break;
+                    }
+                    branch.live = true;
+                    chain.live = true;
+                    chain.parent
+                }
+                FlowContainer::Scope(id) => {
+                    let scope = &mut self.scopes[id];
+                    if scope.live {
+                        break;
+                    }
+                    scope.live = true;
+                    scope.parent
+                }
+            };
         }
     }
 
@@ -670,10 +727,42 @@ impl ComponentFlow {
         self.chains[chain].branches[0].offset
     }
 
+    fn navigator(&self, container: FlowContainer) -> String {
+        match container {
+            FlowContainer::Branch(region) => {
+                format!(
+                    "{PREFIX}R{}",
+                    self.chains[region.chain].branches[region.branch].offset
+                )
+            }
+            FlowContainer::Scope(id) => format!("{PREFIX}L{id}"),
+        }
+    }
+
     /// Emit every live chain once, its branches' navigators and the
     /// component functions reading them.
     fn emit(&self, buf: &mut String, gs: &str, gn: &str) {
         use std::fmt::Write;
+        for (id, scope) in self.scopes.iter().enumerate() {
+            if !scope.live {
+                continue;
+            }
+            crate::ide::template::flow::record(|work| work.component_functions += 1);
+            write!(buf, "\nfunction {PREFIX}L{id}{gs}() {{")
+                .expect("write to String is infallible");
+            match scope.parent {
+                None => self.write_scope(buf, id),
+                Some(parent) => {
+                    let navigator = self.navigator(parent);
+                    write!(
+                        buf,
+                        " const p = {navigator}{gn}(); return p === null ? null : p.l{id};"
+                    )
+                    .expect("write to String is infallible");
+                }
+            }
+            buf.push_str("\n}");
+        }
         for (chain, flow_chain) in self.chains.iter().enumerate() {
             if !flow_chain.live {
                 continue;
@@ -699,10 +788,10 @@ impl ComponentFlow {
                          return f !== null && f.b === {index} ? f : null; }}"
                     ),
                     Some(parent) => {
-                        let parent_offset = self.chains[parent.chain].branches[parent.branch].offset;
+                        let navigator = self.navigator(parent);
                         write!(
                             buf,
-                            "\nfunction {PREFIX}R{offset}{gs}() {{ const p = {PREFIX}R{parent_offset}{gn}(); \
+                            "\nfunction {PREFIX}R{offset}{gs}() {{ const p = {navigator}{gn}(); \
                              const f = p === null ? null : p.f{chain_offset}; \
                              return f !== null && f.b === {index} ? f : null; }}"
                         )
@@ -710,18 +799,59 @@ impl ComponentFlow {
                 }
                 .expect("write to String is infallible");
                 for item in &branch.items {
-                    if let FlowItem::Component { offset: comp, .. } = item {
-                        crate::ide::template::flow::record(|work| work.component_functions += 1);
-                        write!(
-                            buf,
-                            "\nfunction {PREFIX}Comp{comp}{gs}() {{ const r = {PREFIX}R{offset}{gn}(); \
-                             return r === null ? null : r.c{comp}(); }}"
-                        )
-                        .expect("write to String is infallible");
-                    }
+                    self.write_component_navigator(
+                        buf,
+                        item,
+                        FlowContainer::Branch(FlowRegionRef {
+                            chain,
+                            branch: index,
+                        }),
+                        gs,
+                        gn,
+                    );
                 }
             }
         }
+        for (id, scope) in self
+            .scopes
+            .iter()
+            .enumerate()
+            .filter(|(_, scope)| scope.live)
+        {
+            for item in &scope.items {
+                self.write_component_navigator(buf, item, FlowContainer::Scope(id), gs, gn);
+            }
+        }
+    }
+
+    fn write_component_navigator(
+        &self,
+        buf: &mut String,
+        item: &FlowItem,
+        owner: FlowContainer,
+        gs: &str,
+        gn: &str,
+    ) {
+        use std::fmt::Write;
+        if let FlowItem::Component { offset, .. } = item {
+            crate::ide::template::flow::record(|work| work.component_functions += 1);
+            let navigator = self.navigator(owner);
+            write!(buf, "\nfunction {PREFIX}Comp{offset}{gs}() {{ const r = {navigator}{gn}(); return r === null ? null : r.c{offset}(); }}")
+                .expect("write to String is infallible");
+        }
+    }
+
+    fn write_scope(&self, buf: &mut String, id: usize) {
+        use std::fmt::Write;
+        crate::ide::template::flow::record(|work| work.scope_links += 1);
+        let scope = &self.scopes[id];
+        buf.push_str(&scope.source);
+        buf.push_str("\n  {");
+        buf.push_str(&scope.declaration);
+        let mut fields = String::new();
+        self.write_items(buf, &scope.items, &mut fields);
+        write!(buf, "\n  return {{ {fields} }} as const;\n  }}")
+            .expect("write to String is infallible");
     }
 
     /// Write `chain`'s `if` / `else if` / `else` statement: each branch
@@ -729,7 +859,6 @@ impl ComponentFlow {
     /// and returns its record.
     fn write_chain(&self, buf: &mut String, chain: usize) {
         use std::fmt::Write;
-        buf.push_str(&self.chains[chain].scope_decls);
         let mut exhaustive = false;
         for (index, branch) in self.chains[chain].branches.iter().enumerate() {
             match (&branch.test, index) {
@@ -741,35 +870,54 @@ impl ComponentFlow {
             .expect("write to String is infallible");
             exhaustive |= branch.test.is_none();
             let mut fields = format!("b: {index}");
-            for item in &branch.items {
-                match item {
-                    FlowItem::Component { offset, capture } => {
-                        write!(buf, "\n  const {PREFIX}s{offset} = {capture};")
-                            .expect("write to String is infallible");
-                        write!(
-                            fields,
-                            ", c{offset}: () => {PREFIX}instantiateComponent({PREFIX}s{offset}.t, {PREFIX}s{offset}.p)"
-                        )
-                        .expect("write to String is infallible");
-                    }
-                    FlowItem::Chain(nested) if self.chains[*nested].live => {
-                        crate::ide::template::flow::record(|work| work.component_functions += 1);
-                        let nested_offset = self.chain_offset(*nested);
-                        write!(buf, "\n  const {PREFIX}f{nested_offset} = (() => {{")
-                            .expect("write to String is infallible");
-                        self.write_chain(buf, *nested);
-                        buf.push_str("\n  })();");
-                        write!(fields, ", f{nested_offset}: {PREFIX}f{nested_offset}")
-                            .expect("write to String is infallible");
-                    }
-                    FlowItem::Chain(_) => {}
-                }
-            }
+            self.write_items(buf, &branch.items, &mut fields);
             write!(buf, "\n  return {{ {fields} }} as const;\n  }}")
                 .expect("write to String is infallible");
         }
         if !exhaustive {
             buf.push_str("\n  return null;");
+        }
+    }
+
+    fn write_items(&self, buf: &mut String, items: &[FlowItem], fields: &mut String) {
+        use std::fmt::Write;
+        for item in items {
+            let separator = if fields.is_empty() { "" } else { ", " };
+            match item {
+                FlowItem::Component { offset, capture } => {
+                    write!(buf, "\n  const {PREFIX}s{offset} = {capture};")
+                        .expect("write to String is infallible");
+                    write!(
+                            fields,
+                            "{separator}c{offset}: () => {PREFIX}instantiateComponent({PREFIX}s{offset}.t, {PREFIX}s{offset}.p)"
+                        )
+                        .expect("write to String is infallible");
+                }
+                FlowItem::Chain(nested) if self.chains[*nested].live => {
+                    crate::ide::template::flow::record(|work| work.component_functions += 1);
+                    let nested_offset = self.chain_offset(*nested);
+                    write!(buf, "\n  const {PREFIX}f{nested_offset} = (() => {{")
+                        .expect("write to String is infallible");
+                    self.write_chain(buf, *nested);
+                    buf.push_str("\n  })();");
+                    write!(
+                        fields,
+                        "{separator}f{nested_offset}: {PREFIX}f{nested_offset}"
+                    )
+                    .expect("write to String is infallible");
+                }
+                FlowItem::Chain(_) => {}
+                FlowItem::Scope(id) if self.scopes[*id].live => {
+                    crate::ide::template::flow::record(|work| work.component_functions += 1);
+                    write!(buf, "\n  const {PREFIX}l{id} = (() => {{")
+                        .expect("write to String is infallible");
+                    self.write_scope(buf, *id);
+                    buf.push_str("\n  })();");
+                    write!(fields, "{separator}l{id}: {PREFIX}l{id}")
+                        .expect("write to String is infallible");
+                }
+                FlowItem::Scope(_) => {}
+            }
         }
     }
 }
@@ -818,8 +966,7 @@ fn walk_children_for_comp(
                     let flow_chain = match continued {
                         Some(flow_chain) => flow_chain,
                         None => {
-                            let flow_chain =
-                                flow.open_chain(region, scopes, comp_scopes, prop_names);
+                            let flow_chain = flow.open_chain(region, scopes, comp_scopes);
                             if let Some(chain) = authored {
                                 opened.insert(chain, flow_chain);
                             }
@@ -854,41 +1001,6 @@ fn walk_children_for_comp(
             let has_vslot_children =
                 el.v_slot.is_some() && matches!(el.tag_type, TagType::Component);
 
-            // If this element has v-slot, push a VSlot scope for its children
-            if let Some(v_slot) = &el.v_slot {
-                if matches!(el.tag_type, TagType::Component) {
-                    let slot_name =
-                        if let (Some(as_), Some(ae)) = (v_slot.arg_start, v_slot.arg_end) {
-                            source[as_ as usize..ae as usize].to_string()
-                        } else {
-                            "default".to_string()
-                        };
-                    let params_expr =
-                        if let (Some(vs), Some(ve)) = (v_slot.value_start, v_slot.value_end) {
-                            source[vs as usize..ve as usize].to_string()
-                        } else {
-                            String::new()
-                        };
-                    let binding_names = if !params_expr.is_empty() {
-                        extract_vslot_binding_names(&params_expr)
-                    } else {
-                        vec![]
-                    };
-                    new_comp_scopes = scopes.push(
-                        new_comp_scopes,
-                        CompScope::VSlot {
-                            parent_comp_offset: el.tag_open.start,
-                            slot_name,
-                            params_expr,
-                            binding_names,
-                        },
-                    );
-                }
-            }
-
-            // Check children for v-slot via <template #name="params"> (named slots)
-            // These are handled when recursing into <template> elements below.
-
             // If this element has v-for, push a VFor scope
             if let Some(v_for) = &el.v_for {
                 if let (Some(vs), Some(ve)) = (v_for.value_start, v_for.value_end) {
@@ -914,6 +1026,9 @@ fn walk_children_for_comp(
                                 binding_names,
                                 params_expr: params.to_string(),
                             },
+                            region,
+                            flow,
+                            prop_names,
                         );
                     }
                 }
@@ -953,6 +1068,44 @@ fn walk_children_for_comp(
                 }
             }
 
+            // If this element has v-slot, push a VSlot scope for its children
+            if let Some(v_slot) = &el.v_slot {
+                if matches!(el.tag_type, TagType::Component) {
+                    let slot_name =
+                        if let (Some(as_), Some(ae)) = (v_slot.arg_start, v_slot.arg_end) {
+                            source[as_ as usize..ae as usize].to_string()
+                        } else {
+                            "default".to_string()
+                        };
+                    let params_expr =
+                        if let (Some(vs), Some(ve)) = (v_slot.value_start, v_slot.value_end) {
+                            source[vs as usize..ve as usize].to_string()
+                        } else {
+                            String::new()
+                        };
+                    let binding_names = if !params_expr.is_empty() {
+                        extract_vslot_binding_names(&params_expr)
+                    } else {
+                        vec![]
+                    };
+                    new_comp_scopes = scopes.push(
+                        new_comp_scopes,
+                        CompScope::VSlot {
+                            parent_comp_offset: el.tag_open.start,
+                            slot_name,
+                            params_expr,
+                            binding_names,
+                        },
+                        region,
+                        flow,
+                        prop_names,
+                    );
+                }
+            }
+
+            // Check children for v-slot via <template #name="params"> (named slots)
+            // These are handled when recursing into <template> elements below.
+
             // Recurse into children
             if let Some(content) = &el.content {
                 // For <template> elements with v-slot (named slots), push a VSlot scope
@@ -989,6 +1142,9 @@ fn walk_children_for_comp(
                                             params_expr,
                                             binding_names,
                                         },
+                                        region,
+                                        flow,
+                                        prop_names,
                                     )
                                 } else {
                                     new_comp_scopes
@@ -1539,7 +1695,12 @@ fn emit_comp_function_for_element(
                 None => (String::new(), tag_name, props_literal),
             };
             match region {
-                Some(region) => flow.add_component(region, offset, &bindings, tag, props),
+                Some(region) => {
+                    let owner = flow
+                        .container(Some(region), scopes.active, scopes)
+                        .expect("a conditional component has a flow owner");
+                    flow.add_component(owner, offset, &bindings, tag, props);
+                }
                 None => write!(
                     buf,
                     "\nfunction {P}Comp{offset}{gs}() {{{bindings}\
