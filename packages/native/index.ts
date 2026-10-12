@@ -1232,7 +1232,7 @@ export declare class ComponentMetaSession {
   /** Tombstone a file in this session (mark as deleted). */
   delete(canonicalId: string): void;
 
-  /** Single native component-meta query. Returns a protobuf payload or null. */
+  /** Native metadata query. Schema-13 protobuf facts preserve independent guarantees and refusal delivery. */
   getComponentMeta(canonicalOrAlias: string): Buffer | null;
 
   /**

@@ -2,6 +2,7 @@ import type { Message, MessageInitShape } from "@bufbuild/protobuf";
 
 import {
   ComponentMetaPayloadSchema,
+  LegacyComponentMetaPayloadSchema,
   OriginGraphSchema,
   type ComponentMetaPayload as RawComponentMetaPayload,
   type TypeGraph as RawTypeGraph,
@@ -11,7 +12,7 @@ import {
   type OriginEdge as RawOriginEdge,
 } from "./gen/verter/v1/component_meta_pb.js";
 
-export { ComponentMetaPayloadSchema, OriginGraphSchema };
+export { ComponentMetaPayloadSchema, LegacyComponentMetaPayloadSchema, OriginGraphSchema };
 
 // The closed `SurfacePartialReason` taxonomy, re-exported so a decoder maps
 // wire reasons by GENERATED ENUM MEMBER rather than by ordinal position. The
@@ -30,6 +31,9 @@ export type ComponentMetaPayload = ProtoRecord<"verter.v1.ComponentMetaPayload">
   RawComponentMetaPayload;
 
 export type ComponentMetaPayloadInit = MessageInitShape<typeof ComponentMetaPayloadSchema>;
+export type LegacyComponentMetaPayloadInit = MessageInitShape<
+  typeof LegacyComponentMetaPayloadSchema
+>;
 export type OriginGraphInit = MessageInitShape<typeof OriginGraphSchema>;
 
 export type ProtoOriginGraph = ProtoRecord<"verter.v1.OriginGraph"> & RawOriginGraph;
@@ -62,7 +66,7 @@ function typeNode(
   };
 }
 
-export function createTestComponentMetaPayload(): ComponentMetaPayloadInit {
+export function createLegacyTestComponentMetaPayload(): LegacyComponentMetaPayloadInit {
   return {
     schemaVersion: SCHEMA_VERSION,
     typeGraph: {
@@ -238,6 +242,75 @@ export function createTestComponentMetaPayload(): ComponentMetaPayloadInit {
             slots: [],
           },
         },
+      },
+    },
+  };
+}
+
+/** Current transport fixture; semantic values have exactly one wire owner. */
+export function createTestComponentMetaPayload(): ComponentMetaPayloadInit {
+  const legacy = createLegacyTestComponentMetaPayload();
+  const body = legacy.body!;
+  const {
+    props,
+    events,
+    slots,
+    models,
+    exposed,
+    acceptedProps,
+    acceptedEvents,
+    acceptedSurfaceCompleteness,
+    rootReachability,
+    fallthroughSurface,
+    publicInstance,
+    componentPublicContract,
+    resultCompleteness,
+    $typeName,
+    ...authored
+  } = body;
+  const complete = { kind: 1 as const, causes: [] };
+  return {
+    schemaVersion: 13,
+    typeGraph: legacy.typeGraph,
+    body: {
+      ...authored,
+      resultCompleteness: { kind: 1 },
+      facts: {
+        delivery: complete,
+        props: {
+          guarantee: complete,
+          value: {
+            entries: props?.map((prop) => {
+              const { $typeName, ...fields } = prop;
+              return {
+                ...fields,
+                requiredFact: { guarantee: complete, value: prop.required ?? false },
+                hasDefaultFact: { guarantee: complete, value: prop.hasDefault ?? false },
+              };
+            }),
+          },
+        },
+        events: { guarantee: complete, value: { entries: events } },
+        slots: { guarantee: complete, value: { entries: slots } },
+        models: { guarantee: complete, value: { entries: models } },
+        exposed: { guarantee: complete, value: { entries: exposed } },
+        acceptedProps: { guarantee: complete, value: { entries: acceptedProps } },
+        acceptedEvents: { guarantee: complete, value: { entries: acceptedEvents } },
+        rootReachability: { guarantee: complete, value: rootReachability },
+        fallthroughSurface: { guarantee: complete, value: fallthroughSurface },
+        publicInstance: {
+          guarantee: complete,
+          absent: publicInstance === undefined,
+          value: publicInstance,
+        },
+        componentPublicContract: {
+          guarantee: complete,
+          value:
+            componentPublicContract?.availability?.case === "supported"
+              ? componentPublicContract.availability.value
+              : undefined,
+        },
+        typeRegistry: { guarantee: complete, value: { entries: legacy.typeRegistry } },
       },
     },
   };

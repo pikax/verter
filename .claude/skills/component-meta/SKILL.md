@@ -5,6 +5,9 @@ description: "Component metadata: native vs compat boundary, fallthrough/root in
 
 # Component Meta
 
+For the native fact transport, schema compatibility, localized validation and
+public guarantees, see [native-facts.md](references/native-facts.md).
+
 ## Audit & footprint
 
 Per-request semantic footprint observability splits across two crates:

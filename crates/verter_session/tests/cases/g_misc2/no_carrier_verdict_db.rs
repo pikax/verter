@@ -344,15 +344,14 @@ fn line_contains_identifier(line: &str, ident: &str) -> bool {
     }
     let is_ident_char = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
     let mut i = 0usize;
-    while i + n <= bytes.len() {
-        if &bytes[i..i + n] == needle {
-            let before_ok = i == 0 || !is_ident_char(bytes[i - 1]);
-            let after_ok = i + n == bytes.len() || !is_ident_char(bytes[i + n]);
-            if before_ok && after_ok {
-                return true;
-            }
+    while let Some(offset) = line[i..].find(ident) {
+        i += offset;
+        let before_ok = i == 0 || !is_ident_char(bytes[i - 1]);
+        let after_ok = i + n == bytes.len() || !is_ident_char(bytes[i + n]);
+        if before_ok && after_ok {
+            return true;
         }
-        i += 1;
+        i += line[i..].chars().next().unwrap().len_utf8();
     }
     false
 }
@@ -474,6 +473,15 @@ fn no_carrier_verdict_db_in_production() {
                 file.display()
             )
         });
+        // Comments/test bodies are blanked, so a file without a needle cannot
+        // contribute a hit. Keep raw-string files conservatively: the existing
+        // stripper copies their contents. Every read/integrity check still runs.
+        if !RETIRED_SYMBOLS.iter().any(|symbol| text.contains(symbol))
+            && !text.contains("r\"")
+            && !text.contains("r#")
+        {
+            continue;
+        }
         let processed = preprocess(&text);
         let plines: Vec<&str> = processed.lines().collect();
         for symbol in RETIRED_SYMBOLS {

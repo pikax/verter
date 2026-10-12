@@ -104,6 +104,8 @@ defineProps<{
     await settleNativeProject();
 
     const meta = await checker.getComponentMeta("Button.vue");
+    expect(meta._verter?.facts?.props.kind).toBe("complete");
+    expect(meta._verter?.facts?.delivery.kind).toBe("complete");
 
     const label = meta.props.find((p) => p.name === "label");
     expect(label).toBeDefined();
@@ -119,6 +121,34 @@ defineProps<{
 
     // Negative: no phantom props
     expect(meta.props.length).toBe(3);
+  });
+
+  it("preserves independent open and unavailable domains across the native boundary", async () => {
+    const checker = await createRuntimeChecker("native-eval-facts");
+    for (const [name, source, expected] of [
+      [
+        "Open.vue",
+        '<script setup lang="ts" generic="T extends { known: string }">defineProps<T>(); defineEmits<{saved: []}>()</script><template><div/></template>',
+        { kind: "complete", open: true },
+      ],
+      [
+        "Missing.vue",
+        '<script setup lang="ts">import type { Missing } from "./absent"; defineProps<Missing>(); defineEmits<{saved: []}>()</script><template><div/></template>',
+        { kind: "unavailable" },
+      ],
+    ] as const) {
+      checker.updateFile(name, source);
+      await settleNativeProject();
+      const meta = await checker.getComponentMeta(name);
+      expect(meta._verter?.facts?.props).toMatchObject(expected);
+      expect(meta._verter?.facts?.events).toMatchObject({ kind: "complete" });
+      expect(meta.events.map((event) => event.name)).toEqual(["saved"]);
+      if (name === "Missing.vue") {
+        expect(meta._verter?.facts?.props).not.toHaveProperty("value");
+        expect(meta._verter?.facts?.props).toMatchObject({ causes: [14] });
+        expect(meta.props).toEqual([]);
+      }
+    }
   });
 
   it("surfaces a direct root summary on the native payload", async () => {

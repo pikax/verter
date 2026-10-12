@@ -5,6 +5,13 @@ description: Verter scheduler — Scheduler, submit_request/submit_batch/submit_
 
 # Scheduler
 
+Each `FileNode` keeps four shards for its small per-profile artifact map,
+independent of the host CPU count. Source-only scripts still allocate that
+map, so machine-wide sharding multiplies empty storage across an opened
+project. The map remains a DashMap with the same generation fences and
+concurrent profile access. The scheduler's artifact coherence and concurrency
+tests cover publication; allocation comparisons are advisory measurements.
+
 Concise reference for the `verter_scheduler` crate.
 
 **Live** surface (current tree): the `submit_request` / `submit_batch` /
@@ -54,6 +61,14 @@ integrated and then stops; a later Analysis/Artifact request admits the
 missing stage normally. Checking only direct request waiters is incorrect:
 an auto-ingested macro dependency may be required by an Artifact blocker
 before it owns a direct waiter or an admitted downstream node.
+
+Pending Artifact admission requires the owner's current-generation Analysis
+snapshot under the same DAG hold as admission. Dependency Analysis completion
+can visit a parent whose Analysis is already dispatched but has not published;
+an empty dependency-edge set only proves its gate is clear. Defer Artifact
+admission until that parent's own Analysis publishes and its completion retries
+the pending profiles. Otherwise an Artifact worker can return on missing
+Analysis without completing its identity or signalling the request.
 
 Source snapshot publication and Source-stage readiness are distinct. The
 worker may publish generation-coherent snapshot bytes before the driver has

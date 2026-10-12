@@ -281,7 +281,7 @@ pub struct FlowSliceBudget {
 impl Default for FlowSliceBudget {
     fn default() -> Self {
         Self {
-            max_selected_nodes: 4096,
+            max_selected_nodes: 16_384,
             max_value_states: 65_536,
         }
     }

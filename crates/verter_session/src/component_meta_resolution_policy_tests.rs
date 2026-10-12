@@ -132,6 +132,7 @@ fn run_policy_with_macro_participation(
 
 fn empty_meta() -> ComponentMetaAnalysis {
     ComponentMetaAnalysis {
+        domain_guarantees: Default::default(),
         props: vec![],
         events: vec![],
         slots: vec![],

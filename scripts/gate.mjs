@@ -1218,14 +1218,17 @@ async function archiveAndList(ctx, variant = VARIANT_DEBUG) {
   log(`archiving ${variant.label} (cargo nextest archive --workspace) …`);
   const cargoTimingCapture = beginCargoTimingCapture(ctx, "dev-archive");
   const archiveRes = await ctx.supervisor.runStep("front", {
-    cmd: "cargo",
-    args: buildNextestArchiveArgs({
-      buildJobs,
-      cargoProfile: variant.cargoProfile,
-      archiveFile,
-      runnerTarget,
-      timingsEnabled: cargoTimingEnabled(ctx, "dev-archive"),
-    }),
+    cmd: process.execPath,
+    args: [
+      join(repoRealpath, "scripts", "compile-fixture-artifacts.mjs"),
+      ...buildNextestArchiveArgs({
+        buildJobs,
+        cargoProfile: variant.cargoProfile,
+        archiveFile,
+        runnerTarget,
+        timingsEnabled: cargoTimingEnabled(ctx, "dev-archive"),
+      }).slice(1),
+    ],
     cwd: repoRealpath,
     env: cargoEnv,
     phase: "build",
@@ -1245,8 +1248,8 @@ async function archiveAndList(ctx, variant = VARIANT_DEBUG) {
     //   - cargo RAN and the workspace failed to COMPILE => a real build failure, which per the exit
     //     contract is a GATE FAILURE (exit 1), NOT a setup error. A compile failure must be exit 1 so a
     //     red build is reported as a gate failure, not misclassified as a usage problem.
-    if (archiveRes.spawnError) {
-      err(`could not launch 'cargo' for the archive build (command not found / not executable)`);
+    if (archiveRes.spawnError || archiveRes.code === EXIT_USAGE) {
+      err(`could not launch the archive builder (command not found / not executable)`);
       return { error: EXIT_USAGE, where: "archive", res: archiveRes };
     }
     // As with the list step: a SIGNAL-kill (signalName set, not a watchdog reason) is reported by its signal

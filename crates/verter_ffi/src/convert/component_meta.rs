@@ -532,6 +532,7 @@ pub(super) fn component_meta_parts_with_contract_to_ffi(
         lanes.accepted_event_payloads.len(),
     );
     FfiComponentMeta {
+        domain_guarantees: analysis.domain_guarantees,
         component_public_contract: component_contract_to_ffi(contract),
         result_completeness: result_completeness_to_ffi(completeness),
         // Typed resolution status: honest on every lane — a payload
@@ -574,8 +575,7 @@ pub(super) fn component_meta_parts_with_contract_to_ffi(
                     materialized_publication_to_ffi(occurrence.payload);
                 FfiEventMeta {
                     name: e.name,
-                    payload: payload
-                        .expect("materialized event occurrence must carry its required payload"),
+                    payload,
                     publication,
                     terminal_display,
                     payload_expansion: e.payload_expansion.map(expansion_metadata_to_ffi),

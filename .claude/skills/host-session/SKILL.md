@@ -1266,6 +1266,12 @@ not manufacture raw class-domain tuples or recover domains from display text.
 
 ## Injected ambient-root ingestion
 
+Configured-opening linearity is checked by changed-member visitation counts
+over four doubling populations that each span every directory bucket. Visits
+are bounded by twice the member count and grow by at most twice the preceding
+row. Exact global contributor counts and the never-upserted ambient-library
+contributor remain required; scheduler wait time is not the growth oracle.
+
 `MemorySnapshot::changes_since` captures a revision and the latest transition of
 only members changed after a workspace-local cursor. Both concrete workspaces
 expose it through `WorkspaceRead::snapshot_changes_since`; transaction readers

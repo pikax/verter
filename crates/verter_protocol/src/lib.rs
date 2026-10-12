@@ -35,3 +35,5 @@ pub mod verter {
 /// this source. The `const` carries no codegen footprint where unreferenced,
 /// so production binaries that never touch it are unaffected.
 pub const GENERATED_VERTER_V1_RS: &str = include_str!(concat!(env!("OUT_DIR"), "/verter.v1.rs"));
+
+pub mod component_facts;
