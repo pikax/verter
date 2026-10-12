@@ -29,8 +29,12 @@ source arrays merge linearly, and four stable byte-radix passes apply configured
 ranks without comparison sorting. The work metric includes merging, rank
 visits, bucket offsets and entry moves. Global interface bases apply defaults
 in their declaring scope before reusing the first declaration's shared
-instantiation; peers receive effective positional arguments and bind any
-remaining defaults in their own contributor contexts. Content and source-environment
+instantiation; the application retains all supplied positional arguments even
+when the first declaration has fewer parameters. Peers bind any remaining
+defaults in their own contributor contexts. Wide signature completion indexes
+the observed root hashes in one fact pass and removes precise roots through
+that same index, preserving strict validation of every contributor. The probe's
+work metric includes root-fact visits and lookups. Content and source-environment
 facts continue to fence every merged result.
 
 Finite indexed access over an object resolves its shared subject once through

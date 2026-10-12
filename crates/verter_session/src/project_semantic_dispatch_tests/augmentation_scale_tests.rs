@@ -6,6 +6,8 @@ use std::sync::Arc;
 use crate::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use verter_type_engine::semantic_query::{LiteralValue, ProjectionMode, SemanticNodeData};
 
+const ROOT_FACT_VISITS_PER_CONTRIBUTOR: usize = 40;
+
 fn upsert_ts(host: &VerterHost, canonical: &str, source: &str) {
     let _ = host
         .upsert(UpsertRequest {
@@ -18,7 +20,7 @@ fn upsert_ts(host: &VerterHost, canonical: &str, source: &str) {
         .expect("upsert contributor");
 }
 
-fn probe(size: usize, global: bool) -> (usize, usize, usize) {
+fn probe(size: usize, global: bool) -> (usize, usize, usize, usize) {
     let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(
         verter_workspace::MemoryOptions::default(),
     ));
@@ -88,10 +90,17 @@ fn probe(size: usize, global: bool) -> (usize, usize, usize) {
     upsert_ts(&host, "/scenario.ts", source);
     let graph = host.project_type_store().semantic_graph();
     let before_scans = verter_type_engine::semantic_query::key_scan_comparisons_for_tests();
+    let before_roots = verter_type_engine::fact_signature_helpers::root_fact_visits_for_tests();
     let node = host
         .resolve_named_symbol("/scenario.ts", "Probe", Some(ProjectionMode::Expanded))
         .expect("probe answers");
     let scans = verter_type_engine::semantic_query::key_scan_comparisons_for_tests() - before_scans;
+    let root_visits =
+        verter_type_engine::fact_signature_helpers::root_fact_visits_for_tests() - before_roots;
+    assert!(
+        root_visits <= ROOT_FACT_VISITS_PER_CONTRIBUTOR * size,
+        "root-fact sealing must be linear: size={size}, global={global}, visits={root_visits}"
+    );
     let mut pending = vec![node];
     let mut actual = BTreeSet::new();
     while let Some(node) = pending.pop() {
@@ -141,14 +150,20 @@ fn probe(size: usize, global: bool) -> (usize, usize, usize) {
         .ordering_work_count() as usize;
     let cold_queries = graph.stats_snapshot().misses as usize;
     eprintln!(
-        "size={size}, global={global}: scans={scans}, ordering={ordering}, nodes={}, edges={}, collection={collection_entries}, queries={cold_queries}",
+        "size={size}, global={global}: scans={scans}, roots={root_visits}, ordering={ordering}, nodes={}, edges={}, collection={collection_entries}, queries={cold_queries}",
         ownership.live_nodes,
         ownership.internal_edges,
     );
     (
-        scans + ownership.internal_edges + collection_entries + ordering + cold_queries,
+        scans
+            + root_visits
+            + ownership.internal_edges
+            + collection_entries
+            + ordering
+            + cold_queries,
         scans,
         ordering,
+        root_visits,
     )
 }
 
@@ -156,11 +171,13 @@ fn probe(size: usize, global: bool) -> (usize, usize, usize) {
 fn merged_interface_indexed_access_work_is_linear() {
     for global in [false, true] {
         let mut work = Vec::new();
+        let mut completed_work = Vec::new();
         let mut ordering_work = Vec::new();
         for size in [128, 512, 2048] {
-            let (total_work, scans, ordering) = probe(size, global);
+            let (total_work, scans, ordering, root_visits) = probe(size, global);
             ordering_work.push(ordering);
-            work.push((size, total_work));
+            work.push((size, total_work - root_visits));
+            completed_work.push((size, total_work));
             assert!(
                 scans <= 40 * size,
                 "surface scans must be linear: size={size}, scans={scans}"
@@ -176,6 +193,19 @@ fn merged_interface_indexed_access_work_is_linear() {
             assert!(
                 pair[1].1 <= 4 * pair[0].1 + 256,
                 "collection plus probe work must grow linearly: {work:?}"
+            );
+        }
+        // Strict-world compaction starts only above an evidence page's width.
+        // Preserve the structural-work ratios, and bound the completed probe
+        // by one linear envelope that includes the compaction allowance at
+        // every size, including sizes where compaction does no work.
+        let (first_size, first_work) = work[0];
+        for (size, total_work) in &completed_work {
+            let allowance =
+                first_work * size / first_size + ROOT_FACT_VISITS_PER_CONTRIBUTOR * size + 256;
+            assert!(
+                *total_work <= allowance,
+                "collection plus completed probe work must be linear: {completed_work:?}"
             );
         }
     }
@@ -444,6 +474,43 @@ fn global_interface_default_arguments_survive_shared_instantiation() {
                 expected
             };
             assert_eq!(ty, expected, "{first} / {second}: {name}");
+        }
+    }
+}
+
+#[test]
+fn global_interface_added_parameters_keep_explicit_arguments() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    for (canonical, declaration) in [
+        ("/a.ts", "interface Shared<T> { first: T }"),
+        ("/b.ts", "interface Shared<T, U = number> { second: U }"),
+    ] {
+        upsert_ts(
+            &host,
+            canonical,
+            &format!(
+                "{declaration}
+            type Default = Shared<string>['second'];
+            type Explicit = Shared<string, boolean>['second'];
+            type Other = Shared<string, string>['second'];"
+            ),
+        );
+        host.ensure_indexed_ready(canonical).expect("indexed peer");
+    }
+    for canonical in ["/b.ts", "/a.ts"] {
+        for (name, expected) in [
+            ("Default", verter_type_expr::PrimitiveName::Number),
+            ("Explicit", verter_type_expr::PrimitiveName::Boolean),
+            ("Other", verter_type_expr::PrimitiveName::String),
+        ] {
+            let node = host
+                .resolve_named_symbol(canonical, name, Some(ProjectionMode::Expanded))
+                .expect("projection");
+            assert_eq!(
+                host.project_node_to_type_expr_for_test(node),
+                Some(verter_type_expr::TypeExpr::Primitive(expected)),
+                "{canonical}: {name}"
+            );
         }
     }
 }

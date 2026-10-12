@@ -4926,12 +4926,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             unbound_parameter,
         );
 
-        // Defaults are applied in the declaring scope before sharing a global
-        // application, and every peer receives the same positional bindings.
-        let effective_args: Arc<[SemanticNodeId]> = bindings
-            .into_iter()
-            .take_while(Option::is_some)
-            .flatten()
+        // Keep every supplied argument: a merged peer may introduce additional
+        // defaulted parameters beyond this declaration's clause. Only append
+        // defaults for positions the application did not supply.
+        let effective_args: Arc<[SemanticNodeId]> = args
+            .iter()
+            .copied()
+            .chain(
+                bindings
+                    .into_iter()
+                    .skip(args.len())
+                    .take_while(Option::is_some)
+                    .flatten(),
+            )
             .collect();
 
         // Every declaring file names the same global interface. Assemble
