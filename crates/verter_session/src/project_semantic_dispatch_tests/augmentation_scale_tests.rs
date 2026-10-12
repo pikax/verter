@@ -348,3 +348,12 @@ fn finite_batch_reads_match_single_keys_across_projection_modes() {
             "optional reads, accessors, overloads, named terminals and numeric spelling agree in {mode:?}");
     }
 }
+
+#[test]
+fn merged_interface_indexed_access_keeps_every_contributor() {
+    for size in [100, 500, 2000, 4000] {
+        for global in [false, true] {
+            probe(size, global);
+        }
+    }
+}
