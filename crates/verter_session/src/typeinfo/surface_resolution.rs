@@ -110,3 +110,19 @@ pub(crate) fn metadata_guarantee(
         .unwrap_or_default();
     verter_session_query::analysis::component_meta::MetadataFactGuarantee { kind, causes, open }
 }
+
+/// Open unavailable claim for a semantic-query fault (cause 10).
+///
+/// Callers that only need this one status stay off the narrowed `FactStatus`
+/// and `surface_resolution` names.
+pub(crate) fn unavailable_query_fault_guarantee(
+) -> verter_session_query::analysis::component_meta::MetadataFactGuarantee {
+    metadata_guarantee(
+        verter_type_engine::semantic_query::FactStatus::Unavailable(
+            verter_type_engine::semantic_query::surface_resolution::NonEmptyReasons::of(
+                verter_type_engine::semantic_query::PartialReason::SemanticQueryFault,
+            ),
+        ),
+        true,
+    )
+}

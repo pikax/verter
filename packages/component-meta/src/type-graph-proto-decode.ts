@@ -57,6 +57,8 @@ import {
   NODE_INDEXED_ACCESS,
   NODE_INFER,
   NODE_INTERSECTION,
+  LITERAL_BIG_INT,
+  LITERAL_STRING,
   NODE_KEY_OF,
   NODE_LITERAL,
   NODE_MAPPED,
@@ -281,7 +283,9 @@ function decodeLegacyPayload(message: ComponentMetaPayload): NativeComponentMeta
     throw graphError("component-meta protobuf payload is missing a required section");
   }
 
-  const graph = decodeTypeGraph(message.typeGraph);
+  // Localize invalid nodes without turning schema-12 bool fields into fact records.
+  const graph = decodeTypeGraph(message.typeGraph, true);
+  graph.factMode = false;
   const typeRegistry = ((message as ProtoRecord).typeRegistry as ProtoRecord[]).map((entry) =>
     decodeTypeRegistryEntry(entry, graph),
   );
@@ -578,6 +582,7 @@ function decodeTypeGraph(typeGraph: ProtoRecord, localFailures = false): Decoded
   });
   const graph = new DecodedTypeGraph(strings, nodes);
   graph.factMode = localFailures;
+  graph.localizeFailures = localFailures;
   validateNodeTable(graph, localFailures);
   return graph;
 }
@@ -797,7 +802,9 @@ function validateNodeTable(graph: DecodedTypeGraph, localFailures = false): void
           if (node.primitive < 1 || node.primitive > 12) throw graphError("unknown primitive tag");
           break;
         case NODE_LITERAL:
-          if (node.stringId) {
+          if (node.literalKind === LITERAL_STRING || node.literalKind === LITERAL_BIG_INT) {
+            graph.getString(node.stringId ?? 0);
+          } else if (node.stringId) {
             graph.getString(node.stringId);
           }
           break;
@@ -1517,10 +1524,7 @@ function decodeOptionalPublicInstance(
           : Number(member.kind ?? 0) === 2
             ? "slotContainer"
             : "exposed",
-      type: createGraphTypeExprRef(
-        graph,
-        readRequiredId(member.typeNodeId, "public instance member type"),
-      ),
+      ...decodeTypedRef(graph, member.typeNodeId, "public instance member type"),
       ...maybe(
         "typeExpansion",
         decodeOptionalExpansionMetadata(member.typeExpansion as ProtoRecord | undefined, graph),
@@ -1826,7 +1830,9 @@ function decodePublishedTypeFields(
       ...(graph.factMode ? { typeFact } : {}),
     };
   } catch (error) {
-    if (!graph.factMode) throw error;
+    if (!graph.factMode && !(graph.localizeFailures && isLocalizedGraphFailure(error))) {
+      throw error;
+    }
     return {
       publication: {
         kind: "failed",
@@ -1834,9 +1840,14 @@ function decodePublishedTypeFields(
         provenance: "schema",
       },
       terminalDisplay: {},
-      typeFact: { kind: "unavailable", causes: [100] },
+      ...(graph.factMode ? { typeFact: { kind: "unavailable", causes: [100] } } : {}),
     };
   }
+}
+
+function isLocalizedGraphFailure(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /graph node \d+ is invalid/.test(message) || message.includes("missing node id");
 }
 
 function decodeProp(prop: ProtoRecord, graph: DecodedTypeGraph): Record<string, unknown> {
@@ -2903,14 +2914,19 @@ function decodeTypedRef(
   label: string,
   key = "type",
 ): Record<string, unknown> {
-  if (!graph.factMode) {
+  if (!graph.factMode && !graph.localizeFailures) {
     return { [key]: createGraphTypeExprRef(graph, readRequiredId(nodeId, label)) };
   }
   try {
     const type = createGraphTypeExprRef(graph, readRequiredId(nodeId, label));
-    return { [key]: type, typeFact: { kind: "complete", value: type } };
-  } catch {
-    return { typeFact: { kind: "unavailable", causes: [100] } };
+    return graph.factMode
+      ? { [key]: type, typeFact: { kind: "complete", value: type } }
+      : { [key]: type };
+  } catch (error) {
+    if (!graph.factMode && !(graph.localizeFailures && isLocalizedGraphFailure(error))) {
+      throw error;
+    }
+    return graph.factMode ? { typeFact: { kind: "unavailable", causes: [100] } } : {};
   }
 }
 

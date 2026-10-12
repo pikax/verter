@@ -278,6 +278,8 @@ export class DecodedTypeGraph {
   }
 
   factMode = false;
+  /** Invalid nodes stay in the table; dependents refuse locally instead of aborting the payload. */
+  localizeFailures = false;
   readonly invalidNodeIds = new Set<number>();
 
   getNode(id: number): GraphNodeRecord {

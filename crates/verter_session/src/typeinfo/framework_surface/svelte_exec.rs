@@ -189,10 +189,11 @@ pub(crate) fn resolve_svelte_surface(
             // A contributing read tripped after the family was identified but
             // before it could materialize a row. Preserve an explicit empty
             // carrier as PARTIAL; laundering this to `Missing` would make the
-            // public surface look like an ordinary absent macro.
+            // public surface look like an ordinary absent macro. The empty
+            // carrier is unavailable, not a supported-empty closed domain.
             ResolvedOutcome::Missing | ResolvedOutcome::Unsupported { .. } => {
                 ResolvedOutcome::Partial {
-                    value: Arc::new(MacroSurfaceDtos::default()),
+                    value: non_authoritative_membership(),
                     diagnostics,
                 }
             }
@@ -373,11 +374,45 @@ impl<'a> SvelteFactObservations<'a> {
     }
 }
 
+/// Empty membership whose absence is not a producer claim of an exact closed domain.
+fn non_authoritative_membership() -> Arc<MacroSurfaceDtos> {
+    Arc::new(MacroSurfaceDtos {
+        domain_guarantee: Some(
+            verter_session_query::analysis::component_meta::MetadataFactGuarantee::default(),
+        ),
+        ..MacroSurfaceDtos::default()
+    })
+}
+
+/// Keep a typed producer claim. Members without one stay a lower bound;
+/// an empty surface without one is unavailable rather than exact absence.
+fn retain_membership_claim(mut dtos: MacroSurfaceDtos) -> MacroSurfaceDtos {
+    if dtos.domain_guarantee.is_some() {
+        return dtos;
+    }
+    let has_surface = dtos.props.is_some()
+        || dtos.emits.is_some()
+        || dtos.slots.is_some()
+        || !dtos.exposed_fields.is_empty();
+    dtos.domain_guarantee = Some(if has_surface {
+        verter_session_query::analysis::component_meta::MetadataFactGuarantee {
+            kind: 2,
+            causes: vec![104],
+            open: true,
+        }
+    } else {
+        verter_session_query::analysis::component_meta::MetadataFactGuarantee::default()
+    });
+    dtos
+}
+
 fn script_fact_partial(outcome: ResolvedMacroPayload) -> ResolvedMacroPayload {
     let value = match outcome {
-        ResolvedOutcome::Resolved(value) | ResolvedOutcome::Partial { value, .. } => value,
+        ResolvedOutcome::Resolved(value) | ResolvedOutcome::Partial { value, .. } => {
+            Arc::new(retain_membership_claim((*value).clone()))
+        }
         ResolvedOutcome::Unsupported { .. } | ResolvedOutcome::Missing => {
-            Arc::new(MacroSurfaceDtos::default())
+            non_authoritative_membership()
         }
     };
     ResolvedOutcome::Partial {
@@ -502,9 +537,11 @@ fn macro_surface_shell(
 ///   synthesise a surface);
 /// - there is no `$props()` call (sealed negative evidence). `Missing`
 ///   tells the public API projector to ask the legacy `export let`
-///   surface; present-but-empty would hide every legacy prop;
-/// - the key domain is open (rest or `let props = $props()`). Publishing
-///   only enumerated keys would close a surface the author left open.
+///   surface; present-but-empty would hide every legacy prop.
+///
+/// An open key set (rest or `let props = $props()`) is a complete open
+/// domain with no enumerated members. `Missing` would let the classifier
+/// publish that open set as exact closed absence.
 ///
 /// `prop_origins` stays empty: an untyped key has no type declaration.
 fn runes_props_from_destructure_geometry(
@@ -518,7 +555,14 @@ fn runes_props_from_destructure_geometry(
     let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for call in props_calls.iter() {
         if call.has_rest {
-            return ResolvedOutcome::Missing;
+            return ResolvedOutcome::Resolved(Arc::new(MacroSurfaceDtos {
+                domain_guarantee: Some(
+                    verter_session_query::analysis::component_meta::MetadataFactGuarantee::complete(
+                        true,
+                    ),
+                ),
+                ..Default::default()
+            }));
         }
         for key in &call.public_keys {
             if !seen.insert(key.name.as_str()) {

@@ -6,6 +6,7 @@
  */
 
 import type { ProjectEngine, LeaseId, NativeMetaSession } from "./project-engine.js";
+import { normalizePath } from "./engine-key.js";
 import { decodeComponentMetaPayload } from "../type-graph.js";
 
 type OverlayEntry = { kind: "upsert"; source: string } | { kind: "delete" };
@@ -168,10 +169,13 @@ export class ProjectSession {
   /**
    * Single native component-meta query. Returns decoded protobuf metadata or null.
    * Memoized: repeated calls with unchanged overlay + base state skip decode.
+   * The memo key is the normalized canonical, so a Win32 spelling of a file
+   * already fetched as `c:/...` does not re-run native.
    */
   getComponentMeta(canonicalId: string): unknown | null {
-    return this._memoizedDecode("full", canonicalId, () => {
-      const payload = this._nativeSession.getComponentMeta(canonicalId);
+    const canonical = normalizePath(canonicalId);
+    return this._memoizedDecode("full", canonical, () => {
+      const payload = this._nativeSession.getComponentMeta(canonical);
       if (payload === null || payload === undefined) return null;
       return decodeComponentMetaPayload(payload);
     });

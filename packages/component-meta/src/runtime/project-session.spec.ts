@@ -150,6 +150,25 @@ describe("ProjectSession", () => {
       expect(result1).toBe(result2);
     });
 
+    it("reuses one decode for Win32 and normalized spellings of the same file", () => {
+      const payload = encodeTestComponentMetaPayload({
+        filePath: "c:/project/src/Button.vue",
+        props: [{ name: "label", type: { kind: "primitive", name: "string" }, required: true }],
+      });
+      const getComponentMeta = vi.fn(() => payload);
+      const nativeProject = createMockNativeProject();
+      const nativeSession = createMockNativeSession({ getComponentMeta });
+      const engine = new ProjectEngine("engine", "c:/project", nativeProject as any);
+      const session = new ProjectSession(engine, "lease-1", nativeSession as any);
+
+      const normalized = session.getComponentMeta("c:/project/src/Button.vue");
+      const win32 = session.getComponentMeta("C:\\project\\src\\Button.vue");
+
+      expect(getComponentMeta).toHaveBeenCalledTimes(1);
+      expect(getComponentMeta).toHaveBeenCalledWith("c:/project/src/Button.vue");
+      expect(win32).toBe(normalized);
+    });
+
     it("refreshBaseFile bumps baseGeneration and forces re-decode", () => {
       const payload = encodeTestComponentMetaPayload({
         filePath: "/project/src/Button.vue",

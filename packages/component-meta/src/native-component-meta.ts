@@ -321,7 +321,9 @@ export interface NativePublicInstanceMeta {
 export interface NativePublicInstanceMemberMeta {
   name: string;
   kind: "prop" | "slotContainer" | "exposed";
-  type: NativeTypeExprLike;
+  /** Absent when this member's value fact failed and siblings stayed. */
+  type?: NativeTypeExprLike;
+  typeFact?: FactResult<NativeTypeExprLike | undefined>;
   typeExpansion?: NativeExpansionMetadata;
   rawType?: string;
   description?: string;
@@ -838,16 +840,23 @@ function compatRawType(display: NativeTerminalTypeDisplay): { rawType?: string }
   return typeof display.text === "string" ? { rawType: display.text } : {};
 }
 
-function usableMemberType<T extends { type?: NativeTypeExprLike; typeFact?: { kind: string } }>(
-  row: T,
-): row is T & { type: NativeTypeExprLike } {
-  return row.type !== undefined && row.typeFact?.kind !== "unavailable";
+function usableMemberType<
+  T extends {
+    type?: NativeTypeExprLike | null;
+    typeFact?: { kind: string };
+    publication?: { kind: string };
+  },
+>(row: T): row is T & { type: NativeTypeExprLike } {
+  // JSON delivery serializes a missing type as null and omits typeFact.
+  return (
+    row.type != null && row.typeFact?.kind !== "unavailable" && row.publication?.kind !== "failed"
+  );
 }
 
-function usablePayload<T extends { payload?: NativeTypeExprLike; typeFact?: { kind: string } }>(
-  row: T,
-): row is T & { payload: NativeTypeExprLike } {
-  return row.payload !== undefined && row.typeFact?.kind !== "unavailable";
+function usablePayload<
+  T extends { payload?: NativeTypeExprLike | null; typeFact?: { kind: string } },
+>(row: T): row is T & { payload: NativeTypeExprLike } {
+  return row.payload != null && row.typeFact?.kind !== "unavailable";
 }
 
 export function nativeComponentMetaToComponentMeta(meta: NativeComponentMetaResult): ComponentMeta {
@@ -936,7 +945,7 @@ export function nativeComponentMetaToComponentMeta(meta: NativeComponentMetaResu
       ? {
           publicInstance: {
             completeness: meta.publicInstance.completeness,
-            members: meta.publicInstance.members.map((member) => ({
+            members: meta.publicInstance.members.filter(usableMemberType).map((member) => ({
               name: member.name,
               kind: member.kind,
               type: typeExprToDescriptor(member.type, nativeRegistry),

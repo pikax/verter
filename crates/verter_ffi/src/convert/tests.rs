@@ -3838,6 +3838,86 @@ fn ffi_component_meta_distinguishes_partial_from_exact_empty() {
     );
 }
 
+fn svelte_props_lane(source: &str) -> (i32, Vec<u32>, Vec<String>, Option<bool>) {
+    let session = host::VerterHost::new_standalone(host::HostConfig::default());
+    let canonical = "/Props.svelte";
+    let _ = session
+        .upsert(host::UpsertRequest {
+            canonical_id: Some(canonical.to_string()),
+            input_id: canonical.to_string(),
+            source: Arc::from(source),
+            file_language: host::FileLanguage::svelte(),
+            aliases: Vec::new(),
+        })
+        .expect("registered svelte carrier");
+    let meta = sidecar_less_wire_payload(&session, canonical);
+    let facts = meta.facts();
+    let names = facts
+        .props
+        .value()
+        .map(|props| props.iter().map(|prop| prop.name.clone()).collect())
+        .unwrap_or_default();
+    let props = verter_protocol::component_meta::component_meta_payload(&meta)
+        .body
+        .expect("payload body")
+        .facts
+        .expect("component facts")
+        .props
+        .expect("props fact");
+    let guarantee = props.guarantee.expect("props guarantee");
+    (
+        guarantee.kind,
+        guarantee.causes,
+        names,
+        props.value.as_ref().map(|value| value.open),
+    )
+}
+
+/// Svelte producer guarantees survive the session, the FFI facts, and protobuf.
+/// Unavailable and open domains must not publish as complete closed, and a
+/// closed destructure must stay closed with its keys.
+#[test]
+fn svelte_domain_guarantees_reach_protobuf() {
+    let (kind, causes, names, open) = svelte_props_lane(
+        "<script>\n  let { first } = $props();\n  let { second } = $props();\n</script>\n",
+    );
+    assert_eq!(
+        kind, 3,
+        "two $props() calls are unavailable, not complete closed"
+    );
+    assert!(
+        causes.contains(&104),
+        "unavailable props name cause 104, got {causes:?}"
+    );
+    assert!(open.is_none(), "an unavailable fact publishes no value");
+    assert!(names.is_empty());
+
+    let (kind, _, names, open) = svelte_props_lane(
+        "<script>\n  let { label, ...rest } = $props();\n</script>\n<p>{label}</p>\n",
+    );
+    assert_eq!(kind, 1);
+    assert_eq!(open, Some(true), "rest props are a complete open domain");
+    assert!(
+        names.is_empty(),
+        "an open rest domain does not publish enumerated keys as the member list: {names:?}"
+    );
+
+    let (kind, _, names, open) =
+        svelte_props_lane("<script>\n  let { label } = $props();\n</script>\n<p>{label}</p>\n");
+    assert_eq!(kind, 1);
+    assert_eq!(open, Some(false), "a closed destructure stays closed");
+    assert_eq!(names, vec!["label".to_string()]);
+
+    let (kind, _, names, open) =
+        svelte_props_lane("<script>\n  const label = 'ok';\n</script>\n<p>{label}</p>\n");
+    assert_eq!(kind, 1);
+    assert_eq!(open, Some(false));
+    assert!(
+        names.is_empty(),
+        "a component with no props declaration is complete closed empty"
+    );
+}
+
 /// A producer that raises the partial state without naming a class must
 /// still publish a named reason. A `Partial` with an empty reason list is
 /// indistinguishable from a complete result to any consumer that inspects

@@ -681,14 +681,9 @@ impl MacroDtosRefusal {
     pub fn into_partial_read(self) -> MacroDtosRead {
         MacroDtosRead {
             dtos: std::sync::Arc::new(MacroSurfaceDtos {
-                domain_guarantee: Some(crate::typeinfo::surface_resolution::metadata_guarantee(
-                    verter_type_engine::semantic_query::FactStatus::Unavailable(
-                        verter_type_engine::semantic_query::surface_resolution::NonEmptyReasons::of(
-                            verter_type_engine::semantic_query::PartialReason::SemanticQueryFault,
-                        ),
-                    ),
-                    true,
-                )),
+                domain_guarantee: Some(
+                    crate::typeinfo::surface_resolution::unavailable_query_fault_guarantee(),
+                ),
                 ..MacroSurfaceDtos::default()
             }),
             completeness: verter_type_engine::semantic_query::ResultCompleteness::partial(

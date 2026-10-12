@@ -724,6 +724,29 @@ describe("result completeness fail-closed branches", () => {
     const projected = nativeComponentMetaToComponentMeta(result);
     expect(projected.props.map((prop) => prop.name)).toEqual(["root"]);
   });
+
+  it("localizes a schema-12 invalid node without turning bool fields into facts", async () => {
+    const base = createTestComponentMetaPayload();
+    base.typeGraph!.nodes[0].kind = {
+      case: "array",
+      value: { $typeName: "verter.v1.ArrayNode", elementNodeId: 999, readonly: false },
+    };
+    const first = base.body!.props![0]!;
+    first.typeNodeId = 1;
+    base.body!.props!.push({ ...first, nameId: 6, typeNodeId: 2 });
+    const result = decodeTypedComponentMetaPayload(
+      toBinary(ComponentMetaPayloadSchema, create(ComponentMetaPayloadSchema, base)),
+    );
+    expect(result.props.map((prop) => prop.name)).toEqual(["root", "label"]);
+    expect(result.props[0]?.typeFact).toEqual({ kind: "unavailable", causes: [102] });
+    expect(result.props[0]?.required).toBe(true);
+    expect(result.props[0]?.requiredFact).toBeUndefined();
+    expect(result.props[1]?.typeFact?.kind).toBe("complete");
+    expect(result.props[1]?.type).toBeDefined();
+    const { nativeComponentMetaToComponentMeta } = await import("./native-component-meta.js");
+    const projected = nativeComponentMetaToComponentMeta(result);
+    expect(projected.props.map((prop) => prop.name)).toEqual(["label"]);
+  });
 });
 
 describe("independent component facts", () => {
@@ -790,6 +813,68 @@ describe("independent component facts", () => {
     expect(projected.props.map((prop) => prop.name)).toEqual([result.props[1].name]);
     expect(projected.slots[0].bindings).toEqual([]);
     expect(projected.facts!.props.kind).toBe("complete");
+  });
+
+  it("keeps a public-instance fact when one member type node is invalid", async () => {
+    const payload = fixture();
+    payload.typeGraph!.nodes[0].kind = {
+      case: "array",
+      value: { $typeName: "verter.v1.ArrayNode", elementNodeId: 999, readonly: false },
+    };
+    const instance = payload.body!.facts!.publicInstance!;
+    instance.absent = false;
+    instance.value = {
+      $typeName: "verter.v1.PublicInstanceMeta",
+      completeness: 1,
+      members: [
+        {
+          $typeName: "verter.v1.PublicInstanceMemberMeta",
+          nameId: 6,
+          kind: 3,
+          typeNodeId: 1,
+          rawTypeId: 0,
+          descriptionId: 0,
+          tags: [],
+        },
+        {
+          $typeName: "verter.v1.PublicInstanceMemberMeta",
+          nameId: 7,
+          kind: 3,
+          typeNodeId: 2,
+          rawTypeId: 0,
+          descriptionId: 0,
+          tags: [],
+        },
+      ],
+    };
+    const result = decode(payload);
+    expect(result.facts!.publicInstance.kind).not.toBe("unavailable");
+    expect(result.publicInstance?.members.map((member) => member.name)).toEqual(["label", "next"]);
+    expect(result.publicInstance?.members[0]?.typeFact).toEqual({
+      kind: "unavailable",
+      causes: [100],
+    });
+    expect(result.publicInstance?.members[1]?.type).toBeDefined();
+    const { nativeComponentMetaToComponentMeta } = await import("./native-component-meta.js");
+    const projected = nativeComponentMetaToComponentMeta(result);
+    expect(projected.publicInstance?.members.map((member) => member.name)).toEqual(["next"]);
+  });
+
+  it("localizes a string literal whose string id is zero", async () => {
+    const payload = fixture();
+    payload.typeGraph!.nodes[0].kind = {
+      case: "literal",
+      value: { $typeName: "verter.v1.LiteralNode", literalKind: 1, stringId: 0 },
+    };
+    const props = payload.body!.facts!.props!.value!.entries;
+    props[0].typeNodeId = 1;
+    props.push({ ...props[0], nameId: 6, typeNodeId: 2 });
+    const result = decode(payload);
+    expect(result.props[0]?.typeFact).toEqual({ kind: "unavailable", causes: [100] });
+    expect(result.props[1]?.typeFact?.kind).toBe("complete");
+    const { nativeComponentMetaToComponentMeta } = await import("./native-component-meta.js");
+    const projected = nativeComponentMetaToComponentMeta(result);
+    expect(projected.props.map((prop) => prop.name)).toEqual(["label"]);
   });
 
   it("keeps constrained binders distinct and renders their constraints", async () => {
@@ -914,17 +999,18 @@ describe("independent component facts", () => {
       failure: "unrepresentableRequiredMemberValue" as const,
       provenance: "semanticEvaluator" as const,
     };
+    const jsonMember = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
     result.acceptedProps = [
-      {
+      jsonMember({
         name: "bad",
-        typeFact: { kind: "unavailable", causes: [102] },
+        type: null,
         publication: failedPublication,
         terminalDisplay: {},
         required: true,
         provenance: { kind: "declared" },
         availability: { kind: "always" },
         kind: "declaredProp",
-      },
+      }),
       {
         name: "ok",
         type,
@@ -938,13 +1024,13 @@ describe("independent component facts", () => {
       },
     ];
     result.acceptedEvents = [
-      {
+      jsonMember({
         name: "bad",
-        typeFact: { kind: "unavailable", causes: [100] },
+        payload: null,
         provenance: { kind: "declared" },
         availability: { kind: "always" },
         kind: "listener",
-      },
+      }),
       {
         name: "ok",
         payload: type,
@@ -960,13 +1046,13 @@ describe("independent component facts", () => {
         {
           branchKey: "root",
           props: [
-            {
+            jsonMember({
               name: "bad",
-              typeFact: { kind: "unavailable", causes: [102] },
+              type: null,
               publication: failedPublication,
               terminalDisplay: {},
               sources: [],
-            },
+            }),
             {
               name: "ok",
               type,
@@ -977,7 +1063,7 @@ describe("independent component facts", () => {
             },
           ],
           events: [
-            { name: "bad", typeFact: { kind: "unavailable", causes: [100] }, sources: [] },
+            jsonMember({ name: "bad", payload: null, sources: [] }),
             {
               name: "ok",
               payload: type,
@@ -992,6 +1078,8 @@ describe("independent component facts", () => {
     };
     const { nativeComponentMetaToComponentMeta } = await import("./native-component-meta.js");
     const projected = nativeComponentMetaToComponentMeta(result);
+    expect(result.acceptedProps.map((prop) => prop.name)).toEqual(["bad", "ok"]);
+    expect(projected.facts).toBe(result.facts);
     expect(projected.acceptedProps.map((prop) => prop.name)).toEqual(["ok"]);
     expect(projected.acceptedEvents.map((event) => event.name)).toEqual(["ok"]);
     if (projected.fallthroughSurface.kind !== "branches") {
