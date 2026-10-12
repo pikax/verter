@@ -162,7 +162,7 @@ fn request_projection_budget_caps_distinct_dispatch_cold_builds() {
     let first = dispatch.execute_read(first_key);
     assert!(
         matches!(first.value, QueryResult::Value(_))
-            && !first.result_is_partial
+            && !first.result_is_partial()
             && first.walker_diagnostics.is_empty(),
         "first cold projection within budget must succeed, got {first:?}",
     );
@@ -170,7 +170,7 @@ fn request_projection_budget_caps_distinct_dispatch_cold_builds() {
     let second = dispatch.execute_read(second_key);
     assert!(
         matches!(second.value, QueryResult::Value(_))
-            && second.result_is_partial
+            && second.result_is_partial()
             && second.cache_suppress,
         "the limited projection must retain a safe carrier and typed partial rails; got {second:?}"
     );
@@ -246,7 +246,7 @@ fn post_trip_projection_op_queries_bypass_cooperative_admission() {
         context,
     });
     assert!(
-        matches!(first_keyof.value, QueryResult::Value(_)) && !first_keyof.result_is_partial,
+        matches!(first_keyof.value, QueryResult::Value(_)) && !first_keyof.result_is_partial(),
         "1st keyof within budget should succeed (got {first_keyof:?})"
     );
     let second_keyof = dispatch.execute_read(SemanticQueryKey::KeyOf {
@@ -255,7 +255,7 @@ fn post_trip_projection_op_queries_bypass_cooperative_admission() {
     });
     assert!(
         matches!(second_keyof.value, QueryResult::Value(_))
-            && second_keyof.result_is_partial
+            && second_keyof.result_is_partial()
             && second_keyof.cache_suppress,
         "2nd keyof should trip to a safe typed partial carrier (got {second_keyof:?})"
     );
@@ -281,7 +281,7 @@ fn post_trip_projection_op_queries_bypass_cooperative_admission() {
         let result = dispatch.execute_read(key);
         assert!(
             matches!(result.value, QueryResult::Value(_))
-                && result.result_is_partial
+                && result.result_is_partial()
                 && result.cache_suppress,
             "post-trip query #{i} must retain a safe typed partial carrier (got {result:?})"
         );
@@ -347,7 +347,7 @@ fn post_trip_typeof_early_exit_attributes_to_typeof_cold_counter() {
         context,
     });
     assert!(
-        matches!(first.value, QueryResult::Value(_)) && !first.result_is_partial,
+        matches!(first.value, QueryResult::Value(_)) && !first.result_is_partial(),
         "1st keyof within budget should succeed (got {first:?})"
     );
     let second = dispatch.execute_read(SemanticQueryKey::KeyOf {
@@ -356,7 +356,7 @@ fn post_trip_typeof_early_exit_attributes_to_typeof_cold_counter() {
     });
     assert!(
         matches!(second.value, QueryResult::Value(_))
-            && second.result_is_partial
+            && second.result_is_partial()
             && second.cache_suppress,
         "2nd keyof should trip to a safe typed partial carrier (got {second:?})"
     );
@@ -387,7 +387,7 @@ fn post_trip_typeof_early_exit_attributes_to_typeof_cold_counter() {
     let result = dispatch.execute_read(typeof_key);
     assert!(
         matches!(result.value, QueryResult::Value(_))
-            && result.result_is_partial
+            && result.result_is_partial()
             && result.cache_suppress,
         "post-trip TypeOf must take the typed-partial budget early-exit (got {result:?})"
     );
@@ -455,7 +455,7 @@ fn post_trip_non_projection_queries_still_dispatch_normally() {
     });
     assert!(
         matches!(trip.value, QueryResult::Value(_))
-            && trip.result_is_partial
+            && trip.result_is_partial()
             && trip.cache_suppress,
         "2nd keyof should trip the fuse to a safe typed partial (got {trip:?})"
     );
@@ -477,7 +477,7 @@ fn post_trip_non_projection_queries_still_dispatch_normally() {
     let normalize_result = dispatch.execute_read(normalize_key);
     assert!(
         matches!(normalize_result.value, QueryResult::Value(_))
-            && !normalize_result.result_is_partial,
+            && !normalize_result.result_is_partial(),
         "post-trip ReduceUnion must dispatch normally; \
          widening the early-exit gate to non-projection queries would \
          break partial-result assembly (got {normalize_result:?})"
@@ -1102,7 +1102,7 @@ fn budget_trip_conditional_suppresses_and_does_not_warm() {
          never warmed"
     );
     assert!(
-        second.result_is_partial,
+        second.result_is_partial(),
         "a budget-exceeded Conditional read MUST carry result_is_partial=true — this is the \
          signal the component-meta + shape/materialize warm gates key on"
     );
@@ -1243,7 +1243,7 @@ fn budget_trip_instantiate_suppresses_and_does_not_warm() {
         "a budget-exceeded Instantiate read MUST carry cache_suppress=true"
     );
     assert!(
-        second.result_is_partial,
+        second.result_is_partial(),
         "a budget-exceeded Instantiate read MUST carry result_is_partial=true — the warm gate \
          keys on this signal"
     );
@@ -1342,8 +1342,9 @@ fn warm_gate_keys_on_result_is_partial_not_value_kind_or_cache_suppress() {
         dep_signature: empty_sig.clone(),
         walker_diagnostics: Arc::from([]),
         cache_suppress: true,
-        result_is_partial: true,
-        partial_reasons: verter_type_engine::semantic_query::PartialReasonSet::PROPAGATED,
+        fact_status: verter_type_engine::semantic_query::FactStatus::unavailable(
+            verter_type_engine::semantic_query::PartialReasonSet::PROPAGATED,
+        ),
         receipt: verter_type_engine::semantic_query::ReadReceipt::Unpriced,
     };
     assert!(
@@ -1362,8 +1363,7 @@ fn warm_gate_keys_on_result_is_partial_not_value_kind_or_cache_suppress() {
         dep_signature: empty_sig,
         walker_diagnostics: Arc::from([]),
         cache_suppress: true,
-        result_is_partial: false,
-        partial_reasons: verter_type_engine::semantic_query::PartialReasonSet::empty(),
+        fact_status: verter_type_engine::semantic_query::FactStatus::Complete,
         receipt: verter_type_engine::semantic_query::ReadReceipt::Unpriced,
     };
 
@@ -1456,8 +1456,7 @@ fn benign_non_cacheable_complete_results_still_warm_component_meta_final() {
                 dep_signature: empty_sig.clone(),
                 walker_diagnostics: Arc::from([]),
                 cache_suppress: true,
-                result_is_partial: false,
-                partial_reasons: verter_type_engine::semantic_query::PartialReasonSet::empty(),
+                fact_status: verter_type_engine::semantic_query::FactStatus::Complete,
                 receipt: verter_type_engine::semantic_query::ReadReceipt::Unpriced,
             },
         ),
@@ -1468,8 +1467,7 @@ fn benign_non_cacheable_complete_results_still_warm_component_meta_final() {
                 dep_signature: empty_sig.clone(),
                 walker_diagnostics: Arc::from([]),
                 cache_suppress: true,
-                result_is_partial: false,
-                partial_reasons: verter_type_engine::semantic_query::PartialReasonSet::empty(),
+                fact_status: verter_type_engine::semantic_query::FactStatus::Complete,
                 receipt: verter_type_engine::semantic_query::ReadReceipt::Unpriced,
             },
         ),
@@ -1480,8 +1478,7 @@ fn benign_non_cacheable_complete_results_still_warm_component_meta_final() {
                 dep_signature: empty_sig,
                 walker_diagnostics: Arc::from([]),
                 cache_suppress: true,
-                result_is_partial: false,
-                partial_reasons: verter_type_engine::semantic_query::PartialReasonSet::empty(),
+                fact_status: verter_type_engine::semantic_query::FactStatus::Complete,
                 receipt: verter_type_engine::semantic_query::ReadReceipt::Unpriced,
             },
         ),
@@ -1503,7 +1500,7 @@ fn benign_non_cacheable_complete_results_still_warm_component_meta_final() {
         assert!(
             matches!(read.value, QueryResult::Value(_))
                 && read.cache_suppress
-                && !read.result_is_partial,
+                && !read.result_is_partial(),
             "{label}: benign shape must be a complete Value with cache_suppress=true, \
              result_is_partial=false"
         );
@@ -1518,31 +1515,14 @@ fn benign_non_cacheable_complete_results_still_warm_component_meta_final() {
     }
 }
 
-/// Direct PRODUCER-LEVEL discrimination proof for the A2 signal split —
-/// the producer fold, not just the gate.
-///
-/// The concrete reachability path: a `ProjectPath` shallow-walking an
-/// `InstantiationRef` whose nested `Instantiate` trips the projection-op
-/// budget. The walker catches the budget error, contributes no surface,
-/// and `build_project_path` returns `QueryResult::Value` carrying the
-/// folded `result_is_partial = true`. This test observes the DISPATCH READ
-/// directly (proving the producer fold, independent of any request-wide
-/// budget backstop) and asserts it raises the component-meta warm-gate
-/// suppression flag — i.e. it does NOT warm `ComponentMetaResultDb`.
-///
-/// It FAILS if the walker fatal-path fold (`walk.rs` InstantiationRef /
-/// DeclPlaceholder arms → `self.result_is_partial`, drained by
-/// `build_project_path`) is reverted: the read would then be a COMPLETE
-/// `Value` with `result_is_partial = false` and the flag would NOT fire.
-///
-/// Asserts BOTH the request-level warm-gate suppression AND the SEMANTIC
-/// non-admission directly: `graph.get_unvalidated(&projectpath_key)` is
-/// `None` (the partial `ProjectPath` build was refused family-memo
-/// admission), so a later identical request cannot warm-replay it as
-/// complete.
+/// A member projection stopped inside an instantiation supplies no proven
+/// member value. Its opaque shell has no bounded approximation guarantee,
+/// so dispatch withholds it while preserving the budget cause and refusing
+/// both semantic memo admission and component-meta reuse.
 #[test]
-fn projectpath_over_instantiationref_budget_trip_surfaces_value_partial_and_does_not_warm() {
+fn projectpath_over_instantiationref_budget_trip_withholds_value_and_does_not_warm() {
     use verter_type_engine::request_context::current_request_result_is_partial;
+    use verter_type_engine::semantic_query::QueryError;
 
     // `projection_op_budget = 2`: the outer `ProjectPath` (op 1) and the
     // nested `Instantiate(Partial<…>)` (op 2) both pass the entry/raw-build
@@ -1604,16 +1584,24 @@ fn projectpath_over_instantiationref_budget_trip_surfaces_value_partial_and_does
     };
     let read = dispatch.execute_read(projectpath_key.clone());
 
-    // The dispatch read is a COMPLETE `Value` (the walker contributed an
-    // opaque shell, NOT an Error/Recursive) carrying the FOLDED partiality.
+    // A shell from a stopped member walk is not an evaluated member value.
     assert!(
-        matches!(read.value, QueryResult::Value(_)),
-        "the budget-tripped ProjectPath-over-InstantiationRef surfaces as a COMPLETE Value (the \
-         walker catches the nested budget error and contributes an opaque shell), got {:?}",
+        matches!(
+            read.value,
+            QueryResult::Error(QueryError::IncompleteSemanticOperand { .. })
+        ),
+        "the budget-tripped member projection must withhold its unsupported shell, got {:?}",
         read.value
     );
+    assert!(matches!(
+        read.fact_status,
+        verter_type_engine::semantic_query::FactStatus::Unavailable(_)
+    ));
+    assert!(read
+        .partial_reasons()
+        .contains(verter_type_engine::semantic_query::PartialReasonSet::PROJECTION_WORK_LIMIT));
     assert!(
-        read.result_is_partial,
+        read.result_is_partial(),
         "the nested Instantiate budget trip MUST fold result_is_partial=true onto the surfaced \
          Value — reverting the walker fatal-path fold makes this a complete Value with \
          result_is_partial=false (the A2 reachability hole)"
@@ -1722,7 +1710,7 @@ fn lower_indexed_access_chain_budget_trip_folds_partial_through_chokepoint_and_r
 
     let read = dispatch.execute_read(instantiate_key.clone());
     assert!(
-        read.result_is_partial,
+        read.result_is_partial(),
         "the deep indexed-access chain's nested IndexedAccess budget trip MUST fold \
          result_is_partial=true onto the Instantiate(Deep) build output THROUGH the chokepoint — \
          lower.rs has NO per-site fold, so reverting the chokepoint makes this result_is_partial=false"
@@ -1827,7 +1815,7 @@ fn conditional_relation_budget_trip_folds_partial_and_refuses_relation_memo() {
     };
     let read = dispatch.execute_read(conditional_key.clone());
     assert!(
-        read.result_is_partial,
+        read.result_is_partial(),
         "the conditional's relation authority tripped the budget instantiating its identity-carrier \
          operands; the chokepoint MUST fold result_is_partial=true onto the Conditional build output \
          (reverting the chokepoint fold makes this a complete non-partial Value)"

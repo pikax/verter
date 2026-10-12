@@ -95,20 +95,8 @@ pub(super) struct InflightState {
     /// `false` for the abort/retry path (the sentinel result there is
     /// not a real winner build).
     pub(super) cache_suppress: bool,
-    /// The winner build's `result_is_partial` flag — the partial-result
-    /// signal (budget / cancellation / recursion / walker fatal). Set by
-    /// the winner alongside `completed`; a joiner that observes
-    /// `aborted == false` returns this verbatim so a joiner inside an
-    /// outer component-meta synthesis inherits the partial taint and the
-    /// warm gate suppresses the outer result. `false` for the abort/retry
-    /// path. Distinct from [`Self::cache_suppress`] (memo admission only).
-    pub(super) result_is_partial: bool,
-    /// The winner build's partial CLASSES — see
-    /// [`crate::semantic_query::CacheRead::partial_reasons`]. Published
-    /// alongside [`Self::result_is_partial`] and returned verbatim to a
-    /// joiner, so a rendezvous does not launder a named class into the
-    /// anonymous bridge on the follower's side.
-    pub(super) partial_reasons: crate::semantic_query::PartialReasonSet,
+    /// The producer's adopted availability, broadcast unchanged to followers.
+    pub(super) fact_status: crate::semantic_query::FactStatus,
     /// The generation-qualified task that claimed this flight. Subscribers
     /// register a temporary wait-for edge to this task before parking, so a
     /// cycle of waiting tasks escapes through ReturnOnly.
@@ -212,8 +200,9 @@ impl<'a> Drop for InflightPanicGuard<'a> {
             state.graph_carrier = None;
             state.cost_receipt = None;
             state.cache_suppress = true;
-            state.result_is_partial = true;
-            state.partial_reasons = crate::semantic_query::PartialReasonSet::SEMANTIC_QUERY_FAULT;
+            state.fact_status = crate::semantic_query::FactStatus::unavailable(
+                crate::semantic_query::PartialReasonSet::SEMANTIC_QUERY_FAULT,
+            );
         }
         self.inflight.ready.notify_all();
         // `ptr_eq`-guarded remove: only retire THIS guard's own
@@ -356,7 +345,9 @@ impl super::SemanticGraphStore {
             state.cost_receipt = None;
             state.walker_diagnostics = None;
             state.cache_suppress = true;
-            state.result_is_partial = true;
+            state.fact_status = crate::semantic_query::FactStatus::unavailable(
+                crate::semantic_query::PartialReasonSet::SEMANTIC_QUERY_FAULT,
+            );
         }
         flight.inflight.ready.notify_all();
         self.retire_inflight(&flight.prepared, &flight.inflight, false);

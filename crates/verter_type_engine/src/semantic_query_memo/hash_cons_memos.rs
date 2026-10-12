@@ -162,8 +162,7 @@ impl SemanticGraphStore {
                     dep_signature: super::empty_signature(),
                     walker_diagnostics: std::sync::Arc::from([]),
                     cache_suppress: false,
-                    result_is_partial: false,
-                    partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
+                    fact_status: crate::semantic_query::FactStatus::Complete,
                     receipt: crate::semantic_query::ReadReceipt::Priced(std::sync::Arc::clone(
                         receipt,
                     )),

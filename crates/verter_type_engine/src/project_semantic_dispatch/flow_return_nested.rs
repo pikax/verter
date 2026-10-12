@@ -336,6 +336,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     ) -> DriveEnd
     where
         'b: 'a,
+        'd: 'a,
+        'd: 'r,
     {
         let mut delivered: Option<RegionDelivery> = None;
         loop {
@@ -551,6 +553,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         });
         let capture_context = context;
         let mut evaluator = Box::new(FlowEvaluator {
+            independent_members: None,
+            independent_returns: None,
+            constructive_values: rustc_hash::FxHashMap::default(),
             dispatch: self.dispatch,
             call_receivers: rustc_hash::FxHashMap::default(),
             call_arguments: Arc::clone(&owned.content.call_arguments),
@@ -689,6 +694,33 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     nested_evaluator.executed_walk.aborted = true;
                 }
                 nested_holds = nested_evaluator.holds.clone();
+                let independent_return = outcome
+                    .as_ref()
+                    .ok()
+                    .filter(|values| values.len() == 1)
+                    .and_then(|values| {
+                        nested_evaluator
+                            .constructive_values
+                            .get(&values[0].node)
+                            .cloned()
+                            .map(|proof| (values[0].node, proof))
+                    })
+                    .filter(|_| {
+                        !nested_body_falls_through
+                            && nested_holds.is_empty()
+                            && !nested_evaluator.executed_walk.aborted
+                            && !nested_evaluator.executed_walk.local_aborted
+                            && !crate::request_context::current_cold_compute_completeness()
+                                .is_partial()
+                            && crate::request_context::current_execution_abort().is_none()
+                            && matches!(
+                                owned.content.body.statements.as_ref(),
+                                [verter_session_query::flow::slice::SliceStatement::Return {
+                                    argument: Some(_),
+                                    ..
+                                }]
+                            )
+                    });
                 let finished = nested_evaluator
                 .products
                 .finish(nested_evaluator.plan.as_deref())
@@ -757,10 +789,18 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 if let Err(failure) = finished {
                     if matches!(failure, FlowProductFailure::BudgetExceeded(_)) {
                         self.products.execution.borrow_mut().failure = Some(failure);
+                        nested_evaluator.executed_walk.aborted = true;
                     }
-                    nested_evaluator.record_degradation(
-                        crate::semantic_query::FlowReturnDegradation::UnresolvedValue,
-                    );
+                    if independent_return.is_none() || nested_evaluator.executed_walk.aborted {
+                        nested_evaluator.record_degradation(
+                            crate::semantic_query::FlowReturnDegradation::UnresolvedValue,
+                        );
+                    }
+                }
+                if !nested_evaluator.executed_walk.aborted {
+                    if let Some((node, proof)) = independent_return {
+                        self.constructive_values.insert(node, proof);
+                    }
                 }
                 nested_degradation = nested_evaluator.degradation;
                 nested_observations = nested_evaluator.observations;

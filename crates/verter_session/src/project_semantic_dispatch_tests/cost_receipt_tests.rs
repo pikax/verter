@@ -1018,7 +1018,7 @@ fn root_read(
     };
     RootAnswer {
         answer,
-        partial: read.result_is_partial,
+        partial: read.result_is_partial(),
         reasons: read.partial_reason_classes(),
         work: dispatch.connected_demand().work_used_for_tests(),
         bytes: dispatch.connected_demand().bytes_used_for_tests(),
@@ -1769,8 +1769,9 @@ fn the_refusal_table_keeps_the_newest_and_refuses_torn_evaluations() {
         dep_signature: verter_type_engine::semantic_query_memo::empty_signature(),
         walker_diagnostics: Arc::from([]),
         cache_suppress: true,
-        result_is_partial: true,
-        partial_reasons: PartialReasonSet::PROJECTION_WORK_LIMIT,
+        fact_status: verter_type_engine::semantic_query::FactStatus::unavailable(
+            PartialReasonSet::PROJECTION_WORK_LIMIT,
+        ),
         receipt: verter_type_engine::semantic_query::ReadReceipt::Unpriced,
     };
     let carrier =

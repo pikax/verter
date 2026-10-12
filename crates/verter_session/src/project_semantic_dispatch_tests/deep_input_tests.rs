@@ -447,6 +447,39 @@ fn blocks_nested_deep_answer_on_a_small_stack() {
     answers_on(test_path!(), SMALL_STACK, blocks(DEPTH), RETURN, "number");
 }
 
+#[test]
+fn an_independent_return_type_is_exact_beside_its_refused_flow_proof() {
+    let host = default_probe_host();
+    let source = blocks(DEPTH);
+    let public = flow_return_audited_on_host(&host, &source, "pf");
+    assert!(
+        matches!(
+            public.as_result().unwrap().fact(),
+            verter_type_engine::semantic_query::FactResult::Approximate { .. }
+        ),
+        "the public flow retains its unfinished preparation proof"
+    );
+    super::checker_probe_lane_tests::with_probe_outcome_on_host(
+        &host,
+        super::checker_probe_lane_tests::ProbeProject::default(),
+        &source,
+        RETURN,
+        |dispatch, outcome| {
+            let node = outcome.into_complete_node().expect(
+                "an independently proven return source cannot inherit its refused flow proof",
+            );
+            assert!(matches!(
+                dispatch.graph().node_data(node).as_deref(),
+                Some(
+                    verter_type_engine::semantic_query::SemanticNodeData::Primitive(
+                        verter_type_engine::semantic_query::PrimitiveKind::Number
+                    )
+                )
+            ));
+        },
+    );
+}
+
 /// Conditionals, object literals and blocks nested past the plan budget
 /// return its typed budget failure, the planner's refusal recorded.
 #[test]

@@ -302,9 +302,12 @@ pub struct QueryBuildOutput<T = SemanticNodeId> {
     /// through nested reads. Gates the component-meta + shape/materialize
     /// warm caches. The shared cold-build helper copies it onto the
     /// returned `CacheRead` so a partial's CLASS survives the query/build
-    /// boundary. [`Self::projection_fact`] reads it directly: the typed
-    /// fact is derived from this field, never from a parallel flag.
+    /// boundary. Memo settlement adopts the typed fact from this field and
+    /// the producer's interpretation, never from a parallel quality flag.
     pub completeness: crate::semantic_query::ResultCompleteness,
+    /// A bounded interpretation established by the producer's completed
+    /// structural outcome. Causes and incidental markers cannot mint one.
+    pub approximation: Option<super::projection_fact::ProjectionInterpretation>,
     /// The §18 provenance taint of this build's value: how trustworthy the
     /// inputs that produced it were. Defaults to
     /// [`ResultTaint::Clean`](crate::semantic_query::ResultTaint::Clean).
@@ -398,6 +401,7 @@ impl<T> From<(QueryResult<T>, DepSignature)> for QueryBuildOutput<T> {
             walker_diagnostics: Vec::new(),
             cache_suppress: false,
             completeness: crate::semantic_query::ResultCompleteness::Complete,
+            approximation: None,
             taint: crate::semantic_query::ResultTaint::Clean,
             observed_self_roots: Vec::new(),
             graph_carrier: None,
@@ -426,6 +430,7 @@ impl From<QueryBuildOutput<SemanticNodeId>>
             walker_diagnostics: output.walker_diagnostics,
             cache_suppress: output.cache_suppress,
             completeness: output.completeness,
+            approximation: output.approximation,
             taint: output.taint,
             observed_self_roots: output.observed_self_roots,
             graph_carrier: output.graph_carrier,
@@ -507,6 +512,7 @@ impl<T> QueryBuildOutput<T> {
             walker_diagnostics: self.walker_diagnostics,
             cache_suppress: self.cache_suppress,
             completeness: self.completeness,
+            approximation: self.approximation,
             taint: self.taint,
             observed_self_roots: self.observed_self_roots,
             graph_carrier: self.graph_carrier,
@@ -2439,7 +2445,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         key: SemanticQueryKey,
     ) -> QueryResult<SemanticNodeId> {
         let read = self.dispatch.execute_read(key);
-        if read.result_is_partial {
+        if read.result_is_partial() {
             self.mark_partial_with(read.partial_reason_classes());
         }
         read.value
@@ -8046,11 +8052,28 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         // `StructuralTransit(Navigate)`, so the open generic survives
         // as a deferred carrier on the published binding — shallow
         // values, enumerated keys.
-        if crate::project_semantic_dispatch::raise::mapped_type_key_domain_is_open_or_unknown(
-            self.dispatch,
-            source,
-            mapper,
-        ) {
+        let closed_domain = self.dispatch.probe_optional(|| {
+            (!crate::project_semantic_dispatch::raise::mapped_type_key_domain_is_open_or_unknown(
+                self.dispatch, source, mapper,
+            )).then_some(())
+        }).is_some();
+        // A shallow map can enumerate proven presence without proving the
+        // complete key domain. Only the authored keyof-source mapping owns
+        // this subset; arbitrary keyspaces and remaps still need exact keys.
+        let presence_subset = if !closed_domain
+            && mapper.name_remap.is_none()
+            && matches!(self.graph().node_data(mapper.key_space).as_deref(),
+                Some(SemanticNodeData::KeyOf { base }) if *base == source)
+        {
+            self.dispatch.probe_optional(|| {
+                self.dispatch
+                    .mapped_surface_source_members_for_projection(source, self.context)
+                    .filter(|(members, causes)| !members.is_empty() && !causes.is_empty())
+            })
+        } else {
+            None
+        };
+        if !closed_domain && presence_subset.is_none() {
             return None;
         }
         // Prefer the explicit `key_space` for fast literal-union
@@ -8067,7 +8090,18 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         // Shallow synthesiser through it keeps the two paths
         // structurally aligned.
         let mut keys: Vec<crate::project_semantic_dispatch::enumerate::KeyDomainKey> = Vec::new();
-        let collected = collect_literal_keys(self.graph(), mapper.key_space, &mut keys);
+        let collected = if let Some((members, causes)) = &presence_subset {
+            self.mark_partial_with(*causes);
+            keys = crate::project_semantic_dispatch::enumerate::KeyDomainKey::from_keys(
+                members
+                    .iter()
+                    .filter_map(|member| member.key.cloned_known())
+                    .collect(),
+            );
+            true
+        } else {
+            collect_literal_keys(self.graph(), mapper.key_space, &mut keys)
+        };
         // Optional source-member surface — populated only when the new
         // `mapped_surface_source_members_for_projection` helper resolves
         // the source carrier to an `Object`. Used by the per-key build
@@ -8081,7 +8115,8 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         // `None` for sources that did not resolve to an Object (e.g.,
         // the source is itself a Mapped / KeyOf carrier-stop, primitive,
         // etc.).
-        let mut source_members: Option<Vec<crate::semantic_query::SurfaceMember>> = None;
+        let mut source_members: Option<Vec<crate::semantic_query::SurfaceMember>> =
+            presence_subset.map(|(members, _)| members);
         if !collected {
             // The shared enumerator on the SOURCE handles
             // `Opaque(DeclPlaceholder)` / `Object` / `Intersection` /
@@ -8408,6 +8443,16 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         literal,
                         materialise_context,
                     )
+                };
+                let value = if mapper.optionality == crate::semantic_query::OptionalityMod::Remove {
+                    self.dispatch
+                        .key_domain_binder(&key)
+                        .map_or(value, |key_node| {
+                            self.dispatch
+                                .mapped_member_optionality(mapper, value, source, key_node)
+                        })
+                } else {
+                    value
                 };
                 let visibility = source_member
                     .map_or(verter_type_expr::MemberVisibility::Public, |sm| {

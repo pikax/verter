@@ -54,3 +54,73 @@ fn a_composite_operand_is_the_extreme_its_members_name() {
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+#[test]
+fn an_approximate_extreme_cannot_select_a_conditional_branch() {
+    use super::checker_probe_lane_tests::{
+        default_probe_host, flow_return_audited_on_host, with_probe_outcome_on_host, ProbeProject,
+    };
+    use verter_type_engine::project_semantic_dispatch::flow_return::flow_admission_fault_injection;
+    use verter_type_engine::semantic_query::{
+        BranchSelection, FactStatus, LiteralValue, OriginEdgeKind, OriginMeta, SemanticNodeData,
+    };
+
+    const SOURCE: &str = "export function f(x: any) { return x; }";
+    const PROBE: &str = "0 extends 1 & ReturnType<typeof f> ? 'selected' : 'other'";
+    for refused in [true, false] {
+        let host = default_probe_host();
+        let _refusal = refused.then(|| {
+            flow_admission_fault_injection::Guard::arm(
+                &host.flow_fault_injection.zero_obligation_budget,
+            )
+        });
+        let returned = flow_return_audited_on_host(&host, SOURCE, "f")
+            .into_result()
+            .expect("proof refusal retains the evaluated any return");
+        assert_eq!(
+            matches!(returned.fact().status(), FactStatus::Approximate(_)),
+            refused,
+            "the source control must distinguish proof refusal from an exact any"
+        );
+        with_probe_outcome_on_host(
+            &host,
+            ProbeProject::default(),
+            SOURCE,
+            PROBE,
+            |dispatch, outcome| {
+                let decisions = dispatch
+                    .graph()
+                    .export_all_origin_edges()
+                    .into_iter()
+                    .filter(|(_, kind, edge)| {
+                        *kind == OriginEdgeKind::ConditionalSelect
+                            && matches!(
+                                edge.meta,
+                                OriginMeta::Branch(BranchSelection::True | BranchSelection::False)
+                            )
+                    })
+                    .collect::<Vec<_>>();
+                if refused {
+                    assert!(
+                        decisions.is_empty(),
+                        "an approximate extreme must not establish a conditional branch: {decisions:?}"
+                    );
+                    assert!(outcome.into_complete_node().is_none());
+                } else {
+                    assert!(
+                        !decisions.is_empty(),
+                        "the exact control selects its branch"
+                    );
+                    let node = outcome
+                        .into_complete_node()
+                        .expect("the exact control completes");
+                    assert!(matches!(
+                        dispatch.graph().node_data(node).as_deref(),
+                        Some(SemanticNodeData::Literal(LiteralValue::String(value)))
+                            if value.as_str() == "selected"
+                    ));
+                }
+            },
+        );
+    }
+}

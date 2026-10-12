@@ -435,6 +435,9 @@ fn payload_binds_canonical(data: &SemanticNodeData, canonical_id: &str) -> bool 
                 .is_some_and(|occurrence| names(&occurrence.function.anchor.canonical_id))
                 || match return_carrier {
                     SignatureReturnCarrier::Declared(_) => false,
+                    SignatureReturnCarrier::DeferredFlow(source) => {
+                        names(&source.identity().anchor.canonical_id)
+                    }
                     SignatureReturnCarrier::Function(source) => match source {
                         FunctionReturnSource::Declared(locator) => {
                             names(&locator.slot().anchor.canonical_id)

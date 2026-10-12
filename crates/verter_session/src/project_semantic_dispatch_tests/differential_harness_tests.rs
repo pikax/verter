@@ -333,10 +333,11 @@ impl<'a> Matrix<'a> {
                 let read = dispatch.execute_read(
                     verter_type_engine::semantic_query::SemanticQueryKey::FlowReturn(Box::new(key)),
                 );
-                if read.result_is_partial {
+                if read.result_is_partial() {
                     unproven.push(format!(
                         "`{function}` [{}]: its proof does not close ({:?})",
-                        setting.label, read.partial_reasons
+                        setting.label,
+                        read.partial_reasons()
                     ));
                 }
             }

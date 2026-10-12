@@ -46,6 +46,32 @@ use crate::semantic_query::{
 pub struct ProjectedViewOutcome {
     pub node: SemanticNodeId,
     pub completeness: ResultCompleteness,
+    pub(super) extent: ProjectionExtent,
+}
+
+/// The representation the projection actually completed. A suspended walk
+/// returns its entire original source, never its unfinished rewritten prefix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ProjectionExtent {
+    Projected,
+    SourceContinuation,
+    Unavailable,
+}
+
+impl ProjectionExtent {
+    pub(super) fn join(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Unavailable, _) | (_, Self::Unavailable) => Self::Unavailable,
+            (Self::SourceContinuation, _) | (_, Self::SourceContinuation) => {
+                Self::SourceContinuation
+            }
+            _ => Self::Projected,
+        }
+    }
+
+    pub(super) fn has_positional_representation(self) -> bool {
+        self != Self::Unavailable
+    }
 }
 
 impl ProjectedViewOutcome {
@@ -53,6 +79,7 @@ impl ProjectedViewOutcome {
         Self {
             node,
             completeness: ResultCompleteness::Complete,
+            extent: ProjectionExtent::Projected,
         }
     }
 
@@ -60,6 +87,7 @@ impl ProjectedViewOutcome {
         Self {
             node,
             completeness: ResultCompleteness::partial(reasons),
+            extent: ProjectionExtent::SourceContinuation,
         }
     }
 }
@@ -529,7 +557,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 return Err(ProjectedViewOutcome::partial(root, reasons));
             }
             memo.insert((root, root_context), root);
-            return Err(ProjectedViewOutcome::complete(root));
+            return Err(ProjectedViewOutcome {
+                node: root,
+                completeness: ResultCompleteness::partial(
+                    crate::semantic_query::PartialReasonSet::SEMANTIC_QUERY_FAULT,
+                ),
+                extent: ProjectionExtent::Unavailable,
+            });
         };
         if let Err(reasons) = self.charge_connected_work() {
             return Err(ProjectedViewOutcome::partial(root, reasons));

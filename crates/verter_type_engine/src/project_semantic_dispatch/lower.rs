@@ -1333,7 +1333,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // the base to a shallow carrier, flip the `should_defer`
                 // shape gate to a deferred shell, and leave a demanded
                 // `Expanded` single-hop terminal unreduced.
-                let object_context = if matches!(object.as_ref(), TypeExpr::IndexedAccess { .. }) {
+                let object_context = if matches!(
+                    object.as_ref(),
+                    TypeExpr::IndexedAccess { .. } | TypeExpr::Ref { .. }
+                ) {
                     reduction_context.with_mode(ProjectionMode::Navigate)
                 } else {
                     reduction_context
@@ -1966,16 +1969,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 scope.clone(),
             )
         } else {
-            // Path-precision rule: the literal `T[K]` single-hop
-            // is the TERMINAL projection of THIS indexed access,
-            // so it runs in the CALLER's mode (not a hardcoded
-            // `Navigate`). When `object` was itself an indexed
-            // access (an intermediate hop), it was lowered in
-            // `Navigate` so its sibling members never expand;
-            // a non-indexed-access base kept the caller's mode so a
-            // demanded `Expanded` single-hop terminal still reduces.
-            // A structural-transit caller keeps transit/Navigate via
-            // its own `reduction_context.mode`.
+            // The terminal projection uses the caller's mode. Intermediate
+            // indexed accesses and named source carriers are lowered in
+            // Navigate so the selected member is demanded before siblings.
             match self.execute_type_node(SemanticQueryKey::IndexedAccess {
                 base: obj_id,
                 index: index_key,
@@ -2974,21 +2970,28 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         };
                         match scope_canonical {
                             Some(scope_canonical) => {
-                                let carrier =
+                                let mut carrier =
                                     crate::semantic_query::SignatureReturnCarrier::Function(
                                         verter_type_expr::facts::FunctionReturnSource::Flow(
                                             identity.clone(),
                                         ),
                                     );
-                                let return_type = match self.execute_function_return_source(
-                                    &verter_type_expr::facts::FunctionReturnSource::Flow(identity),
+                                let return_type = match self.probe_signature_flow_return(
+                                    &identity,
                                     scope_canonical.as_ref(),
                                 ) {
-                                    super::flow_return::FunctionReturnNode::Flow(result) => {
+                                    super::flow_return_fact::SignatureReturnProbe::Evaluated(
+                                        result,
+                                    ) => {
                                         inferred_predicate = result.inferred_predicate();
                                         result.return_type()
                                     }
-                                    _ => self.opaque(QueryError::Miss),
+                                    super::flow_return_fact::SignatureReturnProbe::Deferred(
+                                        source,
+                                    ) => {
+                                        carrier = crate::semantic_query::SignatureReturnCarrier::DeferredFlow(source.with_bindings(env.iter().map(|(name, node)| (Arc::from(name.as_str()), *node))));
+                                        self.opaque(QueryError::Miss)
+                                    }
                                 };
                                 (return_type, carrier)
                             }

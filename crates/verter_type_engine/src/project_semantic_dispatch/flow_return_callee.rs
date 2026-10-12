@@ -546,6 +546,7 @@ impl CallValue {
         };
         let SemanticNodeData::Signature {
             return_type,
+            return_carrier,
             type_parameters,
             params,
             ..
@@ -554,9 +555,32 @@ impl CallValue {
             return SignatureCall::NotCallable;
         };
         let return_type = *return_type;
+        let return_carrier = return_carrier.clone();
         let type_parameters = Arc::clone(type_parameters);
         let params = Arc::clone(params);
         drop(data);
+        let demand_source = matches!(
+            return_carrier,
+            crate::semantic_query::SignatureReturnCarrier::DeferredFlow(_)
+        ) || matches!(
+            graph.node_data(return_type).as_deref(),
+            Some(SemanticNodeData::Opaque(QueryError::Miss))
+        );
+        let return_type = match return_carrier.result_source() {
+            crate::semantic_query::SignatureResultSource::Function(
+                verter_type_expr::facts::FunctionReturnSource::Flow(identity),
+            ) if demand_source => {
+                match dispatch.execute_function_return_source(
+                    &verter_type_expr::facts::FunctionReturnSource::Flow(identity.clone()),
+                    identity.anchor.canonical_id.as_ref(),
+                ) {
+                    super::flow_return::FunctionReturnNode::Flow(result) => dispatch
+                        .apply_signature_return_source(&return_carrier, result.return_type()),
+                    _ => return SignatureCall::ReturnMiss,
+                }
+            }
+            _ => return_type,
+        };
         let mut clause_params = Vec::with_capacity(type_parameters.len());
         for decl in type_parameters.iter() {
             let param = match decl.default {

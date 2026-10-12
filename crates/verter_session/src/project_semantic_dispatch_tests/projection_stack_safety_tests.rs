@@ -665,7 +665,7 @@ fn runaway_generic_returns_work_partial_one_root_diagnostic_and_seals_its_refusa
         !first_reasons.contains(PartialReasonSet::CONNECTED_QUERY_DEPTH_LIMIT),
         "fresh-identity growth must stop on the work rail, not query depth"
     );
-    assert!(first.result_is_partial);
+    assert!(first.result_is_partial());
     assert!(first.cache_suppress);
     let QueryResult::Value(_carrier) = first.value else {
         panic!("a work trip must preserve a safe typed carrier");

@@ -205,16 +205,30 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> Option<(SemanticNodeId, Vec<SemanticNodeId>)> {
         match identity {
             ReturnObligationIdentity::FlowReturn(key) => {
-                if let Some(result) = self
+                let closed = self
                     .dispatch_txn
                     .borrow()
                     .flow
                     .closed_values
                     .iter()
-                    .find(|(member_key, _)| member_key == key)
-                    .map(|(_, result)| result.return_type())
-                {
-                    return Some((result, Vec::new()));
+                    .find(|member| &member.key == key)
+                    .cloned();
+                if let Some(closed) = closed {
+                    self.deposit_operand_self_roots(&closed.self_roots);
+                    match closed.value.fact().status() {
+                        crate::semantic_query::FactStatus::Complete => {
+                            self.fold_cache_read_rails(
+                                false,
+                                closed.cache_suppress || closed.proof.is_none(),
+                                crate::semantic_query::PartialReasonSet::default(),
+                            );
+                        }
+                        crate::semantic_query::FactStatus::Approximate(causes)
+                        | crate::semantic_query::FactStatus::Unavailable(causes) => {
+                            self.fold_cache_read_rails(true, true, causes.get())
+                        }
+                    }
+                    return Some((closed.value.return_type(), Vec::new()));
                 }
                 self.warm_flow_return_read(key)
                     .map(|result| (result.return_type(), Vec::new()))

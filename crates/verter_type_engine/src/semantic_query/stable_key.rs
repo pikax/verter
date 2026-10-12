@@ -1507,7 +1507,7 @@ fn encode_data(graph: &SemanticGraphStore, id: SemanticNodeId, data: &SemanticNo
                 SignatureReturnCarrier::Declared(node) => {
                     enc.child_unless_same(*node, return_hole, &[3, 1]);
                 }
-                SignatureReturnCarrier::Function(_) => {
+                SignatureReturnCarrier::Function(_) | SignatureReturnCarrier::DeferredFlow(_) => {
                     enc.u8(3);
                     encode_return_carrier(&mut enc, return_carrier);
                 }
@@ -1819,6 +1819,22 @@ fn encode_body_step(enc: &mut Recipe, step: TypeBodyPathStep) {
 /// declared annotation's locator, a body-derived position, or nothing.
 fn encode_return_carrier(enc: &mut Recipe, carrier: &SignatureReturnCarrier) {
     match carrier {
+        SignatureReturnCarrier::DeferredFlow(source) => {
+            enc.u8(3);
+            enc.u32(source.bindings().len() as u32);
+            for (name, image) in source.bindings() {
+                enc.str(name);
+                enc.child(*image);
+            }
+            enc.bool(source.receiver().is_some());
+            if let Some(receiver) = source.receiver() {
+                enc.child(receiver);
+            }
+            encode_return_carrier(
+                enc,
+                &SignatureReturnCarrier::Function(source.source().clone()),
+            );
+        }
         SignatureReturnCarrier::Declared(node) => {
             enc.u8(1);
             enc.child(*node);

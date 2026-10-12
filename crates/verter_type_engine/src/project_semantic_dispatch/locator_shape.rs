@@ -2287,21 +2287,25 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         canonical: &str,
         ctx: &ShapeLowerCtx<'_>,
     ) -> SemanticNodeId {
-        let value = self.resolve_carrier_subject_node(
-            carrier,
-            crate::semantic_query::ProjectionReductionContext::published(
-                crate::semantic_query::ProjectionMode::Navigate,
-            ),
-        );
         let bind = |name: &str| match ctx.lookup_binder(name) {
             Some(BinderSlot::Usable(binder)) => Some(binder),
             _ => None,
         };
-        let rebound = self.rebind_flow_return_binders(value, canonical, bind);
-        if rebound == value {
+        let read = self.observe_read(|| {
+            let value = self.resolve_carrier_subject_node(
+                carrier,
+                crate::semantic_query::ProjectionReductionContext::published(
+                    crate::semantic_query::ProjectionMode::Navigate,
+                ),
+            );
+            let rebound = self.rebind_flow_return_binders(value, canonical, bind);
+            (value, rebound)
+        });
+        if read.value().0 == read.value().1 {
+            let _ = read.discard();
             carrier
         } else {
-            rebound
+            read.adopt(self).map_or(carrier, |(_, rebound)| rebound)
         }
     }
 
@@ -2350,19 +2354,37 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         };
         match scope_canonical {
             Some(scope_canonical) => {
-                let carrier = crate::semantic_query::SignatureReturnCarrier::Function(
+                let mut carrier = crate::semantic_query::SignatureReturnCarrier::Function(
                     verter_type_expr::facts::FunctionReturnSource::Flow(identity.clone()),
                 );
-                let return_type = match self.execute_function_return_source(
-                    &verter_type_expr::facts::FunctionReturnSource::Flow(identity),
-                    scope_canonical.as_ref(),
-                ) {
-                    super::flow_return::FunctionReturnNode::Flow(result) => {
-                        inferred_predicate = result.inferred_predicate();
-                        result.return_type()
-                    }
-                    _ => graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
-                };
+                // The structural signature owns the return SOURCE, not a
+                // demand for its value. An eager exact result is reusable;
+                // a refused/unfinished probe is declined and the carrier
+                // remains the authority when a consumer demands the return.
+                let return_type =
+                    match self.probe_signature_flow_return(&identity, scope_canonical.as_ref()) {
+                        super::flow_return_fact::SignatureReturnProbe::Evaluated(result) => {
+                            inferred_predicate = result.inferred_predicate();
+                            result.return_type()
+                        }
+                        super::flow_return_fact::SignatureReturnProbe::Deferred(source) => {
+                            let mut images = FxHashMap::default();
+                            for frame in inner_ctx.binders.innermost_first() {
+                                for (name, slot) in &frame.names {
+                                    images.entry(Arc::clone(name)).or_insert(*slot);
+                                }
+                            }
+                            let source = source.with_bindings(images.into_iter().filter_map(
+                                |(name, slot)| match slot {
+                                    BinderSlot::Usable(node) => Some((name, node)),
+                                    BinderSlot::ShadowOnly => None,
+                                },
+                            ));
+                            carrier =
+                                crate::semantic_query::SignatureReturnCarrier::DeferredFlow(source);
+                            graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss))
+                        }
+                    };
                 // An enclosing parameter the body reads rebinds to
                 // this lowering's binder for it, so the receiver's
                 // instantiation reaches the return (see

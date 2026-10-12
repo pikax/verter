@@ -332,6 +332,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         check: SemanticNodeId,
         extends: SemanticNodeId,
     ) -> Option<QueryBuildOutput> {
+        self.probe_optional(|| self.probe_named_error_operand(check, extends))
+    }
+
+    fn probe_named_error_operand(
+        &self,
+        check: SemanticNodeId,
+        extends: SemanticNodeId,
+    ) -> Option<QueryBuildOutput> {
         let named = |operand: SemanticNodeId| {
             matches!(
                 self.graph().node_data(operand).as_deref(),
@@ -350,12 +358,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             .into_iter()
             .filter(|operand| named(*operand))
             .find_map(|operand| {
-                let resolved = self
-                    .normalize_node_for_structural_fact_demand(
-                        operand,
-                        crate::semantic_query::ProjectionReductionContext::structural_transit(),
-                    )
-                    .into_usable_node()?;
+                let resolved = self.resolved_conditional_operand(operand)?;
                 matches!(self.peek_special(resolved), Some((SpecialKind::Error, _)))
                     .then_some(resolved)
             })

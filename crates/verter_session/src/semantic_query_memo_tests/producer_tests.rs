@@ -134,6 +134,10 @@ fn a_producer_belongs_to_its_task_and_a_subscription_waits_when_its_holder_choos
     let QueryResult::Value(value) = produced.value else {
         panic!("the producer completes with its value");
     };
+    assert_eq!(
+        produced.fact_status,
+        verter_type_engine::semantic_query::FactStatus::Complete
+    );
 
     let mut capture = ReadCapture::default();
     match subscription.wait(
@@ -143,6 +147,7 @@ fn a_producer_belongs_to_its_task_and_a_subscription_waits_when_its_holder_choos
         &mut capture,
     ) {
         Joined::Read(read) => {
+            assert_eq!(read.fact_status, produced.fact_status);
             assert!(
                 matches!(read.value, QueryResult::Value(joined) if joined == value),
                 "the subscriber reads the producer's value"
@@ -160,6 +165,53 @@ fn a_producer_belongs_to_its_task_and_a_subscription_waits_when_its_holder_choos
     assert_eq!(store.stats_snapshot().joined_waits, 1);
     drop((first, second));
     assert_eq!(store.wait_graph_counts_for_tests(), (0, 0));
+}
+
+#[test]
+fn an_unavailable_producer_broadcasts_its_fact_without_a_candidate_value() {
+    use verter_type_engine::semantic_query::{FactStatus, PartialReasonSet, QueryError};
+    let (host, hash) = keyed_host();
+    let store = SemanticGraphStore::new();
+    let owner = store.task_registry_for_tests().register_task();
+    let follower = store.task_registry_for_tests().register_task();
+    let (claimed, _) = claim(&store, &host, &owner);
+    let Claim::Produce(lease) = claimed else {
+        panic!("cold owner must produce")
+    };
+    let (subscribed, mut attempt) = claim(&store, &host, &follower);
+    let Claim::Subscribed(subscription) = subscribed else {
+        panic!("follower must subscribe")
+    };
+    let mut output = keyed_output(&store, hash);
+    output.add_partial_reasons(PartialReasonSet::MISSING_DEPENDENCY);
+    output.cache_suppress = true;
+    let receipt = lease.fixture_receipt();
+    let mut settled = lease
+        .settle(&host, host.request_flags(), output, Some(receipt))
+        .expect("valid unfinished execution settles");
+    let mut capture = ReadCapture::default();
+    settled
+        .admit(&host, host.request_flags(), &mut capture)
+        .unwrap();
+    let produced = settled.complete(&host, &mut capture);
+    let Joined::Read(joined) =
+        subscription.wait(&host, host.request_flags(), &mut attempt, &mut capture)
+    else {
+        panic!("same-view priced follower must receive the fact")
+    };
+    assert_eq!(produced.fact_status, joined.fact_status);
+    for read in [produced, joined] {
+        assert!(matches!(read.fact_status, FactStatus::Unavailable(_)));
+        assert!(matches!(
+            read.value,
+            QueryResult::Error(QueryError::IncompleteSemanticOperand { .. })
+        ));
+        assert!(read.result_is_partial() && read.cache_suppress);
+        assert!(read
+            .partial_reasons()
+            .contains(PartialReasonSet::MISSING_DEPENDENCY));
+    }
+    assert_eq!(store.slot_candidate_count_for_tests(&key()), 0);
 }
 
 /// A producer whose demand ran out of its allowance completes its flight
@@ -201,7 +253,7 @@ fn a_subscriber_never_takes_another_demands_unpriced_partial() {
             .admit(&host, flags, &mut capture)
             .expect("an uncancelled producer completes");
         let read = settled.complete(&host, &mut capture);
-        assert!(read.result_is_partial && read.receipt.priced().is_none());
+        assert!(read.result_is_partial() && read.receipt.priced().is_none());
     }
 
     let mut capture = ReadCapture::default();

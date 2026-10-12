@@ -322,7 +322,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             self.project_generation_signature(),
                         )
                             .into();
-                        return output.with_observed_self_roots(observed_self_roots);
+                        return output.with_observed_self_roots(observed_self_roots).with_positional_guarantee();
                     }
                 }
                 let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput = (
@@ -556,7 +556,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             self.project_generation_signature(),
         )
             .into();
-        output.with_observed_self_roots(observed_self_roots)
+        output
+            .with_observed_self_roots(observed_self_roots)
+            .with_positional_guarantee()
     }
 
     /// Empty-path value `DeclBody` locators address the binding's type

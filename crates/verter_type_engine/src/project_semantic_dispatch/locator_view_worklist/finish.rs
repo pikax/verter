@@ -622,6 +622,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                     source.clone(),
                                 )
                             }
+                            crate::semantic_query::SignatureReturnCarrier::DeferredFlow(source) => {
+                                crate::semantic_query::SignatureReturnCarrier::DeferredFlow(source.clone())
+                            }
                         },
                         signature_span: *signature_span,
                         return_type_span: *return_type_span,

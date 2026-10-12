@@ -414,7 +414,7 @@ mod carrier {
                 // vault).
                 type_expr: OutputTypeExpr(self.type_expr.0.clone_payload()),
                 dep_signature: self.dep_signature.clone(),
-                result_is_partial: self.result_is_partial,
+                result_is_partial: self.result_is_partial(),
             }
         }
     }

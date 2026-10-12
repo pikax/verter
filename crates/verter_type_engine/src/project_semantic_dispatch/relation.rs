@@ -3532,17 +3532,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
                 no_value => no_value,
             };
-            // The VALUE channel: every member whose close produced an
-            // evaluated value records it for the shared return equation's
-            // override reads — proven or not. Admission is the proof
-            // typing below, never this channel.
-            if let FlowReturnPendingOutcome::EvaluatedValue(result) = &outcome {
-                self.dispatch_txn
-                    .borrow_mut()
-                    .flow
-                    .closed_values
-                    .push((member.key.clone(), result.clone()));
-            }
             let verdict = match &outcome {
                 FlowReturnPendingOutcome::EvaluatedValue(result) => {
                     // The member's OWN evaluation provenance, carried
@@ -3565,6 +3554,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     None
                 }
             };
+            // The value channel owns the finalized disposition, its source
+            // roots and reuse refusal before any equation can consume it.
+            if let FlowReturnPendingOutcome::EvaluatedValue(result) = &outcome {
+                let result = self.flow_value_at_close(
+                    result.clone(),
+                    &verdict,
+                    member_plan_refusal,
+                    crate::semantic_query::PartialReasonSet::default(),
+                );
+                self.record_closed_flow_value(
+                    member.key.clone(),
+                    result,
+                    &verdict,
+                    member.self_roots.clone(),
+                );
+            }
             match verdict {
                 Some(super::flow_solve::FlowSolveOutcome::Complete(proof)) => {
                     proven_flow_members.push(super::dispatch_txn::CompletedFlowReturnMember {
@@ -7568,7 +7573,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             pending: None,
         };
         let read = self.execute_read(key);
-        if read.result_is_partial {
+        if read.result_is_partial() {
             return None;
         }
         match read.value {

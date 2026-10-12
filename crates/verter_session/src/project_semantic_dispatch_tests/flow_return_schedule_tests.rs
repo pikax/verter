@@ -251,9 +251,9 @@ fn a_deep_chain_over_a_reduced_budget_ends_on_the_work_rail() {
                 .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key)));
             (
                 (
-                    read.result_is_partial,
+                    read.result_is_partial(),
                     read.cache_suppress,
-                    read.partial_reasons,
+                    read.partial_reasons(),
                 ),
                 dispatch.connected_demand().work_used_for_tests(),
                 candidates,
@@ -720,8 +720,8 @@ fn warm_second(source: &str, scheduled: bool) -> WarmSecond {
         WarmSecond {
             warm,
             value,
-            partial: read.result_is_partial && read.cache_suppress,
-            reasons: read.partial_reasons,
+            partial: read.result_is_partial() && read.cache_suppress,
+            reasons: read.partial_reasons(),
             candidates,
             work,
         }
@@ -746,8 +746,8 @@ fn unscheduled_plain_chain(levels: usize) -> (bool, bool, PartialReasonSet, usiz
                 .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key)));
             (
                 matches!(read.value, QueryResult::Value(_)),
-                read.result_is_partial && read.cache_suppress,
-                read.partial_reasons,
+                read.result_is_partial() && read.cache_suppress,
+                read.partial_reasons(),
                 candidates,
             )
         })
@@ -881,8 +881,8 @@ fn cold_read(
     };
     ColdRead {
         printed,
-        partial: read.result_is_partial,
-        reasons: read.partial_reasons,
+        partial: read.result_is_partial(),
+        reasons: read.partial_reasons(),
         candidates,
         work,
     }

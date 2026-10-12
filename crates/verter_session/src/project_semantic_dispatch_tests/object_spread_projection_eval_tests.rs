@@ -2959,7 +2959,7 @@ fn empty_path_shallow_over_open_program_root_returns_open_typed_evidence() {
         graph.node_data(node)
     );
     assert!(
-        read.result_is_partial,
+        read.result_is_partial(),
         "the open-root read is genuinely partial"
     );
     assert!(
@@ -3028,7 +3028,7 @@ fn empty_path_shallow_over_correlated_program_merges_closed_alternatives() {
         .collect();
     assert_eq!(names, vec!["c"], "the common member of both alternatives");
     assert!(
-        !read.result_is_partial && !read.cache_suppress,
+        !read.result_is_partial() && !read.cache_suppress,
         "every alternative closed: the merged surface is complete and cacheable"
     );
 }
@@ -3115,7 +3115,7 @@ fn empty_path_shallow_over_union_with_program_arm_projects_the_arm() {
         graph.node_data(terminal)
     );
     assert!(
-        read.result_is_partial && read.cache_suppress,
+        read.result_is_partial() && read.cache_suppress,
         "a union with an open program arm must flag the read partial + uncacheable"
     );
 }
@@ -3173,7 +3173,7 @@ fn empty_path_shallow_over_intersection_with_open_program_arm_keeps_the_carrier(
          observed {:?}",
         graph.node_data(terminal)
     );
-    assert!(read.result_is_partial && read.cache_suppress);
+    assert!(read.result_is_partial() && read.cache_suppress);
 }
 
 /// The shared typeinfo surface reader never hands out a
@@ -3283,7 +3283,7 @@ fn empty_path_shallow_over_program_root_failure_is_typed_partial() {
         "a failed program-root projection must not publish any closed Object"
     );
     assert!(
-        read.result_is_partial && read.cache_suppress,
+        read.result_is_partial() && read.cache_suppress,
         "the failure path is typed partial + uncacheable"
     );
 }
@@ -4252,7 +4252,7 @@ fn keyof_over_program_base_enumerates_closed_and_defers_open() {
     names.sort();
     assert_eq!(names, vec!["a".to_string(), "b".to_string()]);
     assert!(
-        !read.result_is_partial && !read.cache_suppress,
+        !read.result_is_partial() && !read.cache_suppress,
         "the exact closed keyspace is a complete, admissible value"
     );
 

@@ -2830,6 +2830,10 @@ fn hash_shallow_identity<H: std::hash::Hasher>(data: &SemanticNodeData, hasher: 
                     1u8.hash(hasher);
                     source.hash(hasher);
                 }
+                SignatureReturnCarrier::DeferredFlow(source) => {
+                    2u8.hash(hasher);
+                    source.hash(hasher);
+                }
             }
         }
         D::MergedDecl { contributors } => contributors.len().hash(hasher),
@@ -3569,6 +3573,14 @@ fn compare_shallow(
                         return false;
                     }
                 }
+                (
+                    SignatureReturnCarrier::DeferredFlow(a),
+                    SignatureReturnCarrier::DeferredFlow(b),
+                ) => {
+                    if a != b {
+                        return false;
+                    }
+                }
                 _ => return false,
             }
             // A parameter written as a literal type makes the signature a
@@ -4139,8 +4151,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispat
             dep_signature: read.dep_signature,
             walker_diagnostics: read.walker_diagnostics,
             cache_suppress: read.cache_suppress || !value.is_decided() || defensive,
-            result_is_partial: read.result_is_partial || defensive,
-            partial_reasons,
+            fact_status: if defensive {
+                crate::semantic_query::FactStatus::unavailable(partial_reasons)
+            } else {
+                read.fact_status
+            },
             receipt: read.receipt,
         }
     }

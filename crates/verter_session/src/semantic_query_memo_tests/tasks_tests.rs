@@ -91,7 +91,7 @@ fn run_real_singleflight_cycle(task_count: usize) {
                             _,
                         > = (nested.value, nested.dep_signature).into();
                         output.cache_suppress = nested.cache_suppress;
-                        output.fold_partial(nested.result_is_partial);
+                        output.merge_completeness(nested.fact_status.completeness());
                         output
                     },
                 )
@@ -107,7 +107,7 @@ fn run_real_singleflight_cycle(task_count: usize) {
             read.value
         );
         assert!(
-            read.cache_suppress && read.result_is_partial,
+            read.cache_suppress && read.result_is_partial(),
             "cycle task must remain ReturnOnly + partial"
         );
     }

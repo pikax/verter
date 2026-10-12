@@ -46,6 +46,7 @@ pub(super) struct DeclBodyProjection {
     substitution_checkpoint: usize,
     memo: ViewMemo,
     completeness: ResultCompleteness,
+    extent: super::locator_view_worklist::ProjectionExtent,
     plan: BodyPlan,
     run: Option<ProjectionRun>,
     seam: ProjectionSeam,
@@ -462,6 +463,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             substitution_checkpoint,
             memo: ViewMemo::default(),
             completeness: ResultCompleteness::Complete,
+            extent: super::locator_view_worklist::ProjectionExtent::Projected,
             plan,
             run: None,
             seam,
@@ -496,6 +498,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         projection.run = None;
                         projection.completeness =
                             projection.completeness.merge(outcome.completeness);
+                        projection.extent = projection.extent.join(outcome.extent);
                         projection.feed(outcome.node);
                     }
                 }
@@ -516,6 +519,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         Err(outcome) => {
                             projection.completeness =
                                 projection.completeness.merge(outcome.completeness);
+                            projection.extent = projection.extent.join(outcome.extent);
                             projection.feed(outcome.node);
                         }
                     }
@@ -527,11 +531,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         ProjectedViewOutcome {
                             node: projection.shape,
                             completeness: projection.completeness,
+                            extent: projection.extent,
                         }
                     } else {
                         ProjectedViewOutcome {
                             node: projected,
                             completeness: projection.completeness,
+                            extent: projection.extent,
                         }
                     });
                 }

@@ -140,6 +140,27 @@ export function subMemberConstAssert() {
   return { a: "s", b };
 }
 
+export function subIndependentLiteral() { return { selected: 1, sibling: notDeclared() }; }
+export function subConstructed() { class C { value = 1; } return new C(); }
+export function subConstructedTuple() { class C { value = 1; } return [new C(), new C()] as const; }
+export function subConstructedNamed(value: number) { class C { field = value; } return new C(); }
+export function subConstructedUnknown() { class C { field = notDeclared(); } return new C(); }
+export function subConstructedComputed(key: string) { class C { [key] = 1; } return new C(); }
+export function subConstructedBase() { class C extends notDeclared() { field = 1; } return new C(); }
+export function subConstructedClause<T>() { class C { field!: T; } return C; }
+export function subConstructedUnknownClause<T extends NotDeclared>() { class C { field!: T; } return C; }
+export function subConstructedForwardUnknownClause<U extends V, V extends NotDeclared>() { class C { field!: U; } return C; }
+export class StaticDemandSource { static bad = notDeclared(); value = 1; }
+export function subStaticConstruct() { return new StaticDemandSource(); }
+export function subStaticAddressed() { return StaticDemandSource.bad; }
+export function subIndependentParameter(value: number) { return { selected: value }; }
+export function subIndependentCall() { return { selected: notDeclared() }; }
+export function subIndependentOverride() { return { selected: 1, ...{ selected: 2 } }; }
+export function subIndependentControl(flag: boolean) {
+  if (flag) return { selected: 1 };
+  return { selected: 2 };
+}
+
 export function subMixedBareValue(flag: boolean) {
   if (flag) return 1;
   return;
@@ -575,9 +596,9 @@ fn assert_exhausted_follower_abort(
                                 "an exhausted follower must deliver a typed abort: {:?}",
                                 raw.value
                             );
-                            assert!(raw.cache_suppress && raw.result_is_partial);
+                            assert!(raw.cache_suppress && raw.result_is_partial());
                             assert!(raw
-                                .partial_reasons
+                                .partial_reasons()
                                 .contains(PartialReasonSet::SUPERSEDED_GENERATION));
                             if matches!(delivery, Follower::Raw) {
                                 assert!(
@@ -3428,6 +3449,248 @@ fn member_flow_key(
         ),
     };
     key
+}
+
+#[test]
+fn constructed_value_evidence_preserves_capture_refusal_and_its_roots() {
+    use verter_type_engine::request_context::{
+        current_cold_compute_completeness, ColdComputeCompletenessScope,
+    };
+    use verter_type_engine::semantic_query::{FactStatus, FlowReturnStep};
+    for name in [
+        "subConstructed",
+        "subConstructedTuple",
+        "subConstructedClause",
+    ] {
+        let host = make_host();
+        with_dispatch(&host, |dispatch| {
+            let key = flow_key(dispatch, name, FunctionPartIdentity::DeclarationBody, 0);
+            let FlowReturnStep::Complete(whole) = dispatch.execute_flow_return(key) else {
+                panic!("the whole return is evaluated");
+            };
+            assert!(
+                matches!(whole.fact().status(), FactStatus::Approximate(_)),
+                "{name}: full capture proof remains refused"
+            );
+            let source = verter_type_expr::facts::FunctionReturnSource::Flow(
+                verter_type_expr::facts::FlowFunctionReturnIdentity {
+                    anchor: verter_type_expr::locators::AuthoredAnchor {
+                        canonical_id: Arc::from(CANONICAL),
+                        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                        symbol: Arc::from(name),
+                        space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+                    },
+                    function_part: FunctionPartIdentity::DeclarationBody,
+                    overload_ordinal: 0,
+                },
+            );
+            for _ in 0..2 {
+                let quality = ColdComputeCompletenessScope::enter();
+                let frame =
+                    verter_type_engine::project_semantic_dispatch::BuildLocalTaintGuard::push(
+                        &dispatch.build_local_taint,
+                    );
+                let result = dispatch.execute_function_return_source(&source, CANONICAL);
+                let observed = frame.finish();
+                assert!(matches!(
+                    result,
+                    super::flow_return::FunctionReturnNode::Flow(_)
+                ));
+                assert!(
+                    !current_cold_compute_completeness().is_partial(),
+                    "{name}: constructed type owns its exact evidence"
+                );
+                quality.discard();
+                assert!(observed.cache_suppress && !observed.result_is_partial);
+                assert!(observed
+                    .observed_self_roots
+                    .iter()
+                    .any(|(canonical, _)| canonical.as_ref() == CANONICAL));
+            }
+        });
+    }
+}
+
+#[test]
+fn constructor_source_navigation_preserves_unread_static_value_sources() {
+    use verter_type_engine::semantic_query::FlowReturnStep;
+    let host = make_host();
+    for name in ["subStaticConstruct", "subStaticAddressed"] {
+        with_dispatch(&host, |dispatch| {
+            let key = flow_key(dispatch, name, FunctionPartIdentity::DeclarationBody, 0);
+            for _ in 0..2 {
+                match dispatch.execute_flow_return(key.clone()) {
+                    FlowReturnStep::Complete(result) => {
+                        assert_eq!(result.fact().status().is_complete(), name == "subStaticConstruct",
+                            "constructor structure does not consume an unread static value; its actual value demand retains the gap");
+                    }
+                    FlowReturnStep::NoValue(_) if name == "subStaticAddressed" => {}
+                    _ => panic!("{name}: the constructor completes and an unsupported addressed value stays incomplete"),
+                }
+            }
+        });
+    }
+}
+
+#[test]
+fn constructed_value_evidence_withholds_unsupported_source_operands_and_execution() {
+    use verter_type_engine::request_context::{
+        current_cold_compute_completeness, ColdComputeCompletenessScope,
+    };
+    for name in [
+        "subConstructedNamed",
+        "subConstructedUnknown",
+        "subConstructedComputed",
+        "subConstructedBase",
+        "subConstructedUnknownClause",
+        "subConstructedForwardUnknownClause",
+    ] {
+        let host = make_host();
+        with_dispatch(&host, |dispatch| {
+            let source = verter_type_expr::facts::FunctionReturnSource::Flow(
+                verter_type_expr::facts::FlowFunctionReturnIdentity {
+                    anchor: verter_type_expr::locators::AuthoredAnchor {
+                        canonical_id: Arc::from(CANONICAL),
+                        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                        symbol: Arc::from(name),
+                        space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+                    },
+                    function_part: FunctionPartIdentity::DeclarationBody,
+                    overload_ordinal: 0,
+                },
+            );
+            let quality = ColdComputeCompletenessScope::enter();
+            let _result = dispatch.execute_function_return_source(&source, CANONICAL);
+            assert!(
+                current_cold_compute_completeness().is_partial(),
+                "{name}: unsupported operands cannot certify a constructed type"
+            );
+            quality.discard();
+        });
+    }
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let _short = super::flow_return::flow_admission_fault_injection::Guard::arm(
+            &host.flow_fault_injection.short_execution_ledger,
+        );
+        let source = verter_type_expr::facts::FunctionReturnSource::Flow(
+            verter_type_expr::facts::FlowFunctionReturnIdentity {
+                anchor: verter_type_expr::locators::AuthoredAnchor {
+                    canonical_id: Arc::from(CANONICAL),
+                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    symbol: Arc::from("subConstructed"),
+                    space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+                },
+                function_part: FunctionPartIdentity::DeclarationBody,
+                overload_ordinal: 0,
+            },
+        );
+        let quality = ColdComputeCompletenessScope::enter();
+        let _result = dispatch.execute_function_return_source(&source, CANONICAL);
+        assert!(
+            current_cold_compute_completeness().is_partial(),
+            "a short actual walk cannot mint constructed-value evidence"
+        );
+        quality.discard();
+    });
+}
+
+#[test]
+fn an_independent_member_value_keeps_the_whole_return_refusal() {
+    use super::flow_return::flow_admission_fault_injection as inject;
+    use verter_type_engine::request_context::{
+        current_cold_compute_completeness, ColdComputeCompletenessScope,
+    };
+    use verter_type_engine::semantic_query::{
+        FactStatus, FlowReturnStep, PathSegment, PropertyKey, ScopeId, ValueRootKey,
+    };
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let _zero = inject::Guard::arm(&host.flow_fault_injection.zero_obligation_budget);
+        let key = flow_key(
+            dispatch,
+            "subIndependentLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let FlowReturnStep::Complete(whole) = dispatch.execute_flow_return(key) else {
+            panic!("the independently evaluated whole return remains usable")
+        };
+        assert!(matches!(whole.fact().status(), FactStatus::Approximate(_)));
+        let callee = dispatch.graph().intern_node(SemanticNodeData::new_typeof(
+            ValueRootKey {
+                scope: ScopeId::file(
+                    Arc::from(CANONICAL),
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                ),
+                name: Arc::from("subIndependentLiteral"),
+            },
+            Arc::from([]),
+            Arc::from([]),
+        ));
+        let quality = ColdComputeCompletenessScope::enter();
+        let frame = verter_type_engine::project_semantic_dispatch::BuildLocalTaintGuard::push(
+            &dispatch.build_local_taint,
+        );
+        let node = dispatch
+            .flow_return_member_projection(
+                callee,
+                &PathSegment::Member(PropertyKey::identifier("selected")),
+            )
+            .expect("the completed literal member owns independent evidence");
+        let observed = frame.finish();
+        assert!(!current_cold_compute_completeness().is_partial());
+        quality.discard();
+        assert!(matches!(
+            dispatch.graph().node_data(node).as_deref(),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Number))
+        ));
+        assert!(!observed.result_is_partial && observed.cache_suppress);
+        assert!(observed
+            .observed_self_roots
+            .iter()
+            .any(|(canonical, _)| canonical.as_ref() == CANONICAL));
+    });
+}
+
+#[test]
+fn independent_member_evidence_withholds_named_controlled_and_overridden_values() {
+    use super::flow_return::flow_admission_fault_injection as inject;
+    use verter_type_engine::request_context::{
+        current_cold_compute_completeness, ColdComputeCompletenessScope,
+    };
+    use verter_type_engine::semantic_query::{PathSegment, PropertyKey, ScopeId, ValueRootKey};
+    for (name, consumed) in [
+        ("subIndependentParameter", true),
+        ("subIndependentControl", true),
+        ("subIndependentCall", false),
+        ("subIndependentOverride", false),
+    ] {
+        let host = make_host();
+        with_dispatch(&host, |dispatch| {
+            let _zero = inject::Guard::arm(&host.flow_fault_injection.zero_obligation_budget);
+            let callee = dispatch.graph().intern_node(SemanticNodeData::new_typeof(
+                ValueRootKey {
+                    scope: ScopeId::file(
+                        Arc::from(CANONICAL),
+                        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    ),
+                    name: Arc::from(name),
+                },
+                Arc::from([]),
+                Arc::from([]),
+            ));
+            let quality = ColdComputeCompletenessScope::enter();
+            let node = dispatch.flow_return_member_projection(
+                callee,
+                &PathSegment::Member(PropertyKey::identifier("selected")),
+            );
+            assert_eq!(node.is_some(), consumed, "{name}");
+            assert_eq!(current_cold_compute_completeness().is_partial(), consumed,
+                "{name}: a usable unproven value keeps its quality; a declined probe contributes none");
+            quality.discard();
+        });
+    }
 }
 
 /// Whether any dispatched key under the capture names `needle` (the
@@ -6380,15 +6643,15 @@ fn declined_member_projection_probe_leaks_no_partial_into_the_enclosing_build() 
             read.value
         );
         assert!(
-            read.result_is_partial && read.cache_suppress,
+            read.result_is_partial() && read.cache_suppress,
             "a direct member-demand consumer keeps the no-surface rails"
         );
         assert!(
-            read.partial_reasons.contains(
+            read.partial_reasons().contains(
                 verter_type_engine::semantic_query::PartialReasonSet::FLOW_RETURN_NO_SURFACE
             ),
             "the decline rides the no-surface class, got {:?}",
-            read.partial_reasons
+            read.partial_reasons()
         );
     });
 }
@@ -6791,14 +7054,14 @@ fn pending_flow_roots_surface_their_operation_specific_gap() {
                 read.value
             );
             assert!(
-                read.result_is_partial && read.cache_suppress,
+                read.result_is_partial() && read.cache_suppress,
                 "a pending typed-gap root is a typed partial, ReturnOnly"
             );
             assert!(
-                read.partial_reasons
+                read.partial_reasons()
                     .contains(PartialReasonSet::FLOW_RETURN_NO_SURFACE),
                 "the no-surface partial class, got {:?}",
-                read.partial_reasons
+                read.partial_reasons()
             );
             assert!(
                 read.walker_diagnostics
@@ -6840,14 +7103,14 @@ fn flow_root_proof_gate_veto_marks_the_read_partial() {
             read.value
         );
         assert!(
-            read.result_is_partial && read.cache_suppress,
+            read.result_is_partial() && read.cache_suppress,
             "the proof-gate veto marks the read partial + suppressed"
         );
         assert!(
-            read.partial_reasons
+            read.partial_reasons()
                 .contains(PartialReasonSet::FLOW_RETURN_UNVERIFIED),
             "the veto records the unverified class, got {:?}",
-            read.partial_reasons
+            read.partial_reasons()
         );
         assert_eq!(
             dispatch
@@ -6900,23 +7163,23 @@ fn obligation_budget_refusal_takes_the_faulting_request_class() {
             read.value
         );
         assert!(
-            read.result_is_partial && read.cache_suppress,
+            read.result_is_partial() && read.cache_suppress,
             "the budget refusal marks the read partial + suppressed"
         );
         assert!(
-            read.partial_reasons
+            read.partial_reasons()
                 .contains(PartialReasonSet::BUDGET_EXCEEDED),
             "a budget edge is a statement about the request and takes the faulting class, \
              got {:?}",
-            read.partial_reasons
+            read.partial_reasons()
         );
         assert!(
             !read
-                .partial_reasons
+                .partial_reasons()
                 .contains(PartialReasonSet::FLOW_RETURN_UNVERIFIED),
             "the refusal must not ride the contained degraded-success class every macro \
              projection lane publishes through, got {:?}",
-            read.partial_reasons
+            read.partial_reasons()
         );
         assert_eq!(
             dispatch
@@ -10320,24 +10583,24 @@ fn refused_member_cause_reaches_the_root_that_consumed_its_value() {
                     "{label} armed={armed}: the root build ran and drained the injected member"
                 );
                 assert!(
-                    read.result_is_partial && read.cache_suppress,
+                    read.result_is_partial() && read.cache_suppress,
                     "{label} armed={armed}: the refused batch keeps the root non-admissible"
                 );
                 assert_eq!(
-                    read.partial_reasons
+                    read.partial_reasons()
                         .contains(PartialReasonSet::UNSTABLE_STATE),
                     armed,
                     "{label} armed={armed}: the member's refusal must reach the root's rails \
                      as the faulting class it is — and must not appear when no member \
                      recorded a cause, got {:?}",
-                    read.partial_reasons
+                    read.partial_reasons()
                 );
                 assert!(
-                    read.partial_reasons
+                    read.partial_reasons()
                         .contains(PartialReasonSet::FLOW_RETURN_UNVERIFIED),
                     "{label} armed={armed}: the refused batch always rides the unverified \
                      class too — the member set is incomplete either way, got {:?}",
-                    read.partial_reasons
+                    read.partial_reasons()
                 );
                 assert_eq!(
                     graph.slot_candidate_count_for_tests(&query_key),
@@ -10400,22 +10663,22 @@ fn unserved_demand_site_takes_the_transient_class() {
             read.value
         );
         assert!(
-            read.result_is_partial && read.cache_suppress,
+            read.result_is_partial() && read.cache_suppress,
             "the refused preparation keeps the read partial + suppressed"
         );
         assert!(
-            read.partial_reasons
+            read.partial_reasons()
                 .contains(PartialReasonSet::UNSTABLE_STATE),
             "a torn prepare-time read is transient and takes the faulting class, got {:?}",
-            read.partial_reasons
+            read.partial_reasons()
         );
         assert!(
             !read
-                .partial_reasons
+                .partial_reasons()
                 .contains(PartialReasonSet::FLOW_RETURN_UNVERIFIED),
             "the transient read must not ride the contained class every macro projection \
              lane publishes through, got {:?}",
-            read.partial_reasons
+            read.partial_reasons()
         );
         assert_eq!(
             dispatch
@@ -10470,7 +10733,7 @@ fn assert_flow_unverified_rails(
 
 /// SEAM — the RELATION machinery root. An unproven flow member drained
 /// at the root's close turns the decided verdict into
-/// `DecidedReturnOnly`: the payload still reaches the caller, the build
+/// `DecidedReturnOnly`: the unproven scalar payload is withheld, the build
 /// folds the flow-unverified ReturnOnly rails, the relation family slot
 /// admits NOTHING, and the next request runs the build again (the slot
 /// is consumed a second time). The unarmed control admits once. The
@@ -10500,15 +10763,19 @@ fn unproven_flow_member_makes_relation_root_decided_return_only() {
             assert!(
                 matches!(
                     read.value,
-                    QueryResult::Value(SemanticQueryValue::Relation(_))
+                    QueryResult::Error(QueryError::IncompleteSemanticOperand { .. })
                 ),
-                "request {request}: the decided verdict still flows to the caller, got {:?}",
+                "request {request}: an unproven judgment without a bounded interpretation is withheld, got {:?}",
                 read.value
             );
+            assert!(matches!(
+                read.fact_status,
+                verter_type_engine::semantic_query::FactStatus::Unavailable(_)
+            ));
             assert_flow_unverified_rails(
-                read.result_is_partial,
+                read.result_is_partial(),
                 read.cache_suppress,
-                read.partial_reasons,
+                read.partial_reasons(),
                 &format!("request {request}: relation root"),
             );
             assert_eq!(
@@ -10529,7 +10796,7 @@ fn unproven_flow_member_makes_relation_root_decided_return_only() {
             read.value
         );
         assert!(
-            !read.result_is_partial && !read.cache_suppress,
+            !read.result_is_partial() && !read.cache_suppress,
             "control: an unpoisoned root keeps the clean rails"
         );
         assert_eq!(
@@ -10595,11 +10862,26 @@ fn unproven_flow_member_makes_call_root_complete_return_only() {
             read.value
         );
         assert_flow_unverified_rails(
-            read.result_is_partial,
+            read.result_is_partial(),
             read.cache_suppress,
-            read.partial_reasons,
+            read.partial_reasons(),
             "call root",
         );
+        let fact = read.into_fact().expect("the refused proof is not an abort");
+        assert!(
+            fact.exact().is_none(),
+            "provisional selection supplies no exact proof"
+        );
+        let verter_type_engine::semantic_query::FactResult::Approximate {
+            value: SemanticQueryValue::ResolveCall(call),
+            ..
+        } = fact
+        else {
+            panic!("a completed call retains its evaluated return positions")
+        };
+        assert!(matches!(call.as_ref(),
+            verter_type_engine::semantic_query::ResolvedCallResult::Selected { return_type, .. }
+                if *return_type == number));
         assert_eq!(
             graph.slot_candidate_count_for_tests(&query_key),
             0,
@@ -10627,8 +10909,12 @@ fn unproven_flow_member_makes_call_root_complete_return_only() {
             read.value
         );
         assert!(
-            !read.result_is_partial && !read.cache_suppress,
+            !read.result_is_partial() && !read.cache_suppress,
             "control: an unpoisoned root keeps the clean rails"
+        );
+        assert!(
+            read.fact_status.is_complete(),
+            "control: selection is exact"
         );
         assert_eq!(
             graph.slot_candidate_count_for_tests(&query_key),
@@ -10682,9 +10968,9 @@ fn unproven_flow_member_withholds_flow_root_verdict() {
             "the root's own value is usable — only its proof is withheld"
         );
         assert_flow_unverified_rails(
-            read.result_is_partial,
+            read.result_is_partial(),
             read.cache_suppress,
-            read.partial_reasons,
+            read.partial_reasons(),
             "flow root",
         );
         assert_eq!(
@@ -10708,7 +10994,7 @@ fn unproven_flow_member_withholds_flow_root_verdict() {
             read.value
         );
         assert!(
-            !read.result_is_partial && !read.cache_suppress,
+            !read.result_is_partial() && !read.cache_suppress,
             "control: an unpoisoned root keeps the clean rails"
         );
         assert_eq!(
@@ -12417,8 +12703,8 @@ pub(super) fn flow_reads_without_proof(source: &str, names: &[&str]) -> Vec<Stri
                 result_contract: super::flow_solve::flow_return_result_contract_id(),
             };
             let read = dispatch.execute_read(SemanticQueryKey::FlowReturn(Box::new(key)));
-            if read.result_is_partial {
-                unproven.push(format!("{name}: {:?}", read.partial_reasons));
+            if read.result_is_partial() {
+                unproven.push(format!("{name}: {:?}", read.partial_reasons()));
             }
         });
     }

@@ -66,9 +66,10 @@ pub enum FactResult<T> {
 }
 
 /// The status of a [`FactResult`], without its value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FactStatus {
     /// The exact demanded fact.
+    #[default]
     Complete,
     /// A bounded approximation, and why.
     Approximate(NonEmptyReasons),
@@ -251,6 +252,56 @@ pub fn root_narrowing_fact(domain: &FactStatus, required: &[FactStatus]) -> Fact
 }
 
 impl FactStatus {
+    /// Strict dependent composition of two adopted facts.
+    pub fn join(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Complete, right) => right,
+            (left, Self::Complete) => left,
+            (Self::Approximate(left), Self::Approximate(right)) => {
+                Self::Approximate(left.union(right))
+            }
+            (Self::Unavailable(left), Self::Unavailable(right))
+            | (Self::Unavailable(left), Self::Approximate(right))
+            | (Self::Approximate(left), Self::Unavailable(right)) => {
+                Self::Unavailable(left.union(right))
+            }
+        }
+    }
+    /// State that no representation is available. Empty observations name
+    /// the unclassified propagation fault rather than a complete answer.
+    pub fn unavailable(reasons: PartialReasonSet) -> Self {
+        Self::Unavailable(
+            NonEmptyReasons::new(reasons)
+                .unwrap_or_else(|| NonEmptyReasons::of(super::PartialReason::Propagated)),
+        )
+    }
+
+    /// State a producer-established usable approximation.
+    pub fn approximate(reasons: PartialReasonSet) -> Self {
+        Self::Approximate(
+            NonEmptyReasons::new(reasons)
+                .unwrap_or_else(|| NonEmptyReasons::of(super::PartialReason::Propagated)),
+        )
+    }
+    /// Preserve an adopted fact's availability while joining a limitation.
+    /// A producer must establish usability before calling this on a value.
+    pub(crate) fn limited_by(self, more: NonEmptyReasons) -> Self {
+        match self {
+            Self::Complete => Self::Approximate(more),
+            Self::Approximate(own) => Self::Approximate(own.union(more)),
+            Self::Unavailable(own) => Self::Unavailable(own.union(more)),
+        }
+    }
+
+    /// Attach this adopted disposition to its payload. Unavailable never
+    /// extracts a payload, even if a caller supplied one.
+    pub fn with_value<T>(self, value: T) -> FactResult<T> {
+        match self {
+            Self::Complete => FactResult::Complete(value),
+            Self::Approximate(causes) => FactResult::Approximate { value, causes },
+            Self::Unavailable(causes) => FactResult::Unavailable { causes },
+        }
+    }
     /// Whether the fact is exact.
     #[must_use]
     pub const fn is_complete(self) -> bool {

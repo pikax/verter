@@ -29,7 +29,8 @@ fn status(step: &FlowReturnStep, observed: ResultCompleteness) -> FactStatus {
 
 #[test]
 fn declining_an_aborted_probe_cannot_extract_its_apparent_value() {
-    let read = super::ObservedFlowRead {
+    let read = super::ObservedRead {
+        degraded_member_reads: 0,
         value: evaluated(None),
         abort: Some(ExecutionAbort::Superseded),
         completeness: ResultCompleteness::Complete,
@@ -37,6 +38,39 @@ fn declining_an_aborted_probe_cannot_extract_its_apparent_value() {
     };
     assert_eq!(read.fact(), Err(ExecutionAbort::Superseded));
     assert!(matches!(read.discard(), Err(ExecutionAbort::Superseded)));
+}
+
+#[test]
+fn a_complete_payload_cannot_certify_a_probe_with_incomplete_observations() {
+    for (completeness, frame, degraded_member_reads) in [
+        (
+            ResultCompleteness::partial(PartialReasonSet::BUDGET_EXCEEDED),
+            super::BuildLocalTaint::default(),
+            0,
+        ),
+        (
+            ResultCompleteness::Complete,
+            super::BuildLocalTaint {
+                result_is_partial: true,
+                ..Default::default()
+            },
+            0,
+        ),
+        (
+            ResultCompleteness::Complete,
+            super::BuildLocalTaint::default(),
+            1,
+        ),
+    ] {
+        let read = super::ObservedRead {
+            value: evaluated(None),
+            abort: None,
+            completeness,
+            frame,
+            degraded_member_reads,
+        };
+        assert!(!read.observations_are_complete());
+    }
 }
 
 #[test]

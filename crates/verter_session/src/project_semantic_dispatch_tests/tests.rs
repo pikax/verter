@@ -9,6 +9,125 @@ use verter_type_engine::semantic_query::{
 };
 
 #[test]
+fn an_unsupported_typeof_expression_has_no_positional_value() {
+    let host = host();
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/w/unsupported-expression.ts".into(),
+            source: Arc::from("export const value = notDeclared();"),
+            file_language: FileLanguage::script_ts(),
+            aliases: Vec::new(),
+        })
+        .unwrap();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let key = dispatch.typeof_key_for(
+        ValueRootKey {
+            scope: ScopeId::file(
+                Arc::from("/w/unsupported-expression.ts"),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            ),
+            name: Arc::from("value"),
+        },
+        ProjectionReductionContext::published(ProjectionMode::Expanded),
+    );
+    let read = dispatch.execute_read(key.clone());
+    assert!(
+        matches!(
+            read.fact_status,
+            verter_type_engine::semantic_query::FactStatus::Unavailable(_)
+        ),
+        "{read:?}"
+    );
+    assert!(matches!(read.value, QueryResult::Error(_)), "{read:?}");
+    assert_eq!(dispatch.graph().slot_candidate_count_for_tests(&key), 0);
+}
+
+#[test]
+fn presence_projection_keeps_its_subset_without_offering_exact_values() {
+    use verter_type_engine::semantic_query::{FactResult, FactStatus};
+    let host = host();
+    let graph = host.project_type_store().semantic_graph();
+    let number = primitive(graph, PrimitiveKind::Number);
+    let base = simple_object(graph, &[("known", number)]);
+    let key = SemanticQueryKey::ProjectPath {
+        base,
+        path: Arc::from([]),
+        context: ProjectionReductionContext::published(ProjectionMode::Shallow),
+    };
+    host.test_force
+        .engine
+        .force_result_partial_for_tests
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let read = ProjectSemanticDispatch::new(&host).execute_read(key.clone());
+    host.test_force
+        .engine
+        .force_result_partial_for_tests
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    assert!(matches!(read.fact_status, FactStatus::Approximate(_)));
+    let FactResult::Approximate { value, .. } = read.into_fact().unwrap() else {
+        panic!("a proven presence subset must remain usable")
+    };
+    let data = graph.node_data(value).unwrap();
+    let SemanticNodeData::Object(surface) = data.as_ref() else {
+        panic!("presence surface")
+    };
+    assert_eq!(surface.positive_members().len(), 1);
+    assert_eq!(surface.positive_members()[0].key.as_string(), Some("known"));
+    assert_eq!(surface.positive_members()[0].value, number);
+    assert_eq!(graph.slot_candidate_count_for_tests(&key), 0);
+}
+
+#[test]
+fn unsupported_unfinished_projection_withholds_its_value_at_dispatch() {
+    let host = host();
+    let graph = host.project_type_store().semantic_graph();
+    let base = primitive(graph, PrimitiveKind::Number);
+    let key = SemanticQueryKey::ProjectPath {
+        base,
+        path: Arc::from([]),
+        context: ProjectionReductionContext::published(ProjectionMode::Expanded),
+    };
+    host.test_force
+        .engine
+        .force_result_partial_for_tests
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let read = ProjectSemanticDispatch::new(&host).execute_read(key.clone());
+    host.test_force
+        .engine
+        .force_result_partial_for_tests
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    assert!(matches!(
+        read.fact_status,
+        verter_type_engine::semantic_query::FactStatus::Unavailable(_)
+    ));
+    assert!(
+        matches!(
+            read.value,
+            QueryResult::Error(QueryError::IncompleteSemanticOperand { .. })
+        ),
+        "unsupported unfinished values cannot escape: {read:?}"
+    );
+    assert_eq!(graph.slot_candidate_count_for_tests(&key), 0);
+    let clean = ProjectSemanticDispatch::new(&host).execute_read(key.clone());
+    assert!(matches!(clean.value, QueryResult::Value(node) if node == base));
+    assert!(!clean.result_is_partial());
+    assert_eq!(
+        clean.fact_status,
+        verter_type_engine::semantic_query::FactStatus::Complete
+    );
+    assert_eq!(graph.slot_candidate_count_for_tests(&key), 1);
+    let hits = graph.stats_snapshot().hits;
+    let retained = ProjectSemanticDispatch::new(&host).execute_read(key);
+    assert_eq!(retained.fact_status, clean.fact_status);
+    assert!(matches!(retained.value, QueryResult::Value(node) if node == base));
+    assert!(
+        graph.stats_snapshot().hits > hits,
+        "the complete fact must repeat from retention"
+    );
+}
+
+#[test]
 fn decided_lowering_does_not_allocate_the_losing_branch() {
     use verter_type_expr::TypeExpr;
     for take_true in [true, false] {
@@ -255,7 +374,7 @@ fn conditional_pending_frame_is_family_identity_and_reuses_relation_selection() 
     for (key, expected) in [(&string_key, string), (&number_key, number)] {
         let cold = dispatch.execute_read(key.clone());
         assert!(matches!(cold.value, QueryResult::Value(node) if node == expected));
-        assert!(!cold.result_is_partial && !cold.cache_suppress);
+        assert!(!cold.result_is_partial() && !cold.cache_suppress);
         let receipt = graph
             .relation_published_carrier(&relation_key)
             .expect("the decided relation is published")
@@ -339,7 +458,7 @@ fn pending_conditional_keeps_argument_roots_and_cancelled_work_cold() {
     {
         let _guard = verter_type_engine::request_context::RequestContextGuard::install(cancelled);
         let read = ProjectSemanticDispatch::new(&host).execute_read(key.clone());
-        assert!(read.cache_suppress && read.result_is_partial);
+        assert!(read.cache_suppress && read.result_is_partial());
         assert!(matches!(
             read.value,
             QueryResult::Error(QueryError::Cancelled)
@@ -349,7 +468,7 @@ fn pending_conditional_keeps_argument_roots_and_cancelled_work_cold() {
     }
     for _ in 0..2 {
         let (read, evidence) = dispatch.execute_read_with_operand_evidence(key.clone());
-        assert!(!read.cache_suppress && !read.result_is_partial);
+        assert!(!read.cache_suppress && !read.result_is_partial());
         let QueryResult::Value(result) = read.value else {
             panic!("clean retry must resolve")
         };
@@ -504,7 +623,7 @@ fn duplicate_pending_conditionals_retain_argument_roots_cold_warm_and_after_edit
             let (read, evidence) =
                 ProjectSemanticDispatch::new(&host).execute_read_with_operand_evidence(key.clone());
             assert!(matches!(read.value, QueryResult::Value(node) if node == first));
-            assert!(!read.result_is_partial && !read.cache_suppress);
+            assert!(!read.result_is_partial() && !read.cache_suppress);
             assert!(evidence.expect("canonical normalization carries roots").self_roots().iter().any(|(file, hash)| file.as_ref() == "/w/argument.ts" && *hash == expected_hash), "discarding a duplicate conditional retains its frame-only argument root");
             assert_eq!(graph.slot_candidate_count_for_tests(&key), 1);
             assert_eq!(
@@ -2570,7 +2689,7 @@ fn cancelled_dispatch_is_typed_return_only_and_cold_retry_succeeds() {
         ));
         assert!(read.cache_suppress, "cancelled reads are ReturnOnly");
         assert!(
-            read.result_is_partial,
+            read.result_is_partial(),
             "cancelled reads are structurally partial"
         );
         assert!(
@@ -5810,9 +5929,9 @@ fn instantiate_scopes_unresolved_owner_debt_by_demanded_body_role() {
     let member = read("MemberOnly");
     assert!(matches!(member.value, QueryResult::Value(_)));
     assert!(
-        !member.result_is_partial && !member.cache_suppress,
+        !member.result_is_partial() && !member.cache_suppress,
         "a member-value miss must stay locally classifiable; got partial={}, suppress={}",
-        member.result_is_partial,
+        member.result_is_partial(),
         member.cache_suppress,
     );
 
@@ -5820,10 +5939,10 @@ fn instantiate_scopes_unresolved_owner_debt_by_demanded_body_role() {
         let structural = read(name);
         assert!(matches!(structural.value, QueryResult::Value(_)), "{name}");
         assert!(
-            structural.result_is_partial && structural.cache_suppress,
+            structural.result_is_partial() && structural.cache_suppress,
             "{name} loses an authoritative root/surface arm and must remain Partial + ReturnOnly; \
              got partial={}, suppress={}",
-            structural.result_is_partial,
+            structural.result_is_partial(),
             structural.cache_suppress,
         );
     }
@@ -6647,7 +6766,7 @@ fn distributed_conditional_dependencies_follow_member_selections() {
                     );
                 }
                 assert!(
-                    !read.cache_suppress && !read.result_is_partial,
+                    !read.cache_suppress && !read.result_is_partial(),
                     "{case}: {read:?}"
                 );
                 let QueryResult::Value(result) = read.value else {
@@ -7232,6 +7351,54 @@ fn infer_in_closed_conditional_binds_via_relation() {
     assert!(
         !matches!(&*data, SemanticNodeData::Conditional { .. }),
         "closed infer conditional must NOT produce a Conditional shell"
+    );
+}
+
+#[test]
+fn an_infer_selected_nested_conditional_reduces_to_its_final_value() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = host.project_type_store().semantic_graph();
+    let number = primitive(graph, PrimitiveKind::Number);
+    let string = primitive(graph, PrimitiveKind::String);
+    let never = primitive(graph, PrimitiveKind::Never);
+    let one = graph.intern_node(SemanticNodeData::Literal(LiteralValue::Number(1.0)));
+    let infer = graph.intern_node(SemanticNodeData::Infer {
+        name: Arc::from("X"),
+        binder: graph.alloc_infer_binder_id(),
+        constraint: None,
+    });
+    let inner = graph.intern_node(SemanticNodeData::Conditional {
+        check: number,
+        extends: number,
+        true_branch_ref: one,
+        false_branch_ref: never,
+        distributive: false,
+        pending: None,
+    });
+    let middle = graph.intern_node(SemanticNodeData::Conditional {
+        check: string,
+        extends: string,
+        true_branch_ref: inner,
+        false_branch_ref: never,
+        distributive: false,
+        pending: None,
+    });
+    let read = dispatch.execute_read(SemanticQueryKey::Conditional {
+        check: string,
+        extends: infer,
+        true_branch: middle,
+        false_branch: never,
+        distributive: false,
+        pending: None,
+    });
+    assert_eq!(
+        read.fact_status,
+        verter_type_engine::semantic_query::FactStatus::Complete
+    );
+    assert!(
+        matches!(read.value, QueryResult::Value(node) if node == one),
+        "every selected conditional must reduce: {read:?}"
     );
 }
 
@@ -8297,7 +8464,7 @@ fn homomorphic_mapped_over_resolved_empty_source_publishes_empty_object() {
         ),
     }
     assert!(
-        !read.result_is_partial,
+        !read.result_is_partial(),
         "a legitimately empty mapped surface is complete, never partial"
     );
 }
@@ -15111,8 +15278,8 @@ fn binding_relation_cold_publish_obeys_store_owned_abort_fence() {
     let result = dispatch.execute_relate(key.clone());
     drop(abort);
     assert!(
-        matches!(result, super::dispatch_txn::RelationStep::Assignable { .. }),
-        "the raced cold result still returns to its owning request"
+        matches!(result, super::dispatch_txn::RelationStep::Unknown),
+        "the invalidated binding owner cannot deliver its apparent verdict"
     );
     assert!(
         graph
@@ -21694,7 +21861,7 @@ fn budget_early_exit_folds_partial_into_enclosing_build_local_frame_and_request_
         ),
     });
     assert!(
-        read.result_is_partial,
+        read.result_is_partial(),
         "the early-exit return MUST carry result_is_partial=true",
     );
     assert!(
@@ -29183,7 +29350,7 @@ fn roomy_request_recomputes_correct_value_after_budget_truncation() {
 /// EVEN when no `RequestContext` is installed.
 ///
 /// The admission authority for this shared memo is the evaluated entry's
-/// OWN completeness (`EvaluateDeferredOutcome.result_is_partial`), NOT the
+/// OWN completeness (`EvaluateDeferredOutcome.result_is_partial()`), NOT the
 /// request-global `current_request_result_is_partial()` sticky. That
 /// sticky is `RequestContext`-scoped: with NO request context installed
 /// (the reachable `audit Noop` path, where the audit consumer filter
@@ -29711,7 +29878,7 @@ fn real_query_deep_finite_nested_demand_completes_and_warms() {
     });
 
     assert!(
-        !read.result_is_partial,
+        !read.result_is_partial(),
         "a 10,000-deep finite structural value must resolve Complete"
     );
     assert!(
@@ -29734,7 +29901,7 @@ fn real_query_deep_finite_nested_demand_completes_and_warms() {
         context,
     });
     let stats_after_repeat = graph.stats_snapshot();
-    assert!(!repeat.result_is_partial && !repeat.cache_suppress);
+    assert!(!repeat.result_is_partial() && !repeat.cache_suppress);
     assert!(repeat.walker_diagnostics.is_empty());
     assert!(
         stats_after_repeat.hits > stats_before_repeat.hits,
@@ -31643,7 +31810,7 @@ fn mapped_type_over_flow_return_heritage_enumerates_the_composed_key_domain() {
     };
     assert_eq!(member_names(shallow_node), vec!["extra", "label"]);
     assert!(
-        !shallow.result_is_partial,
+        !shallow.result_is_partial(),
         "a fully modelled flow-return heritage source projects COMPLETE"
     );
 
@@ -31771,7 +31938,7 @@ fn mapped_type_over_degraded_flow_return_heritage_preserves_the_typed_partiality
         "the composed surface enumerates every member, observed {members:?}"
     );
     assert!(
-        read.result_is_partial,
+        read.result_is_partial(),
         "one member's value is unmodelled, so the surface IS partial"
     );
     let classes = read.partial_reason_classes();

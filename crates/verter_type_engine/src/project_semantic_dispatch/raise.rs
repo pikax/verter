@@ -1316,7 +1316,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 let typeof_key = self.typeof_key_with_path(value_root, path, context);
                 let root_read = self.execute_read(typeof_key);
                 state.merge_dep_signature(&root_read.dep_signature);
-                if root_read.result_is_partial {
+                if root_read.result_is_partial() {
                     state.result_is_partial = true;
                     crate::request_context::mark_request_result_partial();
                 }
@@ -1573,8 +1573,35 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 signature_span,
                 return_type_span,
                 predicate,
-                is_abstract: _,
-            } => rebuild_function(
+                is_abstract,
+            } => {
+                if is_whole_surface_published(context) {
+                    if let crate::semantic_query::SignatureReturnCarrier::DeferredFlow(source) = return_carrier {
+                        let (returned, inferred) = match self.execute_function_return_source(
+                            source.source(), source.identity().anchor.canonical_id.as_ref(),
+                        ) {
+                            super::flow_return::FunctionReturnNode::Flow(result) =>
+                                (source.apply_result(self, result.return_type()), result.inferred_predicate()),
+                            super::flow_return::FunctionReturnNode::Aborted(abort) =>
+                                (self.opaque(QueryError::ExecutionAborted(abort)), None),
+                            _ => (self.opaque(QueryError::Miss), None),
+                        };
+                        let names: Vec<_> = type_parameters.iter().map(|p| Arc::clone(&p.name)).collect();
+                        let arguments: Vec<_> = type_parameters.iter().map(|p| p.param).collect();
+                        let returned = self.bind_flow_return_own_clause(returned,
+                            source.identity().anchor.canonical_id.as_ref(), source.identity().anchor.owner,
+                            &names, &arguments).unwrap_or(returned);
+                        let demanded = self.graph().intern_preserving_scope(node, SemanticNodeData::Signature {
+                            kind: *kind, params: Arc::clone(params), return_type: returned,
+                            type_parameters: Arc::clone(type_parameters), occurrence: occurrence.clone(),
+                            return_carrier: crate::semantic_query::SignatureReturnCarrier::Function(source.source().clone()),
+                            signature_span: *signature_span, return_type_span: *return_type_span,
+                            predicate: predicate.or(inferred), is_abstract: *is_abstract,
+                        });
+                        return self.reduce_subtree(demanded, context, state);
+                    }
+                }
+                rebuild_function(
                 self,
                 node,
                 *kind,
@@ -1589,7 +1616,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 &state.mapping,
                 context,
             )
-            .unwrap_or(node),
+            .unwrap_or(node)
+            },
             SemanticNodeData::MergedDecl { contributors } => {
                 // Reduce the peer-merged surface, then drive it through the
                 // reducer so its demanded children reduce under `context`.
@@ -1652,7 +1680,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // fenced serve / unrootable self-root) is NOT folded here: it refuses
         // only its own inner-memo admission and MUST NOT suppress a
         // complete component-meta result.
-        if read.result_is_partial {
+        if read.result_is_partial() {
             state.result_is_partial = true;
             crate::request_context::mark_request_result_partial();
         }
@@ -2062,6 +2090,9 @@ fn rebuild_function<C: crate::resolver_core::ResolverCapabilities>(
                 crate::semantic_query::SignatureReturnCarrier::Function(source) => {
                     crate::semantic_query::SignatureReturnCarrier::Function(source)
                 }
+                crate::semantic_query::SignatureReturnCarrier::DeferredFlow(source) => {
+                    crate::semantic_query::SignatureReturnCarrier::DeferredFlow(source)
+                }
             },
             signature_span,
             return_type_span,
@@ -2087,9 +2118,9 @@ struct ReduceState {
     visited: FxHashSet<(SemanticNodeId, ProjectionReductionContext)>,
     mapping: MappingMap,
     dep_facts: Vec<(Arc<str>, crate::semantic_query::DepVersion)>,
-    /// OR-fold of every `read.result_is_partial` observed by `reduce_one`
+    /// OR-fold of every `read.result_is_partial()` observed by `reduce_one`
     /// during this reduce pass. Propagated into the returned
-    /// `MaterializedTypeExpr.result_is_partial` so direct consumers
+    /// `MaterializedTypeExpr.result_is_partial()` so direct consumers
     /// (e.g. `field_types::materialize_component_meta_type_expr_until_stable_full`)
     /// can refuse to publish a PARTIAL result into shared caches without
     /// needing to inspect the request-scoped TLS flag. NOT set by a

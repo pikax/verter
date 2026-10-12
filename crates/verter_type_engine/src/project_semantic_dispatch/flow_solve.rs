@@ -1540,6 +1540,7 @@ pub enum FlowPartialReason {
     NoDemandInstalled, StaleBasis, OperationNotProvable, ResultContractMismatch,
     ObligationSetMismatch, IncompleteObligations, Gap(FlowGap), Failed(FlowFailure),
     NonConverged, DegradedValue,
+    IncompleteValue(crate::semantic_query::surface_resolution::NonEmptyReasons),
     /// The evaluation evidence (value / report / convergence / handle) does
     /// not carry the serving dispatch's current evaluation provenance — a
     /// foreign store or a stale request generation.
@@ -1640,7 +1641,7 @@ impl CompleteFlowResult {
         value: FlowReturnResult,
         convergence: FlowConvergenceEvidence,
     ) -> Option<Self> {
-        if value.degradation().is_some() {
+        if !value.fact().status().is_complete() {
             return None;
         }
         Some(Self::new(CompleteFlowResultParts {
@@ -1794,6 +1795,11 @@ pub fn finalize_flow_solve(
         return partial(FlowPartialReason::NonConverged);
     }
     if completion.value().degradation().is_some() { return partial(FlowPartialReason::DegradedValue); }
+    match completion.value().fact() {
+        crate::semantic_query::FactResult::Complete(_) => {}
+        crate::semantic_query::FactResult::Approximate { causes, .. }
+        | crate::semantic_query::FactResult::Unavailable { causes } => return partial(FlowPartialReason::IncompleteValue(causes)),
+    }
 
     FlowSolveOutcome::Complete(CompleteFlowResult::new(CompleteFlowResultParts {
         basis: plan.basis().clone(), value: completion.value().clone(),

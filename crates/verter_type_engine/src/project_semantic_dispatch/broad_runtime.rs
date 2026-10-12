@@ -546,7 +546,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             &payload_read.dep_signature,
         );
         let mut cache_suppress = payload_read.cache_suppress;
-        let mut result_is_partial = payload_read.result_is_partial;
+        let mut result_is_partial = payload_read.result_is_partial();
         let mut partial_reasons = payload_read.partial_reason_classes();
         let mut node = match payload_read.value {
             QueryResult::Value(node) => node,
@@ -601,7 +601,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     &member_read.dep_signature,
                 );
                 cache_suppress |= member_read.cache_suppress;
-                result_is_partial |= member_read.result_is_partial;
+                result_is_partial |= member_read.result_is_partial();
                 partial_reasons = partial_reasons.union(member_read.partial_reason_classes());
                 node = match member_read.value {
                     QueryResult::Value(node) => node,
@@ -725,7 +725,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         work: &mut Vec<RuntimeWork>,
         kinds: &mut Vec<BroadRuntimeKind>,
     ) -> bool {
-        let result_is_partial = read.result_is_partial;
+        let result_is_partial = read.result_is_partial();
         if result_is_partial {
             match &read.value {
                 QueryResult::Recursive(_) => {

@@ -49,6 +49,7 @@ pub(super) struct ClassEvalFrame<'e> {
     again: Vec<usize>,
     again_next: usize,
     values: Vec<Option<SemanticNodeId>>,
+    source_plan: bool,
     awaiting: ClassAwait<'e>,
 }
 
@@ -66,6 +67,7 @@ enum ClassAwait<'e> {
         degradation: Option<crate::semantic_query::FlowReturnDegradation>,
         again: bool,
         value: MemberAwait<'e>,
+        observations: Option<super::super::flow_return_fact::ReadObservationScope<'e>>,
     },
 }
 
@@ -101,6 +103,8 @@ fn is_class_function(value: &SliceClassMemberValue) -> bool {
 
 /// What a class expression's `extends` value provides to the class.
 struct ClassBase {
+    /// A fully demanded base source, or a source sealed by class composition.
+    exact_source: Option<SemanticNodeId>,
     /// The parameters of each accepted base construct signature, in order —
     /// a constructor-less class inherits one construct signature per entry.
     constructor_params: Vec<Arc<[crate::semantic_query::FunctionParam]>>,
@@ -231,6 +235,16 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 Some(class.offset),
             ))
         });
+        let env = class_env.as_deref().unwrap_or(self.binder_env);
+        let source_plan = class.type_parameters.iter().all(|parameter| env.exact_binders.contains(parameter.name.as_ref()))
+            && class.members.iter().all(|member| matches!(member.key, SliceObjectKey::Static(_)) && match &member.value {
+                SliceClassMemberValue::Initializer { value, .. } => super::independent_member_expression(value)
+                    || matches!(&**value, SliceExpr::Type(ty) if super::closed_type_operand(ty.ty(), Some(env))),
+                SliceClassMemberValue::Declared(ty) => super::closed_type_operand(ty.ty(), Some(env)),
+                _ => false,
+            })
+            && class.index_signatures.iter().all(|signature| super::closed_type_operand(signature.key.ty(), Some(env)) && super::closed_type_operand(signature.value.ty(), Some(env)))
+            && class.constructors.as_ref().is_none_or(|signatures| signatures.iter().all(|signature| signature.iter().all(|parameter| super::closed_type_operand(parameter.ty.ty(), Some(env)))));
         ClassEvalFrame {
             class,
             class_env,
@@ -242,6 +256,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             again: Vec::new(),
             again_next: 0,
             values: vec![None; class.members.len()],
+            source_plan,
             awaiting: ClassAwait::Start,
         }
     }
@@ -259,7 +274,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         &mut self,
         frame: &mut ClassEvalFrame<'e>,
         delivered: Option<Positional<SemanticNodeId>>,
-    ) -> ClassStep<'e> {
+    ) -> ClassStep<'e>
+    where
+        'd: 'e,
+    {
         let class = frame.class;
         match std::mem::replace(&mut frame.awaiting, ClassAwait::Nothing) {
             ClassAwait::Start => match &class.heritage {
@@ -299,8 +317,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 degradation,
                 again,
                 value,
+                observations,
             } => {
                 let outcome = delivered.expect("the member's outcome");
+                if !matches!(outcome, Positional::Value(_)) {
+                    frame.source_plan = false;
+                }
                 let node = match value {
                     MemberAwait::Initializer {
                         holds_before,
@@ -338,7 +360,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         }
                     }
                 };
-                self.class_member_valued(frame, index, degradation, again, node);
+                self.class_member_valued(frame, index, degradation, again, node, observations);
             }
             ClassAwait::Nothing => unreachable!("an outcome delivered to no request"),
         }
@@ -385,20 +407,30 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         degradation: Option<crate::semantic_query::FlowReturnDegradation>,
         again: bool,
         value: SemanticNodeId,
+        observations: Option<super::super::flow_return_fact::ReadObservationScope<'_>>,
     ) {
         let member = &frame.class.members[index];
         let receiver = frame.receiver.clone().expect("the class's receiver");
         if !again && receiver.forward_read.get() && is_class_function(&member.value) {
+            if let Some(observations) = observations {
+                let _ = observations.finish(()).discard();
+            }
             self.degradation = degradation;
             frame.again.push(index);
             return;
+        }
+        if let Some(observations) = observations {
+            let _ = self.dispatch.adopt_read(observations.finish(()));
         }
         self.record_receiver_member(&receiver, member, value);
         frame.values[index] = Some(value);
     }
 
     /// Evaluate the class's next member, or finish the class.
-    fn class_next_member<'e>(&mut self, frame: &mut ClassEvalFrame<'e>) -> ClassStep<'e> {
+    fn class_next_member<'e>(&mut self, frame: &mut ClassEvalFrame<'e>) -> ClassStep<'e>
+    where
+        'd: 'e,
+    {
         let class = frame.class;
         loop {
             let (index, again) = if let Some(&index) = frame.order.get(frame.next) {
@@ -429,6 +461,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         index,
                         degradation,
                         again,
+                        observations: None,
                         value: MemberAwait::Initializer {
                             holds_before: self.holds.len(),
                             declared_reads: std::mem::replace(&mut self.declared_reads, true),
@@ -456,6 +489,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                                 index,
                                 degradation,
                                 again,
+                                observations: Some(self.dispatch.begin_read_observation()),
                                 value: if getter {
                                     MemberAwait::Getter
                                 } else {
@@ -469,7 +503,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 }
                 SliceClassMemberValue::Unmodeled => self.unmodeled_position(),
             };
-            self.class_member_valued(frame, index, degradation, again, value);
+            self.class_member_valued(frame, index, degradation, again, value, None);
         }
     }
 
@@ -705,12 +739,24 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 keyspace: None,
             },
         ));
-        Positional::Value(match base.and_then(|base| base.type_variable) {
+        let exact_base = base.as_ref().is_none_or(|base| base.exact_source.is_some());
+        let result = match base.and_then(|base| base.type_variable) {
             Some(type_variable) => self
                 .dispatch
                 .intern_normalized_union_or_intersection(&[constructor, type_variable], false),
             None => constructor,
-        })
+        };
+        if frame.source_plan
+            && exact_base
+            && !crate::request_context::current_cold_compute_completeness().is_partial()
+            && crate::request_context::current_execution_abort().is_none()
+        {
+            // The plan supplies the finite authored positions. Reaching this
+            // constructor means each was evaluated and actually composed.
+            self.constructive_values
+                .insert(result, super::ConstructiveValue::Class { instance });
+        }
+        Positional::Value(result)
     }
 
     /// Record an evaluated, statically named instance member on the
@@ -1095,6 +1141,39 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         type_arguments: &[SemanticNodeId],
     ) -> Option<ClassBase> {
         let graph = self.dispatch.graph();
+        let exact_source = if matches!(
+            self.constructive_values.get(&constructor),
+            Some(super::ConstructiveValue::Class { .. })
+        ) {
+            Some(constructor)
+        } else {
+            let read = self.dispatch.observe_read(|| {
+                self.dispatch.demand_type_node(
+                    crate::semantic_query::SemanticQueryKey::ProjectPath {
+                        base: constructor,
+                        path: Arc::from([]),
+                        context: crate::semantic_query::ProjectionReductionContext::published(
+                            crate::semantic_query::ProjectionMode::Expanded,
+                        ),
+                    },
+                )
+            });
+            if read.observations_are_complete()
+                && matches!(read.value(), crate::semantic_query::QueryResult::Value(value) if value.provenance.fact_status.is_complete())
+            {
+                self.dispatch
+                    .adopt_read(read)
+                    .ok()
+                    .and_then(|value| match value {
+                        crate::semantic_query::QueryResult::Value(value) => Some(value.value),
+                        _ => None,
+                    })
+            } else {
+                let _ = read.discard();
+                None
+            }
+        };
+        let constructor = exact_source.unwrap_or(constructor);
         let settled = self.dispatch.resolve_signature_source_carrier(
             constructor,
             crate::semantic_query::ProjectionReductionContext::structural_transit(),
@@ -1139,15 +1218,23 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         }
         let mut constructor_params = Vec::with_capacity(constructors.len());
         let mut instance = None;
+        let mut exact_source = exact_source;
         for signature in &constructors {
             let Some(SemanticNodeData::Signature {
                 params,
                 return_type,
+                return_carrier,
                 ..
             }) = graph.node_data(*signature).as_deref().cloned()
             else {
                 return None;
             };
+            if !matches!(
+                return_carrier,
+                crate::semantic_query::SignatureReturnCarrier::Declared(_)
+            ) {
+                exact_source = None;
+            }
             instance.get_or_insert(return_type);
             constructor_params.push(params);
         }
@@ -1234,6 +1321,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             .first()
             .and_then(|signature| self.dispatch.construct_signature_visibility(*signature));
         Some(ClassBase {
+            exact_source,
             constructor_params,
             instance,
             static_members,

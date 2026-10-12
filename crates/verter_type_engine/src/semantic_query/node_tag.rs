@@ -314,6 +314,12 @@ impl SemanticNodeData {
                 if let SignatureReturnCarrier::Declared(node) = return_carrier {
                     visit(*node);
                 }
+                if let SignatureReturnCarrier::DeferredFlow(source) = return_carrier {
+                    for (_, image) in source.bindings() {
+                        visit(*image);
+                    }
+                    source.receiver().into_iter().for_each(&mut visit);
+                }
                 for decl in type_parameters.iter() {
                     visit(decl.param);
                     decl.constraint.into_iter().for_each(&mut visit);

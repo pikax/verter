@@ -893,6 +893,23 @@ impl ResolveCallSelection {
         dispatch: &super::ProjectSemanticDispatch<'_, C>,
         return_type: SemanticNodeId,
     ) -> ResolvedCallResult {
+        // A source-owned return is inferred in its declaration environment.
+        // Apply the selected signature's actual header images only after
+        // the existing return equation has produced its value.
+        let return_type = match self {
+            Self::Selected {
+                selected_signature: SelectedSignature::General(node),
+                ..
+            } => match dispatch.graph().node_data(*node).as_deref() {
+                Some(crate::semantic_query::SemanticNodeData::Signature {
+                    return_carrier:
+                        crate::semantic_query::SignatureReturnCarrier::DeferredFlow(source),
+                    ..
+                }) => source.apply_result(dispatch, return_type),
+                _ => return_type,
+            },
+            _ => return_type,
+        };
         match self {
             Self::Selected {
                 selected,
@@ -2402,6 +2419,15 @@ pub struct CompletedResolveCallMember {
 /// decided outcome is final at pop — same-slot recursive edges are
 /// coinductive holds, never unresolved failures), so the domain owns
 /// no parallel contributor ledger.
+#[derive(Debug, Clone)]
+pub(crate) struct ClosedFlowValue {
+    pub(crate) key: FlowReturnKey,
+    pub(crate) value: FlowReturnResult,
+    pub(crate) proof: Option<super::flow_solve::CompleteFlowResult>,
+    pub(crate) self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
+    pub(crate) cache_suppress: bool,
+}
+
 #[derive(Debug, Default)]
 pub struct FlowReturnDomainRuntime {
     /// SCC-closed flow members queued for the root's batched publish
@@ -2414,7 +2440,7 @@ pub struct FlowReturnDomainRuntime {
     /// targets outside the solving component (never the store). This is a
     /// VALUE-computation input, not an admission channel: admission is
     /// `completed_members`' proof typing alone.
-    pub(crate) closed_values: Vec<(FlowReturnKey, FlowReturnResult)>,
+    pub(crate) closed_values: Vec<ClosedFlowValue>,
     /// The typed failure of the in-flight machinery ROOT's close — the
     /// caller-return payload channel: the family memo admits only COMPLETE
     /// values, so a degraded root's typed failure rides the transaction to

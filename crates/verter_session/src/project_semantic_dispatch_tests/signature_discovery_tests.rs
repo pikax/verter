@@ -19,6 +19,44 @@ use verter_type_engine::signature_kernel::{
 
 const CANONICAL: &str = "/ws/signature-discovery.ts";
 
+#[test]
+fn receiver_utilities_distinguish_incomplete_signatures_from_exact_absence() {
+    use super::signature_utility::SignatureUtility;
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let context =
+        verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit();
+    let incomplete = dispatch
+        .graph()
+        .intern_node(SemanticNodeData::Opaque(QueryError::Miss));
+    // An object with no signatures proves absence without an apparent-lib
+    // demand. A primitive's apparent signatures require that separate scope.
+    let exact = dispatch.graph().intern_node(SemanticNodeData::Object(
+        verter_type_engine::semantic_query::SurfaceView::from_members(Vec::new(), None),
+    ));
+    for utility in [
+        SignatureUtility::ThisParameterType,
+        SignatureUtility::OmitThisParameter,
+    ] {
+        assert_eq!(
+            dispatch.resolve_signature_utility(utility, incomplete, context),
+            None,
+            "an unavailable signature set proves no receiver absence"
+        );
+        let answer = dispatch
+            .resolve_signature_utility(utility, exact, context)
+            .expect("the exact empty signature set proves absence");
+        if utility == SignatureUtility::OmitThisParameter {
+            assert_eq!(answer, exact);
+        } else {
+            assert!(matches!(
+                dispatch.graph().node_data(answer).as_deref(),
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Unknown))
+            ));
+        }
+    }
+}
+
 fn host() -> Arc<VerterHost> {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let _ = host.upsert(UpsertRequest {
