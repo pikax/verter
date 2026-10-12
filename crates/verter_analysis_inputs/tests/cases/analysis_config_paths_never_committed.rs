@@ -221,6 +221,9 @@ fn absolute_path_shape(norm: &str) -> Option<&'static str> {
 /// [`parse_private_tokens`]). Returns a reason naming the matched token BY INDEX
 /// ONLY (a diagnostic must never echo a private token), or `None`.
 pub fn token_leak(decoded_text: &str, tokens: &[String]) -> Option<String> {
+    if tokens.is_empty() {
+        return None;
+    }
     let haystack = collapse_slashes(&normalize(decoded_text).to_ascii_lowercase());
     tokens
         .iter()
@@ -486,6 +489,11 @@ fn analysis_inputs_never_leak_into_tracked_artifacts() {
     for path in &paths {
         let norm = path.replace('\\', "/");
         let abs = root.join(path);
+        // Path-level rules still cover every tracked path. Content has no
+        // applicable rule outside the shape scope when no tokens are supplied.
+        if tokens.is_empty() && !is_shape_scanned_artifact(&norm) {
+            continue;
+        }
         let bytes = match std::fs::read(&abs) {
             Ok(b) => b,
             Err(_) => continue, // a path that does not resolve on this checkout
