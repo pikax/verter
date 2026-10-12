@@ -2730,8 +2730,10 @@ function graphTypeExprToString(expr: GraphTypeExprRef): string {
         .map((id) => graphTypeExprToString(createGraphTypeExprRef(expr.graph, id)))
         .join(" & ");
     case NODE_ARRAY: {
+      const elementNode = expr.graph.getNode(node.elementNodeId);
       const element = graphTypeExprToString(createGraphTypeExprRef(expr.graph, node.elementNodeId));
-      return node.readonly ? `readonly ${element}[]` : `${element}[]`;
+      const rendered = graphArrayElementNeedsParens(elementNode.kind) ? `(${element})` : element;
+      return node.readonly ? `readonly ${rendered}[]` : `${rendered}[]`;
     }
     case NODE_TUPLE: {
       const items = node.elements
@@ -2741,8 +2743,19 @@ function graphTypeExprToString(expr: GraphTypeExprRef): string {
     }
     case NODE_OBJECT:
       return "object";
-    case NODE_FUNCTION:
-      return "function";
+    case NODE_FUNCTION: {
+      const params = node.parameters.map((parameter) => {
+        const name = expr.graph.getStringMaybe(parameter.nameId);
+        const label = name ? `${name}${parameter.optional ? "?" : ""}: ` : "";
+        const rest = parameter.rest ? "..." : "";
+        const ty = graphTypeExprToString(createGraphTypeExprRef(expr.graph, parameter.typeNodeId));
+        return `${rest}${label}${ty}`;
+      });
+      const renderedReturn = node.returnTypeNodeId
+        ? graphTypeExprToString(createGraphTypeExprRef(expr.graph, node.returnTypeNodeId))
+        : "unknown";
+      return `(${params.join(", ")}) => ${renderedReturn}`;
+    }
     case NODE_KEY_OF:
       return `keyof ${graphTypeExprToString(createGraphTypeExprRef(expr.graph, node.operandNodeId))}`;
     case NODE_TYPE_OF:
@@ -2850,7 +2863,8 @@ function nativeTypeExprToString(expr: NativeTypeExpr): string {
       return expr.types.map(nativeTypeExprToString).join(" & ");
     case "array": {
       const element = nativeTypeExprToString(expr.element);
-      return `${expr.readonly ? "readonly " : ""}${element}[]`;
+      const rendered = nativeArrayElementNeedsParens(expr.element.kind) ? `(${element})` : element;
+      return `${expr.readonly ? "readonly " : ""}${rendered}[]`;
     }
     case "tuple": {
       const elements = expr.elements.map((element) => {
@@ -2877,6 +2891,10 @@ function nativeTypeExprToString(expr: NativeTypeExpr): string {
     }
     case "infer":
       return `infer ${expr.name}${expr.constraint ? ` extends ${nativeTypeExprLikeToString(expr.constraint)}` : ""}`;
+    case "function":
+      return nativeCallableToString("", expr.parameters, expr.returnType);
+    case "constructorType":
+      return nativeCallableToString("new ", expr.parameters, expr.returnType);
     case "unknown":
       return expr.raw;
     case "syntheticSlotBinding":
@@ -2890,4 +2908,45 @@ function nativeTypeExprToString(expr: NativeTypeExpr): string {
 
 function nativeTypeExprLikeToString(expr: NativeTypeExprLike): string {
   return isGraphTypeExprRef(expr) ? graphTypeExprToString(expr) : nativeTypeExprToString(expr);
+}
+
+function nativeCallableToString(
+  prefix: "" | "new ",
+  parameters: NativeFunctionParam[],
+  returnType: NativeTypeExpr | undefined,
+): string {
+  const params = parameters
+    .map((parameter) => {
+      const rest = parameter.rest ? "..." : "";
+      const name = parameter.name ? `${parameter.name}${parameter.optional ? "?" : ""}: ` : "";
+      return `${rest}${name}${nativeTypeExprToString(parameter.ty)}`;
+    })
+    .join(", ");
+  const renderedReturn = returnType ? nativeTypeExprToString(returnType) : "unknown";
+  return `${prefix}(${params}) => ${renderedReturn}`;
+}
+
+/** `[]` binds tighter than these forms, so an array element needs parentheses. */
+function nativeArrayElementNeedsParens(kind: NativeTypeExpr["kind"]): boolean {
+  switch (kind) {
+    case "union":
+    case "intersection":
+    case "function":
+    case "constructorType":
+    case "conditional":
+    case "infer":
+      return true;
+    default:
+      return false;
+  }
+}
+
+function graphArrayElementNeedsParens(kind: number): boolean {
+  return (
+    kind === NODE_UNION ||
+    kind === NODE_INTERSECTION ||
+    kind === NODE_FUNCTION ||
+    kind === NODE_CONDITIONAL ||
+    kind === NODE_INFER
+  );
 }

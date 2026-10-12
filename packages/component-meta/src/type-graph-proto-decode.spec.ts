@@ -980,12 +980,13 @@ describe("independent component facts", () => {
     expect(projected.props[0]?.required).toBeUndefined();
     expect(projected.props[1]?.required).toBe(false);
     const schema = propsToJsonSchema(projected);
-    expect(schema.properties).not.toHaveProperty("root");
+    expect(schema.properties).toHaveProperty("root");
     expect(schema.properties).toHaveProperty("label");
+    expect(schema.required ?? []).not.toContain("root");
     expect(schema.required ?? []).not.toContain("label");
     const zod = propsToZodString(projected);
-    expect(zod).not.toContain("root");
-    expect(zod).toContain("label");
+    expect(zod).toContain('"root"');
+    expect(zod).toContain('"label"');
     expect(zod).toContain(".optional()");
   });
 

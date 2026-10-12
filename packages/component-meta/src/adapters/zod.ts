@@ -191,11 +191,12 @@ export function typeToZodString(type: TypeDescriptor): string {
  * Convert ComponentMeta props to a Zod object schema string.
  */
 export function propsToZodString(meta: ComponentMeta): string {
-  const fields = meta.props.flatMap((prop) => {
-    if (typeof prop.required !== "boolean") return [];
+  const fields = meta.props.map((prop) => {
     const schema = typeToZodString(prop.type);
-    const optSuffix = prop.required ? "" : ".optional()";
-    return [`  ${JSON.stringify(prop.name)}: ${schema}${optSuffix}`];
+    // Unavailable requiredness stays in the shape so Zod does not strip a
+    // present value, and is not emitted as a required key.
+    const optSuffix = prop.required === true ? "" : ".optional()";
+    return `  ${JSON.stringify(prop.name)}: ${schema}${optSuffix}`;
   });
   return `z.object({\n${fields.join(",\n")}\n})`;
 }
@@ -234,9 +235,10 @@ export function propsToZodSchema(meta: ComponentMeta): unknown {
   const shape: Record<string, any> = {};
 
   for (const prop of meta.props) {
-    if (typeof prop.required !== "boolean") continue;
     let schema = buildZodSchema(z, prop.type);
-    if (!prop.required) {
+    // Same rule as the generated string: keep the known type, and do not
+    // require the key unless requiredness is exactly true.
+    if (prop.required !== true) {
       schema = (schema as any).optional();
     }
     shape[prop.name] = schema;
