@@ -236,6 +236,10 @@ fn contextual_chain_inference_work_grows_linearly() {
             (small.2 as u64, medium.2 as u64, large.2 as u64),
         ] {
             assert!(
+                small <= medium && medium <= large,
+                "work counts must be monotonic: {small}, {medium}, {large}"
+            );
+            assert!(
                 large - medium <= 3 * (medium - small),
                 "doubling stages repeats earlier work: {small}, {medium}, {large}"
             );

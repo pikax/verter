@@ -1132,6 +1132,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 
     fn run_resolve_call(&self, key: &ResolveCallKey) -> CandidateVerdict {
+        let _contextual_isolation = self.isolate_contextual_call(key);
         let graph = self.graph();
         let session_watermark = self.dispatch_txn.borrow().relation.sessions.len();
         let callee = self.substitute_canonical(key.callee, &key.context.substitution);

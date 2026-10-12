@@ -1937,7 +1937,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     }
                     verter_session_query::function_program::ProgramExpressionSource::SemanticCall {
                         initializer: Some(initializer), ..
-                    } => regular(self.initializer_value(&initializer.function, initializer.preserve_literals)),
+                    } => {
+                        let node = self.initializer_value(&initializer.function, initializer.preserve_literals);
+                        // An unresolved call has no inferred declaration value.
+                        // Keep the ordinary call-source refusal instead of
+                        // publishing the flow evaluator's positional marker.
+                        if node.is_some_and(|node| matches!(
+                            self.graph().node_data(node).as_deref(),
+                            Some(SemanticNodeData::Opaque(QueryError::UnmodeledPosition))
+                        )) {
+                            crate::request_context::mark_request_result_partial();
+                            None
+                        } else {
+                            regular(node)
+                        }
+                    },
                     verter_session_query::function_program::ProgramExpressionSource::Value
                     | verter_session_query::function_program::ProgramExpressionSource::SemanticCall { .. } => {
                         let expression = source_demand.indexed_program_expression_ir(record)?;

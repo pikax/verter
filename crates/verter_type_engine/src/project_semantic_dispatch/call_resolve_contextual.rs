@@ -24,6 +24,7 @@ impl From<ContextualCandidateFailure> for CandidateVerdict {
 
 #[derive(Debug, Default)]
 pub(in crate::project_semantic_dispatch) struct ContextualCallState {
+    owner: Option<crate::semantic_query::ProgramPointId>,
     original: Option<Vec<CallArgument>>,
     /// As in the checker, a callback's parameter context is assigned once,
     /// by the first candidate that reaches it. Inference journals are separate.
@@ -39,6 +40,19 @@ pub(in crate::project_semantic_dispatch) struct ContextualCallState {
     diagnostics_enabled: bool,
     pub(super) diagnostic: Option<crate::semantic_query::CheckerDiagnosticCode>,
     pub(in crate::project_semantic_dispatch) resume_at: Option<(RelationKind, SemanticNodeId)>,
+}
+
+/// Hide an enclosing call's continuation for the entire nested resolution,
+/// including argument acquisition, candidate checks and early refusals.
+pub(super) struct ContextualCallIsolation<'a> {
+    txn: &'a std::cell::RefCell<super::super::dispatch_txn::CheckerDispatchTransaction>,
+    outer: Option<ContextualCallState>,
+}
+
+impl Drop for ContextualCallIsolation<'_> {
+    fn drop(&mut self) {
+        self.txn.borrow_mut().call.contextual = self.outer.take();
+    }
 }
 
 #[derive(Debug)]
@@ -102,6 +116,58 @@ struct ContextualCandidate {
 }
 
 impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
+    pub(super) fn isolate_contextual_call(
+        &self,
+        key: &ResolveCallKey,
+    ) -> Option<ContextualCallIsolation<'_>> {
+        let mut txn = self.dispatch_txn.borrow_mut();
+        if txn
+            .call
+            .contextual
+            .as_ref()
+            .is_some_and(|state| state.owner.as_ref() != Some(&key.point))
+        {
+            Some(ContextualCallIsolation {
+                txn: &self.dispatch_txn,
+                outer: txn.call.contextual.take(),
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Exercise ordinary executor reentry while a real contextual candidate is
+    /// suspended, including preservation of the enclosing continuation.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn resolve_call_under_suspended_context_for_tests(
+        &self,
+        outer_key: ResolveCallKey,
+        inner_key: ResolveCallKey,
+    ) -> ResolveCallStep {
+        let mut state = ContextualCallState::default();
+        assert!(matches!(
+            self.execute_contextual_call(outer_key, &mut state),
+            ResolveCallStep::Degraded(ResolveCallFailure::ContextSensitiveInference {
+                contextual: Some(_)
+            })
+        ));
+        let before = format!("{state:?}");
+        let outer = self
+            .dispatch_txn
+            .borrow_mut()
+            .call
+            .contextual
+            .replace(state);
+        let result = self.execute_resolve_call(inner_key);
+        let state = self.dispatch_txn.borrow_mut().call.contextual.take();
+        self.dispatch_txn.borrow_mut().call.contextual = outer;
+        assert_eq!(
+            format!("{:?}", state.expect("enclosing continuation")),
+            before
+        );
+        result
+    }
+
     pub(super) fn contextual_argument_failure(
         &self,
         source: SemanticNodeId,
@@ -140,6 +206,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         key: ResolveCallKey,
         state: &mut ContextualCallState,
     ) -> ResolveCallStep {
+        state.owner = Some(key.point.clone());
         let outer = self
             .dispatch_txn
             .borrow_mut()

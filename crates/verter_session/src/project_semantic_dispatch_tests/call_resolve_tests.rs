@@ -369,6 +369,79 @@ fn selected_query(
     }
 }
 
+#[test]
+fn ordinary_nested_call_does_not_consume_a_suspended_contextual_candidate() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let graph = dispatch.graph();
+    let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let callback = signature(
+        &dispatch,
+        "callback",
+        0,
+        SignatureKind::Call,
+        vec![FunctionParam::synthetic(None, number, false, false)],
+        Vec::new(),
+        number,
+    );
+    let callback_type = callable(&dispatch, vec![callback], Vec::new());
+    let outer = signature(
+        &dispatch,
+        "outer",
+        0,
+        SignatureKind::Call,
+        vec![FunctionParam::synthetic(None, callback_type, false, false)],
+        Vec::new(),
+        number,
+    );
+    let outer_type = callable(&dispatch, vec![outer], Vec::new());
+    let outer_key = call_key(
+        &dispatch,
+        outer_type,
+        CallKind::Call,
+        None,
+        vec![CallArgKey::Eager {
+            first_pass: None,
+            ty: callback_type,
+            spread: false,
+            literal_mode: ArgumentLiteralMode::Literal,
+            context_sensitive: true,
+            const_view: None,
+        }],
+    );
+    let inner = signature(
+        &dispatch,
+        "inner",
+        0,
+        SignatureKind::Call,
+        vec![FunctionParam::synthetic(None, string, false, false)],
+        Vec::new(),
+        string,
+    );
+    let inner_type = callable(&dispatch, vec![inner], Vec::new());
+    let mut inner_key = call_key(
+        &dispatch,
+        inner_type,
+        CallKind::Call,
+        None,
+        vec![eager(string)],
+    );
+    inner_key.point.offset += 1;
+    let result =
+        selected(dispatch.resolve_call_under_suspended_context_for_tests(outer_key, inner_key));
+    let ResolvedCallResult::Selected {
+        return_type,
+        recovery_diagnostic,
+        ..
+    } = result
+    else {
+        panic!("the nested call must select its own signature");
+    };
+    assert_eq!(return_type, string);
+    assert_eq!(recovery_diagnostic, None);
+}
+
 /// Declaration order is the ranking rule: the literal overload wins before
 /// the later primitive overload — for a pinned literal argument AND for a
 /// bare-literal one, because applicability relates the argument's actual
