@@ -549,26 +549,26 @@ The same turn also reads every known process before the slower tree walk. A
 child already reaped by a parent that is still alive is attributed from
 that parent's child counters: the workload reaps with `waitpid` as soon as
 the child exits and does not wait for the sampler. A successful exit read
-with the parent still alive preserves the final descendant counters even when
-no periodic sweep falls between nested exits, and even when the next snapshot
-finds both generations gone. That read is the attribution: the exit counters
-are a floor for the lifetime, and a descendant first seen on that read counts
-when its parent is still alive. If the exited process and its parent are
-both already gone, the supervisor retains the ambiguity instead.
-Parent presence is established by a fresh matching start identity and a zero
-exit timestamp after the exit sample, never by the previous sweep's cached
-presence. Readable zombies retain their start identities after orphaning their
-surviving children, so neither parent verification nor a later snapshot uses an
-exited parent to certify attribution. If parent metadata is unavailable, the
-stored parent selects the lifetime to verify; a missing, exited or reused parent
-cannot certify attribution. Exit counters remain lifetime floors
-even when that verification fails, so unresolved histories retain unavailable
-totals and bounds that include the final sampled counters.
+preserves final descendant counters as a lifetime floor, including a descendant
+first seen on that read when a fresh matching parent identity establishes tree
+membership. It does not prove that the parent
+will reap the child: a living parent can subsequently exit without waiting.
+If both generations disappear before reaping is observed, the supervisor
+retains unavailable totals and bounds that include the exit floor.
+If exit parent metadata is unavailable, the stored parent selects the lifetime
+to verify for membership; a missing, exited or reused parent cannot establish
+membership for a previously unseen child.
+Reaping requires confirmed child lifetime disappearance followed by a fresh
+matching parent start identity with a zero exit timestamp. A sequential
+snapshot's earlier parent reading cannot provide that witness: the parent may
+exit before the child's lookup. An unreadable zombie also cannot count as
+confirmed disappearance. Readable zombies retain their start identities after
+orphaning their surviving children, so an exited parent never certifies reaping.
 When a child disappears while its parent is still alive, cumulative child
 counters retain unsampled tails without adding the child's sampled usage twice.
 Live reparented descendants remain independent, and reused PIDs are separate
 lifetimes. If a descendant and its parent both disappear before the
-descendant's reaping, reparenting, or exit read was observed, both CPU
+descendant's reaping or reparenting was observed, both CPU
 columns are unavailable (`null`) for the rest of the run. Aggregate child counters cannot attribute that usage:
 sampled root/parent/grandchild user counters of 10/20/100 followed by root user
 20 and child-user 150 can represent nested reaping (total 170) or a parent that
@@ -586,7 +586,9 @@ user counters, kernel bounds 85..135. No point in the interval is published as
 an exact total.
 The watchdog reads the exited leader before reaping it: Apple's
 [proc_pid_rusage API](https://github.com/apple-oss-distributions/xnu/blob/main/libsyscall/wrappers/libproc/libproc.h)
-supports zombies. CPU units are milliseconds. Descendants whose exit read is
+supports zombies. Own and reaped-child CPU counters are converted from Mach
+absolute-time ticks to nanoseconds using the machine timebase before accounting;
+reported totals and bounds use milliseconds. Descendants whose exit read is
 missed retain sampling uncertainty; Linux and Windows keep their existing
 kernel accounting.
 
