@@ -12,7 +12,7 @@
 //! A trailing canary error proves the provider checked the published file
 //! before an empty result is accepted.
 
-use verter_compiler::flow_check::fixtures::{self, Fixture, Root, LIVE_MATRIX_SIZES};
+use verter_compiler::flow_check::fixtures::{self, Fixture, Root};
 use verter_compiler::flow_check::generator::GuardStrategy;
 use verter_compiler::flow_check::growth;
 use verter_compiler::flow_check::oracle::{check_exact, ProviderDiagnostic};
@@ -210,17 +210,11 @@ real_provider_test!(
     }
 );
 
-/// Full-size linearity is an operation count, separate from the provider
-/// round trip so each test stays inside the debug budget. Path-replay
-/// rejection stays on the compiler oracle.
+/// Full-size linearity is an operation count beside the live sweep of the
+/// same sizes. Path-replay rejection stays on the compiler oracle.
 #[test]
 fn reference_matrix_growth_is_linear() {
     growth::assert_reference_matrix_growth();
-}
-
-fn live_matrix_n() -> usize {
-    // 64 callbacks. `MATRIX_SIZES` counters above cover 128/256/512/1024.
-    LIVE_MATRIX_SIZES[2]
 }
 
 async fn run_check_matrix(session: &RealProviderTestSession, fixtures: Vec<Fixture>) {
@@ -258,36 +252,84 @@ async fn run_check_matrix(session: &RealProviderTestSession, fixtures: Vec<Fixtu
     published.close(session).await;
 }
 
-real_provider_test!(
-    flow_check_linear_matrix_checks_every_callback,
-    fixture = FIXTURE,
-    async fn run(session) {
-        let n = live_matrix_n();
-        run_check_matrix(
-            session,
-            vec![
-                fixtures::flat_matrix(n, 1, false),
-                fixtures::flat_matrix(n, 1, true),
-            ],
-        )
-        .await;
-    }
-);
+/// One provider session per matrix size. Each session still publishes that
+/// size's valid file and its broken twin and requires exact diagnostics, so
+/// 128, 256, 512 and 1024 all reach the real engine. One session that walked
+/// every size exceeded the debug budget.
+macro_rules! flow_check_matrix_case {
+    ($name:ident, $n:literal, flat) => {
+        real_provider_test!(
+            $name,
+            fixture = FIXTURE,
+            async fn run(session) {
+                run_check_matrix(
+                    session,
+                    vec![
+                        fixtures::flat_matrix($n, 1, false),
+                        fixtures::flat_matrix($n, 1, true),
+                    ],
+                )
+                .await;
+            }
+        );
+    };
+    ($name:ident, $n:literal, nested) => {
+        real_provider_test!(
+            $name,
+            fixture = FIXTURE,
+            async fn run(session) {
+                run_check_matrix(
+                    session,
+                    vec![
+                        fixtures::nested_matrix($n, false),
+                        fixtures::nested_matrix($n, true),
+                    ],
+                )
+                .await;
+            }
+        );
+    };
+}
 
-real_provider_test!(
-    flow_check_linear_matrix_checks_nested_callbacks,
-    fixture = FIXTURE,
-    async fn run(session) {
-        let n = live_matrix_n();
-        run_check_matrix(
-            session,
-            vec![
-                fixtures::nested_matrix(n, false),
-                fixtures::nested_matrix(n, true),
-            ],
-        )
-        .await;
-    }
+flow_check_matrix_case!(
+    flow_check_linear_matrix_checks_every_callback_128,
+    128,
+    flat
+);
+flow_check_matrix_case!(
+    flow_check_linear_matrix_checks_every_callback_256,
+    256,
+    flat
+);
+flow_check_matrix_case!(
+    flow_check_linear_matrix_checks_every_callback_512,
+    512,
+    flat
+);
+flow_check_matrix_case!(
+    flow_check_linear_matrix_checks_every_callback_1024,
+    1024,
+    flat
+);
+flow_check_matrix_case!(
+    flow_check_linear_matrix_checks_nested_callbacks_128,
+    128,
+    nested
+);
+flow_check_matrix_case!(
+    flow_check_linear_matrix_checks_nested_callbacks_256,
+    256,
+    nested
+);
+flow_check_matrix_case!(
+    flow_check_linear_matrix_checks_nested_callbacks_512,
+    512,
+    nested
+);
+flow_check_matrix_case!(
+    flow_check_linear_matrix_checks_nested_callbacks_1024,
+    1024,
+    nested
 );
 
 real_provider_test!(

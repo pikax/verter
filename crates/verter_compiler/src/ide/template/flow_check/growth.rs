@@ -1,9 +1,9 @@
 //! Deterministic growth counters for the full matrix.
 //!
-//! A live provider round trip proves exact diagnostics at one bounded size.
-//! These counters prove the same linearity claim at [`super::fixtures::MATRIX_SIZES`]:
-//! snapshot construction stays within 2.2× per doubling. Path replay failing
-//! that bound is `restored_path_replay_fails_the_growth_oracle`.
+//! Live provider tests publish [`super::fixtures::MATRIX_SIZES`] and require
+//! exact diagnostics. These counters prove the linearity claim at those same
+//! sizes: snapshot construction stays within 2.2× per doubling. Path replay
+//! failing that bound is `restored_path_replay_fails_the_growth_oracle`.
 
 use oxc_allocator::Allocator;
 

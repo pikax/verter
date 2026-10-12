@@ -845,13 +845,9 @@ pub fn semantic_suite() -> Vec<Fixture> {
 }
 
 /// The chain lengths and nesting depths of the linear-representation matrix.
+/// Live provider tests publish every entry and require exact diagnostics.
+/// Operation counters in [`super::growth`] prove those sizes stay linear.
 pub const MATRIX_SIZES: [usize; 4] = [128, 256, 512, 1024];
-
-/// Bounded sizes a live provider round trip may use. The live tests use 64.
-/// [`MATRIX_SIZES`] remains the growth series: operation counters in
-/// [`super::growth`] prove linear snapshots. Path replay stays on
-/// `restored_path_replay_fails_the_growth_oracle`.
-pub const LIVE_MATRIX_SIZES: [usize; 4] = [16, 32, 64, 128];
 
 /// Counter-based growth probes retain three doublings, nested chains and
 /// multiple lexical frames without materialising the large provider matrices.

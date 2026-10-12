@@ -21,7 +21,7 @@ use tower_lsp_server::ls_types::{
     TextDocumentContentChangeEvent, TextDocumentIdentifier, Uri, VersionedTextDocumentIdentifier,
 };
 use tower_lsp_server::LanguageServer;
-use verter_compiler::flow_check::fixtures::{Expected, LIVE_MATRIX_SIZES};
+use verter_compiler::flow_check::fixtures::Expected;
 use verter_compiler::flow_check::growth;
 use verter_compiler::flow_check::ide_fixtures::{self, SfcFixture};
 use verter_compiler::flow_check::seam::Span;
@@ -444,29 +444,48 @@ async fn run_narrowing_matrix(session: &RealProviderTestSession, fixtures: Vec<S
 }
 
 /// Full-size linearity is an operation count on the production emitter,
-/// separate from the provider round trip.
+/// beside the live sweep of the same sizes.
 #[test]
 fn production_matrix_growth_is_linear() {
     growth::assert_production_matrix_growth();
 }
 
-/// Live round trips use 64 callbacks. Full-size linearity is the production
-/// counter oracle (`assert_production_matrix_growth`), which walks
-/// `MATRIX_SIZES` through 1024.
-fn live_matrix_n() -> usize {
-    LIVE_MATRIX_SIZES[2]
-}
-
+/// One provider session per matrix size. 128, 256, 512 and 1024 each publish
+/// and require exact diagnostics. A single session walking every size exceeded
+/// the debug budget. `assert_production_matrix_growth` counts linearity; it
+/// does not replace this sweep.
 macro_rules! narrowing_matrix_case {
     ($name:ident, $build:ident, $broken:literal) => {
-        real_provider_test!(
-            $name,
-            fixture = FIXTURE,
-            async fn run(session) {
-                let n = live_matrix_n();
-                run_narrowing_matrix(session, vec![ide_fixtures::$build(n, $broken)]).await;
-            }
-        );
+        paste::paste! {
+            real_provider_test!(
+                [<$name _128>],
+                fixture = FIXTURE,
+                async fn run(session) {
+                    run_narrowing_matrix(session, vec![ide_fixtures::$build(128, $broken)]).await;
+                }
+            );
+            real_provider_test!(
+                [<$name _256>],
+                fixture = FIXTURE,
+                async fn run(session) {
+                    run_narrowing_matrix(session, vec![ide_fixtures::$build(256, $broken)]).await;
+                }
+            );
+            real_provider_test!(
+                [<$name _512>],
+                fixture = FIXTURE,
+                async fn run(session) {
+                    run_narrowing_matrix(session, vec![ide_fixtures::$build(512, $broken)]).await;
+                }
+            );
+            real_provider_test!(
+                [<$name _1024>],
+                fixture = FIXTURE,
+                async fn run(session) {
+                    run_narrowing_matrix(session, vec![ide_fixtures::$build(1024, $broken)]).await;
+                }
+            );
+        }
     };
 }
 
