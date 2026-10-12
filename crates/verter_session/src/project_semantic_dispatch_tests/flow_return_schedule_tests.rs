@@ -2159,6 +2159,77 @@ fn switch_witness(cases: usize) -> String {
     format!("export function witness(x: number) {{ switch (x) {{ {arms}default: return -1; }} }}\n")
 }
 
+/// Every clause projects a distinct sibling from its discriminated member.
+fn discriminated_switch(cases: usize) -> String {
+    let members = (0..cases)
+        .map(|i| format!("{{ kind: \"k{i}\"; v{i}: {i} }}"))
+        .collect::<Vec<_>>()
+        .join(" | ");
+    let clauses: String = (0..cases)
+        .map(|i| format!("case \"k{i}\": return x.v{i};\n"))
+        .collect();
+    format!("type U = {members};\nexport function witness(x: U) {{ switch (x.kind) {{ {clauses} }} }}\n")
+}
+
+/// Repeated full-union narrowing per clause must not hide behind memo hits:
+/// measure enumeration leaves as well as connected query work. Every size
+/// answers all its member literals, completely and within production caps.
+#[test]
+fn discriminated_switch_narrowing_work_grows_linearly() {
+    use verter_type_engine::project_semantic_dispatch::flow_return::union_leaf_visits_for_tests;
+
+    let mut measured = Vec::new();
+    for cases in [128, 512, 2_048] {
+        let source = discriminated_switch(cases);
+        let host = host_with(&[(PATH, &source)]);
+        let (outcome, work, leaves) = with_dispatch(&host, |dispatch| {
+            let before = union_leaf_visits_for_tests();
+            let key = key_of(dispatch, PATH, "witness");
+            let outcome = eval_key_on(&host, dispatch, key);
+            (
+                outcome,
+                dispatch.connected_demand_usage().work,
+                union_leaf_visits_for_tests() - before,
+            )
+        });
+        let Outcome::Value {
+            ty: TypeExpr::Union(arms),
+            degradation: None,
+            candidates: 1,
+        } = &outcome
+        else {
+            panic!("{cases} cases must answer completely and admit reuse: {outcome:?}");
+        };
+        let mut values: Vec<_> = arms
+            .iter()
+            .map(|arm| match arm {
+                TypeExpr::Literal(LiteralValue::Number(value)) => *value,
+                other => panic!("unexpected return contributor: {other:?}"),
+            })
+            .collect();
+        values.sort_by(f64::total_cmp);
+        assert_eq!(values, (0..cases).map(|i| i as f64).collect::<Vec<_>>());
+        assert!(work > 0 && leaves >= cases, "work counters must be live");
+        eprintln!("switch cases={cases} connected_work={work} union_leaves={leaves}");
+        measured.push((cases, work, leaves));
+    }
+    for pair in measured.windows(2) {
+        let [(small, small_work, small_leaves), (large, large_work, large_leaves)] = pair else {
+            unreachable!();
+        };
+        for (name, before, after) in [
+            ("connected work", small_work, large_work),
+            ("union leaves", small_leaves, large_leaves),
+        ] {
+            assert!(after > before, "{name} must grow with cases: {measured:?}");
+            assert!(
+                after * small * 10 <= before * large * 11,
+                "{name} grows faster than linear (10% tolerance): {measured:?}"
+            );
+        }
+    }
+}
+
 /// Each return site the slice plans is one unit of connected work, paid
 /// before the body evaluates: the work grows linearly with the returns (one
 /// unit per site, the two relation steps that compare its case with the

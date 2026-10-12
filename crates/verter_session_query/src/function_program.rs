@@ -533,13 +533,14 @@ pub enum ProgramExpressionSource {
     SemanticCall {
         kind: ProgramExpressionCallKind,
         site: FunctionCallSiteRecord,
+        /// A declarator expression body that supplies this call's value.
+        /// The call and callback records remain available to indexed readers.
+        initializer: Option<ProgramInitializerSource>,
     },
     /// An indexed callback/function value's exact return carrier.
     FunctionReturn(FunctionReturnSource),
-    /// A class field's initializer served as its own position
-    /// ([`FunctionNode::Initializer`]): the field's value is the
-    /// position's body-derived return, its fresh literals widened unless
-    /// the field is `readonly`.
+    /// A class field's initializer served as its own expression-body
+    /// position. Fresh literals are widened unless the field is readonly.
     FieldInitializer {
         source: FunctionReturnSource,
         readonly: bool,
@@ -656,6 +657,13 @@ pub enum FunctionWriteTarget {
     Unsupported {
         span: verter_span::Span,
     },
+}
+
+/// The served expression-body position of a contextual-call declarator.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ProgramInitializerSource {
+    pub function: verter_type_expr::facts::FlowFunctionReturnIdentity,
+    pub preserve_literals: bool,
 }
 
 /// A captured value dependency, retaining its exact root and static path.

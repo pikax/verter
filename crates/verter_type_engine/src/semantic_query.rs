@@ -2362,21 +2362,20 @@ pub enum ResolveCallFailure {
     NotCallable,
     /// Every visible candidate was definitely inapplicable.
     NoApplicableOverload,
+    /// A definite applicability failure with a checker diagnostic. The
+    /// diagnostic travels with the refusal; it is never a successful value.
+    Diagnosed(CheckerDiagnostic),
     /// Applicability depended on unsupported or unresolved semantic work.
     Undecidable,
     /// The call-resolution work envelope tripped.
     Budget,
-    /// A type parameter no other argument infers occurs in the return of
-    /// the contextual signature a context-sensitive function argument is
-    /// checked under: the checker infers it from what that function
-    /// returns, which applicability does not model. Undecided like
-    /// [`Self::Undecidable`], but no rail may answer the call with the
-    /// parameter's fallback instead. `contextual` names the first
-    /// context-sensitive argument (its position) and the contextual type it
-    /// is checked under, instantiated with the inferences of the arguments
-    /// before it: the caller types that argument under it and asks again —
-    /// the checker's second inference pass. `None` when the callee has
-    /// several candidates, each of which would type it differently.
+    /// A transient request to contextually type one argument, never a call
+    /// value or an admissible memo result. `contextual` names its position
+    /// and the type supplied by the candidate's current inferences. The flow
+    /// route evaluates that callback and resumes the candidate's collector;
+    /// losing candidates discard their inference deposits. `None` means the
+    /// argument cannot be continued by the requesting rail. No rail may use
+    /// an uninferred parameter's fallback as the call's answer meanwhile.
     ContextSensitiveInference {
         contextual: Option<(u32, SemanticNodeId)>,
     },

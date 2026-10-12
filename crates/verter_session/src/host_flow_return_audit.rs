@@ -476,7 +476,9 @@ fn failure_tag(failure: FlowReturnFailure) -> FlowFailureTag {
         FlowReturnFailure::UnmodeledDemandPoint => FlowFailureTag::UnmodeledDemandPoint,
         FlowReturnFailure::CallResolution(call) => match call {
             ResolveCallFailure::NotCallable => FlowFailureTag::CallNotCallable,
-            ResolveCallFailure::NoApplicableOverload => FlowFailureTag::CallNoApplicableOverload,
+            ResolveCallFailure::NoApplicableOverload | ResolveCallFailure::Diagnosed(_) => {
+                FlowFailureTag::CallNoApplicableOverload
+            }
             ResolveCallFailure::Undecidable
             | ResolveCallFailure::ContextSensitiveInference { .. } => {
                 FlowFailureTag::CallUndecidable

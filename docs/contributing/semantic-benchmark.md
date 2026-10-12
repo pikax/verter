@@ -464,6 +464,38 @@ it observes on any machine, labelled with that machine's provenance, for
 local investigation; those figures are evidence about that machine only.
 An evidence run will apply the rule to its summary's cells (see below).
 
+### Discriminated switches
+
+`switch-discriminated` measures exhaustive switches over 128, 512, 1,000
+and 2,048 object-union members. Each case reads a distinct sibling property;
+the return must contain every member's numeric literal and no `undefined`.
+The existing production release probe and TypeScript API arm read the same
+source and `ReturnType<typeof f>` demand, cold and warm:
+
+```bash
+node scripts/benchmark/evidence-run.mjs --run switch-discriminated
+```
+
+The 1,000-case cold latency and OS peak-memory cells provide the benchmark
+machine's evidence for the 20 ms / 40 MB budget. These absolute figures are
+advisory for landing under the measurement rule above; off `bench-m3`, the
+summary marks them unavailable. The raw harness records retain the worker's
+actual measurements and distinguish request latency from first-type latency.
+
+The machine-independent regression runs in the ordinary session unit-test
+lane:
+
+```bash
+cargo nextest run -p verter_session --lib discriminated_switch_narrowing_work_grows_linearly
+```
+
+It checks complete, reusable answers at 128 / 512 / 2,048 cases under
+production budgets and bounds growth in both connected work and union-leaf
+visits. Leaf visits count the shared flow enumeration boundary, including
+repeated traversal in relation narrowing, so memo hits cannot hide a
+per-clause full-union scan. That counter exists only in test-support builds;
+the production release probe carries no instrumentation overhead from it.
+
 ## Tiers
 
 `--tier` chooses what a run covers; every tier keeps the fairness
@@ -541,12 +573,26 @@ malformed answers remain decoding errors.
 
 On macOS, CPU columns sum sampled user and kernel counters across process
 lifetimes, with reaped-child accounting deduplicated against those samples.
+The kqueue watcher reports each `NOTE_EXIT`; the supervisor reads the exited
+identity immediately and sweeps before consuming watchdog completion. The
+kernel publishes that exit rusage (`ri_proc_exit_abstime` nonzero) before it
+marks the process a zombie and before it wakes a parent blocked in `waitpid`.
+The same turn also reads every known process before the slower tree walk. A
+child already reaped by a parent that is still readable is attributed from
+that parent's child counters: the workload reaps with `waitpid` as soon as
+the child exits and does not wait for the sampler. A successful exit read
+with the parent still present preserves the final descendant counters even when
+no periodic sweep falls between nested exits, and even when the next snapshot
+finds both generations gone. That read is the attribution: the exit counters
+are a floor for the lifetime, and a descendant first seen on that read counts
+when its parent is still present. If the exited process and its parent are
+both already gone, the supervisor retains the ambiguity instead.
 When a child disappears while its parent is still sampled, cumulative child
 counters retain unsampled tails without adding the child's sampled usage twice.
 Live reparented descendants remain independent, and reused PIDs are separate
-lifetimes. If a descendant and its parent both disappear before the descendant's
-reaping or reparenting was observed, both CPU columns are unavailable (`null`)
-for the rest of the run. Aggregate child counters cannot attribute that usage:
+lifetimes. If a descendant and its parent both disappear before the
+descendant's reaping, reparenting, or exit read was observed, both CPU
+columns are unavailable (`null`) for the rest of the run. Aggregate child counters cannot attribute that usage:
 sampled root/parent/grandchild user counters of 10/20/100 followed by root user
 20 and child-user 150 can represent nested reaping (total 170) or a parent that
 used 150 without reaping its child (retained total 270). An unseen reaped sibling
@@ -554,10 +600,17 @@ can produce the same ambiguity. Neither counter magnitude nor later samples
 resolve it. When an intermediate sample observes the parent accounting for the
 missing grandchild before the parent disappears, the nested subtree remains
 attributable and its CPU is counted once.
+Ambiguous reports retain `cpuUserMs: null` and `cpuKernelMs: null` (the benchmark
+shows `n/a` with its existing warning) and include `cpuUserMsBounds` and
+`cpuKernelMsBounds`, each with `lower` and `upper` in milliseconds. These bound
+the attribution of observed counters, not unobserved CPU after the last read.
+The example above has user bounds 170..270 and, with kernel counters half the
+user counters, kernel bounds 85..135. No point in the interval is published as
+an exact total.
 The watchdog reads the exited leader before reaping it: Apple's
 [proc_pid_rusage API](https://github.com/apple-oss-distributions/xnu/blob/main/libsyscall/wrappers/libproc/libproc.h)
-supports zombies. CPU units are milliseconds. Descendants that exit between
-sweeps retain sampling uncertainty; Linux and Windows keep their existing
+supports zombies. CPU units are milliseconds. Descendants whose exit read is
+missed retain sampling uncertainty; Linux and Windows keep their existing
 kernel accounting.
 
 ## Capacity

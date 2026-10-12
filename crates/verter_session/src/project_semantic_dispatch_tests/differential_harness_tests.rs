@@ -261,7 +261,7 @@ impl<'a> Matrix<'a> {
 
     /// One host carrying every setting's project with the probe module for
     /// `rows` (and the library and sibling files) upserted into it.
-    fn host(&self, rows: &[(Read<'_>, Vec<&str>)]) -> Arc<VerterHost> {
+    pub(super) fn host(&self, rows: &[(Read<'_>, Vec<&str>)]) -> Arc<VerterHost> {
         let host = Arc::new(matrix_host(self.settings));
         let module = self.module(rows);
         for (index, setting) in self.settings.iter().enumerate() {
@@ -343,6 +343,49 @@ impl<'a> Matrix<'a> {
             }
         }
         unproven
+    }
+
+    pub(super) fn return_relation_work(&self, function: &str) -> (u64, usize, usize) {
+        let host = self.host(&[]);
+        let canonical = format!("{}/probe.ts", self.settings[0].root);
+        let store_view = host.resolver_store_view_read().into_owned_view();
+        let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+        let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+        let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+        let key = verter_type_engine::semantic_query::FlowReturnKey {
+            function: dispatch.flow_function_slot_for(
+                Arc::from(canonical.as_str()),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                Arc::from(function),
+                verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
+                0,
+            ),
+            normalized_type_args: Arc::from([]),
+            context: dispatch.flow_return_context_for(&canonical),
+            demand: ReturnProjectionDemand::whole_return(),
+            input: verter_type_engine::semantic_query::FlowInputContext::empty(),
+            result_contract: super::flow_solve::flow_return_result_contract_id(),
+        };
+        let before = dispatch.graph().stats_snapshot().relation_check_count;
+        let argument_before =
+            verter_type_engine::project_semantic_dispatch::call_resolve::argument_work_for_tests();
+        let binding_before =
+            verter_type_engine::project_semantic_dispatch::call_resolve::binding_work_for_tests();
+        let result = dispatch.execute_read(
+            verter_type_engine::semantic_query::SemanticQueryKey::FlowReturn(Box::new(key)),
+        );
+        assert!(
+            !result.result_is_partial(),
+            "{function}: {:?}",
+            result.partial_reasons()
+        );
+        (
+            dispatch.graph().stats_snapshot().relation_check_count - before,
+            verter_type_engine::project_semantic_dispatch::call_resolve::argument_work_for_tests()
+                - argument_before,
+            verter_type_engine::project_semantic_dispatch::call_resolve::binding_work_for_tests()
+                - binding_before,
+        )
     }
 
     /// Each row's verdict in each setting, in row then setting order.
@@ -738,7 +781,7 @@ fn print(
     node: SemanticNodeId,
     depth: usize,
 ) -> String {
-    if depth > 12 {
+    if depth > 64 {
         return "<unrendered deep>".to_owned();
     }
     let graph = dispatch.graph();

@@ -756,6 +756,7 @@ fn reversed_object_unions_reach_the_checker_answer_600() {
     assert_reversed_checker_answer(600, 1);
 }
 #[test]
+#[ignore = "operator exception 2026-10-12: about 10 minutes in a debug build, past the 30-minute core step with its siblings; TEST-SPEED-REVERSED-UNIONS makes the relation linear and removes this attribute (the 2100 row keeps the TS2859 recovery path covered)"]
 fn reversed_object_unions_reach_the_checker_answer_1800() {
     assert_reversed_checker_answer(1800, 1);
 }
@@ -764,6 +765,7 @@ fn reversed_object_unions_reach_the_checker_answer_2100() {
     assert_reversed_checker_answer(2100, 2);
 }
 #[test]
+#[ignore = "operator exception 2026-10-12: about 10 minutes in a debug build, past the 30-minute core step with its siblings; TEST-SPEED-REVERSED-UNIONS makes the relation linear and removes this attribute (the 2100 row keeps the TS2859 recovery path covered)"]
 fn reversed_object_unions_reach_the_checker_answer_3200() {
     assert_reversed_checker_answer(3200, 2);
 }

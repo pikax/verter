@@ -226,6 +226,19 @@ fn every_db_field_implements_invalidation_by_canonical() {
 
 #[test]
 fn guard9_predicate_rejects_missing_invalidation_by_canonical_impl() {
+    let headers = "impl InvalidationByCanonical for Concrete {}\n\
+        impl<T> InvalidationByCanonical for Generic<T> {}\n\
+        impl crate::invalidation_domain::InvalidationByCanonical\n\
+        for Wrapped {}\nimpl InvalidationByCanonical for LongerName {}";
+    let indexed = invalidation_impl_heads(headers);
+    assert_eq!(
+        indexed,
+        ["Concrete", "Generic", "LongerName", "Wrapped"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    );
+    assert!(!indexed.contains("Longer"));
     // Deliberate-violation fixture: a struct with a DB-shape field
     // whose head identifier is NOT in the workspace's
     // verter_session src tree (so `invalidation_by_canonical_impl_exists`

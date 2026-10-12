@@ -3907,17 +3907,28 @@ fn budget_tripping_content() -> String {
     )
 }
 
+fn arm_content_budget(host: &VerterHost) {
+    host.project_type_store().flow_slice().set_budget_for_test(
+        verter_session_query::flow::peeker::FlowSliceBudget {
+            max_selected_nodes: 4096,
+            ..Default::default()
+        },
+    );
+}
+
 /// The budget-tripping content trips when it IS lowered: returned, the
 /// function's evaluation answers the leaf lowering's typed budget failure.
 /// The two tests below read it unlowered, which only this makes a proof.
 #[test]
 fn budget_tripping_content_trips_when_lowered() {
+    let host = super::checker_probe_lane_tests::probe_host(Default::default());
+    arm_content_budget(&host);
     let source = format!(
         "export function pf() {{ return {}; }}\n",
         budget_tripping_content()
     );
     assert_eq!(
-        super::checker_probe_lane_tests::flow_return_outcome_in(Default::default(), &source, "pf"),
+        super::checker_probe_lane_tests::flow_return_outcome_on_host(&host, &source, "pf"),
         Err(crate::host_flow_return_audit::FlowReturnError::Failure(
             verter_type_engine::semantic_query::FlowReturnFailure::Budget(
                 verter_type_expr::facts::InferenceUnavailableReason::WorkBudgetExceeded,
@@ -3937,6 +3948,7 @@ fn budget_tripping_content_trips_when_lowered() {
 #[test]
 fn flow_return_unread_binding_content_never_lowers() {
     let host = make_host();
+    arm_content_budget(&host);
     let _ = host.upsert(UpsertRequest {
         canonical_id: Some("/ws/unread-content.ts".to_string()),
         input_id: "/ws/unread-content.ts".to_string(),
@@ -3968,6 +3980,7 @@ fn flow_return_unread_binding_content_never_lowers() {
 #[test]
 fn flow_return_member_demand_never_lowers_elided_sibling_content() {
     let host = make_host();
+    arm_content_budget(&host);
     let _ = host.upsert(UpsertRequest {
         canonical_id: Some("/ws/member-sibling-content.ts".to_string()),
         input_id: "/ws/member-sibling-content.ts".to_string(),

@@ -136,7 +136,9 @@ remain visible to unresolved-value checking. Return demands, call substitution,
 signature result recipes and source roots use the same existing flow source.
 The deferred state survives signature substitution and structural rebuilding.
 It retains sorted lexical clause names and the header images supplied by the
-actual lowering environment, including its own clause. Signature substitution,
+actual lowering environment, excluding the signature's own clause parameters.
+The call resolver instantiates those parameters through the body-derived carrier.
+Signature substitution,
 binder collection and stable encoding carry those images. The existing flow
 binder rebinder applies them after declaration-body inference; nested qualified
 binders remain separate. This preserves overload selection in the declaration

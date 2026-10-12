@@ -136,9 +136,8 @@ pub(super) struct FinishRoute {
     step_observations: super::super::flow_return_fact::ObservedRead<()>,
     declared_result: Option<super::super::call_resolve::DeclaredCallResult>,
     step: Positional<ResolveCallStep>,
+    contextual: super::super::call_resolve::ContextualCallState,
     retyped: bool,
-    /// The arguments retyped so far.
-    rounds: usize,
     /// The argument being retyped.
     position: usize,
 }
@@ -822,10 +821,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             flow: crate::semantic_query::FlowNarrowingKey::empty(),
             context: self.dispatch.resolve_call_context_for(self.canonical),
         };
+        let mut contextual = super::super::call_resolve::ContextualCallState::default();
         let read = self.dispatch.observe_read(|| {
             self.dispatch
-                .execute_resolve_call_with_declared_result(key.clone())
+                .execute_contextual_call(key.clone(), &mut contextual)
         });
+        let complete = read.observations_are_complete();
         let Ok(((step, declared_result), step_observations)) = read.split() else {
             self.adopt_argument_observations(&mut argument_observations);
             return None;
@@ -838,10 +839,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             function_arguments,
             argument_observations,
             step_observations,
-            declared_result,
+            declared_result: declared_result.filter(|_| complete),
             step,
+            contextual,
             retyped: false,
-            rounds: 0,
             position: 0,
         }))
     }
@@ -916,15 +917,18 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 first_pass: None,
                 literal_mode: crate::semantic_query::ArgumentLiteralMode::Literal,
             };
-            finish.function_arguments[position] = None;
             if let Some(old) = finish.argument_observations[position].take() {
                 let _ = old.discard();
             }
-            finish.key.args = Arc::from(finish.args.clone().into_boxed_slice());
             let read = self.dispatch.observe_read(|| {
-                self.dispatch
-                    .execute_resolve_call_with_declared_result(finish.key.clone())
+                self.dispatch.resume_contextual_call(
+                    &mut finish.key,
+                    &finish.args,
+                    position,
+                    &mut finish.contextual,
+                )
             });
+            let complete = read.observations_are_complete();
             let Ok(((step, proof), observations)) = read.split() else {
                 return RetypeRound::Progress(Box::new(ResolveCallProgress::Done(
                     self.settle_retyped_call(*finish),
@@ -933,8 +937,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             let old = std::mem::replace(&mut finish.step_observations, observations);
             let _ = old.discard();
             finish.step = Positional::Value(step);
-            finish.declared_result = proof;
-            finish.rounds += 1;
+            finish.declared_result = proof.filter(|_| complete);
         }
         match self.next_retyped_argument(&finish) {
             Some((position, Some(request))) => {
@@ -964,9 +967,6 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         &mut self,
         finish: &FinishRoute,
     ) -> Option<(usize, Option<FunctionArgumentRequest>)> {
-        if finish.rounds >= finish.args.len() {
-            return None;
-        }
         let (position, contextual) = Self::contextual_argument_request(&finish.step)?;
         let expr = finish.function_arguments.get(position).cloned().flatten()?;
         if matches!(expr, SliceExpr::Object { .. } | SliceExpr::Array { .. }) {
