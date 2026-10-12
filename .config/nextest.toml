@@ -1,6 +1,13 @@
 # Nextest configuration
 # https://nexte.st/docs/configuration/
 
+# Each provider kind is its own test. Running the four together makes the
+# provider-neutral diagnostics receipt go stale and lets a host compile land
+# inside a completion that must not compile. They still run in the normal
+# lane; they just do not overlap each other.
+[test-groups.progressive-child-contract-completion]
+max-threads = 1
+
 [profile.default]
 # A speed gate, on the debug build: a test aims at under 2s and must stay
 # under 10s even on a loaded machine. Past 10s it is flagged slow, and at 20s
@@ -46,15 +53,11 @@ filter = '''
   (package(verter_session) & test(=cases::sts0_profile_gate::publication_surfaces_publish_and_survive_renames_on_both_claimed_engines)) |
   (package(verter_session) & test(=global_contributors::ac3_tests::configured_project_opening_classifies_linear_members)) |
   (package(verter_compiler) & test(=ide::template::flow_check::tests::callback_count_scales_without_path_expansion)) |
-  (package(verter_lsp) & test(=server::server_tests::general::decl_refcount_remove_if_empty_never_clobbers_concurrent_record)) |
   (package(verter_session) & test(=project_semantic_dispatch_tests::cost_receipt_tests::cold_query_entries_fit_within_the_checker_relation_envelope)) |
   (package(verter_compiler) & test(=ide::template::flow_tests::component_functions_read_one_flow_of_every_branch)) |
-  (package(verter_lsp) & test(=server::server_tests::hover::contract_builtin_directive_names_hover_shows_documentation)) |
   (package(verter_session) & test(=cases::g_block::semantic_determinism_matrix::det_05_partial_resident_cache)) |
-  (package(verter_lsp) & test(=server::server_tests::completion::svelte_progressive_component_completion_uses_committed_child_contract)) |
   (package(verter_session) & test(=cases::sts0_profile_gate::backend_projection_checks_clean_on_both_claimed_engines)) |
   (package(verter_session) & test(=cache_runtime_tests::node_tests::query_retention_refusal_preserves_delivery_validation_and_lowering)) |
-  (package(verter_lsp) & test(=external_ts::membership_reconciler::tests::source_churn_returns_gate_population_and_capacity_to_baseline)) |
   (package(verter_session) & test(=cases::sts0_profile_gate::projected_carrier_corruption_is_caught_on_both_claimed_engines)) |
   (package(verter_session) & test(=project_semantic_dispatch_tests::flow_return_coverage_tests::lib_awaited_tail_runs_answer_past_the_checker_limit_and_stop_at_verters_budget)) |
   (package(verter_session) & test(=project_semantic_dispatch_tests::augmentation_scale_tests::merged_interface_indexed_access_work_is_linear)) |
@@ -64,6 +67,10 @@ filter = '''
   (package(verter_session) & test(=project_semantic_dispatch_tests::template_complexity_tests::two_spans_meet_the_limit_at_one_hundred_thousand))
 '''
 slow-timeout = { period = "60s", terminate-after = 5 }
+
+[[profile.default.overrides]]
+filter = 'test(svelte_progressive_component_completion_uses_committed_child_contract_)'
+test-group = 'progressive-child-contract-completion'
 
 [profile.ci]
 # The speed gate (see [profile.default]): flagged at 10s, failed at 20s.
@@ -89,15 +96,11 @@ filter = '''
   (package(verter_session) & test(=cases::sts0_profile_gate::publication_surfaces_publish_and_survive_renames_on_both_claimed_engines)) |
   (package(verter_session) & test(=global_contributors::ac3_tests::configured_project_opening_classifies_linear_members)) |
   (package(verter_compiler) & test(=ide::template::flow_check::tests::callback_count_scales_without_path_expansion)) |
-  (package(verter_lsp) & test(=server::server_tests::general::decl_refcount_remove_if_empty_never_clobbers_concurrent_record)) |
   (package(verter_session) & test(=project_semantic_dispatch_tests::cost_receipt_tests::cold_query_entries_fit_within_the_checker_relation_envelope)) |
   (package(verter_compiler) & test(=ide::template::flow_tests::component_functions_read_one_flow_of_every_branch)) |
-  (package(verter_lsp) & test(=server::server_tests::hover::contract_builtin_directive_names_hover_shows_documentation)) |
   (package(verter_session) & test(=cases::g_block::semantic_determinism_matrix::det_05_partial_resident_cache)) |
-  (package(verter_lsp) & test(=server::server_tests::completion::svelte_progressive_component_completion_uses_committed_child_contract)) |
   (package(verter_session) & test(=cases::sts0_profile_gate::backend_projection_checks_clean_on_both_claimed_engines)) |
   (package(verter_session) & test(=cache_runtime_tests::node_tests::query_retention_refusal_preserves_delivery_validation_and_lowering)) |
-  (package(verter_lsp) & test(=external_ts::membership_reconciler::tests::source_churn_returns_gate_population_and_capacity_to_baseline)) |
   (package(verter_session) & test(=cases::sts0_profile_gate::projected_carrier_corruption_is_caught_on_both_claimed_engines)) |
   (package(verter_session) & test(=project_semantic_dispatch_tests::flow_return_coverage_tests::lib_awaited_tail_runs_answer_past_the_checker_limit_and_stop_at_verters_budget)) |
   (package(verter_session) & test(=project_semantic_dispatch_tests::augmentation_scale_tests::merged_interface_indexed_access_work_is_linear)) |
@@ -107,6 +110,10 @@ filter = '''
   (package(verter_session) & test(=project_semantic_dispatch_tests::template_complexity_tests::two_spans_meet_the_limit_at_one_hundred_thousand))
 '''
 slow-timeout = { period = "60s", terminate-after = 5 }
+
+[[profile.ci.overrides]]
+filter = 'test(svelte_progressive_component_completion_uses_committed_child_contract_)'
+test-group = 'progressive-child-contract-completion'
 
 # Produce JUnit XML for dorny/test-reporter in CI
 [profile.ci.junit]
