@@ -538,7 +538,10 @@ impl Emitter<'_> {
         self.synthetic(">(");
         let (terms, wrapped) = match self.strategy {
             GuardStrategy::Snapshot => (snapshot_terms(callback), !callback.outer_refs.is_empty()),
-            GuardStrategy::ReplayPath => (replay_terms(&self.path), false),
+            GuardStrategy::ReplayPath => {
+                self.work.replayed_terms += self.path.len() as u64;
+                (replay_terms(&self.path), false)
+            }
         };
         if wrapped {
             self.synthetic("(() => {\n");

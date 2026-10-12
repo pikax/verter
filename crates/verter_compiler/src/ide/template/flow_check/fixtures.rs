@@ -851,3 +851,9 @@ pub const MATRIX_SIZES: [usize; 4] = [128, 256, 512, 1024];
 /// Full-size growth, exhaustive callback/condition coverage and path-expansion
 /// rejection are proved by the compiler's operation-site work counters.
 pub const LIVE_MATRIX_SIZES: [usize; 4] = [16, 32, 64, 128];
+
+/// Counter-based growth probes retain three doublings, nested chains and
+/// multiple lexical frames without materialising the large provider matrices.
+/// The same sizes must distinguish linear snapshots from quadratic path replay.
+#[cfg(test)]
+pub(crate) const GROWTH_SIZES: [usize; 4] = [16, 32, 64, 128];
