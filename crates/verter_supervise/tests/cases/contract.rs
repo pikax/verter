@@ -29,6 +29,38 @@ fn cpu_bound_child_accounting_matches_its_own_resource_usage() {
 }
 
 #[test]
+#[cfg(target_os = "macos")]
+fn nested_reaped_cpu_is_attributed_or_unavailable() {
+    let run = supervise("nested-cpu-time", LIMITS, &["cpu-tree", "2", "1000"]);
+    assert_eq!(run.code, Some(0), "stderr: {}", run.stderr);
+    assert_eq!(run.result["errors"], serde_json::json!([]));
+    let measured: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(run.dir.join("result.stdout.log")).unwrap())
+            .unwrap();
+    let actual = measured["userMs"].as_f64().unwrap();
+    assert!(actual > 0.0);
+    match (
+        run.result["cpuUserMs"].as_f64(),
+        run.result["cpuKernelMs"].as_f64(),
+    ) {
+        (Some(user), Some(kernel)) => {
+            assert!(
+                (user - actual).abs() / actual <= 0.10,
+                "supervisor {user} ms, independently reaped tree {actual} ms"
+            );
+            assert!(kernel >= measured["kernelMs"].as_f64().unwrap());
+        }
+        (None, None) => {
+            // Rapid nested exits can hide whether the parent reaped the
+            // grandchild. Those runs must withhold both totals, not guess.
+            assert!(run.result["cpuUserMs"].is_null());
+            assert!(run.result["cpuKernelMs"].is_null());
+        }
+        other => panic!("CPU totals must be available or unavailable together: {other:?}"),
+    }
+}
+
+#[test]
 #[cfg_attr(
     target_os = "linux",
     ignore = "needs a delegated cgroup v2 subtree (systemd-run --user --scope -p Delegate=yes)"

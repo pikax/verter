@@ -235,8 +235,10 @@ exit), `exitCode`,
 largest observation age and sweep time), a bounded `samples` series
 (`{tMs, bytes}` of `sampleMetric`), `processCount`, `descendantsKilled`,
 `cpuUserMs`, `cpuKernelMs`, `stdoutPath`, `stderrPath` and `errors`.
-Telemetry that could not be read is `null`, never `0`. A killed supervisor
-writes no result: a missing `result.json` means the run is invalid.
+Telemetry that could not be read or attributed is `null`, never `0`. On macOS,
+CPU totals are also `null` if simultaneous parent/descendant disappearance
+leaves reaping attribution ambiguous; later counters cannot recover it. A killed
+supervisor writes no result: a missing `result.json` means the run is invalid.
 
 Containment per platform:
 
