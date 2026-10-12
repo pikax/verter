@@ -2169,8 +2169,9 @@ fn relation_memo_has_exactly_one_owner() {
 fn semantic_node_map_has_exactly_one_owner() {
     // The semantic node arena is accessed via `NodeArena` in
     // `SemanticGraphStore`. Ensure the `arena: NodeArena` field
-    // appears exactly once.
-    let count = count_def_in_crates("arena: NodeArena");
+    // appears exactly once. Include the field terminator so constructor
+    // initializers (`arena: NodeArena::...`) are not counted as owners.
+    let count = count_def_in_crates("arena: NodeArena,");
     assert_eq!(
         count, 1,
         "semantic node arena must have exactly one owner; got {count}"

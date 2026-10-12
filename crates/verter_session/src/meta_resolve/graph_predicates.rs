@@ -20,6 +20,72 @@ use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
 
 use std::sync::Arc;
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use verter_type_engine::semantic_query::{LiteralValue, SemanticNodeData};
+    use verter_type_engine::semantic_query_memo::ownership_harness::CountedOwnershipHarness;
+    use verter_type_expr::PropertyKey;
+
+    #[test]
+    fn counted_key_builder_owns_literals_without_an_enclosing_scope() {
+        for keys in [
+            vec![PropertyKey::string_literal("first")],
+            vec![
+                PropertyKey::string_literal("first"),
+                PropertyKey::string_literal("second"),
+            ],
+        ] {
+            let harness = CountedOwnershipHarness::new();
+            let host = crate::VerterHost::new_standalone(Default::default());
+            let dispatch = ProjectSemanticDispatch::with_ownership_harness(&host, harness);
+            let graph = Arc::clone(dispatch.graph());
+            let owner = build_keys_union_node(&graph, &keys).unwrap();
+            let node = owner.id();
+            let data = graph.node_data(node).unwrap();
+            match data.as_ref() {
+                SemanticNodeData::Literal(LiteralValue::String(value)) => {
+                    assert_eq!(value, "first")
+                }
+                SemanticNodeData::Union(children) => {
+                    assert_eq!(children.len(), 2);
+                    assert!(children.iter().all(|child| graph.node_is_live(*child)));
+                }
+                other => {
+                    panic!("key builder returned a reclaimed or invalid key domain: {other:?}")
+                }
+            }
+            let read = dispatch.execute_read(
+                verter_type_engine::semantic_query::SemanticQueryKey::ProjectPath {
+                    base: node,
+                    path: Arc::from([]),
+                    context:
+                        verter_type_engine::semantic_query::ProjectionReductionContext::published(
+                            verter_type_engine::semantic_query::ProjectionMode::Navigate,
+                        ),
+                },
+            );
+            assert!(matches!(
+                read.value,
+                verter_type_engine::semantic_query::QueryResult::Value(_)
+            ));
+            drop(owner);
+            graph.invalidate_all();
+            assert!(
+                graph.node_is_live(node),
+                "the consuming dispatch delivery owns the key domain"
+            );
+            drop(read);
+            drop(dispatch);
+            assert_eq!(
+                graph.node_count(),
+                graph.node_ownership_counts().permanent_nodes,
+                "key owner releases the literal topology"
+            );
+        }
+    }
+}
+
 /// Build a string-literal-union node from a list of keys
 /// for the 2-step Pick/Omit dispatch orchestration. Used by the
 /// registry-decl Pick/Omit route to construct the keys argument for
@@ -29,10 +95,12 @@ use std::sync::Arc;
 /// Single-key fast path produces a bare `Literal` node; multi-key
 /// produces a `Union` of literals. Both are interned at global scope
 /// (no file scope) since the keys are workspace-shared sentinels.
+/// The returned root owns the key topology across the consuming dispatch.
 pub(crate) fn build_keys_union_node(
     graph: &verter_type_engine::semantic_query_memo::SemanticGraphStore,
     keys: &[verter_type_expr::facts::FactPropertyKey],
-) -> Option<verter_type_engine::semantic_query::SemanticNodeId> {
+) -> Option<verter_type_engine::semantic_query_memo::node_roots::NodeRoot> {
+    let _scope = graph.enter_node_root_scope();
     use verter_type_engine::semantic_query::SemanticNodeData;
     use verter_type_expr::LiteralValue;
     use verter_type_expr::PropertyKey;
@@ -67,7 +135,10 @@ pub(crate) fn build_keys_union_node(
         composite.evidence.inspected_file_roots.is_empty() && !composite.evidence.incomplete,
         "key-domain union over freshly interned Global literals must carry no evidence"
     );
-    Some(composite.node)
+    graph
+        .lease_node_data(composite.node)
+        .ok()
+        .map(|lease| lease.root().clone())
 }
 
 /// Extract the package-backed gate's ROOT declaration IDENTITY from a graph

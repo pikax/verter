@@ -22,8 +22,9 @@ pub const DEFAULT_CAPACITY: usize = 64;
 
 /// One cache entry — pairs a scratch URI with its resolved semantic
 /// node id and the access-time tick used by the LRU eviction sweep.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct Entry {
+    _roots: verter_type_engine::semantic_query_memo::node_roots::NodeRootSet,
     node_id: SemanticNodeId,
     last_access: u64,
 }
@@ -66,6 +67,7 @@ impl ScratchCache {
         let now = self.tick.fetch_add(1, Ordering::Relaxed);
         let entry = self.entries.get_mut(uri)?;
         entry.last_access = now;
+        entry._roots.retain_for_construction();
         Some(entry.node_id)
     }
 
@@ -74,7 +76,12 @@ impl ScratchCache {
     /// dropped FIRST so the new entry never lands on a full cache.
     /// Returns the URI that was evicted (if any) so callers can clean
     /// up the host-side scratch file.
-    pub fn insert(&mut self, uri: String, node_id: SemanticNodeId) -> Option<String> {
+    pub fn insert_rooted(
+        &mut self,
+        uri: String,
+        node_id: SemanticNodeId,
+        roots: verter_type_engine::semantic_query_memo::node_roots::NodeRootSet,
+    ) -> Option<String> {
         if self.capacity == 0 {
             return None;
         }
@@ -99,11 +106,18 @@ impl ScratchCache {
         self.entries.insert(
             uri,
             Entry {
+                _roots: roots,
                 node_id,
                 last_access: now,
             },
         );
         evicted
+    }
+
+    /// Insert a synthetic ordinal for the cache policy fixture.
+    #[cfg(test)]
+    pub fn insert(&mut self, uri: String, node_id: SemanticNodeId) -> Option<String> {
+        self.insert_rooted(uri, node_id, Default::default())
     }
 
     /// Drop the cached entry for `uri`. No-op if absent. Used by

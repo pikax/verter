@@ -36,8 +36,8 @@ pub struct EngineProvenance {
     /// (equal to `node_arena_pushes` while every push allocates; diverges
     /// once structural interning serves a push from an existing slot).
     pub node_arena_intern_miss: std::sync::atomic::AtomicU64,
-    /// Time spent waiting on `ArenaInner` mutex acquisition during pushes
-    /// (lock-contention observability counter).
+    /// Time spent acquiring the `ArenaInner` write lock during pushes,
+    /// including dedup hits and both acquisitions on misses.
     pub node_arena_inner_write_wait_ns: std::sync::atomic::AtomicU64,
     /// Per-`SemanticNodeData` variant push count, indexed by
     /// `SemanticNodeTag::bucket_index()`. Sized to

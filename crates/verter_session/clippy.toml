@@ -35,4 +35,11 @@ disallowed-macros = [
 # `FactVersionRef` keys: a `ResultReceipt`'s identity never reads the
 # retention account its evidence page charges (see the workspace-root
 # clippy.toml for the full rationale).
-ignore-interior-mutability = ["bytes::Bytes", "verter_session_query::facts::receipt::ResultReceipt"]
+# Ownership attachments reach mutable storage without participating in key
+# equality/hashing. Keep the workspace's narrowly named lifetime exceptions.
+ignore-interior-mutability = [
+  "bytes::Bytes",
+  "verter_session_query::facts::receipt::ResultReceipt",
+  "verter_type_engine::semantic_query_memo::node_roots::NodeRootSet",
+  "verter_type_engine::signature_kernel::lifetime::SignatureEpochLease",
+]

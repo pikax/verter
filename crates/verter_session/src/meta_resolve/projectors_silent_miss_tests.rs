@@ -24,6 +24,100 @@ use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 use crate::types::HostConfig;
 use crate::VerterHost;
 
+#[test]
+fn counted_emit_merge_owns_surface_without_an_enclosing_scope() {
+    use super::projectors::{resolve_payload_surface_with_scope, PayloadSurfaceScope};
+    use verter_session_query::analysis::component_meta::MacroExpansionKind;
+    use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+    use verter_type_engine::semantic_query::{
+        DeclIdentity, LiteralValue, SemanticNodeData, SurfaceMember, SurfaceView,
+    };
+    use verter_type_engine::semantic_query_memo::ownership_harness::CountedOwnershipHarness;
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let dispatch =
+        ProjectSemanticDispatch::with_ownership_harness(&host, CountedOwnershipHarness::new());
+    let graph = dispatch.graph();
+    let (payload, input_roots) = {
+        let _scope = graph.enter_node_root_scope();
+        let branches: Vec<_> = ["accepted", "dismissed"]
+            .into_iter()
+            .map(|name| {
+                let value =
+                    graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(name.into())));
+                let member = SurfaceMember {
+                    key: verter_type_expr::AuthoredPropertyKey::string(name),
+                    value,
+                    optional: false,
+                    readonly: false,
+                    method_kind: None,
+                    has_implementation_body: false,
+                    visibility: verter_type_expr::MemberVisibility::Public,
+                    spans: Default::default(),
+                    declaration_origin: None,
+                    declared_in_macro_type_arg: Default::default(),
+                    merge_role: Default::default(),
+                    excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+                };
+                graph.intern_node(SemanticNodeData::Object(SurfaceView::from_members(
+                    vec![member],
+                    None,
+                )))
+            })
+            .collect();
+        let check = graph.intern_node(SemanticNodeData::TypeParam {
+            decl: DeclIdentity::synthetic("Mode"),
+            param_index: 0,
+            constraint: None,
+            default: None,
+            display_name: Arc::from("Mode"),
+        });
+        let extends = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+            "editor".into(),
+        )));
+        let payload = graph.intern_node(SemanticNodeData::Conditional {
+            check,
+            extends,
+            true_branch_ref: branches[0],
+            false_branch_ref: branches[1],
+            distributive: false,
+            pending: None,
+        });
+        (payload, graph.root_nodes([payload]).unwrap())
+    };
+    let mut diagnostics = Vec::new();
+    let surface = resolve_payload_surface_with_scope(
+        &dispatch,
+        payload,
+        0,
+        MacroExpansionKind::DefineEmits,
+        PayloadSurfaceScope::EmitClassMacroObject,
+        &mut diagnostics,
+    );
+    let owner = surface
+        .recorded()
+        .expect("both branches supply a complete surface");
+    let node = owner.id();
+    graph.invalidate_all();
+    drop(input_roots);
+    let data = graph.node_data(node).unwrap();
+    let SemanticNodeData::Object(view) = data.as_ref() else {
+        panic!("merged emit surface was reclaimed before consumption: {data:?}");
+    };
+    let members = view.closed().complete_members();
+    assert_eq!(members.len(), 2);
+    assert_eq!(
+        members
+            .iter()
+            .map(|m| m.published_name().unwrap().to_string())
+            .collect::<Vec<_>>(),
+        vec!["accepted", "dismissed"]
+    );
+    assert!(members
+        .iter()
+        .all(|member| graph.node_is_live(member.value)));
+}
+
 #[allow(deprecated)]
 fn make_project_config(root: &str) -> verter_workspace::VfsProjectConfig {
     verter_workspace::VfsProjectConfig {

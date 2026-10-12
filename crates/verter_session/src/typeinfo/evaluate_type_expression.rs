@@ -121,6 +121,10 @@ impl VerterHost {
         &self,
         req: EvaluateTypeExpressionRequest,
     ) -> AuditedResult<Option<SemanticNodeId>, TypeResolutionRequestError> {
+        let _node_scope = self
+            .project_type_store
+            .semantic_graph()
+            .enter_node_root_scope();
         let request_id = self.next_request_id();
         verter_type_engine::request_context::increment_requests_created();
 
@@ -518,7 +522,11 @@ fn evaluate_inner(
     // same value.
     if req.cacheable {
         let mut guard = host.scratch_cache().lock();
-        let evicted = guard.insert(scratch_uri.to_string(), final_node);
+        let roots = dispatch
+            .graph()
+            .root_nodes([final_node])
+            .expect("evaluated scratch node is live");
+        let evicted = guard.insert_rooted(scratch_uri.to_string(), final_node, roots);
         drop(guard);
         if let Some(evicted_uri) = evicted {
             // The LRU dropped an older scratch entry — fully remove its

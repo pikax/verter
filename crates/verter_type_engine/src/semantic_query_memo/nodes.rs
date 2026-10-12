@@ -5,6 +5,68 @@
 use super::*;
 
 impl SemanticGraphStore {
+    /// Retain a multiset of live operands from this arena. Production close
+    /// may still revoke their slots under the legacy activity gate.
+    pub fn root_nodes(
+        &self,
+        ids: impl IntoIterator<Item = SemanticNodeId>,
+    ) -> Result<node_roots::NodeRootSet, QueryError> {
+        node_roots::NodeRootSet::acquire(Arc::clone(&self.arena.core), ids.into_iter().collect())
+    }
+
+    pub(crate) fn root_existing_nodes(
+        &self,
+        mut ids: Vec<SemanticNodeId>,
+    ) -> Result<node_roots::NodeRootSet, QueryError> {
+        // A legacy raw carrier may already name a tombstone (or a synthetic
+        // test ordinal). Such an id owns no storage. Counted delivery, where
+        // all carriers participate in ownership, rejects it instead.
+        if !self.arena.counted() {
+            ids.retain(|node| self.node_is_live(*node));
+        }
+        self.root_nodes(ids)
+    }
+
+    /// Open a construction scope even when no observation capture is active.
+    pub fn enter_node_root_scope(&self) -> node_roots::NodeRootScope {
+        node_roots::NodeRootScope::enter(&self.arena.core)
+    }
+
+    /// Intern a node whose retained operands are covered by arena-qualified
+    /// roots. A foreign scope or an uncovered operand is a typed refusal.
+    pub fn intern_rooted_node(
+        &self,
+        data: SemanticNodeData,
+        scope: NodeScopeId,
+        operands: &node_roots::NodeRootSet,
+    ) -> Result<node_roots::NodeRoot, QueryError> {
+        if !operands.belongs_to(&self.arena.core) {
+            return Err(QueryError::ForeignSemanticOperand);
+        }
+        let mut covered = true;
+        data.for_each_retained_child(|child| {
+            covered &= child.0 >= UNALLOCATABLE_ID_FLOOR || operands.operands().contains(&child);
+        });
+        if !covered {
+            return Err(QueryError::ForeignSemanticOperand);
+        }
+        self.arena.try_intern_owned(data, scope)
+    }
+
+    /// Read a node and retain its graph topology until this lease drops.
+    pub fn lease_node_data(
+        &self,
+        node: SemanticNodeId,
+    ) -> Result<node_data_lease::NodeDataLease, QueryError> {
+        let roots = self.root_nodes([node])?;
+        let data = self
+            .node_data(node)
+            .ok_or(QueryError::ForeignSemanticOperand)?;
+        Ok(node_data_lease::NodeDataLease {
+            data,
+            root: node_roots::NodeRoot::from_roots(node, roots),
+        })
+    }
     /// Intern a new immutable [`SemanticNodeData`] and return its stable id.
     ///
     /// The interned node records [`NodeScopeId::Global`] in the origin

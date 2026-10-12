@@ -33,7 +33,10 @@ pub enum IntersectionPurpose {
 
 /// Owning interned recipe identity.
 #[derive(Clone, PartialEq, Eq, Hash)]
-pub struct IntersectionInputId(Interned<IntersectionRecipe>);
+pub struct IntersectionInputId(
+    Interned<IntersectionRecipe>,
+    crate::semantic_query_memo::node_roots::IdentityNodeRoots,
+);
 
 /// Prints the recipe's digest and its top-level shape only. A nested
 /// subgroup is named by its own digest, never expanded, so formatting a
@@ -57,6 +60,31 @@ impl std::fmt::Debug for IntersectionInputId {
 }
 
 impl IntersectionInputId {
+    fn intern(recipe: IntersectionRecipe) -> Self {
+        let mut nodes = Vec::new();
+        match &recipe {
+            IntersectionRecipe::OrderedOperands(operands) => nodes.extend(operands.iter().copied()),
+            IntersectionRecipe::OrderedSteps(steps) => {
+                for step in steps.iter() {
+                    match step {
+                        IntersectionTerm::Value(node) => nodes.push(*node),
+                        // Nested recipes already own their own node operands;
+                        // the record owns their handles. Compact inputs have
+                        // no record and their direct occurrences belong here.
+                        IntersectionTerm::EvaluateSubgroup { input, .. } => match input {
+                            IntersectionInputRef::Empty | IntersectionInputRef::Recipe(_) => {}
+                            IntersectionInputRef::Unary(node) => nodes.push(*node),
+                            IntersectionInputRef::Binary(left, right) => {
+                                nodes.extend([*left, *right])
+                            }
+                        },
+                    }
+                }
+            }
+        }
+        let roots = crate::semantic_query_memo::node_roots::IdentityNodeRoots::scoped(nodes);
+        Self(Interned::new_scoped(recipe), roots)
+    }
     /// The interned recipe.
     #[must_use]
     pub fn recipe(&self) -> &IntersectionRecipe {
@@ -72,7 +100,7 @@ intern_domain!(IntersectionRecipe {
         if let Some(steps) = Arc::get_mut(steps) {
             for step in steps.iter_mut() {
                 if let IntersectionTerm::EvaluateSubgroup { input, .. } = step {
-                    if let IntersectionInputRef::Recipe(IntersectionInputId(child)) =
+                    if let IntersectionInputRef::Recipe(IntersectionInputId(child, _roots)) =
                         std::mem::replace(input, IntersectionInputRef::Empty)
                     {
                         out.push(child);
@@ -89,7 +117,7 @@ intern_domain!(IntersectionRecipe {
         let shared = std::mem::replace(steps, Arc::from([]));
         for step in shared.iter() {
             if let IntersectionTerm::EvaluateSubgroup {
-                input: IntersectionInputRef::Recipe(IntersectionInputId(child)),
+                input: IntersectionInputRef::Recipe(IntersectionInputId(child, _roots)),
                 ..
             } = step
             {
@@ -147,9 +175,9 @@ impl IntersectionInputRef {
             [] => Self::Empty,
             [only] => Self::Unary(*only),
             [a, b] => Self::Binary(*a, *b),
-            rest => Self::Recipe(IntersectionInputId(Interned::new(
+            rest => Self::Recipe(IntersectionInputId::intern(
                 IntersectionRecipe::OrderedOperands(Arc::from(rest)),
-            ))),
+            )),
         }
     }
 
@@ -161,9 +189,9 @@ impl IntersectionInputRef {
             .iter()
             .any(|step| matches!(step, IntersectionTerm::EvaluateSubgroup { .. }))
         {
-            return Self::Recipe(IntersectionInputId(Interned::new(
+            return Self::Recipe(IntersectionInputId::intern(
                 IntersectionRecipe::OrderedSteps(Arc::from(steps)),
-            )));
+            ));
         }
         let values: Vec<SemanticNodeId> = steps
             .iter()

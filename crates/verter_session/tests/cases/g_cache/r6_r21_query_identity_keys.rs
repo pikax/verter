@@ -1556,6 +1556,12 @@ fn no_unsanctioned_semantic_node_id_in_shape_key() {
         "ShapeCacheKey",
         &shape_cache_key,
         &[
+            // Transport-only ownership: its Eq/Hash exclude the roots.
+            // The exact type prevents a raw node id becoming key identity.
+            ExpectedField {
+                name: "roots",
+                ty: Some("crate::semantic_query_memo::node_roots::IdentityNodeRoots"),
+            },
             ExpectedField {
                 name: "subject",
                 ty: None,

@@ -556,6 +556,30 @@ pub struct ObjectProjectionFormula {
 }
 
 impl ObjectProjectionFormula {
+    pub(crate) fn for_each_retained_node(&self, mut visit: impl FnMut(SemanticNodeId)) {
+        for alternative in self.alternatives.iter() {
+            for fact in alternative.positive.iter() {
+                if let ProjectionEvidence::Proven(node) = fact.value() {
+                    visit(*node);
+                }
+            }
+            for index in alternative.indices.iter() {
+                visit(index.key_type());
+                if let ProjectionEvidence::Proven(node) = index.value() {
+                    visit(*node);
+                }
+            }
+            for signature in alternative.signatures.iter() {
+                visit(signature.node());
+            }
+            match &alternative.domain {
+                AlternativeDomain::Closed(_) => {}
+                AlternativeDomain::Open(open) => {
+                    open.residual_operands.iter().copied().for_each(&mut visit)
+                }
+            }
+        }
+    }
     #[must_use]
     pub fn alternatives(&self) -> &[ObjectProjectionAlternative] {
         &self.alternatives

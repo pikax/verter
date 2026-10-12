@@ -266,12 +266,17 @@ impl SemanticGraphStore {
         let requested_path = requested_path_for_key(&key);
         let admission_seq = self.alloc_candidate_admission_seq();
         let dispatch_dep_signature = self.dep_signature_interner.intern(&dispatch_dep_signature);
+        let result = match result {
+            QueryResult::Value(node) => QueryResult::Value(SemanticQueryValue::TypeNode(node)),
+            QueryResult::Recursive(node) => QueryResult::Recursive(node),
+            QueryResult::Error(error) => QueryResult::Error(error),
+        };
+        let lease = self
+            .lease_candidate(&family, &result, &[])
+            .expect("fixture candidate operands are live");
         let entry = MemoEntry {
-            result: match result {
-                QueryResult::Value(node) => QueryResult::Value(SemanticQueryValue::TypeNode(node)),
-                QueryResult::Recursive(node) => QueryResult::Recursive(node),
-                QueryResult::Error(error) => QueryResult::Error(error),
-            },
+            lease,
+            result,
             read_set_signature: read_set_signature.clone(),
             dispatch_dep_signature: Arc::clone(&dispatch_dep_signature),
             self_root_canonicals,

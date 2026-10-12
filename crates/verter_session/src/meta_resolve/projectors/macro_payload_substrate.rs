@@ -257,8 +257,11 @@ pub(crate) fn resolve_payload_surface_with_scope(
     expansion_kind: MacroExpansionKind,
     scope: PayloadSurfaceScope,
     diag_sink: &mut Vec<MacroExpansionDiagnostics>,
-) -> verter_type_engine::semantic_query::surface_resolution::SurfaceResolution<SemanticNodeId> {
+) -> verter_type_engine::semantic_query::surface_resolution::SurfaceResolution<
+    verter_type_engine::semantic_query_memo::node_roots::NodeRoot,
+> {
     use verter_type_engine::semantic_query::surface_resolution::NonEmptyReasons;
+    let _scope = dispatch.graph().enter_node_root_scope();
     let claims = dispatch.host_attachment().surface_claims();
     if matches!(scope, PayloadSurfaceScope::Default) {
         return super::resolve_payload_surface(
@@ -471,7 +474,7 @@ pub(crate) fn resolve_payload_surface_with_scope(
     let false_surface = false_projection
         .and_then(|(node, open)| read_members(node).map(|members| (node, open, members)));
 
-    match (true_surface, false_surface) {
+    let resolution = match (true_surface, false_surface) {
         (Ok((_, true_open, Some(t))), Ok((_, false_open, Some(f)))) => {
             // An OPEN branch contributed presence-only evidence: do NOT
             // intern a closed `Object` from the merge — `SurfaceView`'s
@@ -482,7 +485,14 @@ pub(crate) fn resolve_payload_surface_with_scope(
             // signal into the macro envelope
             // (`OpenSpreadProgram` → `IndeterminateConditional`).
             if true_open || false_open {
-                return claims.open_presence(conditional_node);
+                return claims.open_presence(
+                    dispatch
+                        .graph()
+                        .lease_node_data(conditional_node)
+                        .expect("conditional surface is live")
+                        .root()
+                        .clone(),
+                );
             }
             let merged = merge_emit_branch_members(&t, &f);
             let view = verter_type_engine::semantic_query::SurfaceView::from_members(merged, None);
@@ -540,7 +550,15 @@ pub(crate) fn resolve_payload_surface_with_scope(
             ));
             claims.no_surface()
         }
-    }
+    };
+    resolution.map(|node| {
+        dispatch
+            .graph()
+            .lease_node_data(node)
+            .expect("produced emit surface is live")
+            .root()
+            .clone()
+    })
 }
 
 /// Union-merge two conditional-branch member lists by member name: the

@@ -3934,6 +3934,8 @@ pub struct HostRetentionSnapshot {
     pub publication_lanes: usize,
     /// Live interned semantic-graph nodes (payloads no close has released).
     pub semantic_nodes: usize,
+    /// Required current graph roots and internal edges; no history capture.
+    pub semantic_node_ownership: verter_type_engine::semantic_query_memo::NodeOwnershipCounts,
     /// Node slots the semantic arena physically holds: live chunks times the
     /// chunk size. Bounded by the live set, so growth here is storage the
     /// release path failed to give back.

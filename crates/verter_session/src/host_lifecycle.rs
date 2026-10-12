@@ -860,6 +860,10 @@ impl VerterHost {
                 .publication_store
                 .retained_lane_count(),
             semantic_nodes: self.project_type_store.semantic_graph().node_count(),
+            semantic_node_ownership: self
+                .project_type_store
+                .semantic_graph()
+                .node_ownership_counts(),
             semantic_node_slots: self
                 .project_type_store
                 .semantic_graph()

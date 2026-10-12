@@ -1228,6 +1228,7 @@ fn build_script_setup_seed_frames(
 /// or query identity.
 #[derive(Debug, Clone)]
 pub struct MacroHotProduct {
+    pub roots: crate::semantic_query_memo::node_roots::NodeRootSet,
     pub hot: HotTypeRef,
     pub prop_reference_heads: Arc<[Option<verter_type_expr::facts::AuthoredReferenceHeadFact>]>,
 }
@@ -1576,6 +1577,7 @@ fn build_macro_hot_ref(
     // The parse-domain producer owns the kind classification
     // (`defineProps` / `withDefaults` own bodies carry the bit).
     let macro_own_body = MacroOwnBodyStamp::from_macro_kind(mac.kind);
+    let _node_scope = graph.enter_node_root_scope();
 
     // Seed the script-setup generic binders so `defineProps<T>()`'s `T` in a
     // `<script setup generic="T">` SFC lowers to its `TypeParam` binder, not
@@ -1596,6 +1598,9 @@ fn build_macro_hot_ref(
             .ok()
             .map(|hot| {
                 Arc::new(MacroHotProduct {
+                    roots: graph
+                        .root_nodes([hot.node()])
+                        .expect("lowered macro node is live"),
                     hot,
                     prop_reference_heads: Arc::from(prop_reference_heads),
                 })

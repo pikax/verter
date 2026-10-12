@@ -586,6 +586,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     ) -> Option<AdmittedRouteProjectionNode> {
         match route {
             RouteDemand::MemberPath(path) if !path.is_empty() => {
+                let graph = std::sync::Arc::clone(self.semantic_dispatch().graph());
+                let _scope = graph.enter_node_root_scope();
                 let root =
                     self.dispatch_root_instantiated(scope_canonical_id, scope_owner, root_symbol)?;
                 let query_path: std::sync::Arc<[PathSegment]> = std::sync::Arc::from(
@@ -612,8 +614,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         // `.filter(dispatch_route_expr_is_materialized)`); the
                         // gated mint is `route_admission::admit_materialized`,
                         // which admits the node WITHOUT materialising it.
-                        node_raised_shape_facts_with_dispatch(dispatch, node)
-                            .and_then(|witness| route_admission::admit_materialized(&witness))
+                        node_raised_shape_facts_with_dispatch(dispatch, node).and_then(|witness| {
+                            route_admission::admit_materialized(dispatch.graph(), &witness)
+                        })
                     }
                     _ => None,
                 }
@@ -666,6 +669,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         // Step A: instantiate the route root to a projectable body. Navigate
         // keeps generic carriers intact (the builtin engine re-projects in the
         // caller's mode), mirroring the materialiser's Step A.
+        let graph = std::sync::Arc::clone(self.semantic_dispatch().graph());
+        let _scope = graph.enter_node_root_scope();
         let body_id =
             self.dispatch_root_instantiated(scope_canonical_id, scope_owner, root_symbol)?;
         let dispatch = self.semantic_dispatch();
@@ -677,7 +682,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
             verter_type_engine::semantic_query::InstantiateKey::new(
                 dispatch.builtin_type_slot(builtin_name),
-                std::sync::Arc::from(vec![body_id, keys_node].into_boxed_slice()),
+                std::sync::Arc::from(vec![body_id, keys_node.id()].into_boxed_slice()),
                 dispatch.instantiate_context_for(
                     "__builtin__",
                     verter_type_engine::semantic_query::ProjectionReductionContext::published(
@@ -692,8 +697,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 // mint is `route_admission::admit_materialized`, which admits the
                 // node WITHOUT materialising it — the publication wrapper
                 // materialises once at the registry sink.
-                node_raised_shape_facts_with_dispatch(dispatch, node)
-                    .and_then(|witness| route_admission::admit_materialized(&witness))
+                node_raised_shape_facts_with_dispatch(dispatch, node).and_then(|witness| {
+                    route_admission::admit_materialized(dispatch.graph(), &witness)
+                })
             }
             _ => None,
         }

@@ -109,6 +109,13 @@ mod carrier {
         }
 
         impl OutputPayload {
+            pub(super) fn root_nodes(
+                &self,
+                node: Option<super::SemanticNodeId>,
+            ) -> crate::semantic_query_memo::node_roots::IdentityNodeRoots {
+                self.engine.root_nodes(node)
+            }
+
             /// Seal a [`MaterializedTypeExpr`] (tree + sidecar) into the
             /// vault. `pub(super)` — only the parent `carrier` module's
             /// carrier constructors reach it.
@@ -264,6 +271,7 @@ mod carrier {
     /// surface, so they stay readable by the Kind-A sinks through public
     /// accessors.
     pub struct MaterializedOutputTypeExpr {
+        roots: crate::semantic_query_memo::node_roots::IdentityNodeRoots,
         /// The producing reduced [`SemanticNodeId`] (facts-rail metadata).
         node_id: Option<SemanticNodeId>,
         /// The sealed raised payload (capability-gated unwrap).
@@ -295,6 +303,7 @@ mod carrier {
             let result_is_partial = result_is_partial || type_expr.0.has_degradation();
             Self {
                 node_id,
+                roots: type_expr.0.root_nodes(node_id),
                 type_expr,
                 dep_signature,
                 result_is_partial,
@@ -382,6 +391,7 @@ mod carrier {
         ) -> Self {
             Self {
                 node_id,
+                roots: crate::semantic_query_memo::node_roots::IdentityNodeRoots::scoped(node_id),
                 type_expr: OutputTypeExpr(payload::OutputPayload::new(
                     EngineIdentity::unbound(),
                     MaterializedTypeExpr::exact(type_expr),
@@ -406,7 +416,9 @@ mod carrier {
 
     impl Clone for MaterializedOutputTypeExpr {
         fn clone(&self) -> Self {
+            self.roots.0.retain_for_construction();
             Self {
+                roots: self.roots.clone(),
                 node_id: self.node_id,
                 // The sealed payload clones its private inner `TypeExpr` inside
                 // the vault; this is structural cloning of the carrier, NOT an
