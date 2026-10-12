@@ -112,6 +112,24 @@ mod tests;
 
 Extracted file contains module contents directly — `use super::*;`, helpers, and `#[test]` fns. No wrapping `mod tests { }` block.
 
+### Repository guard scans
+
+Repository source guards reuse immutable source inventories or indexes within
+each test process. A necessary-condition filter may avoid parsing or scanning
+content only when every possible violation still reaches the original rule;
+retain each rule's path scope, integrity checks, and discriminating fixtures.
+Nextest isolates tests in separate processes, so a once-cell alone does not
+share a scan between nextest tests: the cold scan must also be efficient.
+
+The observation-feature guard resolves each production root and dev closure
+independently for host and wasm targets. Cargo remains the activation authority;
+metadata declarations only bound which seed activations can affect those
+closures. Cache default closures within that target/configuration and fixture
+metadata within the immutable fixture. Keep package identity (including source
+and version), weak edges, dependency defaults, and dev unification controls.
+The bounded repository guards have explicit 20-second nextest watchdogs in
+both default and CI profiles; other tests retain their own hang protection.
+
 ### TDD Workflow
 
 Behavioral code changes use TDD. Documentation, generated projections, formatting, and mechanical metadata changes use their owning freshness/validation evidence unless they also change executable behavior.

@@ -20,6 +20,12 @@ max-threads = 1
 # than the test inventory.
 slow-timeout = { period = "60s", terminate-after = 5 }
 
+# Repository guards have bounded scans and resolver work. Keep their stricter
+# watchdog in both profiles without changing other tests' hang protection.
+[[profile.default.overrides]]
+filter = 'test(=cases::architecture_guards::cache::every_db_field_implements_invalidation_by_canonical) | test(=cases::observe_feature_closure::observe_feature_closure_is_off_for_production_and_its_dev_unification) | test(=cases::analysis_config_paths_never_committed::analysis_inputs_never_leak_into_tracked_artifacts) | test(=cases::g_misc2::no_carrier_verdict_db::no_carrier_verdict_db_in_production) | test(=cases::architecture_dependencies::cosmetic_reprinter_guard::no_compiled_output_cosmetic_reprinter_path) | test(=cases::architecture_dependencies::cosmetic_reprinter_guard::cosmetic_reprinter_scanner_discriminates) | test(=cases::observe_feature_closure::observe_feature_closure_keys_features_by_package_identity) | test(=cases::member_edge_provenance_arch_guard::projected_member_construction_never_uses_default_rest_spread)'
+slow-timeout = { period = "20s", terminate-after = 1 }
+
 # These correctness rows exercise the full checker comparison allowance in
 # unoptimised builds. Each row is isolated and bounded by the engine ledger;
 # keep a watchdog without treating its finite comparison work as a hang.
@@ -33,6 +39,10 @@ test-group = 'relation-comparison-envelope'
 
 [profile.ci]
 slow-timeout = { period = "60s", terminate-after = 5 }
+[[profile.ci.overrides]]
+filter = 'test(=cases::architecture_guards::cache::every_db_field_implements_invalidation_by_canonical) | test(=cases::observe_feature_closure::observe_feature_closure_is_off_for_production_and_its_dev_unification) | test(=cases::analysis_config_paths_never_committed::analysis_inputs_never_leak_into_tracked_artifacts) | test(=cases::g_misc2::no_carrier_verdict_db::no_carrier_verdict_db_in_production) | test(=cases::architecture_dependencies::cosmetic_reprinter_guard::no_compiled_output_cosmetic_reprinter_path) | test(=cases::architecture_dependencies::cosmetic_reprinter_guard::cosmetic_reprinter_scanner_discriminates) | test(=cases::observe_feature_closure::observe_feature_closure_keys_features_by_package_identity) | test(=cases::member_edge_provenance_arch_guard::projected_member_construction_never_uses_default_rest_spread)'
+slow-timeout = { period = "20s", terminate-after = 1 }
+
 [[profile.ci.overrides]]
 filter = 'test(reversed_object_unions_reach_the_checker_answer_)'
 slow-timeout = { period = "60s", terminate-after = 15 }
