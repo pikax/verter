@@ -1926,7 +1926,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     verter_session_query::function_program::ProgramExpressionSource::FieldInitializer {
                         source: verter_type_expr::facts::FunctionReturnSource::Flow(identity),
                         readonly,
-                    } => regular(self.field_initializer_value(identity, *readonly)),
+                    } => regular(self.initializer_value(identity, *readonly)),
                     verter_session_query::function_program::ProgramExpressionSource::FieldInitializer { .. } => {
                         crate::request_context::mark_request_result_partial();
                         None
@@ -1935,6 +1935,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         crate::request_context::mark_request_result_partial();
                         None
                     }
+                    verter_session_query::function_program::ProgramExpressionSource::SemanticCall {
+                        initializer: Some(initializer), ..
+                    } => {
+                        let node = self.initializer_value(&initializer.function, initializer.preserve_literals);
+                        // An unresolved call has no inferred declaration value.
+                        // Keep the ordinary call-source refusal instead of
+                        // publishing the flow evaluator's positional marker.
+                        if node.is_some_and(|node| matches!(
+                            self.graph().node_data(node).as_deref(),
+                            Some(SemanticNodeData::Opaque(QueryError::UnmodeledPosition))
+                        )) {
+                            crate::request_context::mark_request_result_partial();
+                            None
+                        } else {
+                            regular(node)
+                        }
+                    },
                     verter_session_query::function_program::ProgramExpressionSource::Value
                     | verter_session_query::function_program::ProgramExpressionSource::SemanticCall { .. } => {
                         let expression = source_demand.indexed_program_expression_ir(record)?;
@@ -1949,14 +1966,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
-    /// The value of a class field whose initializer is served as its own
+    /// The value of a field or declarator whose initializer is served as its own
     /// position: the position's body-derived return, its fresh literals
     /// widened for a mutable field (the checker's widened literal type of a
     /// property initializer) and kept for a `readonly` one. A read made
     /// while the position is already being evaluated — the initializer
     /// reads, through `this`, a field whose own initializer reads it back
     /// — is the checker's circular initializer (TS7022): `any`.
-    fn field_initializer_value(
+    fn initializer_value(
         &self,
         identity: &verter_type_expr::facts::FlowFunctionReturnIdentity,
         readonly: bool,
@@ -7070,23 +7087,107 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// `getAssignmentReducedType` gate (a NON-union declared type
     /// supplies its binding verbatim). A `keyof` whose keys settle IS the
     /// union of those keys (`keyof Box<string>` is `"value" | "size"`); the
-    /// carrier only keeps the name the checker prints it by. Named union
-    /// declarations use the same identity resolution as the relation engine.
+    /// carrier only keeps the name the checker prints it by. Named
+    /// unions are inspected through shallow body lowering;
+    /// class surfaces and deferred operations stay lazy until demanded.
     fn union_arms_of(&self, node: SemanticNodeId) -> Option<Vec<SemanticNodeId>> {
-        let node = match self.unwrap_identity_carrier_for_relation(node) {
-            IdentityCarrierUnwrap::Concrete(node) => node,
-            IdentityCarrierUnwrap::Unresolvable => return None,
-        };
-        let base = match self.graph().node_data(node).as_deref() {
-            Some(SemanticNodeData::Union(members)) => return Some(members.to_vec()),
-            Some(SemanticNodeData::KeyOf { base }) => *base,
-            _ => return None,
-        };
-        let keys = self.key_set_of(base)?;
-        match self.graph().node_data(keys).as_deref() {
-            Some(SemanticNodeData::Union(members)) => Some(members.to_vec()),
-            _ => None,
+        let mut current = node;
+        let mut seen = rustc_hash::FxHashSet::default();
+        while seen.insert(current) {
+            let (identity, args): (crate::semantic_query::DeclIdentity, Arc<[SemanticNodeId]>) =
+                match self.graph().node_data(current).as_deref()? {
+                    SemanticNodeData::Union(members) => return Some(members.to_vec()),
+                    SemanticNodeData::KeyOf { base } => {
+                        current = self.key_set_of(*base)?;
+                        continue;
+                    }
+                    SemanticNodeData::Alias(inner) => {
+                        current = *inner;
+                        continue;
+                    }
+                    SemanticNodeData::DeclRef { identity } => (identity.clone(), Arc::from([])),
+                    SemanticNodeData::InstantiationRef { base, args } => {
+                        (base.clone(), Arc::clone(args))
+                    }
+                    _ => return None,
+                };
+            let prepared = self.ctx.prepared_type_decl_return_only(
+                &identity.canonical_id,
+                identity.owner,
+                &identity.decl_name,
+            )?;
+            if prepared.kind != verter_session_query::declarations::TypeDeclKind::Alias {
+                return None;
+            }
+            let body = super::raise::deref_slot_body(self.ctx, &prepared.body_facts.body_slot)?;
+            let mut outer = &body;
+            while let verter_type_expr::TypeExpr::Parenthesized(inner) = outer {
+                outer = inner;
+            }
+            let shallow = match outer {
+                verter_type_expr::TypeExpr::Union(_) => true,
+                verter_type_expr::TypeExpr::Ref { type_arguments, .. } => {
+                    prepared.type_parameters.is_empty()
+                        || type_arguments.iter().all(|argument| {
+                            matches!(argument, verter_type_expr::TypeExpr::Ref { name, type_arguments }
+                                if type_arguments.is_empty()
+                                    && prepared.type_parameters.iter().any(|parameter| parameter.name == name.as_ref()))
+                        })
+                }
+                _ => false,
+            };
+            if !shallow {
+                return None;
+            }
+            let indexed = self
+                .ctx
+                .ensure_indexed_ready_serve(&identity.canonical_id)?
+                .indexed;
+            let scope = crate::semantic_query::NodeScopeId::File {
+                canonical_id: Arc::clone(&identity.canonical_id),
+                owner: identity.owner,
+                whole_hash: indexed.whole_hash,
+                local_scope: None,
+            };
+            let payload = self
+                .ctx
+                .prepared_decl_bundle(&identity.canonical_id)
+                .map(|bundle| {
+                    crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
+                        &bundle,
+                        identity.owner,
+                    )
+                });
+            let shadowing =
+                crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(
+                    payload.as_ref(),
+                );
+            let arguments = self.declared_application_arguments(
+                &identity,
+                &args,
+                crate::semantic_query::ProjectionReductionContext::structural_transit(),
+            )?;
+            let env = prepared
+                .type_parameters
+                .iter()
+                .zip(arguments.iter().copied())
+                .map(|(parameter, argument)| (parameter.name.clone(), argument))
+                .collect();
+            current = self.shallow_lower_type_expr_with_context_at_locator(
+                &body,
+                &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
+                    prepared.body_facts.body_slot.clone(),
+                ),
+                &env,
+                &scope,
+                &prepared.name_resolution,
+                payload.as_ref(),
+                &shadowing,
+                &mut Vec::new(),
+                crate::semantic_query::ProjectionReductionContext::structural_transit(),
+            );
         }
+        None
     }
 
     /// Join one function's return-site contributors with the fallthrough
@@ -8582,6 +8683,15 @@ enum GuardNarrowing {
     ),
 }
 
+/// Parent dispatch and member reads can retain different information after
+/// a property write. Exhaustiveness reads the entering discriminant itself.
+struct SwitchDiscriminantRemainder {
+    parents: Vec<SemanticNodeId>,
+    parent_count: usize,
+    discriminant: SemanticNodeId,
+    covered: bool,
+}
+
 /// What an equality's value is to an `unknown` subject
 /// ([`FlowEvaluator::equality_value_class`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -9075,7 +9185,18 @@ pub(super) trait FlowDemandDriver {
         scope_canonical_id: &str,
     ) -> FunctionReturnNode;
     fn execute_relate_pair(&self, source: SemanticNodeId, target: SemanticNodeId) -> RelationStep;
-    fn execute_resolve_call(&self, key: ResolveCallKey) -> ResolveCallStep;
+    fn execute_contextual_call(
+        &self,
+        key: ResolveCallKey,
+        state: &mut super::call_resolve::ContextualCallState,
+    ) -> ResolveCallStep;
+    fn resume_contextual_call(
+        &self,
+        key: &mut ResolveCallKey,
+        args: &[crate::semantic_query::CallArgKey],
+        position: usize,
+        state: &mut super::call_resolve::ContextualCallState,
+    ) -> ResolveCallStep;
     fn demand_type_node(
         &self,
         key: SemanticQueryKey,
@@ -9488,8 +9609,21 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
     fn execute_relate_pair(&self, source: SemanticNodeId, target: SemanticNodeId) -> RelationStep {
         ProjectSemanticDispatch::execute_relate_pair(self, source, target)
     }
-    fn execute_resolve_call(&self, key: ResolveCallKey) -> ResolveCallStep {
-        ProjectSemanticDispatch::execute_resolve_call(self, key)
+    fn execute_contextual_call(
+        &self,
+        key: ResolveCallKey,
+        state: &mut super::call_resolve::ContextualCallState,
+    ) -> ResolveCallStep {
+        ProjectSemanticDispatch::execute_contextual_call(self, key, state)
+    }
+    fn resume_contextual_call(
+        &self,
+        key: &mut ResolveCallKey,
+        args: &[crate::semantic_query::CallArgKey],
+        position: usize,
+        state: &mut super::call_resolve::ContextualCallState,
+    ) -> ResolveCallStep {
+        ProjectSemanticDispatch::resume_contextual_call(self, key, args, position, state)
     }
     fn demand_type_node(
         &self,
@@ -10094,8 +10228,22 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     fn execute_relate_pair(&self, source: SemanticNodeId, target: SemanticNodeId) -> RelationStep {
         self.driver.execute_relate_pair(source, target)
     }
-    fn execute_resolve_call(&self, key: ResolveCallKey) -> ResolveCallStep {
-        self.driver.execute_resolve_call(key)
+    fn execute_contextual_call(
+        &self,
+        key: ResolveCallKey,
+        state: &mut super::call_resolve::ContextualCallState,
+    ) -> ResolveCallStep {
+        self.driver.execute_contextual_call(key, state)
+    }
+    fn resume_contextual_call(
+        &self,
+        key: &mut ResolveCallKey,
+        args: &[crate::semantic_query::CallArgKey],
+        position: usize,
+        state: &mut super::call_resolve::ContextualCallState,
+    ) -> ResolveCallStep {
+        self.driver
+            .resume_contextual_call(key, args, position, state)
     }
     fn demand_type_node(
         &self,
@@ -16542,9 +16690,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         expanded: &mut rustc_hash::FxHashSet<SemanticNodeId>,
         gapped: &mut bool,
     ) {
-        if let Some(members) = self.dispatch.union_arms_of(node) {
+        if let Some(SemanticNodeData::Union(members)) =
+            self.dispatch.arena().node_data(node).as_deref()
+        {
             if expanded.insert(node) {
-                for member in members {
+                for member in members.iter().copied() {
                     self.collect_enumerated_arms(member, arms, expanded, gapped);
                 }
             }
@@ -18431,6 +18581,26 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let parent = self.narrow_parent_by_discriminant(subject, &mut |this, member| {
             this.narrow_type_by_equality(member, literal_node, negated, loose)
         });
+        if comparison == LiteralComparison::SwitchCase {
+            if let GuardNarrowing::Narrowed(parent_subject, node) = &parent {
+                // A selected unit tag supplies the checker's case type even
+                // after a write. A union-valued tag still intersects the
+                // existing member fact with the clause's equality.
+                self.push_narrowing(parent_subject, *node);
+                if let Some(member) = self.member_declared_node(subject) {
+                    let member = if self.is_guard_unit(member) {
+                        member
+                    } else {
+                        self.narrowed_read(subject).unwrap_or(member)
+                    };
+                    if let Some(narrowed) =
+                        self.narrow_type_by_equality(member, literal_node, negated, loose)
+                    {
+                        return GuardNarrowing::Narrowed(subject.clone(), narrowed);
+                    }
+                }
+            }
+        }
         // A member whose type this frame cannot read establishes no
         // readable narrow: a later read of it is unreadable on its own.
         if before.is_some_and(|node| self.dispatch.graph().node_reaches_unresolved(node)) {
@@ -20203,13 +20373,14 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// fits (`string` under `case "a":`) is NOT covered — the checker's
     /// default edge keeps it. Returns the surviving arms and the arm
     /// count, so the caller can tell "no narrow established"
-    /// (survivors == arms) from a real one. The final node carries the
-    /// uncovered discriminant leaves, even when every parent survives.
+    /// (survivors == arms) from a real one. Member reads retain an exact
+    /// fact when a surviving tag is union-valued. Coverage uses the entering
+    /// discriminant fact even when the parent still has unhandled arms.
     fn switch_discriminant_remainder(
         &mut self,
         subject: &verter_session_query::flow::slice::SliceNarrowSubject,
         tests: &[verter_session_query::flow::slice::SliceGuardLiteral],
-    ) -> Option<(Vec<SemanticNodeId>, usize, SemanticNodeId)> {
+    ) -> Option<SwitchDiscriminantRemainder> {
         // The narrow lands at the tested property's PARENT reference
         // (the root itself for a whole-subject or one-segment
         // discriminant), so the arms are the parent's — a nested
@@ -20297,6 +20468,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         }
         let mut survivors: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
         let mut surviving_tags = Vec::new();
+        let mut retains_member_fact = false;
         for arm in &arms {
             let member = if subject.path.is_empty() {
                 *arm
@@ -20305,12 +20477,32 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             };
             let tags = self.switch_member_remainder(member, &test_nodes)?;
             if !tags.is_empty() {
+                retains_member_fact |= !self.is_guard_unit(member);
                 survivors.push(*arm);
                 surviving_tags.extend(tags);
             }
         }
-        let total = arms.len();
-        Some((survivors, total, self.union_or_never(&surviving_tags)))
+        let covered = if subject.path.is_empty() {
+            // The parent is the tested value, already read through its current
+            // narrowing above. Its remainder also decides coverage; asking the
+            // same relation again would charge each surviving leaf twice.
+            survivors.is_empty()
+        } else if let Some(current) = self.narrowed_read(subject) {
+            let remaining = self.switch_member_remainder(current, &test_nodes)?;
+            let covered = remaining.is_empty();
+            if retains_member_fact {
+                surviving_tags = remaining;
+            }
+            covered
+        } else {
+            survivors.is_empty()
+        };
+        Some(SwitchDiscriminantRemainder {
+            parents: survivors,
+            parent_count: arms.len(),
+            discriminant: self.union_or_never(&surviving_tags),
+            covered,
+        })
     }
 
     /// The runtime values of one arm's tested member not matched
@@ -26246,6 +26438,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             // An SCC back-edge through the executor: the close discharges
             // it on the component's admitted results.
             super::call_resolve::ResolveCallStep::Hold(_) => Some(Positional::Hold),
+            super::call_resolve::ResolveCallStep::Degraded(
+                crate::semantic_query::ResolveCallFailure::Diagnosed(diagnostic),
+            ) => {
+                self.record_checker_diagnostic(diagnostic);
+                Some(self.degraded_unrepresentable_callee())
+            }
             // A PROVEN refusal — the callee is not callable, or no
             // overload accepts the authored arguments — is the typed
             // `UnrepresentableCallee` degradation this rail already

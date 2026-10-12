@@ -2330,21 +2330,20 @@ pub enum ResolveCallFailure {
     NotCallable,
     /// Every visible candidate was definitely inapplicable.
     NoApplicableOverload,
+    /// A definite applicability failure with a checker diagnostic. The
+    /// diagnostic travels with the refusal; it is never a successful value.
+    Diagnosed(CheckerDiagnostic),
     /// Applicability depended on unsupported or unresolved semantic work.
     Undecidable,
     /// The call-resolution work envelope tripped.
     Budget,
-    /// A type parameter no other argument infers occurs in the return of
-    /// the contextual signature a context-sensitive function argument is
-    /// checked under: the checker infers it from what that function
-    /// returns, which applicability does not model. Undecided like
-    /// [`Self::Undecidable`], but no rail may answer the call with the
-    /// parameter's fallback instead. `contextual` names the first
-    /// context-sensitive argument (its position) and the contextual type it
-    /// is checked under, instantiated with the inferences of the arguments
-    /// before it: the caller types that argument under it and asks again —
-    /// the checker's second inference pass. `None` when the callee has
-    /// several candidates, each of which would type it differently.
+    /// A transient request to contextually type one argument, never a call
+    /// value or an admissible memo result. `contextual` names its position
+    /// and the type supplied by the candidate's current inferences. The flow
+    /// route evaluates that callback and resumes the candidate's collector;
+    /// losing candidates discard their inference deposits. `None` means the
+    /// argument cannot be continued by the requesting rail. No rail may use
+    /// an uninferred parameter's fallback as the call's answer meanwhile.
     ContextSensitiveInference {
         contextual: Option<(u32, SemanticNodeId)>,
     },
@@ -4373,6 +4372,34 @@ impl<'a> SurfaceKeyIndex<'a> {
                 .filter(|member| member.visibility.is_public()),
         )
     }
+
+    pub(crate) fn project_known_key_overload_group(
+        &self,
+        key: &PropertyKey,
+    ) -> Option<Vec<SemanticNodeId>> {
+        visible_method_overloads(self.colliding(key).iter().copied())
+    }
+}
+
+fn visible_method_overloads<'a>(
+    members: impl Iterator<Item = &'a SurfaceMember>,
+) -> Option<Vec<SemanticNodeId>> {
+    let group: Vec<_> = members
+        .filter(|member| member.visibility.is_public())
+        .collect();
+    if group.len() < 2
+        || !group
+            .iter()
+            .all(|member| member.method_kind == Some(verter_type_expr::ObjectMethodKind::Method))
+    {
+        return None;
+    }
+    Some(
+        visible_overload_ordinals(group.iter().map(|member| member.has_implementation_body))
+            .into_iter()
+            .map(|ordinal| group[ordinal].value)
+            .collect(),
+    )
 }
 
 /// Key evidence available from the sole positive-member state.
@@ -4582,30 +4609,13 @@ impl SurfaceView {
         &self,
         key: &PropertyKey,
     ) -> Option<Vec<SemanticNodeId>> {
-        let group: Vec<&SurfaceMember> = self
-            .members
-            .iter()
-            .filter(|member| {
-                member.visibility.is_public()
-                    && member
-                        .key
-                        .as_known()
-                        .is_some_and(|known| known.element_access_collides(&key.as_ref()))
-            })
-            .collect();
-        if group.len() < 2
-            || !group.iter().all(|member| {
-                member.method_kind == Some(verter_type_expr::ObjectMethodKind::Method)
-            })
-        {
-            return None;
-        }
-        Some(
-            visible_overload_ordinals(group.iter().map(|member| member.has_implementation_body))
-                .into_iter()
-                .map(|ordinal| group[ordinal].value)
-                .collect(),
-        )
+        visible_method_overloads(self.members.iter().filter(|member| {
+            note_key_scan_comparison();
+            member
+                .key
+                .as_known()
+                .is_some_and(|known| known.element_access_collides(&key.as_ref()))
+        }))
     }
 
     /// The ACCESSOR a key names: the public `get` and / or `set` members
@@ -4639,6 +4649,7 @@ impl SurfaceView {
             smallvec::SmallVec<[&SurfaceMember; 1]>,
         > = std::collections::HashMap::default();
         for member in self.members.iter() {
+            note_key_scan_comparison();
             if let Some(known) = member.key.cloned_known() {
                 members
                     .entry(property_spelling(known))

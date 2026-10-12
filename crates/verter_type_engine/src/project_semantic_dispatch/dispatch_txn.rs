@@ -2431,6 +2431,9 @@ pub struct FlowReturnDomainRuntime {
 /// The call-resolution domain runtime.
 #[derive(Debug)]
 pub struct ResolveCallDomainRuntime {
+    /// The flow route owns this continuation between contextual deliveries.
+    /// It is installed only while that route asks the call executor.
+    pub(super) contextual: Option<super::call_resolve::ContextualCallState>,
     /// The relation the candidate being checked is applicable under: the
     /// subtype pass of a multi-candidate call, else assignability.
     pub(crate) applicability: crate::semantic_query::RelationKind,
@@ -2452,6 +2455,7 @@ pub struct ResolveCallDomainRuntime {
 impl Default for ResolveCallDomainRuntime {
     fn default() -> Self {
         Self {
+            contextual: None,
             applicability: crate::semantic_query::RelationKind::Assignable,
             completed_members: Vec::new(),
             last_root_failure: None,

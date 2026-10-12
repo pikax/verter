@@ -224,10 +224,9 @@ jobs below that, always capped by available CPUs. This keeps the documented
 measured 12-job peak was 11.60 GiB and is too close to call portable there.
 Explicit positive overrides remain exact. Windows uses full nextest capacity;
 the provider-free core has no provider-specific `max-threads = 1` groups.
-The three wide reversed-union checker-boundary rows share the
-`relation-comparison-envelope` group: only one retains its full pair evidence
-at a time, with the same answers, comparison allowances and watchdogs. Other
-core tests and the BF2 inventory keep their normal nextest concurrency.
+Core tests and the BF2 inventory keep their normal nextest concurrency; no test
+group serialises slow rows (serialised, the three reversed-union rows alone
+outran the 30-minute core step).
 Real-provider tests run through dedicated serial libtest jobs, while compile-fail
 fixtures run through standalone Cargo binaries rather than nextest test targets.
 
@@ -383,6 +382,17 @@ Use a reversible mutation recipe only when preflight identifies a plausible crit
 Canonical in-tree examples of fully self-contained recipes (in-memory plant → expected verdict → trivial restore + GREEN control): the Vue structural-conformance discriminator `crates/verter_vue_conformance/tests/cases/conformance_discriminator.rs` (cosmetic-PASS vs behavioral-FAIL mutations on committed goldens, each plant proven applied) and the Svelte oracle discriminator in `crates/verter_compiler/tests/cases/svelte_client_emit_topology.rs`.
 
 ### Timeout Is Never a Pass
+
+When shortening a process-harness integrity test's injected deadline, arm it
+after an explicit fixture readiness check; startup scheduling must not prevent
+creation of the grandchild whose teardown the test proves. That readiness wait
+ends when the child has already exited, and the post-kill liveness check keeps
+a reap backstop long enough for a loaded host to drop the pid. Keep ordinary
+invocation deadlines unchanged. A transport read failure must kill the live driver before waiting
+for its exit, retain the harness-failure classification, and stop later probes.
+The broken-stream and wedged-child-tree tests stay on each profile's ordinary
+slow-timeout (no new per-test entry) and retain their classification and
+descendant liveness assertions.
 
 A timeout or incomplete run is never green and never presumed environmental. Rerun the timed-out test in isolation with an adequate timeout and no co-resident heavy work: if it clears → environmental (retain both artifacts); if it repeats → collect hang diagnostics; if classification stays ambiguous → HARD FAIL. The advertised slow-timeout must match the configured one — `.config/nextest.toml` advertises ~60s but configures 5s×3, killing valid tests around 15s on an 8GB host; fix that mismatch rather than tolerating false timeouts. Genuinely long tests get explicit per-test overrides.
 

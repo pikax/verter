@@ -177,6 +177,60 @@ fn switch_fallback_subtracts_handled_tags() {
 }
 
 #[test]
+fn switch_preserves_exact_discriminant_writes() {
+    for (parameter, discriminant) in [("U", "x.kind"), ("{payload: U}", "x.payload.kind")] {
+        for (declaration, written, expected) in [
+            (
+                "{kind: 'a'; value: 1} | {kind: 'b'; value: 2}",
+                "a",
+                vec!["b", "handled"],
+            ),
+            (
+                "{kind: 'a'; value: 1} | {kind: 'b'; value: 2} | {kind: 'c'; value: 3}",
+                "b",
+                vec!["a", "c", "handled"],
+            ),
+        ] {
+            let source = format!("type U = {declaration}; function f(x: {parameter}) {{ {discriminant} = '{written}'; switch ({discriminant}) {{ case '{written}': return 'handled' as const; default: return {discriminant}; }} }} type Result = ReturnType<typeof f>;");
+            assert_literal_union(&resolve_switch(&source), &expected);
+        }
+    }
+}
+
+#[test]
+fn switch_unit_discriminant_write_recovery() {
+    // TS2678 diagnoses the incompatible label but declaration emission still
+    // contributes the selected parent's unit tag from that authored case.
+    for (parameter, discriminant) in [("U", "x.kind"), ("{payload: U}", "x.payload.kind")] {
+        let source = format!("type U = {{kind: 'a'; value: 1}} | {{kind: 'b'; value: 2}}; function f(x: {parameter}) {{ {discriminant} = 'a'; switch ({discriminant}) {{ case 'b': return {discriminant}; default: return 'handled' as const; }} }} type Result = ReturnType<typeof f>;");
+        assert_literal_union(&resolve_switch(&source), &["b", "handled"]);
+    }
+}
+
+#[test]
+fn switch_preserves_union_valued_discriminant_writes() {
+    for (parameter, discriminant) in [("U", "x.kind"), ("{payload: U}", "x.payload.kind")] {
+        for body in [
+            // TS2678 is expected; unlike a unit tag, the union-valued tag
+            // retains the write and contributes never from the case read.
+            "case 'a': return DISCRIMINANT; default: return 'handled' as const;",
+            "case 'b': return 'handled' as const; default: return DISCRIMINANT;",
+            "case 'b': return 'handled' as const;",
+        ] {
+            let body = body.replace("DISCRIMINANT", discriminant);
+            let source = format!("type U = {{kind: 'a' | 'b'; value: 1}} | {{kind: 'c'; value: 2}}; function f(x: {parameter}) {{ {discriminant} = 'b'; switch ({discriminant}) {{ {body} }} }} type Result = ReturnType<typeof f>;");
+            assert_string_literal(&resolve_switch(&source), "handled");
+        }
+    }
+}
+
+#[test]
+fn switch_exhaustiveness_reads_the_written_discriminant() {
+    let source = "type U = {kind: 'a'; value: 1} | {kind: 'b'; value: 2} | {kind: 'c'; value: 3}; function f(x: U) { x.kind = 'b'; switch (x.kind) { case 'b': return 'handled' as const; } } type Result = ReturnType<typeof f>;";
+    assert_string_literal(&resolve_switch(source), "handled");
+}
+
+#[test]
 fn parameter_assignment_updates_member_reads() {
     for (body, expected) in [
         ("x = y; return x.value;", vec![2]),
@@ -187,6 +241,24 @@ fn parameter_assignment_updates_member_reads() {
     ] {
         let source = format!("type U = {{kind: 'a' | 'b'; value: 1}} | {{kind: 'c'; value: 2}}; function f(x: U, y: {{kind: 'c'; value: 2}}) {{ {body} }} type Result = ReturnType<typeof f>;");
         assert_switch_literals(resolve_switch(&source), &expected, false);
+    }
+}
+
+#[test]
+fn named_union_local_assignments_select_the_declared_member() {
+    for declaration in [
+        "type U = {kind: 'a'; value: 1} | {kind: 'b'; value: 2}; type Named = U;",
+        "type U<T> = {kind: 'a'; value: T} | {kind: 'b'; value: 2}; type Named = U<1>;",
+        "type U<T> = {kind: 'a'; value: T} | {kind: 'b'; value: 2}; type Forward<T> = U<T>; type Named = Forward<1>;",
+        "type U<T = 1> = {kind: 'a'; value: T} | {kind: 'b'; value: 2}; type Named = U;",
+    ] {
+        for body in [
+            "let x: Named = y; return x.value;",
+            "let x: Named; x = y; return x.value;",
+        ] {
+            let source = format!("{declaration} function f(y: {{kind: 'b'; value: 2}}) {{ {body} }} type Result = ReturnType<typeof f>;");
+            assert_switch_literals(resolve_switch(&source), &[2], false);
+        }
     }
 }
 
