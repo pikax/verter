@@ -16,8 +16,10 @@ tag supplies the case type even after a property write, including recovery
 from an incompatible case label. A union-valued tag instead narrows the
 existing exact-path fact by the clause equality, preserving contradictory
 member writes as `never`. The general remainder preserves that exact member
-fact while any surviving tag is union-valued. Exhaustiveness tests the entering
-discriminant fact independently of the declared parent arms. The remainder
+fact while any surviving tag is union-valued. Whole-value switches reuse the
+parent remainder for coverage because the parent already carries the entering
+narrowing. Member-switch exhaustiveness tests the entering discriminant fact
+independently of the declared parent arms. The remainder
 narrows both default dispatch and implicit no-match exits
 from the switch entry state, including union-valued and enum discriminants.
 Partly covered parents remain while a separate discriminant fact subtracts

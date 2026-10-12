@@ -20407,7 +20407,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 surviving_tags.extend(tags);
             }
         }
-        let covered = if let Some(current) = self.narrowed_read(subject) {
+        let covered = if subject.path.is_empty() {
+            // The parent is the tested value, already read through its current
+            // narrowing above. Its remainder also decides coverage; asking the
+            // same relation again would charge each surviving leaf twice.
+            survivors.is_empty()
+        } else if let Some(current) = self.narrowed_read(subject) {
             let remaining = self.switch_member_remainder(current, &test_nodes)?;
             let covered = remaining.is_empty();
             if retains_member_fact {
