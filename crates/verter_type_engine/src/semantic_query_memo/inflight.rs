@@ -31,6 +31,7 @@ pub struct FlightCell {
 
 #[derive(Default)]
 pub(super) struct InflightState {
+    pub(super) lease: super::delivery_lease::SemanticDeliveryLease,
     /// `None` while building; `Some` after the winner publishes.
     pub(super) completed: Option<QueryResult<SemanticQueryValue>>,
     /// Dispatch-fence dep signature the winner's cold build produced
@@ -318,7 +319,7 @@ impl super::SemanticGraphStore {
         &self,
         key: crate::semantic_query::SemanticQueryKey,
     ) -> Option<InlineMemberFlight> {
-        let prepared = PreparedKeyHandle::prepare(key);
+        let prepared = self.prepare_rooted_key(key);
         let inflight = Arc::new(FlightCell::new());
         let task = super::tasks::ExecutionScope::current(&self.task_registry)
             .unwrap_or_else(|| self.task_registry.register_task());

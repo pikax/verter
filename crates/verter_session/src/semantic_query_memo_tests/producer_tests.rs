@@ -14,6 +14,322 @@ use verter_type_expr::TopLevelOwnerId;
 
 const KEYED: &str = "/producer/keyed.ts";
 
+#[test]
+fn counted_zero_retention_admission_returns_an_owned_complete_delivery() {
+    use verter_session_query::retention::{
+        RetentionLimits, SemanticRetentionAccount, StoreAccount,
+    };
+    use verter_type_engine::semantic_query::LiteralValue;
+    use verter_type_engine::semantic_query_memo::ownership_harness::CountedOwnershipHarness;
+    let (host, _) = keyed_host();
+    let harness = CountedOwnershipHarness::with_account(StoreAccount::new(
+        SemanticRetentionAccount::new(RetentionLimits {
+            aggregate_ceiling_bytes: 0,
+            ..RetentionLimits::defaults()
+        }),
+    ));
+    let read = harness.run(|store| {
+        store.execute_cooperative(
+            &host,
+            key(),
+            || panic!("no recursion"),
+            || {
+                (
+                    QueryResult::Value(store.intern_node(SemanticNodeData::Literal(
+                        LiteralValue::String("complete but uncached".into()),
+                    ))),
+                    empty_signature(),
+                )
+            },
+        )
+    });
+    assert!(matches!(read.value, QueryResult::Value(_)));
+    assert!(
+        !read.result_is_partial,
+        "retention pressure does not change computation completeness"
+    );
+    harness.run(|store| {
+        assert_eq!(store.memo_entry_count(), 0);
+        assert_eq!(store.retention_account().snapshot().retained_bytes, 0);
+    });
+    assert_eq!(harness.live_nodes(), 1);
+    drop(read);
+    assert_eq!(harness.live_nodes(), 0);
+}
+
+#[test]
+fn counted_sealed_refusal_owns_nonempty_key_value_and_diagnostic_operands() {
+    use verter_type_engine::project_semantic_dispatch::cost_receipt::{
+        BudgetProfile, BudgetProfileSpec, COST_MODEL_REVISION,
+    };
+    use verter_type_engine::project_semantic_dispatch::walk::{
+        QueryBuildOutput, ShallowDiagnostic,
+    };
+    use verter_type_engine::semantic_query::{LiteralValue, PartialReasonSet};
+    use verter_type_engine::semantic_query_memo::ownership_harness::CountedOwnershipHarness;
+    let (host, _) = keyed_host();
+    let harness = CountedOwnershipHarness::new();
+    harness.run(|store| {
+        let key_node = store.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+            "refused operand".into(),
+        )));
+        let read = store.execute_cooperative(
+            &host,
+            key(),
+            || panic!("no recursion"),
+            || {
+                let result = store.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+                    "partial result".into(),
+                )));
+                let diagnostic = store.intern_node(SemanticNodeData::Literal(
+                    LiteralValue::String("refusal diagnostic".into()),
+                ));
+                let mut output: QueryBuildOutput<SemanticNodeId> =
+                    (QueryResult::Value(result), empty_signature()).into();
+                output.cache_suppress = true;
+                output.mark_partial_with(PartialReasonSet::PROJECTION_WORK_LIMIT);
+                output
+                    .walker_diagnostics
+                    .push(ShallowDiagnostic::OpenConditional { node: diagnostic });
+                output
+            },
+        );
+        let read = read.map_value(|result| match result {
+            QueryResult::Value(node) => QueryResult::Value(SemanticQueryValue::TypeNode(node)),
+            _ => panic!("partial value still returns its complete carrier"),
+        });
+        let profile = BudgetProfile::intern(BudgetProfileSpec {
+            work: 1,
+            bytes: 1024,
+            query_depth: 2,
+            instantiation_depth: 2,
+            tail_steps: 2,
+            request_operations: 0,
+            relation_comparisons: 2,
+            cost_model_revision: COST_MODEL_REVISION,
+        });
+        assert!(store.seal_refusal_for_tests(
+            &host,
+            SemanticQueryKey::ClassifyTruthinessDomain { subject: key_node },
+            profile,
+            store.refusal_entry_for_tests(&host),
+            read,
+            verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from([]))
+        ));
+    });
+    assert_eq!(
+        harness.live_nodes(),
+        3,
+        "the summary owns its key and actual partial delivery"
+    );
+    harness.run(|store| {
+        assert_eq!(store.refusal_summary_count_for_tests(), 1);
+        store.invalidate_all();
+    });
+    assert_eq!(harness.live_nodes(), 0);
+}
+
+#[test]
+fn counted_outer_build_keeps_a_consumed_warm_read_through_cache_eviction() {
+    use verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput;
+    use verter_type_engine::semantic_query::LiteralValue;
+    use verter_type_engine::semantic_query_memo::ownership_harness::CountedOwnershipHarness;
+    let (host, _) = keyed_host();
+    let harness = CountedOwnershipHarness::new();
+    harness.run(|store| {
+        drop(store.execute_cooperative(
+            &host,
+            key(),
+            || panic!("no recursion"),
+            || {
+                (
+                    QueryResult::Value(store.intern_node(SemanticNodeData::Literal(
+                        LiteralValue::String("warm dependency".into()),
+                    ))),
+                    empty_signature(),
+                )
+            },
+        ));
+    });
+    let mut outer_key = key();
+    if let SemanticQueryKey::ResolveDecl(ref mut key) = outer_key {
+        key.name = Arc::from("Outer");
+    }
+    let read = harness.run(|store| {
+        store.execute_cooperative(
+            &host,
+            outer_key,
+            || panic!("no recursion"),
+            || {
+                let inner = store.execute_cooperative(
+                    &host,
+                    key(),
+                    || panic!("no recursion"),
+                    || -> (QueryResult<SemanticNodeId>, DepSignature) {
+                        panic!("must read warm");
+                    },
+                );
+                let QueryResult::Value(node) = inner.value else {
+                    panic!("complete dependency");
+                };
+                store.invalidate_all();
+                drop(inner);
+                assert!(
+                    store.node_is_live(node),
+                    "outer construction owns the consumed dependency"
+                );
+                let mut output: QueryBuildOutput<SemanticNodeId> =
+                    (QueryResult::Value(node), empty_signature()).into();
+                output.cache_suppress = true;
+                output
+            },
+        )
+    });
+    assert_eq!(harness.live_nodes(), 1);
+    drop(read);
+    assert_eq!(harness.live_nodes(), 0);
+}
+
+#[test]
+fn counted_cancelled_producer_releases_unaudited_intermediates() {
+    use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+    use verter_type_engine::semantic_query::LiteralValue;
+    use verter_type_engine::semantic_query_memo::ownership_harness::CountedOwnershipHarness;
+    let (host, _) = keyed_host();
+    let harness = CountedOwnershipHarness::new();
+    let context = RequestContext::new(1, Arc::from(KEYED), false, None);
+    let _request = RequestContextGuard::install(Arc::clone(&context));
+    let read = harness.run(|store| {
+        store.execute_cooperative(
+            &host,
+            key(),
+            || panic!("no recursion"),
+            || {
+                let node = store.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+                    "cancelled".into(),
+                )));
+                context.cancel();
+                (QueryResult::Value(node), empty_signature())
+            },
+        )
+    });
+    assert!(matches!(
+        read.value,
+        QueryResult::Error(QueryError::Cancelled)
+    ));
+    assert_eq!(harness.live_nodes(), 0);
+    harness.run(|store| assert_eq!(store.memo_entry_count(), 0));
+}
+
+#[test]
+fn counted_return_only_delivery_owns_value_and_actual_diagnostic_after_store_drop() {
+    use verter_type_engine::project_semantic_dispatch::walk::{
+        QueryBuildOutput, ShallowDiagnostic,
+    };
+    use verter_type_engine::semantic_query::LiteralValue;
+    use verter_type_engine::semantic_query_memo::ownership_harness::CountedOwnershipHarness;
+    let (host, _) = keyed_host();
+    let harness = CountedOwnershipHarness::new();
+    let read = harness.run(|store| {
+        store.execute_cooperative(
+            &host,
+            key(),
+            || panic!("no recursion"),
+            || {
+                let result = store.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+                    "result".into(),
+                )));
+                let diagnostic = store.intern_node(SemanticNodeData::Literal(
+                    LiteralValue::String("diagnostic".into()),
+                ));
+                let mut output: QueryBuildOutput<SemanticNodeId> =
+                    (QueryResult::Value(result), empty_signature()).into();
+                output.cache_suppress = true;
+                output
+                    .walker_diagnostics
+                    .push(ShallowDiagnostic::OpenConditional { node: diagnostic });
+                output
+            },
+        )
+    });
+    assert!(read.cache_suppress);
+    assert_eq!(read.walker_diagnostics.len(), 1);
+    assert_eq!(harness.live_nodes(), 2);
+    harness.run(|store| assert_eq!(store.memo_entry_count(), 0));
+    drop(harness);
+    assert_eq!(
+        read.lease.live_nodes_for_tests(),
+        2,
+        "delivery itself owns both nodes"
+    );
+    let cloned = read.clone();
+    drop(read);
+    assert_eq!(cloned.lease.live_nodes_for_tests(), 2);
+}
+
+#[test]
+fn counted_recursion_delivery_owns_its_returned_sentinel() {
+    use verter_type_engine::semantic_query_memo::ownership_harness::CountedOwnershipHarness;
+    let (host, _) = keyed_host();
+    let harness = CountedOwnershipHarness::new();
+    let read = harness.run(|store| {
+        store.with_same_path_inflight_for_test(key(), || {
+            store.execute_cooperative(
+                &host,
+                key(),
+                || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+                || -> (QueryResult<SemanticNodeId>, DepSignature) {
+                    panic!("recursive producer must not run")
+                },
+            )
+        })
+    });
+    assert!(matches!(read.value, QueryResult::Recursive(_)));
+    assert_eq!(harness.live_nodes(), 1);
+    drop(harness);
+    assert_eq!(read.lease.live_nodes_for_tests(), 1);
+}
+
+#[test]
+fn counted_cache_and_reader_can_drop_in_either_order() {
+    use verter_type_engine::semantic_query::LiteralValue;
+    use verter_type_engine::semantic_query_memo::ownership_harness::CountedOwnershipHarness;
+    for cache_first in [true, false] {
+        let (host, _) = keyed_host();
+        let harness = CountedOwnershipHarness::new();
+        let read = harness.run(|store| {
+            store.execute_cooperative(
+                &host,
+                key(),
+                || panic!("no recursion"),
+                || {
+                    (
+                        QueryResult::Value(store.intern_node(SemanticNodeData::Literal(
+                            LiteralValue::String("cached".into()),
+                        ))),
+                        empty_signature(),
+                    )
+                },
+            )
+        });
+        harness.run(|store| assert_eq!(store.memo_entry_count(), 1));
+        if cache_first {
+            harness.run(|store| {
+                store.invalidate_all();
+            });
+            assert_eq!(harness.live_nodes(), 1);
+            drop(read);
+        } else {
+            drop(read);
+            assert_eq!(harness.live_nodes(), 1);
+            harness.run(|store| {
+                store.invalidate_all();
+            });
+        }
+        assert_eq!(harness.live_nodes(), 0);
+    }
+}
+
 fn keyed_host() -> (VerterHost, [u8; 16]) {
     let host = VerterHost::new_standalone(HostConfig::default());
     let _ = host

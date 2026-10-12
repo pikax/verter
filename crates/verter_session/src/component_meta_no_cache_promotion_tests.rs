@@ -1338,6 +1338,7 @@ fn warm_gate_keys_on_result_is_partial_not_value_kind_or_cache_suppress() {
     // `result_is_partial = true`. A value-kind gate
     // (`matches!(value, Error | Recursive)`) is FALSE for this `Value`.
     let value_partial: CacheRead<QueryResult<SemanticNodeId>> = CacheRead {
+        lease: Default::default(),
         value: QueryResult::Value(value_node),
         dep_signature: empty_sig.clone(),
         walker_diagnostics: Arc::from([]),
@@ -1358,6 +1359,7 @@ fn warm_gate_keys_on_result_is_partial_not_value_kind_or_cache_suppress() {
     // `cache_suppress = true` but `result_is_partial = false` (ReturnOnly /
     // overflow / unrootable self-root).
     let complete_non_cacheable: CacheRead<QueryResult<SemanticNodeId>> = CacheRead {
+        lease: Default::default(),
         value: QueryResult::Value(value_node),
         dep_signature: empty_sig,
         walker_diagnostics: Arc::from([]),
@@ -1452,6 +1454,7 @@ fn benign_non_cacheable_complete_results_still_warm_component_meta_final() {
         (
             "signature-overflow",
             CacheRead {
+                lease: Default::default(),
                 value: QueryResult::Value(value_node),
                 dep_signature: empty_sig.clone(),
                 walker_diagnostics: Arc::from([]),
@@ -1464,6 +1467,7 @@ fn benign_non_cacheable_complete_results_still_warm_component_meta_final() {
         (
             "unrootable-self-root",
             CacheRead {
+                lease: Default::default(),
                 value: QueryResult::Value(value_node),
                 dep_signature: empty_sig.clone(),
                 walker_diagnostics: Arc::from([]),
@@ -1476,6 +1480,7 @@ fn benign_non_cacheable_complete_results_still_warm_component_meta_final() {
         (
             "return-only",
             CacheRead {
+                lease: Default::default(),
                 value: QueryResult::Value(value_node),
                 dep_signature: empty_sig,
                 walker_diagnostics: Arc::from([]),

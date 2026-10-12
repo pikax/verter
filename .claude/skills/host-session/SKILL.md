@@ -1287,3 +1287,19 @@ active overlay nor a backing file. A filesystem snapshot tombstone may merely
 invalidate its disk cache on editor close. Custom
 workspaces without incremental membership use the existing revision/listing
 contract. Semantic lookup never enumerates all concrete-workspace members.
+
+### Internal node roots and current ownership counts
+
+Internal semantic reads now carry a `SemanticDeliveryLease`; scratch entries,
+materialized shape values and macro mirror products retain their node operands.
+This is a production-inactive destruction substrate: canonical sweeps, ordinal
+watermarks and `SemanticActivityGate` still govern close/reload, and roots do not
+promise non-revocation across a legacy close. Ordinary constructors cannot enable
+counted last-root destruction, even in test-support builds.
+
+`HostRetentionSnapshot::semantic_node_ownership` reports current live nodes,
+root acquisitions, retained child occurrences and permanent nodes. Statistics
+expose `semanticNodeRoots`, `semanticNodeInternalEdges` and
+`semanticNodePermanentNodes`. These required current counts add no observation
+history. See the [ownership reference](../type-resolution/references/counted-node-ownership.md)
+for the fixture activation interface and internal transport contract.

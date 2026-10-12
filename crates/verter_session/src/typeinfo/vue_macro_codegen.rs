@@ -1006,7 +1006,7 @@ impl VerterHost {
             let macro_scope =
                 verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
             let mut diagnostics = Vec::new();
-            let (payload, payload_local) = observe_local(|| {
+            let (payload_owner, payload_local) = observe_local(|| {
                 resolve_macro_payload(
                     &dispatch,
                     &owner,
@@ -1018,6 +1018,7 @@ impl VerterHost {
                     &mut diagnostics,
                 )
             });
+            let payload = payload_owner.as_ref().map(|root| root.id());
             if payload.is_none() {
                 state.dependency_failures.extend(
                     demand_row

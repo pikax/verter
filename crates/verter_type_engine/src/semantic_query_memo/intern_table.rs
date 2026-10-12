@@ -164,6 +164,7 @@ impl IdentityIndexSnapshot {
 /// One interned record: the value plus its content digest. Freed with
 /// its last owning handle; its destructor forgets the index entry.
 struct InternRecord<T: InternDomain> {
+    arena: Option<usize>,
     digest: u64,
     value: T,
 }
@@ -190,7 +191,7 @@ impl<T: InternDomain> WeakInternTable<T> {
 
     /// The handle for `value`'s content: the live record when one exists,
     /// otherwise a fresh record owned by the returned handle.
-    fn intern(&self, value: T) -> Interned<T> {
+    fn intern(&self, value: T, arena: Option<usize>) -> Interned<T> {
         let digest = digest_of(&value);
         // Upgraded candidates whose content differs. Dropping one may
         // destroy its record, whose destructor takes this lock, so they
@@ -201,7 +202,7 @@ impl<T: InternDomain> WeakInternTable<T> {
         let mut found = None;
         for weak in bucket.iter() {
             if let Some(record) = weak.upgrade() {
-                if record.value == value {
+                if record.arena == arena && record.value == value {
                     found = Some(record);
                     break;
                 }
@@ -217,7 +218,11 @@ impl<T: InternDomain> WeakInternTable<T> {
                 drop(value);
                 return Interned { record };
             }
-            None => Arc::new(InternRecord { digest, value }),
+            None => Arc::new(InternRecord {
+                arena,
+                digest,
+                value,
+            }),
         };
         bucket.push(Arc::downgrade(&record));
         drop(slots);
@@ -341,7 +346,17 @@ impl<T: InternDomain> Interned<T> {
     /// The owning handle for `value`'s content in its kind's index.
     #[must_use]
     pub fn new(value: T) -> Self {
-        T::index().intern(value)
+        T::index().intern(value, None)
+    }
+
+    /// Separate node-bearing records by their issuing arena so a shared
+    /// content record cannot import another arena's nested root attachments.
+    /// Equality and hashing still compare only semantic content.
+    pub(crate) fn new_scoped(value: T) -> Self {
+        T::index().intern(
+            value,
+            super::node_roots::NodeRootScope::current_arena_identity(),
+        )
     }
 
     /// The interned value.

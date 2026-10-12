@@ -49,6 +49,7 @@ use verter_type_engine::semantic_query::{
     DeclIdentity, PathSegment, ProjectionMode, QueryResult, SemanticNodeData, SemanticNodeId,
     SemanticQueryKey,
 };
+use verter_type_engine::semantic_query_memo::node_roots::NodeRoot;
 
 use super::diagnostic_convert::shallow_diagnostics_to_macro_expansion;
 use verter_type_engine::meta_resolve::emit_dispatch_dep_signature_facts;
@@ -515,7 +516,8 @@ pub(crate) fn resolve_macro_payload(
     macro_kind: AnalyzedMacroKind,
     expansion_kind: MacroExpansionKind,
     diag_sink: &mut Vec<MacroExpansionDiagnostics>,
-) -> Option<SemanticNodeId> {
+) -> Option<NodeRoot> {
+    let _scope = dispatch.graph().enter_node_root_scope();
     let _ = mac.parsed_type_argument.as_ref()?;
     // The macro type-argument graph node is the ONE mode-neutral mirror
     // handle (its macro-T own-body provenance is baked at production time —
@@ -746,7 +748,11 @@ pub(crate) fn resolve_macro_payload(
         }
     }
 
-    Some(payload_node)
+    dispatch
+        .graph()
+        .lease_node_data(payload_node)
+        .ok()
+        .map(|lease| lease.root().clone())
 }
 
 pub(crate) fn resolve_payload_surface(
@@ -756,7 +762,8 @@ pub(crate) fn resolve_payload_surface(
     expansion_kind: MacroExpansionKind,
     provenance: verter_type_engine::semantic_query::SurfaceProvenanceContext,
     diag_sink: &mut Vec<MacroExpansionDiagnostics>,
-) -> verter_type_engine::semantic_query::surface_resolution::SurfaceResolution<SemanticNodeId> {
+) -> verter_type_engine::semantic_query::surface_resolution::SurfaceResolution<NodeRoot> {
+    let _scope = dispatch.graph().enter_node_root_scope();
     let claims = dispatch.host_attachment().surface_claims();
     // The empty-path `ProjectPath` carries the macro's surface
     // provenance (by design): for a props payload that
@@ -796,7 +803,7 @@ pub(crate) fn resolve_payload_surface(
             surface_read.cache_suppress,
         ));
     }
-    match surface_read.value {
+    let resolution = match surface_read.value {
         QueryResult::Value(id) => claims.resolved(id),
         QueryResult::Recursive(_) => {
             // Cycles are NON-FATAL by rule: they bound the publish surface
@@ -826,7 +833,15 @@ pub(crate) fn resolve_payload_surface(
                 None => claims.no_surface(),
             }
         }
-    }
+    };
+    resolution.map(|node| {
+        dispatch
+            .graph()
+            .lease_node_data(node)
+            .expect("produced surface is live")
+            .root()
+            .clone()
+    })
 }
 
 // Macro-payload boundary substrate primitives — diagnostic probe,

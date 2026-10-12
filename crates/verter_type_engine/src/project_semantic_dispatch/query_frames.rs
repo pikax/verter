@@ -36,8 +36,7 @@ use crate::semantic_query::{
     SemanticQueryKey, SemanticQueryValue,
 };
 use crate::semantic_query_memo::{
-    Claim, ClaimAttempt, ExecutionTask, Joined, ProducerLease, ReadCapture, Recursion,
-    SemanticGraphStore, Subscription,
+    Claim, ClaimAttempt, ExecutionTask, Joined, ProducerLease, ReadCapture, Recursion, Subscription,
 };
 use verter_session_query::facts::fact_cache::ReadSetSignature;
 
@@ -528,7 +527,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if recursion == Recursion::WaitCycle {
             self.connected_demand.note_schedule_cut();
         }
-        let read = SemanticGraphStore::recursion_read(recursion, self.query_sentinel(key));
+        let read = self
+            .graph()
+            .recursion_read(recursion, self.query_sentinel(key));
         QueryDelivery {
             read: self.attribute_query_read(key, false, read, &CarrierNormalizationPrelude::none()),
             carrier: None,

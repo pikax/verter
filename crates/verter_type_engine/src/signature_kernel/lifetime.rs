@@ -6,7 +6,7 @@
 //! A stale handle (wrong epoch, or epoch 0) is rejected.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock, Weak};
 
 use arc_swap::ArcSwap;
 use parking_lot::Mutex;
@@ -80,6 +80,8 @@ pub(super) struct EpochInner {
     pub environments: AppendInterner<CanonicalTypeSubstitution>,
     pub locators: AppendInterner<u64>,
     pub type_tokens: AppendInterner<SemanticNodeId>,
+    graph_roots:
+        Mutex<rustc_hash::FxHashMap<u32, crate::semantic_query_memo::node_roots::NodeRootSet>>,
     /// Authored source node of a descriptor (graph `Signature` node token).
     /// Epoch-local, like every handle it is keyed by.
     /// Logical identity that owns each binder-space key, so a truncated key
@@ -118,6 +120,7 @@ impl EpochInner {
             environments: AppendInterner::new(epoch),
             locators: AppendInterner::new(epoch),
             type_tokens: AppendInterner::new(epoch),
+            graph_roots: Mutex::new(rustc_hash::FxHashMap::default()),
             space_key_owners: Mutex::new(rustc_hash::FxHashMap::default()),
             descriptor_sources: Mutex::new(rustc_hash::FxHashMap::default()),
             live_readers: AtomicU64::new(0),
@@ -207,6 +210,7 @@ const MAX_BINDER_SPACE_KEY: u64 = (1 << 31) - 1;
 /// retained results and live readers keep the old tables alive. The live
 /// `ArcSwap` slot is the live-project-state root.
 pub struct SignatureStore {
+    graph: OnceLock<Weak<crate::semantic_query_memo::arena::NodeArenaCore>>,
     current: ArcSwap<EpochInner>,
     retained_results: Mutex<Vec<RetainedRoot>>,
     next_epoch: AtomicU64,
@@ -225,6 +229,7 @@ impl SignatureStore {
             Arc::new(AtomicU64::new(0)),
         ));
         Self {
+            graph: OnceLock::new(),
             current: ArcSwap::from(inner),
             retained_results: Mutex::new(Vec::new()),
             next_epoch: AtomicU64::new(GraphEpoch::FIRST.as_u32() as u64 + 1),
@@ -309,7 +314,16 @@ impl SignatureStore {
         let inner = self.current.load();
         let stranded = released
             .into_iter()
-            .filter(|node| inner.type_tokens.lookup(node).is_some())
+            .filter(|node| {
+                let Some(index) = inner.type_tokens.lookup(node) else {
+                    return false;
+                };
+                inner
+                    .graph_roots
+                    .lock()
+                    .remove(&super::records::handle_index(index));
+                true
+            })
             .count();
         inner.stranded_tokens.fetch_add(stranded, Ordering::Relaxed);
         stranded
@@ -634,7 +648,29 @@ impl SignatureStore {
         cancelled: Option<&AtomicBool>,
     ) -> Result<super::records::TypeToken, StoreError> {
         let inner = self.inner();
+        let root = self
+            .graph
+            .get()
+            .and_then(Weak::upgrade)
+            .map(|arena| {
+                let nodes =
+                    if Self::is_binder_token(node) || (!arena.counted() && !arena.is_live(node)) {
+                        Vec::new()
+                    } else {
+                        vec![node]
+                    };
+                crate::semantic_query_memo::node_roots::NodeRootSet::acquire(arena, nodes)
+                    .map_err(|_| StoreError::Missing)
+            })
+            .transpose()?;
         let raw = inner.type_tokens.intern(node, cancelled)?;
+        if let Some(root) = root {
+            inner
+                .graph_roots
+                .lock()
+                .entry(super::records::handle_index(raw))
+                .or_insert(root);
+        }
         Ok(super::records::TypeToken::from_raw(raw))
     }
 
@@ -1217,6 +1253,44 @@ impl SignatureStore {
         Self::require_id(&inner, space.epoch(), space.index(), &inner.spaces)?;
         let rec = inner.spaces.get(space.index()).ok_or(StoreError::Missing)?;
         Self::binder_token(rec.key, ordinal)
+    }
+}
+
+/// Owns the tables used by one published result without adding it to a
+/// store-global retained-results list. Replacement never changes this lease.
+#[derive(Clone)]
+pub struct SignatureEpochLease {
+    inner: Arc<EpochInner>,
+}
+
+impl std::fmt::Debug for SignatureEpochLease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("SignatureEpochLease")
+            .field(&self.inner.epoch)
+            .finish()
+    }
+}
+
+impl SignatureEpochLease {
+    pub(super) fn from_epoch(inner: Arc<EpochInner>) -> Self {
+        Self { inner }
+    }
+    pub fn epoch(&self) -> GraphEpoch {
+        self.inner.epoch
+    }
+    pub fn read_view(&self) -> super::read_view::SemanticReadView {
+        super::read_view::SemanticReadView::from_epoch(Arc::clone(&self.inner))
+    }
+}
+
+impl SignatureStore {
+    pub(crate) fn bind_graph(&self, graph: &Arc<crate::semantic_query_memo::arena::NodeArenaCore>) {
+        let _ = self.graph.set(Arc::downgrade(graph));
+    }
+    pub fn lease_epoch(&self, epoch: GraphEpoch) -> Result<SignatureEpochLease, StoreError> {
+        let inner = self.current.load_full();
+        check_epoch(inner.epoch, epoch)?;
+        Ok(SignatureEpochLease { inner })
     }
 }
 

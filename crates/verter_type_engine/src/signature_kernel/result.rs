@@ -47,6 +47,9 @@ pub struct ReadSignatureResultKey {
 /// Value of a `SignaturesOfType` query.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignatureSetValue {
+    /// The immutable tables that produced this value; transport ownership
+    /// does not participate in semantic equality.
+    pub version: SignatureVersion,
     pub set: SignatureSetRef,
     /// Per candidate, in set order: the graph nodes THIS read's subject walk
     /// published it from. A descriptor is content-interned, so one
@@ -70,7 +73,17 @@ pub struct SignatureCandidateNodes {
 }
 
 /// Value of a `ReadSignatureResult` query.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignatureResultValue {
+    pub version: SignatureVersion,
     pub result: AppliedResultId,
 }
+
+#[derive(Debug, Clone, Default)]
+pub struct SignatureVersion(pub(crate) Option<super::lifetime::SignatureEpochLease>);
+impl PartialEq for SignatureVersion {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+impl Eq for SignatureVersion {}

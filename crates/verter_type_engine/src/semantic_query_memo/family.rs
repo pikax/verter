@@ -24,6 +24,7 @@ use verter_session_query::facts::fact_cache::ReadSetSignature;
 
 #[derive(Clone)]
 pub(super) struct MemoEntry {
+    pub(super) lease: super::delivery_lease::SemanticDeliveryLease,
     pub(super) result: QueryResult<SemanticQueryValue>,
     /// Carrier holding the path-precise R28 fact signature for this
     /// entry — the sole cache-validity rail. Warm-hit reads validate
@@ -904,15 +905,7 @@ impl FamilyKey {
                 ..
             } => {
                 if let Some(pending) = pending {
-                    for &(param, argument) in pending
-                        .true_branch()
-                        .pairs()
-                        .iter()
-                        .chain(pending.false_branch().pairs())
-                    {
-                        visit(param);
-                        visit(argument);
-                    }
+                    pending.for_each_retained_node(&mut visit);
                 }
                 [*check, *extends, *true_branch, *false_branch]
                     .into_iter()
