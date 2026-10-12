@@ -33,7 +33,6 @@ fn retained_payload_budget_error(
         // refusal's completeness; the template's own copy is not.
         let mut resolved = cached.resolution_template.rehydrate(snapshot, 0);
         resolved.completeness = retained.completeness;
-        resolved.synthesis_should_suppress = retained.completeness.is_partial();
         return component_meta_resolution_budget_error(
             canonical,
             Some(&cached.analysis),
@@ -302,7 +301,16 @@ impl MetaSession {
             #[cfg(test)]
             if let Some(map) = PAYLOAD_ITEM_COMPLETENESS_PROBE.lock().unwrap().as_mut() {
                 let partial = completeness.get().is_partial();
-                map.insert(canonical.to_string(), (partial, partial));
+                map.insert(
+                    canonical.to_string(),
+                    (
+                        partial,
+                        retained
+                            .recovery
+                            .resolution_template
+                            .synthesis_should_suppress,
+                    ),
+                );
             }
             return Ok(Some(payload));
         }

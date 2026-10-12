@@ -29,6 +29,29 @@ fn cpu_bound_child_accounting_matches_its_own_resource_usage() {
 }
 
 #[test]
+#[cfg(target_os = "macos")]
+fn nested_reaped_cpu_matches_process_tree_resource_usage() {
+    let run = supervise("nested-cpu-time", LIMITS, &["cpu-tree", "2", "1000"]);
+    assert_eq!(run.code, Some(0), "stderr: {}", run.stderr);
+    assert_eq!(run.result["errors"], serde_json::json!([]));
+    let measured: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(run.dir.join("result.stdout.log")).unwrap())
+            .unwrap();
+    let reported = run.result["cpuUserMs"]
+        .as_f64()
+        .expect("tree user CPU time");
+    let actual = measured["userMs"].as_f64().unwrap();
+    assert!(actual > 0.0);
+    assert!(
+        (reported - actual).abs() / actual <= 0.10,
+        "supervisor {reported} ms, independently reaped tree {actual} ms"
+    );
+    assert!(run.result["cpuKernelMs"]
+        .as_f64()
+        .is_some_and(|ms| ms >= measured["kernelMs"].as_f64().unwrap()));
+}
+
+#[test]
 #[cfg_attr(
     target_os = "linux",
     ignore = "needs a delegated cgroup v2 subtree (systemd-run --user --scope -p Delegate=yes)"

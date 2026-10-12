@@ -541,6 +541,10 @@ malformed answers remain decoding errors.
 
 On macOS, CPU columns sum sampled user and kernel counters across process
 lifetimes, with reaped-child accounting deduplicated against those samples.
+Reconciliation covers whole reaped subtrees, including intermediate parents
+that vanish between sweeps; live reparented descendants remain independent,
+and reused PIDs are separate lifetimes. Cumulative child counters retain
+unsampled tails without adding sampled descendants twice.
 The watchdog reads the exited leader before reaping it: Apple's
 [proc_pid_rusage API](https://github.com/apple-oss-distributions/xnu/blob/main/libsyscall/wrappers/libproc/libproc.h)
 supports zombies. CPU units are milliseconds. Descendants that exit between
