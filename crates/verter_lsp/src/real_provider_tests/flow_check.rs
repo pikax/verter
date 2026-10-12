@@ -12,16 +12,33 @@
 //! A trailing canary error proves the provider checked the published file
 //! before an empty result is accepted.
 
-use verter_compiler::flow_check::fixtures::{self, Fixture, Root, MATRIX_SIZES};
+use verter_compiler::flow_check::fixtures::{self, Fixture, Root, LIVE_MATRIX_SIZES};
 use verter_compiler::flow_check::generator::GuardStrategy;
 use verter_compiler::flow_check::oracle::{check_exact, ProviderDiagnostic};
 use verter_compiler::flow_check::seam::{GeneratedCheck, Mapping, Span};
 use verter_type_runtime::protocol::TypeDiagnosticSeverity;
 
-use crate::test_harness::{real_provider_test, RealProviderTestSession};
+use crate::test_harness::{real_provider_test, PublishedWorkspaceFile, RealProviderTestSession};
 
 const FIXTURE: &str = "flow-check";
 const CANARY: &str = "\nexport const __verter_flow_canary: number = \"checked\";\n";
+
+struct PublishedCheck {
+    relative: String,
+    canary_start: u32,
+    _file: PublishedWorkspaceFile,
+}
+
+fn publish_check(session: &RealProviderTestSession, name: &str, code: &str) -> PublishedCheck {
+    let relative = format!("src/{name}.ts");
+    let content = format!("{code}{CANARY}");
+    let file = session.publish_workspace_file(&relative, &content);
+    PublishedCheck {
+        relative,
+        canary_start: code.len() as u32,
+        _file: file,
+    }
+}
 
 /// Publish `code` as a configured-project member, open it in the provider
 /// and return its error diagnostics once the canary proves it was checked.
@@ -30,11 +47,15 @@ async fn provider_errors(
     name: &str,
     code: &str,
 ) -> Vec<ProviderDiagnostic> {
-    let relative = format!("src/{name}.ts");
-    let content = format!("{code}{CANARY}");
-    let canary_start = code.len() as u32;
-    let _published = session.publish_workspace_file(&relative, &content);
-    let (path, _) = session.open_fixture_in_provider(&relative).await;
+    let published = publish_check(session, name, code);
+    published_errors(session, &published).await
+}
+
+async fn published_errors(
+    session: &RealProviderTestSession,
+    published: &PublishedCheck,
+) -> Vec<ProviderDiagnostic> {
+    let (path, _) = session.open_fixture_in_provider(&published.relative).await;
     for attempt in 0..120 {
         if let Ok(diagnostics) = session.provider().get_diagnostics(&path).await {
             let errors: Vec<ProviderDiagnostic> = diagnostics
@@ -49,12 +70,12 @@ async fn provider_errors(
                 .collect();
             if errors
                 .iter()
-                .any(|d| d.start >= canary_start && d.code == 2322)
+                .any(|d| d.start >= published.canary_start && d.code == 2322)
             {
                 session.provider().close_file(&path).await.ok();
                 return errors
                     .into_iter()
-                    .filter(|d| d.start < canary_start)
+                    .filter(|d| d.start < published.canary_start)
                     .collect();
             }
         }
@@ -62,7 +83,11 @@ async fn provider_errors(
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         }
     }
-    panic!("{name}: the provider never reported the canary, so the check was not executed");
+    session.provider().close_file(&path).await.ok();
+    panic!(
+        "{}: the provider never reported the canary, so the check was not executed",
+        published.relative
+    );
 }
 
 async fn assert_fixture(
@@ -151,14 +176,24 @@ real_provider_test!(
     flow_check_linear_matrix_checks_every_callback,
     fixture = FIXTURE,
     async fn run(session) {
-        for &n in &MATRIX_SIZES {
+        // Keep one configured-project member for the complete matrix. Replacing
+        // its bytes preserves every case while avoiding a root-set invalidation
+        // and a missing-file residue for each independent module.
+        let mut published = publish_check(session, "matrix", "");
+        for &n in &LIVE_MATRIX_SIZES {
             for fixture in [
                 fixtures::flat_matrix(n, 1, false),
                 fixtures::flat_matrix(n, 1, true),
                 fixtures::nested_matrix(n, false),
                 fixtures::nested_matrix(n, true),
             ] {
-                let check = assert_fixture(session, &fixture, GuardStrategy::Snapshot).await;
+                let check = fixture.generate_with(GuardStrategy::Snapshot);
+                published._file.replace_contents(&format!("{}{CANARY}", check.code));
+                published.canary_start = check.code.len() as u32;
+                let errors = published_errors(session, &published).await;
+                check_exact(&fixture, &check, &errors).unwrap_or_else(|mismatch| {
+                    panic!("[{}] {mismatch}", session.provider_kind().label())
+                });
                 assert_eq!(
                     check.layout.callbacks.len(),
                     fixture.authored_callbacks,

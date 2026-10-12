@@ -501,6 +501,14 @@ jobs:
             case "$lane" in *:success) ;; *) echo "::error::${lane%%:*} lane did not succeed (${lane#*:})"; failed=1;; esac
           done
           exit "$failed"
+      - name: Upload provider test timings
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: provider-test-timings
+          path: target/provider-timings/*.json
+          if-no-files-found: warn
   # Required and parallel with the shared archive build. Compile-fail fixtures
   # are standalone Cargo work, not test cases, so this job owns their cached
   # execution outside the nextest inventory.

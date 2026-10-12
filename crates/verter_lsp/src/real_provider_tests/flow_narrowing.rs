@@ -24,7 +24,7 @@ use verter_compiler::flow_check::fixtures::Expected;
 use verter_compiler::flow_check::ide_fixtures::{self, SfcFixture};
 use verter_compiler::flow_check::seam::Span;
 
-use crate::test_harness::{real_provider_test, RealProviderTestSession};
+use crate::test_harness::{real_provider_test, PublishedWorkspaceFile, RealProviderTestSession};
 
 const FIXTURE: &str = "flow-narrowing";
 
@@ -54,41 +54,70 @@ fn authored_span(session: &RealProviderTestSession, uri: &Uri, diagnostic: &Diag
     Span::new(start, end)
 }
 
-/// Publish `fixture` into the workspace, open it in the server, run `body`
-/// against the open document, then close the document BEFORE its file leaves
-/// the workspace — after a panic inside `body` as well, which resumes once
-/// the cleanup ran. A document that stays open after its file is deleted is
-/// re-checked by the provider on every later project change, against a file
-/// that no longer exists; neither a passing nor a failing fixture may leave
-/// one behind for the fixtures that follow.
-async fn with_open_fixture<T, Fut>(
+/// One project member for a corpus. Each case still opens its complete source
+/// through the real watched-file and editor lifecycle. The file remains on
+/// disk until all cases close, so old missing roots cannot accumulate.
+struct FixtureSlot {
+    relative: String,
+    file: PublishedWorkspaceFile,
+    change: FileChangeType,
+}
+
+impl FixtureSlot {
+    fn new(session: &RealProviderTestSession) -> Self {
+        let relative = format!(
+            "src/Corpus{}.vue",
+            if session.is_tsgo() {
+                "Tsgo"
+            } else {
+                "Tsserver"
+            }
+        );
+        let file = session.publish_workspace_file(&relative, "<template />");
+        Self {
+            relative,
+            file,
+            change: FileChangeType::CREATED,
+        }
+    }
+
+    async fn with_fixture<T, Fut>(
+        &mut self,
+        session: &RealProviderTestSession,
+        fixture: &SfcFixture,
+        body: impl FnOnce(Uri) -> Fut,
+    ) -> T
+    where
+        Fut: Future<Output = T>,
+    {
+        self.file.replace_contents(&fixture.source);
+        let change = self.change;
+        self.change = FileChangeType::CHANGED;
+        with_fixture_path(session, &self.relative, change, body).await
+    }
+}
+
+/// Close the document before the corpus owner can delete its file, including
+/// on assertion failure. A failed case must not leave an open missing source.
+async fn with_fixture_path<T, Fut>(
     session: &RealProviderTestSession,
-    fixture: &SfcFixture,
+    relative: &str,
+    change: FileChangeType,
     body: impl FnOnce(Uri) -> Fut,
 ) -> T
 where
     Fut: Future<Output = T>,
 {
-    let relative = format!(
-        "src/{}{}.vue",
-        fixture.name,
-        if session.is_tsgo() {
-            "Tsgo"
-        } else {
-            "Tsserver"
-        }
-    );
-    let published = session.publish_workspace_file(&relative, &fixture.source);
     session
         .server()
         .did_change_watched_files(DidChangeWatchedFilesParams {
             changes: vec![FileEvent {
-                uri: session.workspace_uri(&relative),
-                typ: FileChangeType::CREATED,
+                uri: session.workspace_uri(relative),
+                typ: change,
             }],
         })
         .await;
-    let uri = session.open_fixture_file(&relative).await;
+    let uri = session.open_fixture_file(relative).await;
     let outcome = AssertUnwindSafe(body(uri.clone())).catch_unwind().await;
     session
         .server()
@@ -96,7 +125,6 @@ where
             text_document: TextDocumentIdentifier { uri },
         })
         .await;
-    drop(published);
     match outcome {
         Ok(value) => value,
         Err(payload) => std::panic::resume_unwind(payload),
@@ -110,11 +138,9 @@ async fn checked_errors(
     fixture: &SfcFixture,
     uri: &Uri,
 ) -> Vec<Expected> {
-    // A cold provider project answers diagnostics only once it has built the
-    // program; a completion inside the canary proves it did.
-    session
-        .wait_until_ready(uri, "flowCanary", 4, "flowCanary")
-        .await;
+    // The exact diagnostic canary below proves this source was checked. A
+    // separate completion warmup would build an auto-import answer that this
+    // diagnostic contract never observes.
     for _ in 0..30 {
         let diagnostics = session
             .merged_diagnostics_until(uri, |diagnostics| {
@@ -177,15 +203,16 @@ fn check_exact(fixture: &SfcFixture, reported: &[Expected]) -> Result<(), String
 }
 
 /// Open `fixture`, require its exact error set, run `after` against the still
-/// open document, and close it (see [`with_open_fixture`]).
+/// open document, and close it.
 async fn assert_fixture<Fut>(
     session: &RealProviderTestSession,
+    slot: &mut FixtureSlot,
     fixture: &SfcFixture,
     after: impl FnOnce(Uri) -> Fut,
 ) where
     Fut: Future<Output = ()>,
 {
-    with_open_fixture(session, fixture, |uri| async move {
+    slot.with_fixture(session, fixture, |uri| async move {
         let reported = checked_errors(session, fixture, &uri).await;
         if let Err(mismatch) = check_exact(fixture, &reported) {
             panic!("[{}] {mismatch}", session.provider_kind().label());
@@ -199,9 +226,10 @@ real_provider_test!(
     flow_narrowing_semantics_are_exact,
     fixture = FIXTURE,
     async fn run(session) {
+        let mut slot = FixtureSlot::new(session);
         for fixture in ide_fixtures::semantic_suite() {
             let fixture = &fixture;
-            assert_fixture(session, fixture, |uri| async move {
+            assert_fixture(session, &mut slot, fixture, |uri| async move {
                 for hover in &fixture.hovers {
                     let doc_position = {
                         let doc = session
@@ -240,7 +268,11 @@ real_provider_test!(
     flow_narrowing_linear_matrix_checks_every_callback,
     fixture = FIXTURE,
     async fn run(session) {
-        for &n in &verter_compiler::flow_check::fixtures::MATRIX_SIZES {
+        // Every case retains its complete source and exact diagnostic proof.
+        // Reuse one on-disk project member so each content change invalidates
+        // that member rather than creating another root and deleting the last.
+        let mut slot = FixtureSlot::new(session);
+        for &n in &verter_compiler::flow_check::fixtures::LIVE_MATRIX_SIZES {
             for fixture in [
                 ide_fixtures::flat_matrix(n, false),
                 ide_fixtures::flat_matrix(n, true),
@@ -251,7 +283,7 @@ real_provider_test!(
                 ide_fixtures::component_matrix(n, false),
                 ide_fixtures::component_matrix(n, true),
             ] {
-                assert_fixture(session, &fixture, |_| async {}).await;
+                assert_fixture(session, &mut slot, &fixture, |_| async {}).await;
                 if fixture.name.ends_with("Broken") {
                     // One planted error per callback (plus the canary): every
                     // callback body was type-checked.
