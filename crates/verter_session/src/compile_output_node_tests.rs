@@ -707,13 +707,29 @@ fn session_publish_claims_wide_signature_pages_and_is_refused_for_them() {
 fn raw_template_slot_claims_wide_signature_pages() {
     use crate::types::{DerivedRawState, RawTemplateSlotAdmission};
     use verter_session_query::retention::{ChargeClass, RetentionLimits, SemanticRetentionAccount};
-    for (limit, admitted) in [(usize::MAX, true), (1, false)] {
+    for (limit, admitted, pressure) in [
+        (usize::MAX, true, false),
+        (1, false, false),
+        (usize::MAX, false, true),
+    ] {
         let account = SemanticRetentionAccount::new(RetentionLimits {
             max_entry_bytes: limit,
+            aggregate_ceiling_bytes: if pressure {
+                4096
+            } else {
+                RetentionLimits::defaults().aggregate_ceiling_bytes
+            },
             ..RetentionLimits::defaults()
         });
         let signature = wide_signature();
         let pages = signature_pages(&signature);
+        let page_bytes: usize = pages.iter().map(|page| page.retained_charge_bytes()).sum();
+        if pressure {
+            assert!(
+                page_bytes > account.limits().aggregate_ceiling_bytes,
+                "the pressure control can retain an empty slot but not its evidence"
+            );
+        }
         let mut state = DerivedRawState::default();
         let template = Arc::new(
             verter_session_query::analysis::template::TemplateAnalysisSnapshot {
@@ -746,6 +762,12 @@ fn raw_template_slot_claims_wide_signature_pages() {
         assert!(pages
             .iter()
             .all(|page| page.retained_charge_class() == Some(expected)));
+        assert_eq!(
+            account.snapshot().retained_bytes,
+            if admitted { page_bytes } else { 0 }
+        );
+        state.clear_raw_template_analysis();
+        assert!(state.raw_template_analysis().is_none());
         drop((state, pages));
         assert_eq!(account.snapshot().retained_bytes, 0);
     }

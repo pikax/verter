@@ -383,6 +383,10 @@ pub struct FlowWork {
     /// Component-function flow blocks, navigators and component functions
     /// emitted.
     pub component_functions: u64,
+    /// Lexical scope records copied, linked or inspected by component emission.
+    pub scope_links: u64,
+    /// Expression nodes visited while discovering callback references and locals.
+    pub callback_discovery: u64,
 }
 
 #[cfg(any(test, feature = "semantic-observe"))]
@@ -397,6 +401,8 @@ thread_local! {
             snapshots: 0,
             component_branches: 0,
             component_functions: 0,
+            scope_links: 0,
+            callback_discovery: 0,
         })
     };
 }
@@ -663,6 +669,10 @@ impl<'alloc> Locals<'alloc> {
 }
 
 impl<'alloc> Visit<'alloc> for Locals<'alloc> {
+    fn visit_expression(&mut self, it: &Expression<'alloc>) {
+        record(|work| work.callback_discovery += 1);
+        walk::walk_expression(self, it);
+    }
     fn visit_block_statement(&mut self, it: &oxc_ast::ast::BlockStatement<'alloc>) {
         self.scoped(it.span, |this| walk::walk_block_statement(this, it));
     }
@@ -914,6 +924,7 @@ impl<'alloc> Refs<'_, 'alloc> {
 
 impl<'alloc> Visit<'alloc> for Refs<'_, 'alloc> {
     fn visit_expression(&mut self, it: &Expression<'alloc>) {
+        record(|work| work.callback_discovery += 1);
         if !self.chain(it) {
             walk::walk_expression(self, it);
         }

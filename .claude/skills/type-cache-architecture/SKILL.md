@@ -994,6 +994,11 @@ Retention refusal never bypasses the cache runtime's post-compute generation
 and self-root validation or a query node's rejection lowering. Compile companion
 publication uses the session node's actual `SessionPublishOutcome`: a refused
 slot publishes neither scheduler artifacts nor raw-template companions.
+A lowered invalid query propagates `PostComputeRevalidationFailed` to its
+consumer, even when its page claim also failed. Only validated complete
+delivery keeps `RetentionPressure` family-local. A refused compile evicts
+previous companions under its captured source-version/witness fence; a late
+refusal cannot evict a newer publication.
 A refused claim stores
 nothing and the complete value is delivered uncached. A later candidate sharing a claimed
 page is not charged for it again; the page's charge drains when its last holder
