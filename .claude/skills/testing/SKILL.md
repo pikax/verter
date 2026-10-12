@@ -167,7 +167,11 @@ foreground work. The coordinator's `block_in_place` path requires a multithreade
 runtime, which cannot use Tokio's paused clock. After proving the edit publications
 finished, its test-only dispatch barrier can hold subsequent background revalidation
 while foreground counters are sampled; already-dispatched diagnostics must finish
-before sampling. For queued-waiter cancellation, poll the acquire future to
+before sampling. Snapshot provider drains have a test-only execution fence on
+the document registry: hold its write guard after taking the import-publication
+lanes to observe running drains finish and exclude successor passes throughout
+foreground sampling. Aborting the fixture's outbound writer does not stop those
+producers. For queued-waiter cancellation, poll the acquire future to
 `Pending`, assert participant registration, then drop the future; a zero-duration
 timeout still pays a timer turn. Concurrency regressions
 should force the relevant orders and observe lock ownership at the decision
@@ -262,8 +266,15 @@ outran the 30-minute core step).
 Real-provider tests run through dedicated serial libtest jobs, while compile-fail
 fixtures run through standalone Cargo binaries rather than nextest test targets.
 The local live-provider timeout override uses the structural CI ownership
-selectors for LSP and type-runtime tests; `provider-ci-lane-selftest.mjs` pins
-that agreement. Mock child-contract completion variants keep Core ownership,
+selectors for LSP and type-runtime tests. The LSP
+`mock_completion_inventory_and_effective_nextest_policy` test reads compiled
+libtest discovery and checks Core selection and serial groups with nextest
+under both profiles. It projects every timeout-bearing override onto a test
+group in a temporary configuration so nextest's own precedence and inheritance
+expose any exemption matching a mock, including package-wide overrides. Original
+timeout values remain present for native validation, and compiled live-provider
+controls must retain their exemption. Mock child-contract completion variants
+keep Core ownership,
 their serial test group, and each profile's ordinary watchdog even when their
 names include `tsgo` or `tsserver`.
 
