@@ -11,9 +11,14 @@ across producer arenas. Broad leaves, enum units, unresolved projections,
 guard clauses (`switch (true)` / `switch (typeof x)`)
 and non-strict nullability retain the general relation-based rules. An exact
 existing discriminant fact also declines partitioning: relation-based dispatch
-re-establishes both the selected parent and its tested member, so an earlier
-property write cannot override the switch edge's discriminant read. The
-general remainder narrows both default dispatch and implicit no-match exits
+re-establishes both the selected parent and its tested member. A selected unit
+tag supplies the case type even after a property write, including recovery
+from an incompatible case label. A union-valued tag instead narrows the
+existing exact-path fact by the clause equality, preserving contradictory
+member writes as `never`. The general remainder preserves that exact member
+fact while any surviving tag is union-valued. Exhaustiveness tests the entering
+discriminant fact independently of the declared parent arms. The remainder
+narrows both default dispatch and implicit no-match exits
 from the switch entry state, including union-valued and enum discriminants.
 Partly covered parents remain while a separate discriminant fact subtracts
 handled literals. General case dispatch retains both the selected parent and

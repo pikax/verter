@@ -416,7 +416,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     return partition.covered;
                 }
                 match self.switch_discriminant_remainder(subject, &tests) {
-                    Some((remainder, _, _)) => remainder.is_empty(),
+                    Some(remainder) => remainder.covered,
                     None => {
                         self.record_degradation(FlowReturnDegradation::FlowGap(
                             verter_session_query::flow::policy::FlowGap::GuardNarrowing,
@@ -721,18 +721,18 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         tests: &[verter_session_query::flow::slice::SliceGuardLiteral],
     ) {
         match self.switch_discriminant_remainder(subject, tests) {
-            Some((remainder, total, discriminant)) => {
+            Some(remainder) => {
                 // These arms belong to the tested property's parent, including
                 // a nested parent. Complete coverage narrows it to `never`.
-                if remainder.len() < total {
-                    let node = self.union_or_never(&remainder);
+                if remainder.parents.len() < remainder.parent_count {
+                    let node = self.union_or_never(&remainder.parents);
                     let parent = verter_session_query::flow::slice::SliceNarrowSubject {
                         root: subject.root.clone(),
                         path: Arc::from(&subject.path[..subject.path.len().saturating_sub(1)]),
                     };
                     self.bake_narrow_into_state(state, &parent, node);
                 }
-                self.bake_narrow_into_state(state, subject, discriminant);
+                self.bake_narrow_into_state(state, subject, remainder.discriminant);
             }
             None => self.record_degradation(FlowReturnDegradation::FlowGap(
                 verter_session_query::flow::policy::FlowGap::GuardNarrowing,

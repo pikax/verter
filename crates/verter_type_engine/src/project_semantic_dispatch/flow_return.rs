@@ -8666,6 +8666,15 @@ enum GuardNarrowing {
     ),
 }
 
+/// Parent dispatch and member reads can retain different information after
+/// a property write. Exhaustiveness reads the entering discriminant itself.
+struct SwitchDiscriminantRemainder {
+    parents: Vec<SemanticNodeId>,
+    parent_count: usize,
+    discriminant: SemanticNodeId,
+    covered: bool,
+}
+
 /// What an equality's value is to an `unknown` subject
 /// ([`FlowEvaluator::equality_value_class`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18499,10 +18508,16 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         });
         if comparison == LiteralComparison::SwitchCase {
             if let GuardNarrowing::Narrowed(parent_subject, node) = &parent {
-                // Switch dispatch reads the selected parent's discriminant,
-                // including when an earlier property write has its own fact.
+                // A selected unit tag supplies the checker's case type even
+                // after a write. A union-valued tag still intersects the
+                // existing member fact with the clause's equality.
                 self.push_narrowing(parent_subject, *node);
                 if let Some(member) = self.member_declared_node(subject) {
+                    let member = if self.is_guard_unit(member) {
+                        member
+                    } else {
+                        self.narrowed_read(subject).unwrap_or(member)
+                    };
                     if let Some(narrowed) =
                         self.narrow_type_by_equality(member, literal_node, negated, loose)
                     {
@@ -20283,13 +20298,14 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// fits (`string` under `case "a":`) is NOT covered — the checker's
     /// default edge keeps it. Returns the surviving arms and the arm
     /// count, so the caller can tell "no narrow established"
-    /// (survivors == arms) from a real one. The final node carries the
-    /// uncovered discriminant leaves, even when every parent survives.
+    /// (survivors == arms) from a real one. Member reads retain an exact
+    /// fact when a surviving tag is union-valued. Coverage uses the entering
+    /// discriminant fact even when the parent still has unhandled arms.
     fn switch_discriminant_remainder(
         &mut self,
         subject: &verter_session_query::flow::slice::SliceNarrowSubject,
         tests: &[verter_session_query::flow::slice::SliceGuardLiteral],
-    ) -> Option<(Vec<SemanticNodeId>, usize, SemanticNodeId)> {
+    ) -> Option<SwitchDiscriminantRemainder> {
         // The narrow lands at the tested property's PARENT reference
         // (the root itself for a whole-subject or one-segment
         // discriminant), so the arms are the parent's — a nested
@@ -20377,6 +20393,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         }
         let mut survivors: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
         let mut surviving_tags = Vec::new();
+        let mut retains_member_fact = false;
         for arm in &arms {
             let member = if subject.path.is_empty() {
                 *arm
@@ -20385,12 +20402,27 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             };
             let tags = self.switch_member_remainder(member, &test_nodes)?;
             if !tags.is_empty() {
+                retains_member_fact |= !self.is_guard_unit(member);
                 survivors.push(*arm);
                 surviving_tags.extend(tags);
             }
         }
-        let total = arms.len();
-        Some((survivors, total, self.union_or_never(&surviving_tags)))
+        let covered = if let Some(current) = self.narrowed_read(subject) {
+            let remaining = self.switch_member_remainder(current, &test_nodes)?;
+            let covered = remaining.is_empty();
+            if retains_member_fact {
+                surviving_tags = remaining;
+            }
+            covered
+        } else {
+            survivors.is_empty()
+        };
+        Some(SwitchDiscriminantRemainder {
+            parents: survivors,
+            parent_count: arms.len(),
+            discriminant: self.union_or_never(&surviving_tags),
+            covered,
+        })
     }
 
     /// The runtime values of one arm's tested member not matched
