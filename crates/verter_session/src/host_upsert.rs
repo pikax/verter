@@ -542,6 +542,9 @@ impl VerterHost {
     /// invariant a regression test can drive directly and so the
     /// check is unambiguously computed before any per-request side effect.
     fn assert_canonicals_unique(canonicals: &[String]) {
+        if canonicals.len() < 2 {
+            return;
+        }
         let mut seen = std::collections::HashSet::with_capacity(canonicals.len());
         for canonical in canonicals {
             assert!(

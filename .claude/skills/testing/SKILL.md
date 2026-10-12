@@ -130,6 +130,16 @@ A comment may supplement that durable explanation with a GitHub issue only when 
 
 ### Test Economy
 
+The Svelte projection profile gates run one solution build per pinned
+TypeScript engine. Every profile and corruption/publication twin remains a
+separate project with its original checking options, globals, consumer and
+declaration directory. Batch diagnostics must be attributed by project, and
+unassigned errors and missing per-project build receipts fail the gate. One
+dirty project must never make another appear dirty or mask a clean consumer.
+Engine pins and fixture populations remain authoritative. Launcher counts are
+work evidence; elapsed times are
+samples rather than portable performance thresholds.
+
 Tests are evidence, not a quota. At preflight, map each changed contract to the smallest sufficient proof before proposing new tests:
 
 - Prefer an existing test, then extending or table-driving one existing test, before creating a new test or file.

@@ -391,7 +391,10 @@ impl FileNode {
             source_integrated_generation: AtomicU64::new(0),
             source_integration_ready: AtomicBool::new(false),
             analysis: ArcSwap::new(Arc::new(None)),
-            artifacts: DashMap::new(),
+            // A file has only a handful of compile profiles. Machine-wide
+            // sharding would allocate thousands of empty slots per opened
+            // script, including files that never request an artifact.
+            artifacts: DashMap::with_shard_amount(4),
             pending_source: ArcSwap::new(Arc::new(None)),
             incarnation_id,
             submission_lifetime: incarnation_id,

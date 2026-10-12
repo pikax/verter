@@ -525,15 +525,12 @@ struct EngineRun {
     declaration_text: String,
 }
 
-fn run_engine(
-    engine: &Engine,
-    launcher: &Path,
+fn prepare_engine_project(
+    root: &Path,
     carrier: &CarrierSpec,
     extra_files: &[(&str, String)],
     declaration: bool,
-) -> Option<EngineRun> {
-    let tmp = tempfile::tempdir().expect("temp dir");
-    let root = tmp.path();
+) {
     std::fs::write(root.join(&carrier.entry), &carrier.text).expect("write entry");
     for (rel, content) in extra_files {
         let path = root.join(rel);
@@ -614,43 +611,268 @@ fn run_engine(
 }}"#
     );
     std::fs::write(root.join("tsconfig.json"), tsconfig).expect("write tsconfig");
+}
 
-    let project = root.join("tsconfig.json");
-    let output = if engine.through_node {
-        Command::new("node")
-            .arg(launcher)
-            .arg("-p")
-            .arg(&project)
-            .arg("--pretty")
-            .arg("false")
-            .current_dir(root)
-            .output()
-            .unwrap_or_else(|e| panic!("run {} through node: {e}", engine.label))
+enum ExpectedRun {
+    Clean,
+    Diagnostic,
+    Publishes(Vec<String>),
+    Renamed(String),
+}
+
+struct EngineCase {
+    profile: String,
+    kind: &'static str,
+    carrier: CarrierSpec,
+    extras: Vec<(&'static str, String)>,
+    declaration: bool,
+    expected: ExpectedRun,
+}
+
+/// Each case remains its own TypeScript project, including its script globals,
+/// checkJs setting, consumer and emit directory. A solution build amortizes
+/// launcher and library setup without merging the programs or their diagnostics.
+fn run_engine_batch(engine: &Engine, cases: &[EngineCase]) -> Vec<EngineRun> {
+    assert!(
+        !cases.is_empty(),
+        "an engine batch must check at least one project"
+    );
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let root = tmp.path();
+    let projects: Vec<_> = cases
+        .iter()
+        .enumerate()
+        .map(|(index, case)| {
+            let relative = format!("case_{index}/tsconfig.json");
+            let directory = root.join(format!("case_{index}"));
+            std::fs::create_dir_all(&directory).expect("create project");
+            prepare_engine_project(&directory, &case.carrier, &case.extras, case.declaration);
+            relative
+        })
+        .collect();
+    let mut command = if engine.through_node {
+        let mut command = Command::new("node");
+        command.arg(&engine.launcher);
+        command
     } else {
-        Command::new(launcher)
-            .arg("-p")
-            .arg(&project)
-            .arg("--pretty")
-            .arg("false")
-            .current_dir(root)
-            .output()
-            .unwrap_or_else(|e| panic!("run {} directly: {e}", engine.label))
+        Command::new(&engine.launcher)
     };
+    let output = command
+        .arg("--build")
+        .args(&projects)
+        .args(["--pretty", "false"])
+        .current_dir(root)
+        .output()
+        .unwrap_or_else(|error| panic!("run {}: {error}", engine.label));
     let combined = format!(
         "{}{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    let diagnostics = project_diagnostics(&combined, cases.len());
+    let has_diagnostics = diagnostics.iter().any(|text| !text.is_empty());
+    assert_eq!(
+        output.status.success(),
+        !has_diagnostics,
+        "{} must exit successfully exactly when all projects check clean:\n{combined}",
+        engine.label
+    );
+    // Solution builds write this only after visiting the program. Fresh temp
+    // projects cannot carry an old receipt, so a launcher that stops after an
+    // earlier diagnostic cannot silently leave later cases unchecked.
+    for (index, case) in cases.iter().enumerate() {
+        let receipt_path = if case.declaration {
+            format!("case_{index}/types/tsconfig.tsbuildinfo")
+        } else {
+            format!("case_{index}/tsconfig.tsbuildinfo")
+        };
+        let receipt = std::fs::read_to_string(root.join(receipt_path)).unwrap_or_else(|error| {
+            panic!(
+                "{} did not finish project {index}: {error}\n{combined}",
+                engine.label
+            )
+        });
+        let receipt: Value = serde_json::from_str(&receipt).expect("engine build receipt");
+        assert_eq!(receipt["version"].as_str(), Some(engine.version));
+        assert!(
+            receipt["root"]
+                .as_array()
+                .is_some_and(|roots| !roots.is_empty()),
+            "{} did not record the roots of project {index}",
+            engine.label
+        );
+    }
+    eprintln!(
+        "ENGINE-BATCH {} projects={} launches=1",
+        engine.label,
+        cases.len()
+    );
+    diagnostics
+        .into_iter()
+        .enumerate()
+        .map(|(index, output)| {
+            let mut declaration_text = String::new();
+            gather_declarations(
+                &root.join(format!("case_{index}/types")),
+                &mut declaration_text,
+            );
+            EngineRun {
+                ok: output.is_empty(),
+                output,
+                declaration_text,
+            }
+        })
+        .collect()
+}
 
-    // Gather emitted declarations (publication assertions read them).
-    let mut declaration_text = String::new();
-    gather_declarations(&root.join("types"), &mut declaration_text);
+/// Fail closed on launcher/configuration errors that cannot be assigned to one
+/// project. Continuation lines belong to the preceding diagnostic, never to
+/// another project's result. `case_1/` must not match `case_10/`.
+fn project_diagnostics(output: &str, count: usize) -> Vec<String> {
+    let mut diagnostics = vec![String::new(); count];
+    let mut current = None;
+    for line in output.lines().filter(|line| !line.trim().is_empty()) {
+        let normalized = line.replace('\\', "/");
+        if normalized.contains(": error TS") {
+            current = (0..count).find(|index| normalized.starts_with(&format!("case_{index}/")));
+            assert!(current.is_some(), "unassigned engine diagnostic: {line}");
+        } else {
+            assert!(
+                line.starts_with(char::is_whitespace),
+                "unexpected engine output: {line}"
+            );
+        }
+        let index = current.expect("engine output without a project diagnostic");
+        diagnostics[index].push_str(line);
+        diagnostics[index].push('\n');
+    }
+    diagnostics
+}
 
-    Some(EngineRun {
-        ok: output.status.success(),
-        output: combined,
-        declaration_text,
-    })
+fn check_engine_cases(engines: &[Engine], cases: &[EngineCase]) {
+    map_in_parallel(engines, |engine| {
+        let runs = run_engine_batch(engine, cases);
+        assert_eq!(runs.len(), cases.len());
+        for (case, run) in cases.iter().zip(&runs) {
+            match &case.expected {
+                ExpectedRun::Diagnostic => {
+                    assert_failed(run, engine.label, &case.profile, case.kind)
+                }
+                ExpectedRun::Clean | ExpectedRun::Publishes(_) => {
+                    assert!(
+                        run.ok,
+                        "{} for profile {} must check on {}:\n{}\n--- carrier:\n{}",
+                        case.kind, case.profile, engine.label, run.output, case.carrier.text
+                    );
+                    if let ExpectedRun::Publishes(symbols) = &case.expected {
+                        for symbol in symbols {
+                            assert!(
+                                names_symbol(&run.declaration_text, symbol),
+                                "profile {} must emit {symbol} on {}:\n{}",
+                                case.profile,
+                                engine.label,
+                                run.declaration_text
+                            );
+                        }
+                    }
+                }
+                ExpectedRun::Renamed(symbol) => assert!(
+                    publication_rename_holds(run, symbol),
+                    "profile {} must check and drop {symbol} on {}:\n{}\n{}",
+                    case.profile,
+                    engine.label,
+                    run.output,
+                    run.declaration_text
+                ),
+            }
+        }
+    });
+}
+
+#[test]
+fn batch_diagnostics_preserve_project_boundaries_and_continuations() {
+    let output = "case_10/entry.ts(1,1): error TS2322: wrong type\n  Details.\ncase_1\\consumer.ts(2,1): error TS2578: unused directive\n";
+    let diagnostics = project_diagnostics(output, 11);
+    assert!(diagnostics[0].is_empty());
+    assert!(diagnostics[1].contains("TS2578"));
+    assert!(!diagnostics[1].contains("TS2322"));
+    assert!(diagnostics[10].contains("TS2322"));
+    assert!(diagnostics[10].contains("Details."));
+    assert_eq!(
+        diagnostics.iter().filter(|text| !text.is_empty()).count(),
+        2
+    );
+    assert!(
+        std::panic::catch_unwind(|| project_diagnostics("error TS5083: missing project", 1))
+            .is_err()
+    );
+    assert!(std::panic::catch_unwind(|| project_diagnostics("launcher failed", 1)).is_err());
+}
+
+#[test]
+fn batched_engine_projects_keep_diagnostics_options_and_declarations_isolated() {
+    let engines = claimed_engines();
+    if engines.is_empty() {
+        skip_note("batched engine project isolation");
+        return;
+    }
+    let fixture = |text: &str, entry: &str, check_js, declaration, expected| EngineCase {
+        profile: entry.into(),
+        kind: "project isolation",
+        carrier: CarrierSpec {
+            entry: entry.into(),
+            text: text.into(),
+            check_js,
+        },
+        extras: Vec::new(),
+        declaration,
+        expected,
+    };
+    let cases = vec![
+        fixture(
+            "let shared: number = 1;",
+            "entry.ts",
+            false,
+            false,
+            ExpectedRun::Clean,
+        ),
+        fixture(
+            "let shared: string = 'x';",
+            "entry.ts",
+            false,
+            false,
+            ExpectedRun::Clean,
+        ),
+        fixture(
+            "let shared = 'x'.missing;",
+            "entry.js",
+            true,
+            false,
+            ExpectedRun::Diagnostic,
+        ),
+        fixture(
+            "let shared = 'x'.missing;",
+            "entry.js",
+            false,
+            false,
+            ExpectedRun::Clean,
+        ),
+        fixture(
+            "export const answer = 1;",
+            "entry.ts",
+            false,
+            true,
+            ExpectedRun::Publishes(vec!["answer".into()]),
+        ),
+        fixture(
+            "export const renamedAnswer = 1;",
+            "entry.ts",
+            false,
+            true,
+            ExpectedRun::Renamed("answer".into()),
+        ),
+    ];
+    check_engine_cases(&engines, &cases);
 }
 
 fn gather_declarations(dir: &Path, out: &mut String) {
@@ -782,24 +1004,15 @@ fn backend_projection_checks_clean_on_both_claimed_engines() {
         return;
     }
     let rows = load_profile_rows();
-    // Every profile's engine runs are its own: the profiles check at once.
-    map_in_parallel(&rows, |row| {
-        let carrier = carrier_for(row);
-        let extras = sidecars_for(row);
-        for engine in &engines {
-            let Some(run) = run_engine(engine, &engine.launcher, &carrier, &extras, false) else {
-                return;
-            };
-            assert!(
-                run.ok,
-                "the owned-backend projection of profile {} must check clean on {}:\n{}\n--- carrier:\n{}",
-                row.id,
-                engine.label,
-                run.output,
-                carrier.text
-            );
-        }
+    let cases = map_in_parallel(&rows, |row| EngineCase {
+        profile: row.id.clone(),
+        kind: "owned-backend projection",
+        carrier: carrier_for(row),
+        extras: sidecars_for(row),
+        declaration: false,
+        expected: ExpectedRun::Clean,
     });
+    check_engine_cases(&engines, &cases);
 }
 
 #[test]
@@ -810,8 +1023,7 @@ fn evidence_template_corruption_is_caught_on_both_claimed_engines() {
         return;
     }
     let rows = load_profile_rows();
-    // Every profile's engine runs are its own: the profiles check at once.
-    map_in_parallel(&rows, |row| {
+    let cases = map_in_parallel(&rows, |row| {
         let evidence = evidence_text(row);
         let corrupted_evidence = if row.file_kind == ".svelte" {
             format!("{evidence}{TEMPLATE_CORRUPTION}")
@@ -821,22 +1033,20 @@ fn evidence_template_corruption_is_caught_on_both_claimed_engines() {
         // Re-derive the carrier from the corrupted evidence: the corruption
         // travels THROUGH the owned projection, never around it.
         let carrier = carrier_from_evidence(row, corrupted_evidence);
-        let extras = sidecars_for(row);
-        for engine in &engines {
-            let Some(run) = run_engine(engine, &engine.launcher, &carrier, &extras, false) else {
-                return;
-            };
-            if row.checking == "engine-checked" {
-                assert_failed(&run, engine.label, &row.id, "evidence corruption");
+        EngineCase {
+            profile: row.id.clone(),
+            kind: "evidence corruption",
+            carrier,
+            extras: sidecars_for(row),
+            declaration: false,
+            expected: if row.checking == "engine-checked" {
+                ExpectedRun::Diagnostic
             } else {
-                assert!(
-                    run.ok,
-                    "js-unchecked profile {} must not report authored-JS corruption on {}:\n{}",
-                    row.id, engine.label, run.output
-                );
-            }
+                ExpectedRun::Clean
+            },
         }
     });
+    check_engine_cases(&engines, &cases);
 }
 
 #[test]
@@ -847,24 +1057,26 @@ fn projected_carrier_corruption_is_caught_on_both_claimed_engines() {
         return;
     }
     let rows = load_profile_rows();
-    // Every profile's engine runs are its own: the profiles check at once.
-    map_in_parallel(&rows, |row| {
-        if row.checking != "engine-checked" {
-            return; // unchecked surfaces must NOT report; the evidence twin covers them
-        }
+    let checked_rows: Vec<_> = rows
+        .iter()
+        .filter(|row| row.checking == "engine-checked")
+        .collect();
+    let cases = map_in_parallel(&checked_rows, |row| {
         let clean = carrier_for(row);
         let corrupted = CarrierSpec {
             text: format!("{}{}", clean.text, type_corruption_for(&row.dialect)),
             ..clean.clone()
         };
-        let extras = sidecars_for(row);
-        for engine in &engines {
-            let Some(run) = run_engine(engine, &engine.launcher, &corrupted, &extras, false) else {
-                return;
-            };
-            assert_failed(&run, engine.label, &row.id, "projected-carrier corruption");
+        EngineCase {
+            profile: row.id.clone(),
+            kind: "projected-carrier corruption",
+            carrier: corrupted,
+            extras: sidecars_for(row),
+            declaration: false,
+            expected: ExpectedRun::Diagnostic,
         }
     });
+    check_engine_cases(&engines, &cases);
 }
 
 fn sidecars_for(row: &ProfileRow) -> Vec<(&'static str, String)> {
@@ -913,8 +1125,8 @@ fn publication_surfaces_publish_and_survive_renames_on_both_claimed_engines() {
         return;
     }
     let rows = load_profile_rows();
-    // Every profile's engine runs are its own: the profiles check at once.
-    map_in_parallel(&rows, |row| {
+    let cases = map_in_parallel(&rows, |row| {
+        let mut cases = Vec::new();
         let first = row.published_symbols.first().cloned();
         match row.publishing.as_str() {
             "declarations-published" => {
@@ -951,19 +1163,14 @@ fn publication_surfaces_publish_and_survive_renames_on_both_claimed_engines() {
                      void notAny;\n"
                 );
                 let extras = declaration_consumer_sidecars(row, &consumer, &declaration);
-                for engine in &engines {
-                    let Some(run) = run_engine(engine, &engine.launcher, &carrier, &extras, false)
-                    else {
-                        return;
-                    };
-                    assert!(
-                        run.ok,
-                        "the declaration consumer for profile {} must check on {}:\n{}\n--- declaration:\n{declaration}",
-                        row.id,
-                        engine.label,
-                        run.output
-                    );
-                }
+                cases.push(EngineCase {
+                    profile: row.id.clone(),
+                    kind: "declaration consumer",
+                    carrier: carrier.clone(),
+                    extras,
+                    declaration: false,
+                    expected: ExpectedRun::Clean,
+                });
                 // DIRTY TWIN: collapse ONLY the published declaration's
                 // default export to `any` — every pinned symbol spelling and
                 // the IDE carrier stay byte-identical, so only the
@@ -983,14 +1190,14 @@ fn publication_surfaces_publish_and_survive_renames_on_both_claimed_engines() {
                     );
                 }
                 let twin_extras = declaration_consumer_sidecars(row, &consumer, &corrupted);
-                for engine in &engines {
-                    let Some(run) =
-                        run_engine(engine, &engine.launcher, &carrier, &twin_extras, false)
-                    else {
-                        return;
-                    };
-                    assert_failed(&run, engine.label, &row.id, "any-default declaration");
-                }
+                cases.push(EngineCase {
+                    profile: row.id.clone(),
+                    kind: "any-default declaration",
+                    carrier,
+                    extras: twin_extras,
+                    declaration: false,
+                    expected: ExpectedRun::Diagnostic,
+                });
                 if let Some(symbol) = first {
                     let renamed =
                         evidence.replace(symbol.as_str(), &format!("{symbol}__sts0_removed"));
@@ -1012,52 +1219,34 @@ fn publication_surfaces_publish_and_survive_renames_on_both_claimed_engines() {
                         row.id
                     );
                 }
-                for engine in &engines {
-                    let Some(run) = run_engine(engine, &engine.launcher, &carrier, &extras, true)
-                    else {
-                        return;
-                    };
-                    assert!(
-                        run.ok,
-                        "the module surface of profile {} must check on {} for declaration emit:\n{}",
-                        row.id,
-                        engine.label,
-                        run.output
-                    );
-                    for symbol in &row.published_symbols {
-                        assert!(
-                            names_symbol(&run.declaration_text, symbol),
-                            "the emitted declarations for profile {} must publish {symbol} on {}:\n{}",
-                            row.id,
-                            engine.label,
-                            run.declaration_text
-                        );
-                    }
-                }
+                cases.push(EngineCase {
+                    profile: row.id.clone(),
+                    kind: "module declaration emit",
+                    carrier,
+                    extras: extras.clone(),
+                    declaration: true,
+                    expected: ExpectedRun::Publishes(row.published_symbols.clone()),
+                });
                 if let Some(symbol) = first {
                     let renamed = evidence_text(row)
                         .replace(symbol.as_str(), &format!("{symbol}__sts0_removed"));
                     let renamed_carrier = carrier_from_evidence(row, renamed);
-                    for engine in &engines {
-                        let Some(run) =
-                            run_engine(engine, &engine.launcher, &renamed_carrier, &extras, true)
-                        else {
-                            return;
-                        };
-                        assert!(
-                            publication_rename_holds(&run, &symbol),
-                            "renaming export {symbol} must still check and drop the old spelling from the emitted declarations of profile {} on {}:\n{}\n--- declarations:\n{}",
-                            row.id,
-                            engine.label,
-                            run.output,
-                            run.declaration_text
-                        );
-                    }
+                    cases.push(EngineCase {
+                        profile: row.id.clone(),
+                        kind: "renamed module declaration emit",
+                        carrier: renamed_carrier,
+                        extras,
+                        declaration: true,
+                        expected: ExpectedRun::Renamed(symbol),
+                    });
                 }
             }
             other => panic!("profile {} claims unknown publishing {other}", row.id),
         }
+        cases
     });
+    let cases: Vec<_> = cases.into_iter().flatten().collect();
+    check_engine_cases(&engines, &cases);
 }
 
 /// The carrier-and-consumer extras shared by every engine run in the
