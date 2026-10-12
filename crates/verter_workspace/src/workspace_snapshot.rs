@@ -171,6 +171,9 @@ impl WorkspaceSnapshot {
         let ProjectPayload::Configured { membership, .. } = &self.project(pid).payload else {
             return u32::MAX;
         };
+        if let Some(ranks) = self.owners_memo.declaration_ranks.get(&pid) {
+            return ranks.get(canonical).copied().unwrap_or(u32::MAX);
+        }
         let ranks = self
             .owners_memo
             .declaration_ranks

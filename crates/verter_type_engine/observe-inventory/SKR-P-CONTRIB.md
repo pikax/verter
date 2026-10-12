@@ -10,6 +10,7 @@ Classification follows [the observation policy](../../../docs/arch/semantic-obse
 | `GlobalContributorPopulation.project_views` | Program-scoped global lookup: filters and orders one immutable view instead of copying and scanning for each base | REQUIRED | Contributor snapshot and workspace membership revision | `src/global_contributors/mod.rs` | always |
 | `GlobalContributorPopulation.collection_views` and its construction-local interface-declarer set | Augmentation collection: a shared slot order over immutable input arrays, preserving interface/namespace co-declaration rules | REQUIRED | Contributor snapshot, augmentation index and workspace membership revision | `src/global_contributors/mod.rs` | always |
 | `GlobalContributorPopulation.materialized_view_entries` and `materialized_view_entry_count()` (contributor entries copied into views) | none; the all-base demand growth test only | OPTIONAL | One published snapshot | `src/global_contributors/mod.rs` | `cfg(any(test, feature = "semantic-observe"))` |
+| `GlobalContributorPopulation.ordering_work` and `ordering_work_count()` (merge, rank and radix-pass work) | none; the linear-ordering scale tests only | OPTIONAL | One published snapshot | `src/global_contributors/mod.rs` | `cfg(any(test, feature = "semantic-observe"))` |
 
 ## verter_type_engine
 

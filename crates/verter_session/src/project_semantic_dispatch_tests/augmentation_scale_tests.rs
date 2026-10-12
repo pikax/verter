@@ -329,9 +329,9 @@ fn finite_batch_reads_match_single_keys_across_projection_modes() {
     let host = VerterHost::new_standalone(HostConfig::default());
     upsert_ts(&host, "/read.ts", "
         interface Named { x: 1 }
-        interface Values { optional?: 1; get access(): 2; method(x: string): 3; method(x: number): 4; named: Named; 5: 6 }
+        interface Values { optional?: 1; get access(): 2; method(x: string): 3; method(x: number): 4; named: Named; namedAgain: Named; 5: 6 }
         type Batch = Values[keyof Values];
-        type Singles = Values['optional'] | Values['access'] | Values['method'] | Values['named'] | Values['5'];
+        type Singles = Values['optional'] | Values['access'] | Values['method'] | Values['named'] | Values['namedAgain'] | Values['5'];
     ");
     use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
     use verter_type_engine::semantic_query::{IndexKey, QueryResult, SemanticQueryKey};
@@ -363,7 +363,7 @@ fn finite_batch_reads_match_single_keys_across_projection_modes() {
         ),
         graph.node_scope(base).expect("subject scope"),
     );
-    let key_names = ["optional", "access", "method", "named", "5"];
+    let key_names = ["optional", "access", "method", "named", "namedAgain", "5"];
     let keys: Vec<_> = key_names
         .iter()
         .map(|key| {
@@ -427,6 +427,77 @@ fn finite_batch_reads_match_single_keys_across_projection_modes() {
         assert_eq!(host.project_node_to_type_expr_for_test(batch), host.project_node_to_type_expr_for_test(singles),
             "optional reads, accessors, overloads, named terminals and numeric spelling agree in {mode:?}");
     }
+}
+
+#[test]
+fn project_global_reads_retain_unowned_dependencies_and_exclude_other_projects() {
+    let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    let host = VerterHost::new(HostConfig::default(), workspace.clone());
+    let projects = ["app", "other"].map(|name| {
+        let root = format!("/{name}");
+        let config = format!("{root}/tsconfig.json");
+        workspace.inject_file(
+            config.clone(),
+            Arc::from(r#"{"compilerOptions":{"noLib":true},"include":["**/*.ts"]}"#),
+        );
+        let mut project =
+            verter_workspace::ide_project_config(root.clone(), root, Some(config.clone()));
+        project.compiler_options =
+            verter_workspace::load_compiler_options(workspace.as_ref(), &config);
+        project
+    });
+    host.configure_projects(projects.to_vec());
+    for (canonical, source) in [
+        ("/app/global.ts", "interface Shared { own: 1 }"),
+        (
+            "/app/node_modules/pkg/index.d.ts",
+            "export {}; declare global { interface Shared { dependency: 2 } }",
+        ),
+        ("/other/global.ts", "interface Shared { foreign: 3 }"),
+    ] {
+        upsert_ts(&host, canonical, source);
+        host.ensure_indexed_ready(canonical)
+            .expect("indexed contributor");
+    }
+    let root = host.workspace().published_root().expect("configured root");
+    assert!(!root.snapshot.owners_for_file("/app/global.ts").is_empty());
+    assert!(root
+        .snapshot
+        .owners_for_file("/app/node_modules/pkg/index.d.ts")
+        .is_empty());
+    assert_ne!(
+        root.snapshot.owners_for_file("/app/global.ts"),
+        root.snapshot.owners_for_file("/other/global.ts")
+    );
+    upsert_ts(&host, "/app/read.ts", "type Probe = Shared['dependency'];");
+    use verter_type_engine::resolver_core::request_ports::OwnedLowering;
+    let contributors = host
+        .global_contributor_answer(
+            "/app/read.ts",
+            "Shared",
+            verter_session_query::facts::SymbolSpace::Type,
+        )
+        .contributors;
+    let canonicals: BTreeSet<_> = contributors
+        .entries
+        .iter()
+        .map(|entry| entry.artifact_key.canonical.as_ref())
+        .collect();
+    assert_eq!(
+        canonicals,
+        BTreeSet::from(["/app/global.ts", "/app/node_modules/pkg/index.d.ts"])
+    );
+    let node = host
+        .resolve_named_symbol("/app/read.ts", "Probe", Some(ProjectionMode::Expanded))
+        .expect("global read");
+    assert_eq!(
+        host.project_node_to_type_expr_for_test(node),
+        Some(verter_type_expr::TypeExpr::Literal(
+            verter_type_expr::LiteralValue::Number(2.0)
+        ))
+    );
 }
 
 #[test]

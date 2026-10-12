@@ -649,7 +649,10 @@ macro_rules! owned_lowering_from_source_inputs {
                 let project = project_for(demand_canonical);
                 let contributors = population.lookup_in_project(name, space, discriminator, project,
                     root.as_ref().map(|root| root.snapshot.generation.0),
-                    |entry| project_for(entry.artifact_key.canonical.as_ref()) == project,
+                    |entry| {
+                        let owner = project_for(entry.artifact_key.canonical.as_ref());
+                        owner.is_none() || owner == project
+                    },
                     |canonical| root.as_ref().map_or(u32::MAX, |root| root.snapshot.declaration_sequence_rank(canonical)));
                 verter_type_engine::resolver_core::request_ports::ContributorAnswer {
                     population_fingerprint: population.observation_fingerprint(

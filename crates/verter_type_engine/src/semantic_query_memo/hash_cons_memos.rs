@@ -213,6 +213,10 @@ impl SemanticGraphStore {
                 let Ok(roots) = self.root_existing_nodes(vec![node, result]) else {
                     return;
                 };
+                // This node/context memo has no single file owner. Every
+                // observed whole-file fact is intentionally a strict root:
+                // an untracked declaration or augmenter must reject the
+                // evaluated answer rather than validate as a lazy dependency.
                 let mut seen = rustc_hash::FxHashSet::default();
                 let self_roots: Arc<[Arc<str>]> = signature.entries().filter_map(|fact| match fact {
                     verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash { canonical_id, .. }

@@ -2610,7 +2610,13 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         }
         let values: Vec<_> = values
             .into_iter()
-            .map(|value| self.finish_path_terminal(value))
+            .map(|value| {
+                // Each key is an independent path. A declaration expanded
+                // for another key is not a recursive edge on this one.
+                self.visited_aliases.clear();
+                self.visited_nodes.clear();
+                self.finish_path_terminal(value)
+            })
             .collect();
         if values.iter().any(|value| {
             matches!(

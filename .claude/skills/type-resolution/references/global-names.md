@@ -15,6 +15,9 @@ their `Arc` slices. The first global declaration lookup therefore reads the
 first eligible entry instead of scanning every contributor again. Every base
 of a global interface routes its merged body through that first interface's
 instantiation, preserving one assembly and the full contributor fact rail.
+Project filtering retains contributors with no workspace owner, including
+dependency declarations and eligible automatic libraries, while excluding
+contributors owned by a different project.
 
 - A script's `var` declared in a nested block (an `if` / `else` branch, a bare block, any loop and its head, `try` / `catch` / `finally`, a `switch` case, a labeled statement — never a function or class body) hoists to the top level, so it is a file-scope value of the script and a global (`type_eval_build::for_each_hoisted_var`, mirrored by the header index). A `for…in` variable is a `string`, a `for…of` variable an element of a literal array or string (any other iterated value leaves it untyped); a declarator with neither an initializer nor an annotation declares the implicit `any`. The global-contributor pre-filter (`source_may_have_file_scope_global_contribution`) admits a script whose only global is such a nested `var`.
 - A declaration file is ambient: its namespace bodies (and a `declare namespace`, and a namespace in a `declare global` / `declare module` block) are EXPORT CONTEXTS unless they hold an export declaration (`export {}`, `export { … }`, `export =`, `export *`, `export default <expression>` — `route_inventory::statements_have_export_declarations`), and a declaration-file module without an export declaration exports every top-level declaration. A namespace member is its own declaration under its qualified name (`NS.Inner.f`, `NS.T`).

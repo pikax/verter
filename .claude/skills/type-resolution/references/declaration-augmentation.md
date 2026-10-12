@@ -41,7 +41,9 @@ Finite indexed access over an object resolves its shared subject once through
 `normalize_node_for_structural_fact_demand`,
 builds one `SurfaceKeyIndex`, and applies the path walker's known-member and
 terminal rules to the keys. It retains optional-property widening, accessors,
-visible method overloads, key coercion and projection-mode semantics. An absent
+visible method overloads, key coercion and projection-mode semantics. Each
+terminal has independent cycle tracking, so repeated references to one
+declaration expand as they do in separate indexed reads. An absent
 key or unsupported subject uses the ordinary indexed-access path. This avoids
 one full merged-surface construction and dependency closure per member;
 `M[keyof M]` and a subsequent member projection have linear member visits and
@@ -51,6 +53,8 @@ Deferred evaluation can read a declaration's current augmentation even when
 the declaring file's own bytes are unchanged. Its memo therefore stores the
 evaluation's fact signature alongside its result and cost receipt, validates
 contributing file roots on every hit, and replays those facts into the caller.
+All observed whole-file facts are strict roots: the memo key has no single
+file owner, and an untracked contributor must reject the cached answer.
 Each continuation frame traces its own reads; completing a child folds its
 signature into its parent. The metadata and evidence pages use the existing
 aggregate retention account. A newly added consumer must observe augmenter
