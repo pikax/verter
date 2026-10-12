@@ -384,6 +384,15 @@ Canonical in-tree examples of fully self-contained recipes (in-memory plant → 
 
 ### Timeout Is Never a Pass
 
+When shortening a process-harness integrity test's injected deadline, arm it
+after an explicit fixture readiness check; startup scheduling must not prevent
+creation of the grandchild whose teardown the test proves. Keep ordinary
+invocation deadlines unchanged. A transport read failure must kill the live driver before waiting
+for its exit, retain the harness-failure classification, and stop later probes.
+The broken-stream and wedged-child-tree tests have explicit 20-second nextest
+backstops in both profiles and retain their classification and descendant
+liveness assertions.
+
 A timeout or incomplete run is never green and never presumed environmental. Rerun the timed-out test in isolation with an adequate timeout and no co-resident heavy work: if it clears → environmental (retain both artifacts); if it repeats → collect hang diagnostics; if classification stays ambiguous → HARD FAIL. The advertised slow-timeout must match the configured one — `.config/nextest.toml` advertises ~60s but configures 5s×3, killing valid tests around 15s on an 8GB host; fix that mismatch rather than tolerating false timeouts. Genuinely long tests get explicit per-test overrides.
 
 ### Enum-variant ripple (silent catch-all absorption)

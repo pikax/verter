@@ -20,6 +20,10 @@ max-threads = 1
 # than the test inventory.
 slow-timeout = { period = "60s", terminate-after = 5 }
 
+[[profile.default.overrides]]
+filter = 'test(a_broken_stdout_stream_is_a_harness_failure_not_a_compiler_crash) | test(the_runner_kills_a_wedged_child_tree_instead_of_blocking_forever)'
+slow-timeout = { period = "10s", terminate-after = 2 }
+
 # These correctness rows exercise the full checker comparison allowance in
 # unoptimised builds. Each row is isolated and bounded by the engine ledger;
 # keep a watchdog without treating its finite comparison work as a hang.
@@ -33,6 +37,11 @@ test-group = 'relation-comparison-envelope'
 
 [profile.ci]
 slow-timeout = { period = "60s", terminate-after = 5 }
+
+[[profile.ci.overrides]]
+filter = 'test(a_broken_stdout_stream_is_a_harness_failure_not_a_compiler_crash) | test(the_runner_kills_a_wedged_child_tree_instead_of_blocking_forever)'
+slow-timeout = { period = "10s", terminate-after = 2 }
+
 [[profile.ci.overrides]]
 filter = 'test(reversed_object_unions_reach_the_checker_answer_)'
 slow-timeout = { period = "60s", terminate-after = 15 }
