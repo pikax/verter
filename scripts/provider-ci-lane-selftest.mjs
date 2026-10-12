@@ -304,6 +304,13 @@ test("CI builds one provider-free archive and runs providers serially in their o
   assert.match(providers, /--exclude ['"]packages\/typescript-plugin\/src\/tsc\/\*\*['"]/);
   assert.match(providers, /VERTER_REQUIRE_TSGO:\s*"1"/);
   assert.doesNotMatch(core, /VERTER_REQUIRE_TS(?:GO|SERVER)/);
+  // Timings are written under CARGO_TARGET_DIR (default target/). The upload
+  // must use that same root or a relocated target dir drops the artifact.
+  assert.match(
+    providers,
+    /path:\s*\$\{\{\s*format\('\{0\}\/provider-timings\/\*\.json',\s*env\.CARGO_TARGET_DIR\s*\|\|\s*'target'\)\s*\}\}/,
+  );
+  assert.doesNotMatch(providers, /path:\s*target\/provider-timings\/\*\.json/);
 });
 
 test("native-only TypeScript plugin specs remain with the native artifact", () => {

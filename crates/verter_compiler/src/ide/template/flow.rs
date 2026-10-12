@@ -362,7 +362,7 @@ impl FlowNarrowing {
 /// Construction work of the emitter's narrowing, counted where it happens.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[cfg_attr(
-    not(any(test, feature = "semantic-observe")),
+    not(any(test, feature = "semantic-observe", feature = "test-support")),
     allow(dead_code, reason = "counted only in measurement builds")
 )]
 pub struct FlowWork {
@@ -389,7 +389,7 @@ pub struct FlowWork {
     pub callback_discovery: u64,
 }
 
-#[cfg(any(test, feature = "semantic-observe"))]
+#[cfg(any(test, feature = "semantic-observe", feature = "test-support"))]
 thread_local! {
     static FLOW_WORK: std::cell::Cell<FlowWork> = const {
         std::cell::Cell::new(FlowWork {
@@ -407,7 +407,7 @@ thread_local! {
     };
 }
 
-#[cfg(any(test, feature = "semantic-observe"))]
+#[cfg(any(test, feature = "semantic-observe", feature = "test-support"))]
 #[inline]
 pub(crate) fn record(update: impl FnOnce(&mut FlowWork)) {
     FLOW_WORK.with(|cell| {
@@ -417,12 +417,12 @@ pub(crate) fn record(update: impl FnOnce(&mut FlowWork)) {
     });
 }
 
-#[cfg(not(any(test, feature = "semantic-observe")))]
+#[cfg(not(any(test, feature = "semantic-observe", feature = "test-support")))]
 #[inline(always)]
 pub(crate) fn record(_update: impl FnOnce(&mut FlowWork)) {}
 
 /// Read and reset the per-thread narrowing work counters.
-#[cfg(any(test, feature = "semantic-observe"))]
+#[cfg(any(test, feature = "semantic-observe", feature = "test-support"))]
 #[cfg_attr(
     not(test),
     allow(

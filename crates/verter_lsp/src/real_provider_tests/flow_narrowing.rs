@@ -16,11 +16,13 @@ use std::panic::AssertUnwindSafe;
 
 use futures_util::FutureExt;
 use tower_lsp_server::ls_types::{
-    Diagnostic, DiagnosticSeverity, DidChangeWatchedFilesParams, DidCloseTextDocumentParams,
-    FileChangeType, FileEvent, NumberOrString, TextDocumentIdentifier, Uri,
+    Diagnostic, DiagnosticSeverity, DidChangeTextDocumentParams, DidChangeWatchedFilesParams,
+    DidCloseTextDocumentParams, FileChangeType, FileEvent, NumberOrString,
+    TextDocumentContentChangeEvent, TextDocumentIdentifier, Uri, VersionedTextDocumentIdentifier,
 };
 use tower_lsp_server::LanguageServer;
-use verter_compiler::flow_check::fixtures::Expected;
+use verter_compiler::flow_check::fixtures::{Expected, LIVE_MATRIX_SIZES};
+use verter_compiler::flow_check::growth;
 use verter_compiler::flow_check::ide_fixtures::{self, SfcFixture};
 use verter_compiler::flow_check::seam::Span;
 
@@ -36,31 +38,31 @@ fn code_of(diagnostic: &Diagnostic) -> u32 {
     }
 }
 
-/// The authored byte span of a merged diagnostic.
-fn authored_span(session: &RealProviderTestSession, uri: &Uri, diagnostic: &Diagnostic) -> Span {
-    let doc = session
-        .server()
-        .test_documents()
-        .get(uri)
-        .expect("the fixture is open");
-    let start = doc
-        .line_index
-        .position_to_offset(&diagnostic.range.start)
-        .expect("a mapped diagnostic starts inside the source");
-    let end = doc
-        .line_index
-        .position_to_offset(&diagnostic.range.end)
-        .expect("a mapped diagnostic ends inside the source");
-    Span::new(start, end)
+/// `None` when a stale diagnostic still refers to a longer previous source.
+fn try_authored_span(
+    session: &RealProviderTestSession,
+    uri: &Uri,
+    diagnostic: &Diagnostic,
+) -> Option<Span> {
+    let doc = session.server().test_documents().get(uri)?;
+    let start = doc.line_index.position_to_offset(&diagnostic.range.start)?;
+    let end = doc.line_index.position_to_offset(&diagnostic.range.end)?;
+    Some(Span::new(start, end))
 }
 
 /// One project member for a corpus. Each case still opens its complete source
 /// through the real watched-file and editor lifecycle. The file remains on
 /// disk until all cases close, so old missing roots cannot accumulate.
+struct OpenDocument {
+    uri: Uri,
+    version: i32,
+}
+
 struct FixtureSlot {
     relative: String,
     file: PublishedWorkspaceFile,
     change: FileChangeType,
+    open: Option<OpenDocument>,
 }
 
 impl FixtureSlot {
@@ -78,6 +80,18 @@ impl FixtureSlot {
             relative,
             file,
             change: FileChangeType::CREATED,
+            open: None,
+        }
+    }
+
+    async fn close(&mut self, session: &RealProviderTestSession) {
+        if let Some(open) = self.open.take() {
+            session
+                .server()
+                .did_close(DidCloseTextDocumentParams {
+                    text_document: TextDocumentIdentifier { uri: open.uri },
+                })
+                .await;
         }
     }
 
@@ -93,66 +107,74 @@ impl FixtureSlot {
         self.file.replace_contents(&fixture.source);
         let change = self.change;
         self.change = FileChangeType::CHANGED;
-        with_fixture_path(session, &self.relative, change, body).await
+        session
+            .server()
+            .did_change_watched_files(DidChangeWatchedFilesParams {
+                changes: vec![FileEvent {
+                    uri: session.workspace_uri(&self.relative),
+                    typ: change,
+                }],
+            })
+            .await;
+        let uri = if let Some(open) = &mut self.open {
+            open.version += 1;
+            let uri = open.uri.clone();
+            let version = open.version;
+            session
+                .server()
+                .did_change(DidChangeTextDocumentParams {
+                    text_document: VersionedTextDocumentIdentifier {
+                        uri: uri.clone(),
+                        version,
+                    },
+                    content_changes: vec![TextDocumentContentChangeEvent {
+                        range: None,
+                        range_length: None,
+                        text: fixture.source.clone(),
+                    }],
+                })
+                .await;
+            uri
+        } else {
+            let uri = session.open_fixture_file(&self.relative).await;
+            self.open = Some(OpenDocument {
+                uri: uri.clone(),
+                version: 1,
+            });
+            uri
+        };
+        let outcome = AssertUnwindSafe(body(uri)).catch_unwind().await;
+        if outcome.is_err() {
+            // A failed case must not leave an open document whose file is
+            // about to be deleted with the slot.
+            self.close(session).await;
+        }
+        match outcome {
+            Ok(value) => value,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
     }
 }
 
-/// Close the document before the corpus owner can delete its file, including
-/// on assertion failure. A failed case must not leave an open missing source.
-async fn with_fixture_path<T, Fut>(
-    session: &RealProviderTestSession,
-    relative: &str,
-    change: FileChangeType,
-    body: impl FnOnce(Uri) -> Fut,
-) -> T
-where
-    Fut: Future<Output = T>,
-{
-    session
-        .server()
-        .did_change_watched_files(DidChangeWatchedFilesParams {
-            changes: vec![FileEvent {
-                uri: session.workspace_uri(relative),
-                typ: change,
-            }],
-        })
-        .await;
-    let uri = session.open_fixture_file(relative).await;
-    let outcome = AssertUnwindSafe(body(uri.clone())).catch_unwind().await;
-    session
-        .server()
-        .did_close(DidCloseTextDocumentParams {
-            text_document: TextDocumentIdentifier { uri },
-        })
-        .await;
-    match outcome {
-        Ok(value) => value,
-        Err(payload) => std::panic::resume_unwind(payload),
-    }
-}
-
-/// The mapped error diagnostics of the open `fixture` once the canary proves
-/// the provider checked it.
+/// The mapped error diagnostics of the open `fixture` once its own canary
+/// proves the provider checked this source. A previous case's TS2322 does
+/// not count: the canary span is part of this fixture.
 async fn checked_errors(
     session: &RealProviderTestSession,
     fixture: &SfcFixture,
     uri: &Uri,
 ) -> Vec<Expected> {
-    // The exact diagnostic canary below proves this source was checked. A
-    // separate completion warmup would build an auto-import answer that this
-    // diagnostic contract never observes.
-    for _ in 0..30 {
-        let diagnostics = session
-            .merged_diagnostics_until(uri, |diagnostics| {
-                diagnostics.iter().any(|d| code_of(d) == 2322)
-            })
-            .await;
+    session.ensure_synced(uri).await;
+    for attempt in 0..100 {
+        let diagnostics = session.server().test_merged_diagnostics(uri).await;
         let errors: Vec<Expected> = diagnostics
             .iter()
             .filter(|d| d.severity == Some(DiagnosticSeverity::ERROR))
-            .map(|d| Expected {
-                code: code_of(d),
-                authored: authored_span(session, uri, d),
+            .filter_map(|d| {
+                Some(Expected {
+                    code: code_of(d),
+                    authored: try_authored_span(session, uri, d)?,
+                })
             })
             .collect();
         if errors.contains(&Expected {
@@ -160,6 +182,9 @@ async fn checked_errors(
             authored: fixture.canary,
         }) {
             return errors;
+        }
+        if attempt < 99 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
     }
     panic!(
@@ -222,79 +247,266 @@ async fn assert_fixture<Fut>(
     .await;
 }
 
-real_provider_test!(
-    flow_narrowing_semantics_are_exact,
-    fixture = FIXTURE,
-    async fn run(session) {
-        let mut slot = FixtureSlot::new(session);
-        for fixture in ide_fixtures::semantic_suite() {
-            let fixture = &fixture;
-            assert_fixture(session, &mut slot, fixture, |uri| async move {
-                for hover in &fixture.hovers {
-                    let doc_position = {
-                        let doc = session
-                            .server()
-                            .test_documents()
-                            .get(&uri)
-                            .expect("the fixture is open");
-                        doc.line_index
-                            .offset_to_position(hover.authored.start)
-                            .expect("a hovered identifier lies inside the source")
-                    };
-                    let mut text = String::new();
-                    for _ in 0..20 {
-                        if let Some(found) = session.hover_text(&uri, doc_position).await {
-                            text = found;
-                            break;
-                        }
-                        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                    }
-                    assert!(
-                        text.contains(hover.contains),
-                        "[{}] {}: the contextually typed parameter `{}` must hover as `{}`; got {text:?}",
-                        session.provider_kind().label(),
-                        fixture.name,
-                        &fixture.source[hover.authored.start as usize..hover.authored.end as usize],
-                        hover.contains,
-                    );
-                }
-            })
-            .await;
-        }
-    }
-);
+/// Chain depth 40 and the JavaScript setup are the expensive provider checks.
+/// A chain sharing its round trip with smaller fixtures used the whole debug
+/// budget, so each chain and each hover fixture is its own test. Smaller
+/// fixtures share a test in threes. Together the partitions are the whole suite.
+fn is_heavy_semantic(name: &str) -> bool {
+    name.contains("40") || name.contains("JavaScript")
+}
 
-real_provider_test!(
-    flow_narrowing_linear_matrix_checks_every_callback,
-    fixture = FIXTURE,
-    async fn run(session) {
-        // Every case retains its complete source and exact diagnostic proof.
-        // Reuse one on-disk project member so each content change invalidates
-        // that member rather than creating another root and deleting the last.
-        let mut slot = FixtureSlot::new(session);
-        for &n in &verter_compiler::flow_check::fixtures::LIVE_MATRIX_SIZES {
-            for fixture in [
-                ide_fixtures::flat_matrix(n, false),
-                ide_fixtures::flat_matrix(n, true),
-                ide_fixtures::nested_matrix(n, false),
-                ide_fixtures::nested_matrix(n, true),
-                ide_fixtures::nested_component_matrix(n, false),
-                ide_fixtures::nested_component_matrix(n, true),
-                ide_fixtures::component_matrix(n, false),
-                ide_fixtures::component_matrix(n, true),
-            ] {
-                assert_fixture(session, &mut slot, &fixture, |_| async {}).await;
-                if fixture.name.ends_with("Broken") {
-                    // One planted error per callback (plus the canary): every
-                    // callback body was type-checked.
-                    assert_eq!(
-                        fixture.expected.len(),
-                        fixture.guarded_callbacks + 1,
-                        "{}: one planted error per callback",
-                        fixture.name
-                    );
-                }
-            }
+fn is_contextual(name: &str) -> bool {
+    name.contains("Contextual")
+}
+
+fn semantic_partitions() -> Vec<Vec<SfcFixture>> {
+    let mut heavy = Vec::new();
+    let mut contextual = Vec::new();
+    let mut light = Vec::new();
+    for fixture in ide_fixtures::semantic_suite() {
+        if is_heavy_semantic(&fixture.name) {
+            heavy.push(fixture);
+        } else if is_contextual(&fixture.name) {
+            contextual.push(fixture);
+        } else {
+            light.push(fixture);
         }
     }
+    let mut partitions: Vec<Vec<SfcFixture>> =
+        heavy.into_iter().map(|fixture| vec![fixture]).collect();
+    for fixture in contextual {
+        partitions.push(vec![fixture]);
+    }
+    let mut bucket = Vec::new();
+    for fixture in light {
+        bucket.push(fixture);
+        if bucket.len() == 3 {
+            partitions.push(std::mem::take(&mut bucket));
+        }
+    }
+    if !bucket.is_empty() {
+        partitions.push(bucket);
+    }
+    partitions
+}
+
+async fn assert_semantic_fixture(
+    session: &RealProviderTestSession,
+    slot: &mut FixtureSlot,
+    fixture: &SfcFixture,
+) {
+    assert_fixture(session, slot, fixture, |uri| async move {
+        for hover in &fixture.hovers {
+            let doc_position = {
+                let doc = session
+                    .server()
+                    .test_documents()
+                    .get(&uri)
+                    .expect("the fixture is open");
+                doc.line_index
+                    .offset_to_position(hover.authored.start)
+                    .expect("a hovered identifier lies inside the source")
+            };
+            let mut text = String::new();
+            for _ in 0..20 {
+                if let Some(found) = session.hover_text(&uri, doc_position).await {
+                    text = found;
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
+            assert!(
+                text.contains(hover.contains),
+                "[{}] {}: the contextually typed parameter `{}` must hover as `{}`; got {text:?}",
+                session.provider_kind().label(),
+                fixture.name,
+                &fixture.source[hover.authored.start as usize..hover.authored.end as usize],
+                hover.contains,
+            );
+        }
+    })
+    .await;
+}
+
+async fn run_semantic_partition(session: &RealProviderTestSession, index: usize) {
+    let partitions = semantic_partitions();
+    let fixtures = partitions
+        .get(index)
+        .unwrap_or_else(|| panic!("semantic partition {index} is missing"));
+    let mut slot = FixtureSlot::new(session);
+    for fixture in fixtures {
+        assert_semantic_fixture(session, &mut slot, fixture).await;
+    }
+    slot.close(session).await;
+}
+
+#[test]
+fn semantic_partitions_cover_the_exact_suite() {
+    let partitions = semantic_partitions();
+    assert_eq!(
+        partitions.len(),
+        SEMANTIC_PARTITION_COUNT,
+        "one provider test per partition; add a test when the suite grows"
+    );
+    for partition in &partitions {
+        let heavy = partition
+            .iter()
+            .filter(|fixture| is_heavy_semantic(&fixture.name))
+            .count();
+        let contextual = partition
+            .iter()
+            .filter(|fixture| is_contextual(&fixture.name))
+            .count();
+        assert!(heavy <= 1, "a partition carries at most one chain");
+        assert!(partition.len() <= 3, "a partition stays a short round trip");
+        assert!(
+            contextual == 0 || partition.len() == 1,
+            "a hover fixture is its own round trip"
+        );
+        if heavy == 1 {
+            assert_eq!(partition.len(), 1, "a chain is its own round trip");
+        }
+    }
+    let mut covered: Vec<_> = partitions
+        .iter()
+        .flat_map(|partition| partition.iter().map(|fixture| fixture.name.clone()))
+        .collect();
+    let mut expected: Vec<_> = ide_fixtures::semantic_suite()
+        .into_iter()
+        .map(|fixture| fixture.name)
+        .collect();
+    covered.sort();
+    expected.sort();
+    assert_eq!(covered, expected);
+    assert!(covered.iter().any(|name| is_heavy_semantic(name)));
+}
+
+/// One provider test per `semantic_partitions()` index. The cover test pins
+/// this length; add an entry when that assertion asks for one.
+const SEMANTIC_PARTITION_COUNT: usize = 27;
+
+macro_rules! narrowing_partition {
+    ($name:ident, $index:literal) => {
+        real_provider_test!(
+            $name,
+            fixture = FIXTURE,
+            async fn run(session) {
+                run_semantic_partition(session, $index).await;
+            }
+        );
+    };
+}
+
+narrowing_partition!(flow_narrowing_semantics_are_exact, 0);
+narrowing_partition!(flow_narrowing_semantics_partition_1, 1);
+narrowing_partition!(flow_narrowing_semantics_partition_2, 2);
+narrowing_partition!(flow_narrowing_semantics_partition_3, 3);
+narrowing_partition!(flow_narrowing_semantics_partition_4, 4);
+narrowing_partition!(flow_narrowing_semantics_partition_5, 5);
+narrowing_partition!(flow_narrowing_semantics_partition_6, 6);
+narrowing_partition!(flow_narrowing_semantics_partition_7, 7);
+narrowing_partition!(flow_narrowing_semantics_partition_8, 8);
+narrowing_partition!(flow_narrowing_semantics_partition_9, 9);
+narrowing_partition!(flow_narrowing_semantics_partition_10, 10);
+narrowing_partition!(flow_narrowing_semantics_partition_11, 11);
+narrowing_partition!(flow_narrowing_semantics_partition_12, 12);
+narrowing_partition!(flow_narrowing_semantics_partition_13, 13);
+narrowing_partition!(flow_narrowing_semantics_partition_14, 14);
+narrowing_partition!(flow_narrowing_semantics_partition_15, 15);
+narrowing_partition!(flow_narrowing_semantics_partition_16, 16);
+narrowing_partition!(flow_narrowing_semantics_partition_17, 17);
+narrowing_partition!(flow_narrowing_semantics_partition_18, 18);
+narrowing_partition!(flow_narrowing_semantics_partition_19, 19);
+narrowing_partition!(flow_narrowing_semantics_partition_20, 20);
+narrowing_partition!(flow_narrowing_semantics_partition_21, 21);
+narrowing_partition!(flow_narrowing_semantics_partition_22, 22);
+narrowing_partition!(flow_narrowing_semantics_partition_23, 23);
+narrowing_partition!(flow_narrowing_semantics_partition_24, 24);
+narrowing_partition!(flow_narrowing_semantics_partition_25, 25);
+narrowing_partition!(flow_narrowing_semantics_partition_26, 26);
+
+async fn run_narrowing_matrix(session: &RealProviderTestSession, fixtures: Vec<SfcFixture>) {
+    let mut slot = FixtureSlot::new(session);
+    for fixture in &fixtures {
+        assert_fixture(session, &mut slot, fixture, |_| async {}).await;
+        if fixture.name.ends_with("Broken") {
+            // One planted error per callback (plus the canary): every
+            // callback body was type-checked.
+            assert_eq!(
+                fixture.expected.len(),
+                fixture.guarded_callbacks + 1,
+                "{}: one planted error per callback",
+                fixture.name
+            );
+        }
+    }
+    slot.close(session).await;
+}
+
+/// Full-size linearity is an operation count on the production emitter,
+/// separate from the provider round trip.
+#[test]
+fn production_matrix_growth_is_linear() {
+    growth::assert_production_matrix_growth();
+}
+
+/// Live round trips use 64 callbacks. Full-size linearity is the production
+/// counter oracle (`assert_production_matrix_growth`), which walks
+/// `MATRIX_SIZES` through 1024.
+fn live_matrix_n() -> usize {
+    LIVE_MATRIX_SIZES[2]
+}
+
+macro_rules! narrowing_matrix_case {
+    ($name:ident, $build:ident, $broken:literal) => {
+        real_provider_test!(
+            $name,
+            fixture = FIXTURE,
+            async fn run(session) {
+                let n = live_matrix_n();
+                run_narrowing_matrix(session, vec![ide_fixtures::$build(n, $broken)]).await;
+            }
+        );
+    };
+}
+
+narrowing_matrix_case!(
+    flow_narrowing_linear_matrix_checks_every_callback,
+    flat_matrix,
+    false
+);
+narrowing_matrix_case!(
+    flow_narrowing_linear_matrix_checks_every_callback_broken,
+    flat_matrix,
+    true
+);
+narrowing_matrix_case!(
+    flow_narrowing_linear_matrix_checks_nested_callbacks,
+    nested_matrix,
+    false
+);
+narrowing_matrix_case!(
+    flow_narrowing_linear_matrix_checks_nested_callbacks_broken,
+    nested_matrix,
+    true
+);
+narrowing_matrix_case!(
+    flow_narrowing_linear_matrix_checks_component_callbacks,
+    component_matrix,
+    false
+);
+narrowing_matrix_case!(
+    flow_narrowing_linear_matrix_checks_component_callbacks_broken,
+    component_matrix,
+    true
+);
+narrowing_matrix_case!(
+    flow_narrowing_linear_matrix_checks_nested_component_callbacks,
+    nested_component_matrix,
+    false
+);
+narrowing_matrix_case!(
+    flow_narrowing_linear_matrix_checks_nested_component_callbacks_broken,
+    nested_component_matrix,
+    true
 );

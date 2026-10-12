@@ -14,6 +14,7 @@
 
 use verter_compiler::flow_check::fixtures::{self, Fixture, Root, LIVE_MATRIX_SIZES};
 use verter_compiler::flow_check::generator::GuardStrategy;
+use verter_compiler::flow_check::growth;
 use verter_compiler::flow_check::oracle::{check_exact, ProviderDiagnostic};
 use verter_compiler::flow_check::seam::{GeneratedCheck, Mapping, Span};
 use verter_type_runtime::protocol::TypeDiagnosticSeverity;
@@ -25,17 +26,31 @@ const CANARY: &str = "\nexport const __verter_flow_canary: number = \"checked\";
 
 struct PublishedCheck {
     relative: String,
+    path: Option<String>,
     canary_start: u32,
+    canary_end: u32,
     _file: PublishedWorkspaceFile,
+}
+
+/// A canary whose byte window moves every generation, so a diagnostic from the
+/// previous matrix case cannot satisfy the next case when code lengths match.
+fn generation_canary(generation: u32) -> String {
+    format!(
+        "\n/*{}*/export const __verter_flow_canary: number = \"checked-{generation:04}\";\n",
+        " ".repeat(generation as usize)
+    )
 }
 
 fn publish_check(session: &RealProviderTestSession, name: &str, code: &str) -> PublishedCheck {
     let relative = format!("src/{name}.ts");
     let content = format!("{code}{CANARY}");
     let file = session.publish_workspace_file(&relative, &content);
+    let canary_start = code.len() as u32;
     PublishedCheck {
         relative,
-        canary_start: code.len() as u32,
+        path: None,
+        canary_start,
+        canary_end: canary_start + CANARY.len() as u32,
         _file: file,
     }
 }
@@ -47,16 +62,39 @@ async fn provider_errors(
     name: &str,
     code: &str,
 ) -> Vec<ProviderDiagnostic> {
-    let published = publish_check(session, name, code);
-    published_errors(session, &published).await
+    let mut published = publish_check(session, name, code);
+    let content = format!("{code}{CANARY}");
+    let errors = published_errors(session, &mut published, &content).await;
+    published.close(session).await;
+    errors
+}
+
+impl PublishedCheck {
+    async fn close(&mut self, session: &RealProviderTestSession) {
+        if let Some(path) = self.path.take() {
+            session.provider().close_file(&path).await.ok();
+        }
+    }
 }
 
 async fn published_errors(
     session: &RealProviderTestSession,
-    published: &PublishedCheck,
+    published: &mut PublishedCheck,
+    content: &str,
 ) -> Vec<ProviderDiagnostic> {
-    let (path, _) = session.open_fixture_in_provider(&published.relative).await;
-    for attempt in 0..120 {
+    let path = if let Some(path) = published.path.clone() {
+        session
+            .provider()
+            .update_file(&path, content)
+            .await
+            .expect("provider update_file should succeed");
+        path
+    } else {
+        let (path, _) = session.open_fixture_in_provider(&published.relative).await;
+        published.path = Some(path.clone());
+        path
+    };
+    for attempt in 0..160 {
         if let Ok(diagnostics) = session.provider().get_diagnostics(&path).await {
             let errors: Vec<ProviderDiagnostic> = diagnostics
                 .into_iter()
@@ -68,22 +106,22 @@ async fn published_errors(
                     message: d.message,
                 })
                 .collect();
-            if errors
-                .iter()
-                .any(|d| d.start >= published.canary_start && d.code == 2322)
-            {
-                session.provider().close_file(&path).await.ok();
+            let canary_seen = errors.iter().any(|diagnostic| {
+                diagnostic.code == 2322
+                    && diagnostic.start >= published.canary_start
+                    && diagnostic.start < published.canary_end
+            });
+            if canary_seen {
                 return errors
                     .into_iter()
                     .filter(|d| d.start < published.canary_start)
                     .collect();
             }
         }
-        if attempt < 119 {
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        if attempt < 159 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
     }
-    session.provider().close_file(&path).await.ok();
     panic!(
         "{}: the provider never reported the canary, so the check was not executed",
         published.relative
@@ -172,49 +210,83 @@ real_provider_test!(
     }
 );
 
+/// Full-size linearity is an operation count, separate from the provider
+/// round trip so each test stays inside the debug budget. Path-replay
+/// rejection stays on the compiler oracle.
+#[test]
+fn reference_matrix_growth_is_linear() {
+    growth::assert_reference_matrix_growth();
+}
+
+fn live_matrix_n() -> usize {
+    // 64 callbacks. `MATRIX_SIZES` counters above cover 128/256/512/1024.
+    LIVE_MATRIX_SIZES[2]
+}
+
+async fn run_check_matrix(session: &RealProviderTestSession, fixtures: Vec<Fixture>) {
+    let mut published = publish_check(session, "matrix", "");
+    let mut generation = 0u32;
+    for fixture in fixtures {
+        generation += 1;
+        let check = fixture.generate_with(GuardStrategy::Snapshot);
+        let canary = generation_canary(generation);
+        let content = format!("{}{canary}", check.code);
+        published.canary_start = check.code.len() as u32;
+        published.canary_end = content.len() as u32;
+        published._file.replace_contents(&content);
+        let errors = published_errors(session, &mut published, &content).await;
+        check_exact(&fixture, &check, &errors)
+            .unwrap_or_else(|mismatch| panic!("[{}] {mismatch}", session.provider_kind().label()));
+        assert_eq!(
+            check.layout.callbacks.len(),
+            fixture.authored_callbacks,
+            "{}: every authored callback is emitted",
+            fixture.name
+        );
+        if fixture.name.ends_with("-broken") {
+            assert_eq!(fixture.expected.len(), fixture.authored_callbacks);
+            for site in &check.layout.callbacks {
+                let inside = fixture
+                    .expected
+                    .iter()
+                    .filter(|e| site.authored.contains(e.authored))
+                    .count();
+                assert_eq!(inside, 1, "{}: callback {site:?}", fixture.name);
+            }
+        }
+    }
+    published.close(session).await;
+}
+
 real_provider_test!(
     flow_check_linear_matrix_checks_every_callback,
     fixture = FIXTURE,
     async fn run(session) {
-        // Keep one configured-project member for the complete matrix. Replacing
-        // its bytes preserves every case while avoiding a root-set invalidation
-        // and a missing-file residue for each independent module.
-        let mut published = publish_check(session, "matrix", "");
-        for &n in &LIVE_MATRIX_SIZES {
-            for fixture in [
+        let n = live_matrix_n();
+        run_check_matrix(
+            session,
+            vec![
                 fixtures::flat_matrix(n, 1, false),
                 fixtures::flat_matrix(n, 1, true),
+            ],
+        )
+        .await;
+    }
+);
+
+real_provider_test!(
+    flow_check_linear_matrix_checks_nested_callbacks,
+    fixture = FIXTURE,
+    async fn run(session) {
+        let n = live_matrix_n();
+        run_check_matrix(
+            session,
+            vec![
                 fixtures::nested_matrix(n, false),
                 fixtures::nested_matrix(n, true),
-            ] {
-                let check = fixture.generate_with(GuardStrategy::Snapshot);
-                published._file.replace_contents(&format!("{}{CANARY}", check.code));
-                published.canary_start = check.code.len() as u32;
-                let errors = published_errors(session, &published).await;
-                check_exact(&fixture, &check, &errors).unwrap_or_else(|mismatch| {
-                    panic!("[{}] {mismatch}", session.provider_kind().label())
-                });
-                assert_eq!(
-                    check.layout.callbacks.len(),
-                    fixture.authored_callbacks,
-                    "{}: every authored callback is emitted",
-                    fixture.name
-                );
-                if fixture.name.ends_with("-broken") {
-                    // One planted error per callback, each inside its own
-                    // callback: every callback body was type-checked.
-                    assert_eq!(fixture.expected.len(), fixture.authored_callbacks);
-                    for site in &check.layout.callbacks {
-                        let inside = fixture
-                            .expected
-                            .iter()
-                            .filter(|e| site.authored.contains(e.authored))
-                            .count();
-                        assert_eq!(inside, 1, "{}: callback {site:?}", fixture.name);
-                    }
-                }
-            }
-        }
+            ],
+        )
+        .await;
     }
 );
 
