@@ -36,12 +36,6 @@ slow-timeout = { period = "10s", terminate-after = 2 }
 filter = 'test(/tsserver|tsgo/) & (package(verter_lsp) | package(verter_type_runtime))'
 slow-timeout = { period = "60s", terminate-after = 5 }
 
-# Predates the gate: these rows exercise the full checker comparison allowance
-# and take minutes in a debug build. Their fix makes reversed unions linear.
-[[profile.default.overrides]]
-filter = 'test(reversed_object_unions_reach_the_checker_answer_)'
-slow-timeout = { period = "60s", terminate-after = 15 }
-
 # Known slow tests (CI, 2026-10-12): over 10s each, so over the speed target.
 # Each has a fix task; a test leaves this list when its fix lands. Never add to it.
 [[profile.default.overrides]]
@@ -55,7 +49,6 @@ filter = '''
   (package(verter_session) & test(=cases::corpus_audit_tests::chunk_004::corpus_audit_chunk_004_produces_audit_records_or_documents_skips)) |
   (package(verter_compiler) & test(=ide::template::flow_check::tests::chains_and_nested_scopes_grow_linearly)) |
   (package(verter_compiler) & test(=ide::template::flow_check::tests::callback_count_scales_without_path_expansion)) |
-  (package(verter_session) & test(=project_semantic_dispatch_tests::cost_receipt_tests::cold_query_entries_fit_within_the_checker_relation_envelope)) |
   (package(verter_compiler) & test(=ide::template::flow_tests::component_functions_read_one_flow_of_every_branch)) |
   (package(verter_session) & test(=project_semantic_dispatch_tests::augmentation_scale_tests::merged_interface_indexed_access_work_is_linear)) |
   (package(verter_session) & test(=project_semantic_dispatch_tests::augmentation_scale_tests::merged_interface_indexed_access_keeps_every_contributor)) |
@@ -78,10 +71,6 @@ slow-timeout = { period = "10s", terminate-after = 2 }
 filter = 'package(verter_session) & (test(publication_surfaces_publish_and_survive_renames_on_both_claimed_engines) | test(configured_project_opening_classifies_linear_members) | test(det_05_partial_resident_cache) | test(backend_projection_checks_clean_on_both_claimed_engines) | test(query_retention_refusal_preserves_delivery_validation_and_lowering) | test(projected_carrier_corruption_is_caught_on_both_claimed_engines) | test(lib_awaited_tail_runs_answer_past_the_checker_limit_and_stop_at_verters_budget))'
 slow-timeout = { period = "10s", terminate-after = 2 }
 
-[[profile.ci.overrides]]
-filter = 'test(reversed_object_unions_reach_the_checker_answer_)'
-slow-timeout = { period = "60s", terminate-after = 15 }
-
 # Known slow tests (CI, 2026-10-12): over 10s each, so over the speed target.
 # Each has a fix task; a test leaves this list when its fix lands. Never add to it.
 [[profile.ci.overrides]]
@@ -95,7 +84,6 @@ filter = '''
   (package(verter_session) & test(=cases::corpus_audit_tests::chunk_004::corpus_audit_chunk_004_produces_audit_records_or_documents_skips)) |
   (package(verter_compiler) & test(=ide::template::flow_check::tests::chains_and_nested_scopes_grow_linearly)) |
   (package(verter_compiler) & test(=ide::template::flow_check::tests::callback_count_scales_without_path_expansion)) |
-  (package(verter_session) & test(=project_semantic_dispatch_tests::cost_receipt_tests::cold_query_entries_fit_within_the_checker_relation_envelope)) |
   (package(verter_compiler) & test(=ide::template::flow_tests::component_functions_read_one_flow_of_every_branch)) |
   (package(verter_session) & test(=project_semantic_dispatch_tests::augmentation_scale_tests::merged_interface_indexed_access_work_is_linear)) |
   (package(verter_session) & test(=project_semantic_dispatch_tests::augmentation_scale_tests::merged_interface_indexed_access_keeps_every_contributor)) |
