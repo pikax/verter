@@ -8723,6 +8723,42 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             _ => return None,
         };
         let targets = self.relation_union_members(&target_members);
+        // Preparing the index spends work ahead of authored alternatives.
+        // When that work could compete with a checker refusal, let the
+        // ordinary worklist preserve the order of both boundaries (including
+        // recovery after a refused alternative). Require room for preparation,
+        // source/matching visits and the remaining pairs' work before reading
+        // the apparent Object surface or charging any index preparation.
+        let chain = self.current_relation_chain()?;
+        let comparison_room = self
+            .dispatch_txn
+            .borrow()
+            .relation
+            .chain_comparisons
+            .iter()
+            .find(|(base, _)| *base == chain.base)
+            .map(|(_, comparisons)| comparisons.remaining())?;
+        // Each source tries at most every target plus its scalar value.
+        // If those comparisons cannot reach a checker refusal, keep the
+        // index's existing work accounting even under a tight work allowance;
+        // changing paths there can change a partly warm cost receipt.
+        let possible_comparisons = sources
+            .len()
+            .saturating_mul(targets.len().saturating_add(1));
+        if comparison_room as usize <= possible_comparisons {
+            let preparation_room = sources
+                .len()
+                .saturating_mul(3)
+                .saturating_add(targets.len())
+                .saturating_add(
+                    (comparison_room as usize)
+                        .saturating_add(1)
+                        .saturating_mul(2),
+                );
+            if self.connected_demand.work_available().ok()? < preparation_room {
+                return None;
+            }
+        }
         let source_keys = sources
             .iter()
             .copied()

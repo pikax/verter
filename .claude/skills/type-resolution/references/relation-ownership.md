@@ -13,6 +13,13 @@ behavior without allocating a query and obligation for each negative pair.
 At a partial batch boundary, charge the next alternative, admit its checker
 comparison and reserve its pair bytes before charging an apparent `Object`
 read. An exhausted comparison reports TS2859 without paying for that read.
+When the union's possible target and scalar-value comparisons can reach a
+checker refusal, require connected work for index preparation, source/matching
+visits and the remaining checker pairs (including the refused next alternative)
+before preparing the index or reading apparent `Object`. Tight work allowances
+retain the ordinary worklist so speculative preparation cannot mask its checker
+refusal, partiality or subsequent recovery budget outcome. Unions too small to
+reach that refusal keep their existing cold/partly warm cost accounting.
 Inference sessions, fresh sources, optional properties, signatures, index
 signatures, deferred values and unit-valued targets retain the general path;
 unit targets may need the existing discriminant-splitting proof.

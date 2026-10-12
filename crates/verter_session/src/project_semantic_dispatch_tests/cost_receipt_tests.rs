@@ -1236,7 +1236,9 @@ fn operation_refusal_isolates_depth_and_preceding_connected_work() {
 }
 
 /// An exhausted comparison refuses before its apparent Object query enters,
-/// even when the next alternative fits the last unit of connected work.
+/// even when index preparation would exhaust work before the first alternative
+/// or the next alternative fits the last unit of connected work. Preserve the
+/// recovery outcome as well as partiality, named subjects and exact repeats.
 #[test]
 fn object_union_comparison_refusal_precedes_apparent_read() {
     use super::checker_probe_lane_tests::{
@@ -1248,10 +1250,14 @@ fn object_union_comparison_refusal_precedes_apparent_read() {
         SemanticQueryKey,
     };
 
-    let observe = |aliased| {
+    let observe = |aliased, ambient, comparisons, work| {
         let project = ProbeProject {
             compiler_options: Some(r#"{"strict": true, "noLib": true}"#),
-            files: &[("lib.object.d.ts", "interface Object { z: number; }")],
+            files: if ambient {
+                &[("lib.object.d.ts", "interface Object { z: number; }")]
+            } else {
+                &[]
+            },
             ..Default::default()
         };
         let host = probe_host(project);
@@ -1265,12 +1271,13 @@ fn object_union_comparison_refusal_precedes_apparent_read() {
         };
         let source = format!("{source} type T = {{q2: number}} | {{q1: number}} | {{q0: number}};");
         let key = with_probe_on_host(&host, project, &source, "[S, T]", |dispatch, node| {
-            assert!(
+            assert_eq!(
                 matches!(
                     dispatch.global_wrapper_surface("Object", &[], PROBE_FILE),
                     super::apparent_type::GlobalWrapper::Surface(_)
                 ),
-                "the apparent Object interface is available"
+                ambient,
+                "the apparent Object interface matches the control"
             );
             let data = dispatch.graph().node_data(node).expect("the tuple exists");
             let SemanticNodeData::Tuple { elements, .. } = data.as_ref() else {
@@ -1292,41 +1299,64 @@ fn object_union_comparison_refusal_precedes_apparent_read() {
         let SemanticQueryKey::Relate { source, target, .. } = &key else {
             unreachable!("a relation key")
         };
-        with_relation_comparisons_for_tests(3, || {
+        with_relation_comparisons_for_tests(comparisons, || {
             let read = || {
                 let _request = verter_type_engine::request_context::RequestContextGuard::install(
                     verter_type_engine::request_context::RequestContext::with_kind_timing_and_projection_budget(
                         1, Arc::from(PROBE_FILE), verter_audit::RequestKind::ComponentMeta, false, false, None, 1_000_000));
-                root_read(&host, &key, 20)
+                root_read(&host, &key, work)
             };
             let cold = read();
             assert_eq!(read(), cold, "exact repeat, aliased={aliased}");
-            assert_eq!(
-                cold.refusals,
+            let expected_refusals = if comparisons == 100 {
+                vec![]
+            } else {
                 vec![super::walk::ShallowDiagnostic::RelationTooComplex {
                     source: *source,
-                    target: *target
-                }],
+                    target: *target,
+                }]
+            };
+            assert_eq!(
+                cold.refusals, expected_refusals,
                 "TS2859 subjects: {cold:?}"
             );
             (cold.answer, cold.partial, cold.reasons)
         })
     };
-    let ordinary = observe(true);
-    assert_eq!(
-        ordinary,
-        (
-            "NotAssignable".to_owned(),
-            true,
-            PartialReasonSet::OPERATION_BUDGET
-        )
-    );
-    assert_eq!(
-        observe(false),
-        ordinary,
-        "indexed and ordinary refusal classes"
-    );
+    for (ambient, comparisons, work) in [
+        (false, 1, 5),
+        (true, 2, 12),
+        (true, 3, 20),
+        (false, 100, 1_000),
+        (true, 100, 1_000),
+    ] {
+        let ordinary = observe(true, ambient, comparisons, work);
+        assert_eq!(
+            ordinary.0,
+            if comparisons <= 2 {
+                "BudgetExceeded(RelationBudget)"
+            } else {
+                "NotAssignable"
+            },
+            "the ordinary path's recovery outcome"
+        );
+        if comparisons == 100 {
+            assert_eq!(
+                ordinary,
+                ("NotAssignable".to_owned(), false, PartialReasonSet::empty())
+            );
+        } else {
+            assert!(ordinary.1, "the checker refusal is partial");
+            assert_eq!(ordinary.2, PartialReasonSet::OPERATION_BUDGET);
+        }
+        assert_eq!(
+            observe(false, ambient, comparisons, work),
+            ordinary,
+            "indexed and ordinary refusal classes: ambient={ambient}, comparisons={comparisons}, work={work}"
+        );
+    }
 }
+
 /// Install a fresh request with an operation fuse no relation here reaches.
 fn fresh_request(id: u64) -> verter_type_engine::request_context::RequestContextGuard {
     verter_type_engine::request_context::RequestContextGuard::install(
