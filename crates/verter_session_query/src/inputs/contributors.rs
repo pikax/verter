@@ -65,6 +65,15 @@ pub struct SymbolContributors {
     pub fingerprint: Hash16,
 }
 
+/// One slot in the shared declaration-precedence order of an augmentation
+/// collection. Indices address the caller's immutable augmenter/population
+/// arrays; the order owns no bodies or copied contributor entries.
+#[derive(Debug, Clone, Copy)]
+pub enum AugmentationCandidate {
+    Augmenter(usize),
+    FileScope(usize),
+}
+
 impl SymbolContributors {
     pub fn empty() -> Self {
         Self {
