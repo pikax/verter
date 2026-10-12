@@ -184,3 +184,116 @@ fn default_profile_inline_compile_still_persists_and_warm_serves() {
         "the persisted default extraction carries the msg interpolation occurrence",
     );
 }
+
+#[test]
+fn page_retention_refusal_evicts_compile_companions_and_serves_uncached() {
+    use verter_session_query::facts::fact_cache::{FactVersionRef, ReadSetSignature};
+    use verter_session_query::retention::{
+        RetentionLimits, SemanticRetentionAccount, StoreAccount,
+    };
+    let profile = CompileProfile::default();
+    for refused in [false, true] {
+        let host = make_host();
+        upsert(&host, INLINE_SOURCE);
+        let facts: Vec<_> = (0..2 * verter_session_query::facts::fact_read_set::FACT_PAGE_WIDTH
+            + 3)
+            .map(|i| {
+                let canonical_id = format!("/publish-evidence/{i}.ts");
+                let _ = host
+                    .upsert(UpsertRequest {
+                        canonical_id: Some(canonical_id.clone()),
+                        input_id: canonical_id.clone(),
+                        source: Arc::from("export const value = 1;"),
+                        file_language: verter_language::FileLanguage::script_ts(),
+                        aliases: Vec::new(),
+                    })
+                    .unwrap();
+                let source = host.scheduler.try_get_source(&canonical_id).unwrap();
+                let hash = source
+                    .downcast_data::<crate::host_executor::HostSourceData>()
+                    .unwrap()
+                    .parse
+                    .whole_hash;
+                FactVersionRef::FileWholeHash { canonical_id, hash }
+            })
+            .collect();
+        let first = compile_with(&host, profile.clone()).unwrap();
+        assert!(template_slot(&host).is_some());
+        let profile_hash = compile_profile_hash(&profile);
+        assert!(host
+            .scheduler
+            .try_get_artifact(OWNER, profile_hash)
+            .is_some());
+        // Force the same production route cold, leaving both companions as
+        // witnesses that refusal must evict them rather than merely skip writes.
+        {
+            let mut state = host.compile_cache().get_mut(OWNER).unwrap();
+            crate::compile_output_node::CompileOutputNodeFactValidatedSession::new()
+                .remove(&mut state, profile_hash);
+        }
+        let account = SemanticRetentionAccount::new(RetentionLimits {
+            max_entry_bytes: if refused { 1 } else { usize::MAX },
+            ..RetentionLimits::defaults()
+        });
+        let read = || {
+            let signature = ReadSetSignature::new(
+                verter_session_query::facts::fact_read_set::seal_canonical_signature(facts.clone()),
+            );
+            crate::compile_output_node::with_session_publish_evidence_for_test(
+                signature,
+                StoreAccount::new(Arc::clone(&account)),
+                || compile_with(&host, profile.clone()).unwrap(),
+            )
+        };
+        assert_eq!(
+            read().code,
+            first.code,
+            "retention never changes the product"
+        );
+        assert_eq!(session_slot_present(&host, &profile), !refused);
+        assert_eq!(template_slot(&host).is_some(), !refused);
+        assert_eq!(
+            host.scheduler
+                .try_get_artifact(OWNER, profile_hash)
+                .is_some(),
+            !refused
+        );
+        if refused {
+            assert_eq!(read().code, first.code, "repeat delivers uncached output");
+            assert!(!session_slot_present(&host, &profile));
+            assert!(template_slot(&host).is_none());
+            assert!(host
+                .scheduler
+                .try_get_artifact(OWNER, profile_hash)
+                .is_none());
+        } else {
+            let signature = host
+                .compile_cache()
+                .get(OWNER)
+                .and_then(|state| {
+                    crate::compile_output_node::CompileOutputNodeFactValidatedSession::new()
+                        .peek_signature(&state, profile_hash)
+                })
+                .unwrap();
+            let view = host.resolver_store_view_read().into_owned_view();
+            assert!(
+                verter_session_query::facts::store_view::StoreView::validates_fact_signature(
+                    &view,
+                    &signature.facts
+                ),
+                "the admitted wide witness is current"
+            );
+            assert_eq!(
+                compile_with(&host, profile.clone()).unwrap().code,
+                first.code,
+                "valid admitted warm output equals the cold product"
+            );
+        }
+        drop(host);
+        assert_eq!(
+            account.snapshot().retained_bytes,
+            0,
+            "dropping companions drains pages"
+        );
+    }
+}
