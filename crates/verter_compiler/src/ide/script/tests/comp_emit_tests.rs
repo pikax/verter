@@ -1199,6 +1199,37 @@ const components = [() => {}]
 }
 
 #[test]
+fn comp_function_tag_shadowing_restores_outer_and_script_bindings() {
+    let (code, _, _) = gen_tsx_script_full(
+        r#"<script setup lang="ts">
+const Local = () => {}
+const outer = [Local]
+const inner = [Local]
+</script>
+<template><main>
+  <section v-for="Local in outer">
+    <Local ref="before" />
+    <section v-for="Local in inner"><Local ref="inside" /></section>
+    <Local ref="after" />
+  </section>
+  <Local ref="script" />
+</main></template>"#,
+    );
+    assert_eq!(code.matches("(typeof outer)[number]").count(), 2, "{code}");
+    assert_eq!(code.matches("(typeof inner)[number]").count(), 1, "{code}");
+    assert_eq!(code.matches("const Local = {} as").count(), 3, "{code}");
+    assert_eq!(
+        code.matches("instantiateComponent(Local,").count(),
+        4,
+        "{code}"
+    );
+    let alloc = oxc_allocator::Allocator::new();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&alloc, &code, oxc_span::SourceType::tsx()).parse();
+    assert!(parsed.diagnostics.is_empty(), "{code}");
+}
+
+#[test]
 fn comp_function_parent_vslot_emits_comp_even_without_ref() {
     // Parent elements with v-slot should always emit a Comp function
     // even without a ref, since child scope-aware Comp functions reference the parent offset

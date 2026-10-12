@@ -2291,6 +2291,19 @@ impl VerterHost {
                                 },
                             );
                         }
+                    } else if let Some(mut derived) =
+                        self.derived_raw_cache().get_mut(&canonical_id)
+                    {
+                        // A refused session publication evicts its coupled raw
+                        // companion, with the same captured-version fence as
+                        // scheduler eviction. A late compile cannot clear a
+                        // newer generation's successful publication.
+                        if derived
+                            .raw_template_analysis()
+                            .is_some_and(|entry| entry.source_version <= source_snap.version())
+                        {
+                            derived.clear_raw_template_analysis();
+                        }
                     }
 
                     // The artifact substrate carries PRODUCTS, so the commit is
