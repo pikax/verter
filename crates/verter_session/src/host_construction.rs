@@ -1189,24 +1189,10 @@ impl VerterHost {
     /// path was discovered by include/globs (unordered inputs are then
     /// normalized by canonical spelling).
     pub(crate) fn declaration_sequence_rank(&self, canonical: &str) -> u32 {
-        let Some(pid) = self.resolve_project_for_canonical(canonical) else {
-            return u32::MAX;
-        };
         let Some(root) = self.workspace().published_root() else {
             return u32::MAX;
         };
-        match &root.snapshot.project(pid).payload {
-            verter_workspace::workspace_snapshot::ProjectPayload::Configured {
-                membership, ..
-            } => membership
-                .spec
-                .files
-                .iter()
-                .position(|file| file.as_str() == canonical)
-                .map(|index| index as u32)
-                .unwrap_or(u32::MAX),
-            _ => u32::MAX,
-        }
+        root.snapshot.declaration_sequence_rank(canonical)
     }
 
     /// IndexedReady for a declaration file whose source is a global/ambient

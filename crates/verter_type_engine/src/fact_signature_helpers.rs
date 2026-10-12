@@ -1313,6 +1313,22 @@ pub fn fact_signature_from_fence(
 /// torn roots and unresolved strict-world provenance.
 pub type StructuralCarrierReadSet = (Arc<[FactVersionRef]>, Arc<[Arc<str>]>);
 
+#[cfg(any(test, feature = "test-support"))]
+std::thread_local! {
+    static ROOT_FACT_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn note_root_fact_visit() {
+    #[cfg(any(test, feature = "test-support"))]
+    ROOT_FACT_VISITS.with(|count| count.set(count.get() + 1));
+}
+
+/// Fact entries visited and lookups made while compacting structural self-roots.
+#[cfg(any(test, feature = "test-support"))]
+pub fn root_fact_visits_for_tests() -> usize {
+    ROOT_FACT_VISITS.with(std::cell::Cell::get)
+}
+
 /// Finalize a structural cache carrier after every self-root, fence, prelude,
 /// and traced fact has been merged.
 ///
@@ -1336,16 +1352,24 @@ pub(crate) fn bound_completed_structural_carrier(
     self_root_canonicals.dedup();
 
     if facts.len() > FACT_PAGE_WIDTH && !self_root_canonicals.is_empty() {
+        // Index the requested roots once, including hashes held on evidence
+        // pages. Scanning from the beginning for each root is quadratic.
+        let mut root_hashes: rustc_hash::FxHashMap<&str, Option<Hash16>> = self_root_canonicals
+            .iter()
+            .map(|root| (root.as_ref(), None))
+            .collect();
+        for fact in signature_entries(&facts) {
+            note_root_fact_visit();
+            if let FactVersionRef::FileWholeHash { canonical_id, hash } = fact {
+                if let Some(observed) = root_hashes.get_mut(canonical_id.as_str()) {
+                    observed.get_or_insert(*hash);
+                }
+            }
+        }
         let mut roots: Vec<(Arc<str>, Hash16)> = Vec::with_capacity(self_root_canonicals.len());
         for canonical in &self_root_canonicals {
-            let Some(hash) = signature_entries(&facts).find_map(|fact| match fact {
-                FactVersionRef::FileWholeHash { canonical_id, hash }
-                    if canonical_id == canonical.as_ref() =>
-                {
-                    Some(*hash)
-                }
-                _ => None,
-            }) else {
+            note_root_fact_visit();
+            let Some(hash) = root_hashes[canonical.as_ref()] else {
                 return Err(NonAdmissionReason::UnresolvedProvenance);
             };
             roots.push((Arc::clone(canonical), hash));
@@ -1361,11 +1385,14 @@ pub(crate) fn bound_completed_structural_carrier(
         // The witness replaces every precise root fact, including one held
         // on an evidence page; the remaining entries are sealed (and paged)
         // again below.
-        let is_self_root = |fact: &FactVersionRef| match fact {
-            FactVersionRef::FileWholeHash { canonical_id, .. } => self_root_canonicals
-                .binary_search_by(|root| root.as_ref().cmp(canonical_id.as_str()))
-                .is_ok(),
-            _ => false,
+        let is_self_root = |fact: &FactVersionRef| {
+            note_root_fact_visit();
+            match fact {
+                FactVersionRef::FileWholeHash { canonical_id, .. } => {
+                    root_hashes.contains_key(canonical_id.as_str())
+                }
+                _ => false,
+            }
         };
         facts = if facts.iter().any(is_paged_entry) {
             signature_entries(&facts)
