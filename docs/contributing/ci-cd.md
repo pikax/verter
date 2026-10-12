@@ -34,7 +34,14 @@ third-party engines have explicit initialization and lifecycle ownership; that
 job and the editor-contracts job run every engine or editor even after an
 earlier one failed and decide with a final verdict step, so one run reports
 every regression. The
-Svelte compiler benchmark's measurement (the 1.10x wall-time and RSS fences)
+provider runner also prints `PROVIDER TEST TIME` for each serial libtest result
+and writes `target/provider-timings/{tsserver,tsgo}.json` (under
+`CARGO_TARGET_DIR` when set). CI uploads these as `provider-test-timings`.
+Durations measure the stdout stream edges from the flushed test name to its
+terminal status; Cargo compilation and failure-detail output are excluded.
+Pipe batching can round very short tests down to zero, so timings are advisory
+and never change a test verdict or timeout.
+The Svelte compiler benchmark's measurement (the 1.10x wall-time and RSS fences)
 runs nightly; the PR-side `svelte-compiler-benchmark` job proves only the
 benchmark contract, the corpus against the official goldens and the manifest's
 oracle proof.

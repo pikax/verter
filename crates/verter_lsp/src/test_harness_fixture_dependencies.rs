@@ -439,20 +439,36 @@ fn tracked_fixture_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
 /// A declared dependency this harness cannot supply is passed over, NOT an error
 /// — see [`supplier_for`] for why relevance is not decided here.
 pub(crate) fn materialize_real_provider_framework_types(fixture: &str) {
-    static MATERIALIZE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _guard = MATERIALIZE_LOCK
+    static MATERIALIZED: std::sync::LazyLock<
+        std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>,
+    > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+    let mut completed = MATERIALIZED
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     let fixture_root = std::path::PathBuf::from(fixture_workspace_root(fixture));
     let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let node_modules = fixture_root.join("node_modules");
 
-    for dependency in declared_dependencies(&fixture_root) {
-        let Some(supplier) = supplier_for(&dependency) else {
-            continue;
-        };
-        supplier(&repo_root, &node_modules);
+    materialize_fixture_once(&mut completed, &fixture_root, || {
+        for dependency in declared_dependencies(&fixture_root) {
+            let Some(supplier) = supplier_for(&dependency) else {
+                continue;
+            };
+            supplier(&repo_root, &node_modules);
+        }
+    });
+}
+
+fn materialize_fixture_once(
+    completed: &mut std::collections::HashSet<std::path::PathBuf>,
+    fixture_root: &std::path::Path,
+    materialize: impl FnOnce(),
+) {
+    if completed.contains(fixture_root) {
+        return;
     }
+    materialize();
+    completed.insert(fixture_root.to_path_buf());
 }
 
 /// A routine that materializes one dependency into a staged `node_modules`.
@@ -763,6 +779,38 @@ export as namespace React;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completed_dependency_setup_is_reused_per_staged_root() {
+        let mut completed = std::collections::HashSet::new();
+        let calls = std::cell::RefCell::new(Vec::new());
+        for root in ["fixture-a", "fixture-a", "fixture-b", "fixture-a"] {
+            materialize_fixture_once(&mut completed, std::path::Path::new(root), || {
+                calls.borrow_mut().push(root);
+            });
+        }
+        assert_eq!(
+            calls.into_inner(),
+            vec!["fixture-a", "fixture-b"],
+            "dependency traversal is paid once per staged root"
+        );
+    }
+
+    #[test]
+    fn failed_dependency_setup_is_not_cached_as_complete() {
+        let mut completed = std::collections::HashSet::new();
+        let root = std::path::Path::new("fixture");
+        let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            materialize_fixture_once(&mut completed, root, || panic!("missing dependency"));
+        }));
+        assert!(failed.is_err());
+        let retried = std::cell::Cell::new(false);
+        materialize_fixture_once(&mut completed, root, || retried.set(true));
+        assert!(
+            retried.get(),
+            "a failed supplier must run again after repair"
+        );
+    }
 
     /// A planted directory that removes itself even if the test unwinds.
     ///
