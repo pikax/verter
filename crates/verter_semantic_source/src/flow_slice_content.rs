@@ -123,6 +123,45 @@ mod branches;
 mod class_expression;
 use branches::{arm_statements, LoopLower, LowerAcc, LowerEntered, LowerStep};
 
+/// A receiver-independent return contributes to the outer call's inference
+/// before methods that need a contextual receiver are checked.
+fn method_return_is_context_independent(expression: &Expression<'_>) -> bool {
+    let Expression::FunctionExpression(function) = expression else {
+        return false;
+    };
+    if function
+        .params
+        .items
+        .iter()
+        .any(|param| param.type_annotation.is_none())
+        || function
+            .params
+            .rest
+            .as_ref()
+            .is_some_and(|param| param.type_annotation.is_none())
+    {
+        return false;
+    }
+    struct ThisRead(bool);
+    impl<'a> Visit<'a> for ThisRead {
+        fn visit_this_expression(&mut self, _: &oxc_ast::ast::ThisExpression) {
+            self.0 = true;
+        }
+        // Ordinary nested functions own their `this`; arrows inherit it.
+        fn visit_function(
+            &mut self,
+            _: &oxc_ast::ast::Function<'a>,
+            _: oxc_syntax::scope::ScopeFlags,
+        ) {
+        }
+    }
+    let mut reads = ThisRead(false);
+    if let Some(body) = function.body.as_ref() {
+        reads.visit_function_body(body);
+    }
+    !reads.0
+}
+
 // ---------------------------------------------------------------------------
 // Guards — the narrowing facts a conditional test establishes
 // ---------------------------------------------------------------------------
@@ -13624,6 +13663,7 @@ impl<'a> Lowerer<'a> {
                     readonly: policy.readonly(),
                     spans,
                     accessor_annotated: false,
+                    infer_return_eagerly: false,
                     context_sensitive: !is_accessor(method_kind)
                         && verter_semantic::analysis::type_eval_build::indexed_context_sensitive(
                             Some(value_expression),
@@ -13685,6 +13725,7 @@ impl<'a> Lowerer<'a> {
                     readonly: false,
                     spans,
                     accessor_annotated,
+                    infer_return_eagerly: method_return_is_context_independent(value_expression),
                     // An accessor is no context-sensitive member.
                     context_sensitive: !is_accessor(method_kind)
                         && verter_semantic::analysis::type_eval_build::indexed_context_sensitive(
@@ -13726,6 +13767,7 @@ impl<'a> Lowerer<'a> {
                     spans,
                     accessor_annotated: false,
                     context_sensitive: false,
+                    infer_return_eagerly: false,
                 })));
             return None;
         }
@@ -13823,6 +13865,7 @@ impl<'a> Lowerer<'a> {
                 spans,
                 accessor_annotated: false,
                 context_sensitive,
+                infer_return_eagerly: false,
             })));
     }
 

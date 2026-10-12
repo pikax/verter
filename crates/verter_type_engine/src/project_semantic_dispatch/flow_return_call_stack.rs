@@ -827,7 +827,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 // A context-sensitive literal retyped in place, under the
                 // contextual type the executor's step names: its value is
                 // the next round's delivery.
-                RetypeRound::InPlace(next) => {
+                RetypeRound::InPlace(mut next) => {
                     let expr = next
                         .function_arguments
                         .get(next.position)
@@ -837,7 +837,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         Self::contextual_argument_request(&next.step).map(|(_, ty)| ty);
                     delivered = Some(match (expr, contextual) {
                         (Some(expr), Some(contextual)) => {
-                            match self.eval_in_context(&expr, None, contextual) {
+                            match self.eval_contextual_object_argument(
+                                &expr,
+                                contextual,
+                                &mut next.contextual,
+                            ) {
                                 Positional::Value(node) => Some(node),
                                 Positional::Hold | Positional::Unmodeled => None,
                             }

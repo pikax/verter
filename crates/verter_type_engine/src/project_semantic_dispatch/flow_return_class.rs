@@ -842,6 +842,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             .as_ref()
             .filter(|bound| bound.binder == receiver)
         {
+            // A contextual object receiver is the supplied type itself.
+            // Literal members cannot replace that type's declared members.
+            if bound.base == Some(bound.binder) {
+                return bound.base;
+            }
             // A class expression's own member reads the value its class
             // evaluated for it; one not evaluated yet is a forward read the
             // class retries; an inherited one reads off the base instance,

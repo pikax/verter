@@ -116,6 +116,60 @@ struct ContextualCandidate {
 }
 
 impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
+    /// A checked property advances the suspended call's own collector. The
+    /// collector is installed only for inference, never while a body runs.
+    pub(in crate::project_semantic_dispatch) fn contextual_object_member(
+        &self,
+        state: &mut ContextualCallState,
+        name: &str,
+        value: Option<SemanticNodeId>,
+    ) -> Result<Option<SemanticNodeId>, ResolveCallFailure> {
+        let Some(progress) = state.active.as_mut() else {
+            return Ok(None);
+        };
+        let (_, target) = progress.deferred[progress.cursor];
+        let id = progress.session.as_ref().expect("suspended collector").id;
+        self.restore_contextual_session(&mut progress.session);
+        let mut budget = CallResolutionBudget::new(&self.connected_demand);
+        let result = (|| {
+            let target = self.resolved_reduction_view(target);
+            let surface = self
+                .resolve_typeinfo_surface_view(
+                    target,
+                    ProjectionReductionContext::structural_transit(),
+                )
+                .ok_or(ResolveCallFailure::Undecidable)?;
+            let crate::semantic_query::SurfaceKeyProjection::Exact(member) =
+                surface.project_known_key(&crate::semantic_query::PropertyKey::identifier(name))
+            else {
+                return Ok(None);
+            };
+            if let Some(node) = value {
+                let argument = CallArgument {
+                    node,
+                    first_pass: None,
+                    const_view: None,
+                    indefinite_spread: false,
+                    literal_mode: ArgumentLiteralMode::Literal,
+                    context_sensitive: false,
+                    freshness_origin: node,
+                };
+                match self.collect_contextual_argument(&argument, member.value, &mut budget) {
+                    Ok(true) => {}
+                    Ok(false) | Err(ContextualCandidateFailure::Mismatch) => {
+                        return Err(ResolveCallFailure::Undecidable)
+                    }
+                    Err(ContextualCandidateFailure::Degraded(failure)) => return Err(failure),
+                }
+                Ok(None)
+            } else {
+                self.contextual_candidate_mapper(progress, member.value, id, &mut budget)
+                    .map(|(contextual, _)| Some(contextual))
+            }
+        })();
+        progress.session = Some(self.take_contextual_session(id));
+        result
+    }
     pub(super) fn isolate_contextual_call(
         &self,
         key: &ResolveCallKey,
@@ -590,6 +644,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                             let checkpoint = self.relation_session_checkpoint();
                             let view = CallArgument {
                                 node: first_pass,
+                                // The flow pass already applied mutable-slot
+                                // widening. Preserve pins in checked returns.
+                                literal_mode: ArgumentLiteralMode::Literal,
                                 ..*argument
                             };
                             match self.collect_contextual_argument(&view, target, budget) {

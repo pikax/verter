@@ -13,6 +13,142 @@
 
 use super::checker_probe_lane_tests::mismatches;
 
+#[test]
+fn contextual_this_marker_uses_inferred_data_before_methods() {
+    let source = "\
+export {};
+declare global { interface ThisType<T> {} }
+declare function defineComponent<D, M>(o: { data(): D; methods: M & ThisType<D & M> }):
+  { [K in keyof M]: M[K] extends () => infer R ? R : never };
+const comp = defineComponent({
+  data() { return { d0: 0 as const, d1: 1 as const }; },
+  methods: { m0() { return this.d0; }, m1() { return this.d1; } },
+});
+";
+    let failures = mismatches(source, &[("typeof comp", "{ m0: 0; m1: 1; }")]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn contextual_this_marker_scales_across_object_members() {
+    let mut work = Vec::new();
+    for count in [20, 100, 400] {
+        let data = (0..count)
+            .map(|i| format!("d{i}: {i} as const"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let methods = (0..count)
+            .map(|i| format!("m{i}() {{ return this.d{i}; }}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let source = format!(
+            "export {{}}; declare global {{ interface ThisType<T> {{}} }}
+declare function defineComponent<D, M>(o: {{ data(): D; methods: M & ThisType<D & M> }}):
+  {{ [K in keyof M]: M[K] extends () => infer R ? R : never }};
+const comp = defineComponent({{ data() {{ return {{ {data} }}; }}, methods: {{ {methods} }} }});"
+        );
+        let expected = format!(
+            "{{ {} }}",
+            (0..count)
+                .map(|i| format!("m{i}: {i};"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        let mut relation_work = 0;
+        let failures = super::checker_probe_lane_tests::mismatches_in_one_host_observing(
+            &source,
+            &[("typeof comp", &expected), ("typeof comp", &expected)],
+            |dispatch| relation_work = dispatch.graph().stats_snapshot().relation_check_count,
+        );
+        assert!(failures.is_empty(), "{count}: {}", failures.join("\n"));
+        work.push(relation_work);
+    }
+    let [small, medium, large] = work.as_slice() else {
+        unreachable!()
+    };
+    eprintln!("contextual receiver relation work (20, 100, 400): {work:?}");
+    assert!(*small > 0 && small < medium && medium < large);
+    assert!(
+        large - medium <= 5 * (medium - small),
+        "member growth repeats prior relation work: {work:?}"
+    );
+}
+
+#[test]
+fn contextual_this_marker_and_lexical_arrow_controls() {
+    let source = "export {};
+declare global { interface ThisType<T> {} }
+type Context = { m(): 3 } & ({} & ThisType<{ n: 3 }>);
+function marked() { return { m() { return this.n; } } satisfies Context; }
+function plain() { return { n: 7 as const, m() { return this.n; } }; }
+function contextual() { return { n: 7 as const, m() { return this.n; } } satisfies { n: number; m(): number }; }
+declare function hold<T>(o: { nested: T }): T;
+const authored = hold({ nested: { value: null as any, method() { return this.value; } } });
+const outer = { n: 9 as const, make() { return { n: 3 as const, arrow: () => this.n, m() { return this.n; } } satisfies ThisType<{ n: 3 }>; } };
+";
+    let failures = mismatches(
+        source,
+        &[
+            ("ReturnType<ReturnType<typeof marked>['m']>", "3"),
+            ("ReturnType<ReturnType<typeof plain>['m']>", "7"),
+            ("ReturnType<ReturnType<typeof contextual>['m']>", "number"),
+            ("typeof authored.value", "any"),
+            ("ReturnType<typeof authored.method>", "any"),
+            ("ReturnType<ReturnType<typeof outer.make>['arrow']>", "9"),
+            ("ReturnType<ReturnType<typeof outer.make>['m']>", "3"),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    let failures = mismatches(
+        "type ThisType<T> = { shadow: T };
+export function shadowed() { return { shadow: { n: 4 as const }, m() { return this.shadow.n; } } satisfies ThisType<{ n: 4 }> & { m(): 4 }; }",
+        &[("ReturnType<ReturnType<typeof shadowed>['m']>", "4")],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    let failures = super::checker_probe_lane_tests::mismatches_in(
+        super::checker_probe_lane_tests::ProbeProject {
+            ambient_lib: Some("interface ThisType<T> {}"),
+            ..Default::default()
+        },
+        &source.replace("declare global { interface ThisType<T> {} }", ""),
+        &[("ReturnType<ReturnType<typeof marked>['m']>", "3")],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    let failures = super::checker_probe_lane_tests::mismatches_in(
+        super::checker_probe_lane_tests::ProbeProject {
+            compiler_options: Some(r#"{ "strict": true, "noImplicitThis": false }"#),
+            ..Default::default()
+        },
+        source,
+        &[("ReturnType<ReturnType<typeof marked>['m']>", "any")],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn contextual_this_marker_types_store_getters_and_actions() {
+    let source = "export {};
+declare global { interface ThisType<T> {} }
+declare function defineStore<S, G, A>(o: {
+  state(): S;
+  getters: G & ThisType<S>;
+  actions: A & ThisType<S & A & { [K in keyof G]: G[K] extends () => infer R ? R : never }>;
+}): S & A & { [K in keyof G]: G[K] extends () => infer R ? R : never };
+const store = defineStore({ state() { return { count: 1 as const }; },
+  getters: { doubled() { return this.count; } },
+  actions: { read() { return this.doubled; }, stateValue() { return this.count; } },
+});";
+    let failures = mismatches(
+        source,
+        &[
+            ("typeof store.doubled", "1"),
+            ("ReturnType<typeof store.read>", "1"),
+            ("ReturnType<typeof store.stateValue>", "1"),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 const STATICS: &str = "\
 export class S { static k = 1; static s() { return this; } static e() { return S; } static kk() { return S.k; } static viaS() { return this.s(); } }
 export class B0s { static bk = 1; static bm() { return 'b' as string; } }

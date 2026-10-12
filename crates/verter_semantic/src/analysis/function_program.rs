@@ -1627,7 +1627,10 @@ fn discover_variable_declaration<'ast>(
         if let Some(anchor) = ctx.anchor(contributor_index) {
             let mut source = program_expression_source(&ctx.walks, init);
             let contextual_call = matches!(&source, ProgramExpressionSource::SemanticCall { site, .. }
-                if site.args.iter().any(|argument| argument.is_function_value));
+                if site.args.iter().any(|argument| argument.is_function_value))
+                || matches!(unwrap_program_expression(init), Expression::CallExpression(call)
+                    if call.arguments.iter().any(|argument|
+                        super::type_eval_build::indexed_context_sensitive(argument.as_expression())));
             if contextual_call {
                 // The initializer is a served expression body. Its callbacks
                 // use the same flow evaluator and call continuation as bodies.

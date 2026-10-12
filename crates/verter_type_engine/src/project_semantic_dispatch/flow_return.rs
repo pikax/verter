@@ -52,7 +52,8 @@ use super::ProjectSemanticDispatch;
 use crate::semantic_query::{
     FlowReturnDegradation, FlowReturnFailure, FlowReturnKey, FlowReturnResult, FlowReturnStep,
     FlowReturnUnsupported, PartialReason, PartialReasonSet, PrimitiveKind, QueryError, QueryResult,
-    SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryValue,
+    ResolveCallFailure, SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey,
+    SemanticQueryValue,
 };
 use verter_session_query::facts::fact_cache::{FactVersionRef, ProgramAnalysisFactRef};
 use verter_session_query::flow::completion::{
@@ -9300,6 +9301,17 @@ pub(super) trait FlowDemandDriver {
     ) -> NormalizedTupleShape;
     fn opaque(&self, err: QueryError) -> SemanticNodeId;
     fn receiver_this_types(&self, node: SemanticNodeId) -> Vec<SemanticNodeId>;
+    fn contextual_object_this_type(
+        &self,
+        node: SemanticNodeId,
+        canonical: &str,
+    ) -> Option<SemanticNodeId>;
+    fn contextual_object_member(
+        &self,
+        state: &mut super::call_resolve::ContextualCallState,
+        name: &str,
+        value: Option<SemanticNodeId>,
+    ) -> Result<Option<SemanticNodeId>, ResolveCallFailure>;
     fn reduce_arms_to_supertypes(
         &self,
         arms: &[ReductionArm],
@@ -9815,6 +9827,21 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
     }
     fn receiver_this_types(&self, node: SemanticNodeId) -> Vec<SemanticNodeId> {
         ProjectSemanticDispatch::receiver_this_types(self, node)
+    }
+    fn contextual_object_this_type(
+        &self,
+        node: SemanticNodeId,
+        canonical: &str,
+    ) -> Option<SemanticNodeId> {
+        ProjectSemanticDispatch::contextual_object_this_type(self, node, canonical)
+    }
+    fn contextual_object_member(
+        &self,
+        state: &mut super::call_resolve::ContextualCallState,
+        name: &str,
+        value: Option<SemanticNodeId>,
+    ) -> Result<Option<SemanticNodeId>, ResolveCallFailure> {
+        ProjectSemanticDispatch::contextual_object_member(self, state, name, value)
     }
     fn reduce_arms_to_supertypes(
         &self,
@@ -10416,6 +10443,21 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     }
     fn receiver_this_types(&self, node: SemanticNodeId) -> Vec<SemanticNodeId> {
         self.driver.receiver_this_types(node)
+    }
+    fn contextual_object_this_type(
+        &self,
+        node: SemanticNodeId,
+        canonical: &str,
+    ) -> Option<SemanticNodeId> {
+        self.driver.contextual_object_this_type(node, canonical)
+    }
+    fn contextual_object_member(
+        &self,
+        state: &mut super::call_resolve::ContextualCallState,
+        name: &str,
+        value: Option<SemanticNodeId>,
+    ) -> Result<Option<SemanticNodeId>, ResolveCallFailure> {
+        self.driver.contextual_object_member(state, name, value)
     }
     fn reduce_arms_to_supertypes(
         &self,
@@ -11729,6 +11771,7 @@ enum ResumedCall {
 /// [`FlowEvaluator::run_expr`]'s explicit stack: the forms waiting on a
 /// child's value, and the child to evaluate next.
 struct ExprRun<'e> {
+    skips_context_sensitive_objects: bool,
     waiting: Vec<Waiting<'e>>,
     current: &'e verter_session_query::flow::slice::SliceExpr,
 }
@@ -11736,6 +11779,7 @@ struct ExprRun<'e> {
 impl<'e> ExprRun<'e> {
     fn new(expr: &'e verter_session_query::flow::slice::SliceExpr) -> Self {
         Self {
+            skips_context_sensitive_objects: false,
             waiting: vec![Waiting::Erase],
             current: expr,
         }
@@ -11920,6 +11964,10 @@ enum ArrayEvalStep<'e> {
 /// [`FlowEvaluator::object_eval_step`]: what [`FlowEvaluator::eval_object_literal`]
 /// keeps across its members, the next entry, and the child it waits on.
 struct ObjectEvalFrame<'e> {
+    /// Whether this first pass checked an authored value rather than only
+    /// producing withheld-function placeholders.
+    first_pass_contributes: bool,
+    inference: Option<&'e mut super::call_resolve::ContextualCallState>,
     entries: &'e [verter_session_query::flow::slice::SliceObjectEntry],
     offset: u32,
     assignment_fresh: bool,
@@ -12150,8 +12198,23 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         assignment_fresh: bool,
         contextual: Option<SemanticNodeId>,
     ) -> Positional<SemanticNodeId> {
-        let frame = self.object_eval_frame(entries, offset, assignment_fresh, contextual);
-        self.drive_object_literal(frame)
+        let mut frame = self.object_eval_frame(entries, offset, assignment_fresh, contextual);
+        self.drive_object_literal(&mut frame)
+    }
+
+    pub(super) fn eval_contextual_object_argument(
+        &mut self,
+        expr: &verter_session_query::flow::slice::SliceExpr,
+        contextual: SemanticNodeId,
+        state: &mut super::call_resolve::ContextualCallState,
+    ) -> Positional<SemanticNodeId> {
+        if let verter_session_query::flow::slice::SliceExpr::Object { entries, offset } = expr {
+            let mut frame = self.object_eval_frame(entries, *offset, false, Some(contextual));
+            frame.inference = Some(state);
+            self.drive_object_literal(&mut frame)
+        } else {
+            self.eval_in_context(expr, None, contextual)
+        }
     }
 
     /// A context-sensitive object literal as a call's first inference pass
@@ -12166,19 +12229,24 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     ) -> Positional<SemanticNodeId> {
         let mut frame = self.object_eval_frame(entries, offset, false, None);
         frame.skips_context_sensitive = true;
-        self.drive_object_literal(frame)
+        self.drive_object_literal(&mut frame)
     }
 
     /// Run an object literal's frame with each child evaluated in place.
-    fn drive_object_literal(&mut self, frame: ObjectEvalFrame<'_>) -> Positional<SemanticNodeId> {
+    fn drive_object_literal(
+        &mut self,
+        frame: &mut ObjectEvalFrame<'_>,
+    ) -> Positional<SemanticNodeId> {
         // [`Self::eval_expr`] steps an object literal from its own stack;
         // here the same steps run with each child evaluated in place.
-        let mut frame = frame;
         let mut delivered = None;
         loop {
-            match self.object_eval_step(&mut frame, delivered.take()) {
+            match self.object_eval_step(frame, delivered.take()) {
                 ObjectEvalStep::Done(value) => return value,
-                ObjectEvalStep::Descend(child) => delivered = Some(self.eval_expr(child)),
+                ObjectEvalStep::Descend(child) => {
+                    delivered =
+                        Some(self.eval_expr_in_object_pass(child, frame.skips_context_sensitive))
+                }
                 ObjectEvalStep::Deliver(outcome) => delivered = Some(outcome),
             }
         }
@@ -12194,6 +12262,28 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         assignment_fresh: bool,
         contextual: Option<SemanticNodeId>,
     ) -> ObjectEvalFrame<'e> {
+        let contextual_this = self
+            .no_implicit_this
+            .then(|| {
+                contextual.and_then(|context| {
+                    self.dispatch
+                        .contextual_object_this_type(context, self.canonical)
+                        .or_else(|| {
+                            let context = self.dispatch.resolved_reduction_view(context);
+                            (!matches!(
+                                self.dispatch.graph().node_data(context).as_deref(),
+                                Some(
+                                    SemanticNodeData::TypeParam { .. }
+                                        | SemanticNodeData::Primitive(
+                                            PrimitiveKind::Any | PrimitiveKind::Unknown
+                                        )
+                                )
+                            ))
+                            .then_some(context)
+                        })
+                })
+            })
+            .flatten();
         // A literal's methods and accessors run against the object it
         // builds: their bodies read its other members through `this`, so
         // they evaluate after every other member (and once more after a
@@ -12209,12 +12299,14 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             })
             .then(|| {
                 std::rc::Rc::new(class_expression::ClassReceiver {
-                    binder: self.dispatch.this_binder(
-                        self.canonical,
-                        self.owner,
-                        &Arc::from(super::substitute::object_literal_this_name(offset)),
-                        None,
-                    ),
+                    binder: contextual_this.unwrap_or_else(|| {
+                        self.dispatch.this_binder(
+                            self.canonical,
+                            self.owner,
+                            &Arc::from(super::substitute::object_literal_this_name(offset)),
+                            None,
+                        )
+                    }),
                     members: std::cell::RefCell::new(Vec::new()),
                     declared: entries
                         .iter()
@@ -12230,12 +12322,14 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                             _ => None,
                         })
                         .collect(),
-                    base: None,
+                    base: contextual_this,
                     forward_read: std::cell::Cell::new(false),
                 })
             });
-        let enclosing_receiver = std::mem::replace(&mut self.receiver, receiver.clone());
+        let enclosing_receiver = self.receiver.clone();
         ObjectEvalFrame {
+            first_pass_contributes: false,
+            inference: None,
             skips_context_sensitive: false,
             entries,
             offset,
@@ -12305,6 +12399,16 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     holds_before,
                     widens_unique_symbols,
                 } => {
+                    if frame.skips_context_sensitive
+                        && member.context_sensitive
+                        && matches!(
+                            member.value,
+                            verter_session_query::flow::slice::SliceExpr::Object { .. }
+                        )
+                    {
+                        frame.first_pass_contributes |= matches!(outcome, Positional::Value(node)
+                            if !matches!(self.dispatch.graph().node_data(node).as_deref(), Some(SemanticNodeData::Primitive(PrimitiveKind::Any))));
+                    }
                     if let Some(step) = self.object_eval_member_valued(
                         frame,
                         member,
@@ -12358,7 +12462,22 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         while let Some(entry) = frame.entries.get(frame.next) {
             frame.next += 1;
             if let verter_session_query::flow::slice::SliceObjectEntry::Member(member) = entry {
-                if frame.skips_context_sensitive && member.context_sensitive {
+                if frame.skips_context_sensitive
+                    && member.context_sensitive
+                    && !member.infer_return_eagerly
+                {
+                    if matches!(
+                        member.value,
+                        verter_session_query::flow::slice::SliceExpr::Object { .. }
+                    ) {
+                        frame.awaiting = ObjectEvalAwait::Value {
+                            member,
+                            member_value: &member.value,
+                            holds_before: self.holds.len(),
+                            widens_unique_symbols: false,
+                        };
+                        return ObjectEvalStep::Descend(&member.value);
+                    }
                     let any = self
                         .dispatch
                         .graph()
@@ -12376,6 +12495,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     continue;
                 }
             }
+            frame.first_pass_contributes = true;
             if let (Some(_), verter_session_query::flow::slice::SliceObjectEntry::Member(member)) =
                 (frame.receiver.as_ref(), entry)
             {
@@ -12454,13 +12574,23 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             } else {
                 &member.value
             };
-            let member_context = match (&member.key, frame.contextual) {
-                (
-                    verter_session_query::flow::slice::SliceObjectKey::Static(name),
-                    Some(contextual),
-                ) => self.contextual_property_type(contextual, name),
+            let inferred_context = match (&member.key, frame.inference.as_deref_mut()) {
+                (verter_session_query::flow::slice::SliceObjectKey::Static(name), Some(state)) => {
+                    match self.dispatch.contextual_object_member(state, name, None) {
+                        Ok(context) => context,
+                        Err(_) => return self.object_eval_abandon(frame),
+                    }
+                }
                 _ => None,
             };
+            let member_context =
+                inferred_context.or_else(|| match (&member.key, frame.contextual) {
+                    (
+                        verter_session_query::flow::slice::SliceObjectKey::Static(name),
+                        Some(contextual),
+                    ) => self.contextual_property_type(contextual, name),
+                    _ => None,
+                });
             // A mutable member with no contextual type widens a `unique
             // symbol` value to `symbol`.
             let widens_unique_symbols = member_context.is_none() && !member.readonly;
@@ -12501,6 +12631,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// and one that read a member not evaluated yet once more after the
     /// rest; then its surface is built.
     fn object_eval_methods<'e>(&mut self, frame: &mut ObjectEvalFrame<'e>) -> ObjectEvalStep<'e> {
+        self.receiver = frame.receiver.clone();
         if frame.receiver.is_some() {
             let (next, again) = if let Some(&next) = frame.deferred.get(frame.deferred_next) {
                 frame.deferred_next += 1;
@@ -12628,6 +12759,18 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         surface_member: crate::semantic_query::SurfaceMember,
         unwidened: SemanticNodeId,
     ) {
+        if let (Some(name), Some(state)) = (
+            surface_member.key.as_string(),
+            frame.inference.as_deref_mut(),
+        ) {
+            if self
+                .dispatch
+                .contextual_object_member(state, name, Some(surface_member.value))
+                .is_err()
+            {
+                self.record_degradation(FlowReturnDegradation::UnmodeledPosition);
+            }
+        }
         frame.unwidened_differs |= unwidened != surface_member.value;
         frame
             .unwidened_members
@@ -12764,6 +12907,19 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             .enclosing_receiver
             .take()
             .expect("the literal's enclosing receiver");
+        // An object containing only withheld functions contributes no
+        // inference candidate. Authored `any` values remain real contributions.
+        if frame.skips_context_sensitive
+            && !frame.first_pass_contributes
+            && !frame.entries.is_empty()
+        {
+            self.receiver = enclosing_receiver;
+            return Positional::Value(
+                self.dispatch
+                    .graph()
+                    .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any)),
+            );
+        }
         // A member whose value holds the literal's own `this` (a method
         // returning `this`) names the literal's type recursively: the
         // literal is then its own identity, whose reads bind that `this` to
@@ -24847,7 +25003,16 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         &mut self,
         expr: &verter_session_query::flow::slice::SliceExpr,
     ) -> Positional<SemanticNodeId> {
+        self.eval_expr_in_object_pass(expr, false)
+    }
+
+    fn eval_expr_in_object_pass(
+        &mut self,
+        expr: &verter_session_query::flow::slice::SliceExpr,
+        skips_context_sensitive_objects: bool,
+    ) -> Positional<SemanticNodeId> {
         let mut run = ExprRun::new(expr);
+        run.skips_context_sensitive_objects = skips_context_sensitive_objects;
         match self.run_expr(&mut run, None, false) {
             ExprProgress::Done(value) => value,
             ExprProgress::Nested(_) => {
@@ -25002,6 +25167,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     }
                     SliceExpr::Object { entries, offset } => {
                         let mut frame = self.object_eval_frame(entries, *offset, false, None);
+                        frame.skips_context_sensitive = run.skips_context_sensitive_objects;
                         match self.object_eval_step(&mut frame, None) {
                             ObjectEvalStep::Done(value) => value,
                             // Only a literal under a contextual type types a

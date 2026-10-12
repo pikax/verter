@@ -3082,6 +3082,9 @@ pub struct SliceObjectMember {
     /// inference pass reads such a member as the non-inferring
     /// `anyFunctionType` (`SkipContextSensitive`).
     pub context_sensitive: bool,
+    /// The method's return can infer before contextual receiver typing:
+    /// its parameters are annotated and its body does not read `this`.
+    pub infer_return_eagerly: bool,
 }
 
 /// The unsupported-construct classification.

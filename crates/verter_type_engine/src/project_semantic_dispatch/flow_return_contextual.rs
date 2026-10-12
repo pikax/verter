@@ -8,6 +8,48 @@ use super::{FlowDemandDriver, FlowEvaluator, Positional};
 use crate::semantic_query::{SemanticNodeData, SemanticNodeId, SignatureKind};
 use verter_session_query::flow::slice::SliceExpr;
 
+impl<C: crate::resolver_core::ResolverCapabilities> super::super::ProjectSemanticDispatch<'_, C> {
+    /// Find the global marker through contextual intersections and aliases,
+    /// before its empty interface is reduced to a structural object.
+    pub(super) fn contextual_object_this_type(
+        &self,
+        contextual: SemanticNodeId,
+        canonical: &str,
+    ) -> Option<SemanticNodeId> {
+        let mut pending = vec![contextual];
+        let mut seen = rustc_hash::FxHashSet::default();
+        while let Some(node) = pending.pop() {
+            if !seen.insert(node) {
+                continue;
+            }
+            match self.graph().node_data(node).as_deref() {
+                Some(SemanticNodeData::InstantiationRef { base, args })
+                    if base.decl_name.as_ref() == "ThisType" && args.len() == 1 =>
+                {
+                    if self
+                        .first_global_declaration(canonical, "ThisType")
+                        .is_some_and(|global| {
+                            global.canonical_id == base.canonical_id && global.owner == base.owner
+                        })
+                    {
+                        return Some(args[0]);
+                    }
+                }
+                Some(SemanticNodeData::Intersection(members)) => {
+                    pending.extend(members.iter().copied())
+                }
+                _ => {
+                    let resolved = self.resolved_reduction_view(node);
+                    if resolved != node {
+                        pending.push(resolved);
+                    }
+                }
+            }
+        }
+        None
+    }
+}
+
 /// A function-value argument to type under a contextual signature: the
 /// nested function's demand, and what its outcome is read against.
 pub(super) struct FunctionArgumentRequest {
