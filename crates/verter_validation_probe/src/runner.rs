@@ -1482,6 +1482,7 @@ pub(crate) fn drive_probe(
                 // A broken pipe is the harness's own transport failing, NOT a
                 // process outcome: classifying it through the phase map would
                 // report a crash the compiler never had.
+                let _ = child.kill();
                 *stop = Some(LaneStop::Harness);
                 return;
             }
