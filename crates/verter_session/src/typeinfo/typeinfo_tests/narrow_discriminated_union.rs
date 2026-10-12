@@ -157,6 +157,40 @@ fn switch_union_controls() {
 }
 
 #[test]
+fn switch_fallback_refines_the_case_tag() {
+    let source = "type U = {kind: 'a' | 'b'; value: 1} | {kind: 'c'; value: 2}; function f(x: U) { switch (x.kind) { case 'a': return x.kind; default: return 'handled' as const; } } type Result = ReturnType<typeof f>;";
+    assert_literal_union(&resolve_switch(source), &["a", "handled"]);
+}
+
+#[test]
+fn switch_fallback_subtracts_handled_tags() {
+    for (body, tail) in [
+        ("case 'a': return 'handled' as const;", "return x.kind;"),
+        (
+            "case 'a': return 'handled' as const; default: return x.kind;",
+            "",
+        ),
+    ] {
+        let source = format!("type U = {{kind: 'a' | 'b'; value: 1}} | {{kind: 'c'; value: 2}}; function f(x: U) {{ switch (x.kind) {{ {body} }} {tail} }} type Result = ReturnType<typeof f>;");
+        assert_literal_union(&resolve_switch(&source), &["b", "c", "handled"]);
+    }
+}
+
+#[test]
+fn parameter_assignment_updates_member_reads() {
+    for (body, expected) in [
+        ("x = y; return x.value;", vec![2]),
+        (
+            "switch (x.kind) { case 'a': x = y; break; case 'b': return 20; } return x.value;",
+            vec![2, 20],
+        ),
+    ] {
+        let source = format!("type U = {{kind: 'a' | 'b'; value: 1}} | {{kind: 'c'; value: 2}}; function f(x: U, y: {{kind: 'c'; value: 2}}) {{ {body} }} type Result = ReturnType<typeof f>;");
+        assert_switch_literals(resolve_switch(&source), &expected, false);
+    }
+}
+
+#[test]
 fn switch_fallback_multi_literal_fallout() {
     let declaration = "type U = {kind: 'a' | 'b'; value: 1} | {kind: 'c'; value: 2};";
     for (body, expected) in [

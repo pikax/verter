@@ -868,6 +868,12 @@ defineProps<Payload>()
 #[test]
 fn tsc_inference_partial_is_entry_scoped_and_complete_sibling_continues() {
     let host = VerterHost::new_standalone(HostConfig::default());
+    host.project_type_store().flow_slice().set_budget_for_test(
+        verter_session_query::flow::peeker::FlowSliceBudget {
+            max_selected_nodes: 4096,
+            ..Default::default()
+        },
+    );
     // A leaf the flow lowering infers whole (a `satisfies` over a
     // conditional holding a 5,000-element array literal) exceeds that
     // inference's work budget.
@@ -925,6 +931,12 @@ defineModel<string>('selected')
 #[test]
 fn authored_splice_and_exact_sibling_survive_a_refused_member() {
     let host = VerterHost::new_standalone(HostConfig::default());
+    host.project_type_store().flow_slice().set_budget_for_test(
+        verter_session_query::flow::peeker::FlowSliceBudget {
+            max_selected_nodes: 4096,
+            ..Default::default()
+        },
+    );
     let inferred = format!(
         "(true ? [{}] : 0) satisfies unknown",
         vec!["0"; 5_000].join(", ")

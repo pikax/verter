@@ -5,12 +5,20 @@ Literal switch narrowing partitions the entering parent union once in
 an exact concrete unit, each clause reuses its matching parent member(s), and
 one shared remainder serves default dispatch, exhaustiveness and the implicit
 no-match exit. Clause fall-through still joins its live predecessor state with
-the dispatch state; break exits keep their own state. Broad leaves, enum units,
-unresolved projections, guard clauses (`switch (true)` / `switch (typeof x)`)
+the dispatch state. Unit keys are re-interned from their concrete values in the
+graph's canonical domain, so projected keys and lowered case literals match
+across producer arenas. Broad leaves, enum units, unresolved projections,
+guard clauses (`switch (true)` / `switch (typeof x)`)
 and non-strict nullability retain the general relation-based rules. The
 general remainder narrows both default dispatch and implicit no-match exits
 from the switch entry state, including union-valued and enum discriminants.
-Partly covered members remain, and break exits retain their own reaching state.
+Partly covered parents remain while a separate discriminant fact subtracts
+handled literals. General case dispatch retains both the selected parent and
+the tested-member equality, so reads of union-valued tags see the case literal.
+Break exits retain their own reaching state.
+The shared union gate resolves named declaration carriers and settled `keyof`
+domains before assignment reduction or switch enumeration. A reduction keeping
+every constituent preserves the original declared carrier and its print origin.
 The partition is evaluation-local and introduces no reusable-cache authority.
 The finite default limits allow 16,384 selected graph nodes and 32,768 proof
 obligations; the request projection fuse defaults to 16,384 operations.

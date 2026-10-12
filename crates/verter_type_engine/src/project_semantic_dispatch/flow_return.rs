@@ -7070,8 +7070,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// `getAssignmentReducedType` gate (a NON-union declared type
     /// supplies its binding verbatim). A `keyof` whose keys settle IS the
     /// union of those keys (`keyof Box<string>` is `"value" | "size"`); the
-    /// carrier only keeps the name the checker prints it by.
+    /// carrier only keeps the name the checker prints it by. Named union
+    /// declarations use the same identity resolution as the relation engine.
     fn union_arms_of(&self, node: SemanticNodeId) -> Option<Vec<SemanticNodeId>> {
+        let node = match self.unwrap_identity_carrier_for_relation(node) {
+            IdentityCarrierUnwrap::Concrete(node) => node,
+            IdentityCarrierUnwrap::Unresolvable => return None,
+        };
         let base = match self.graph().node_data(node).as_deref() {
             Some(SemanticNodeData::Union(members)) => return Some(members.to_vec()),
             Some(SemanticNodeData::KeyOf { base }) => *base,
@@ -16523,11 +16528,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         expanded: &mut rustc_hash::FxHashSet<SemanticNodeId>,
         gapped: &mut bool,
     ) {
-        if let Some(SemanticNodeData::Union(members)) =
-            self.dispatch.arena().node_data(node).as_deref()
-        {
+        if let Some(members) = self.dispatch.union_arms_of(node) {
             if expanded.insert(node) {
-                for member in members.iter().copied() {
+                for member in members {
                     self.collect_enumerated_arms(member, arms, expanded, gapped);
                 }
             }
@@ -18395,13 +18398,6 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 comparison,
             );
         }
-        // A `case` clause's dispatch edge is baked as ONE fact: the
-        // discriminant's parent.
-        if comparison == LiteralComparison::SwitchCase {
-            return self.narrow_parent_by_discriminant(subject, &mut |this, member| {
-                this.narrow_type_by_equality(member, literal_node, negated, false)
-            });
-        }
         // The discriminant narrows the tested property's PARENT
         // reference, so that fact lands at the parent subject: a later
         // read of the parent, or of any member projected from it,
@@ -20183,16 +20179,17 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     ///
     /// "Covers" is per-LEAF mutual assignability between the arm's
     /// projected member and a test literal
-    /// ([`Self::switch_member_covered`]): a broad leaf a literal merely
+    /// ([`Self::switch_member_remainder`]): a broad leaf a literal merely
     /// fits (`string` under `case "a":`) is NOT covered — the checker's
     /// default edge keeps it. Returns the surviving arms and the arm
     /// count, so the caller can tell "no narrow established"
-    /// (survivors == arms) from a real one.
+    /// (survivors == arms) from a real one. The final node carries the
+    /// uncovered discriminant leaves, even when every parent survives.
     fn switch_discriminant_remainder(
         &mut self,
         subject: &verter_session_query::flow::slice::SliceNarrowSubject,
         tests: &[verter_session_query::flow::slice::SliceGuardLiteral],
-    ) -> Option<(Vec<SemanticNodeId>, usize)> {
+    ) -> Option<(Vec<SemanticNodeId>, usize, SemanticNodeId)> {
         // The narrow lands at the tested property's PARENT reference
         // (the root itself for a whole-subject or one-segment
         // discriminant), so the arms are the parent's — a nested
@@ -20279,22 +20276,25 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             test_nodes.push(node);
         }
         let mut survivors: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
+        let mut surviving_tags = Vec::new();
         for arm in &arms {
             let member = if subject.path.is_empty() {
                 *arm
             } else {
                 self.project_segments_navigate(*arm, &subject.path[subject.path.len() - 1..])?
             };
-            if !self.switch_member_covered(member, &test_nodes)? {
+            let tags = self.switch_member_remainder(member, &test_nodes)?;
+            if !tags.is_empty() {
                 survivors.push(*arm);
+                surviving_tags.extend(tags);
             }
         }
         let total = arms.len();
-        Some((survivors, total))
+        Some((survivors, total, self.union_or_never(&surviving_tags)))
     }
 
-    /// Whether every runtime value of one arm's tested member is matched
-    /// by some carried case test — the coverage relation behind the
+    /// The runtime values of one arm's tested member not matched
+    /// by any carried case test — the coverage relation behind the
     /// switch remainder and the exhaustiveness verdict. Coverage is
     /// decided per LEAF of the member: its enumerated union arms, with a
     /// `boolean` leaf decomposing into its two literals — the checker's
@@ -20304,11 +20304,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// arms cannot be enumerated: coverage is then unknowable and the
     /// whole probe declines — the callers degrade instead of publishing
     /// a clean unnarrowed edge or a false liveness verdict.
-    fn switch_member_covered(
+    fn switch_member_remainder(
         &mut self,
         member: SemanticNodeId,
         tests: &[SemanticNodeId],
-    ) -> Option<bool> {
+    ) -> Option<Vec<SemanticNodeId>> {
         let mut leaves = Vec::new();
         let mut expanded = rustc_hash::FxHashSet::default();
         let mut gapped = false;
@@ -20341,15 +20341,16 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 }
             })
             .collect();
+        let mut survivors = Vec::new();
         'leaves: for leaf in &leaves {
             for test in tests {
                 if self.assignable(*leaf, *test)? && self.assignable(*test, *leaf)? {
                     continue 'leaves;
                 }
             }
-            return Some(false);
+            survivors.push(*leaf);
         }
-        Some(true)
+        Some(survivors)
     }
 
     /// `subject instanceof Ctor`, applying the checker's own per-arm

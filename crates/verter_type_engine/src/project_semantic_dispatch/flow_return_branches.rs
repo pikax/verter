@@ -416,7 +416,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     return partition.covered;
                 }
                 match self.switch_discriminant_remainder(subject, &tests) {
-                    Some((remainder, _)) => remainder.is_empty(),
+                    Some((remainder, _, _)) => remainder.is_empty(),
                     None => {
                         self.record_degradation(FlowReturnDegradation::FlowGap(
                             verter_session_query::flow::policy::FlowGap::GuardNarrowing,
@@ -535,7 +535,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         })
     }
 
-    /// Canonical identity is equality for these concrete unit types.
+    /// Intern concrete unit values in the graph's canonical domain before
+    /// comparing keys: lowered and projected leaves may use different arenas.
     /// Enum units and broad leaves retain the relation-based path.
     fn switch_unit_key(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
         let concrete = match self.dispatch.unwrap_identity_carrier_for_relation(node) {
@@ -547,17 +548,17 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 if !value.is_finite() {
                     return None;
                 }
-                Some(if *value == 0.0 {
-                    self.dispatch.graph().intern_node(SemanticNodeData::Literal(
-                        crate::semantic_query::LiteralValue::Number(0.0),
-                    ))
-                } else {
-                    concrete
-                })
+                Some(self.dispatch.graph().intern_node(SemanticNodeData::Literal(
+                    crate::semantic_query::LiteralValue::Number(if *value == 0.0 {
+                        0.0
+                    } else {
+                        *value
+                    }),
+                )))
             }
-            SemanticNodeData::Literal(_)
-            | SemanticNodeData::Primitive(PrimitiveKind::Null | PrimitiveKind::Undefined) => {
-                Some(concrete)
+            data @ (SemanticNodeData::Literal(_)
+            | SemanticNodeData::Primitive(PrimitiveKind::Null | PrimitiveKind::Undefined)) => {
+                Some(self.dispatch.graph().intern_node(data.clone()))
             }
             _ => None,
         }
@@ -636,6 +637,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                                 LiteralComparison::SwitchCase,
                             ) {
                                 GuardNarrowing::Narrowed(fact_subject, node) => {
+                                    // The equality rule also establishes the
+                                    // tested member's parent fact in the frame.
+                                    dispatch = self.layer_state();
                                     self.bake_narrow_into_state(&mut dispatch, &fact_subject, node);
                                 }
                                 GuardNarrowing::Unchanged => {}
@@ -714,17 +718,19 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         tests: &[verter_session_query::flow::slice::SliceGuardLiteral],
     ) {
         match self.switch_discriminant_remainder(subject, tests) {
-            Some((remainder, total)) if remainder.len() < total => {
+            Some((remainder, total, discriminant)) => {
                 // These arms belong to the tested property's parent, including
                 // a nested parent. Complete coverage narrows it to `never`.
-                let node = self.union_or_never(&remainder);
-                let parent = verter_session_query::flow::slice::SliceNarrowSubject {
-                    root: subject.root.clone(),
-                    path: Arc::from(&subject.path[..subject.path.len().saturating_sub(1)]),
-                };
-                self.bake_narrow_into_state(state, &parent, node);
+                if remainder.len() < total {
+                    let node = self.union_or_never(&remainder);
+                    let parent = verter_session_query::flow::slice::SliceNarrowSubject {
+                        root: subject.root.clone(),
+                        path: Arc::from(&subject.path[..subject.path.len().saturating_sub(1)]),
+                    };
+                    self.bake_narrow_into_state(state, &parent, node);
+                }
+                self.bake_narrow_into_state(state, subject, discriminant);
             }
-            Some(_) => {}
             None => self.record_degradation(FlowReturnDegradation::FlowGap(
                 verter_session_query::flow::policy::FlowGap::GuardNarrowing,
             )),
