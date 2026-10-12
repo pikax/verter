@@ -136,8 +136,11 @@ profile while its unrelated known-slow list remains. Apply policy to the whole
 chunk namespace so regenerated chunks cannot inherit a longer base watchdog.
 The compiled session policy guard probes nextest's override precedence and
 profile inheritance, with an unrelated base-policy control. The corpus
-layout and generator-parity guards preserve complete fixture coverage, authored
-overrides and fresh host state per logical row. Set `VERTER_CORPUS_AUDIT_TIMING=1`
+probe uses manifest-only Cargo metadata (`--no-deps --locked --offline`) for
+workspace package selectors and an empty temporary `CARGO_HOME` for metadata
+and nextest children, so a compiled archive consumer needs no registry cache.
+The corpus layout and generator-parity guards preserve complete fixture coverage,
+authored overrides and fresh host state per logical row. Set `VERTER_CORPUS_AUDIT_TIMING=1`
 when running the chunk inventory to collect pool and row timings; report these
 as evidence without asserting machine-dependent elapsed times.
 

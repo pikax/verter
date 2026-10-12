@@ -113,14 +113,24 @@ fn every_compiled_corpus_chunk_has_the_twenty_second_nextest_deadline() {
     );
 
     // Listing-only metadata reuses the running binary; no nested test build.
+    // Archive consumers have no registry cache. Manifest-only metadata supplies
+    // the workspace package identities used by the policy's package selectors.
     let temp = tempfile::tempdir().expect("policy probe directory");
-    let metadata = policy_output(Command::new("cargo").current_dir(&repo).args([
-        "metadata",
-        "--locked",
-        "--offline",
-        "--format-version",
-        "1",
-    ]));
+    let cargo_home = temp.path().join("cargo-home");
+    std::fs::create_dir(&cargo_home).expect("empty Cargo home for archive consumer control");
+    let metadata = policy_output(
+        Command::new("cargo")
+            .current_dir(&repo)
+            .env("CARGO_HOME", &cargo_home)
+            .args([
+                "metadata",
+                "--no-deps",
+                "--locked",
+                "--offline",
+                "--format-version",
+                "1",
+            ]),
+    );
     let cargo: serde_json::Value = serde_json::from_str(&metadata).unwrap();
     let package = cargo["packages"]
         .as_array()
@@ -204,6 +214,7 @@ fn every_compiled_corpus_chunk_has_the_twenty_second_nextest_deadline() {
         let groups = policy_output(
             Command::new("cargo-nextest")
                 .current_dir(&repo)
+                .env("CARGO_HOME", &cargo_home)
                 .args(["nextest", "--color", "never", "--config-file"])
                 .arg(&projected)
                 .args([
