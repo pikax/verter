@@ -9,13 +9,16 @@
 //! fall-through; shared properties; destructure correlation; and
 //! reassignment re-narrowing.
 //!
-//! All emissions verified against tsgo 7.0.0-dev.20260523.1 via IsExactly
+//! Fixture emissions verified against tsgo 7.0.0-dev.20260523.1 via IsExactly
 //! probes BEFORE encoding the Rust assertions.
+//! Generated switch sizes and unit controls are checked against pinned
+//! TypeScript 7.0.2 with exact-type probes.
 //!
 //! Each scenario is one `*Result = ReturnType<typeof duXX>` alias in the
 //! fixture. The Rust test resolves that alias and asserts the TS7 emission.
 
 use super::support::*;
+use std::fmt::Write;
 
 const NARROW_DISCRIMINATED_UNION: &str = include_str!("fixtures/narrow_discriminated_union.ts");
 
@@ -39,6 +42,157 @@ fn resolve_alias(alias: &str) -> TypeExpr {
     );
     assert_query_mode(&record, ProjectionModeTag::Expanded);
     expr
+}
+
+fn resolve_switch(source: &str) -> TypeExpr {
+    let host = make_host_with_footprint();
+    let path = "/fixtures/switch.ts";
+    upsert_ts(&host, path, source);
+    let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
+        anchor: verter_type_expr::locators::AuthoredAnchor {
+            canonical_id: Arc::from(path),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            symbol: Arc::from("f"),
+            space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+        },
+        function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
+        overload_ordinal: 0,
+    };
+    let flow = host.get_flow_return_type_with_audit(
+        &identity,
+        verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+    );
+    let fact = flow.as_result().expect("switch flow must resolve").fact();
+    assert!(
+        matches!(
+            fact,
+            verter_type_engine::semantic_query::FactResult::Complete(_)
+        ),
+        "switch must be complete: {fact:?}"
+    );
+    resolve_expr(&host, path, "Result", &[], ProjectionMode::Expanded).0
+}
+
+fn assert_switch_literals(expr: TypeExpr, expected: &[i32], undefined: bool) {
+    let arms = match &expr {
+        TypeExpr::Union(arms) => arms.to_vec(),
+        other => vec![other.clone()],
+    };
+    let mut values = Vec::new();
+    let mut has_undefined = false;
+    for arm in arms {
+        match arm {
+            TypeExpr::Literal(verter_type_expr::LiteralValue::Number(value)) => {
+                assert_eq!(value.fract(), 0.0, "integer literal");
+                values.push(value as i32);
+            }
+            TypeExpr::Primitive(PrimitiveName::Undefined) => has_undefined = true,
+            other => panic!("expected exact switch return literals, got {other:?}"),
+        }
+    }
+    values.sort_unstable();
+    assert_eq!(values, expected);
+    assert_eq!(has_undefined, undefined);
+}
+
+fn assert_large_switch(count: i32) {
+    let mut source = String::from("type U = ");
+    for index in 0..count {
+        if index != 0 {
+            source.push_str(" | ");
+        }
+        write!(source, "{{ kind: \"k{index}\"; v{index}: {index} }}").unwrap();
+    }
+    source.push_str("; function f(x: U) { switch (x.kind) {");
+    for index in 0..count {
+        write!(source, "case \"k{index}\": return x.v{index};").unwrap();
+    }
+    source.push_str("} } type Result = ReturnType<typeof f>;");
+    assert_switch_literals(
+        resolve_switch(&source),
+        &(0..count).collect::<Vec<_>>(),
+        false,
+    );
+}
+
+#[test]
+fn switch_union_50_cases() {
+    assert_large_switch(50);
+}
+
+#[test]
+fn switch_union_300_cases() {
+    assert_large_switch(300);
+}
+
+#[test]
+fn switch_union_1000_cases() {
+    assert_large_switch(1000);
+}
+
+#[test]
+fn switch_union_3000_cases() {
+    assert_large_switch(3000);
+}
+
+#[test]
+fn switch_union_controls() {
+    let declaration =
+        "type U = {kind: 'a'; value: 1} | {kind: 'b'; value: 2} | {kind: 'c'; value: 3};";
+    for (body, expected, undefined) in [
+        ("case 'a': case 'b': return x.value; case 'c': return x.value;", vec![1, 2, 3], false),
+        ("case 'a': return x.value; default: return x.value;", vec![1, 2, 3], false),
+        ("default: return x.value; case 'a': return x.value;", vec![1, 2, 3], false),
+        ("case 'a': return x.value;", vec![1], true),
+        ("case 'a': return x.value; case 'a': return x.value; case 'b': return x.value; case 'c': return x.value;", vec![1, 2, 3], false),
+    ] {
+        let source = format!("{declaration} function f(x: U) {{ switch (x.kind) {{ {body} }} }} type Result = ReturnType<typeof f>;");
+        assert_switch_literals(resolve_switch(&source), &expected, undefined);
+    }
+    // A reference after a non-exhaustive switch reads the unhandled member.
+    let source = format!("{declaration} function f(x: U) {{ switch (x.kind) {{ case 'a': return 10; case 'b': return 20; }} return x.value; }} type Result = ReturnType<typeof f>;");
+    assert_switch_literals(resolve_switch(&source), &[3, 10, 20], false);
+    let source = format!("{declaration} function f(x: U) {{ switch (true) {{ case x.kind === 'a': return x.value; case x.kind === 'b': return x.value; default: return x.value; }} }} type Result = ReturnType<typeof f>;");
+    assert_switch_literals(resolve_switch(&source), &[1, 2, 3], false);
+}
+
+#[test]
+fn switch_union_unit_discriminants_and_shared_labels() {
+    for (declaration, discriminant, cases) in [
+        (
+            "{kind: 0; value: 1} | {kind: 1; value: 2}",
+            "x.kind",
+            "case -0: return x.value; case 1: return x.value;",
+        ),
+        (
+            "{kind: true; value: 1} | {kind: false; value: 2}",
+            "x.kind",
+            "case true: return x.value; case false: return x.value;",
+        ),
+        (
+            "{kind: null; value: 1} | {kind: undefined; value: 2}",
+            "x.kind",
+            "case null: return x.value; case undefined: return x.value;",
+        ),
+        (
+            "{kind: 'a'; value: 1} | {kind: 'a'; value: 2} | {kind: 'b'; value: 2}",
+            "x.kind",
+            "case 'a': return x.value; default: return x.value;",
+        ),
+        (
+            "{kind: 'a'; value: 1} | {kind: 'b'; value: 2}",
+            "x.payload.kind",
+            "case 'a': return x.payload.value; case 'b': return x.payload.value;",
+        ),
+    ] {
+        let parameter = if discriminant == "x.payload.kind" {
+            "{payload: U}"
+        } else {
+            "U"
+        };
+        let source = format!("type U = {declaration}; function f(x: {parameter}) {{ switch ({discriminant}) {{ {cases} }} }} type Result = ReturnType<typeof f>;");
+        assert_switch_literals(resolve_switch(&source), &[1, 2], false);
+    }
 }
 
 // ----- 1) if (s.kind === "a") on {kind:"a";a:string} | {kind:"b";b:number}

@@ -13,6 +13,7 @@
 //! ([`FlowEvaluator::resume_entered`]), entering its next region or
 //! finishing.
 
+use super::super::relation::IdentityCarrierUnwrap;
 use super::FlowDemandDriver;
 use super::*;
 
@@ -96,6 +97,8 @@ pub(super) struct SwitchEval<'r> {
     entry: FlowLayerState,
     bases: ScopeBases,
     tests: Vec<verter_session_query::flow::slice::SliceGuardLiteral>,
+    /// Exact unit discriminants are projected once for all clauses.
+    partition: Option<LiteralSwitchPartition>,
     /// The clauses whose relation is a guard (`switch (typeof x)`,
     /// `switch (true)`): the default edge and the no-matching-case path
     /// apply every one negated.
@@ -109,6 +112,16 @@ pub(super) struct SwitchEval<'r> {
     /// The next clause.
     next: usize,
     contributors: Vec<FlowContribution>,
+}
+
+/// A switch-local partition of the entering parent union. Each clause
+/// holds only its matching member(s); the unhandled set is shared by
+/// default dispatch, exhaustiveness and the no-matching-case edge.
+struct LiteralSwitchPartition {
+    subject: verter_session_query::flow::slice::SliceNarrowSubject,
+    clauses: Vec<Option<SemanticNodeId>>,
+    remainder: SemanticNodeId,
+    covered: bool,
 }
 
 /// A labeled statement whose body is being evaluated.
@@ -394,8 +407,14 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         // no-matching-case path live over arms the checker may
         // prove covered — a superset, so it degrades: the
         // liveness verdict is then unproven, never clean.
+        let partition = discriminant
+            .as_ref()
+            .and_then(|subject| self.literal_switch_partition(subject, cases));
         let covered = !has_default
             && discriminant.as_ref().is_some_and(|subject| {
+                if let Some(partition) = &partition {
+                    return partition.covered;
+                }
                 match self.switch_discriminant_remainder(subject, &tests) {
                     Some((remainder, _)) => remainder.is_empty(),
                     None => {
@@ -418,6 +437,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             entry,
             bases,
             tests,
+            partition,
             guards,
             guards_before: 0,
             covered,
@@ -427,6 +447,120 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             next: 0,
             contributors: Vec::new(),
         }))
+    }
+
+    /// Index exact unit discriminants once. Broad members, guard clauses,
+    /// unresolved carriers and non-discriminating properties use the
+    /// general narrowing/coverage relations instead.
+    fn literal_switch_partition(
+        &mut self,
+        subject: &verter_session_query::flow::slice::SliceNarrowSubject,
+        cases: &[verter_session_query::flow::slice::SliceSwitchCase],
+    ) -> Option<LiteralSwitchPartition> {
+        use verter_session_query::flow::slice::SliceSwitchTest;
+        if !self.nullability.is_strict()
+            || cases.iter().any(|case| {
+                matches!(
+                    case.test,
+                    SliceSwitchTest::Guard(_) | SliceSwitchTest::Unmodeled
+                )
+            })
+        {
+            return None;
+        }
+        let parent = verter_session_query::flow::slice::SliceNarrowSubject {
+            root: subject.root.clone(),
+            path: Arc::from(&subject.path[..subject.path.len().saturating_sub(1)]),
+        };
+        if !subject.path.is_empty() && self.parent_is_never_a_union(&parent) {
+            return None;
+        }
+        let current = self.subject_current_node(&parent)?;
+        let arms = self.enumerated_union_arms_or_self(current);
+        if arms.len() < 2 {
+            return None;
+        }
+        let mut members = Vec::with_capacity(arms.len());
+        let mut keys = Vec::with_capacity(arms.len());
+        let mut groups: rustc_hash::FxHashMap<SemanticNodeId, Vec<SemanticNodeId>> =
+            rustc_hash::FxHashMap::default();
+        for arm in &arms {
+            let member = if subject.path.is_empty() {
+                *arm
+            } else {
+                self.project_segments_navigate(*arm, &subject.path[subject.path.len() - 1..])?
+            };
+            let key = self.switch_unit_key(member)?;
+            members.push(member);
+            keys.push(key);
+            groups.entry(key).or_default().push(*arm);
+        }
+        if !subject.path.is_empty() && !self.members_discriminate(&members) {
+            return None;
+        }
+        let groups: rustc_hash::FxHashMap<SemanticNodeId, SemanticNodeId> = groups
+            .into_iter()
+            .map(|(key, arms)| (key, self.union(&arms)))
+            .collect();
+        let mut tested = rustc_hash::FxHashSet::default();
+        let mut clauses = Vec::with_capacity(cases.len());
+        for case in cases {
+            match &case.test {
+                SliceSwitchTest::Literal(literal) => {
+                    let ty = guard_literal_type_expr(literal)?;
+                    let node = self.lower_body_type(&ty);
+                    let key = self.switch_unit_key(node)?;
+                    tested.insert(key);
+                    clauses.push(Some(
+                        groups
+                            .get(&key)
+                            .copied()
+                            .unwrap_or_else(|| self.never_node()),
+                    ));
+                }
+                SliceSwitchTest::Default => clauses.push(None),
+                SliceSwitchTest::Guard(_) | SliceSwitchTest::Unmodeled => return None,
+            }
+        }
+        let remainder: Vec<_> = arms
+            .iter()
+            .zip(keys)
+            .filter_map(|(arm, key)| (!tested.contains(&key)).then_some(*arm))
+            .collect();
+        Some(LiteralSwitchPartition {
+            subject: parent,
+            clauses,
+            covered: remainder.is_empty(),
+            remainder: self.union_or_never(&remainder),
+        })
+    }
+
+    /// Canonical identity is equality for these concrete unit types.
+    /// Enum units and broad leaves retain the relation-based path.
+    fn switch_unit_key(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
+        let concrete = match self.dispatch.unwrap_identity_carrier_for_relation(node) {
+            IdentityCarrierUnwrap::Concrete(node) => node,
+            IdentityCarrierUnwrap::Unresolvable => return None,
+        };
+        match self.dispatch.graph().node_data(concrete).as_deref()? {
+            SemanticNodeData::Literal(crate::semantic_query::LiteralValue::Number(value)) => {
+                if !value.is_finite() {
+                    return None;
+                }
+                Some(if *value == 0.0 {
+                    self.dispatch.graph().intern_node(SemanticNodeData::Literal(
+                        crate::semantic_query::LiteralValue::Number(0.0),
+                    ))
+                } else {
+                    concrete
+                })
+            }
+            SemanticNodeData::Literal(_)
+            | SemanticNodeData::Primitive(PrimitiveKind::Null | PrimitiveKind::Undefined) => {
+                Some(concrete)
+            }
+            _ => None,
+        }
     }
 
     /// Enter a `switch`'s next live clause, or finish the statement.
@@ -485,18 +619,39 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     // through the `never` subject (measured:
                     // `switch (x) { case "b": return 1 }` over
                     // `x: "a"` still contributes `1`).
-                    verter_session_query::flow::slice::SliceSwitchTest::Literal(test) => match self
-                        .narrow_eq_literal(subject, test, false, LiteralComparison::SwitchCase)
-                    {
-                        GuardNarrowing::Narrowed(fact_subject, node) => {
-                            self.bake_narrow_into_state(&mut dispatch, &fact_subject, node);
+                    verter_session_query::flow::slice::SliceSwitchTest::Literal(test) => {
+                        if let Some(partition) = &eval.partition {
+                            if let Some(node) = partition.clauses[eval.next - 1] {
+                                self.bake_narrow_into_state(
+                                    &mut dispatch,
+                                    &partition.subject,
+                                    node,
+                                );
+                            }
+                        } else {
+                            match self.narrow_eq_literal(
+                                subject,
+                                test,
+                                false,
+                                LiteralComparison::SwitchCase,
+                            ) {
+                                GuardNarrowing::Narrowed(fact_subject, node) => {
+                                    self.bake_narrow_into_state(&mut dispatch, &fact_subject, node);
+                                }
+                                GuardNarrowing::Unchanged => {}
+                            }
                         }
-                        GuardNarrowing::Unchanged => {}
-                    },
+                    }
                     // The default clause's dispatch edge: the
                     // discriminant minus every carried test.
                     verter_session_query::flow::slice::SliceSwitchTest::Default => {
-                        if let Some((remainder, total)) =
+                        if let Some(partition) = &eval.partition {
+                            self.bake_narrow_into_state(
+                                &mut dispatch,
+                                &partition.subject,
+                                partition.remainder,
+                            );
+                        } else if let Some((remainder, total)) =
                             self.switch_discriminant_remainder(subject, &eval.tests)
                         {
                             if remainder.len() < total {
@@ -599,7 +754,15 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let mut dead_no_match: Option<FlowLayerState> = None;
         if !eval.has_default && !eval.covered {
             if eval.guards.is_empty() {
-                exit_states.push(eval.entry.clone());
+                let mut state = eval.entry.clone();
+                if let Some(partition) = &eval.partition {
+                    self.bake_narrow_into_state(
+                        &mut state,
+                        &partition.subject,
+                        partition.remainder,
+                    );
+                }
+                exit_states.push(state);
             } else {
                 // The no-matching-case path sees every guard
                 // negated, and is dead when that leaves the

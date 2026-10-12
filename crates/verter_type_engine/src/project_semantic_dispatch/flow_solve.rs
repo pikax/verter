@@ -715,7 +715,7 @@ pub struct FlowResourcePolicy { pub slice_budget: FlowSliceBudget, pub max_oblig
 
 #[rustfmt::skip]
 impl Default for FlowResourcePolicy {
-    fn default() -> Self { Self { slice_budget: FlowSliceBudget::default(), max_obligations: 1024 } }
+    fn default() -> Self { Self { slice_budget: FlowSliceBudget::default(), max_obligations: 32_768 } }
 }
 
 /// The validated structural work of one execution. This capability carries
