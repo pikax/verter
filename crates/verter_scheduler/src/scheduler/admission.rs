@@ -804,12 +804,16 @@ impl Scheduler {
         // `invalidate()` must take the same lock.
         let mut dag = self.dag.lock();
         // The generation must still be live as of THIS acquisition: the
-        // caller computed it before the lock was taken.
-        if !self
-            .nodes
-            .get(&**canonical)
-            .is_some_and(|n| n.incarnation_id() == incarnation && n.generation() == generation)
-        {
+        // caller computed it before the lock was taken. A dependency's
+        // Analysis can complete while this owner's Analysis is dispatched
+        // but has not published. Its clear dependency gate does not imply
+        // an Analysis snapshot exists; the owner's completion will retry
+        // these profiles after publication.
+        if !self.nodes.get(&**canonical).is_some_and(|n| {
+            n.incarnation_id() == incarnation
+                && n.generation() == generation
+                && n.current_analysis().is_some()
+        }) {
             return;
         }
         let profiles: Vec<(u64, Priority)> = dag.pending_artifact_profiles(canonical, generation);

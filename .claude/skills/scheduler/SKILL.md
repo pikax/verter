@@ -62,6 +62,14 @@ missing stage normally. Checking only direct request waiters is incorrect:
 an auto-ingested macro dependency may be required by an Artifact blocker
 before it owns a direct waiter or an admitted downstream node.
 
+Pending Artifact admission requires the owner's current-generation Analysis
+snapshot under the same DAG hold as admission. Dependency Analysis completion
+can visit a parent whose Analysis is already dispatched but has not published;
+an empty dependency-edge set only proves its gate is clear. Defer Artifact
+admission until that parent's own Analysis publishes and its completion retries
+the pending profiles. Otherwise an Artifact worker can return on missing
+Analysis without completing its identity or signalling the request.
+
 Source snapshot publication and Source-stage readiness are distinct. The
 worker may publish generation-coherent snapshot bytes before the driver has
 integrated extracted dependencies and late blockers. `FileNode` therefore
