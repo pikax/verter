@@ -646,11 +646,11 @@ impl RaisedShapeAlgebra for RaisedFactsAlg {
             && (matches!(
                 carrier,
                 crate::semantic_query::SignatureReturnCarrier::DeferredFlow(_)
+                    | crate::semantic_query::SignatureReturnCarrier::EvaluatedFlow(_)
             ) || matches!(
                 carrier,
                 crate::semantic_query::SignatureReturnCarrier::Function(
                     verter_type_expr::facts::FunctionReturnSource::Flow(_)
-                        | verter_type_expr::facts::FunctionReturnSource::Absent
                 )
             )))
         .then(summary::materialized_expanded_leaf)

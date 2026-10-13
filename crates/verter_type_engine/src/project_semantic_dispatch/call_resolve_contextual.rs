@@ -381,15 +381,18 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         state.diagnostics_enabled = true;
         let graph = self.graph();
         let (params, type_parameters) = if resumed.is_none() {
-            let Some(SemanticNodeData::Signature {
-                params,
-                type_parameters,
-                ..
-            }) = graph.node_data(candidate.node).as_deref().cloned()
+            let Some(data) = graph.node_data(candidate.node) else {
+                return Ok(arguments.to_vec());
+            };
+            let Some(header) =
+                data.callable_header(&crate::semantic_query::ResolveOverloadSetConsumer::witness())
             else {
                 return Ok(arguments.to_vec());
             };
-            (params, type_parameters)
+            (
+                Arc::clone(header.params),
+                Arc::clone(header.type_parameters),
+            )
         } else {
             (Arc::from([]), Arc::from([]))
         };

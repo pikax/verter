@@ -2557,14 +2557,38 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let verdict = self.reduce_relation(key, &mut bindings);
         #[cfg(any(test, feature = "test-support"))]
         self.inject_unproven_flow_member_for_tests(idx);
+        let root_refused = self
+            .dispatch_txn
+            .borrow()
+            .reentry()
+            .frame(idx)
+            .and_then(super::dispatch_txn::ObligationFrame::relation)
+            .is_some_and(|state| state.chain.base == idx && state.chain.overflowed);
         match self.relation_frame_close_root(idx, verdict, bindings) {
             RootClose::Decided(payload) => {
                 let observed_self_roots = self.relation_completed_publication_roots(key);
-                crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+                // Only this pair's explicit false recovery supplies a bounded
+                // interpretation. Inherited refusals and unproven mixed
+                // component verdicts carry no recovery authority.
+                let recovered = root_refused
+                    && payload.outcome == RelationOutcome::NotAssignable
+                    && self.build_local_taint.borrow().last().is_some_and(|frame| {
+                        frame.operation_refusals.iter().any(|refusal| {
+                            matches!(refusal,
+                            super::walk::ShallowDiagnostic::RelationTooComplex { source, target }
+                                if *source == key.source && *target == key.target)
+                        })
+                    });
+                let mut output = crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
                     QueryResult::Value(SemanticQueryValue::Relation(payload)),
                     fence,
                 ))
-                .with_observed_self_roots(observed_self_roots)
+                .with_observed_self_roots(observed_self_roots);
+                if recovered {
+                    output.approximation =
+                        Some(super::projection_fact::ProjectionInterpretation::CheckerRecovery);
+                }
+                output
             }
             RootClose::DecidedReturnOnly(payload) => {
                 let observed_self_roots =
@@ -8192,18 +8216,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> RelationResult {
         // The checker's `recursiveTypeRelatedTo` entry, judged on the
         // operands the carriers stand for.
-        let concrete = [source, target].map(|operand| {
-            match self.unwrap_identity_carrier_for_relation(operand) {
-                IdentityCarrierUnwrap::Concrete(id) => id,
-                IdentityCarrierUnwrap::Unresolvable => operand,
-            }
+        let concrete_read = self.observe_read(|| {
+            [source, target].map(|operand| {
+                match self.unwrap_identity_carrier_for_relation(operand) {
+                    IdentityCarrierUnwrap::Concrete(id) => id,
+                    IdentityCarrierUnwrap::Unresolvable => operand,
+                }
+            })
         });
+        let concrete = *concrete_read.value();
         // Without `strictNullChecks` a union of one type and `null` /
         // `undefined` is that type to the checker: the pair relates as the
         // pair of its member, one recursion entry, not a union and then its
         // member.
         let erased = concrete.map(|operand| self.relation_union_erased_member(operand));
         if erased[0].is_some() || erased[1].is_some() {
+            let _ = concrete_read.adopt(self);
             return self.decide_relation_with_dispatch(
                 erased[0].unwrap_or(source),
                 erased[1].unwrap_or(target),
@@ -8212,17 +8240,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             );
         }
         if let Some(result) = self.enter_checker_recursion([source, target], concrete) {
+            let _ = concrete_read.adopt(self);
             return result;
         }
         // Two references to one generic declaration infer from, and relate
         // by, their type arguments' variance before any structural
         // comparison.
         if let Some(result) = self.infer_from_type_arguments(source, target, bindings) {
+            let _ = concrete_read.discard();
             return result;
         }
         if let Some(result) = self.relate_by_variance(source, target, bindings) {
+            let _ = concrete_read.discard();
             return result;
         }
+        let _ = concrete_read.adopt(self);
         if let Some(r) = self.try_object_vs_record_relation(source, target, bindings) {
             return r;
         }
@@ -9961,6 +9993,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // resolves it where it is written, so a relation compares
                 // that type. One the deferred evaluator cannot read further
                 // (`T['k']` over an open `T`) stays the operand it is.
+                SemanticNodeData::DeferredCallable(_) => {
+                    drop(data);
+                    let materialized = self.materialize_returned_callable(current);
+                    if materialized == current {
+                        return IdentityCarrierUnwrap::Unresolvable;
+                    }
+                    current = materialized;
+                    continue;
+                }
                 SemanticNodeData::IndexedAccess { .. } => {
                     drop(data);
                     let read = self
@@ -10720,8 +10761,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     }
                     match target
                         .project_known_key_accessor(&target_key)
-                        .and_then(|accessor| accessor.property_member(graph))
-                    {
+                        .and_then(|accessor| {
+                            accessor.property_member(graph, |signature| {
+                                self.materialize_returned_callable(signature)
+                            })
+                        }) {
                         Some(property) => {
                             target_property = property;
                             &target_property
@@ -10739,7 +10783,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 _ => t_prop,
             };
             if let Some(accessor) = source_keys.project_known_key_accessor(&target_key) {
-                let prop_result = match accessor.property_member(graph) {
+                let prop_result = match accessor.property_member(graph, |signature| {
+                    self.materialize_returned_callable(signature)
+                }) {
                     Some(source_member) => {
                         self.relate_property_pair(&source_member, t_prop, bindings)
                     }

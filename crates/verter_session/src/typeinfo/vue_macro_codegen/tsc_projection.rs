@@ -288,16 +288,24 @@ pub(super) fn tsc_scope_requirements_for(
                 ))?;
             found = true;
             let (inferred_class_members, inferred_value_dependencies, declaration_failure) =
-                match inferred_class_members(
-                    top_level_owner(owner),
-                    &name,
-                    contributor_ordinal,
-                    entry.span,
-                    entry.kind == LocalDeclarationKind::TypeAndValue,
-                    inventory,
-                    dispatch,
-                    owner_canonical,
-                ) {
+                match dispatch
+                    .project_semantic_attempt(|| {
+                        inferred_class_members(
+                            top_level_owner(owner),
+                            &name,
+                            contributor_ordinal,
+                            entry.span,
+                            entry.kind == LocalDeclarationKind::TypeAndValue,
+                            inventory,
+                            dispatch,
+                            owner_canonical,
+                        )
+                    })
+                    .map_err(|abort| {
+                        let observed = ResultCompleteness::partial(abort.reason_class());
+                        verter_type_engine::request_context::fold_result_completeness(observed);
+                        failure_from_local(observed)
+                    })? {
                     Ok(inferred) => (inferred.members, inferred.value_dependencies, None),
                     Err(failure) => (
                         Vec::new(),

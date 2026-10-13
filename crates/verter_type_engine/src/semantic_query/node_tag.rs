@@ -314,7 +314,7 @@ impl SemanticNodeData {
                 if let SignatureReturnCarrier::Declared(node) = return_carrier {
                     visit(*node);
                 }
-                if let SignatureReturnCarrier::DeferredFlow(source) = return_carrier {
+                if let Some(source) = return_carrier.owned_flow_source() {
                     for (_, image) in source.bindings() {
                         visit(*image);
                     }

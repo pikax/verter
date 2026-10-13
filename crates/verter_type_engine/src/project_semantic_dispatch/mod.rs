@@ -896,8 +896,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         self.connected_limit_projection(key, reasons).0
     }
 
-    /// A continuation has a positional guarantee only when its constructor
-    /// retained every operand of the addressed type at the demanded position.
+    /// A stopped demand retains its addressed source for diagnostics only.
+    /// Constructing a carrier supplies no evaluated structure guarantee.
     fn connected_limit_projection(
         &self,
         key: &SemanticQueryKey,
@@ -907,10 +907,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         Option<projection_fact::ProjectionInterpretation>,
     ) {
         let graph = self.graph();
-        let mut interpretation = None;
+        let interpretation = None;
         let carrier = match key {
             SemanticQueryKey::Instantiate(key) => {
-                interpretation = Some(projection_fact::ProjectionInterpretation::Positional);
                 graph.intern_node(SemanticNodeData::InstantiationRef {
                     base: DeclIdentity {
                         canonical_id: Arc::clone(&key.base().defining_canonical),
@@ -921,23 +920,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     args: Arc::clone(key.args()),
                 })
             }
-            SemanticQueryKey::ProjectPath { base, path, .. } if path.is_empty() => {
-                interpretation = Some(projection_fact::ProjectionInterpretation::Positional);
-                *base
-            }
+            SemanticQueryKey::ProjectPath { base, path, .. } if path.is_empty() => *base,
             SemanticQueryKey::KeyOf { base, .. } => {
-                interpretation = Some(projection_fact::ProjectionInterpretation::Positional);
                 graph.intern_node(SemanticNodeData::KeyOf { base: *base })
             }
             SemanticQueryKey::IndexedAccess { base, index, .. } => {
-                interpretation = Some(projection_fact::ProjectionInterpretation::Positional);
                 graph.intern_node(SemanticNodeData::IndexedAccess {
                     object: *base,
                     index: index.clone(),
                 })
             }
             SemanticQueryKey::ProjectMember { base, member, .. } => {
-                interpretation = Some(projection_fact::ProjectionInterpretation::Positional);
                 graph.intern_node(SemanticNodeData::IndexedAccess {
                     object: *base,
                     index: crate::semantic_query::IndexKey::String(Arc::clone(member)),
@@ -963,7 +956,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 })
             }
             SemanticQueryKey::MappedType { source, mapper, .. } => {
-                interpretation = Some(projection_fact::ProjectionInterpretation::Positional);
                 graph.intern_node(SemanticNodeData::Mapped {
                     source: *source,
                     mapper: mapper.clone(),
@@ -976,22 +968,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 false_branch,
                 distributive,
                 pending,
-            } => {
-                interpretation = Some(projection_fact::ProjectionInterpretation::Positional);
-                graph.intern_node(SemanticNodeData::Conditional {
-                    check: *check,
-                    extends: *extends,
-                    true_branch_ref: *true_branch,
-                    false_branch_ref: *false_branch,
-                    distributive: *distributive,
-                    pending: pending.clone(),
-                })
-            }
+            } => graph.intern_node(SemanticNodeData::Conditional {
+                check: *check,
+                extends: *extends,
+                true_branch_ref: *true_branch,
+                false_branch_ref: *false_branch,
+                distributive: *distributive,
+                pending: pending.clone(),
+            }),
             // The reduce-query SUBJECT representation: the
             // pre-reduction member list interned verbatim (the query's
             // subject must stay distinct from its canonical result).
             SemanticQueryKey::ReduceUnion { members, .. } => {
-                interpretation = Some(projection_fact::ProjectionInterpretation::Positional);
                 graph.intern_node(SemanticNodeData::Union(
                     crate::semantic_query::composite::CompositeList::query_subject(Arc::clone(
                         members,
@@ -999,7 +987,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 ))
             }
             SemanticQueryKey::ReduceIntersection { input, .. } => {
-                interpretation = Some(projection_fact::ProjectionInterpretation::Positional);
                 let members: Arc<[SemanticNodeId]> = Arc::from(input.as_ordered_values());
                 graph.intern_node(SemanticNodeData::Intersection(
                     crate::semantic_query::composite::CompositeList::query_subject(members),
@@ -1008,16 +995,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             SemanticQueryKey::Relate { source, .. } => *source,
             SemanticQueryKey::TypeOf {
                 value_root, path, ..
-            } => {
-                interpretation = Some(projection_fact::ProjectionInterpretation::Positional);
-                graph.intern_node(SemanticNodeData::new_typeof(
-                    value_root.root.clone(),
-                    Arc::clone(path),
-                    Arc::from([]),
-                ))
-            }
+            } => graph.intern_node(SemanticNodeData::new_typeof(
+                value_root.root.clone(),
+                Arc::clone(path),
+                Arc::from([]),
+            )),
             SemanticQueryKey::TemplateLiteralReduce { pattern, args, .. } => {
-                interpretation = Some(projection_fact::ProjectionInterpretation::Positional);
                 graph.intern_node(SemanticNodeData::TemplateLiteral {
                     quasis: Arc::clone(pattern),
                     expressions: Arc::clone(args),
@@ -2044,8 +2027,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     callable.parts(&crate::semantic_query::ResolveOverloadSetConsumer::witness());
                 return Some(SignatureRef {
                     node: sig,
-                    occurrence: crate::semantic_query::SignatureCandidateOrigin::Authored(
-                        self.signature_occurrence_for(parts.occurrence),
+                    occurrence: parts.occurrence.map_or(
+                        crate::semantic_query::SignatureCandidateOrigin::Rootless,
+                        |occurrence| {
+                            crate::semantic_query::SignatureCandidateOrigin::Authored(
+                                self.signature_occurrence_for(occurrence),
+                            )
+                        },
                     ),
                     return_carrier: parts.return_carrier.clone(),
                 });
@@ -3125,31 +3113,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         build_local: BuildLocalTaint,
         finalise: verter_session_query::facts::fact_read_set::FactReadSetFinalise,
         carrier_prelude: &CarrierNormalizationPrelude,
-        key: &SemanticQueryKey,
     ) -> (
         crate::project_semantic_dispatch::walk::QueryBuildOutput<SemanticQueryValue>,
         Option<CompletedSelfRoots>,
     ) {
-        if output.approximation.is_none() {
-            if let (Some(reasons), QueryResult::Value(SemanticQueryValue::TypeNode(node))) =
-                (self.connected_demand_trip(), &output.result)
-            {
-                if matches!(
-                    self.graph().node_data(*node).as_deref(),
-                    Some(SemanticNodeData::Opaque(
-                        QueryError::Miss | QueryError::BudgetExceeded(_)
-                    ))
-                ) {
-                    let (source, interpretation) = self.connected_limit_projection(key, reasons);
-                    if let Some(interpretation) = interpretation {
-                        output.result = QueryResult::Value(SemanticQueryValue::TypeNode(source));
-                        output.approximation = Some(interpretation);
-                        output.add_partial_reasons(reasons);
-                        output.cache_suppress = true;
-                    }
-                }
-            }
-        }
         if let QueryResult::Value(SemanticQueryValue::TypeNode(node)) = &output.result {
             if matches!(
                 self.graph().node_data(*node).as_deref(),
@@ -3159,21 +3126,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     Some(projection_fact::ProjectionInterpretation::CheckerRecovery);
             }
         }
+        if build_local.result_is_partial {
+            if let QueryResult::Value(SemanticQueryValue::FlowReturn(value)) = &mut output.result {
+                *value = value
+                    .as_ref()
+                    .clone()
+                    .with_dependent_value_limitations(build_local.partial_reasons)
+                    .into();
+            }
+        }
         output.fold_partial(build_local.result_is_partial);
         output.cache_suppress |= build_local.cache_suppress;
         output.add_partial_reasons(build_local.partial_reasons);
-        // A relation's typed comparison refusal supplies the checker's
-        // explicit false recovery. Its diagnostic is emitted only by the
-        // OperationRefusal arm, rather than by a generic budget cause.
-        if matches!(key, SemanticQueryKey::Relate { .. })
-            && !build_local.operation_refusals.is_empty()
-            && matches!(
-                output.result,
-                QueryResult::Value(SemanticQueryValue::Relation(_))
-            )
-        {
-            output.approximation = Some(projection_fact::ProjectionInterpretation::CheckerRecovery);
-        }
         for refusal in build_local.operation_refusals {
             if !output.walker_diagnostics.contains(&refusal) {
                 output.walker_diagnostics.push(refusal);
@@ -3367,7 +3331,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // complete scalar has no such guarantee for this incomplete basis.
             if matches!(
                 cache_read.fact_status,
-                crate::semantic_query::FactStatus::Approximate(_)
+                crate::semantic_query::FactStatus::Approximate(_, _)
             ) {
                 cache_read.fact_status = crate::semantic_query::FactStatus::approximate(reasons);
             } else {
@@ -3790,6 +3754,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
         };
         let key_for_build = key.clone();
+        #[cfg(any(test, feature = "test-support"))]
         let key_for_close = key.clone();
         let raw_build = move || -> crate::project_semantic_dispatch::walk::QueryBuildOutput<
             SemanticQueryValue,
@@ -4124,6 +4089,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let (output, finalise) =
                 crate::fact_signature_helpers::install_fact_tracer(&basis_source, || {
                     self.open_cold_build(evidence_target_key.as_ref());
+                    #[cfg(any(test, feature = "test-support"))]
+                    if let Some(hook) = self.graph().produce_hook_for_tests() {
+                        hook(&key_for_close, &|nested| {
+                            let _ = self.execute_via_cold_build_helper(nested);
+                        });
+                    }
                     raw_build()
                 });
             let build_local = taint_guard.finish();
@@ -4132,9 +4103,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 build_local,
                 finalise,
                 &carrier_prelude_for_build,
-                &key_for_close,
             );
-            rooting_for_closure.set(rooted);
+                rooting_for_closure.set(rooted);
             output
         };
         let authority = SemanticOperandAuthority::mint_for_forcing_boundary();
@@ -4206,12 +4176,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     )
                 }
                 Acquired::Produce(lease) => {
-                    #[cfg(any(test, feature = "test-support"))]
-                    if let Some(hook) = graph.produce_hook_for_tests() {
-                        hook(&key, &|nested| {
-                            let _ = self.execute_via_cold_build_helper(nested);
-                        });
-                    }
                     let traced_build = traced_build.take().expect("the claim ends once");
                     // The clocks the build computes under: an edit landing
                     // while it runs moves them, so its result is never

@@ -56,7 +56,8 @@ impl SemanticQueryValue {
                     visit(signature.node);
                     match &signature.return_carrier {
                         SignatureReturnCarrier::Declared(node) => visit(*node),
-                        SignatureReturnCarrier::DeferredFlow(source) => {
+                        SignatureReturnCarrier::DeferredFlow(source)
+                        | SignatureReturnCarrier::EvaluatedFlow(source) => {
                             for (_, image) in source.bindings() {
                                 visit(*image);
                             }

@@ -1507,7 +1507,9 @@ fn encode_data(graph: &SemanticGraphStore, id: SemanticNodeId, data: &SemanticNo
                 SignatureReturnCarrier::Declared(node) => {
                     enc.child_unless_same(*node, return_hole, &[3, 1]);
                 }
-                SignatureReturnCarrier::Function(_) | SignatureReturnCarrier::DeferredFlow(_) => {
+                SignatureReturnCarrier::Function(_)
+                | SignatureReturnCarrier::DeferredFlow(_)
+                | SignatureReturnCarrier::EvaluatedFlow(_) => {
                     enc.u8(3);
                     encode_return_carrier(&mut enc, return_carrier);
                 }
@@ -1659,8 +1661,34 @@ fn encode_data(graph: &SemanticGraphStore, id: SemanticNodeId, data: &SemanticNo
             });
             encode_params(&mut enc, parts.params);
             encode_type_parameters(&mut enc, parts.type_parameters);
-            encode_signature_occurrence(&mut enc, parts.occurrence);
+            enc.bool(parts.occurrence.is_some());
+            if let Some(occurrence) = parts.occurrence {
+                encode_signature_occurrence(&mut enc, occurrence);
+            }
             encode_return_carrier(&mut enc, parts.return_carrier);
+            if parts.is_abstract || parts.predicate.is_some() {
+                enc.u8(4);
+                enc.bool(parts.is_abstract);
+                if let Some(predicate) = parts.predicate {
+                    match predicate.subject {
+                        PredicateSubject::This => enc.u8(1),
+                        PredicateSubject::Parameter(index) => {
+                            enc.u8(2);
+                            enc.u32(index);
+                        }
+                    }
+                    enc.bool(predicate.asserts);
+                    match predicate.ty {
+                        Some(ty) => {
+                            enc.u8(1);
+                            enc.child(ty);
+                        }
+                        None => enc.u8(0),
+                    }
+                } else {
+                    enc.u8(0);
+                }
+            }
         }
     }
     enc
@@ -1819,8 +1847,15 @@ fn encode_body_step(enc: &mut Recipe, step: TypeBodyPathStep) {
 /// declared annotation's locator, a body-derived position, or nothing.
 fn encode_return_carrier(enc: &mut Recipe, carrier: &SignatureReturnCarrier) {
     match carrier {
-        SignatureReturnCarrier::DeferredFlow(source) => {
-            enc.u8(3);
+        SignatureReturnCarrier::DeferredFlow(source)
+        | SignatureReturnCarrier::EvaluatedFlow(source) => {
+            enc.u8(
+                if matches!(carrier, SignatureReturnCarrier::EvaluatedFlow(_)) {
+                    4
+                } else {
+                    3
+                },
+            );
             enc.u32(source.bindings().len() as u32);
             for (name, image) in source.bindings() {
                 enc.str(name);

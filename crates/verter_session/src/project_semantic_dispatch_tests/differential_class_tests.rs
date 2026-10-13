@@ -152,7 +152,7 @@ fn generic_method_return_inference_precedes_enclosing_specialization() {
         } else {
             assert!(matches!(
                 result.fact().status(),
-                verter_type_engine::semantic_query::FactStatus::Approximate(_)
+                verter_type_engine::semantic_query::FactStatus::Approximate(_, _)
                     | verter_type_engine::semantic_query::FactStatus::Unavailable(_)
             ));
             assert_eq!(result.degradation(), Some(verter_type_engine::semantic_query::FlowReturnDegradation::UnrepresentableCallee));

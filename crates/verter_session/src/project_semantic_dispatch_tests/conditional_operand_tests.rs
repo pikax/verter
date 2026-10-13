@@ -78,7 +78,7 @@ fn an_approximate_extreme_cannot_select_a_conditional_branch() {
             .into_result()
             .expect("proof refusal retains the evaluated any return");
         assert_eq!(
-            matches!(returned.fact().status(), FactStatus::Approximate(_)),
+            matches!(returned.fact().status(), FactStatus::Approximate(_, _)),
             refused,
             "the source control must distinguish proof refusal from an exact any"
         );
@@ -141,11 +141,16 @@ fn approximate_member_evidence_cannot_select_a_conditional_branch() {
             "}".repeat(depth)
         );
         let host = default_probe_host();
+        let _refusal = (depth != 0).then(|| {
+            super::flow_return::flow_admission_fault_injection::Guard::arm(
+                &host.flow_fault_injection.zero_obligation_budget,
+            )
+        });
         let returned = flow_return_audited_on_host(&host, &source, "f")
             .into_result()
             .expect("the nested return retains its evaluated value");
         assert_eq!(
-            matches!(returned.fact().status(), FactStatus::Approximate(_)),
+            matches!(returned.fact().status(), FactStatus::Approximate(_, _)),
             depth != 0,
             "the source must distinguish a refused proof from a complete return"
         );
@@ -182,4 +187,16 @@ fn approximate_member_evidence_cannot_select_a_conditional_branch() {
             },
         );
     }
+}
+
+#[test]
+fn generic_argument_inference_preserves_variance_across_the_whole_pattern() {
+    let failures = mismatches_in_one_host(
+        "interface Contra<T> { f: (x: T) => void }",
+        &[(
+            "[Contra<\"a\">, Contra<\"b\">] extends [Contra<infer U>, Contra<infer U>] ? U : never",
+            "never",
+        )],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

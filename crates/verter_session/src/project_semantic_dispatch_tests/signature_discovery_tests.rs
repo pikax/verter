@@ -112,12 +112,12 @@ fn deferred_signature_sources_capture_outer_binders_and_exclude_their_own_clause
     );
     for node in [locator, reducing] {
         let data = d.graph().node_data(node).unwrap();
-        let SemanticNodeData::Signature {
-            return_carrier: SignatureReturnCarrier::DeferredFlow(source),
-            ..
-        } = data.as_ref()
+        let SemanticNodeData::DeferredCallable(callable) = data.as_ref() else {
+            panic!("deferred headers have no return-value slot: {data:?}")
+        };
+        let SignatureReturnCarrier::DeferredFlow(source) = callable.return_carrier_for_tests()
         else {
-            panic!("the refused eager probe must retain its return source: {data:?}")
+            panic!("the header retains its owned source")
         };
         assert_eq!(
             source.bindings_for_tests(),
@@ -144,10 +144,7 @@ fn deferred_signature_sources_capture_outer_binders_and_exclude_their_own_clause
     );
     assert!(matches!(
         d.graph().node_data(callee).as_deref(),
-        Some(SemanticNodeData::Signature {
-            return_carrier: SignatureReturnCarrier::DeferredFlow(_),
-            ..
-        })
+        Some(SemanticNodeData::DeferredCallable(_))
     ));
     drop(_refusal);
     let key = super::call_resolve_tests::call_key_at(
@@ -1699,5 +1696,263 @@ fn utility_inference_reads_the_last_shared_signature_and_never_a_union_or_binder
     assert_eq!(
         d.resolve_signature_utility(SignatureUtility::ReturnType, constrained, context),
         None
+    );
+}
+
+#[test]
+fn deferred_callable_headers_keep_event_parameters_without_demanding_the_return() {
+    use verter_type_engine::project_semantic_dispatch::callable_view::CallableNodeView;
+    use verter_type_engine::resolver_core::scope_shadowing::ScopeShadowing;
+    use verter_type_engine::semantic_query::{
+        LiteralValue, NodeScopeId, ProjectionReductionContext,
+    };
+    use verter_type_expr::{FunctionExpr, TypeExpr};
+    let host = host();
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: Some(CANONICAL.into()),
+            input_id: CANONICAL.into(),
+            source: Arc::from("export function emit(e: 'changed') { return opaqueCall(); }"),
+            file_language: crate::FileLanguage::script_ts(),
+            aliases: Vec::new(),
+        })
+        .unwrap();
+    let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+    let scope = NodeScopeId::File {
+        canonical_id: Arc::from(CANONICAL),
+        owner,
+        whole_hash: host.shallow_file_state(CANONICAL).unwrap().whole_hash,
+        local_scope: None,
+    };
+    let mut function = FunctionExpr::synthetic(
+        vec![verter_type_expr::FunctionParam::synthetic(
+            Some("e".into()),
+            TypeExpr::Literal(verter_type_expr::LiteralValue::String("changed".into())),
+            false,
+            false,
+        )],
+        None,
+        Vec::new(),
+    );
+    function.flow_return = Some(Box::new(
+        verter_type_expr::facts::FlowFunctionReturnIdentity {
+            anchor: verter_type_expr::locators::AuthoredAnchor {
+                canonical_id: Arc::from(CANONICAL),
+                owner,
+                symbol: Arc::from("emit"),
+                space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+            },
+            function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
+            overload_ordinal: 0,
+        },
+    ));
+    let _refusal = super::flow_return::flow_admission_fault_injection::Guard::arm(
+        &host.flow_fault_injection.zero_obligation_budget,
+    );
+    let node = dispatch.shallow_lower_type_expr_with_context_for_tests(
+        &TypeExpr::Function(Arc::new(function)),
+        &rustc_hash::FxHashMap::default(),
+        &scope,
+        &rustc_hash::FxHashMap::default(),
+        None,
+        &ScopeShadowing::empty(),
+        &mut Vec::new(),
+        ProjectionReductionContext::structural_transit(),
+    );
+    assert!(matches!(
+        dispatch.graph().node_data(node).as_deref(),
+        Some(SemanticNodeData::DeferredCallable(_))
+    ));
+    let view = CallableNodeView::new(&dispatch, node);
+    let signature = view
+        .signature(ProjectionReductionContext::structural_transit())
+        .expect("a deferred return cannot remove the completed call header");
+    let params = signature.raw_params();
+    assert_eq!(params.len(), 1);
+    assert!(
+        matches!(dispatch.graph().node_data(params[0].ty).as_deref(), Some(SemanticNodeData::Literal(LiteralValue::String(name))) if name == "changed")
+    );
+    let names = view.event_names(ProjectionReductionContext::structural_transit());
+    assert!(
+        matches!(names, verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::Resolved(ref names) if names.iter().map(|name| name.as_ref()).collect::<Vec<_>>() == ["changed"]),
+        "the complete event parameter belongs to the header: {names:?}"
+    );
+}
+
+fn with_deferred_utility_header(
+    symbol: &str,
+    mut function: verter_type_expr::FunctionExpr,
+    check: impl FnOnce(
+        &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+        SemanticNodeId,
+    ),
+) {
+    use verter_type_engine::resolver_core::scope_shadowing::ScopeShadowing;
+    use verter_type_engine::semantic_query::{NodeScopeId, ProjectionReductionContext};
+    let host = host();
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(CANONICAL.into()), input_id: CANONICAL.into(),
+        source: Arc::from("export function generic<T extends string>(input: T) { return opaqueCall(); } export function receiver(this: string, input: number) { return opaqueCall(); }"),
+        file_language: crate::FileLanguage::script_ts(), aliases: Vec::new(),
+    }).unwrap();
+    let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+    let scope = NodeScopeId::File {
+        canonical_id: Arc::from(CANONICAL),
+        owner,
+        whole_hash: host.shallow_file_state(CANONICAL).unwrap().whole_hash,
+        local_scope: None,
+    };
+    function.flow_return = Some(Box::new(
+        verter_type_expr::facts::FlowFunctionReturnIdentity {
+            anchor: verter_type_expr::locators::AuthoredAnchor {
+                canonical_id: Arc::from(CANONICAL),
+                owner,
+                symbol: Arc::from(symbol),
+                space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+            },
+            function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
+            overload_ordinal: 0,
+        },
+    ));
+    let _refusal = super::flow_return::flow_admission_fault_injection::Guard::arm(
+        &host.flow_fault_injection.zero_obligation_budget,
+    );
+    let node = dispatch.shallow_lower_type_expr_with_context_for_tests(
+        &verter_type_expr::TypeExpr::Function(Arc::new(function)),
+        &rustc_hash::FxHashMap::default(),
+        &scope,
+        &rustc_hash::FxHashMap::default(),
+        None,
+        &ScopeShadowing::empty(),
+        &mut Vec::new(),
+        ProjectionReductionContext::structural_transit(),
+    );
+    assert!(matches!(
+        dispatch.graph().node_data(node).as_deref(),
+        Some(SemanticNodeData::DeferredCallable(_))
+    ));
+    check(&dispatch, node);
+}
+
+#[test]
+fn deferred_parameters_still_instantiate_their_own_base_constraint() {
+    use verter_type_expr::{FunctionExpr, PrimitiveName, TypeExpr, TypeParam};
+    let function = FunctionExpr::synthetic(
+        vec![verter_type_expr::FunctionParam::synthetic(
+            Some("input".into()),
+            TypeExpr::Ref {
+                name: Arc::from("T"),
+                type_arguments: Arc::from([]),
+            },
+            false,
+            false,
+        )],
+        None,
+        vec![TypeParam {
+            name: "T".into(),
+            constraint: Some(Arc::new(TypeExpr::Primitive(PrimitiveName::String))),
+            default: None,
+            is_const: false,
+        }],
+    );
+    with_deferred_utility_header("generic", function, |dispatch, node| {
+        let tuple = dispatch
+            .resolve_signature_utility(
+                super::signature_utility::SignatureUtility::Parameters,
+                node,
+                verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit(
+                ),
+            )
+            .unwrap();
+        let data = dispatch.graph().node_data(tuple).unwrap();
+        let SemanticNodeData::Tuple { elements, .. } = data.as_ref() else {
+            panic!("Parameters returns a tuple")
+        };
+        assert!(
+            matches!(
+                dispatch.graph().node_data(elements[0].value).as_deref(),
+                Some(SemanticNodeData::Primitive(PrimitiveKind::String))
+            ),
+            "a deferred return cannot leak the signature's own binder: {data:?}"
+        );
+    });
+}
+
+#[test]
+fn omit_this_parameter_rebuilds_a_deferred_header_without_its_receiver() {
+    use verter_type_expr::{FunctionExpr, PrimitiveName, TypeExpr};
+    let function = FunctionExpr::synthetic(
+        vec![
+            verter_type_expr::FunctionParam::synthetic(
+                Some("this".into()),
+                TypeExpr::Primitive(PrimitiveName::String),
+                false,
+                false,
+            ),
+            verter_type_expr::FunctionParam::synthetic(
+                Some("input".into()),
+                TypeExpr::Primitive(PrimitiveName::Number),
+                false,
+                false,
+            ),
+        ],
+        None,
+        Vec::new(),
+    );
+    with_deferred_utility_header("receiver", function, |dispatch, node| {
+        let output = dispatch
+            .resolve_signature_utility(
+                super::signature_utility::SignatureUtility::OmitThisParameter,
+                node,
+                verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit(
+                ),
+            )
+            .unwrap();
+        let data = dispatch.graph().node_data(output).unwrap();
+        let SemanticNodeData::DeferredCallable(callable) = data.as_ref() else {
+            panic!("the return remains deferred")
+        };
+        let _ = callable;
+        let view =
+            verter_type_engine::project_semantic_dispatch::callable_view::CallableNodeView::new(
+                dispatch, output,
+            );
+        let signature = view
+            .signature(
+                verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit(
+                ),
+            )
+            .unwrap();
+        let params = signature.raw_params();
+        assert_eq!(
+            params.len(),
+            1,
+            "OmitThisParameter must remove the receiver from a deferred header"
+        );
+        assert_eq!(params[0].name.as_deref(), Some("input"));
+    });
+}
+
+#[test]
+fn a_deferred_header_still_classifies_as_a_runtime_function() {
+    with_deferred_utility_header(
+        "generic",
+        verter_type_expr::FunctionExpr::synthetic(Vec::new(), None, Vec::new()),
+        |dispatch, node| {
+            let output = dispatch.classify_broad_runtime_transient(node);
+            let verter_type_engine::semantic_query::QueryResult::Value(
+                verter_type_engine::semantic_query::SemanticQueryValue::BroadRuntime(value),
+            ) = output.result
+            else {
+                panic!("a callable header has a runtime classification")
+            };
+            assert_eq!(
+                value.kinds(),
+                &[verter_type_engine::semantic_query::BroadRuntimeKind::Function],
+                "body deferral cannot hide a completed callable header"
+            );
+        },
     );
 }

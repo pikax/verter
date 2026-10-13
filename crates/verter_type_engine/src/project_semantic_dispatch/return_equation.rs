@@ -223,7 +223,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 crate::semantic_query::PartialReasonSet::default(),
                             );
                         }
-                        crate::semantic_query::FactStatus::Approximate(causes)
+                        crate::semantic_query::FactStatus::Approximate(causes, _)
                         | crate::semantic_query::FactStatus::Unavailable(causes) => {
                             self.fold_cache_read_rails(true, true, causes.get())
                         }

@@ -303,7 +303,13 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// route.
     fn drive_call<'e>(&mut self, mut flight: CallInFlight<'e>) -> CallStep<'e> {
         let enclosing = self.call_drive.replace(flight.drive);
-        let value = self.eval_call_value(flight.call, flight.site, flight.arguments);
+        let driver = self.dispatch;
+        let read = driver
+            .observe_read(|| self.eval_call_value(flight.call, flight.site, flight.arguments));
+        // The call is a required value dependency, including a no-surface
+        // result represented by this position's gap. Selected siblings own
+        // separate value observations and need not adopt this dependency.
+        let value = driver.adopt_read(read).unwrap_or(Positional::Unmodeled);
         flight.drive = std::mem::replace(&mut self.call_drive, enclosing)
             .expect("the call's drive stays installed while its value computes");
         if let Some(callee) = flight.drive.demand.take() {

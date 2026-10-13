@@ -207,7 +207,8 @@ fn an_undegraded_value_over_a_partial_read_is_never_exact() {
         FactStatus::Approximate(
             crate::semantic_query::surface_resolution::NonEmptyReasons::of(
                 PartialReason::FlowReturnUnverified
-            )
+            ),
+            None,
         )
     );
 }
@@ -259,5 +260,52 @@ fn a_cancelled_or_torn_read_aborts_instead_of_answering() {
             ),
             Err(abort)
         );
+    }
+}
+
+#[test]
+fn independent_adoption_preserves_observed_value_partiality() {
+    let graph = SemanticGraphStore::new();
+    let node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let key = super::super::dispatch_txn::dispatch_txn_tests::flow_return_key();
+    for partial in [false, true] {
+        let result = FlowReturnResult::new(
+            &graph,
+            node,
+            NormalCompletion::minted_for_fixture(false),
+            None,
+        )
+        .with_independent_member(super::super::flow_return::ExactMemberValue::for_tests(
+            key.clone(),
+            node,
+        ));
+        let completeness = if partial {
+            ResultCompleteness::partial(PartialReasonSet::MISSING_DEPENDENCY)
+        } else {
+            ResultCompleteness::Complete
+        };
+        let read = super::ObservedRead {
+            value: FlowReturnStep::Complete(result),
+            abort: None,
+            completeness,
+            frame: super::BuildLocalTaint {
+                result_is_partial: partial,
+                partial_reasons: completeness.reasons(),
+                cache_suppress: true,
+                ..Default::default()
+            },
+            degraded_member_reads: u32::from(partial),
+        }
+        .into_independent_member(&key)
+        .unwrap();
+        assert_eq!(read.value, node);
+        assert_eq!(
+            read.completeness, completeness,
+            "an independent certificate cannot discard observed value partiality"
+        );
+        assert_eq!(read.frame.result_is_partial, partial);
+        assert_eq!(read.frame.partial_reasons, completeness.reasons());
+        assert_eq!(read.degraded_member_reads, u32::from(partial));
+        assert!(read.frame.cache_suppress);
     }
 }

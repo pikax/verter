@@ -599,7 +599,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         is_const: parameter.is_const,
                     })
                     .collect();
-                graph.intern_preserving_scope(
+                let signature = graph.intern_preserving_scope(
                     node,
                     SemanticNodeData::Signature {
                         kind: *kind,
@@ -622,9 +622,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                     source.clone(),
                                 )
                             }
-                            crate::semantic_query::SignatureReturnCarrier::DeferredFlow(source) => {
-                                crate::semantic_query::SignatureReturnCarrier::DeferredFlow(source.clone())
-                            }
+                            crate::semantic_query::SignatureReturnCarrier::DeferredFlow(_)
+                    | crate::semantic_query::SignatureReturnCarrier::EvaluatedFlow(_) => return_carrier.clone(),
                         },
                         signature_span: *signature_span,
                         return_type_span: *return_type_span,
@@ -632,7 +631,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             .map(|predicate| predicate.map_type(|ty| projected(memo, ty, context))),
                         is_abstract: *is_abstract,
                     },
-                )
+                );
+                if context.mode == crate::semantic_query::ProjectionMode::Expanded {
+                    self.materialize_returned_callable(signature)
+                } else {
+                    signature
+                }
             }
             SemanticNodeData::KeyOf { base } => {
                 let base_id = projected(memo, *base, context);

@@ -144,6 +144,23 @@ impl DeferredFlowReturnSource {
         self
     }
 
+    /// A consumed own clause specializes its deferred result at this boundary;
+    /// uninstantiated headers never capture their own binders as lexical images.
+    pub(crate) fn with_instantiated_clause(
+        self,
+        bindings: impl IntoIterator<Item = (std::sync::Arc<str>, crate::semantic_query::SemanticNodeId)>,
+    ) -> Self {
+        let mut images = self.bindings.to_vec();
+        for (name, image) in bindings {
+            if let Some(binding) = images.iter_mut().find(|(bound, _)| *bound == name) {
+                binding.1 = image;
+            } else {
+                images.push((name, image));
+            }
+        }
+        self.with_bindings(images)
+    }
+
     pub(crate) fn receiver(&self) -> Option<crate::semantic_query::SemanticNodeId> {
         self.receiver
     }
@@ -249,6 +266,64 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let Some(data) = graph.node_data(node) else {
             return node;
         };
+        if let SemanticNodeData::DeferredCallable(callable) = data.as_ref() {
+            let callable = callable.clone();
+            let parts =
+                callable.parts(&crate::semantic_query::ResolveOverloadSetConsumer::witness());
+            let carrier = parts.return_carrier.clone();
+            let mut inferred_predicate = None;
+            let returned = match carrier.result_source() {
+                crate::semantic_query::SignatureResultSource::Declared(node) => *node,
+                crate::semantic_query::SignatureResultSource::Function(source) => {
+                    let Some(identity) = carrier.flow_identity() else {
+                        return node;
+                    };
+                    let key = self.flow_return_key_for(identity);
+                    if self
+                        .dispatch_txn
+                        .borrow()
+                        .reentry()
+                        .find(&super::dispatch_txn::ObligationIdentity::FlowReturn(key))
+                        .is_some()
+                    {
+                        return node;
+                    }
+                    match self.execute_function_return_source(
+                        source,
+                        identity.anchor.canonical_id.as_ref(),
+                    ) {
+                        super::flow_return::FunctionReturnNode::Flow(result) => match result
+                            .fact()
+                            .status()
+                        {
+                            FactStatus::Complete | FactStatus::Approximate(_, _) => {
+                                inferred_predicate = result.inferred_predicate();
+                                self.apply_signature_return_source(&carrier, result.return_type())
+                            }
+                            FactStatus::Unavailable(causes) => {
+                                self.opaque(QueryError::IncompleteSemanticOperand {
+                                    reasons: causes.get(),
+                                })
+                            }
+                        },
+                        super::flow_return::FunctionReturnNode::Aborted(abort) => {
+                            self.opaque(QueryError::ExecutionAborted(abort))
+                        }
+                        _ => self.opaque(QueryError::IncompleteSemanticOperand {
+                            reasons:
+                                crate::semantic_query::PartialReasonSet::FLOW_RETURN_NO_SURFACE,
+                        }),
+                    }
+                }
+            };
+            let mut signature = callable.into_general_signature(returned);
+            if let SemanticNodeData::Signature { predicate, .. } = &mut signature {
+                if predicate.is_none() {
+                    *predicate = inferred_predicate;
+                }
+            }
+            return graph.intern_preserving_scope(node, signature);
+        }
         if let SemanticNodeData::Object(surface) = data.as_ref() {
             let entries = surface
                 .entries
@@ -301,7 +376,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             source.identity().anchor.canonical_id.as_ref(),
         ) {
             super::flow_return::FunctionReturnNode::Flow(result) => match result.fact().status() {
-                FactStatus::Complete | FactStatus::Approximate(_) => {
+                FactStatus::Complete | FactStatus::Approximate(_, _) => {
                     inferred_predicate = result.inferred_predicate();
                     source.apply_result(self, result.return_type())
                 }
@@ -322,12 +397,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let SemanticNodeData::Signature {
             return_type,
             predicate,
+            return_carrier,
             ..
         } = &mut rebuilt
         else {
             unreachable!()
         };
         *return_type = returned;
+        *return_carrier = crate::semantic_query::SignatureReturnCarrier::EvaluatedFlow(source);
         if predicate.is_none() {
             *predicate = inferred_predicate;
         }
@@ -345,11 +422,69 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         value: crate::semantic_query::SemanticNodeId,
     ) -> crate::semantic_query::SemanticNodeId {
         match carrier {
-            crate::semantic_query::SignatureReturnCarrier::DeferredFlow(source) => {
+            crate::semantic_query::SignatureReturnCarrier::DeferredFlow(source)
+            | crate::semantic_query::SignatureReturnCarrier::EvaluatedFlow(source) => {
                 source.apply_result(self, value)
             }
             _ => value,
         }
+    }
+
+    /// Observe the selected value fact separately from the whole-return
+    /// completion proof. Only the producer's sealed source certificate permits
+    /// this projection; an uncertified result adopts the whole read unchanged.
+    pub(super) fn observe_flow_return_value(
+        &self,
+        key: crate::semantic_query::FlowReturnKey,
+    ) -> ObservedRead<FlowReturnStep> {
+        self.observe_read(|| {
+            let whole = self.observe_read(|| self.execute_flow_return(key.clone()));
+            let proof = match whole.value() {
+                FlowReturnStep::Complete(result) => result.independent_member(&key).cloned(),
+                _ => None,
+            };
+            if let Some(proof) = proof {
+                let mut roots = whole.frame.observed_self_roots.clone();
+                for root in proof.roots() {
+                    if !roots.contains(root) {
+                        roots.push(root.clone());
+                    }
+                }
+                self.fold_observed_frame_into_top(&BuildLocalTaint {
+                    cache_suppress: whole.frame.cache_suppress,
+                    observed_self_roots: roots,
+                    ..BuildLocalTaint::default()
+                });
+                whole.discard().unwrap_or_else(FlowReturnStep::Aborted)
+            } else {
+                whole.adopt(self).unwrap_or_else(FlowReturnStep::Aborted)
+            }
+        })
+    }
+
+    /// A key-domain demand consumes only the source's certified static keys.
+    /// Whole-return value limitations remain on the separate value fact.
+    pub(super) fn observe_flow_return_key_domain(
+        &self,
+        key: crate::semantic_query::FlowReturnKey,
+    ) -> ObservedRead<FlowReturnStep> {
+        self.observe_read(|| {
+            let whole = self.observe_read(|| self.execute_flow_return(key.clone()));
+            let domain = match whole.value() {
+                FlowReturnStep::Complete(result) => result.exact_return_keys().cloned(),
+                _ => None,
+            };
+            if let Some(domain) = domain {
+                self.fold_observed_frame_into_top(&BuildLocalTaint {
+                    cache_suppress: whole.frame.cache_suppress,
+                    observed_self_roots: domain.roots().to_vec(),
+                    ..BuildLocalTaint::default()
+                });
+                whole.discard().unwrap_or_else(FlowReturnStep::Aborted)
+            } else {
+                whole.adopt(self).unwrap_or_else(FlowReturnStep::Aborted)
+            }
+        })
     }
 
     /// Signature construction owns its source; consumers demand its value.
@@ -396,6 +531,26 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             bindings: std::sync::Arc::from([]),
             receiver: None,
         })
+    }
+
+    /// A failed value projection can produce a contained diagnostic instead.
+    /// That diagnostic retains source roots and reuse refusal, but consumes no
+    /// provisional value. Successful projections adopt all their observations.
+    pub fn project_semantic_attempt<T, E>(
+        &self,
+        projection: impl FnOnce() -> Result<T, E>,
+    ) -> Result<Result<T, E>, ExecutionAbort> {
+        let read = self.observe_read(projection);
+        if read.value().is_ok() {
+            read.adopt(self)
+        } else {
+            self.fold_observed_frame_into_top(&BuildLocalTaint {
+                cache_suppress: read.frame.cache_suppress,
+                observed_self_roots: read.frame.observed_self_roots.clone(),
+                ..BuildLocalTaint::default()
+            });
+            read.discard()
+        }
     }
 
     /// Run `read` with its observations held aside: the request sticky is
@@ -501,6 +656,13 @@ impl ObservedRead<FlowReturnStep> {
         dispatch: &ProjectSemanticDispatch<'_, C>,
         key: &crate::semantic_query::FlowReturnKey,
     ) -> Result<crate::semantic_query::SemanticNodeId, ExecutionAbort> {
+        self.into_independent_member(key)?.adopt(dispatch)
+    }
+
+    fn into_independent_member(
+        self,
+        key: &crate::semantic_query::FlowReturnKey,
+    ) -> Result<ObservedRead<crate::semantic_query::SemanticNodeId>, ExecutionAbort> {
         if let Some(abort) = self.abort {
             crate::request_context::observe_execution_abort(abort);
             return Err(abort);
@@ -511,18 +673,21 @@ impl ObservedRead<FlowReturnStep> {
         let proof = result
             .independent_member(key)
             .expect("only a separately certified value can be adopted");
-        let mut roots = self.frame.observed_self_roots;
+        let mut roots = self.frame.observed_self_roots.clone();
         for root in proof.roots() {
             if !roots.contains(root) {
                 roots.push(root.clone());
             }
         }
-        dispatch.fold_observed_frame_into_top(&BuildLocalTaint {
-            cache_suppress: self.frame.cache_suppress,
-            observed_self_roots: roots,
-            ..BuildLocalTaint::default()
-        });
-        Ok(result.return_type())
+        let mut frame = self.frame;
+        frame.observed_self_roots = roots;
+        Ok(ObservedRead {
+            value: result.return_type(),
+            abort: None,
+            completeness: self.completeness,
+            frame,
+            degraded_member_reads: self.degraded_member_reads,
+        })
     }
 
     /// The fact this flow-return read established. See the module

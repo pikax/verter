@@ -984,6 +984,7 @@ impl<'s> ProducerLease<'s> {
         };
         let (result, fact_status) =
             crate::project_semantic_dispatch::projection_fact::adopt_projection_result(
+                store,
                 prepared.key(),
                 result,
                 if result_is_partial {

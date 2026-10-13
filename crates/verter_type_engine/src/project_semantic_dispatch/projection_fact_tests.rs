@@ -37,8 +37,8 @@ fn partial() -> ResultCompleteness {
 #[test]
 fn a_complete_read_is_exact_for_every_projection() {
     let (shallow, key_of, expanded) = keys();
-    for key in [&shallow, &key_of, &expanded] {
-        let fact = projection_fact(key, Some(1), ResultCompleteness::Complete, None);
+    for _key in [&shallow, &key_of, &expanded] {
+        let fact = projection_fact(Some(1), ResultCompleteness::Complete, None);
         assert_eq!(fact, FactResult::Complete(1));
     }
 }
@@ -46,14 +46,13 @@ fn a_complete_read_is_exact_for_every_projection() {
 #[test]
 fn a_partial_member_or_key_projection_is_a_presence_only_approximation() {
     let (shallow, key_of, _) = keys();
-    for key in [&shallow, &key_of] {
+    for _key in [&shallow, &key_of] {
         let fact = projection_fact(
-            key,
             Some(1),
             partial(),
             Some(super::ProjectionInterpretation::PresenceOnly),
         );
-        assert!(matches!(fact.status(), FactStatus::Approximate(_)));
+        assert!(matches!(fact.status(), FactStatus::Approximate(_, _)));
         assert_eq!(fact.exact(), None);
     }
 }
@@ -61,16 +60,16 @@ fn a_partial_member_or_key_projection_is_a_presence_only_approximation() {
 #[test]
 fn a_partial_value_projection_has_no_usable_representation() {
     let (shallow, key_of, expanded) = keys();
-    for key in [&shallow, &key_of, &expanded] {
-        let fact = projection_fact(key, Some(1), partial(), None);
+    for _key in [&shallow, &key_of, &expanded] {
+        let fact = projection_fact(Some(1), partial(), None);
         assert!(matches!(fact.status(), FactStatus::Unavailable(_)));
     }
 }
 
 #[test]
 fn a_build_without_a_value_is_unavailable_even_when_the_read_was_clean() {
-    let (shallow, ..) = keys();
-    let fact = projection_fact::<u8>(&shallow, None, ResultCompleteness::Complete, None);
+    let (_shallow, ..) = keys();
+    let fact = projection_fact::<u8>(None, ResultCompleteness::Complete, None);
     assert!(matches!(fact.status(), FactStatus::Unavailable(_)));
 }
 
@@ -89,16 +88,41 @@ fn cancellation_and_torn_views_abort_instead_of_publishing() {
 
 #[test]
 fn positional_guarantees_keep_a_value_with_the_same_causes_as_an_unavailable_one() {
-    let (_, _, expanded) = keys();
+    let (_, _, _expanded) = keys();
     let fact = projection_fact(
-        &expanded,
         Some(1),
         partial(),
         Some(super::ProjectionInterpretation::Positional),
     );
     assert!(matches!(fact, FactResult::Approximate { value: 1, .. }));
     assert!(matches!(
-        projection_fact(&expanded, Some(1), partial(), None),
+        projection_fact(Some(1), partial(), None),
         FactResult::Unavailable { .. }
     ));
+}
+
+#[test]
+fn typed_root_failures_cannot_be_certified_by_a_positional_forwarder() {
+    let graph = crate::semantic_query_memo::SemanticGraphStore::new();
+    let (_, _, key) = keys();
+    for error in [
+        crate::semantic_query::QueryError::Miss,
+        crate::semantic_query::QueryError::UnmodeledPosition,
+    ] {
+        let node = graph.intern_node(crate::semantic_query::SemanticNodeData::Opaque(error));
+        let (result, status) = super::adopt_projection_result(
+            &graph,
+            &key,
+            crate::semantic_query::QueryResult::Value(
+                crate::semantic_query::SemanticQueryValue::TypeNode(node),
+            ),
+            ResultCompleteness::Complete,
+            Some(super::ProjectionInterpretation::Positional),
+        );
+        assert!(matches!(status, FactStatus::Unavailable(_)));
+        assert!(matches!(
+            result,
+            crate::semantic_query::QueryResult::Error(_)
+        ));
+    }
 }

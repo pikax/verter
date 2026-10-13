@@ -142,6 +142,8 @@ struct ConditionalOperands {
     /// The check the absorbing lattice rows read.
     absorbed_check: SemanticNodeId,
     extends: SemanticNodeId,
+    /// Every tuple position was exact or its own typed checker recovery.
+    checker_recovery: bool,
 }
 
 /// How the decision procedure reaches a conditional's branches.
@@ -419,6 +421,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             }
         };
         if !operands_complete
+            && !operands.checker_recovery
             && !self.is_conditional_checker_recovery(operands.absorbed_check)
             && !self.is_conditional_checker_recovery(operands.extends)
         {
@@ -519,8 +522,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             ConditionalBranchSelection::True | ConditionalBranchSelection::False => {
                 let take_true = selection == ConditionalBranchSelection::True;
                 let winner = branches.branch(self, take_true);
-                let mut output =
-                    self.commit_conditional_winner(check, extends, winner, selection, infer);
+                let mut output = self.commit_conditional_winner(
+                    check,
+                    extends,
+                    winner,
+                    selection,
+                    infer,
+                    operands.checker_recovery,
+                );
                 branches.committed(self, take_true, &mut output);
                 output
             }
@@ -572,12 +581,94 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let declared_check = self
             .conditional_operand_extreme(declared_check)
             .unwrap_or(declared_check);
+        let check_tuple = self.conditional_tuple_operand(check);
+        let extends_tuple = self.conditional_tuple_operand(extends);
+        let recovery = check_tuple.is_some_and(|(_, recovered)| recovered)
+            || extends_tuple.is_some_and(|(_, recovered)| recovered);
+        let constructed = |original, tuple: Option<(SemanticNodeId, bool)>| {
+            tuple.map(|(node, _)| node).or_else(|| {
+                if matches!(
+                    self.graph().node_data(original).as_deref(),
+                    Some(SemanticNodeData::Tuple { .. })
+                ) {
+                    None
+                } else {
+                    self.resolved_conditional_operand(original)
+                }
+            })
+        };
+        let pair = recovery
+            .then(|| {
+                Some((
+                    constructed(check, check_tuple)?,
+                    constructed(extends, extends_tuple)?,
+                ))
+            })
+            .flatten();
+        let checker_recovery = pair.is_some();
+        let (check, extends) = pair.unwrap_or((check, extends));
         ConditionalOperands {
+            checker_recovery,
             check,
             declared_check,
             absorbed_check: self.indexed_access_where_written(declared_check),
             extends,
         }
+    }
+
+    /// Normalize every tuple position through the shared demand. A typed
+    /// recovery is usable here only when all other positions are exact;
+    /// an arbitrary partial value supplies no comparison evidence.
+    fn conditional_tuple_operand(&self, node: SemanticNodeId) -> Option<(SemanticNodeId, bool)> {
+        self.probe_optional(|| self.probe_conditional_tuple_operand(node))
+    }
+
+    fn probe_conditional_tuple_operand(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<(SemanticNodeId, bool)> {
+        let data = self.graph().node_data(node)?;
+        let SemanticNodeData::Tuple { elements, readonly } = data.as_ref() else {
+            return None;
+        };
+        let mut recovered = false;
+        let mut normalized = Vec::with_capacity(elements.len());
+        for element in elements.iter() {
+            let outcome = self.normalize_node_for_structural_fact_demand(
+                element.value,
+                crate::semantic_query::ProjectionReductionContext::structural_transit(),
+            );
+            let value = match outcome {
+                super::evaluate::StructuralFactDemandOutcome::Complete(value) => {
+                    let constructed = self.conditional_operand_extreme(value).unwrap_or(value);
+                    recovered |= self.is_conditional_checker_recovery(constructed);
+                    constructed
+                }
+                super::evaluate::StructuralFactDemandOutcome::Recovered { node: value, .. }
+                    if self.is_conditional_checker_recovery(value) =>
+                {
+                    recovered = true;
+                    value
+                }
+                _ => return None,
+            };
+            let mut position = element.clone();
+            position.value = value;
+            normalized.push(position);
+        }
+        if !recovered {
+            return Some((node, false));
+        }
+        Some((
+            self.graph().intern_preserving_scope(
+                node,
+                SemanticNodeData::Tuple {
+                    elements: Arc::from(normalized),
+                    readonly: *readonly,
+                },
+            ),
+            true,
+        ))
     }
 
     /// The conditional kept whole: the checker's deferred type, or, for a
@@ -621,8 +712,6 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         // typed gap: the shell stands where the checker's answer should be,
         // so it is never published complete or warm-admitted.
         if selection == ConditionalBranchSelection::Undecided {
-            output.approximation =
-                Some(super::projection_fact::ProjectionInterpretation::Positional);
             output.mark_partial();
             output.cache_suppress = true;
             output.add_partial_reasons(
@@ -774,11 +863,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         // Conditional branches and their union normalization already carry
         // a bounded positional representation. Forward the adopted value,
         // including its gaps, rather than discarding its producer guarantee.
-        let approximation = matches!(
-            read.fact_status,
-            crate::semantic_query::FactStatus::Approximate(_)
-        )
-        .then_some(super::projection_fact::ProjectionInterpretation::Positional);
+        let approximation = read.fact_status.interpretation();
         let mut output = super::walk::QueryBuildOutput::from((read.value, read.dep_signature));
         output.cache_suppress = read.cache_suppress;
         output.merge_completeness(read.fact_status.completeness());
@@ -806,11 +891,20 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             extends,
         ]));
         let mut per_member = Vec::with_capacity(members.len());
+        let mut positions_complete = true;
         for &member in members.iter() {
             if self.cancellation.is_cancelled() {
                 return Some(self.cancelled_build_output());
             }
             let member_output = reduce_member(member);
+            positions_complete &= !member_output.result_is_partial()
+                || matches!(
+                    member_output.approximation,
+                    Some(
+                        super::projection_fact::ProjectionInterpretation::Positional
+                            | super::projection_fact::ProjectionInterpretation::CheckerRecovery
+                    )
+                );
             output.cache_suppress |= member_output.cache_suppress;
             output.fold_partial(member_output.result_is_partial());
             output.add_partial_reasons(member_output.partial_reasons());
@@ -833,10 +927,19 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         output.cache_suppress |= normalized.cache_suppress;
         output.fold_partial(normalized.result_is_partial());
         output.add_partial_reasons(normalized.partial_reasons());
-        output.result = normalized.result;
         // Every distributed branch produced its position; gaps remain in
         // their own branches rather than being interpreted as absent arms.
-        output.approximation = Some(super::projection_fact::ProjectionInterpretation::Positional);
+        positions_complete &= !normalized.result_is_partial()
+            || matches!(
+                normalized.approximation,
+                Some(
+                    super::projection_fact::ProjectionInterpretation::Positional
+                        | super::projection_fact::ProjectionInterpretation::CheckerRecovery
+                )
+            );
+        output.result = normalized.result;
+        output.approximation = positions_complete
+            .then_some(super::projection_fact::ProjectionInterpretation::Positional);
         Some(output)
     }
 
@@ -849,6 +952,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         winner: SemanticNodeId,
         selection: ConditionalBranchSelection,
         infer: Option<super::relation::RelationInferBindings>,
+        checker_recovery: bool,
     ) -> super::walk::QueryBuildOutput {
         if self.cancellation.is_cancelled() {
             return self.cancelled_build_output();
@@ -892,38 +996,44 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         if self.cancellation.is_cancelled() {
             return self.cancelled_build_output();
         }
-        let branch = match selection {
-            ConditionalBranchSelection::True => {
-                graph.record_branch_selection_true();
-                BranchSelection::True
-            }
-            ConditionalBranchSelection::False => {
-                graph.record_branch_selection_false();
-                BranchSelection::False
-            }
-            ConditionalBranchSelection::Deferred | ConditionalBranchSelection::Undecided => {
-                unreachable!("only decided winners are committed")
-            }
-        };
-        graph.record_origin_edge(
-            result,
-            OriginEdgeKind::ConditionalSelect,
-            Arc::from([check, extends]),
-            OriginMeta::Branch(branch),
-            fence.clone(),
-        );
-        graph.record_conditional_decided();
-        selected_output
+        if !checker_recovery {
+            let branch = match selection {
+                ConditionalBranchSelection::True => {
+                    graph.record_branch_selection_true();
+                    BranchSelection::True
+                }
+                ConditionalBranchSelection::False => {
+                    graph.record_branch_selection_false();
+                    BranchSelection::False
+                }
+                ConditionalBranchSelection::Deferred | ConditionalBranchSelection::Undecided => {
+                    unreachable!("only decided winners are committed")
+                }
+            };
+            graph.record_origin_edge(
+                result,
+                OriginEdgeKind::ConditionalSelect,
+                Arc::from([check, extends]),
+                OriginMeta::Branch(branch),
+                fence.clone(),
+            );
+            graph.record_conditional_decided();
+        }
+        let mut output = selected_output
             .unwrap_or_else(|| {
                 super::walk::QueryBuildOutput::from((QueryResult::Value(result), fence))
-                    // Selection already required exact operands and the relation
-                    // authority's exact verdict.
-                    // The completed winner retains its authored value positions.
-                    .with_positional_guarantee()
+                // Selection already required exact operands and the relation
+                // authority's exact verdict.
+                // The completed winner retains its authored value positions.
             })
             .with_observed_self_roots(
                 self.observed_self_roots_from_nodes([check, extends, winner, result]),
-            )
+            );
+        if checker_recovery && !output.completeness.is_partial() {
+            output.approximation =
+                Some(super::projection_fact::ProjectionInterpretation::CheckerRecovery);
+        }
+        output
     }
 
     /// The resolved check and its union members, or `None` when the check

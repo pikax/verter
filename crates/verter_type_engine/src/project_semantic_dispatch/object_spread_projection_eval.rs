@@ -554,6 +554,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 
     fn accessor_value(&self, signature: SemanticNodeId, getter: bool) -> SemanticNodeId {
+        let signature = if getter {
+            self.materialize_returned_callable(signature)
+        } else {
+            signature
+        };
         match self.graph().node_data(signature).as_deref() {
             Some(SemanticNodeData::Signature {
                 params,
@@ -566,6 +571,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     params.first().map_or(*return_type, |param| param.ty)
                 }
             }
+            Some(SemanticNodeData::DeferredCallable(callable)) if !getter => callable
+                .parts(&crate::semantic_query::ResolveOverloadSetConsumer::witness())
+                .params
+                .first()
+                .map_or_else(|| self.opaque(QueryError::Miss), |param| param.ty),
             _ => signature,
         }
     }

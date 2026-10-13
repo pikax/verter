@@ -61,7 +61,7 @@ fn presence_projection_keeps_its_subset_without_offering_exact_values() {
         );
         ProjectSemanticDispatch::new(&host).execute_read(key.clone())
     };
-    assert!(matches!(read.fact_status, FactStatus::Approximate(_)));
+    assert!(matches!(read.fact_status, FactStatus::Approximate(_, _)));
     let FactResult::Approximate { value, .. } = read.into_fact().unwrap() else {
         panic!("a proven presence subset must remain usable")
     };
@@ -7802,7 +7802,7 @@ fn build_conditional_distributive_per_member_subquery_has_distributive_false() {
 // C3 — real `build_project_path` ( C3)
 // ──────────────────────────────────────────────────────────────────
 
-fn simple_object(
+pub(super) fn simple_object(
     graph: &Arc<verter_type_engine::semantic_query_memo::SemanticGraphStore>,
     members: &[(&str, SemanticNodeId)],
 ) -> SemanticNodeId {

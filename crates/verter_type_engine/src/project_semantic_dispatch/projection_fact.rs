@@ -20,19 +20,9 @@ use crate::semantic_query::{
     ResultCompleteness, SemanticQueryKey, SemanticQueryValue,
 };
 
-/// The producer's bounded interpretation of its unfinished value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProjectionInterpretation {
-    /// Every carried member/key is present; omissions prove nothing.
-    PresenceOnly,
-    /// Structural lowering completed, retaining typed gaps at their positions.
-    Positional,
-    /// The typed checker-recovery outcome supplies its recovery contract.
-    CheckerRecovery,
-}
+pub use crate::semantic_query::FactInterpretation as ProjectionInterpretation;
 
 pub(crate) fn projection_fact<T>(
-    _key: &SemanticQueryKey,
     value: Option<T>,
     observed: ResultCompleteness,
     guarantee: Option<ProjectionInterpretation>,
@@ -49,6 +39,7 @@ pub(crate) fn projection_fact<T>(
 /// Adopt once, before either the owner or a follower receives the result.
 /// The compatibility summary is derived from this disposition by the read.
 pub(crate) fn adopt_projection_result(
+    graph: &crate::semantic_query_memo::SemanticGraphStore,
     key: &SemanticQueryKey,
     result: QueryResult<SemanticQueryValue>,
     observed: ResultCompleteness,
@@ -56,6 +47,21 @@ pub(crate) fn adopt_projection_result(
 ) -> (QueryResult<SemanticQueryValue>, FactStatus) {
     match result {
         QueryResult::Value(value) => {
+            if let SemanticQueryValue::TypeNode(node) = &value {
+                if let Some(crate::semantic_query::SemanticNodeData::Opaque(error)) =
+                    graph.node_data(*node).as_deref()
+                {
+                    if let Some(abort) = ExecutionAbort::from_query_error(error) {
+                        crate::request_context::observe_execution_abort(abort);
+                        return (
+                            QueryResult::Error(error.clone()),
+                            FactStatus::Unavailable(
+                                NonEmptyReasons::from_query_error(error).with(observed.reasons()),
+                            ),
+                        );
+                    }
+                }
+            }
             let fact = match value {
                 SemanticQueryValue::FlowReturn(value) => {
                     let status = value.fact().status();
@@ -72,9 +78,28 @@ pub(crate) fn adopt_projection_result(
                 SemanticQueryValue::BroadRuntime(value) if !observed.is_partial() => {
                     value.into_fact().map(SemanticQueryValue::BroadRuntime)
                 }
-                value => projection_fact(key, Some(value), observed, guarantee),
+                SemanticQueryValue::TypeNode(node) => match graph.node_data(node).as_deref() {
+                    Some(crate::semantic_query::SemanticNodeData::Opaque(error))
+                        if matches!(
+                            super::query_error_disposition::classify_query_error(error).disposition,
+                            super::query_error_disposition::QueryErrorDisposition::OptionalAbsence
+                                | super::query_error_disposition::QueryErrorDisposition::Partial
+                                | super::query_error_disposition::QueryErrorDisposition::Failure
+                        ) =>
+                    {
+                        FactResult::unavailable(
+                            NonEmptyReasons::from_query_error(error).with(observed.reasons()),
+                        )
+                    }
+                    _ => projection_fact(
+                        Some(SemanticQueryValue::TypeNode(node)),
+                        observed,
+                        guarantee,
+                    ),
+                },
+                value => projection_fact(Some(value), observed, guarantee),
             };
-            let status = fact.status();
+            let status = fact.status().with_interpretation(guarantee);
             let result = match fact {
                 FactResult::Complete(value) | FactResult::Approximate { value, .. } => {
                     QueryResult::Value(value)
@@ -123,6 +148,7 @@ pub(crate) fn adopt_projection_result(
 impl<T> QueryBuildOutput<T> {
     /// Construct a completed positional source in controlled producer fixtures.
     #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
     pub fn with_positional_guarantee_for_tests(self) -> Self {
         self.with_positional_guarantee()
     }

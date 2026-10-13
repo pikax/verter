@@ -1089,7 +1089,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // Raw-fallback / synthetic-binding carriers pass through this
             // reducer unchanged — the dispatch resolves them as a whole.
             | SemanticNodeData::RawFallback { .. }
-            | SemanticNodeData::DeferredCallable(_)
             | SemanticNodeData::SyntheticBinding { .. } => node,
 
             // Unresolved bare-name / dynamic-import reference carriers: a
@@ -1567,6 +1566,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 rebuild_tuple(self, node, elements, *readonly, &state.mapping, context)
                     .unwrap_or(node)
             }
+            SemanticNodeData::DeferredCallable(_) => {
+                if is_whole_surface_published(context) {
+                    self.materialize_returned_callable(node)
+                } else {
+                    node
+                }
+            }
             SemanticNodeData::Signature {
                 kind,
                 params,
@@ -1705,6 +1711,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
             QueryResult::Recursive(_id) => node,
+            QueryResult::Error(error @ QueryError::IncompleteSemanticOperand { .. }) => {
+                // This demanded reduction completed without a usable value.
+                // Preserve its typed failure instead of republishing the
+                // authored subject as if it were a deliberate carrier stop.
+                self.graph()
+                    .intern_preserving_scope(node, SemanticNodeData::Opaque(error))
+            }
             QueryResult::Error(_) => node,
         };
 
@@ -2094,9 +2107,8 @@ fn rebuild_function<C: crate::resolver_core::ResolverCapabilities>(
                 crate::semantic_query::SignatureReturnCarrier::Function(source) => {
                     crate::semantic_query::SignatureReturnCarrier::Function(source)
                 }
-                crate::semantic_query::SignatureReturnCarrier::DeferredFlow(source) => {
-                    crate::semantic_query::SignatureReturnCarrier::DeferredFlow(source)
-                }
+                other @ (crate::semantic_query::SignatureReturnCarrier::DeferredFlow(_)
+                | crate::semantic_query::SignatureReturnCarrier::EvaluatedFlow(_)) => other,
             },
             signature_span,
             return_type_span,
@@ -4325,9 +4337,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> OpenWalk<'a, C> {
     /// Bounded ONE-HOP reduction fallback behind the builtin registry rule.
     ///
     /// Resolves a `__builtin__` instantiation the per-utility output-key
-    /// rule could not prove closed through the ONE shared structural-fact
-    /// demand ([`ProjectSemanticDispatch::normalize_node_for_structural_fact_demand`]
-    /// — the residual-`InstantiationRef` `Instantiate` hop: bounded,
+    /// rule could not prove closed through a shallow source-domain demand
+    /// (`ProjectPath` — the residual-`InstantiationRef` `Instantiate` hop: bounded,
     /// fail-closed, dep-signature facts recorded into the active tracer),
     /// then classifies the REDUCED node with this same walk at the
     /// key-domain position. Returns `false` (not provably closed) on a
@@ -4345,15 +4356,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> OpenWalk<'a, C> {
             return false;
         }
         self.budget -= 1;
-        let Some(reduced) = self
-            .dispatch
-            .normalize_node_for_structural_fact_demand(
-                node,
-                ProjectionReductionContext::structural_transit(),
-            )
-            .into_complete_node()
-        else {
-            return false;
+        // Key closure consumes a source domain, not its member values.
+        // A partial presence subset alone cannot prove a closed domain.
+        let read = self.dispatch.execute_read(SemanticQueryKey::ProjectPath {
+            base: node,
+            path: Arc::from([]),
+            context: ProjectionReductionContext::published(ProjectionMode::Shallow),
+        });
+        let reduced = match read.value {
+            QueryResult::Value(reduced) if read.fact_status.is_complete() => reduced,
+            _ => return false,
         };
         if reduced == node {
             return false;

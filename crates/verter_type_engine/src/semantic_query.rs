@@ -90,7 +90,8 @@ pub mod fact_result;
 #[cfg(test)]
 mod fact_result_tests;
 pub use fact_result::{
-    root_narrowing_fact, summarize, ExecutionAbort, FactResult, FactStatus, MemberDomain,
+    root_narrowing_fact, summarize, ExecutionAbort, FactInterpretation, FactResult, FactStatus,
+    MemberDomain,
 };
 pub mod outcome;
 pub mod stable_key;
@@ -2235,6 +2236,8 @@ pub enum SignatureReturnCarrier {
     Function(verter_type_expr::facts::FunctionReturnSource),
     /// An owned body source whose return value has not been demanded.
     DeferredFlow(DeferredFlowReturnSource),
+    /// An evaluated return slot whose owned source still supplies later body recipes.
+    EvaluatedFlow(DeferredFlowReturnSource),
 }
 
 /// The existing return authority, borrowed for a value demand or body recipe.
@@ -2248,7 +2251,27 @@ impl SignatureReturnCarrier {
         match self {
             Self::Declared(node) => SignatureResultSource::Declared(node),
             Self::Function(source) => SignatureResultSource::Function(source),
-            Self::DeferredFlow(source) => SignatureResultSource::Function(source.source()),
+            Self::DeferredFlow(source) | Self::EvaluatedFlow(source) => {
+                SignatureResultSource::Function(source.source())
+            }
+        }
+    }
+
+    pub(crate) fn owned_flow_source(&self) -> Option<&DeferredFlowReturnSource> {
+        match self {
+            Self::DeferredFlow(source) | Self::EvaluatedFlow(source) => Some(source),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn map_source_images(
+        &self,
+        map: impl FnMut(SemanticNodeId) -> SemanticNodeId,
+    ) -> Option<Self> {
+        match self {
+            Self::DeferredFlow(source) => Some(Self::DeferredFlow(source.map_images(map))),
+            Self::EvaluatedFlow(source) => Some(Self::EvaluatedFlow(source.map_images(map))),
+            _ => None,
         }
     }
 
@@ -4450,8 +4473,12 @@ pub(crate) struct KnownKeyAccessor<'a> {
 impl KnownKeyAccessor<'_> {
     /// The accessor as the one PROPERTY every reader sees: its read value
     /// ([`Self::read_value`]), `readonly` when there is no setter.
-    pub(crate) fn property_member(&self, graph: &impl NodeRead) -> Option<SurfaceMember> {
-        let value = self.read_value(graph)?;
+    pub(crate) fn property_member(
+        &self,
+        graph: &impl NodeRead,
+        materialize: impl FnOnce(SemanticNodeId) -> SemanticNodeId,
+    ) -> Option<SurfaceMember> {
+        let value = self.read_value(graph, materialize)?;
         let declared = self.getter.or(self.setter)?;
         Some(SurfaceMember {
             value,
@@ -4466,20 +4493,24 @@ impl KnownKeyAccessor<'_> {
     /// The accessor's VALUE type as a read sees it: the getter's return,
     /// else the setter's parameter. `None` when the accessor's signature
     /// carries neither.
-    pub(crate) fn read_value(&self, graph: &impl NodeRead) -> Option<SemanticNodeId> {
+    pub(crate) fn read_value(
+        &self,
+        graph: &impl NodeRead,
+        materialize: impl FnOnce(SemanticNodeId) -> SemanticNodeId,
+    ) -> Option<SemanticNodeId> {
         if let Some(getter) = self.getter {
-            return match graph.node_data(getter.value).as_deref() {
+            return match graph.node_data(materialize(getter.value)).as_deref() {
                 Some(SemanticNodeData::Signature { return_type, .. }) => Some(*return_type),
                 _ => None,
             };
         }
         let setter = self.setter?;
-        match graph.node_data(setter.value).as_deref() {
-            Some(SemanticNodeData::Signature { params, .. }) => {
-                split_this_receiver(params).1.first().map(|param| param.ty)
-            }
-            _ => None,
-        }
+        let data = graph.node_data(setter.value)?;
+        let header = data.callable_header(&ResolveOverloadSetConsumer::witness())?;
+        split_this_receiver(header.params)
+            .1
+            .first()
+            .map(|param| param.ty)
     }
 }
 
@@ -6302,7 +6333,7 @@ impl BroadRuntimeClassification {
     pub fn into_fact(self) -> FactResult<Self> {
         match self.status {
             FactStatus::Complete => FactResult::complete(self),
-            FactStatus::Approximate(causes) => FactResult::approximate(self, causes),
+            FactStatus::Approximate(causes, _) => FactResult::approximate(self, causes),
             FactStatus::Unavailable(causes) => FactResult::unavailable(causes),
         }
     }

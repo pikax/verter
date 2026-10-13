@@ -81,9 +81,9 @@ codes and incidental markers elsewhere in a value:
   types. A short structural walk cannot claim this guarantee.
 - A typed undecided conditional preserves its operands and branch carriers as
   a positional gap; only exact conditional readings can select a branch.
-- A connected-demand refusal can retain the addressed type's source and operands
-  as a suspended continuation at that position, never as its evaluated answer.
-  Unsupported demands with no such carrier are unavailable.
+- A stopped connected demand is Unavailable. Its addressed source may remain
+  in internal diagnostic state, but an unevaluated continuation establishes no
+  positional guarantee and is never offered as a usable value.
 - A root `CheckerRecovery` outcome carries the checker's explicit recovery and
   diagnostic, including TS2589/TS2590; an arbitrary budget reason does not.
 - An independently evaluated flow return retains the guarantee described above,
@@ -97,7 +97,12 @@ codes and incidental markers elsewhere in a value:
   interpretation and is Unavailable.
 
 Conditional selection, runtime classification and other proof consumers accept
-only `Complete`. Discarded probes contribute no quality to an independently
+only `Complete`. `FactStatus::Approximate` carries the producer's
+`FactInterpretation` through cold delivery, retained reads and singleflight
+followers. Forwarders preserve it; distribution may construct a positional
+representation only when every adopted arm has completed positional structure
+or explicit checker recovery. A presence-only child cannot establish that.
+Discarded probes contribute no quality to an independently
 derived answer; adopted incomplete dependencies degrade it. Execution validity
 is non-discardable and supersedes every approximation.
 
@@ -119,22 +124,45 @@ The relation's own observed dependencies must also be complete before a
 verdict selects a branch: nested member values may first be demanded after
 operand normalization. An incomplete relation retains the conditional shell
 and its adopted causes, rather than committing an approximate winner.
-The relation producer's typed comparison refusal for that exact operand pair
-may supply the checker's explicit false recovery. The conditional propagates
+The relation producer grants checker recovery only at its decided root close,
+when the payload is false and the typed comparison refusal names that exact
+operand pair. Inherited diagnostics cannot authorize a different verdict, and
+a mixed close with unproven flow evidence supplies no relation interpretation.
+The exact pair's refusal may supply the checker's explicit false recovery. The conditional propagates
 the authored false value as Approximate with the refusal diagnostic, without
 publishing a `ConditionalSelect` proof or counting an exact branch decision.
 
+Tuple operand construction can retain a checker recovery only after every
+position normalizes through the shared demand to an exact answer or its own
+typed root recovery. The resulting checker-selected value is Approximate;
+it emits no branch-selection proof. An unsupported partial position cannot
+supply that guarantee.
+
 ### Signature source and selected member evidence
+
+Expanded signature projection demands a deferred body return in its declaration
+environment and applies the captured lexical images once. Shallower projection
+keeps the source without demanding its value. A signature with an absent return
+source has no owned body to defer: strict source publication must still reject
+its interior miss.
 
 Signature construction owns a return source. Its shared optional eager probe
 retains a value only when the captured value observations are complete and
 the payload is complete or supplies a separately certified exact source value.
 A declined probe constructs the opaque `DeferredFlowReturnSource`
-token and `SignatureReturnCarrier::DeferredFlow`; its provisional return slot
-is not an evaluated gap. Values retained by signature construction use `Function(Flow)` and
+token and `SignatureReturnCarrier::DeferredFlow` inside the sealed
+`DeferredCallable` header. That type has no return-value slot, so direct
+signature readers cannot mistake a deliberately deferred value for a real miss.
+The shared value-demand accessor turns it into a general signature only after
+consuming the owned source. Header-only utilities read its parameters without
+forcing the return. Values retained by signature construction use `Function(Flow)` and
 remain visible to unresolved-value checking. Return demands, call substitution,
 signature result recipes and source roots use the same existing flow source.
-The deferred state survives signature substitution and structural rebuilding.
+After a value demand, `SignatureReturnCarrier::EvaluatedFlow` retains the
+same source and lexical images beside the evaluated slot. Value readers use
+that slot; call equations still apply the source images once to their newly
+inferred body result. The deferred state survives signature substitution and
+structural rebuilding.
 It retains sorted lexical clause names and the header images supplied by the
 actual lowering environment, excluding the signature's own clause parameters.
 The call resolver instantiates those parameters through the body-derived carrier.
@@ -189,13 +217,25 @@ return value; ordinary value/domain shape inspection retains its full checks.
 One static member may establish separate exact value evidence while the whole
 flow-return proof remains refused. The private producer certificate is limited
 to a single unconditional object return, a completed selected static-key path,
-and the closed nameless primitive/literal/Union source algebra. The existing
+and the closed nameless primitive/literal/Union source algebra. Unconditional
+block wrappers around a closed return preserve its eligibility; the source walk
+admits only straight-line bindings followed by one return or nested block.
+Successful product finalization is required even without a prepared flow plan.
+The existing
 evaluator must actually complete its lowering, joins and widening with complete
 value observations, no hold or fallthrough, and valid execution. The certificate
 binds the function, demand, produced node and observed source roots. Named or
 unsupported expressions, later spreads/computed overrides and truncated walks
 cannot certify. Consuming it retains roots and reuse suppression; it never
 promotes the original `FlowReturnResult::fact()` or its admission proof.
+The flow producer offers its selected value fact separately from whole-proof
+refusal. Adopting that value retains every observation of its value read,
+including partiality, degraded reads, roots and reuse suppression. A required
+value limitation withdraws an earlier certificate; refusal of the separate
+whole-function proof cannot change the certified value's fact.
+The producer's completed literal-widening operation transfers an existing
+certificate to its widened node. Arbitrary result replacement still withdraws
+the certificate; widening cannot mint one for an uncertified source.
 
 Nested constructive evidence also requires successful product finalization.
 A missing product degrades the nested value and cannot supply a certificate to
@@ -278,3 +318,24 @@ its in-component provisional override remains owned by the current equation.
 Benign suppression on a proven complete value remains separate from semantic
 partiality. Native flow replay and instantiation reads adopt the carried fact
 status even when a receipt alone would only suppress reuse.
+
+A shallow result-utility surface demand
+consumes the producer's certified static return keys; each member keeps its
+separate deferred indexed value source. Presence alone cannot prove key-domain
+closure. A required output reduction that returns `IncompleteSemanticOperand`
+retains that typed failure; it cannot republish its authored subject as a
+deliberately unreduced carrier.
+
+Explicit signature instantiation records consumed own-clause images on its
+deferred result source. Uninstantiated signature construction captures lexical
+outer images only. The later result demand applies those images once, including
+class capture environments. Getter reads demand that result; setter reads need
+only the sealed parameter header. Heritage's own-member shortcut uses the same
+member reader as ordinary projection, preserving accessors, overloads and
+visibility without observing unrelated base values.
+
+A required call retains its adopted no-surface causes even when the enclosing
+value represents that call as a positional gap. Independently certified sibling
+values keep their separate observations. A qualified `typeof` demand uses the
+shared root-and-path lookup; a failed member lookup cannot retry a joined name
+that bypasses the namespace's excluded-export fact.

@@ -1510,6 +1510,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         seam: &mut ProjectionSeam,
     ) -> Result<bool, crate::semantic_query::PartialReasonSet> {
         match data.as_ref() {
+            SemanticNodeData::DeferredCallable(_) => {
+                work_credit.settle();
+                let value = if context.mode == ProjectionMode::Expanded {
+                    self.materialize_returned_callable(node)
+                } else {
+                    node
+                };
+                work_credit.refresh()?;
+                self.memoize_projected(memo, node, context, value);
+                Ok(false)
+            }
             SemanticNodeData::Primitive(_)
             | SemanticNodeData::Literal(_)
             | SemanticNodeData::EnumLiteral(_)

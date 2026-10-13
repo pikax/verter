@@ -319,6 +319,9 @@ pub mod flow_admission_fault_injection {
     /// `VerterHost`; every slot defaults to disarmed.
     #[derive(Debug, Default)]
     pub struct FlowAdmissionFaultKnobs {
+        /// Optional observer of actual preparation refusals, including inline demands.
+        pub refused_preparations:
+            std::sync::Mutex<Option<Vec<crate::semantic_query::FlowReturnKey>>>,
         #[cfg(any(test, feature = "test-support"))]
         pub observe_product_execution: AtomicBool,
         #[cfg(any(test, feature = "test-support"))]
@@ -662,8 +665,40 @@ pub(crate) struct ExactMemberValue {
 }
 
 impl ExactMemberValue {
+    #[cfg(test)]
+    pub(super) fn for_tests(key: FlowReturnKey, node: SemanticNodeId) -> Self {
+        Self {
+            key,
+            node,
+            roots: Arc::from([]),
+        }
+    }
+
     pub(crate) fn matches(&self, key: &FlowReturnKey, node: SemanticNodeId) -> bool {
         &self.key == key && self.node == node
+    }
+    pub(crate) fn roots(&self) -> &[crate::semantic_query_memo::ObservedGraphSelfRoot] {
+        &self.roots
+    }
+}
+
+pub(super) enum FlowMemberHop {
+    Value(SemanticNodeId),
+    /// Only the key domain is consumed; the requested own key is absent.
+    AbsentSurface(SemanticNodeId),
+}
+
+/// Exact keys of one completed, plain, unconditional object-return source.
+/// Values are independent inputs: an unresolved field cannot add a static key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExactReturnKeyDomain {
+    key: FlowReturnKey,
+    keys: Arc<[Arc<str>]>,
+    roots: Arc<[crate::semantic_query_memo::ObservedGraphSelfRoot]>,
+}
+impl ExactReturnKeyDomain {
+    pub(crate) fn proves_absent(&self, key: &FlowReturnKey, member: &str) -> bool {
+        &self.key == key && !self.keys.iter().any(|name| name.as_ref() == member)
     }
     pub(crate) fn roots(&self) -> &[crate::semantic_query_memo::ObservedGraphSelfRoot] {
         &self.roots
@@ -2199,7 +2234,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // the universal read funnel propagates them into this
                 // enclosing composition when the read returns.
                 let key = self.flow_return_key_for(identity);
-                let read = self.observe_read(|| self.execute_flow_return(key.clone()));
+                let read = self.observe_flow_return_value(key.clone());
                 let independent = match read.value() {
                     FlowReturnStep::Complete(result)
                         if result.independent_member(&key).is_some() =>
@@ -2279,10 +2314,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             return None;
         }
-        if let SemanticNodeData::Signature { return_carrier, .. } = data.as_ref() {
-            // Lowering may already have composed the single signature. Its
-            // source still names the same demand without requiring its body.
-            return return_carrier.flow_identity().cloned();
+        if let Some(header) =
+            data.callable_header(&crate::semantic_query::ResolveOverloadSetConsumer::witness())
+        {
+            return header.return_carrier.flow_identity().cloned();
         }
         let (value_root, typeof_path) = data.typeof_head()?;
         if !typeof_path.is_empty() {
@@ -2416,6 +2451,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         callee_arg: SemanticNodeId,
         segment: &crate::semantic_query::PathSegment,
     ) -> Option<SemanticNodeId> {
+        let read = self.observe_read(|| self.flow_return_member_read(callee_arg, segment));
+        if matches!(read.value(), Some(FlowMemberHop::Value(_))) {
+            match read.adopt(self).ok()? {
+                Some(FlowMemberHop::Value(node)) => Some(node),
+                _ => unreachable!(),
+            }
+        } else {
+            let _ = read.discard();
+            None
+        }
+    }
+
+    pub(super) fn flow_return_member_read(
+        &self,
+        callee_arg: SemanticNodeId,
+        segment: &crate::semantic_query::PathSegment,
+    ) -> Option<FlowMemberHop> {
         // The demanded member must be a statically-named key.
         let member_name: Arc<str> = match segment {
             crate::semantic_query::PathSegment::Member(key) => Arc::from(key.as_string()?),
@@ -2457,7 +2509,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // build-local taint frame, the per-cold-compute completeness
         // scope, and the request-level partial sticky (deferred — the
         // sticky has no un-mark).
-        let read = self.observe_read(|| self.execute_flow_return(key.clone()));
+        let read = self.observe_flow_return_value(key.clone());
         if matches!(read.value(), FlowReturnStep::Complete(result)
             if result.independent_member(&key).is_some())
         {
@@ -2466,7 +2518,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .ok()
                 .and_then(|node| {
                     self.instantiate_callee_clause_at_base_constraints(&identity, node)
-                });
+                })
+                .map(FlowMemberHop::Value);
         }
         // The probe consumes an exact member, or an undegraded value whose
         // read observed partiality (adopted with it). A degraded success
@@ -2481,6 +2534,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         };
         if !consumed {
             let _declined = read.discard();
+            let whole_key = self.flow_return_key_for(&identity);
+            let domain_read = self.observe_flow_return_key_domain(whole_key.clone());
+            let absent = matches!(domain_read.value(), FlowReturnStep::Complete(result)
+                if result.exact_return_keys().is_some_and(|domain| domain.proves_absent(&whole_key, member_name.as_ref())));
+            if absent {
+                let FlowReturnStep::Complete(result) = domain_read.adopt(self).ok()? else {
+                    unreachable!()
+                };
+                return Some(FlowMemberHop::AbsentSurface(result.return_type()));
+            }
+            let _ = domain_read.discard();
             return None;
         }
         match read.adopt(self) {
@@ -2508,6 +2572,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // composition here would materialise exactly the sibling
                 // members this rail exists to leave cold.
                 self.instantiate_callee_clause_at_base_constraints(&identity, result.return_type())
+                    .map(FlowMemberHop::Value)
             }
             // A consumed read always carries a value.
             Ok(
@@ -2638,7 +2703,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     // A consumer retaining the value adopts that status.
                     match result.fact().status() {
                         crate::semantic_query::FactStatus::Complete => {}
-                        crate::semantic_query::FactStatus::Approximate(causes)
+                        crate::semantic_query::FactStatus::Approximate(causes, _)
                         | crate::semantic_query::FactStatus::Unavailable(causes) => {
                             self.fold_cache_read_rails(true, true, causes.get());
                         }
@@ -4216,6 +4281,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// the cause's partial class rather than the one merged
     /// degraded-success class ([`plan_refusal_reason_class`]).
     fn record_flow_plan_refusal(&self, frame_idx: usize, refusal: FlowPlanRefusal) {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(refusals) = self
+            .binding
+            .observers
+            .flow
+            .refused_preparations
+            .lock()
+            .unwrap()
+            .as_mut()
+        {
+            if let Some(frame) = self.dispatch_txn.borrow().reentry().frame(frame_idx) {
+                if let ObligationIdentity::FlowReturn(key) = &frame.identity {
+                    refusals.push(key.clone());
+                }
+            }
+        }
         let mut txn = self.dispatch_txn.borrow_mut();
         if let Some(state) = txn
             .reentry_mut()
@@ -5479,6 +5560,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
                 if let Some(seed) = current[i].as_ref() {
                     next = next.with_checker_diagnostics(Arc::clone(seed.checker_diagnostics()));
+                    if next.return_type() == seed.return_type() {
+                        if let Some(keys) = seed.exact_return_keys() {
+                            next = next.with_exact_return_keys(keys.clone());
+                        }
+                    }
                     if let Some(proof) = seed.independent_member(&entries[i].key) {
                         if proof.matches(&entries[i].key, next.return_type()) {
                             next = next.with_independent_member(proof.clone());
@@ -5529,8 +5615,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // re-derived rather than copied: `with_return_type` routes
             // back through the one constructor.
             let result = if component_is_fresh {
-                result
-                    .with_return_type(self.graph(), widen_literal_node(self, result.return_type()))
+                let widened = widen_literal_node(self, result.return_type());
+                let proof = result.independent_member(&entry.key).cloned();
+                let result = result.with_return_type(self.graph(), widened);
+                // Widening is this producer's completed transformation of
+                // the certified value, rather than an arbitrary replacement.
+                if let Some(mut proof) = proof {
+                    proof.node = widened;
+                    result.with_independent_member(proof)
+                } else {
+                    result
+                }
             } else {
                 result
             };
@@ -6481,6 +6576,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let mut executed_walk;
         let product_budget_exceeded;
         let frame_product_evidence;
+        let products_finished;
         let frame_bindings;
         let frame_products;
         let inferred_predicate;
@@ -6508,6 +6604,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             call_evidence = std::mem::take(&mut evaluator.call_evidence);
             executed_walk = std::mem::take(&mut evaluator.executed_walk);
             let finished = evaluator.products.finish(evaluator.plan.as_deref());
+            products_finished = finished.is_ok();
             product_budget_exceeded = match &finished {
                 Err(FlowProductFailure::BudgetExceeded(exceeded)) => Some(*exceeded),
                 _ => None,
@@ -6764,23 +6861,30 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             && independent_members.is_some_and(|count| count > 0);
         // This is source selection evidence, not an inference from the result
         // node: one authored top-level return after straight-line bindings.
+        let unconditional_closed_return = {
+            use verter_session_query::flow::slice::SliceStatement;
+            let mut region = &ir.body;
+            loop {
+                if !region.statements[..region.statements.len().saturating_sub(1)]
+                    .iter()
+                    .all(|statement| matches!(statement, SliceStatement::Binding { .. }))
+                {
+                    break false;
+                }
+                match region.statements.last() {
+                    Some(SliceStatement::Return {
+                        argument: Some(_), ..
+                    }) => break true,
+                    Some(SliceStatement::Block(nested)) => region = nested,
+                    _ => break false,
+                }
+            }
+        };
         let constructed_proof = whole_return_point
-            && constructive_return.is_some()
-            && matches!(
-                ir.body.statements.last(),
-                Some(verter_session_query::flow::slice::SliceStatement::Return {
-                    argument: Some(_),
-                    ..
-                })
-            )
-            && ir.body.statements[..ir.body.statements.len().saturating_sub(1)]
-                .iter()
-                .all(|statement| {
-                    matches!(
-                        statement,
-                        verter_session_query::flow::slice::SliceStatement::Binding { .. }
-                    )
-                });
+            && products_finished
+            && (constructive_return.is_some()
+                || independent_returns.is_some_and(|count| count > 0))
+            && unconditional_closed_return;
         let whole_value_proof = whole_return_point
             && independent_returns.is_some_and(|count| count > 0)
             && witness.executed_selection.is_some()
@@ -6801,6 +6905,52 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 roots: Arc::from(self_roots.clone()),
             };
             result.with_independent_member(proof)
+        } else {
+            result
+        };
+        let result = if whole_return_point
+            && skeleton.kind == verter_session_query::flow::skeleton::FunctionBodyKind::Plain
+            && products_finished
+            && unconditional_closed_return
+            && !body_falls_through
+            && holds.is_empty()
+            && !executed_walk.aborted
+            && !executed_walk.local_aborted
+            && crate::request_context::current_execution_abort().is_none()
+            && self.connected_demand_trip().is_none()
+            && matches!(
+                self.graph().node_data(result.return_type()).as_deref(),
+                Some(SemanticNodeData::Object(_))
+            ) {
+            use verter_session_query::flow::slice::{SliceExpr, SliceObjectEntry, SliceStatement};
+            let mut region = &ir.body;
+            while let Some(SliceStatement::Block(nested)) = region.statements.last() {
+                region = nested;
+            }
+            let keys = match region.statements.last() {
+                Some(SliceStatement::Return {
+                    argument: Some(SliceExpr::Object { entries, .. }),
+                    ..
+                }) => entries
+                    .iter()
+                    .map(|entry| match entry {
+                        SliceObjectEntry::Member(member) => {
+                            member.key.static_name().map(Arc::<str>::from)
+                        }
+                        SliceObjectEntry::Spread { .. } => None,
+                    })
+                    .collect::<Option<Vec<_>>>(),
+                _ => None,
+            };
+            if let Some(keys) = keys {
+                result.with_exact_return_keys(ExactReturnKeyDomain {
+                    key: key.clone(),
+                    keys: Arc::from(keys),
+                    roots: Arc::from(self_roots.clone()),
+                })
+            } else {
+                result
+            }
         } else {
             result
         };
@@ -26553,9 +26703,15 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let key = crate::semantic_query::PropertyKey::identifier(Arc::from(name));
         if let Some(accessor) = surface.project_known_key_accessor(&key) {
             return accessor
-                .property_member(graph)
+                .property_member(graph, |signature| {
+                    self.dispatch.materialize_returned_callable(signature)
+                })
                 .filter(|member| !member.visibility.is_public())
-                .and_then(|_| accessor.read_value(graph));
+                .and_then(|_| {
+                    accessor.read_value(graph, |signature| {
+                        self.dispatch.materialize_returned_callable(signature)
+                    })
+                });
         }
         match surface.project_known_key(&key) {
             crate::semantic_query::SurfaceKeyProjection::Exact(member)
@@ -27030,15 +27186,18 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// of a function declaration does. A return still in flight (a hold)
     /// or with no value adds nothing here.
     fn absorb_body_degradation(&mut self, signature: SemanticNodeId) {
-        let identity = match self.dispatch.arena().node_data(signature).as_deref() {
-            Some(SemanticNodeData::Signature { return_carrier, .. }) => {
-                match return_carrier.flow_identity() {
-                    Some(identity) => identity.clone(),
-                    None => return,
-                }
-            }
-            _ => return,
+        let Some(data) = self.dispatch.arena().node_data(signature) else {
+            return;
         };
+        let Some(header) =
+            data.callable_header(&crate::semantic_query::ResolveOverloadSetConsumer::witness())
+        else {
+            return;
+        };
+        let Some(identity) = header.return_carrier.flow_identity().cloned() else {
+            return;
+        };
+        drop(data);
         let key = self.dispatch.flow_return_key_for(&identity);
         if let FlowReturnStep::Complete(callee) = self.dispatch.execute_flow_return(key) {
             if let Some(degradation) = callee.degradation() {

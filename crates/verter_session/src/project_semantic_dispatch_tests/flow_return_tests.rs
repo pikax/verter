@@ -3478,7 +3478,7 @@ fn constructed_value_evidence_preserves_capture_refusal_and_its_roots() {
                 panic!("the whole return is evaluated");
             };
             assert!(
-                matches!(whole.fact().status(), FactStatus::Approximate(_)),
+                matches!(whole.fact().status(), FactStatus::Approximate(_, _)),
                 "{name}: full capture proof remains refused"
             );
             let source = verter_type_expr::facts::FunctionReturnSource::Flow(
@@ -3655,7 +3655,10 @@ fn an_independent_member_value_keeps_the_whole_return_refusal() {
         let FlowReturnStep::Complete(whole) = dispatch.execute_flow_return(key) else {
             panic!("the independently evaluated whole return remains usable")
         };
-        assert!(matches!(whole.fact().status(), FactStatus::Approximate(_)));
+        assert!(matches!(
+            whole.fact().status(),
+            FactStatus::Approximate(_, _)
+        ));
         let callee = dispatch.graph().intern_node(SemanticNodeData::new_typeof(
             ValueRootKey {
                 scope: ScopeId::file(
@@ -3689,6 +3692,73 @@ fn an_independent_member_value_keeps_the_whole_return_refusal() {
             .observed_self_roots
             .iter()
             .any(|(canonical, _)| canonical.as_ref() == CANONICAL));
+    });
+}
+
+#[test]
+fn static_return_keys_are_exact_beside_an_unfinished_member_value() {
+    use verter_type_engine::semantic_query::{FactStatus, ScopeId, ValueRootKey};
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let graph = dispatch.graph();
+        let callee = graph.intern_node(SemanticNodeData::new_typeof(
+            ValueRootKey {
+                scope: ScopeId::file(
+                    Arc::from(CANONICAL),
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                ),
+                name: Arc::from("subIndependentLiteral"),
+            },
+            Arc::from([]),
+            Arc::from([]),
+        ));
+        let key =
+            SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
+                dispatch.builtin_type_slot("ReturnType"),
+                Arc::from([callee]),
+                dispatch.instantiate_context_for(
+                    "__builtin__",
+                    verter_type_engine::semantic_query::ProjectionReductionContext::published(
+                        verter_type_engine::semantic_query::ProjectionMode::Shallow,
+                    ),
+                ),
+            ));
+        let read = dispatch.execute_read(key);
+        assert_eq!(
+            read.fact_status,
+            FactStatus::Complete,
+            "static keys own their source fact: {read:?}"
+        );
+        let QueryResult::Value(node) = read.value else {
+            panic!("the key source has a value")
+        };
+        let data = graph.node_data(node).unwrap();
+        let SemanticNodeData::Object(surface) = data.as_ref() else {
+            panic!("the key source is an object: {data:?}")
+        };
+        assert_eq!(
+            surface
+                .positive_members()
+                .iter()
+                .map(|member| member.key.as_string().unwrap())
+                .collect::<Vec<_>>(),
+            ["selected", "sibling"]
+        );
+        let key = flow_key(
+            dispatch,
+            "subIndependentLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let verter_type_engine::semantic_query::FlowReturnStep::Complete(whole) =
+            dispatch.execute_flow_return(key)
+        else {
+            panic!("the unfinished value remains usable")
+        };
+        assert!(matches!(
+            whole.fact(),
+            verter_type_engine::semantic_query::FactResult::Approximate { .. }
+        ));
     });
 }
 
@@ -10792,6 +10862,89 @@ fn assert_flow_unverified_rails(
 /// member enters through the real provisional pop path beneath the open
 /// root frame, so the close drains it exactly as an organic torn
 /// component would.
+#[test]
+fn an_inherited_comparison_refusal_cannot_certify_an_unproven_relation() {
+    use verter_type_engine::semantic_query::checker_policy::with_relation_comparisons_for_tests;
+    use verter_type_engine::semantic_query::{FactStatus, PartialReasonSet, RelationOutcome};
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let graph = dispatch.graph();
+        let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let source = super::tests::simple_object(graph, &[("value", number)]);
+        let target = super::tests::simple_object(graph, &[("value", string)]);
+        let refused_key = dispatch.relate_key_for(source, target).to_query_key();
+        let root_key = dispatch.relate_key_for(number, number).to_query_key();
+        let member = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let refusal = with_relation_comparisons_for_tests(0, || {
+            dispatch.execute_via_cold_build_helper(refused_key.clone())
+        });
+        assert!(
+            matches!(refusal.fact_status, FactStatus::Approximate(_, _)),
+            "{refusal:?}"
+        );
+        assert!(
+            matches!(refusal.value, QueryResult::Value(SemanticQueryValue::Relation(ref payload))
+            if payload.outcome == RelationOutcome::NotAssignable)
+        );
+        assert_eq!(
+            refusal.walker_diagnostics.as_ref(),
+            &[super::walk::ShallowDiagnostic::RelationTooComplex { source, target }]
+        );
+        struct HookGuard<'a>(&'a verter_type_engine::semantic_query_memo::SemanticGraphStore);
+        impl Drop for HookGuard<'_> {
+            fn drop(&mut self) {
+                self.0.set_produce_hook_for_tests(None);
+            }
+        }
+        let root = root_key.clone();
+        graph.set_produce_hook_for_tests(Some(Arc::new(move |key, read| {
+            if key == &root {
+                with_relation_comparisons_for_tests(0, || read(refused_key.clone()));
+            }
+        })));
+        let hook = HookGuard(graph);
+        arm_unproven_member(&host, &member);
+        let read = dispatch.execute_via_cold_build_helper(root_key.clone());
+        drop(hook);
+        assert!(unproven_member_slot_consumed(&host));
+        assert_eq!(
+            read.walker_diagnostics.as_ref(),
+            &[super::walk::ShallowDiagnostic::RelationTooComplex { source, target }]
+        );
+        assert!(read
+            .partial_reasons()
+            .contains(PartialReasonSet::FLOW_RETURN_UNVERIFIED));
+        assert!(
+            matches!(read.fact_status, FactStatus::Unavailable(_)),
+            "another pair's recovery cannot authorize this unproven judgment: {read:?}"
+        );
+        assert!(matches!(
+            read.value,
+            QueryResult::Error(QueryError::IncompleteSemanticOperand { .. })
+        ));
+        assert_eq!(graph.slot_candidate_count_for_tests(&root_key), 0);
+    });
+    let control_host = make_host();
+    with_dispatch(&control_host, |dispatch| {
+        let graph = dispatch.graph();
+        let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let key = dispatch.relate_key_for(number, number).to_query_key();
+        let control = dispatch.execute_via_cold_build_helper(key.clone());
+        assert_eq!(control.fact_status, FactStatus::Complete);
+        assert!(
+            matches!(control.value, QueryResult::Value(SemanticQueryValue::Relation(ref payload))
+            if payload.outcome == RelationOutcome::Assignable)
+        );
+        assert_eq!(graph.slot_candidate_count_for_tests(&key), 1);
+    });
+}
+
 #[test]
 fn unproven_flow_member_makes_relation_root_decided_return_only() {
     let host = make_host();

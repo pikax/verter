@@ -5111,7 +5111,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             decl_whole_hash,
             base,
             args: Arc::clone(args),
-            source_args: Arc::clone(args),
             effective_args,
             scope,
             prepared,
@@ -5314,10 +5313,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return BodyLowering::Ready(self.enum_type(&enumeration));
         }
         // The declaration's OWN decl-body locator (whole body).
-        let canonical: Arc<str> = match &build.scope {
-            NodeScopeId::File { canonical_id, .. } => Arc::clone(canonical_id),
-            NodeScopeId::Global => Arc::clone(&prepared.root_identity.canonical_id),
-        };
+        let canonical = Arc::clone(&prepared.root_identity.canonical_id);
         let locator = verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
             verter_type_expr::locators::TypeBodySlot {
                 anchor: verter_type_expr::locators::AuthoredAnchor {
@@ -5568,21 +5564,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             output.cache_suppress = true;
         }
         if build.complete_structure {
-            output = output.with_positional_guarantee();
-        } else if self.connected_demand_trip().is_some() {
-            // A stopped structural walk supplies no evaluated body. Retain
-            // the original application as its addressed continuation instead.
-            output.result = QueryResult::Value(self.graph().intern_node(
-                SemanticNodeData::InstantiationRef {
-                    base: crate::semantic_query::DeclIdentity {
-                        canonical_id: Arc::clone(decl_canonical),
-                        owner: decl_owner,
-                        whole_hash: decl_whole_hash,
-                        decl_name: Arc::clone(decl_name),
-                    },
-                    args: Arc::clone(&build.source_args),
-                },
-            ));
             output = output.with_positional_guarantee();
         }
         output
@@ -9898,13 +9879,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let Some(data) = self.graph().node_data(function_node) else {
             return extracted;
         };
-        let SemanticNodeData::Signature {
-            type_parameters, ..
-        } = &*data
+        let Some(header) =
+            data.callable_header(&crate::semantic_query::ResolveOverloadSetConsumer::witness())
         else {
             return extracted;
         };
-        let type_parameters = Arc::clone(type_parameters);
+        let type_parameters = Arc::clone(header.type_parameters);
         drop(data);
         self.instantiate_clause_at_base_constraints(
             type_parameters
@@ -10298,12 +10278,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             bound.push((decl.param, arg));
         }
-        self.graph().intern_node(SemanticNodeData::DeferredCallable(
-            callable.with_substituted(
+        let source = callable.map_source_values(|mut image| {
+            for (binder, argument) in &bound {
+                image = self.substitute_semantic_type_param(image, *binder, *argument);
+            }
+            image
+        });
+        let source = source.with_instantiated_clause(
+            type_parameters
+                .iter()
+                .zip(bound.iter())
+                .map(|(decl, (_, argument))| (Arc::clone(&decl.name), *argument)),
+        );
+        self.graph()
+            .intern_node(SemanticNodeData::DeferredCallable(source.with_substituted(
                 Arc::from(params.into_boxed_slice()),
                 Arc::from(Vec::<crate::semantic_query::TypeParamDecl>::new().into_boxed_slice()),
-            ),
-        ))
+            )))
     }
 
     /// The type argument binding the type parameter at `index`: the
@@ -10524,8 +10515,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     crate::semantic_query::SignatureReturnCarrier::Function(source) => {
                         crate::semantic_query::SignatureReturnCarrier::Function(source.clone())
                     }
-                    crate::semantic_query::SignatureReturnCarrier::DeferredFlow(source) => {
-                        crate::semantic_query::SignatureReturnCarrier::DeferredFlow(source.clone())
+                    crate::semantic_query::SignatureReturnCarrier::DeferredFlow(_)
+                    | crate::semantic_query::SignatureReturnCarrier::EvaluatedFlow(_) => {
+                        return_carrier.clone()
                     }
                 },
                 signature_span: *signature_span,
@@ -11007,6 +10999,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let Some(data) = self.graph().node_data(function_node) else {
             return function_node;
         };
+        if let SemanticNodeData::DeferredCallable(callable) = data.as_ref() {
+            return self.graph().intern_preserving_scope(
+                function_node,
+                SemanticNodeData::DeferredCallable(callable.without_receiver(ordinary)),
+            );
+        }
         let SemanticNodeData::Signature {
             kind,
             is_abstract,
@@ -11054,10 +11052,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         use crate::semantic_query::TupleElement;
 
         let data = self.graph().node_data(function_node)?;
-        let SemanticNodeData::Signature { params, .. } = &*data else {
-            return None;
+        let params = match data.as_ref() {
+            SemanticNodeData::Signature { params, .. } => Arc::clone(params),
+            SemanticNodeData::DeferredCallable(callable) => Arc::clone(
+                callable
+                    .parts(&crate::semantic_query::ResolveOverloadSetConsumer::witness())
+                    .params,
+            ),
+            _ => return None,
         };
-        let params = Arc::clone(params);
         drop(data);
         // The authored `this` receiver takes no positional slot: TypeScript's
         // `Parameters<F>` / `ConstructorParameters<F>` publish the ordinary
@@ -17955,7 +17958,6 @@ pub(super) struct InstantiateBuild {
     decl_whole_hash: crate::semantic_query::HashValue,
     base: SemanticNodeId,
     pub(super) args: Arc<[SemanticNodeId]>,
-    source_args: Arc<[SemanticNodeId]>,
     effective_args: Arc<[SemanticNodeId]>,
     scope: NodeScopeId,
     prepared: Arc<PreparedTypeDecl>,

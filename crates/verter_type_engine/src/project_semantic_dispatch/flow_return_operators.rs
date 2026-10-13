@@ -1139,7 +1139,8 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
             SemanticNodeData::Object(_)
             | SemanticNodeData::Array { .. }
             | SemanticNodeData::Tuple { .. }
-            | SemanticNodeData::Signature { .. } => LogicalFacts {
+            | SemanticNodeData::Signature { .. }
+            | SemanticNodeData::DeferredCallable(_) => LogicalFacts {
                 truthy: true,
                 falsy: !strict,
                 nullish: !strict,

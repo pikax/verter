@@ -906,8 +906,34 @@ impl ResolveCallSelection {
                         crate::semantic_query::SignatureReturnCarrier::DeferredFlow(source),
                     ..
                 }) => source.apply_result(dispatch, return_type),
+                Some(crate::semantic_query::SemanticNodeData::Signature {
+                    return_carrier, ..
+                }) => return_carrier
+                    .owned_flow_source()
+                    .map_or(return_type, |source| {
+                        source.apply_result(dispatch, return_type)
+                    }),
+                Some(crate::semantic_query::SemanticNodeData::DeferredCallable(callable)) => {
+                    callable
+                        .parts(&crate::semantic_query::ResolveCallConsumer::witness())
+                        .return_carrier
+                        .owned_flow_source()
+                        .map_or(return_type, |source| {
+                            source.apply_result(dispatch, return_type)
+                        })
+                }
                 _ => return_type,
             },
+            Self::Selected {
+                selected_signature: SelectedSignature::Deferred(callable),
+                ..
+            } => callable
+                .parts(&crate::semantic_query::ResolveCallConsumer::witness())
+                .return_carrier
+                .owned_flow_source()
+                .map_or(return_type, |source| {
+                    source.apply_result(dispatch, return_type)
+                }),
             _ => return_type,
         };
         match self {
@@ -2794,4 +2820,4 @@ impl CheckerDispatchTransaction {
 
 #[cfg(test)]
 #[path = "dispatch_txn_tests.rs"]
-mod dispatch_txn_tests;
+pub(super) mod dispatch_txn_tests;

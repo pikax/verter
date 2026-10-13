@@ -1,11 +1,9 @@
-//! The sealed index-composed callable carrier.
+//! The sealed source-owned callable header.
 //!
-//! An index-composed callable is a same-file served function position
-//! composed from the authoritative function-program index: its parameters
-//! lower under the target's own binder environment, and its return is
-//! owned by the `return_carrier` equation edge rather than being served
-//! here (serving it would open a SECOND demand on the same target and
-//! deposit it twice into the enclosing component's equation).
+//! A callable whose return demand is deferred retains its formal parameters,
+//! lexical images, source occurrence and metadata here. Index composition and
+//! ordinary signature lowering use the same carrier. Its return is owned by
+//! the `return_carrier` source rather than a provisional value slot.
 //!
 //! Deferral is encoded in the TYPE, not in a sentinel: [`DeferredCallable`]
 //! has no return-type slot at all, so a deliberately deferred return can
@@ -76,8 +74,12 @@ pub struct DeferredCallable {
     kind: SignatureKind,
     params: Arc<[FunctionParam]>,
     type_parameters: Arc<[TypeParamDecl]>,
-    occurrence: SignatureNodeOccurrence,
+    occurrence: Option<SignatureNodeOccurrence>,
     return_carrier: SignatureReturnCarrier,
+    signature_span: Option<verter_span::Span>,
+    return_type_span: Option<verter_span::Span>,
+    predicate: Option<super::SignaturePredicate>,
+    is_abstract: bool,
 }
 
 /// The composed parts of a [`DeferredCallable`], readable only by a
@@ -91,12 +93,21 @@ pub struct DeferredCallableParts<'a> {
     /// The position's own type parameters.
     pub type_parameters: &'a Arc<[TypeParamDecl]>,
     /// The env-free occurrence of the served position.
-    pub occurrence: &'a SignatureNodeOccurrence,
+    pub occurrence: Option<&'a SignatureNodeOccurrence>,
     /// Where the deferred return comes from.
     pub return_carrier: &'a SignatureReturnCarrier,
+    pub signature_span: Option<verter_span::Span>,
+    pub return_type_span: Option<verter_span::Span>,
+    pub predicate: Option<super::SignaturePredicate>,
+    pub is_abstract: bool,
 }
 
 impl DeferredCallable {
+    pub(crate) fn with_occurrence(mut self, occurrence: SignatureNodeOccurrence) -> Self {
+        self.occurrence = Some(occurrence);
+        self
+    }
+
     /// Read the composed parts. Requires a sealed consumer witness.
     #[must_use]
     pub fn parts(&self, _consumer: &impl DeferredCallableConsumer) -> DeferredCallableParts<'_> {
@@ -104,8 +115,12 @@ impl DeferredCallable {
             kind: self.kind,
             params: &self.params,
             type_parameters: &self.type_parameters,
-            occurrence: &self.occurrence,
+            occurrence: self.occurrence.as_ref(),
             return_carrier: &self.return_carrier,
+            signature_span: self.signature_span,
+            return_type_span: self.return_type_span,
+            predicate: self.predicate,
+            is_abstract: self.is_abstract,
         }
     }
 
@@ -120,8 +135,12 @@ impl DeferredCallable {
             kind: self.kind,
             params: &self.params,
             type_parameters: &self.type_parameters,
-            occurrence: &self.occurrence,
+            occurrence: self.occurrence.as_ref(),
             return_carrier: &self.return_carrier,
+            signature_span: self.signature_span,
+            return_type_span: self.return_type_span,
+            predicate: self.predicate,
+            is_abstract: self.is_abstract,
         }
     }
 
@@ -135,6 +154,15 @@ impl DeferredCallable {
             visit(decl.param);
             decl.constraint.into_iter().for_each(&mut visit);
             decl.default.into_iter().for_each(&mut visit);
+        }
+        if let Some(predicate) = self.predicate {
+            predicate.ty.into_iter().for_each(&mut visit);
+        }
+        if let SignatureReturnCarrier::DeferredFlow(source) = &self.return_carrier {
+            for (_, image) in source.bindings() {
+                visit(*image);
+            }
+            source.receiver().into_iter().for_each(&mut visit);
         }
         if let SignatureReturnCarrier::Declared(node) = &self.return_carrier {
             visit(*node);
@@ -155,9 +183,88 @@ impl DeferredCallable {
             kind,
             params,
             type_parameters,
-            occurrence,
+            occurrence: Some(occurrence),
             return_carrier,
+            signature_span: None,
+            return_type_span: None,
+            predicate: None,
+            is_abstract: false,
         }
+    }
+
+    /// Convert a source-owned deferred header before it enters the graph.
+    /// The resulting callable has no return-value slot to read prematurely.
+    pub(crate) fn seal_signature_header(header: SemanticNodeData) -> SemanticNodeData {
+        let SemanticNodeData::Signature {
+            kind,
+            params,
+            type_parameters,
+            occurrence,
+            return_carrier: SignatureReturnCarrier::DeferredFlow(source),
+            signature_span,
+            return_type_span,
+            predicate,
+            is_abstract,
+            ..
+        } = &header
+        else {
+            return header;
+        };
+        SemanticNodeData::DeferredCallable(Self {
+            kind: *kind,
+            params: Arc::clone(params),
+            type_parameters: Arc::clone(type_parameters),
+            occurrence: occurrence.clone(),
+            return_carrier: SignatureReturnCarrier::DeferredFlow(source.clone()),
+            signature_span: *signature_span,
+            return_type_span: *return_type_span,
+            predicate: *predicate,
+            is_abstract: *is_abstract,
+        })
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn return_carrier_for_tests(&self) -> &SignatureReturnCarrier {
+        &self.return_carrier
+    }
+
+    /// Map lexical images and predicate targets without exposing a return slot.
+    pub(crate) fn map_source_values(
+        &self,
+        mut map: impl FnMut(SemanticNodeId) -> SemanticNodeId,
+    ) -> Self {
+        let mut mapped = self.clone();
+        if let SignatureReturnCarrier::DeferredFlow(source) = &self.return_carrier {
+            mapped.return_carrier =
+                SignatureReturnCarrier::DeferredFlow(source.map_images(&mut map));
+        }
+        mapped.predicate = self.predicate.map(|predicate| predicate.map_type(map));
+        mapped
+    }
+
+    /// Retain the result substitution after explicit instantiation consumed
+    /// this header's own clause. Lexical capture remains a separate producer step.
+    pub(crate) fn with_instantiated_clause(
+        &self,
+        bindings: impl IntoIterator<Item = (Arc<str>, SemanticNodeId)>,
+    ) -> Self {
+        let mut specialized = self.clone();
+        if let SignatureReturnCarrier::DeferredFlow(source) = &self.return_carrier {
+            specialized.return_carrier = SignatureReturnCarrier::DeferredFlow(
+                source.clone().with_instantiated_clause(bindings),
+            );
+        }
+        specialized
+    }
+
+    pub(crate) fn with_receiver(&self, receiver: SemanticNodeId) -> Self {
+        let mut mapped = self.clone();
+        if let SignatureReturnCarrier::DeferredFlow(source) = &self.return_carrier {
+            mapped.return_carrier =
+                SignatureReturnCarrier::DeferredFlow(source.clone().with_receiver(receiver));
+        }
+        mapped
     }
 
     /// The canonical that declares this callable's served position.
@@ -169,7 +276,22 @@ impl DeferredCallable {
     /// content-free anchor through its public `occurrence` field.
     #[must_use]
     pub(crate) fn declaring_canonical(&self) -> &Arc<str> {
-        &self.occurrence.function.anchor.canonical_id
+        self.return_carrier
+            .flow_identity()
+            .map(|identity| &identity.anchor.canonical_id)
+            .or_else(|| {
+                self.occurrence
+                    .as_ref()
+                    .map(|occurrence| &occurrence.function.anchor.canonical_id)
+            })
+            .expect("a deferred callable retains its source or served occurrence")
+    }
+
+    pub(crate) fn without_receiver(&self, ordinary: &[FunctionParam]) -> Self {
+        let mut rebuilt = self.clone();
+        rebuilt.params = Arc::from(ordinary);
+        rebuilt.predicate = None;
+        rebuilt
     }
 
     /// Rebuild the carrier with substituted parameter / type-parameter
@@ -186,6 +308,10 @@ impl DeferredCallable {
             type_parameters,
             occurrence: self.occurrence.clone(),
             return_carrier: self.return_carrier.clone(),
+            signature_span: self.signature_span,
+            return_type_span: self.return_type_span,
+            predicate: self.predicate,
+            is_abstract: self.is_abstract,
         }
     }
 
@@ -199,13 +325,62 @@ impl DeferredCallable {
             params: self.params,
             return_type,
             type_parameters: self.type_parameters,
-            occurrence: Some(self.occurrence),
-            return_carrier: self.return_carrier,
-            signature_span: None,
-            return_type_span: None,
-            // A body-derived return carries no authored predicate.
-            predicate: None,
-            is_abstract: false,
+            occurrence: self.occurrence,
+            return_carrier: match self.return_carrier {
+                SignatureReturnCarrier::DeferredFlow(source) => {
+                    SignatureReturnCarrier::EvaluatedFlow(source)
+                }
+                other => other,
+            },
+            signature_span: self.signature_span,
+            return_type_span: self.return_type_span,
+            predicate: self.predicate,
+            is_abstract: self.is_abstract,
+        }
+    }
+}
+
+/// Formal callable facts shared by evaluated and source-owned headers.
+/// Return values are a separate demand and are intentionally absent here.
+pub(crate) struct CallableHeaderParts<'a> {
+    pub kind: SignatureKind,
+    pub params: &'a Arc<[FunctionParam]>,
+    pub return_carrier: &'a SignatureReturnCarrier,
+    pub type_parameters: &'a Arc<[TypeParamDecl]>,
+    pub return_type_span: Option<verter_span::Span>,
+}
+
+impl SemanticNodeData {
+    pub(crate) fn callable_header(
+        &self,
+        consumer: &impl DeferredCallableConsumer,
+    ) -> Option<CallableHeaderParts<'_>> {
+        match self {
+            Self::Signature {
+                kind,
+                params,
+                return_carrier,
+                type_parameters,
+                return_type_span,
+                ..
+            } => Some(CallableHeaderParts {
+                kind: *kind,
+                params,
+                return_carrier,
+                type_parameters,
+                return_type_span: *return_type_span,
+            }),
+            Self::DeferredCallable(callable) => {
+                let parts = callable.parts(consumer);
+                Some(CallableHeaderParts {
+                    kind: parts.kind,
+                    params: parts.params,
+                    return_carrier: parts.return_carrier,
+                    type_parameters: parts.type_parameters,
+                    return_type_span: parts.return_type_span,
+                })
+            }
+            _ => None,
         }
     }
 }

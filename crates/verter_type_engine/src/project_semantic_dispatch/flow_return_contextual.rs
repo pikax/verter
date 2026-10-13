@@ -221,14 +221,9 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
         };
         let graph = self.dispatch.graph();
         let data = graph.node_data(*signature)?;
-        let SemanticNodeData::Signature {
-            params,
-            type_parameters,
-            ..
-        } = &*data
-        else {
-            return None;
-        };
+        let header =
+            data.callable_header(&crate::semantic_query::ResolveOverloadSetConsumer::witness())?;
+        let (params, type_parameters) = (header.params, header.type_parameters);
         let mut parameter = None;
         for (position, param) in params.iter().enumerate() {
             if param.rest {

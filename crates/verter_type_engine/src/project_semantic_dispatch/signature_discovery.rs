@@ -672,11 +672,10 @@ impl<'w, 'a, 'd, C: crate::resolver_core::ResolverCapabilities> Walk<'w, 'a, 'd,
                     parts.kind,
                     Arc::clone(parts.params),
                     Arc::clone(parts.type_parameters),
-                    Some(parts.occurrence.clone()),
+                    parts.occurrence.cloned(),
                     parts.return_carrier.clone(),
-                    None,
-                    // A body-derived return carries no authored predicate.
-                    None,
+                    parts.signature_span,
+                    parts.predicate,
                 )
             }
             _ => return Ok(None),
@@ -801,6 +800,7 @@ impl<'w, 'a, 'd, C: crate::resolver_core::ResolverCapabilities> Walk<'w, 'a, 'd,
                     carrier,
                     crate::semantic_query::SignatureReturnCarrier::Function(_)
                         | crate::semantic_query::SignatureReturnCarrier::DeferredFlow(_)
+                        | crate::semantic_query::SignatureReturnCarrier::EvaluatedFlow(_)
                 )
         }) && params.iter().all(|p| {
             matches!(
@@ -1241,7 +1241,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         &self,
         key: crate::semantic_query::FlowReturnKey,
     ) -> Result<crate::semantic_query::FlowReturnResult, DiscoveryError> {
-        let read = self.observe_read(|| self.execute_flow_return(key.clone()));
+        let read = self.observe_flow_return_value(key.clone());
         let independent = match read.value() {
             crate::semantic_query::FlowReturnStep::Complete(result)
                 if result.independent_member(&key).is_some() =>

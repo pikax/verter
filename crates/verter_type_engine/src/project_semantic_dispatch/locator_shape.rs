@@ -2460,21 +2460,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             })
             .or(inferred_predicate);
         self.graph().intern_node_with_scope(
-            SemanticNodeData::Signature {
-                kind,
-                params: Arc::from(params.into_boxed_slice()),
-                return_type,
-                type_parameters: Arc::from(type_parameters.into_boxed_slice()),
-                // The `LowerLocator` producer patches the ROOT signature's
-                // occurrence from the key's locator; nested function nodes
-                // carry none.
-                occurrence: None,
-                return_carrier,
-                signature_span: func.spans.signature,
-                return_type_span: func.spans.return_type,
-                predicate,
-                is_abstract: func.is_abstract,
-            },
+            crate::semantic_query::DeferredCallable::seal_signature_header(
+                SemanticNodeData::Signature {
+                    kind,
+                    params: Arc::from(params.into_boxed_slice()),
+                    return_type,
+                    type_parameters: Arc::from(type_parameters.into_boxed_slice()),
+                    // The `LowerLocator` producer patches the ROOT signature's
+                    // occurrence from the key's locator; nested function nodes
+                    // carry none.
+                    occurrence: None,
+                    return_carrier,
+                    signature_span: func.spans.signature,
+                    return_type_span: func.spans.return_type,
+                    predicate,
+                    is_abstract: func.is_abstract,
+                },
+            ),
             entry.scope.clone(),
         )
     }

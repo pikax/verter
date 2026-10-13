@@ -160,25 +160,27 @@ impl EvaluateDeferredOutcome {
         dispatch: &ProjectSemanticDispatch<'_, C>,
     ) -> super::walk::QueryBuildOutput {
         let node = self.into_active_query_build_node(dispatch);
+        self.forwarded_output(node, dispatch.project_generation_signature())
+    }
+
+    fn forwarded_output(
+        self,
+        node: SemanticNodeId,
+        fence: crate::semantic_query::DepSignature,
+    ) -> super::walk::QueryBuildOutput {
         let result = match self.availability {
             crate::semantic_query::FactStatus::Complete
-            | crate::semantic_query::FactStatus::Approximate(_) => QueryResult::Value(node),
+            | crate::semantic_query::FactStatus::Approximate(_, _) => QueryResult::Value(node),
             crate::semantic_query::FactStatus::Unavailable(causes) => {
                 QueryResult::Error(QueryError::IncompleteSemanticOperand {
                     reasons: causes.get(),
                 })
             }
         };
-        let mut output =
-            super::walk::QueryBuildOutput::from((result, dispatch.project_generation_signature()));
+        let mut output = super::walk::QueryBuildOutput::from((result, fence));
         output.merge_completeness(self.completeness);
         output.cache_suppress = self.cache_suppress;
-        if matches!(
-            self.availability,
-            crate::semantic_query::FactStatus::Approximate(_)
-        ) {
-            output = output.with_positional_guarantee();
-        }
+        output.approximation = self.availability.interpretation();
         output
     }
 
@@ -1512,7 +1514,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // holds the checker's recovery, usable but incomplete.
                 if (matches!(
                     availability,
-                    crate::semantic_query::FactStatus::Approximate(_)
+                    crate::semantic_query::FactStatus::Approximate(_, _)
                 ) && availability.completeness().reasons() == reasons)
                     || matches!(
                         self.graph().node_data(n).as_deref(),
@@ -2132,16 +2134,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
         let availability = if !frame.completeness.is_partial() {
             crate::semantic_query::FactStatus::Complete
-        } else if (matches!(
+        } else if matches!(
             frame.availability,
-            crate::semantic_query::FactStatus::Approximate(_)
-        ) && frame.availability.completeness().reasons() == frame.completeness.reasons())
-            || matches!(
-                self.graph().node_data(result).as_deref(),
-                Some(SemanticNodeData::Opaque(QueryError::CheckerRecovery { .. }))
-            )
+            crate::semantic_query::FactStatus::Approximate(_, _)
+        ) && frame.availability.completeness().reasons() == frame.completeness.reasons()
         {
+            frame.availability
+        } else if matches!(
+            self.graph().node_data(result).as_deref(),
+            Some(SemanticNodeData::Opaque(QueryError::CheckerRecovery { .. }))
+        ) {
             crate::semantic_query::FactStatus::approximate(frame.completeness.reasons())
+                .with_interpretation(Some(
+                    crate::semantic_query::FactInterpretation::CheckerRecovery,
+                ))
         } else {
             crate::semantic_query::FactStatus::unavailable(frame.completeness.reasons())
         };
@@ -3249,5 +3255,55 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> SemanticNodeId {
         self.fold_local_partial_completeness(PartialReasonSet::OPERATION_BUDGET);
         crate::semantic_query::checker_policy::resource_recovery(self.graph(), refusal, origin)
+    }
+}
+
+#[cfg(test)]
+mod forwarding_tests {
+    use super::*;
+    use crate::semantic_query::surface_resolution::NonEmptyReasons;
+    use crate::semantic_query::{FactInterpretation, FactStatus, SemanticQueryValue};
+
+    #[test]
+    fn a_deferred_forwarder_preserves_presence_only_instead_of_certifying_positions() {
+        let graph = crate::semantic_query_memo::SemanticGraphStore::new();
+        let node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let causes = NonEmptyReasons::new(PartialReasonSet::MISSING_DEPENDENCY).unwrap();
+        let outcome = EvaluateDeferredOutcome {
+            node,
+            completeness: ResultCompleteness::partial(causes.get()),
+            availability: FactStatus::Approximate(causes, Some(FactInterpretation::PresenceOnly)),
+            cache_suppress: true,
+        };
+        let output = outcome.forwarded_output(node, Arc::from([]));
+        assert_eq!(
+            output.approximation,
+            Some(FactInterpretation::PresenceOnly),
+            "a forwarded presence subset cannot certify completed positions"
+        );
+        let key = SemanticQueryKey::KeyOf {
+            base: node,
+            context: ProjectionReductionContext::published(ProjectionMode::Shallow),
+        };
+        let output: super::super::walk::QueryBuildOutput<SemanticQueryValue> = output.into();
+        let (_, status) = super::super::projection_fact::adopt_projection_result(
+            &graph,
+            &key,
+            output.result,
+            output.completeness,
+            output.approximation,
+        );
+        assert_eq!(
+            status.interpretation(),
+            Some(FactInterpretation::PresenceOnly)
+        );
+        let mut read = CacheRead::from_value_and_signature(1u8, Arc::from([]));
+        read.fact_status = status;
+        let copied = read.clone().map_value(|value| value + 1);
+        assert_eq!(
+            copied.fact_status.interpretation(),
+            Some(FactInterpretation::PresenceOnly)
+        );
+        assert_eq!(read.fact_status, copied.fact_status);
     }
 }

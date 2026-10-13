@@ -489,6 +489,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     ));
                 }
             }
+            if let SemanticNodeData::DeferredCallable(callable) = data.as_ref() {
+                let bound = callable.with_receiver(receiver);
+                if &bound != callable {
+                    deferred.push((
+                        current,
+                        self.graph().intern_preserving_scope(
+                            current,
+                            SemanticNodeData::DeferredCallable(bound),
+                        ),
+                    ));
+                }
+            }
             if let SemanticNodeData::TypeParam { param_index, .. } = data.as_ref() {
                 if *param_index == THIS_BINDER_INDEX && current != receiver {
                     binders.push(current);
@@ -1630,20 +1642,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // legitimate outer references carry an exact InferRef;
                 // locally shadowed occurrences carry the local TypeParam.
                 let mut any_changed = false;
-                let mapped_carrier = match return_carrier {
-                    crate::semantic_query::SignatureReturnCarrier::DeferredFlow(source) => {
-                        let mapped = source.map_images(|image| {
-                            let (value, changed) =
-                                self.substitute_with_change_tracking(image, parameter_node, arg);
-                            any_changed |= changed;
-                            value
-                        });
-                        Some(crate::semantic_query::SignatureReturnCarrier::DeferredFlow(
-                            mapped,
-                        ))
-                    }
-                    _ => None,
-                };
+                let mapped_carrier = return_carrier.map_source_images(|image| {
+                    let (value, changed) =
+                        self.substitute_with_change_tracking(image, parameter_node, arg);
+                    any_changed |= changed;
+                    value
+                });
                 let mut new_params = Vec::with_capacity(params.len());
                 for param in params.iter() {
                     let (sub_ty, c) =
@@ -1775,14 +1779,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                         source.clone(),
                                     )
                                 }
-                                crate::semantic_query::SignatureReturnCarrier::DeferredFlow(
-                                    source,
-                                ) => crate::semantic_query::SignatureReturnCarrier::DeferredFlow(
-                                    match mapped_carrier.as_ref() {
-                                        Some(crate::semantic_query::SignatureReturnCarrier::DeferredFlow(mapped)) => mapped.clone(),
-                                        _ => source.clone(),
-                                    },
-                                ),
+                                crate::semantic_query::SignatureReturnCarrier::DeferredFlow(_)
+                                | crate::semantic_query::SignatureReturnCarrier::EvaluatedFlow(_) =>
+                                    mapped_carrier.clone().unwrap_or_else(|| return_carrier.clone()),
                             },
                             // Substitution preserves the signature's OXC spans.
                             signature_span: *signature_span,
@@ -1849,6 +1848,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             SemanticNodeData::DeferredCallable(callable) => {
                 let parts = callable.parts(&crate::semantic_query::ResolveCallConsumer::witness());
                 let mut any_changed = false;
+                let mapped_source = callable.map_source_values(|image| {
+                    let (value, changed) =
+                        self.substitute_with_change_tracking(image, parameter_node, arg);
+                    any_changed |= changed;
+                    value
+                });
                 let mut new_params = Vec::with_capacity(parts.params.len());
                 for param in parts.params.iter() {
                     let (sub_ty, changed) =
@@ -1897,7 +1902,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 if !any_changed {
                     return (node, false);
                 }
-                let rebuilt = SemanticNodeData::DeferredCallable(callable.with_substituted(
+                let rebuilt = SemanticNodeData::DeferredCallable(mapped_source.with_substituted(
                     Arc::from(new_params.into_boxed_slice()),
                     Arc::from(new_type_parameters.into_boxed_slice()),
                 ));

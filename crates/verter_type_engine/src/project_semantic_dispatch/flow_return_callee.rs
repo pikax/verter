@@ -544,20 +544,31 @@ impl CallValue {
         let Some(data) = graph.node_data(function_node) else {
             return SignatureCall::NotCallable;
         };
-        let SemanticNodeData::Signature {
-            return_type,
-            return_carrier,
-            type_parameters,
-            params,
-            ..
-        } = &*data
-        else {
-            return SignatureCall::NotCallable;
+        let (return_type, return_carrier, type_parameters, params) = match data.as_ref() {
+            SemanticNodeData::Signature {
+                return_type,
+                return_carrier,
+                type_parameters,
+                params,
+                ..
+            } => (
+                *return_type,
+                return_carrier.clone(),
+                Arc::clone(type_parameters),
+                Arc::clone(params),
+            ),
+            SemanticNodeData::DeferredCallable(callable) => {
+                let header =
+                    callable.parts(&crate::semantic_query::ResolveOverloadSetConsumer::witness());
+                (
+                    dispatch.opaque(QueryError::Miss),
+                    header.return_carrier.clone(),
+                    Arc::clone(header.type_parameters),
+                    Arc::clone(header.params),
+                )
+            }
+            _ => return SignatureCall::NotCallable,
         };
-        let return_type = *return_type;
-        let return_carrier = return_carrier.clone();
-        let type_parameters = Arc::clone(type_parameters);
-        let params = Arc::clone(params);
         drop(data);
         let demand_source = matches!(
             return_carrier,

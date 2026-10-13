@@ -694,7 +694,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             std::mem::take(&mut frame.taint),
             finalise,
             &CarrierNormalizationPrelude::none(),
-            &frame.key,
         );
         let lease = frame
             .lease

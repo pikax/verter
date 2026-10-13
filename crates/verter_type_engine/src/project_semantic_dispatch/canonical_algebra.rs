@@ -2834,6 +2834,10 @@ fn hash_shallow_identity<H: std::hash::Hasher>(data: &SemanticNodeData, hasher: 
                     2u8.hash(hasher);
                     source.hash(hasher);
                 }
+                SignatureReturnCarrier::EvaluatedFlow(source) => {
+                    3u8.hash(hasher);
+                    source.hash(hasher);
+                }
             }
         }
         D::MergedDecl { contributors } => contributors.len().hash(hasher),

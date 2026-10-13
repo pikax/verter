@@ -449,41 +449,82 @@ fn blocks_nested_deep_answer_on_a_small_stack() {
 
 #[test]
 fn an_independent_return_type_is_exact_beside_its_refused_flow_proof() {
+    use std::sync::Arc;
+    use verter_type_engine::semantic_query::{
+        FactStatus, InstantiateKey, PrimitiveKind, ProjectionMode, ProjectionReductionContext,
+        QueryResult, ScopeId, SemanticNodeData, SemanticQueryKey, ValueRootKey,
+    };
     let host = default_probe_host();
     let source = blocks(DEPTH);
-    // Deep blocks can now complete preparation. Refuse the proof explicitly
-    // so this control continues to distinguish it from the exact return value.
     let refusal = super::flow_return::flow_admission_fault_injection::Guard::arm(
         &host.flow_fault_injection.zero_obligation_budget,
     );
     let public = flow_return_audited_on_host(&host, &source, "pf");
-    assert!(
-        matches!(
-            public.as_result().unwrap().fact(),
-            verter_type_engine::semantic_query::FactResult::Approximate { .. }
-        ),
-        "the public flow retains its unfinished preparation proof"
-    );
-    drop(refusal);
-    super::checker_probe_lane_tests::with_probe_outcome_on_host(
-        &host,
-        super::checker_probe_lane_tests::ProbeProject::default(),
-        &source,
-        RETURN,
-        |dispatch, outcome| {
-            let node = outcome.into_complete_node().expect(
-                "an independently proven return source cannot inherit its refused flow proof",
-            );
-            assert!(matches!(
-                dispatch.graph().node_data(node).as_deref(),
-                Some(
-                    verter_type_engine::semantic_query::SemanticNodeData::Primitive(
-                        verter_type_engine::semantic_query::PrimitiveKind::Number
-                    )
-                )
-            ));
+    assert!(matches!(
+        public.as_result().unwrap().fact(),
+        verter_type_engine::semantic_query::FactResult::Approximate { .. }
+    ));
+    let view = host.resolver_store_view_read().into_owned_view();
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let ctx = crate::resolver_core::HostResolverContext::new(&host, &view, overlay);
+    let dispatch = super::ProjectSemanticDispatch::new(&ctx);
+    let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
+    // Keep the callee as a source carrier: ReturnType itself must demand
+    // the signature and body, rather than receive an eagerly settled header.
+    let callee = dispatch.graph().intern_node(SemanticNodeData::new_typeof(
+        ValueRootKey {
+            scope: ScopeId::file(
+                Arc::from(PROBE_FILE),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            ),
+            name: Arc::from("pf"),
         },
+        Arc::from([]),
+        Arc::from([]),
+    ));
+    let observations = &host.flow_fault_injection.refused_preparations;
+    *observations.lock().unwrap() = Some(Vec::new());
+    struct ObservationGuard<'a>(
+        &'a std::sync::Mutex<Option<Vec<verter_type_engine::semantic_query::FlowReturnKey>>>,
     );
+    impl Drop for ObservationGuard<'_> {
+        fn drop(&mut self) {
+            *self.0.lock().unwrap_or_else(|poison| poison.into_inner()) = None;
+        }
+    }
+    let _observations = ObservationGuard(observations);
+    let key = SemanticQueryKey::Instantiate(InstantiateKey::new(
+        dispatch.builtin_type_slot("ReturnType"),
+        Arc::from([callee]),
+        dispatch.instantiate_context_for("__builtin__", context),
+    ));
+    let read = dispatch.execute_read(key.clone());
+    assert!(
+        observations
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|key| key.function.declaration_slot.merged_symbol_name.as_ref() == "pf"),
+        "ReturnType actually demanded pf while its preparation refused proof"
+    );
+    assert_eq!(
+        read.fact_status,
+        FactStatus::Complete,
+        "an independently proven return source cannot inherit its refused flow proof: {read:?}"
+    );
+    let QueryResult::Value(node) = read.value else {
+        panic!("ReturnType has a value")
+    };
+    assert!(matches!(
+        dispatch.graph().node_data(node).as_deref(),
+        Some(SemanticNodeData::Primitive(PrimitiveKind::Number))
+    ));
+    drop(refusal);
+    let control = dispatch.execute_read(key);
+    assert_eq!(control.fact_status, FactStatus::Complete);
+    assert!(matches!(control.value, QueryResult::Value(control) if control == node));
 }
 
 /// Conditionals, object literals and blocks nested past the plan budget
