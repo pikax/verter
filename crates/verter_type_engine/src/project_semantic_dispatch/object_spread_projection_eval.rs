@@ -869,8 +869,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             SemanticNodeData::ObjectSpreadProgram(_) => {
                 drop(data);
                 if let Some(chain) = self.property_spread_chain(operand)? {
-                    let mut states =
-                        self.apply_spread_operand(states, chain.base, context, depth)?;
+                    // Each inner object starts its own spread operand at depth
+                    // zero, as the general evaluator does. Outer distribution
+                    // must not suppress its nullable merge or consume its fuse.
+                    let mut states = self.apply_spread_operand(states, chain.base, context, 0)?;
                     // The inner objects' own writes arrive as copied properties.
                     // Each required public write overwrites independently of the
                     // caller's prior state, so no intermediate surface is needed.

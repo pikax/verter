@@ -141,6 +141,66 @@ fn cross_module_spread_returns_preserve_every_literal_and_reuse_each_body() {
     }
 }
 
+#[test]
+fn conditional_spread_return_chains_preserve_each_objects_union_boundary() {
+    let mut control = None;
+    for general in [true, false] {
+        let host = make_host_with_footprint();
+        let leading = if general { "...{}," } else { "" };
+        let mut source =
+            "export function f0(c: boolean) { return { x: 1 as const }; }\n".to_string();
+        for level in 1..=10 {
+            source.push_str(&format!(
+                "export function f{level}(c: boolean) {{ return {{ {leading}...(c ? f{}(c) : {{ z: 2 as const }}), k{level}: {level} as const }}; }}\n",
+                level - 1
+            ));
+        }
+        source.push_str("type Result = ReturnType<typeof f10>;");
+        let canonical = "/fixtures/conditional-spread-returns.ts";
+        upsert_ts(&host, canonical, &source);
+        let (result, _) = resolve_expr(&host, canonical, "Result", &[], ProjectionMode::Expanded);
+        let TypeExpr::Union(arms) = &result else {
+            panic!("finite spread alternatives must resolve, general={general}: {result:?}");
+        };
+        assert_eq!(arms.len(), 11);
+        let mut shapes = Vec::new();
+        for arm in arms.iter() {
+            let props = object_props(arm);
+            assert_number_literal(&props["k10"].ty, 10.0);
+            for (name, property) in &props {
+                assert!(!property.optional && !property.readonly);
+                let expected = match name.as_str() {
+                    "x" => 1.0,
+                    "z" => 2.0,
+                    _ => name.strip_prefix('k').unwrap().parse::<f64>().unwrap(),
+                };
+                assert_number_literal(&property.ty, expected);
+            }
+            shapes.push(props.keys().cloned().collect::<Vec<_>>());
+        }
+        shapes.sort();
+        let mut expected = vec![{
+            let mut keys = (1..=10).map(|i| format!("k{i}")).collect::<Vec<_>>();
+            keys.push("x".to_string());
+            keys.sort();
+            keys
+        }];
+        for first in 1..=10 {
+            let mut keys = (first..=10).map(|i| format!("k{i}")).collect::<Vec<_>>();
+            keys.push("z".to_string());
+            keys.sort();
+            expected.push(keys);
+        }
+        expected.sort();
+        assert_eq!(shapes, expected);
+        if let Some(control) = &control {
+            assert_eq!(&shapes, control, "composition preserves the general answer");
+        } else {
+            control = Some(shapes);
+        }
+    }
+}
+
 fn upsert_value_fixture(host: &crate::VerterHost) {
     upsert_ts(host, "/fixtures/value-inference.ts", VALUE_INFERENCE);
 }

@@ -2493,6 +2493,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if let Some(served) = self.graph().get_flow_return_result(self.ctx, key) {
             return self.admits_served(&served.receipt).then_some(served.value);
         }
+        // A completed transaction member owns its recorded reads and refusal.
+        // Let transaction reuse replay them before consulting a publication
+        // retained by this dispatcher after the shared candidate was evicted.
+        if self.dispatch_txn.borrow().flow.results.contains(key) {
+            return None;
+        }
         // A return inferred while lowering a locator can be newer than
         // this dispatcher's pinned view. Its own published read has the
         // same edit fence, priced receipt and fact replay as other queries;

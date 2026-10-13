@@ -9,11 +9,14 @@ and contextual/inherited receiver typing retain their receiver path.
 At a consumer demand, the shared object-spread evaluator peels a
 leading-spread chain with required, public, known-key property tails iteratively
 and applies each copied write once. General operands and non-composable tails
-retain the correlated projection path. Copied metadata and overwrite order
-follow the same named-write policy, and an indexed JS property identity avoids
-scanning the accumulated surface for each collision. Closed materialisation
-remains at the demanding consumer. Union closure, source-edit invalidation,
-open-domain evidence and warm admission retain their existing authorities.
+retain the correlated projection path. Each composed inner object starts its
+own spread operand at union depth zero, preserving its nullable merge and
+depth fuse independently of an enclosing union. Copied metadata and
+overwrite order follow the same named-write policy, and an indexed JS property
+identity avoids scanning the accumulated surface for each collision. Closed
+materialisation remains at the demanding consumer. Union closure, source-edit
+invalidation, open-domain evidence and warm admission retain their existing
+authorities.
 The public named-type regression covers 20, 40, 100 and 300 modules, exact
 literal answers, warm reuse, upstream edits and member/collision work growth
 when the chain length doubles.
@@ -23,7 +26,9 @@ when its pinned view cannot serve a result that the same dispatcher just
 published. The shared workspace-edit fence, cost receipt admission and fact
 replay apply unchanged. Locator lowering and a subsequent signature utility
 therefore reuse one inferred body result within the request, while a source
-edit still forces a fresh inference.
+edit still forces a fresh inference. When a completed transaction member exists
+and the shared candidate is absent, transaction reuse precedes the dispatcher's
+own publication so its recorded reads, self-roots and refusal are replayed.
 
 Literal switch narrowing partitions the entering parent union once in
 `flow_return_branches.rs`. When every projected discriminant and case test is
