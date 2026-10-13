@@ -214,6 +214,14 @@
       "implementationOwner": "ACT1",
       "successorPath": ["LRA0", "LSO8", "ACT1"],
       "receivingAcceptance": "ACT1-AC1"
+    },
+    {
+      "id": "LRA-C14",
+      "consumer": "Native LSP unused-import removal, invoked directly by handle_code_action_attempt for source.organizeImports independently of ActionEngine and native quickfix producers",
+      "source": "crates/verter_lsp/src/features/organize_imports.rs",
+      "implementationOwner": "ACT1",
+      "successorPath": ["LRA0", "LSO8", "ACT1"],
+      "receivingAcceptance": "ACT1-AC1"
     }
   ],
   "displacedRoutes": [
@@ -337,6 +345,28 @@
       "receivingAcceptance": "LSO8-AC1",
       "parentRoute": null,
       "disposition": "Delete or structurally reject semantic producers' direct WorkspaceEdit/TextEdit construction, including the inline builder in make_insert_action and every caller of all three shared builders. Normalize authored intents with exact current/foreign source and mapping preconditions through the sole transaction validator; retain only thin transport projection after validation. Placeholder URI replacement and live-content anchor checks do not discharge transaction validation. ACT1 separately migrates native action envelopes; its model cutover cannot discharge this retirement."
+    },
+    {
+      "id": "LRA-D12",
+      "category": "untagged public identity",
+      "route": "organize_imports_actions constructs transport-native CodeActionOrCommand inline for source.organizeImports, bypassing ActionEngine, CodeAction/FileEdit and action_utils action wrappers",
+      "source": "crates/verter_lsp/src/features/organize_imports.rs",
+      "deletionOwner": "ACT1",
+      "successorPath": ["LRA0", "LSO8", "ACT1"],
+      "receivingAcceptance": "ACT1-AC1",
+      "parentRoute": null,
+      "disposition": "Migrate LSP-native unused-import removal onto qualified alternatives with independent applicability and safety, preserving full-import deletion and partial-specifier edits on existing fixtures. The source.organizeImports-only request must consume this model even when no quickfix or ActionEngine route runs. LSO8 separately retires the inline raw edit builder; model migration cannot discharge transaction validation."
+    },
+    {
+      "id": "LRA-D13",
+      "category": "untagged coordinate/public identity",
+      "route": "organize_imports_actions constructs TextEdit deletion/replacement ranges and an inline WorkspaceEdit with version: None, without make_insert_action, make_insert_edit or make_replace_edit",
+      "source": "crates/verter_lsp/src/features/organize_imports.rs",
+      "deletionOwner": "LSO8",
+      "successorPath": ["LRA0", "LSO8"],
+      "receivingAcceptance": "LSO8-AC1",
+      "parentRoute": null,
+      "disposition": "Delete or structurally reject this independent semantic fix edit-construction route. Express unused-import deletion and specifier replacement as authored intents validated against exact source and map basis by the sole transaction engine, then project validated edits to LSP. Placeholder URI replacement does not validate the basis. Retiring the three action_utils builders leaves this route intact; ACT1 separately owns its action envelope."
     }
   ],
   "referencedRoutes": [

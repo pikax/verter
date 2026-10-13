@@ -87,6 +87,19 @@ producers to consumers:
   intents and thin transport projection; placeholder URI replacement does
   not validate a transaction. ACT1's envelope migration cannot discharge
   this separate transaction cutover.
+- `handle_code_action_attempt` also calls `organize_imports_actions` directly
+  for `source.organizeImports`, including requests whose `context.only`
+  excludes quickfixes. This unused-import consumer (`LRA-C14`) bypasses both
+  ActionEngine and the native quickfix producers. It constructs its own
+  transport-native action inline. ACT1 owns that action-model migration
+  (`LRA-D12`, `ACT1-AC1`), preserving existing full-import deletion and
+  partial-specifier replacement fixtures with applicability and safety.
+  `organize_imports_actions` also builds `TextEdit` ranges and an unversioned
+  `WorkspaceEdit` inline without any of the three `action_utils` edit builders.
+  LSO8 owns this distinct retirement (`LRA-D13`, `LSO8-AC1`): validated
+  authored intents replace semantic edit construction before LSP projection.
+  ACT1's envelope migration and placeholder URI replacement cannot discharge
+  the source/map transaction preconditions.
 
 The finite consumer population is lint configuration, catalog/rule selection,
 analysis and TypeInfo, suppressions, diagnostic publication, action planning,
@@ -94,8 +107,12 @@ LSP, NAPI/WASM/FFI and MCP. The inventory names the live paths for each.
 The LSP audit follows both the ActionEngine bridge and the independent native
 macro/component/event-type-hint quickfix routes to their action wrappers and
 current/foreign edit builders, including edits built inline by
-`make_insert_action`; completing only `LRA-D04`/`LRA-D05` or only retiring
-`make_insert_edit`/`make_replace_edit` leaves the macro route alive.
+`make_insert_action`. It also follows the independent `source.organizeImports`
+unused-import route to its inline action and edit builders. Completing only
+`LRA-D04`/`LRA-D05` or only retiring `make_insert_edit`/`make_replace_edit`
+leaves the macro route alive; completing the quickfix migrations
+`LRA-D10`/`LRA-D11` still leaves unused-import removal outside the cutover
+unless `LRA-D12`/`LRA-D13` are also discharged.
 MCP scoring is included: its direct `Linter::new` call is a consumer even
 though it presents a score instead of individual diagnostics. Rule bodies,
 providers, compiler diagnostics and the component view remain with their
@@ -277,7 +294,12 @@ deletion belongs solely to LNT3, and shared action model migration to ACT1.
   `crates/verter_lsp/src/features/macro_actions_tests.rs`,
   `crates/verter_lsp/src/features/component_actions_tests.rs`,
   the inline tests in `event_type_hints.rs` and the
-  `cross_file.rs` child-anchor/stale-revision tests. ACT1 preserves their
+  `cross_file.rs` child-anchor/stale-revision tests. The inline
+  `organize_imports.rs::test_fully_unused_import_removed_entirely` control
+  supplies the unused-import trigger and asserts one empty replacement;
+  `test_partial_unused_removes_only_unused_specifier` preserves used specifiers while
+  removing unused ones. These bind ACT1's unused-import fixture parity to
+  the independent `source.organizeImports` route. ACT1 preserves their
   authored edits while LSO8 adds transaction validation; these existing
   controls do not certify the future alternative or transaction model.
 - **LRA0-AC3:** runtime incremental comparisons are not applicable to this
