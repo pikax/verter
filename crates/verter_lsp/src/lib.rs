@@ -141,6 +141,8 @@ mod resilient_provider;
 mod uri;
 
 #[cfg(test)]
+mod flow_fixture_tests;
+#[cfg(test)]
 mod hot_path_overhead_tests;
 #[cfg(test)]
 #[allow(

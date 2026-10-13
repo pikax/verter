@@ -71,8 +71,8 @@ pub(crate) use world_snapshot::{
 pub(crate) use admission::NonAdmissionReason;
 #[allow(unused_imports)]
 pub use admission::{
-    refuse_result_cache_admission_if_partial, CacheAdmission, CacheEntry, Candidate,
-    DeferredVictims, FactCandidateDiscriminant, PublishCoreOutcome, PublishOutcome,
+    propagate_non_admission, refuse_result_cache_admission_if_partial, CacheAdmission, CacheEntry,
+    Candidate, DeferredVictims, FactCandidateDiscriminant, PublishCoreOutcome, PublishOutcome,
 };
 #[allow(unused_imports)]
 pub(crate) use node::{lookup, query, ArtifactNode, ComputeCtx, QueryFlightKey, QueryNode};

@@ -130,6 +130,20 @@ and version), weak edges, dependency defaults, and dev unification controls.
 The bounded repository guards are held to the standard nextest speed gate and
 are not on its known-slow list.
 
+Generated component-meta corpus chunks retain a 10-second slow warning and a
+20-second termination deadline in both nextest profiles, including the local
+profile while its unrelated known-slow list remains. Apply policy to the whole
+chunk namespace so regenerated chunks cannot inherit a longer base watchdog.
+The compiled session policy guard probes nextest's override precedence and
+profile inheritance, with an unrelated base-policy control. The corpus
+probe uses manifest-only Cargo metadata (`--no-deps --locked --offline`) for
+workspace package selectors and an empty temporary `CARGO_HOME` for metadata
+and nextest children, so a compiled archive consumer needs no registry cache.
+The corpus layout and generator-parity guards preserve complete fixture coverage,
+authored overrides and fresh host state per logical row. Set `VERTER_CORPUS_AUDIT_TIMING=1`
+when running the chunk inventory to collect pool and row timings; report these
+as evidence without asserting machine-dependent elapsed times.
+
 ### TDD Workflow
 
 Behavioral code changes use TDD. Documentation, generated projections, formatting, and mechanical metadata changes use their owning freshness/validation evidence unless they also change executable behavior.
@@ -416,6 +430,13 @@ sites and require every callback and condition plus ≤2.2× growth per doubling
 `restored_path_replay_fails_the_growth_oracle` retains the quadratic negative
 control. Run these native proofs alongside the live leg when changing its size
 range; a smaller provider corpus alone is not growth evidence.
+
+Provider-free LSP flow growth and semantic-suite coverage tests live in
+`crates/verter_lsp/src/flow_fixture_tests.rs`, alongside the partition builder
+shared by the live semantic tests. Keep `real_provider_tests::` reserved for
+paired live-provider variants: archive partition verification rejects tests
+there without an explicit tsserver or tsgo selector. Native guards remain on
+the provider-free core lane.
 
 **Conformance-harness preflight — real work, before Cargo.** Before the archive
 build, the core gate runs only the harness-owned
