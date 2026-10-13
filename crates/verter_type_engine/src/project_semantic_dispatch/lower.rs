@@ -1936,16 +1936,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         scope: &NodeScopeId,
     ) -> SemanticNodeId {
         let graph = self.graph();
-        // A literal member of an already resolved surface is a narrow demand,
-        // even during transit. Select it before returning a carrier so unrelated
-        // unresolved siblings do not become part of the selected value.
-        let resolved_member =
-            matches!(
+        // Operand lowering preserves the operator. Only its value demand may
+        // select the member; a transit read must retain both path segments.
+        let should_defer = !crate::semantic_query::may_reduce_operator(reduction_context)
+            || reduction_context.mode == ProjectionMode::Skeleton
+            || !matches!(
                 graph.node_data(obj_id).as_deref(),
                 Some(SemanticNodeData::Object(_))
-            ) && !matches!(index_key, crate::semantic_query::IndexKey::Computed(_));
-        let should_defer = (!crate::semantic_query::may_reduce_operator(reduction_context)
-            && !resolved_member)
+            )
             || self.indexed_access_reads_named_declaration(obj_id, &index_key);
         if should_defer {
             graph.intern_node_with_scope(

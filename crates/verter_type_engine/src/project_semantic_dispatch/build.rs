@@ -9436,25 +9436,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // canonical shape before the nullish filter; a genuinely
                 // unsettled operand returns its carrier and keeps the
                 // deferred shell below.
-                let arg = self.resolve_signature_source_carrier(args[0], context);
-                // `NonNullable<T>` is `T & {}`: `unknown & {}` collapses to
-                // the empty-object base (the trap row — NOT `unknown`, NOT
-                // `never`). `any`/`never` pass through the settled arms
-                // below (`any & {}` = `any`; distribution over `never`
-                // collapses).
-                if matches!(
-                    self.peek_special(arg),
-                    Some((
-                        crate::project_semantic_dispatch::absorb::SpecialKind::Unknown,
-                        _
-                    ))
-                ) {
-                    let result = graph.intern_node(SemanticNodeData::Object(
-                        crate::project_semantic_dispatch::walk::empty_surface_view(),
-                    ));
-                    record_utility_edges(result);
-                    return (QueryResult::Value(result), fence, false);
-                }
                 let nullish = |id: SemanticNodeId| {
                     matches!(
                         graph.node_data(id).as_deref(),
@@ -9502,6 +9483,29 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     ) || names_object_declaration(id))
                         && !nullish(id)
                 };
+                let arg = if names_object_declaration(args[0]) {
+                    args[0]
+                } else {
+                    self.resolve_signature_source_carrier(args[0], context)
+                };
+                // `NonNullable<T>` is `T & {}`: `unknown & {}` collapses to
+                // the empty-object base (the trap row — NOT `unknown`, NOT
+                // `never`). `any`/`never` pass through the settled arms
+                // below (`any & {}` = `any`; distribution over `never`
+                // collapses).
+                if matches!(
+                    self.peek_special(arg),
+                    Some((
+                        crate::project_semantic_dispatch::absorb::SpecialKind::Unknown,
+                        _
+                    ))
+                ) {
+                    let result = graph.intern_node(SemanticNodeData::Object(
+                        crate::project_semantic_dispatch::walk::empty_surface_view(),
+                    ));
+                    record_utility_edges(result);
+                    return (QueryResult::Value(result), fence, false);
+                }
                 let reduced: Option<SemanticNodeId> = match graph.node_data(arg).as_deref() {
                     Some(SemanticNodeData::Union(arms))
                         if arms.iter().all(|a| nullish(*a) || settled_non_nullable(*a)) =>
@@ -11936,7 +11940,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 };
             }
         }
-        let settled = self.resolve_signature_source_carrier(base, context);
+        // A settled source surface already owns the member names and index
+        // signatures. Reuse that key-domain demand instead of materializing
+        // another declaration body at the published value's altitude.
+        let settled = transit_settled
+            .filter(|node| {
+                matches!(
+                    self.graph().node_data(*node).as_deref(),
+                    Some(SemanticNodeData::Object(_))
+                )
+            })
+            .unwrap_or_else(|| {
+                self.resolve_signature_source_carrier(
+                    base,
+                    context.with_mode(ProjectionMode::Navigate),
+                )
+            });
         if settled == base {
             return None;
         }

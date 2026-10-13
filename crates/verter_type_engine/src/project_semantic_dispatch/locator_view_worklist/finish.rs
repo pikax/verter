@@ -153,12 +153,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     self.canonical_argument_carrier(projected(
                         memo,
                         *argument,
-                        self.argument_operand_context(*argument, argument_context, Some(base)),
+                        self.argument_operand_context(*argument, argument_context),
                     ))
                 })
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
         );
+        let projected_args = if may_reduce_operator(context) {
+            let (args, completeness) =
+                self.evaluate_carrier_arguments(base, &projected_args, context);
+            if let crate::semantic_query::ResultCompleteness::Partial(reasons) = completeness {
+                self.fold_local_partial_completeness(reasons);
+            }
+            args
+        } else {
+            projected_args
+        };
         let rebuild = |projected_args: Arc<[SemanticNodeId]>| {
             if projected_args.as_ref() == args.as_ref() {
                 node
@@ -701,7 +711,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         }),
                 };
                 let proven_empty = matches!(&index, IndexKey::Computed(key) if self.known_key_space_domain(*key).is_some_and(|domain| domain.is_empty()));
-                let should_defer = !proven_empty && (!may_reduce_operator(context) || deferred_position);
+                let should_defer = !proven_empty
+                    && (!may_reduce_operator(context)
+                        || context.mode == ProjectionMode::Skeleton
+                        || deferred_position
+                        || !matches!(graph.node_data(object_id).as_deref(), Some(SemanticNodeData::Object(_))));
                 if should_defer {
                     graph.intern_preserving_scope(
                         node,

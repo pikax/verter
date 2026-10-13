@@ -744,6 +744,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         root: SemanticNodeId,
     ) -> Option<Arc<KeySpaceDomain>> {
+        let (_guard, trip) = self.enter_connected_demand(false);
+        if let Some(reasons) = trip {
+            self.fold_local_partial_completeness(reasons);
+            return None;
+        }
         if let Some(cached) = self.graph().structural_domain_get(root) {
             return cached;
         }

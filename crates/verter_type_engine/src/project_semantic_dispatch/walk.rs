@@ -4664,7 +4664,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     let inst_ctx = self.dispatch.instantiate_context_for(
                         canonical_id,
                         self.context.into_structural_transit_with_mode(
-                            ProjectionMode::Shallow,
+                            ProjectionMode::Navigate,
                         ),
                     );
                     drop(data);
@@ -4858,7 +4858,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     // 62-edge leak in `compute_evaluated_types`.
                     let unwrap_context = if still_more_path {
                         self.context
-                            .into_structural_transit_with_mode(ProjectionMode::Shallow)
+                            .into_structural_transit_with_mode(ProjectionMode::Navigate)
                     } else {
                         self.context_from_template(
                             crate::semantic_query::ProjectionReductionContext::published(

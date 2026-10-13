@@ -405,6 +405,28 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         if self.cancellation.is_cancelled() {
             return self.cancelled_build_output();
         }
+        // The check consumes its indexed operand. Retain the authored
+        // application's argument, but use the demanded value in its winner.
+        // This is a fresh receipt-backed demand, independent of prior work.
+        let authored_check = check;
+        let check = if matches!(
+            self.graph().node_data(check).as_deref(),
+            Some(SemanticNodeData::IndexedAccess { .. })
+        ) {
+            let evaluated = self
+                .evaluate_deferred_semantic_node_with_context(
+                    check,
+                    crate::semantic_query::ProjectionReductionContext::published(
+                        crate::semantic_query::ProjectionMode::Navigate,
+                    ),
+                )
+                .into_complete_active_query_build_node(self)
+                .unwrap_or(check);
+            self.canonical_argument_carrier(evaluated)
+        } else {
+            check
+        };
+        let demanded_check = check;
         let operands = self.conditional_operands(check, extends);
         let extends = operands.extends;
         if let Some(absorbed) = self.absorb_conditional(
@@ -436,6 +458,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             ConditionalBranchSelection::True | ConditionalBranchSelection::False => {
                 let take_true = selection == ConditionalBranchSelection::True;
                 let winner = branches.branch(self, take_true);
+                let winner = if authored_check != demanded_check {
+                    self.substitute_semantic_type_param(winner, authored_check, demanded_check)
+                } else {
+                    winner
+                };
                 let mut output =
                     self.commit_conditional_winner(check, extends, winner, selection, infer);
                 branches.committed(self, take_true, &mut output);

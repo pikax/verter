@@ -963,7 +963,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 | SemanticNodeData::ClassExpressionInstance { .. },
             ) => true,
             Some(SemanticNodeData::Union(arms)) => {
-                arms.iter().all(|arm| self.is_named_reference(*arm))
+                arms.iter().any(|arm| self.is_named_reference(*arm))
+                    && arms.iter().all(|arm| {
+                        self.is_named_reference(*arm)
+                            || matches!(
+                                self.graph().node_data(*arm).as_deref(),
+                                Some(SemanticNodeData::Primitive(
+                                    PrimitiveKind::Null | PrimitiveKind::Undefined
+                                ))
+                            )
+                    })
             }
             Some(SemanticNodeData::Intersection(arms)) => {
                 arms.iter().all(|arm| self.is_named_reference(*arm))
@@ -2087,12 +2096,49 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let args = args
             .iter()
             .map(|&arg| {
-                let outcome = self.evaluate_deferred_outcome(
-                    arg,
-                    self.argument_operand_context(arg, argument_context, Some(base)),
+                let context = self.argument_operand_context(arg, argument_context);
+                let indexed = matches!(
+                    self.graph().node_data(arg).as_deref(),
+                    Some(SemanticNodeData::IndexedAccess { .. })
                 );
+                let outcome = if indexed && !self.defers_type_arguments(base) {
+                    let outcome = self.evaluate_deferred_outcome(
+                        arg,
+                        argument_context.with_mode(ProjectionMode::Navigate),
+                    );
+                    // Named values have one defining scope across import
+                    // sites. Other operands retain their authored identity.
+                    if matches!(
+                        self.graph().node_data(outcome.node).as_deref(),
+                        Some(
+                            SemanticNodeData::DeclRef { .. }
+                                | SemanticNodeData::InstantiationRef { .. }
+                        )
+                    ) {
+                        outcome
+                    } else {
+                        EvaluateDeferredOutcome {
+                            node: arg,
+                            ..outcome
+                        }
+                    }
+                } else if crate::semantic_query::may_reduce_operator(context) {
+                    self.evaluate_deferred_outcome(arg, context)
+                } else {
+                    EvaluateDeferredOutcome::complete(arg)
+                };
                 completeness = completeness.merge(outcome.completeness);
-                self.canonical_argument_carrier(outcome.node)
+                let canonical = self.canonical_argument_carrier(outcome.node);
+                if canonical != arg {
+                    self.graph().record_origin_edge(
+                        canonical,
+                        crate::semantic_query::OriginEdgeKind::Normalize,
+                        Arc::from([arg]),
+                        crate::semantic_query::OriginMeta::None,
+                        self.project_generation_signature(),
+                    );
+                }
+                canonical
             })
             .collect();
         (args, completeness)
@@ -2192,10 +2238,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         // evaluated here, at a demand for its value: its
                         // keys where they settle, as the checker prints
                         // them.
-                        if let QueryResult::Value(keys) = read.value {
-                            if let Some(settled) = self.settled_key_of_carrier(keys, frame.context)
-                            {
-                                read.value = QueryResult::Value(settled);
+                        if demand == DeferredEvaluationDemand::Shell {
+                            if let QueryResult::Value(keys) = read.value {
+                                if let Some(settled) =
+                                    self.settled_key_of_carrier(keys, frame.context)
+                                {
+                                    read.value = QueryResult::Value(settled);
+                                }
                             }
                         }
                         let fallback = self.opaque(QueryError::Miss);
@@ -2625,13 +2674,31 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
             SemanticNodeData::Object(surface) => {
-                let members = surface
-                    .positive_members()
+                // Entries own the surface; the member list is its derived
+                // index. Rebuild the stream so both readers see the value.
+                let mut values = values.iter();
+                let entries = surface
+                    .entries
                     .iter()
-                    .zip(values)
-                    .map(|(m, &value)| crate::semantic_query::SurfaceMember { value, ..m.clone() })
+                    .map(|entry| match entry {
+                        crate::semantic_query::SurfaceEntry::Member(member) => {
+                            crate::semantic_query::SurfaceEntry::Member(
+                                crate::semantic_query::SurfaceMember {
+                                    value: *values
+                                        .next()
+                                        .expect("each member has an evaluated value"),
+                                    ..member.clone()
+                                },
+                            )
+                        }
+                        other => other.clone(),
+                    })
                     .collect();
-                SemanticNodeData::Object(surface.clone().with_positive_members(members))
+                SemanticNodeData::Object(crate::semantic_query::SurfaceView::from_entries(
+                    entries,
+                    surface.keyspace,
+                    surface.has_known_index_signature(),
+                ))
             }
             SemanticNodeData::Signature {
                 kind,
