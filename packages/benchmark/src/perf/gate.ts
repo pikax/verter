@@ -341,6 +341,9 @@ export interface MetricResult {
   /** Raw per-side sample sets (in order) — persisted for reproducibility. */
   candidateSamples: number[];
   baselineSamples: number[];
+  /** Run boundaries required to replay the cluster bootstrap. */
+  candidateClusters: number[][];
+  baselineClusters: number[][];
   unavailableReason?: string;
 }
 export interface CorrectnessResult {
@@ -471,6 +474,8 @@ export interface GateEvaluationInput {
  */
 export interface SampledMetric {
   readonly values: number[];
+  /** Independent runs; operations from one run share one bootstrap draw. */
+  readonly clusters: number[][];
   /** Samples whose gated payload for this metric was absent (uncoerced). */
   readonly missing: number;
   readonly total: number;
@@ -491,6 +496,7 @@ function zeroIsMissing(kind: MetricSource["kind"]): boolean {
 function sampleSetFor(side: SideSamples, source: MetricSource): SampledMetric {
   const total = side.samples.length;
   const values: number[] = [];
+  const clusters: number[][] = [];
   let missing = 0;
   const zMissing = zeroIsMissing(source.kind);
   // A scalar/rss/attribution/total_wall reading is MISSING when it is null /
@@ -507,6 +513,7 @@ function sampleSetFor(side: SideSamples, source: MetricSource): SampledMetric {
       return;
     }
     values.push(v);
+    clusters.push([v]);
   };
   switch (source.kind) {
     case "scalar":
@@ -533,8 +540,10 @@ function sampleSetFor(side: SideSamples, source: MetricSource): SampledMetric {
         // ops is partial — counted as missing, never pooled into the percentile.
         const expected = s.expectedOps;
         const complete = d != null && d.length > 0 && (expected == null || d.length === expected);
-        if (complete) values.push(...d);
-        else missing++;
+        if (complete) {
+          values.push(...d);
+          clusters.push([...d]);
+        } else missing++;
       }
       break;
     default: {
@@ -546,7 +555,7 @@ function sampleSetFor(side: SideSamples, source: MetricSource): SampledMetric {
       throw new Error(`unknown metric source kind: ${String((_exhaustive as MetricSource).kind)}`);
     }
   }
-  return { values, missing, total };
+  return { values, clusters, missing, total };
 }
 
 const isAllZero = (xs: number[]): boolean => xs.length === 0 || xs.every((v) => v === 0);
@@ -581,7 +590,7 @@ function sameResolvedPath(a: string, b: string): boolean {
   return resolvedPathKey(a) === resolvedPathKey(b);
 }
 
-function decideRatio(cand: number[], base: number[], spec: MetricSpec): RatioDecision {
+function decideRatio(cand: number[][], base: number[][], spec: MetricSpec): RatioDecision {
   const opts = { statistic: spec.statistic };
   // EXHAUSTIVE over the direction enum — an unknown direction is a hard throw, never
   // a silent lower-is-better default that would disable a higher-is-better/invariant
@@ -945,7 +954,7 @@ export function evaluateGate(input: GateEvaluationInput): GateReport {
       const allZero = isAllZero(cand.values) || isAllZero(base.values);
       const nonFinite = hasNonFinite(cand.values) || hasNonFinite(base.values);
       const unusable = missingPayload || allZero || nonFinite;
-      const decision = unusable ? null : decideRatio(cand.values, base.values, mspec);
+      const decision = unusable ? null : decideRatio(cand.clusters, base.clusters, mspec);
       const unusableReason = missingPayload
         ? `gated payload missing (null / ≤0, never coerced to 0) on ${cand.missing}/${cand.total} candidate + ${base.missing}/${base.total} baseline samples — partial/missing instrumentation`
         : nonFinite
@@ -963,6 +972,8 @@ export function evaluateGate(input: GateEvaluationInput): GateReport {
         degenerate: unusable,
         candidateSamples: cand.values,
         baselineSamples: base.values,
+        candidateClusters: cand.clusters,
+        baselineClusters: base.clusters,
         unavailableReason: unusableReason,
       });
       if (reported) return; // reported metrics are informational — they never gate

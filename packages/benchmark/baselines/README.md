@@ -2,13 +2,13 @@
 
 `block6.json` is the committed baseline manifest for the external-TS-engine
 self-referential perf gate (design the external TypeScript engine contract
-§2.7). It holds the methodology version, the pinned-baseline git ref, the
+§2.7). It holds the methodology version, the runtime comparison policy, the
 corpus content hash, the tsgo engine pin, the thread-count policy, and the
 per-workload gated metrics + thresholds.
 
 ## What the gate compares (and what it does NOT)
 
-The gate is **self-referential**: a candidate Verter build vs a **pinned-baseline
+The gate is **self-referential**: a candidate Verter build vs a **runtime-selected baseline
 Verter build**, on the **same** runner / job / corpus / tsgo / thread regime
 (axis-A is thread-pinned via `hostCpuThreads`; the axis-B `verter-tsc`/`verter_lsp`/
 tsgo subprocesses do NOT accept a harness thread-pin and run at machine-default
@@ -53,14 +53,18 @@ An **`invariant`** metric (e.g. the generated-carrier count, output bytes) is
 count/byte-size that **shrinks** (skipped work) is a regression, not a perf win.
 The statistic is the **median** for time/throughput/RSS
 scalars and the **named percentile (p50/p95/p99) over the pooled per-operation
-distribution** for tail latency (never collapsed to the median). It is a ratio
+distribution** for tail latency (never collapsed to the median). Bootstrap draws
+resample **whole runs**, with replacement, retaining every operation from each
+selected run. This preserves within-run correlation instead of treating all
+operations as independent observations. Scalars form one singleton cluster per
+run. Artifacts retain both pooled samples and run clusters for replay. It is a ratio
 of per-side statistics; the interleaving balances drift, it is not a paired
 per-sample comparison. On a **full** run, a skipped/unavailable workload, a
 degenerate (all-zero) gated metric, an engine-version mismatch, or an armed run
 that fell back to self-check are **hard fails** — a misconfiguration or missing
 instrument never reads as green. The gate gates the **axis-A Verter-owned codegen overhead**
 (codegen(+source-map) emit time, codegen throughput, carrier output count, output
-+ source-map bytes, and the carrier+source-map **content** hash) **plus the axis-B
+and source-map bytes, and the carrier+source-map **content** hash) **plus the axis-B
 END-TO-END regression signals** (the interactive/warm LSP latency distributions,
 the carrier-typecheck exit-code + diagnostic-SET correctness, and the IDE-query
 hover/completion content equality). The axis-B signals are whole-pipeline (Verter +
@@ -140,26 +144,38 @@ The offline **vize** comparison is a separate, manager-run, `VIZE_PATH`-gated
 script (`pnpm --filter @verter/benchmark bench:perf:vize`). It is **never** part
 of this gate and **never** a CI test — CI is 100% self-referential.
 
-## Refreshing the baseline — a reviewed change, like an API change
+## Comparison selection and methodology governance
 
-A baseline refresh is **not** an incidental edit. It is a **dedicated change**:
+Scheduled runs compare the candidate with its **immediate first parent**. Manual
+dispatch may supply `baseline-ref`; an empty input uses the same parent policy.
+`src/perf/baseline.ts` resolves both checkout identities once before either build,
+records them in the run log, and rejects missing or identical revisions. Checkout
+identities are runtime provenance, never committed historical acceptance proof.
+There is no `block6.json.baselineRef` field to refresh or arm.
 
-1. **Title it** `perf: refresh baseline` (a conventional-commit `perf` change),
-   on its own commit/PR — never folded into an unrelated change.
-2. **Attach a before/after report.** Run the gate against the OLD baseline and
-   the NEW candidate and record both sides' numbers (ratios, CIs, memory) in the
-   PR description. A refresh that moves a threshold must justify the move with
-   data, the same way an API change justifies a contract change.
-3. **Preserve history.** Do **not** overwrite `block6.json` in place when the
-   methodology or thresholds change materially: snapshot the prior manifest as
-   `block6.<methodologyVersion>.json` (or a dated sibling) before bumping
-   `methodologyVersion`, so a chain of "just under threshold" regressions stays
-   visible across refreshes — a slow drift can never hide behind a moving
-   baseline.
-4. **Bump `baselineRef`** to the new pinned commit. The pinned baseline is the
-   exact build the candidate is measured against; it should be a known-good
-   commit on `main`.
-5. **Keep the corpus hash in sync.** If the refresh accompanies a corpus change,
+An immediate-parent comparison detects a change against its predecessor. It
+**does not protect against cumulative drift** from several changes below the
+threshold. A manual comparison against a deliberately selected earlier revision
+can investigate that drift, remeasuring both sides on the same worker; stored
+timings or manifest history alone do not establish it.
+
+Changes to thresholds, corpus, engine or methodology remain deliberate reviewed
+changes:
+
+1. **Explain the change and attach a before/after report.** Record the comparison
+   selection, ratios, CIs and available memory measurements in the PR description.
+   Justify threshold changes with fresh measurements; never refresh a threshold
+   merely to clear a red run.
+2. **Preserve and version material methodology changes.** Snapshot the prior
+   manifest as `block6.<methodologyVersion>.json` (or a dated sibling) before
+   bumping `methodologyVersion`; describe the changed statistic or sampling
+   procedure. These snapshots describe the method, not proof of cumulative
+   performance. Methodology 1.2.0 replaces pooled-observation resampling with
+   whole-run cluster resampling; `block6.1.1.0.json` retains its predecessor.
+3. **Preserve the engine and thread policy.** Both installed engines must match
+   the manifest pin. Keep separate builds, workload/sample completeness, content,
+   coverage and correctness checks intact.
+4. **Keep the corpus hash in sync.** If the change accompanies a corpus change,
    `corpusHash` must equal the corpus `manifest.json` `contentHash` (the
    `gate.spec.ts` freshness rail and the gate's corpus-hash refusal both enforce
    this). A corpus change is itself a deliberate, reviewed act (see
@@ -174,24 +190,34 @@ variance while still catching a real regression: a candidate that is genuinely
 slower shows a ratio whose **whole CI** sits above the threshold, regardless of
 the absolute speed of the day's runner.
 
-## The pinned-baseline lifecycle
+## Running the comparison
 
-`baselineRef` ships as `PENDING` — an **unarmed placeholder** that is physically
-incapable of a green *armed* gate. While it is PENDING:
+The nightly and manual workflows resolve the comparison, build each side's native
+package and `verter-tsc`/`verter-lsp` binaries separately, and invoke the full gate
+with at least seven runs per side. A missing parent requires an explicit valid
+manual ref; an identical ref is refused, never converted to a green self-check.
 
-- The **scheduled nightly blocking run fails RED-until-armed** (exit nonzero). An
-  unpinned baseline can never be a green blocking gate; the nightly red is the
-  **intended honest state** until the baseline is pinned — not a green self-check.
-- A manual `workflow_dispatch` run (and a local / on-demand `--smoke` run)
-  executes the **same-commit self-check** (candidate === baseline, ~1.0 ratios,
-  a loud NOT-ARMED warning) — this proves the predicate does not false-fail
-  before the gate is armed against a real historical baseline.
-- The gate itself forces self-check mode for a PENDING baseline and HARD-FAILS a
-  non-self-check invocation; an *armed* comparison additionally REQUIRES
-  `--baseline-root` (the baseline tsgo engine is resolved from that worktree,
-  never the candidate root).
+For a local equivalent, resolve the identities with `src/perf/baseline.ts`, create
+a separate baseline worktree, install its frozen dependencies, and build each
+side using the commands in `.github/workflows/perf-gate.yml`. Then run:
 
-Arming the gate is itself a `perf: refresh baseline` change (see "Refreshing the
-baseline" above) that sets `baselineRef` to the real pinned commit. **The baseline
-is armed by a subsequent change** (not the same change) that pins the commit SHA,
-since a squash-merge SHA cannot self-reference at author time.
+```sh
+pnpm --filter @verter/benchmark exec node --import tsx src/perf/gate.ts \
+  --samples 7 --out artifacts/perf-gate-result.json \
+  --baseline-ref "$BASELINE_REF" \
+  --candidate-bin "$CANDIDATE_BIN" --baseline-bin "$BASELINE_BIN" \
+  --candidate-native "$CANDIDATE_ROOT/packages/native" \
+  --baseline-native "$BASELINE_ROOT/packages/native" \
+  --baseline-root "$BASELINE_ROOT"
+```
+
+`BASELINE_REF` is the resolved identity printed for this invocation; the binary
+directories and native roots must belong to the corresponding distinct builds.
+The baseline engine is resolved from `--baseline-root`, never borrowed from the
+candidate. The full gate requires the committed 15k corpus hash, every declared
+workload, complete per-run measurements and the engine pin on both sides.
+Artifacts are retained even when setup or a behavioral check fails.
+
+A local `--smoke` invocation is a smaller harness check and may self-compare.
+It does not establish a green full nightly comparison. Scheduled and manual
+blocking runs never fall back to that mode.

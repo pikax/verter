@@ -679,6 +679,59 @@ describe("evaluateGate — discriminating gate evaluation", () => {
     expect(ok.pass).toBe(true);
   });
 
+  it("bootstraps whole runs so correlated operations do not manufacture confidence", () => {
+    const spec: WorkloadSpec = {
+      axis: "B",
+      title: "correlated edits",
+      gated: {
+        latency: {
+          threshold: 1.1,
+          direction: "lower-is-better",
+          statistic: "median",
+          source: { kind: "distribution", key: "editLatency" },
+        },
+      },
+    };
+    const runs = (values: number[]) =>
+      side(
+        values.map((value) =>
+          sample({
+            expectedOps: 50,
+            distributions: { editLatency: Array<number>(50).fill(value) },
+          }),
+        ),
+      );
+    const wl: WorkloadEvaluationInput = {
+      id: "edit",
+      spec,
+      available: true,
+      candidate: runs([1, 1, 1, 2, 2, 2, 2]),
+      baseline: runs([1, 1, 1, 1, 1, 1, 1]),
+    };
+    const report = evaluateGate(
+      gateInput({ manifest: manifestOf({ edit: spec }), workloads: [wl] }),
+    );
+    const decision = report.results[0].metrics[0].decision!;
+    expect(decision.statisticRatio).toBe(2);
+    expect(decision.lowerBound95).toBe(1);
+    expect(report.pass).toBe(true);
+    expect(report.results[0].metrics[0].candidateClusters).toEqual(
+      wl.candidate.samples.map((run) => run.distributions!.editLatency),
+    );
+
+    // Consistent between-run regression still fails; widening uncertainty must
+    // not disable the predicate or discard the operation distribution.
+    const regressed = { ...wl, candidate: runs([2, 2, 2, 2, 2, 2, 2]) };
+    expect(
+      evaluateGate(
+        gateInput({
+          manifest: manifestOf({ edit: spec }),
+          workloads: [regressed],
+        }),
+      ).pass,
+    ).toBe(false);
+  });
+
   it("FAILS on a candidate/baseline diagnostic-SET or exit-code mismatch; PASSES on equality", () => {
     const spec: WorkloadSpec = { axis: "B", title: "cold", gated: {}, correctnessGated: true };
 
