@@ -42,10 +42,12 @@ separate static proof, runtime observation and estimates. Existing
 and [ProductReceiptBasis](../../product-experience/DX0/products/product-receipt-basis.v1.json)
 govern claims. Their historical ledger/path references do not recreate removed
 repository governance; the controller owns readiness. The charter's legacy
-`contracts/web-product-expansion-v1.md` companion is absent from this candidate
-and dispatched packet. This document grounds the bounded decision in the
-frozen charter and available predecessor artifacts; it claims no inspection
-or ratification of that unavailable companion.
+`contracts/web-product-expansion-v1.md` companion is absent. The operator's
+2026-10-13 `cwb0-companion-authority` ruling replaces that authority with the
+frozen requirements, accepted WDX0/DX0 products and TIF1D's ComponentInfo view
+schema, preserving every specified obligation. No new prerequisite is added;
+implementation and extended evidence remain in CWB1. This contract applies
+that ruling without claiming inspection of the unavailable companion.
 
 ## Observation and provenance contract
 
