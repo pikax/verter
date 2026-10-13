@@ -285,7 +285,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> bool {
         use verter_session_query::declarations::TypeDeclKind;
         if declaration.canonical_id.as_ref() == "__builtin__" {
-            return true;
+            // Utility intrinsics model aliases; the remaining builtin
+            // carriers model interfaces and classes (including ThisType).
+            return verter_session_query::type_solver::builtin::BuiltinUtility::from_name(
+                &declaration.decl_name,
+            )
+            .is_none();
         }
         !matches!(
             self.prepared_decl_kind(declaration),
@@ -298,10 +303,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// alias arguments are eager; class and interface arguments are deferred.
     pub(super) fn instantiation_argument_context(
         &self,
-        _declaration: &crate::semantic_query::DeclIdentity,
+        declaration: &crate::semantic_query::DeclIdentity,
         context: ProjectionReductionContext,
     ) -> ProjectionReductionContext {
-        context.into_structural_provenance()
+        let context = context.into_structural_provenance();
+        if self.defers_type_arguments(declaration) && may_reduce_operator(context) {
+            context.into_structural_transit_with_mode(ProjectionMode::Navigate)
+        } else {
+            context
+        }
     }
 
     pub(super) fn argument_operand_context(

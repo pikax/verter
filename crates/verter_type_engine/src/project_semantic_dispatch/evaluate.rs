@@ -1296,17 +1296,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         Arc::clone(&base.decl_name),
                     );
                     let owner_canonical = Arc::clone(&base.canonical_id);
-                    let args: Arc<[SemanticNodeId]> = args
-                        .iter()
-                        .map(|&arg| {
-                            let outcome = self.evaluate_deferred_outcome(
-                                arg,
-                                self.argument_operand_context(arg, context, None),
-                            );
-                            completeness = completeness.merge(outcome.completeness);
-                            self.canonical_argument_carrier(outcome.node)
-                        })
-                        .collect();
+                    let (args, argument_completeness) =
+                        self.evaluate_carrier_arguments(base, args, context);
+                    completeness = completeness.merge(argument_completeness);
                     drop(data);
                     let read = self.execute_read(SemanticQueryKey::Instantiate(
                         crate::semantic_query::InstantiateKey::new(
@@ -2078,6 +2070,32 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         reduction_context: ProjectionReductionContext,
     ) -> EvaluateDeferredOutcome {
         self.evaluate_deferred_demand(node, reduction_context, DeferredEvaluationDemand::Shell)
+    }
+
+    /// Prepare the arguments a carrier's owner consumes, using the same
+    /// eager-alias/deferred-declaration classification as projection. The
+    /// source reader keeps nominal result carriers; argument operator demand
+    /// stays with this shared evaluator and its ordinary memo/proof pipeline.
+    pub(super) fn evaluate_carrier_arguments(
+        &self,
+        base: &crate::semantic_query::DeclIdentity,
+        args: &[SemanticNodeId],
+        context: ProjectionReductionContext,
+    ) -> (Arc<[SemanticNodeId]>, ResultCompleteness) {
+        let argument_context = self.instantiation_argument_context(base, context);
+        let mut completeness = ResultCompleteness::Complete;
+        let args = args
+            .iter()
+            .map(|&arg| {
+                let outcome = self.evaluate_deferred_outcome(
+                    arg,
+                    self.argument_operand_context(arg, argument_context, Some(base)),
+                );
+                completeness = completeness.merge(outcome.completeness);
+                self.canonical_argument_carrier(outcome.node)
+            })
+            .collect();
+        (args, completeness)
     }
 
     pub(super) fn evaluate_selected_value_with_context(

@@ -2197,3 +2197,17 @@ The `DeclBodyMemo::whole_env()` whole-file env product (the lazy, lease-pinned e
 - `/type-resolution` — cross-file type resolver + macro traversal
 - `/component-meta` — downstream consumer
 - `/audit-infrastructure` — `StructuredAuditEvent` extensions
+
+### Immutable structural summaries
+
+`SemanticGraphStore` owns bounded binder-dependency and structural key-domain
+summaries beside its substitution and deferred-evaluation memos. These summarize
+immutable node payloads only, retain graph roots, reserve the shared retention
+account, and clear on graph invalidation. Refused admission leaves the computed
+summary usable without retaining it. Declaration references and symbolic key
+patterns cannot produce a complete structural domain; their resolution remains
+with the ordinary fact-backed query owners. A structural domain retains ordered
+keys and a membership index, distinguishes broad domains from finite empty
+ones, and never reads member values. Deferred evaluation separately keys shell
+and selected-value demands with the complete projection context and retains
+its ordinary dependency proof and cost receipt.

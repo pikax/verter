@@ -37,3 +37,24 @@ Infer declarations within nested signatures or conditionals belong to those
 scopes and do not make an enclosing argument an infer pattern. An actual infer
 pattern keeps its helper application addressable until the relation owner
 requests its shape.
+
+**Signature source demand.** Source readers settle reference chains through the
+ordinary `Instantiate` owner and prepare arguments through the shared deferred
+evaluator and continuation classification. They preserve resolved class
+expression identity. Full structural-fact normalization has a different demand:
+it may read a class expression's structural surface and is not a substitute for
+that source reader. Literal indexing on an already resolved surface selects the
+member during transit too, so unresolved siblings do not contaminate its value.
+
+**Key-domain reuse.** One typed key-domain result supplies enumeration,
+membership and emptiness. Immutable key syntax uses a bounded, rooted summary;
+live declarations and symbolic patterns retain the fact-backed resolution path.
+A broad domain never proves finite emptiness, and unsupported source shapes
+cannot produce absence evidence. Finite mapped batches reuse membership instead
+of rebuilding a set per selected value. Mapped materializers index source members
+once and preserve the first matching member's modifiers and declaration metadata.
+
+Utility intrinsics follow eager alias argument semantics; nominal builtin
+interfaces and classes keep deferred argument semantics. A budget recovery in
+an `Extract` or `Exclude` operand propagates its diagnostic and resource partial
+instead of becoming a semantic miss.

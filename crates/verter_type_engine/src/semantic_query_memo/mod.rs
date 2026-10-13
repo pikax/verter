@@ -65,6 +65,7 @@ pub mod node_roots;
 pub(crate) mod nodes;
 #[cfg(any(test, feature = "test-support"))]
 pub mod ownership_harness;
+mod structural_domains;
 pub use nodes::AliasChainEnd;
 mod observability;
 pub use observability::NodeOwnershipCounts;
@@ -655,6 +656,10 @@ pub struct SemanticGraphStore {
     // sidecar deque) so a long-running workspace cannot grow either
     // memo without bound; see `hash_cons_memos.rs` for the
     // eviction contract.
+    pub(super) structural_domains:
+        DashMap<SemanticNodeId, structural_domains::StructuralDomainEntry>,
+    pub(super) structural_domains_fifo:
+        parking_lot::Mutex<std::collections::VecDeque<SemanticNodeId>>,
     pub(super) binder_dependencies:
         DashMap<SemanticNodeId, binder_dependencies::BinderDependencyEntry>,
     pub(super) binder_dependencies_fifo:
@@ -766,6 +771,8 @@ impl SemanticGraphStore {
             dep_signature_interner: Default::default(),
             memo_budget: Default::default(),
             candidate_admission_seq: Default::default(),
+            structural_domains: Default::default(),
+            structural_domains_fifo: Default::default(),
             binder_dependencies: Default::default(),
             binder_dependencies_fifo: Default::default(),
             substitute_memo: Default::default(),

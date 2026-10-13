@@ -2624,12 +2624,14 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         }
         // Prove membership once for the whole finite batch. A dictionary,
         // remapping or open domain retains the ordinary per-key walker.
-        let domain = self
-            .dispatch
-            .key_literals_from_keyspace_node(mapper.key_space)?;
-        let admitted: rustc_hash::FxHashSet<_> = domain.into_iter().map(|key| key.key).collect();
+        let domain = self.dispatch.key_space_domain(mapper.key_space)?;
+        if !domain.is_finite() {
+            return None;
+        }
         if !keys.iter().all(|key| match key {
-            IndexKey::String(name) => admitted.contains(&PropertyKey::String(Arc::clone(name))),
+            IndexKey::String(name) => {
+                domain.membership(&PropertyKey::String(Arc::clone(name))) == Some(true)
+            }
             _ => false,
         }) {
             return None;
@@ -6115,18 +6117,8 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 }
                 work.push(ExpandFrame::Expand(expanded));
             }
-            // `DeclRef`/`InstantiationRef`
-            // arms are deliberately NOT added to
-            // `expand_terminal_step`. Eagerly unwrapping these
-            // carriers in the empty-path terminal under publication
-            // demand collapsed the slot-binding indexed-access
-            // preservation policy (the symbolic
-            // `IndexedAccess { object: DeclRef(AppProps), index }`
-            // form). The carrier-preserving path-walker arms above
-            // (`PathWalker::advance_step` at walk.rs:1204-1313)
-            // handle DeclRef/InstantiationRef under demand-bounded
-            // intermediate-vs-terminal selection; the empty-path
-            // terminal expander does not need a duplicate arm.
+            // A non-empty path has selected this terminal. Empty-path
+            // carriers remain addressable until a member demand reads them.
             SemanticNodeData::DeclRef { .. } | SemanticNodeData::InstantiationRef { .. }
                 if self.original_path_non_empty =>
             {
@@ -8527,6 +8519,15 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         // dead and must never be materialised.
         let mut shared_value: Option<SemanticNodeId> = None;
         let mut members: Vec<ShallowSurfaceMember> = Vec::with_capacity(keys.len());
+        let source_member_index = source_members.as_ref().map(|members| {
+            let mut index = rustc_hash::FxHashMap::default();
+            for member in members {
+                if let Some(key) = member.key.cloned_known() {
+                    index.entry(key).or_insert(member);
+                }
+            }
+            index
+        });
         for key in keys.into_iter() {
             // Cancellation before this key's remap substitution.
             //
@@ -8575,10 +8576,9 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 return None;
             }
             let member = {
-                let source_member = source_members.as_ref().and_then(|m| {
-                    m.iter()
-                        .find(|sm| sm.key.cloned_known().as_ref() == Some(&key.key))
-                });
+                let source_member = source_member_index
+                    .as_ref()
+                    .and_then(|index| index.get(&key.key).copied());
                 // Optionality / readonly resolution per TS semantics:
                 //   - Add → always on
                 //   - Remove → always off

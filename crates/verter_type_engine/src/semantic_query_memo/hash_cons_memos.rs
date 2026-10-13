@@ -257,6 +257,8 @@ impl SemanticGraphStore {
     /// evaluation reads establish freshness through their retained facts;
     /// correctness does not depend on this cleanup running after an edit.
     pub(super) fn clear_hash_cons_memos(&self) {
+        self.structural_domains.clear();
+        self.structural_domains_fifo.lock().clear();
         self.binder_dependencies.clear();
         self.binder_dependencies_fifo.lock().clear();
         self.substitute_memo.clear();

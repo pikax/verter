@@ -53,10 +53,11 @@ impl KeyDomainKey {
 
 /// A key domain can contain literal keys, primitive key kinds, or both.
 /// Only a domain with no primitive kinds is finite enough to enumerate.
-#[derive(Default)]
-struct KeySpaceDomain {
+#[derive(Clone, Default)]
+pub(crate) struct KeySpaceDomain {
     keys: Vec<KeyDomainKey>,
     seen: FxHashSet<KeyDomainKey>,
+    members: FxHashSet<PropertyKey>,
     broad: FxHashSet<PrimitiveKind>,
 }
 
@@ -65,10 +66,51 @@ impl KeySpaceDomain {
         let mut domain = Self::default();
         for key in keys {
             if domain.seen.insert(key.clone()) {
+                domain.members.insert(key.key.clone());
                 domain.keys.push(key);
             }
         }
         domain
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.keys.is_empty() && self.broad.is_empty()
+    }
+    pub(super) fn is_finite(&self) -> bool {
+        self.broad.is_empty()
+    }
+    pub(super) fn membership(&self, key: &PropertyKey) -> Option<bool> {
+        if self.members.contains(key) {
+            return Some(true);
+        }
+        let kind = match key {
+            PropertyKey::String(_) => PrimitiveKind::String,
+            PropertyKey::Number(_) => PrimitiveKind::Number,
+            PropertyKey::UniqueSymbol(_) => PrimitiveKind::Symbol,
+        };
+        if self.broad.contains(&kind) {
+            Some(true)
+        } else if self.broad.is_empty() {
+            Some(false)
+        } else {
+            None
+        }
+    }
+    pub(crate) fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.keys.capacity() * std::mem::size_of::<KeyDomainKey>()
+            + self.seen.capacity() * std::mem::size_of::<KeyDomainKey>()
+            + self.members.capacity() * std::mem::size_of::<PropertyKey>()
+            + self
+                .keys
+                .iter()
+                .map(|key| match &key.literal {
+                    Some(LiteralValue::String(name)) => name.len(),
+                    _ => 0,
+                })
+                .sum::<usize>()
+                * 2
+            + self.broad.capacity() * std::mem::size_of::<PrimitiveKind>()
     }
 
     fn admits(&self, key: &KeyDomainKey) -> bool {
@@ -85,6 +127,7 @@ impl KeySpaceDomain {
         self.broad.extend(other.broad);
         for key in other.keys {
             if self.seen.insert(key.clone()) {
+                self.members.insert(key.key.clone());
                 self.keys.push(key);
             }
         }
@@ -550,7 +593,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         node: SemanticNodeId,
     ) -> Option<Vec<KeyDomainKey>> {
         let domain = self.key_space_domain(node)?;
-        domain.broad.is_empty().then_some(domain.keys)
+        domain.broad.is_empty().then(|| domain.keys.clone())
     }
 
     /// Index distribution also retains broad key kinds. Named members alone
@@ -695,7 +738,170 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         Some(self.intern_normalized_union_or_intersection(&arguments, true))
     }
 
-    fn key_space_domain(&self, node: SemanticNodeId) -> Option<KeySpaceDomain> {
+    /// Immutable key syntax has one reusable domain. Declaration references
+    /// and symbolic patterns stay unknown here and use the fact-backed owner.
+    pub(super) fn known_key_space_domain(
+        &self,
+        root: SemanticNodeId,
+    ) -> Option<Arc<KeySpaceDomain>> {
+        if let Some(cached) = self.graph().structural_domain_get(root) {
+            return cached;
+        }
+        let mut done: rustc_hash::FxHashMap<SemanticNodeId, Option<Arc<KeySpaceDomain>>> =
+            Default::default();
+        let mut active = FxHashSet::default();
+        let mut work = vec![(root, false)];
+        while let Some((node, finish)) = work.pop() {
+            if done.contains_key(&node) {
+                continue;
+            }
+            if let Some(cached) = self.graph().structural_domain_get(node) {
+                done.insert(node, cached);
+                continue;
+            }
+            let data = self.graph().node_data(node)?;
+            if !finish {
+                if !active.insert(node) {
+                    done.insert(node, None);
+                    continue;
+                }
+                if let Err(reasons) = self.charge_connected_work() {
+                    self.fold_local_partial_completeness(reasons);
+                    return None;
+                }
+                work.push((node, true));
+                match data.as_ref() {
+                    composite
+                    @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => work
+                        .extend(
+                            composite
+                                .composite_members()
+                                .expect("key composition")
+                                .iter()
+                                .rev()
+                                .map(|&child| (child, false)),
+                        ),
+                    SemanticNodeData::KeyOf { base }
+                        if matches!(
+                            self.graph().node_data(*base).as_deref(),
+                            Some(SemanticNodeData::Object(_))
+                        ) =>
+                    {
+                        work.push((*base, false))
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+            active.remove(&node);
+            let domain = match data.as_ref() {
+                SemanticNodeData::Literal(LiteralValue::String(name)) => {
+                    Some(KeySpaceDomain::finite(vec![KeyDomainKey {
+                        key: PropertyKey::string_literal(name.as_str()),
+                        literal: Some(LiteralValue::String(name.clone())),
+                    }]))
+                }
+                SemanticNodeData::Literal(LiteralValue::Number(number)) => {
+                    Some(KeySpaceDomain::finite(vec![KeyDomainKey {
+                        key: PropertyKey::from_js_number(*number),
+                        literal: Some(LiteralValue::Number(*number)),
+                    }]))
+                }
+                SemanticNodeData::TypeOfNominal(_) => {
+                    Some(KeySpaceDomain::finite(vec![KeyDomainKey {
+                        key: PropertyKey::UniqueSymbol(data.typeof_nominal_identity()?.clone()),
+                        literal: None,
+                    }]))
+                }
+                SemanticNodeData::Primitive(PrimitiveKind::Never) => {
+                    Some(KeySpaceDomain::default())
+                }
+                SemanticNodeData::Primitive(
+                    kind @ (PrimitiveKind::String | PrimitiveKind::Number | PrimitiveKind::Symbol),
+                ) => Some(KeySpaceDomain {
+                    broad: FxHashSet::from_iter([*kind]),
+                    ..Default::default()
+                }),
+                SemanticNodeData::Object(surface) => {
+                    let mut keys = Vec::new();
+                    let mut broad = FxHashSet::default();
+                    let mut closed = !(surface.closed().has_index_signature()
+                        && surface.index_signatures.is_empty());
+                    for member in surface.positive_members() {
+                        if !member.visibility.is_public() {
+                            if surface.closed().has_index_signature() {
+                                closed = false;
+                            }
+                            continue;
+                        }
+                        if let Some(key) = member.key.cloned_known() {
+                            keys.push(key);
+                        } else {
+                            closed = false;
+                        }
+                    }
+                    for signature in surface.index_signatures.iter() {
+                        match self.graph().node_data(signature.key_type).as_deref() {
+                            Some(SemanticNodeData::Primitive(PrimitiveKind::String)) => {
+                                broad.extend([PrimitiveKind::String, PrimitiveKind::Number]);
+                            }
+                            Some(SemanticNodeData::Primitive(
+                                kind @ (PrimitiveKind::Number | PrimitiveKind::Symbol),
+                            )) => {
+                                broad.insert(*kind);
+                            }
+                            _ => closed = false,
+                        }
+                    }
+                    closed.then(|| {
+                        let mut domain = KeySpaceDomain::finite(KeyDomainKey::from_keys(keys));
+                        domain.broad = broad;
+                        domain
+                    })
+                }
+                SemanticNodeData::KeyOf { base }
+                    if matches!(
+                        self.graph().node_data(*base).as_deref(),
+                        Some(SemanticNodeData::Object(_))
+                    ) =>
+                {
+                    done.get(base)
+                        .cloned()
+                        .flatten()
+                        .map(|domain| (*domain).clone())
+                }
+                composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
+                    let arms = composite.composite_members().expect("key composition");
+                    let domains = arms
+                        .iter()
+                        .map(|arm| done.get(arm).cloned().flatten())
+                        .collect::<Option<Vec<_>>>();
+                    domains.map(|domains| {
+                        let mut iter = domains.into_iter();
+                        let mut result = iter.next().map(|d| (*d).clone()).unwrap_or_default();
+                        for child in iter {
+                            result = if matches!(composite, SemanticNodeData::Union(_)) {
+                                result.union((*child).clone())
+                            } else {
+                                result.intersection((*child).clone())
+                            };
+                        }
+                        result
+                    })
+                }
+                _ => None,
+            }
+            .map(Arc::new);
+            self.graph().structural_domain_publish(node, domain.clone());
+            done.insert(node, domain);
+        }
+        done.remove(&root).flatten()
+    }
+
+    pub(super) fn key_space_domain(&self, node: SemanticNodeId) -> Option<Arc<KeySpaceDomain>> {
+        if let Some(domain) = self.known_key_space_domain(node) {
+            return Some(domain);
+        }
         // Key-set reads stay in structural transit. The explicit stack also
         // carries alias followups, so authored nesting cannot grow the stack.
         let (_connected_guard, trip) = self.enter_connected_demand(false);
@@ -798,7 +1004,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
         }
-        values.pop()
+        values.pop().map(Arc::new)
     }
 
     fn key_space_leaf(&self, resolved: SemanticNodeId) -> Option<KeySpaceLeaf> {
@@ -1036,6 +1242,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         node: SemanticNodeId,
         needle: &PropertyKey,
     ) -> Option<bool> {
+        if let Some(domain) = self.known_key_space_domain(node) {
+            return domain.membership(needle);
+        }
         let data = self.graph().node_data(node)?;
         match data.as_ref() {
             // A single literal: admits iff it matches.

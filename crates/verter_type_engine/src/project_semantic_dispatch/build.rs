@@ -4552,6 +4552,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let decl_canonical = &base.defining_canonical;
         let decl_owner = base.owner;
         let decl_name = &base.merged_symbol_name;
+
         // R6 / R20: the key is content-free. Re-source the base file's
         // content version from the live indexed view at value-build
         // time, so the cached `MemoEntry` self-roots on the current
@@ -9308,6 +9309,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // so an application that is a union (`Partial<A | B>`)
                 // distributes like one.
                 let source_resolved = self.resolve_signature_source_carrier(source_arg, context);
+
                 // A `keyof` whose keys settle IS that key union
                 // (`Exclude<keyof Box<string>, "size">` filters
                 // `"value" | "size"`).
@@ -9325,6 +9327,26 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 let filter_resolved = self
                     .evaluate_deferred_semantic_node_with_context(filter_arg, context)
                     .into_active_query_build_node(self);
+                // A refused operand is the operation's recovery, not an
+                // undecidable source to turn into a semantic miss. Keep its
+                // diagnostic and resource partial through every enclosing alias.
+                if let Some(recovery) =
+                    [source_resolved, filter_resolved].into_iter().find(|node| {
+                        matches!(
+                            graph.node_data(*node).as_deref(),
+                            Some(SemanticNodeData::Opaque(QueryError::CheckerRecovery {
+                                basis: crate::semantic_query::RecoveryBasis::Budget,
+                                ..
+                            }))
+                        )
+                    })
+                {
+                    self.fold_local_partial_completeness(
+                        crate::semantic_query::PartialReasonSet::OPERATION_BUDGET,
+                    );
+                    record_utility_edges(recovery);
+                    return (QueryResult::Value(recovery), fence, true);
+                }
                 let source_data = graph.node_data(source_resolved);
                 let arms: Vec<SemanticNodeId> = match source_data.as_deref() {
                     Some(SemanticNodeData::Union(members)) => members.iter().copied().collect(),
@@ -9538,9 +9560,88 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         node: SemanticNodeId,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> SemanticNodeId {
-        self.normalize_node_for_structural_fact_demand(node, context)
-            .into_usable_node()
-            .unwrap_or(node)
+        let mut current = self
+            .evaluate_deferred_semantic_node_with_context(node, context)
+            .into_active_query_build_node(self);
+        // Sound termination on the residual chain: a `visited` set detects
+        // exact resolution cycles, and the connected work envelope bounds
+        // fresh-node regrowth the visited set cannot (each `Instantiate` step
+        // can mint a NEW node id). Both
+        // abnormal stops are TYPED: they fold a partial into the enclosing
+        // query build's taint frame (refusing warm admission) instead of
+        // silently returning an intermediate carrier the signature-utility
+        // caller would classify as settled.
+        let mut visited = rustc_hash::FxHashSet::default();
+        // Bounded loop: exact-identity cycle detection plus the shared
+        // connected work envelope, both typed-partial on trip.
+        loop {
+            let (slot, inst_args, owner_canonical) =
+                match self.graph().node_data(current).as_deref() {
+                    Some(SemanticNodeData::DeclRef { identity }) => (
+                        self.type_slot_for(
+                            Arc::clone(&identity.canonical_id),
+                            identity.owner,
+                            Arc::clone(&identity.decl_name),
+                        ),
+                        Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                        Arc::clone(&identity.canonical_id),
+                    ),
+                    Some(SemanticNodeData::InstantiationRef { base, args }) => (
+                        self.type_slot_for(
+                            Arc::clone(&base.canonical_id),
+                            base.owner,
+                            Arc::clone(&base.decl_name),
+                        ),
+                        {
+                            let (args, completeness) =
+                                self.evaluate_carrier_arguments(base, args, context);
+                            if let crate::semantic_query::ResultCompleteness::Partial(reasons) =
+                                completeness
+                            {
+                                self.fold_local_partial_completeness(reasons);
+                            }
+                            args
+                        },
+                        Arc::clone(&base.canonical_id),
+                    ),
+                    // Settled (non-carrier) — the stable stop; checked BEFORE the
+                    // work budget so a chain that settles on exactly the last
+                    // permitted step is never falsely partial.
+                    _ => return current,
+                };
+            if !visited.insert(current) {
+                // Residual-carrier resolution cycle: the chain can never
+                // settle — typed partial, never a silent carrier return.
+                self.fold_local_partial_completeness(
+                    crate::semantic_query::PartialReasonSet::SAME_PATH_RECURSION,
+                );
+                return current;
+            }
+            if let Err(reasons) = self.charge_connected_work() {
+                // Fresh-node regrowth exhausted the shared connected envelope.
+                self.fold_local_partial_completeness(reasons);
+                return current;
+            }
+            let read = self.execute_read(SemanticQueryKey::Instantiate(
+                crate::semantic_query::InstantiateKey::new(
+                    slot,
+                    inst_args,
+                    self.instantiate_context_for(&owner_canonical, context),
+                ),
+            ));
+            // A2 signal-split: fold a genuinely-incomplete carrier resolve.
+            crate::request_context::observe_component_meta_read_suppress(&read);
+            let next = match read.value {
+                QueryResult::Value(id) => id,
+                _ => return current,
+            };
+            if next == current {
+                return current;
+            }
+            current = self
+                .evaluate_deferred_semantic_node_with_context(next, context)
+                .into_active_query_build_node(self);
+        }
     }
 
     /// Registry classification: `name` is the global lib `Promise` type
@@ -13115,6 +13216,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // A cancelled request abandons the key loop; the surface built so
         // far is discarded rather than published torn.
         let mut cancelled = false;
+        let mut source_member_index = FxHashMap::default();
+        for member in &source_members {
+            if let Some(key) = member.key.cloned_known() {
+                source_member_index.entry(key).or_insert(member);
+            }
+        }
         for key in &keys {
             // Cancellation before this key's remap substitution AND before
             // its value force — the two per-key forcing points.
@@ -13148,9 +13255,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     break;
                 }
             };
-            let source_member = source_members
-                .iter()
-                .find(|member| member.key.cloned_known().as_ref() == Some(&key.key));
+            let source_member = source_member_index.get(&key.key).copied();
             let optional = match mapper.optionality {
                 crate::semantic_query::OptionalityMod::Add => true,
                 crate::semantic_query::OptionalityMod::Remove => false,

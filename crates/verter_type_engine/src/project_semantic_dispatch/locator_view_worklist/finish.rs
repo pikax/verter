@@ -700,7 +700,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 .unwrap_or_else(|| self.normalized_index_key_node(projected))
                         }),
                 };
-                let should_defer = !may_reduce_operator(context) || deferred_position;
+                let proven_empty = matches!(&index, IndexKey::Computed(key) if self.known_key_space_domain(*key).is_some_and(|domain| domain.is_empty()));
+                let should_defer = !proven_empty && (!may_reduce_operator(context) || deferred_position);
                 if should_defer {
                     graph.intern_preserving_scope(
                         node,

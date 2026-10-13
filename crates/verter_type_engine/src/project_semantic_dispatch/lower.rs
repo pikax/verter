@@ -1208,7 +1208,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // demand populates ONE family slot instead of two.
                 let context = self.reference_argument_context(
                     &continuation,
-                    reduction_context.into_structural_transit_with_mode(ProjectionMode::Navigate),
+                    reduction_context.into_structural_transit_with_mode(
+                        match reduction_context.mode {
+                            ProjectionMode::Expanded | ProjectionMode::Identity => {
+                                ProjectionMode::Navigate
+                            }
+                            other => other,
+                        },
+                    ),
                 );
                 match type_arguments.first() {
                     None => LowerStep::Value(
@@ -1929,7 +1936,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         scope: &NodeScopeId,
     ) -> SemanticNodeId {
         let graph = self.graph();
-        let should_defer = !crate::semantic_query::may_reduce_operator(reduction_context)
+        // A literal member of an already resolved surface is a narrow demand,
+        // even during transit. Select it before returning a carrier so unrelated
+        // unresolved siblings do not become part of the selected value.
+        let resolved_member =
+            matches!(
+                graph.node_data(obj_id).as_deref(),
+                Some(SemanticNodeData::Object(_))
+            ) && !matches!(index_key, crate::semantic_query::IndexKey::Computed(_));
+        let should_defer = (!crate::semantic_query::may_reduce_operator(reduction_context)
+            && !resolved_member)
             || self.indexed_access_reads_named_declaration(obj_id, &index_key);
         if should_defer {
             graph.intern_node_with_scope(
