@@ -2242,10 +2242,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     }
                 }
                 let (first, _) = path.split_first()?;
-                let (resolved, route_facts) = self
-                    .ctx
-                    .resolve_imported_type_root_with_facts(&dependency, first);
-                self.ctx.observe_borrowed_signature(&route_facts);
+                let resolved = if assigned.is_none() {
+                    let table = self.ctx.module_export_table(&dependency)?;
+                    self.ctx.observe_borrowed_signature(&table.facts);
+                    match table.bindings.get(first) {
+                        Some(Some(verter_session_query::declarations::module_exports::ModuleExportBinding::Value(root))) => Some(root.clone()),
+                        // Namespace carriers and excluded names project through
+                        // the same whole-module object as indexed access.
+                        _ => None,
+                    }
+                } else {
+                    let (resolved, route_facts) = self
+                        .ctx
+                        .resolve_imported_type_root_with_facts(&dependency, first);
+                    self.ctx.observe_borrowed_signature(&route_facts);
+                    resolved
+                };
                 match (resolved, assigned) {
                     (Some(resolved), _) => (resolved, 1),
                     // A member no namespace merged into X declares is one
@@ -4540,6 +4552,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let decl_canonical = &base.defining_canonical;
         let decl_owner = base.owner;
         let decl_name = &base.merged_symbol_name;
+
         // R6 / R20: the key is content-free. Re-source the base file's
         // content version from the live indexed view at value-build
         // time, so the cached `MemoEntry` self-roots on the current
@@ -6395,6 +6408,26 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             base_position,
             signature_groups,
         })
+    }
+
+    /// Resolve a named ambient value export through the import value owner.
+    /// Contributor-set and declaration observations join the active fact tracer.
+    pub fn ambient_value_export_root(
+        &self,
+        specifier: &str,
+        name: &str,
+    ) -> Option<ResolvedRootIdentity> {
+        let target = verter_session_query::inputs::shallow::ImportTarget {
+            source_specifier: specifier.to_owned(),
+            imported_name: name.to_owned(),
+            is_namespace: false,
+        };
+        let (root, _) = self.ambient_import_member_root(&target, &[])?;
+        Some(ResolvedRootIdentity::new_in_owner(
+            root.scope.canonical_id,
+            root.scope.owner,
+            root.name,
+        ))
     }
 
     /// The declaration an import of an AMBIENT module names through `path`
@@ -9276,6 +9309,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // so an application that is a union (`Partial<A | B>`)
                 // distributes like one.
                 let source_resolved = self.resolve_signature_source_carrier(source_arg, context);
+
                 // A `keyof` whose keys settle IS that key union
                 // (`Exclude<keyof Box<string>, "size">` filters
                 // `"value" | "size"`).
@@ -9293,6 +9327,26 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 let filter_resolved = self
                     .evaluate_deferred_semantic_node_with_context(filter_arg, context)
                     .into_active_query_build_node(self);
+                // A refused operand is the operation's recovery, not an
+                // undecidable source to turn into a semantic miss. Keep its
+                // diagnostic and resource partial through every enclosing alias.
+                if let Some(recovery) =
+                    [source_resolved, filter_resolved].into_iter().find(|node| {
+                        matches!(
+                            graph.node_data(*node).as_deref(),
+                            Some(SemanticNodeData::Opaque(QueryError::CheckerRecovery {
+                                basis: crate::semantic_query::RecoveryBasis::Budget,
+                                ..
+                            }))
+                        )
+                    })
+                {
+                    self.fold_local_partial_completeness(
+                        crate::semantic_query::PartialReasonSet::OPERATION_BUDGET,
+                    );
+                    record_utility_edges(recovery);
+                    return (QueryResult::Value(recovery), fence, true);
+                }
                 let source_data = graph.node_data(source_resolved);
                 let arms: Vec<SemanticNodeId> = match source_data.as_deref() {
                     Some(SemanticNodeData::Union(members)) => members.iter().copied().collect(),
@@ -9382,27 +9436,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // canonical shape before the nullish filter; a genuinely
                 // unsettled operand returns its carrier and keeps the
                 // deferred shell below.
-                let arg = self
-                    .evaluate_deferred_semantic_node_with_context(args[0], context)
-                    .into_active_query_build_node(self);
-                // `NonNullable<T>` is `T & {}`: `unknown & {}` collapses to
-                // the empty-object base (the trap row — NOT `unknown`, NOT
-                // `never`). `any`/`never` pass through the settled arms
-                // below (`any & {}` = `any`; distribution over `never`
-                // collapses).
-                if matches!(
-                    self.peek_special(arg),
-                    Some((
-                        crate::project_semantic_dispatch::absorb::SpecialKind::Unknown,
-                        _
-                    ))
-                ) {
-                    let result = graph.intern_node(SemanticNodeData::Object(
-                        crate::project_semantic_dispatch::walk::empty_surface_view(),
-                    ));
-                    record_utility_edges(result);
-                    return (QueryResult::Value(result), fence, false);
-                }
                 let nullish = |id: SemanticNodeId| {
                     matches!(
                         graph.node_data(id).as_deref(),
@@ -9450,6 +9483,29 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     ) || names_object_declaration(id))
                         && !nullish(id)
                 };
+                let arg = if names_object_declaration(args[0]) {
+                    args[0]
+                } else {
+                    self.resolve_signature_source_carrier(args[0], context)
+                };
+                // `NonNullable<T>` is `T & {}`: `unknown & {}` collapses to
+                // the empty-object base (the trap row — NOT `unknown`, NOT
+                // `never`). `any`/`never` pass through the settled arms
+                // below (`any & {}` = `any`; distribution over `never`
+                // collapses).
+                if matches!(
+                    self.peek_special(arg),
+                    Some((
+                        crate::project_semantic_dispatch::absorb::SpecialKind::Unknown,
+                        _
+                    ))
+                ) {
+                    let result = graph.intern_node(SemanticNodeData::Object(
+                        crate::project_semantic_dispatch::walk::empty_surface_view(),
+                    ));
+                    record_utility_edges(result);
+                    return (QueryResult::Value(result), fence, false);
+                }
                 let reduced: Option<SemanticNodeId> = match graph.node_data(arg).as_deref() {
                     Some(SemanticNodeData::Union(arms))
                         if arms.iter().all(|a| nullish(*a) || settled_non_nullable(*a)) =>
@@ -9540,7 +9596,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             base.owner,
                             Arc::clone(&base.decl_name),
                         ),
-                        Arc::clone(args),
+                        {
+                            let (args, completeness) =
+                                self.evaluate_carrier_arguments(base, args, context);
+                            if let crate::semantic_query::ResultCompleteness::Partial(reasons) =
+                                completeness
+                            {
+                                self.fold_local_partial_completeness(reasons);
+                            }
+                            args
+                        },
                         Arc::clone(&base.canonical_id),
                     ),
                     // Settled (non-carrier) — the stable stop; checked BEFORE the
@@ -10982,35 +11047,34 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             _ => subject,
         };
-        {
-            if let Some(data) = self.graph().node_data(object) {
-                if let SemanticNodeData::Object(surface) = data.as_ref() {
-                    let fence = self.project_generation_signature();
-                    let mut walker = PathWalker::new(self, context, &fence);
-                    if let Some(values) =
-                        walker.finite_object_index_values(base, object, surface, &keys)
-                    {
-                        let norm = self.execute_read(SemanticQueryKey::ReduceUnion {
-                            members: Arc::from(values.into_boxed_slice()),
-                            nullability:
-                                verter_session_query::flow::policy::NullabilityPolicy::Strict,
-                        });
-                        if let QueryResult::Value(id) = norm.value {
-                            let mut out =
-                                crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
-                                    QueryResult::Value(id),
-                                    Arc::clone(&fence),
-                                ))
-                                .with_observed_self_roots(
-                                    self.observed_self_roots_from_nodes([base, object]),
-                                );
-                            out.fold_partial(norm.result_is_partial);
-                            out.merge_completeness(walker.completeness);
-                            out.cache_suppress |= walker.cache_suppress;
-                            out.walker_diagnostics = std::mem::take(&mut walker.walker_diagnostics);
-                            return Some(out);
-                        }
-                    }
+        if let Some(data) = self.graph().node_data(object) {
+            let fence = self.project_generation_signature();
+            let mut walker = PathWalker::new(self, context, &fence);
+            let values = match data.as_ref() {
+                SemanticNodeData::Object(surface) => {
+                    walker.finite_object_index_values(base, object, surface, &keys)
+                }
+                SemanticNodeData::Mapped { source, mapper } => {
+                    walker.finite_mapped_index_values(object, *source, mapper, &keys)
+                }
+                _ => None,
+            };
+            if let Some(values) = values {
+                let norm = self.execute_read(SemanticQueryKey::ReduceUnion {
+                    members: Arc::from(values.into_boxed_slice()),
+                    nullability: verter_session_query::flow::policy::NullabilityPolicy::Strict,
+                });
+                if let QueryResult::Value(id) = norm.value {
+                    let mut out = crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+                        QueryResult::Value(id),
+                        Arc::clone(&fence),
+                    ))
+                    .with_observed_self_roots(self.observed_self_roots_from_nodes([base, object]));
+                    out.fold_partial(norm.result_is_partial);
+                    out.merge_completeness(walker.completeness);
+                    out.cache_suppress |= walker.cache_suppress;
+                    out.walker_diagnostics = std::mem::take(&mut walker.walker_diagnostics);
+                    return Some(out);
                 }
             }
         }
@@ -11876,7 +11940,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 };
             }
         }
-        let settled = self.resolve_signature_source_carrier(base, context);
+        // A settled source surface already owns the member names and index
+        // signatures. Reuse that key-domain demand instead of materializing
+        // another declaration body at the published value's altitude.
+        let settled = transit_settled
+            .filter(|node| {
+                matches!(
+                    self.graph().node_data(*node).as_deref(),
+                    Some(SemanticNodeData::Object(_))
+                )
+            })
+            .unwrap_or_else(|| {
+                self.resolve_signature_source_carrier(
+                    base,
+                    context.with_mode(ProjectionMode::Navigate),
+                )
+            });
         if settled == base {
             return None;
         }
@@ -12530,7 +12609,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// A mapped member's value read at its key under its optionality
     /// modifier, as the checker types a mapped symbol's property under
     /// `strictNullChecks` (`resolveMappedTypeMembers`): `+?` adds `undefined`
-    /// unless the value holds it, and `-?` removes the `undefined` an
+    /// unless the value holds it, Keep inherits the source's optionality,
+    /// and `-?` removes the `undefined` an
     /// optional source member `key` added (`removeMissingOrUndefinedType`).
     /// Without `strictNullChecks` the value is unchanged.
     pub(super) fn mapped_member_optionality(
@@ -12540,16 +12620,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         source: SemanticNodeId,
         key: SemanticNodeId,
     ) -> SemanticNodeId {
-        let (strict_null_checks, exact_optional) = self
+        let strict_null_checks = self
             .graph()
             .node_scope(source)
             .and_then(|scope| scope.canonical_file())
-            .map_or((true, false), |canonical| {
-                let options = self.ctx.semantic_compiler_options_for(&canonical);
-                (
-                    options.strict_null_checks,
-                    options.exact_optional_property_types,
-                )
+            .is_none_or(|canonical| {
+                self.ctx
+                    .semantic_compiler_options_for(&canonical)
+                    .strict_null_checks
             });
         if !strict_null_checks {
             return value;
@@ -12566,8 +12644,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             )
         };
         match mapper.optionality {
-            crate::semantic_query::OptionalityMod::Add
-                if !exact_optional && !arms.iter().any(is_undefined) =>
+            crate::semantic_query::OptionalityMod::Add if !arms.iter().any(is_undefined) => {
+                let mut arms = arms;
+                arms.push(self.primitive_node(PrimitiveKind::Undefined));
+                self.intern_normalized_union_or_intersection(&arms, true)
+            }
+            crate::semantic_query::OptionalityMod::Keep
+                if !arms.iter().any(is_undefined)
+                    && source != mapper.key_space
+                    && self.mapped_source_member_optional(source, key) == Some(true) =>
             {
                 let mut arms = arms;
                 arms.push(self.primitive_node(PrimitiveKind::Undefined));
@@ -12623,7 +12708,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // The instantiated template reduces the operators its
                 // instantiation closed wherever they sit (`{ v: T[K] }`
                 // over `[1, 2]` at `"0"` is `{ v: 1 }`).
-                self.reduce_instantiated_operators(instantiated)
+                self.evaluate_selected_value_with_context(instantiated, context)
             }
         };
         let value = self
@@ -13001,7 +13086,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             && source_keys_are_nameable
             && !homomorphic_over_unprojected_source)
             .then(|| {
-                if source_domain_is_finite {
+                // A shallow infer/type-parameter projection may have no
+                // members while retaining an unresolved keyspace. Only a
+                // directly empty source or successful constraint enumeration
+                // proves that a homomorphic mapping has zero keys.
+                if source_domain_is_finite
+                    && (!source_members.is_empty() || resolved_empty_homomorphic_source)
+                {
                     Some(source_member_keys(&source_members))
                 } else {
                     self.key_literals_from_keyspace_node(mapper.key_space)
@@ -13136,12 +13227,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // [`Self::evaluate_k_independent_mapped_value`].
         let mut shared_value: Option<SemanticNodeId> = None;
         let mut produced: Vec<SurfaceMember> = Vec::with_capacity(keys.len());
-        let mut source_by_key = std::collections::HashMap::with_capacity(source_members.len());
-        for member in &source_members {
-            if let Some(key) = member.key.cloned_known() {
-                source_by_key.entry(key).or_insert(member);
-            }
-        }
         let mut produced_by_key = std::collections::HashMap::with_capacity(keys.len());
         let mut project_member_edges: Vec<(SemanticNodeId, PropertyKey)> = Vec::new();
         // A key whose `as` remap fails closed (`DeferCarrier`) taints the whole
@@ -13151,6 +13236,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // A cancelled request abandons the key loop; the surface built so
         // far is discarded rather than published torn.
         let mut cancelled = false;
+        let mut source_member_index = FxHashMap::default();
+        for member in &source_members {
+            if let Some(key) = member.key.cloned_known() {
+                source_member_index.entry(key).or_insert(member);
+            }
+        }
         for key in &keys {
             // Cancellation before this key's remap substitution AND before
             // its value force — the two per-key forcing points.
@@ -13184,7 +13275,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     break;
                 }
             };
-            let source_member = source_by_key.get(&key.key).copied();
+            let source_member = source_member_index.get(&key.key).copied();
             let optional = match mapper.optionality {
                 crate::semantic_query::OptionalityMod::Add => true,
                 crate::semantic_query::OptionalityMod::Remove => false,
@@ -13491,7 +13582,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             self.graph().node_data(substituted).as_deref(),
             Some(SemanticNodeData::Union(_) | SemanticNodeData::TemplateLiteral { .. })
         ) {
-            self.reduce_instantiated_operators(substituted)
+            self.evaluate_selected_value_with_context(substituted, context)
         } else {
             substituted
         };
@@ -13639,7 +13730,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // The selected value reduces the operators its key closes
         // wherever they sit (`() => T[K]` over `{ a: 1 }` at `"a"` is
         // `() => 1`).
-        let substituted = self.reduce_instantiated_operators(substituted);
+        let substituted = self.evaluate_selected_value_with_context(substituted, context);
         let evaluated = self
             .evaluate_deferred_semantic_node_with_context(substituted, context)
             .into_active_query_build_node(self);
@@ -13723,7 +13814,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         mapper: &crate::semantic_query::MapperKey,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> SemanticNodeId {
-        let value_expr = self.reduce_instantiated_operators(mapper.value_expr);
+        let value_expr = self.evaluate_selected_value_with_context(mapper.value_expr, context);
         let evaluated = self
             .evaluate_deferred_semantic_node_with_context(value_expr, context)
             .into_active_query_build_node(self);
@@ -13967,7 +14058,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> (SemanticNodeId, crate::semantic_query::PartialReasonSet) {
         let graph = self.graph();
         let mut reasons = crate::semantic_query::PartialReasonSet::empty();
-        let value_expr = self.reduce_instantiated_operators(mapper.value_expr);
+        let value_expr = self.evaluate_selected_value_with_context(mapper.value_expr, context);
         let evaluated = self
             .evaluate_deferred_semantic_node_with_context(value_expr, context)
             .into_active_query_build_node(self);

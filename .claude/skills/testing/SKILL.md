@@ -130,6 +130,20 @@ and version), weak edges, dependency defaults, and dev unification controls.
 The bounded repository guards are held to the standard nextest speed gate and
 are not on its known-slow list.
 
+Generated component-meta corpus chunks retain a 10-second slow warning and a
+20-second termination deadline in both nextest profiles, including the local
+profile while its unrelated known-slow list remains. Apply policy to the whole
+chunk namespace so regenerated chunks cannot inherit a longer base watchdog.
+The compiled session policy guard probes nextest's override precedence and
+profile inheritance, with an unrelated base-policy control. The corpus
+probe uses manifest-only Cargo metadata (`--no-deps --locked --offline`) for
+workspace package selectors and an empty temporary `CARGO_HOME` for metadata
+and nextest children, so a compiled archive consumer needs no registry cache.
+The corpus layout and generator-parity guards preserve complete fixture coverage,
+authored overrides and fresh host state per logical row. Set `VERTER_CORPUS_AUDIT_TIMING=1`
+when running the chunk inventory to collect pool and row timings; report these
+as evidence without asserting machine-dependent elapsed times.
+
 ### TDD Workflow
 
 Behavioral code changes use TDD. Documentation, generated projections, formatting, and mechanical metadata changes use their owning freshness/validation evidence unless they also change executable behavior.
@@ -188,6 +202,15 @@ Tests are evidence, not a quota. At preflight, map each changed contract to the 
 - Incremental, cancellation, stale-publication, counter, allocation, soak, and performance evidence applies only when the change touches the corresponding authority or hot path. Otherwise record it as not applicable with a terse boundary-based rationale.
 - New features and bug fixes still require adequate regression evidence. Refactors must keep applicable existing coverage green; they do not earn new tests merely by changing structure.
 
+### Whole-module growth probes
+
+Read export-table suffixes through one `HostResolverContext` and its request
+view, as production does. The test-only `VerterHost` route adapter captures a
+fresh view per call, so using it for every suffix repeats dependency validation
+and snapshot setup. Include those suffix reads in proof-work accounting; a
+counter sampled only after the root build cannot detect that quadratic replay.
+Keep every suffix's binding/proof assertions and the final literal-value probe.
+
 ### LSP request barriers
 
 Reuse one server for read-only fixture matrices. Batch independent edit cases
@@ -225,8 +248,8 @@ evaluate type-level assertions, and the package builds exclude spec files, so
 type-only contract fixtures compile nowhere unless a dedicated TypeScript
 project is run explicitly. `packages/component-meta/test/*.test-d.ts` is bound
 through `tsconfig.contract-tests.json` to
-`pnpm --filter @verter/component-meta run test:types`, which CI's *JS Build &
-Test* lane runs after `build:ts` (the fixtures assert the built `dist`
+`pnpm --filter @verter/component-meta run test:types`, which CI's _JS Build &
+Test_ lane runs after `build:ts` (the fixtures assert the built `dist`
 declarations as well as the source ones). A new `*.test-d.ts` under that
 package's `test/` is picked up by pattern; a type contract placed anywhere else
 needs its own binding.
@@ -437,6 +460,13 @@ sites and require every callback and condition plus ≤2.2× growth per doubling
 control. Run these native proofs alongside the live leg when changing its size
 range; a smaller provider corpus alone is not growth evidence.
 
+Provider-free LSP flow growth and semantic-suite coverage tests live in
+`crates/verter_lsp/src/flow_fixture_tests.rs`, alongside the partition builder
+shared by the live semantic tests. Keep `real_provider_tests::` reserved for
+paired live-provider variants: archive partition verification rejects tests
+there without an explicit tsserver or tsgo selector. Native guards remain on
+the provider-free core lane.
+
 **Conformance-harness preflight — real work, before Cargo.** Before the archive
 build, the core gate runs only the harness-owned
 `packages/framework-conformance-harness/bin/gate-smoke.mjs typescript`. The separate required BF2 lane
@@ -490,7 +520,7 @@ are structurally eliminated repo-wide.)
   an item that vanishes under another profile. Under this profile that is a COMPILE error in the gate rather
   than a shipped-build surprise.
 - **Selection integrity.** The guard fails closed (exit 127) if `cargo nextest run -p
-  verter_shipped_cfg_contract` selects a different number of tests than an INDEPENDENT scan of that crate's
+verter_shipped_cfg_contract` selects a different number of tests than an INDEPENDENT scan of that crate's
   own source finds `#[test]` attributes — not merely "selected zero tests", which a regression that compiles
   out every behavioral test while leaving the two profile-sanity canaries intact would still satisfy.
 - **The class is discriminated, not merely asserted.** The behavioural test

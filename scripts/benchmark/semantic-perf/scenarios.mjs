@@ -1,6 +1,6 @@
 // The scenario catalog of the equivalent-demand semantic benchmark.
 //
-// A scenario is ONE TypeScript module that both arms read byte for byte. It
+// A scenario is a TypeScript project that both arms read byte for byte. Its entry
 // declares two type aliases the harness demands, in this order:
 //
 //   __BenchInit  a trivial alias (`0`); its request absorbs each tool's
@@ -466,6 +466,56 @@ export function allScenarios() {
     );
   }
 
+  for (const n of [20, 100, 400]) {
+    out.push(
+      scenario(
+        `contextual-this-${n}`,
+        "inference",
+        `${n} object methods read data inferred before their contextual ThisType receiver`,
+        "declare global { interface ThisType<T> {} }\n" +
+          "declare function defineComponent<D, M>(o: { data(): D; methods: M & ThisType<D & M> }): { [K in keyof M]: M[K] extends () => infer R ? R : never };\n" +
+          `const comp = defineComponent({ data() { return { ${range(n)
+            .map((i) => `d${i}: ${i} as const`)
+            .join(", ")} }; }, methods: { ${range(n)
+            .map((i) => `m${i}() { return this.d${i}; }`)
+            .join(", ")} } });\n`,
+        "typeof comp",
+        {
+          beyond: `{ ${range(n)
+            .map((i) => `m${i}: ${i};`)
+            .join(" ")} }`,
+        },
+      ),
+    );
+  }
+
+  for (const n of [20, 100, 300]) {
+    const files = Object.fromEntries(
+      range(n).map((i) => [
+        `m-${i}.ts`,
+        i === 0
+          ? "export function f0() { return { k0: 0 as const }; }\n"
+          : `import { f${i - 1} } from "./m-${i - 1}";\n` +
+            `export function f${i}() { const p = f${i - 1}(); return { ...p, k${i}: ${i} as const }; }\n`,
+      ]),
+    );
+    out.push(
+      scenario(
+        `return-chain-${n}`,
+        "flow",
+        `${n} modules, each spreading its predecessor's inferred return`,
+        `import { f${n - 1} } from "./m-${n - 1}";\n`,
+        `ReturnType<typeof f${n - 1}>`,
+        {
+          files,
+          beyond: `{ ${range(n)
+            .map((i) => `k${i}: ${i};`)
+            .join(" ")} }`,
+        },
+      ),
+    );
+  }
+
   return out;
 }
 
@@ -510,6 +560,12 @@ export const SCENARIO_TIERS = {
   "mapped-index-tags-1000": "quick",
   "mapped-index-tags-3000": "standard",
   "mapped-index-tags-10000": "stress",
+  "return-chain-20": "quick",
+  "return-chain-100": "standard",
+  "return-chain-300": "standard",
+  "contextual-this-20": "quick",
+  "contextual-this-100": "standard",
+  "contextual-this-400": "standard",
   "baseline-empty": "quick",
   "switch-discriminated-128": "quick",
   "switch-discriminated-512": "standard",
@@ -603,7 +659,11 @@ export const SETTINGS = [
 ];
 
 /** The tsconfig both arms read for `setting`. */
-export function tsconfigText(setting) {
+export function projectSources(scenario) {
+  return { "scenario.ts": scenario.source, ...scenario.files };
+}
+
+export function tsconfigText(setting, scenario) {
   return (
     JSON.stringify(
       {
@@ -618,7 +678,10 @@ export function tsconfigText(setting) {
           skipLibCheck: false,
           noErrorTruncation: true,
         },
-        files: ["lib.bench.d.ts", "scenario.ts"],
+        files: [
+          "lib.bench.d.ts",
+          ...(scenario ? Object.keys(projectSources(scenario)) : ["scenario.ts"]),
+        ],
       },
       null,
       2,

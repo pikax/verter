@@ -11,6 +11,8 @@
 
 use std::sync::Arc;
 
+use verter_session_query::facts::fact_read_set::FactReadSetFinalise;
+
 use super::ProjectSemanticDispatch;
 use crate::semantic_query::{
     CacheRead, IndexKey, LiteralValue, PartialReasonSet, PrimitiveKind, ProjectionMode,
@@ -288,6 +290,14 @@ pub fn force_partial_closed_operator_evaluation_for_tests() -> impl Drop {
     Restore(FORCE_PARTIAL_CLOSED_EVALUATION.replace(true))
 }
 
+/// Shell evaluation follows only operator operands. A selected result also
+/// reads value composition, and whole publication reads surface interiors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum DeferredEvaluationDemand {
+    Shell,
+    SelectedValue,
+}
+
 /// Heap-owned continuation for one deferred-operator evaluation entry. A
 /// frame advances alias/fix-point hops in place and suspends only when the
 /// current operator needs an operand evaluated first. No frame is represented
@@ -295,15 +305,24 @@ pub fn force_partial_closed_operator_evaluation_for_tests() -> impl Drop {
 enum DeferredEvaluationStage {
     EvaluateCurrent,
     AwaitKeyOfBase,
-    AwaitIndexedObject { index: IndexKey },
-    AwaitIndexedIndex { object: SemanticNodeId },
+    AwaitIndexedObject {
+        index: IndexKey,
+    },
+    AwaitIndexedIndex {
+        object: SemanticNodeId,
+    },
+    AwaitValueChildren {
+        data: Arc<SemanticNodeData>,
+        children: Vec<SemanticNodeId>,
+        values: Vec<SemanticNodeId>,
+    },
 }
 
 struct DeferredEvaluationFrame {
-    tracer: std::rc::Rc<crate::resolver_core::resolver_context::OwnedFactTracer>,
     entry_node: SemanticNodeId,
     node: SemanticNodeId,
     context: ProjectionReductionContext,
+    demand: DeferredEvaluationDemand,
     memo_checked: bool,
     visited: rustc_hash::FxHashSet<SemanticNodeId>,
     completeness: ResultCompleteness,
@@ -322,17 +341,15 @@ impl DeferredEvaluationFrame {
         node: SemanticNodeId,
         context: ProjectionReductionContext,
         budget_epoch: u64,
-        basis: verter_session_query::facts::fact_cache::AggregateGenerations,
+        demand: DeferredEvaluationDemand,
     ) -> Self {
         let mut visited = rustc_hash::FxHashSet::default();
         visited.insert(node);
         Self {
-            tracer: std::rc::Rc::new(
-                crate::resolver_core::resolver_context::OwnedFactTracer::new(basis),
-            ),
             entry_node: node,
             node,
             context,
+            demand,
             memo_checked: false,
             visited,
             completeness: ResultCompleteness::Complete,
@@ -946,7 +963,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 | SemanticNodeData::ClassExpressionInstance { .. },
             ) => true,
             Some(SemanticNodeData::Union(arms)) => {
-                arms.iter().all(|arm| self.is_named_reference(*arm))
+                arms.iter().any(|arm| self.is_named_reference(*arm))
+                    && arms.iter().all(|arm| {
+                        self.is_named_reference(*arm)
+                            || matches!(
+                                self.graph().node_data(*arm).as_deref(),
+                                Some(SemanticNodeData::Primitive(
+                                    PrimitiveKind::Null | PrimitiveKind::Undefined
+                                ))
+                            )
+                    })
             }
             Some(SemanticNodeData::Intersection(arms)) => {
                 arms.iter().all(|arm| self.is_named_reference(*arm))
@@ -1262,11 +1288,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     }
                 }
                 // Residual InstantiationRef → the shared `Instantiate` query
-                // (the `relation::record_target_shape` shape generalised): args
-                // evaluate carrier-shaped under the caller's context (their
-                // completeness merges into the demand outcome), the slot is
-                // the base decl's type slot, and the instantiate context derives
-                // from the caller's context.
+                // with the authored argument carriers intact. The body owns
+                // argument demand: evaluating all arguments here would force
+                // unused mapped values and losing conditional branches. The
+                // slot is the base decl's type slot, and the instantiate
+                // context derives from the caller's context.
                 //
                 // The carrier-preserving peel (`instantiate_instantiation_refs
                 // == false`) never reaches this arm — `is_residual` classified
@@ -1279,16 +1305,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         Arc::clone(&base.decl_name),
                     );
                     let owner_canonical = Arc::clone(&base.canonical_id);
-                    let args: Arc<[SemanticNodeId]> = Arc::from(
-                        args.iter()
-                            .map(|arg| {
-                                let arg_outcome = self.evaluate_deferred_outcome(*arg, context);
-                                completeness = completeness.merge(arg_outcome.completeness);
-                                arg_outcome.node
-                            })
-                            .collect::<Vec<_>>()
-                            .into_boxed_slice(),
-                    );
+                    let (args, argument_completeness) =
+                        self.evaluate_carrier_arguments(base, args, context);
+                    completeness = completeness.merge(argument_completeness);
                     drop(data);
                     let read = self.execute_read(SemanticQueryKey::Instantiate(
                         crate::semantic_query::InstantiateKey::new(
@@ -1968,34 +1987,37 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
-    fn evaluation_fact_basis(
-        &self,
-    ) -> verter_session_query::facts::fact_cache::AggregateGenerations {
-        verter_session_query::facts::fact_cache::AggregateGenerations::from_seed(
-            &verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
-            &self.snapshot.clocks().live(),
-        )
-    }
-
     fn finish_deferred_evaluation_frame(
         &self,
         mut frame: DeferredEvaluationFrame,
         result: SemanticNodeId,
-        parent: Option<&DeferredEvaluationFrame>,
+        finalise: FactReadSetFinalise,
     ) -> EvaluateDeferredOutcome {
-        let tracer = std::rc::Rc::try_unwrap(frame.tracer)
-            .unwrap_or_else(|_| unreachable!("a completed evaluation owns its tracer"));
-        let signature = verter_session_query::facts::fact_cache::SignatureAdmission::from_finalise(
-            tracer.into_read_set().finalise(),
-        )
-        .into_cacheable();
-        if let Some(signature) = &signature {
-            use crate::fact_signature_helpers::ReadSetSignatureExt as _;
-            let _parent_scope = parent.map(|parent| parent.tracer.install());
-            signature.bubble(self.ctx);
-        } else {
-            frame.cache_suppress = true;
-        }
+        let evidence = match finalise {
+            FactReadSetFinalise::Ok(facts) => {
+                use verter_session_query::facts::fact_cache::{signature_entries, FactVersionRef};
+
+                let mut roots = self.observed_self_roots_from_nodes([frame.entry_node, result]);
+                // This memo has no single file owner. Every consumed
+                // declaration and augmentation contributor is a strict root,
+                // including whole-file facts retained on evidence pages.
+                roots.extend(signature_entries(&facts).filter_map(|fact| match fact {
+                    FactVersionRef::FileWholeHash { canonical_id, hash } => {
+                        Some((Arc::from(canonical_id.as_str()), *hash))
+                    }
+                    _ => None,
+                }));
+                self.ctx.complete_graph_signature(&roots, &facts).ok()
+            }
+            FactReadSetFinalise::NonCacheable(_) => None,
+            FactReadSetFinalise::MutationUnstable => {
+                frame.completeness = frame.completeness.merge(ResultCompleteness::partial(
+                    PartialReasonSet::UNSTABLE_STATE,
+                ));
+                None
+            }
+        };
+        frame.cache_suppress |= evidence.is_none();
         // A recovery made under the evaluation — an inline relation, a
         // canonical construction — makes it a resource partial, never a
         // published memo entry, even where no read carried its reason here.
@@ -2032,15 +2054,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             self.connected_demand
                 .record_prerequisite(receipt, super::cost_receipt::Nesting::InPlace);
         }
-        if let (true, false, Some(receipt), Some(signature)) =
-            (complete, frame.cache_suppress, receipt, signature)
+        if let (true, false, Some(receipt), Some(evidence)) =
+            (complete, frame.cache_suppress, receipt, evidence)
         {
             self.graph().evaluate_deferred_memo_publish(
                 frame.entry_node,
                 frame.context,
+                frame.demand,
                 result,
                 receipt,
-                signature,
+                evidence,
             );
         }
         EvaluateDeferredOutcome {
@@ -2055,6 +2078,88 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         node: SemanticNodeId,
         reduction_context: ProjectionReductionContext,
     ) -> EvaluateDeferredOutcome {
+        self.evaluate_deferred_demand(node, reduction_context, DeferredEvaluationDemand::Shell)
+    }
+
+    /// Prepare the arguments a carrier's owner consumes, using the same
+    /// eager-alias/deferred-declaration classification as projection. The
+    /// source reader keeps nominal result carriers; argument operator demand
+    /// stays with this shared evaluator and its ordinary memo/proof pipeline.
+    pub(super) fn evaluate_carrier_arguments(
+        &self,
+        base: &crate::semantic_query::DeclIdentity,
+        args: &[SemanticNodeId],
+        context: ProjectionReductionContext,
+    ) -> (Arc<[SemanticNodeId]>, ResultCompleteness) {
+        let argument_context = self.instantiation_argument_context(base, context);
+        let mut completeness = ResultCompleteness::Complete;
+        let args = args
+            .iter()
+            .map(|&arg| {
+                let context = self.argument_operand_context(arg, argument_context);
+                let indexed = matches!(
+                    self.graph().node_data(arg).as_deref(),
+                    Some(SemanticNodeData::IndexedAccess { .. })
+                );
+                let outcome = if indexed && !self.defers_type_arguments(base) {
+                    let outcome = self.evaluate_deferred_outcome(
+                        arg,
+                        argument_context.with_mode(ProjectionMode::Navigate),
+                    );
+                    // Named values have one defining scope across import
+                    // sites. Other operands retain their authored identity.
+                    if matches!(
+                        self.graph().node_data(outcome.node).as_deref(),
+                        Some(
+                            SemanticNodeData::DeclRef { .. }
+                                | SemanticNodeData::InstantiationRef { .. }
+                        )
+                    ) {
+                        outcome
+                    } else {
+                        EvaluateDeferredOutcome {
+                            node: arg,
+                            ..outcome
+                        }
+                    }
+                } else if crate::semantic_query::may_reduce_operator(context) {
+                    self.evaluate_deferred_outcome(arg, context)
+                } else {
+                    EvaluateDeferredOutcome::complete(arg)
+                };
+                completeness = completeness.merge(outcome.completeness);
+                let canonical = self.canonical_argument_carrier(outcome.node);
+                if canonical != arg {
+                    self.graph().record_origin_edge(
+                        canonical,
+                        crate::semantic_query::OriginEdgeKind::Normalize,
+                        Arc::from([arg]),
+                        crate::semantic_query::OriginMeta::None,
+                        self.project_generation_signature(),
+                    );
+                }
+                canonical
+            })
+            .collect();
+        (args, completeness)
+    }
+
+    pub(super) fn evaluate_selected_value_with_context(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+    ) -> SemanticNodeId {
+        self.evaluate_deferred_demand(node, context, DeferredEvaluationDemand::SelectedValue)
+            .into_complete_active_query_build_node(self)
+            .unwrap_or(node)
+    }
+
+    fn evaluate_deferred_demand(
+        &self,
+        node: SemanticNodeId,
+        reduction_context: ProjectionReductionContext,
+        demand: DeferredEvaluationDemand,
+    ) -> EvaluateDeferredOutcome {
         // Continuations live on the heap. Authored structural depth has no
         // cap here; only connected operational limits can stop evaluation.
         let (_connected_guard, initial_trip) = self.enter_connected_demand(false);
@@ -2066,7 +2171,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // memo; one this demand cannot pay for is evaluated here.
         if let Some(served) =
             self.graph()
-                .evaluate_deferred_memo_get(node, reduction_context, self.ctx)
+                .evaluate_deferred_memo_get(node, reduction_context, demand, self.ctx)
         {
             if self.admits_served(&served.receipt) {
                 return EvaluateDeferredOutcome::complete(served.value);
@@ -2080,18 +2185,26 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             node,
             reduction_context,
             self.operation_budget_epoch.get(),
-            self.evaluation_fact_basis(),
+            demand,
         );
         self.connected_demand.open_cost_scope(
-            super::cost_receipt::CostIdentity::of_key((node, reduction_context)).with_roots(
-                self.graph()
-                    .root_existing_nodes(vec![node])
-                    .expect("evaluation operand is live"),
-            ),
+            super::cost_receipt::CostIdentity::of_key((node, reduction_context, demand))
+                .with_roots(
+                    self.graph()
+                        .root_existing_nodes(vec![node])
+                        .expect("evaluation operand is live"),
+                ),
         );
         root.memo_checked = true;
         root.recording = true;
         let mut frames = vec![root];
+        // Tracers live beside the frames so a step can mutate its frame.
+        // Only the current frame is installed; a completed child replays
+        // its proof into its parent. Deep operands do not install or copy
+        // an entire stack of tracers on every step.
+        let mut tracers = vec![crate::fact_signature_helpers::StepwiseFactTracer::new(
+            crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(self.ctx),
+        )];
         let mut completed_child: Option<EvaluateDeferredOutcome> = None;
 
         loop {
@@ -2104,9 +2217,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 return aborted_evaluation_outcome(&frames, completed_child.as_ref(), reasons);
             }
 
-            let frame_tracer =
-                std::rc::Rc::clone(&frames.last().expect("active evaluator frame").tracer);
-            let tracer_scope = frame_tracer.install();
+            let scope = tracers
+                .last_mut()
+                .expect("active evaluation tracer")
+                .install();
             let action = if let Some(child) = completed_child.take() {
                 let frame = frames
                     .last_mut()
@@ -2124,10 +2238,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         // evaluated here, at a demand for its value: its
                         // keys where they settle, as the checker prints
                         // them.
-                        if let QueryResult::Value(keys) = read.value {
-                            if let Some(settled) = self.settled_key_of_carrier(keys, frame.context)
-                            {
-                                read.value = QueryResult::Value(settled);
+                        if demand == DeferredEvaluationDemand::Shell {
+                            if let QueryResult::Value(keys) = read.value {
+                                if let Some(settled) =
+                                    self.settled_key_of_carrier(keys, frame.context)
+                                {
+                                    read.value = QueryResult::Value(settled);
+                                }
                             }
                         }
                         let fallback = self.opaque(QueryError::Miss);
@@ -2165,6 +2282,28 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         let fallback = self.opaque(QueryError::Miss);
                         self.deferred_read_action(frame, read, fallback)
                     }
+                    DeferredEvaluationStage::AwaitValueChildren {
+                        data,
+                        children,
+                        mut values,
+                    } => {
+                        values.push(child.node);
+                        if let Some(&next) = children.get(values.len()) {
+                            frame.stage = DeferredEvaluationStage::AwaitValueChildren {
+                                data,
+                                children,
+                                values,
+                            };
+                            DeferredEvaluationAction::Push {
+                                node: next,
+                                context: frame.context,
+                            }
+                        } else {
+                            let rebuilt =
+                                self.rebuild_evaluated_value(frame.node, &data, &children, &values);
+                            DeferredEvaluationAction::Finish(rebuilt)
+                        }
+                    }
                     DeferredEvaluationStage::EvaluateCurrent => {
                         unreachable!("only a suspended frame can receive an operand")
                     }
@@ -2180,7 +2319,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 };
                 let memo_hit = if check_memo {
                     self.graph()
-                        .evaluate_deferred_memo_get(entry_node, context, self.ctx)
+                        .evaluate_deferred_memo_get(entry_node, context, demand, self.ctx)
                         .filter(|served| self.admits_served(&served.receipt))
                         .map(|served| served.value)
                 } else {
@@ -2189,7 +2328,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 if check_memo && memo_hit.is_none() {
                     // The frame evaluates: its charges are its own.
                     self.connected_demand.open_cost_scope(
-                        super::cost_receipt::CostIdentity::of_key((entry_node, context))
+                        super::cost_receipt::CostIdentity::of_key((entry_node, context, demand))
                             .with_roots(
                                 self.graph()
                                     .root_existing_nodes(vec![entry_node])
@@ -2210,6 +2349,29 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         .node;
                     if let Some(data) = self.graph().node_data(current) {
                         match data.as_ref() {
+                            _ if demand == DeferredEvaluationDemand::SelectedValue
+                                && self
+                                    .selected_value_children(data.as_ref(), context)
+                                    .is_some() =>
+                            {
+                                let children = self
+                                    .selected_value_children(data.as_ref(), context)
+                                    .expect("selected child topology");
+                                if let Some(&first) = children.first() {
+                                    let frame = frames.last_mut().expect("active evaluator frame");
+                                    frame.stage = DeferredEvaluationStage::AwaitValueChildren {
+                                        data: Arc::clone(&data),
+                                        children,
+                                        values: Vec::new(),
+                                    };
+                                    DeferredEvaluationAction::Push {
+                                        node: first,
+                                        context,
+                                    }
+                                } else {
+                                    DeferredEvaluationAction::Finish(current)
+                                }
+                            }
                             SemanticNodeData::Alias(target) => frames
                                 .last_mut()
                                 .expect("active evaluator frame")
@@ -2219,7 +2381,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 frame.stage = DeferredEvaluationStage::AwaitKeyOfBase;
                                 DeferredEvaluationAction::Push {
                                     node: *base,
-                                    context: frame.context,
+                                    context: frame.context.into_structural_transit_with_mode(
+                                        ProjectionMode::Navigate,
+                                    ),
                                 }
                             }
                             SemanticNodeData::IndexedAccess { object, index } => {
@@ -2229,7 +2393,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 };
                                 DeferredEvaluationAction::Push {
                                     node: *object,
-                                    context: frame.context.with_mode(ProjectionMode::Navigate),
+                                    context: super::raise::indexed_access_object_context(
+                                        frame.context,
+                                    ),
                                 }
                             }
                             SemanticNodeData::Mapped { source, mapper } => {
@@ -2373,9 +2539,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     }
                 }
             };
-            drop(tracer_scope);
-            drop(frame_tracer);
 
+            drop(scope);
             match action {
                 DeferredEvaluationAction::Continue => {}
                 DeferredEvaluationAction::Push { node, context } => {
@@ -2383,24 +2548,61 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         node,
                         context,
                         self.operation_budget_epoch.get(),
-                        self.evaluation_fact_basis(),
+                        demand,
+                    ));
+                    tracers.push(crate::fact_signature_helpers::StepwiseFactTracer::new(
+                        crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(self.ctx),
                     ));
                 }
                 DeferredEvaluationAction::Finish(result) => {
                     let frame = frames.pop().expect("finishing an active evaluator frame");
-                    let outcome =
-                        self.finish_deferred_evaluation_frame(frame, result, frames.last());
+                    let tracer = tracers.pop().expect("each evaluation owns a tracer");
+                    let finalise = tracer.finish();
+                    if let Some(parent) = tracers.last_mut() {
+                        let _scope = parent.install();
+                        match &finalise {
+                            FactReadSetFinalise::Ok(facts)
+                            | FactReadSetFinalise::NonCacheable(facts) => {
+                                self.ctx.observe_borrowed_signature(facts)
+                            }
+                            FactReadSetFinalise::MutationUnstable => {}
+                        }
+                    }
+                    let outcome = self.finish_deferred_evaluation_frame(frame, result, finalise);
                     if frames.is_empty() {
                         return outcome;
                     }
                     completed_child = Some(outcome);
                 }
                 DeferredEvaluationAction::Cached(cached) => {
-                    let frame = frames
+                    let finalise = tracers
+                        .pop()
+                        .expect("each evaluation owns a tracer")
+                        .finish();
+                    if let Some(parent) = tracers.last_mut() {
+                        let _scope = parent.install();
+                        match &finalise {
+                            FactReadSetFinalise::Ok(facts)
+                            | FactReadSetFinalise::NonCacheable(facts) => {
+                                self.ctx.observe_borrowed_signature(facts)
+                            }
+                            FactReadSetFinalise::MutationUnstable => {}
+                        }
+                    }
+                    frames
                         .pop()
                         .expect("a memo hit belongs to an active evaluator frame");
-                    let outcome =
-                        self.finish_deferred_evaluation_frame(frame, cached, frames.last());
+                    let mut outcome = EvaluateDeferredOutcome::complete(cached);
+                    match finalise {
+                        FactReadSetFinalise::Ok(_) => {}
+                        FactReadSetFinalise::NonCacheable(_) => outcome.cache_suppress = true,
+                        FactReadSetFinalise::MutationUnstable => {
+                            outcome = EvaluateDeferredOutcome::partial(
+                                cached,
+                                PartialReasonSet::UNSTABLE_STATE,
+                            )
+                        }
+                    }
                     if frames.is_empty() {
                         return outcome;
                     }
@@ -2408,6 +2610,131 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
         }
+    }
+
+    fn selected_value_children(
+        &self,
+        data: &SemanticNodeData,
+        context: ProjectionReductionContext,
+    ) -> Option<Vec<SemanticNodeId>> {
+        let whole = crate::semantic_query::may_reduce_operator(context)
+            && context.mode == ProjectionMode::Expanded;
+        match data {
+            SemanticNodeData::Union(arms) => Some(arms.iter().copied().collect()),
+            SemanticNodeData::Array { element, .. } if whole => Some(vec![*element]),
+            SemanticNodeData::Tuple { elements, .. } if whole => {
+                Some(elements.iter().map(|e| e.value).collect())
+            }
+            SemanticNodeData::Object(surface) if whole => {
+                Some(surface.positive_members().iter().map(|m| m.value).collect())
+            }
+            SemanticNodeData::Signature {
+                params,
+                return_type,
+                return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(_),
+                ..
+            } if whole => Some(
+                params
+                    .iter()
+                    .map(|p| p.ty)
+                    .chain(std::iter::once(*return_type))
+                    .collect(),
+            ),
+            _ => None,
+        }
+    }
+
+    fn rebuild_evaluated_value(
+        &self,
+        node: SemanticNodeId,
+        data: &SemanticNodeData,
+        children: &[SemanticNodeId],
+        values: &[SemanticNodeId],
+    ) -> SemanticNodeId {
+        if children == values {
+            return node;
+        }
+        let rebuilt = match data {
+            SemanticNodeData::Union(_) => {
+                return self.intern_normalized_union_or_intersection(values, true)
+            }
+            SemanticNodeData::Array { readonly, .. } => SemanticNodeData::Array {
+                element: values[0],
+                readonly: *readonly,
+            },
+            SemanticNodeData::Tuple { elements, readonly } => {
+                let elements = elements
+                    .iter()
+                    .zip(values)
+                    .map(|(e, &value)| crate::semantic_query::TupleElement { value, ..e.clone() })
+                    .collect();
+                SemanticNodeData::Tuple {
+                    elements,
+                    readonly: *readonly,
+                }
+            }
+            SemanticNodeData::Object(surface) => {
+                // Entries own the surface; the member list is its derived
+                // index. Rebuild the stream so both readers see the value.
+                let mut values = values.iter();
+                let entries = surface
+                    .entries
+                    .iter()
+                    .map(|entry| match entry {
+                        crate::semantic_query::SurfaceEntry::Member(member) => {
+                            crate::semantic_query::SurfaceEntry::Member(
+                                crate::semantic_query::SurfaceMember {
+                                    value: *values
+                                        .next()
+                                        .expect("each member has an evaluated value"),
+                                    ..member.clone()
+                                },
+                            )
+                        }
+                        other => other.clone(),
+                    })
+                    .collect();
+                SemanticNodeData::Object(crate::semantic_query::SurfaceView::from_entries(
+                    entries,
+                    surface.keyspace,
+                    surface.has_known_index_signature(),
+                ))
+            }
+            SemanticNodeData::Signature {
+                kind,
+                params,
+                type_parameters,
+                occurrence,
+                signature_span,
+                return_type_span,
+                predicate,
+                is_abstract,
+                ..
+            } => {
+                let params = params
+                    .iter()
+                    .zip(values)
+                    .map(|(p, &ty)| crate::semantic_query::FunctionParam { ty, ..p.clone() })
+                    .collect();
+                let return_type = values[values.len() - 1];
+                SemanticNodeData::Signature {
+                    kind: *kind,
+                    params,
+                    return_type,
+                    type_parameters: Arc::clone(type_parameters),
+                    occurrence: occurrence.clone(),
+                    return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(
+                        return_type,
+                    ),
+                    signature_span: *signature_span,
+                    return_type_span: *return_type_span,
+                    predicate: *predicate,
+                    is_abstract: *is_abstract,
+                }
+            }
+            _ => unreachable!("only selected value composition is rebuilt"),
+        };
+        self.graph().intern_preserving_scope(node, rebuilt)
     }
 
     /// The union or intersection `node` reduced over its arms' RESOLVED

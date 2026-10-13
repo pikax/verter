@@ -951,6 +951,13 @@ Concrete substrate (the per-domain target form):
 - Admission writes use RCU; write contention serialised by
   `StoreViewCompatToken`-keyed singleflight.
 
+Live observation storage: `FactReadSet::observe` and
+`observe_borrowed_signature` suppress exact duplicates in a bounded recent
+window before cloning or appending them. Replaying a small warm witness must
+not grow the outer tracer per read. The window bounds insertion work; it
+does not bound the answer or replace final canonicalization. Distinct versions
+of the same fact remain distinct observations.
+
 Paged signature evidence: a `fact_dep_signature` is never refused for its
 width. `FactReadSet::finalise` (and `seal_canonical_signature` for a signature
 a producer assembles by hand) cuts a canonical set wider than
@@ -1075,6 +1082,24 @@ form a DAG (a child is minted before its parent) and drop from an explicit
 stack. A member closed inside a larger component keeps no receipt of its own:
 the component root's receipt, whose evaluation covered every member, is the
 sealed component receipt.
+
+Whole-module export proofs use `ResultReceipt::retained_signature` for an
+already-canonical producer signature and `retained_join` for its dependency
+receipts. Joins radix-order receipt digests, retaining exact comparison for
+equal digests, and never copy a child's transitive facts. These result-evidence
+allocations use the same pin-to-retained reservation transfer as evidence
+pages, so their charges remain attached when an enclosing cache retains the
+proof after the export table is evicted. Canonical summaries are persistent
+hash tries; their public iteration stays lexical through a byte radix walk.
+Radix ordering consumes common prefixes once per bucket (including small
+insertion buckets) and visits only the occupied bucket range when names
+diverge. Component publication projects its shared carrier's canonical union
+once, outside the memo lock, and reuses that temporary projection for every
+member and populated slot; each candidate still registers its own admission
+identity and the complete fact carrier. Export-table scale tests inspect all
+suffixes through one request context and count proof work
+across construction and those reads; the request's receipt validation memo
+remains responsible for sharing completed validation.
 
 ## Typed SignatureAdmission gate (CRITICAL)
 
@@ -2172,3 +2197,17 @@ The `DeclBodyMemo::whole_env()` whole-file env product (the lazy, lease-pinned e
 - `/type-resolution` — cross-file type resolver + macro traversal
 - `/component-meta` — downstream consumer
 - `/audit-infrastructure` — `StructuredAuditEvent` extensions
+
+### Immutable structural summaries
+
+`SemanticGraphStore` owns bounded binder-dependency and structural key-domain
+summaries beside its substitution and deferred-evaluation memos. These summarize
+immutable node payloads only, retain graph roots, reserve the shared retention
+account, and clear on graph invalidation. Refused admission leaves the computed
+summary usable without retaining it. Declaration references and symbolic key
+patterns cannot produce a complete structural domain; their resolution remains
+with the ordinary fact-backed query owners. A structural domain retains ordered
+keys and a membership index, distinguishes broad domains from finite empty
+ones, and never reads member values. Deferred evaluation separately keys shell
+and selected-value demands with the complete projection context and retains
+its ordinary dependency proof and cost receipt.

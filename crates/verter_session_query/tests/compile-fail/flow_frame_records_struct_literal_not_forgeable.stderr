@@ -26,7 +26,7 @@ error[E0451]: fields `gate` and `region` of struct `CapturedFrame` are private
 21 |             region: scope.enclosing().unwrap().region(),
    |             ^^^^^^ private field
 
-error[E0451]: fields `captures` and `this` of struct `NestedFlowContext` are private
+error[E0451]: fields `captures`, `this` and `lexical_this` of struct `NestedFlowContext` are private
   --> tests/compile-fail/flow_frame_records_struct_literal_not_forgeable.rs:28:9
    |
 27 |     NestedFlowContext {
@@ -35,3 +35,5 @@ error[E0451]: fields `captures` and `this` of struct `NestedFlowContext` are pri
    |         ^^^^^^^^ private field
 29 |         this: None,
    |         ^^^^ private field
+30 |         lexical_this: false,
+   |         ^^^^^^^^^^^^ private field

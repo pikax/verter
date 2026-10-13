@@ -129,6 +129,16 @@ pub fn profile_scenario(dir: &Path) -> Result<LaneProfile, JobError> {
         lib: "lib.bench.d.ts".into(),
         lib_mode: LibMode::RootFile,
         scenario: "scenario.ts".into(),
+        files: serde_json::from_str::<serde_json::Value>(&super::read(dir, "tsconfig.json")?)
+            .map_err(|error| JobError(format!("read scenario project: {error}")))?
+            .get("files")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .filter(|file| *file != "scenario.ts" && *file != "lib.bench.d.ts")
+            .map(String::from)
+            .collect(),
         init_alias: "__BenchInit".into(),
         probes: vec!["__Probe".into()],
         warm_repeats: 1,

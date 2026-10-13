@@ -242,31 +242,39 @@ export function validateRun(
     }
     if (cell.inputs?.["scenario.ts"] !== sha256Text(scenario.source))
       fail(`${key}: scenario.ts is not the catalog's source`);
-    if (cell.inputs?.["tsconfig.json"] !== sha256Text(tsconfigText(setting)))
+    if (cell.inputs?.["tsconfig.json"] !== sha256Text(tsconfigText(setting, scenario)))
       fail(`${key}: tsconfig.json is not the catalog's`);
     if (cell.inputs?.["cli/scenario.ts"] !== sha256Text(cliSource(scenario)))
       fail(`${key}: cli/scenario.ts is not the catalog's source plus the probe's use`);
+    for (const [file, text] of Object.entries(scenario.files ?? {})) {
+      for (const path of [file, `cli/${file}`]) {
+        if (cell.inputs?.[path] !== sha256Text(text))
+          fail(`${key}: ${path} is not the catalog's source`);
+      }
+    }
     const measured = expected.scenarios?.[cell.id];
     if (!measured) warnings.push(`${key}: no measured reference`);
     else {
+      const method = measured.method ?? expected.method;
       if (measured.sourceSha256 !== sha256Text(scenario.source))
         fail(`${key}: the measured reference is stale (measured on a different source)`);
-      if (expected.method?.libSha256 !== cell.inputs?.["lib.bench.d.ts"])
+      for (const [file, text] of Object.entries(scenario.files ?? {})) {
+        if (measured.files?.[file] !== sha256Text(text))
+          fail(`${key}: the measured reference has stale ${file}`);
+      }
+      if (method?.libSha256 !== cell.inputs?.["lib.bench.d.ts"])
         fail(`${key}: the measured reference used a different library`);
-      if (expected.method?.measuringSuffixSha256 !== sha256Text(MEASURING_SUFFIX))
+      if (method?.measuringSuffixSha256 !== sha256Text(MEASURING_SUFFIX))
         fail(`${key}: the measured reference used a different measuring method`);
       // Every cell carries its own immutable provenance: measured by the
-      // file's one method, by a verified tsc 7.0.2 executable, on exactly
+      // scenario's method (or the file default), by a verified tsc 7.0.2 executable, on exactly
       // this source (plus the measuring suffix) and this tsconfig.
       const receipt = measured.settings?.[cell.setting]?.receipt;
-      if (receipt?.method !== JSON.stringify(expected.method))
+      if (receipt?.method !== JSON.stringify(method))
         fail(`${key}: the reference cell was measured by another method than the file states`);
-      if (
-        !expected.method?.tscExeSha256 ||
-        expected.method?.tscVersion !== `Version ${TYPESCRIPT_VERSION}`
-      )
+      if (!method?.tscExeSha256 || method?.tscVersion !== `Version ${TYPESCRIPT_VERSION}`)
         fail(`${key}: the reference was not measured by a verified tsc ${TYPESCRIPT_VERSION}`);
-      if (receipt?.tsconfigSha256 !== sha256Text(tsconfigText(setting)))
+      if (receipt?.tsconfigSha256 !== sha256Text(tsconfigText(setting, scenario)))
         fail(`${key}: the reference cell was measured with another tsconfig`);
       if (receipt?.sourceSha256 !== sha256Text(scenario.source + MEASURING_SUFFIX))
         fail(`${key}: the reference cell was measured on another source`);
@@ -460,8 +468,11 @@ export function validateRun(
         "/",
       );
       const roots = (r.rootFiles ?? []).map((f) => f.toLowerCase().replace(/\\/g, "/"));
-      const want = [`${dir}/lib.bench.d.ts`, `${dir}/scenario.ts`].map((f) => f.toLowerCase());
-      if (roots.length !== 2 || want.some((w) => !roots.includes(w)))
+      const scenario = byId.get(inv.scenario);
+      const want = ["lib.bench.d.ts", "scenario.ts", ...Object.keys(scenario?.files ?? {})].map(
+        (file) => `${dir}/${file}`.toLowerCase(),
+      );
+      if (roots.length !== want.length || want.some((w) => !roots.includes(w)))
         fail(`${id}: tsc program roots ${JSON.stringify(r.rootFiles)} are not the scenario's`);
     }
     const answer = probeAnswer(inv, runLimits(opts));

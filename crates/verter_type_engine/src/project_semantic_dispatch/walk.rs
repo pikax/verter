@@ -2599,6 +2599,105 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
 
     /// Project a finite key set from an already reduced object in one pass.
     /// Unknown keys retain the ordinary walker path (including index signatures).
+    pub(super) fn finite_mapped_index_values(
+        &mut self,
+        object: SemanticNodeId,
+        source: SemanticNodeId,
+        mapper: &crate::semantic_query::MapperKey,
+        keys: &[IndexKey],
+    ) -> Option<Vec<SemanticNodeId>> {
+        if mapper.name_remap.is_some()
+            || matches!(mapper.kind, crate::semantic_query::MapperKind::Identity)
+            || !keys.iter().all(|key| matches!(key, IndexKey::String(_)))
+        {
+            return None;
+        }
+        // A homomorphic primitive/array/tuple is mapped by its container owner.
+        if mapper.over_type_variable {
+            let subject = self
+                .dispatch
+                .normalize_node_for_structural_fact_demand(
+                    source,
+                    self.context
+                        .into_structural_transit_with_mode(ProjectionMode::Navigate),
+                )
+                .into_complete_node()?;
+            if !matches!(
+                self.graph().node_data(subject).as_deref(),
+                Some(SemanticNodeData::Object(_))
+            ) {
+                return None;
+            }
+        }
+        // Prove membership once for the whole finite batch. A dictionary,
+        // remapping or open domain retains the ordinary per-key walker.
+        let domain = self.dispatch.key_space_domain(mapper.key_space)?;
+        if !domain.is_finite() {
+            return None;
+        }
+        if !keys.iter().all(|key| match key {
+            IndexKey::String(name) => {
+                domain.membership(&PropertyKey::String(Arc::clone(name))) == Some(true)
+            }
+            _ => false,
+        }) {
+            return None;
+        }
+        self.original_path_non_empty = true;
+        self.origin_file = self
+            .graph()
+            .node_scope(object)
+            .and_then(|scope| scope.canonical_file());
+        let mut values = Vec::with_capacity(keys.len());
+        for key in keys {
+            if let Err(reasons) = self.dispatch.charge_connected_work() {
+                self.mark_partial_with(reasons);
+                return None;
+            }
+            let IndexKey::String(name) = key else {
+                unreachable!("finite string keys checked above")
+            };
+            let argument = self.graph().intern_node(SemanticNodeData::Literal(
+                crate::semantic_query::LiteralValue::String(name.to_string()),
+            ));
+            let value = self
+                .dispatch
+                .materialize_selected_key_mapped_value_with_node(
+                    mapper,
+                    argument,
+                    // Selected values use the same publication context as
+                    // ordinary single-key projection, including its structural
+                    // provenance and authored merge role.
+                    self.context_from_template(
+                        crate::semantic_query::ProjectionReductionContext::published(self.mode()),
+                    ),
+                );
+            let value = self
+                .dispatch
+                .mapped_member_optionality(mapper, value, source, argument);
+            self.graph().record_origin_edge(
+                value,
+                OriginEdgeKind::ProjectIndex,
+                Arc::from([object, source, mapper.key_space]),
+                OriginMeta::Index(key.clone()),
+                Arc::clone(self.fence),
+            );
+            self.visited_aliases.clear();
+            self.visited_nodes.clear();
+            let value = self.finish_path_terminal(value);
+            if matches!(
+                self.graph().node_data(value).as_deref(),
+                Some(SemanticNodeData::Opaque(QueryError::Miss))
+            ) {
+                return None;
+            }
+            values.push(value);
+        }
+        Some(values)
+    }
+
+    /// Project a finite key set from an already reduced object in one pass.
+    /// Unknown keys retain the ordinary walker path (including index signatures).
     pub(super) fn finite_object_index_values(
         &mut self,
         subject: SemanticNodeId,
@@ -4196,8 +4295,8 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                             LiteralKey::String(name) => PropertyKey::string_literal(name.as_ref()),
                             LiteralKey::Number(number) => PropertyKey::from_js_number(*number),
                         };
-                        if self.dispatch.base_member_admission_non_emitting(subject, &needle) == Some(true) {
-                            key_admission = MappedKeyAdmission::Admitted;
+                        if let Some(admits) = self.dispatch.base_member_admission_non_emitting(subject, &needle) {
+                            key_admission = if admits { MappedKeyAdmission::Admitted } else { MappedKeyAdmission::AbsentProven };
                         }
                         }
                     }
@@ -4572,7 +4671,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     let inst_ctx = self.dispatch.instantiate_context_for(
                         canonical_id,
                         self.context.into_structural_transit_with_mode(
-                            ProjectionMode::Shallow,
+                            ProjectionMode::Navigate,
                         ),
                     );
                     drop(data);
@@ -4766,7 +4865,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     // 62-edge leak in `compute_evaluated_types`.
                     let unwrap_context = if still_more_path {
                         self.context
-                            .into_structural_transit_with_mode(ProjectionMode::Shallow)
+                            .into_structural_transit_with_mode(ProjectionMode::Navigate)
                     } else {
                         self.context_from_template(
                             crate::semantic_query::ProjectionReductionContext::published(
@@ -5075,6 +5174,11 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                             return;
                         }
                     }
+                }
+                SemanticNodeData::Primitive(PrimitiveKind::Never) => {
+                    // The empty type absorbs every remaining projection hop.
+                    results.push(current);
+                    return;
                 }
                 // A primitive's members are its apparent wrapper's
                 // (`string['length']` is `String['length']`, `number`),
@@ -6020,18 +6124,19 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 }
                 work.push(ExpandFrame::Expand(expanded));
             }
-            // `DeclRef`/`InstantiationRef`
-            // arms are deliberately NOT added to
-            // `expand_terminal_step`. Eagerly unwrapping these
-            // carriers in the empty-path terminal under publication
-            // demand collapsed the slot-binding indexed-access
-            // preservation policy (the symbolic
-            // `IndexedAccess { object: DeclRef(AppProps), index }`
-            // form). The carrier-preserving path-walker arms above
-            // (`PathWalker::advance_step` at walk.rs:1204-1313)
-            // handle DeclRef/InstantiationRef under demand-bounded
-            // intermediate-vs-terminal selection; the empty-path
-            // terminal expander does not need a duplicate arm.
+            // A non-empty path has selected this terminal. Empty-path
+            // carriers remain addressable until a member demand reads them.
+            SemanticNodeData::DeclRef { .. } | SemanticNodeData::InstantiationRef { .. }
+                if self.original_path_non_empty =>
+            {
+                drop(data);
+                let resolved = self.resolve_expanded_terminal_carrier(node);
+                if resolved == node {
+                    results.push(node);
+                } else {
+                    work.push(ExpandFrame::Expand(resolved));
+                }
+            }
             SemanticNodeData::Mapped { source, mapper }
                 if matches!(self.mode(), ProjectionMode::Expanded) =>
             {
@@ -8421,15 +8526,16 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         // dead and must never be materialised.
         let mut shared_value: Option<SemanticNodeId> = None;
         let mut members: Vec<ShallowSurfaceMember> = Vec::with_capacity(keys.len());
-        let mut source_by_key = std::collections::HashMap::new();
-        if let Some(source_members) = source_members.as_ref() {
-            for member in source_members {
+        let mut produced_by_key = std::collections::HashMap::with_capacity(keys.len());
+        let source_member_index = source_members.as_ref().map(|members| {
+            let mut index = rustc_hash::FxHashMap::default();
+            for member in members {
                 if let Some(key) = member.key.cloned_known() {
-                    source_by_key.entry(key).or_insert(member);
+                    index.entry(key).or_insert(member);
                 }
             }
-        }
-        let mut produced_by_key = std::collections::HashMap::with_capacity(keys.len());
+            index
+        });
         for key in keys.into_iter() {
             // Cancellation before this key's remap substitution.
             //
@@ -8478,7 +8584,9 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 return None;
             }
             let member = {
-                let source_member = source_by_key.get(&key.key).copied();
+                let source_member = source_member_index
+                    .as_ref()
+                    .and_then(|index| index.get(&key.key).copied());
                 // Optionality / readonly resolution per TS semantics:
                 //   - Add → always on
                 //   - Remove → always off

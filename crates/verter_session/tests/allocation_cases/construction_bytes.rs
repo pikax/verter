@@ -48,6 +48,52 @@ fn host_with(source: &str) -> Arc<VerterHost> {
     host
 }
 
+#[test]
+fn repeated_callbacks_allocate_in_the_linear_class() {
+    let mut measurements = Vec::new();
+    for count in [10, 100, 128, 256, 500, 512] {
+        let parameters = (0..count)
+            .map(|i| format!("f{i}: (x: T) => void"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let arguments = vec![r#"(x: "a") => {}"#; count].join(", ");
+        let source = format!(
+            "type Init = 0; declare function co<T>({parameters}): T; const r = co({arguments}); export type Result = typeof r;"
+        );
+        let host = host_with(&source);
+        let (init, _) = host
+            .resolve_named_symbol_with_audit(FILE, "Init", None)
+            .into_parts();
+        assert!(init.unwrap().is_some());
+        reset_alloc_counter();
+        let (answer, _) = host
+            .resolve_named_symbol_with_audit(FILE, "Result", None)
+            .into_parts();
+        let bytes = super::alloc_bytes();
+        let peak = peak_live_bytes();
+        let answer = answer.unwrap().expect("the callback result resolves");
+        let json = host.project_node_to_type_expr_json_bytes(answer).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&json).unwrap();
+        let expression = verter_type_expr::type_expr_from_json(&value).unwrap();
+        assert_eq!(
+            expression,
+            verter_type_expr::TypeExpr::Literal(verter_type_expr::LiteralValue::String("a".into()))
+        );
+        measurements.push((bytes, peak));
+    }
+    eprintln!("callback (allocated bytes, peak live bytes): {measurements:?}");
+    for adjacent in [
+        [measurements[2], measurements[3]],
+        [measurements[3], measurements[5]],
+    ] {
+        assert!(adjacent[0].0 > 0 && adjacent[1].0 > adjacent[0].0);
+        assert!(
+            adjacent[1].0 < 3 * adjacent[0].0,
+            "doubling callbacks allocates a quadratic volume: {measurements:?}"
+        );
+    }
+}
+
 /// The fixed cost of setting one connected demand up beside what it
 /// constructs: lowering the two names and opening the relation.
 const DEMAND_SETUP_BYTES: i64 = 4 << 20;

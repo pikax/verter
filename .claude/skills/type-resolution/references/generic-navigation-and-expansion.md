@@ -5,10 +5,11 @@ Generic substitutions are part of semantic meaning and therefore part of semanti
 - Query keys for reusable semantic work must include the relevant type arguments or substitution environment.
 - Member projection and indexed access against generic aliases, instantiated types, or mapped helpers must apply substitutions before deciding what member or keyspace is visible.
 - Mapped values and name remaps remain parameterized through locator-view projection and reducing lowering. Outer arguments substitute into the shape first; the per-key materializer then binds the mapped parameter before evaluating helpers, conditionals, or template holes. Projecting a recursive helper while its mapped key is still unbound can replace the application with a recursion sentinel and lose its arguments.
+- An empty shallow projection of an infer or type-parameter source does not prove an empty homomorphic key domain. Preserve the mapped carrier unless the source is directly empty or its constraint enumerates successfully, so reverse-inference holes retain their binder identity. Optional mapped property reads include `undefined` under `strictNullChecks`, including with `exactOptionalPropertyTypes`; exact optionality governs writes rather than absence on reads.
 - A mapped index distributes over the selected key domain through the shared indexed-access query. Intersection key domains use the shared key-domain reader: finite arms intersect by typed key identity, and primitive `string`, `number`, or `symbol` arms filter key kinds. Index signatures contribute their broad key kinds beside named members; homomorphic materialization retains a finite-domain proof from the shallow source or constraint before using source members, since a named-member list alone never proves a finite or empty domain. A named member of a homomorphic dictionary can be admitted from its shallow source surface without forcing sibling values. A proven-empty index reduces to `never`, including every following index hop. Admitted nominal and broad keys, and an index equal to a closed template pattern, bind the same per-key mapped value materializer as literal keys. Open template interpolants retain their deferred access. Unique-symbol indices retain their nominal `typeof` form at the wire boundary.
 - An open key-domain arm preserves the deferred access. A mapped carrier or intermediate indexed access that stalls before consuming a path retains the full remaining indexed-access structure and alias arguments; the mapping itself is never the answer to its pending index.
 - Structural openness checks use an ordered worklist for nested surfaces and operators. Each node retains its role/operand-position memo identity, in-flight cycles remain closed only for that revisit, and the first open child stops sibling descent. Tuple rest elements keep their key-domain position; object index keys remain visible even when member values are not demanded. The shared walk budget and scoped binder rules still govern declaration and generic leaves.
-- `keyof` lowers and projects its operand in structural transit with `Navigate`, then reads its key domain under the caller's demand. Mapped key-domain queries do not inspect values. Reverse-homomorphic inference selects the key before unwrapping a helper template and registering its indexed inference holes; those holes remain patterns rather than ordinary member reads.
+- `keyof` lowers and projects its operand in structural transit with `Navigate`, then reads its key domain under the caller's demand. Mapped key-domain queries do not inspect values. Settling a declaration-backed `keyof` reuses an already settled source surface for names and index signatures; residual carriers use Navigate with the caller's reduction demand instead of expanding member values. Reverse-homomorphic inference selects the key before unwrapping a helper template and registering its indexed inference holes; those holes remain patterns rather than ordinary member reads.
 - If two callers reach the same instantiated semantic node through different entry paths, they converge onto the same cache entry.
 - If two callers reach the same declaration name with different type arguments, they do not alias to the same cache entry.
 - When a declaration body is navigated in `Navigate` or `Shallow` mode with some type parameters unbound, the resulting graph preserves those parameters as first-class type-parameter references. Clients may later instantiate the preserved graph by applying a substitution environment.
@@ -24,3 +25,38 @@ Concrete expectations:
 - Navigating `Box<C>['full']['bar']` resolves `"full"` against the instantiated `Box<C>` meaning, not the unsubstituted generic body.
 - If `ProjectMember(ResolveDecl(Box), "full", [C])` is already cached, a later path reaching the same instantiated query reuses it.
 - Navigating `MyType<T>` with `T` free returns a shape whose body preserves `T` as a parameter reference. Navigating `MyType<string>` returns a shape with `T` substituted, every substituted position carrying a `SubstituteTypeParam` origin edge to the decl's parameter list.
+
+**Binder dependency summaries.** Immutable semantic subtrees carry graph-epoch
+summaries independent of the substitution argument. A complete negative proof
+returns the original subtree before consulting `(node, parameter, argument)`
+memos; binder-presence and pending-substitution guards reuse that proof. Exact
+infer declaration/reference identities participate. Sealed or missing children
+cannot prove absence. Entries retain their graph roots, reserve the shared
+retention budget, and use bounded eviction; graph invalidation clears them.
+Infer declarations within nested signatures or conditionals belong to those
+scopes and do not make an enclosing argument an infer pattern. An actual infer
+pattern keeps its helper application addressable until the relation owner
+requests its shape.
+
+**Signature source demand.** Source readers settle reference chains through the
+ordinary `Instantiate` owner and prepare arguments through the shared deferred
+evaluator and continuation classification. They preserve resolved class
+expression identity. Full structural-fact normalization has a different demand:
+it may read a class expression's structural surface and is not a substitute for
+that source reader. Transit and Skeleton projection retain indexed operators.
+A declaration-backed index remains addressable until the shared indexed-access demand consumes it;
+intermediate declaration reads use Navigate and reuse that same body demand.
+A named declaration accompanied by null or undefined retains its name.
+
+**Key-domain reuse.** One typed key-domain result supplies enumeration,
+membership and emptiness. Immutable key syntax uses a bounded, rooted summary;
+live declarations and symbolic patterns retain the fact-backed resolution path.
+A broad domain never proves finite emptiness, and unsupported source shapes
+cannot produce absence evidence. Finite mapped batches reuse membership instead
+of rebuilding a set per selected value. Mapped materializers index source members
+once and preserve the first matching member's modifiers and declaration metadata.
+
+Utility intrinsics follow eager alias argument semantics; nominal builtin
+interfaces and classes keep deferred argument semantics. A budget recovery in
+an `Extract` or `Exclude` operand propagates its diagnostic and resource partial
+instead of becoming a semantic miss.

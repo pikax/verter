@@ -93,6 +93,8 @@ impl FlowSliceSelection {
 pub struct SliceContent {
     pub bindings: Arc<crate::flow::binding::FlowBindingMap>,
     pub declared_return: Option<GatedType>,
+    /// The receiver annotation belongs to this demanded body, not its lexical context.
+    pub declared_this: Option<GatedType>,
     /// The authored return's type predicate (`x is T`, `asserts x`, …),
     /// beside the `boolean` / `void` [`Self::declared_return`].
     pub declared_predicate: Option<SlicePredicate>,
@@ -3082,6 +3084,9 @@ pub struct SliceObjectMember {
     /// inference pass reads such a member as the non-inferring
     /// `anyFunctionType` (`SkipContextSensitive`).
     pub context_sensitive: bool,
+    /// The method's return can infer before contextual receiver typing:
+    /// its parameters are annotated and its body does not read `this`.
+    pub infer_return_eagerly: bool,
 }
 
 /// The unsupported-construct classification.
@@ -3366,6 +3371,8 @@ impl CapturedFrame {
 /// receiver for the member (`checkThisExpression`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SliceThis {
+    /// An authored receiver annotation, which precedes contextual typing.
+    Explicit,
     /// An instance member of the class `class` (its registered
     /// declaration name) declaring `type_parameters`: the class's
     /// polymorphic `this` type, whose constraint is the class instance.
@@ -3416,9 +3423,20 @@ pub struct CaptureScope {
 pub struct NestedFlowContext {
     captures: CaptureScope,
     this: Option<SliceThis>,
+    lexical_this: bool,
 }
 
 impl NestedFlowContext {
+    /// An arrow retains its creating frame's receiver under contextual typing.
+    pub fn with_lexical_this(mut self) -> Self {
+        self.lexical_this = true;
+        self
+    }
+
+    pub fn this_is_lexical(&self) -> bool {
+        self.lexical_this
+    }
+
     /// The lexical chain at the nested function's position.
     #[must_use]
     pub fn captures(&self) -> &CaptureScope {
@@ -4020,6 +4038,7 @@ impl DefiningFrameGate {
                 })),
             },
             this,
+            lexical_this: false,
         })
     }
 

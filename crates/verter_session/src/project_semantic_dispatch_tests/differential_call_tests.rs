@@ -16,6 +16,41 @@
 
 use super::differential_harness_tests::{Matrix, Read};
 
+#[test]
+fn repeated_contravariant_callbacks_charge_linear_work() {
+    let mut counts = Vec::new();
+    for callbacks in [128, 256, 512] {
+        let parameters = (0..callbacks)
+            .map(|i| format!("f{i}: (x: T) => void"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let arguments = vec![r#"(x: "a") => {}"#; callbacks].join(", ");
+        let source = format!(
+            "declare function co<T>({parameters}): T;\nexport function result() {{ return co({arguments}); }}"
+        );
+        let matrix = Matrix::new(&source).settings(&super::differential_harness_tests::ALL[..1]);
+        let failures = matrix.returns(&[("result", "\"a\"")]);
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+        counts.push(matrix.return_relation_work("result"));
+    }
+    eprintln!("callback (relation, argument/parameter, binding) work: {counts:?}");
+    for axis in 0..3 {
+        let work = |count: &(u64, usize, usize)| match axis {
+            0 => count.0,
+            1 => count.1 as u64,
+            _ => count.2 as u64,
+        };
+        let small = work(&counts[0]);
+        let medium = work(&counts[1]);
+        let large = work(&counts[2]);
+        assert!(small > 0 && small <= medium && medium <= large);
+        assert!(
+            large - medium <= 2 * (medium - small) + 8,
+            "doubling callbacks repeats earlier work on axis {axis}: {small}, {medium}, {large}"
+        );
+    }
+}
+
 fn pipe_declaration(stages: usize, name: &str) -> String {
     let binders = (0..=stages)
         .map(|i| format!("T{i}"))

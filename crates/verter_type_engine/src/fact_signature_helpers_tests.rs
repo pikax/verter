@@ -189,3 +189,42 @@ mod file_source_env_observation_tests {
         assert_eq!(canons[0].as_ref(), "/contrib.d.ts");
     }
 }
+
+#[test]
+fn cacheability_probe_preserves_mutation_and_provenance_refusals() {
+    use verter_session_query::facts::fact_cache::{AggregateGenerations, AggregateStamp};
+    use verter_session_query::facts::fact_read_set::NonCacheablePropagation;
+
+    let knobs = crate::engine_test_knobs::TestKnobs::default();
+    let source = FactTracerBasisSource::unbound_observers(&knobs);
+    let (_, read_set) = source.with_fact_tracer_cell(|cell| {
+        let probe = CacheabilityProbe {
+            cell,
+            source: &source,
+        };
+        assert_eq!(probe.non_admission_reason(), None);
+        cell.note_non_cacheable_read(NonCacheablePropagation::Transitive);
+        assert_eq!(
+            probe.non_admission_reason(),
+            Some(verter_audit::NonAdmissionReason::UnresolvedProvenance)
+        );
+        cell.set_aggregate_basis(AggregateGenerations {
+            content: Some(AggregateStamp::Generation(1)),
+            view_population: Some(verter_session_query::facts::fact_cache::ViewPopulation::Base),
+            ..AggregateGenerations::default()
+        });
+        cell.note_basis_recheck(&AggregateGenerations {
+            content: Some(AggregateStamp::Generation(2)),
+            view_population: Some(verter_session_query::facts::fact_cache::ViewPopulation::Base),
+            ..AggregateGenerations::default()
+        });
+        assert_eq!(
+            probe.non_admission_reason(),
+            Some(verter_audit::NonAdmissionReason::MutationUnstable)
+        );
+    });
+    assert!(matches!(
+        read_set.finalise(),
+        FactReadSetFinalise::MutationUnstable
+    ));
+}

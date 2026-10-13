@@ -14,7 +14,7 @@ planned layer.
 
 ## What it measures
 
-Each scenario is one TypeScript module that declares two aliases:
+Each scenario is a TypeScript project whose `scenario.ts` entry declares two aliases:
 
 ```ts
 type __BenchInit = 0;          // absorbs one-time lazy initialisation
@@ -188,10 +188,12 @@ No `cfg(test)` instrumentation is compiled into either probe binary.
 
 Why each probe demands the same work of both tools:
 
-1. **Same source.** One `scenario.ts` per (scenario, setting) is written
-   once; both arms read that file. The validator checks the tsc program's
-   root files are exactly that directory's library and scenario, and that
-   every input is the catalog's.
+1. **Same source.** One `scenario.ts` and the catalog's optional supporting
+   `files` per (scenario, setting) are written once; both arms read those
+   bytes. The tsconfig lists the library, entry and supporting modules as
+   roots. Verter opens the supporting modules during setup, before either
+   alias demand. The validator checks every root and input digest, including
+   the copies used by whole-program CLI arms and measured references.
 2. **Same library.** Both read `lib.bench.d.ts`, a copy of TypeScript 7.0.2's
    own declarations for the members the scenarios read. tsc reads it as a
    root file under `noLib`, so no other library is loaded; Verter upserts it
@@ -280,9 +282,12 @@ in all four `strictNullChecks` × `noImplicitAny` settings, and committed as
 `scripts/benchmark/semantic-perf/expected.json`. Every cell carries its own
 immutable provenance (the method — measuring suffix, library, verified tsc
 executable, platform, limits, launcher — plus the tsconfig and source digests
-and a digest of tsc's output); a cell measured by any other method is
-re-measured, never relabelled, and the validator rejects a cell whose
-provenance disagrees with the file's method. The measurement uses the CLI: the scenario plus
+and a digest of tsc's type output). A scenario may carry its own `method`;
+otherwise it uses the file's default method. A targeted measurement retains
+unselected reference fixtures and records the new scenario's actual method.
+Resume reuses a scenario only when its method, entry source and every supporting
+module match. The validator rejects mismatched method, library, compiler,
+tsconfig or source evidence. The measurement uses the CLI: the scenario plus
 
 ```ts
 type __BenchExpand<T> = T extends unknown ? [T] : never;
@@ -303,7 +308,7 @@ output with neither verdict is an error, never an answer; a print tsc elided
 (bare `any` members among the tuples) is recorded as elided; an `any` beside
 TS2589 / TS2590 is tsc's error-any; a measurement tsc cannot finish inside the
 cap or the deadline is recorded as `killed` ("tsc exhausts resources"), never
-retried with more. Every measured tsc process is contained, and its receipt
+retried with more. Every measured tsc process is contained. A killed measurement's receipt
 keeps the supervisor's termination evidence (backend, containment, cap,
 actual kill threshold, deadline, wall time, termination latency): a kill is
 read as tsc exhausting the resource by the same rule as a benchmark arm

@@ -48,6 +48,7 @@ use crate::semantic_query::{
 };
 
 pub mod arena;
+mod binder_dependencies;
 pub mod delivery_lease;
 pub mod derivation;
 pub mod family;
@@ -64,6 +65,7 @@ pub mod node_roots;
 pub(crate) mod nodes;
 #[cfg(any(test, feature = "test-support"))]
 pub mod ownership_harness;
+mod structural_domains;
 pub use nodes::AliasChainEnd;
 mod observability;
 pub use observability::NodeOwnershipCounts;
@@ -654,6 +656,14 @@ pub struct SemanticGraphStore {
     // sidecar deque) so a long-running workspace cannot grow either
     // memo without bound; see `hash_cons_memos.rs` for the
     // eviction contract.
+    pub(super) structural_domains:
+        DashMap<SemanticNodeId, structural_domains::StructuralDomainEntry>,
+    pub(super) structural_domains_fifo:
+        parking_lot::Mutex<std::collections::VecDeque<SemanticNodeId>>,
+    pub(super) binder_dependencies:
+        DashMap<SemanticNodeId, binder_dependencies::BinderDependencyEntry>,
+    pub(super) binder_dependencies_fifo:
+        parking_lot::Mutex<std::collections::VecDeque<SemanticNodeId>>,
     pub(super) substitute_memo: DashMap<
         (SemanticNodeId, SemanticNodeId, SemanticNodeId),
         (SemanticNodeId, node_roots::NodeRootSet),
@@ -665,13 +675,15 @@ pub struct SemanticGraphStore {
         (
             SemanticNodeId,
             crate::semantic_query::ProjectionReductionContext,
+            crate::project_semantic_dispatch::evaluate::DeferredEvaluationDemand,
         ),
-        std::sync::Arc<hash_cons_memos::DeferredMemoEntry>,
+        Arc<hash_cons_memos::DeferredEvaluationMemoEntry>,
     >,
     pub(super) evaluate_deferred_memo_fifo: parking_lot::Mutex<
         std::collections::VecDeque<(
             SemanticNodeId,
             crate::semantic_query::ProjectionReductionContext,
+            crate::project_semantic_dispatch::evaluate::DeferredEvaluationDemand,
         )>,
     >,
     // Member-ordinal index sidecar for large interned `Object` surfaces —
@@ -759,6 +771,10 @@ impl SemanticGraphStore {
             dep_signature_interner: Default::default(),
             memo_budget: Default::default(),
             candidate_admission_seq: Default::default(),
+            structural_domains: Default::default(),
+            structural_domains_fifo: Default::default(),
+            binder_dependencies: Default::default(),
+            binder_dependencies_fifo: Default::default(),
             substitute_memo: Default::default(),
             substitute_memo_fifo: Default::default(),
             evaluate_deferred_memo: Default::default(),
@@ -2488,8 +2504,7 @@ impl SemanticGraphStore {
             &self.canonical_to_entries,
             family,
             &populated_slots,
-            &read_set_signature,
-            &dispatch_dep_signature,
+            &reverse_index::ReverseIndexInputs::new(&read_set_signature, &dispatch_dep_signature),
             admission_seq,
         );
         let published = PublishedMemoCandidate {
@@ -2711,8 +2726,10 @@ impl SemanticGraphStore {
             &self.canonical_to_entries,
             family,
             &populated_slots,
-            &read_set_signature,
-            &dispatch_dep_signature_clone,
+            &reverse_index::ReverseIndexInputs::new(
+                &read_set_signature,
+                &dispatch_dep_signature_clone,
+            ),
             admission_seq,
         );
         let admitted = !populated_slots.is_empty();
