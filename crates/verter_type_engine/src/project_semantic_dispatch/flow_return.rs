@@ -3157,11 +3157,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// storage, no `MergedDecl` or other ordered merge carrier, no
     /// already-sealed completion, and no display path.
     ///
-    /// Scope is deliberately the TOP-LEVEL return only. A spread program
-    /// with one proven closed alternative becomes its inferred object
-    /// surface through the shared spread query, so callers reuse the
-    /// surface without traversing a chain of construction programs. Open
-    /// and correlated programs keep their carrier. The join flow
+    /// Scope is deliberately the TOP-LEVEL composite only. Spread programs
+    /// retain their immutable shared operands: projecting each inferred
+    /// prefix here would copy every inherited member at every call link.
+    /// The shared spread query materialises them at the consumer demand.
+    /// The join flow
     /// construction derives is UNION-kinded, and "normalization normalizes
     /// only the already-demanded semantic portion". A UNION top re-closes
     /// through the canonical authority (flatten, lattice absorption,
@@ -3214,31 +3214,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let Some(data) = self.graph().node_data(node) else {
             return result;
         };
-        if matches!(&*data, SemanticNodeData::ObjectSpreadProgram(_)) {
-            drop(data);
-            // Reuse a callee's inferred surface rather than retaining a
-            // construction chain through every caller. The shared spread
-            // query remains the authority for overwrite and member policy.
-            // Correlated or open formulas keep their original carrier.
-            if let QueryResult::Value(formula) = self.project_object_spread_for_consumer(
-                node,
-                crate::semantic_query::ObjectProjectionSelector::Surface,
-                crate::semantic_query::ProjectionReductionContext::structural_transit(),
-            ) {
-                if let [only] = formula.alternatives() {
-                    if let Some(surface) = only
-                        .closed()
-                        .and_then(|closed| closed.to_closed_surface_view())
-                    {
-                        let closed = self
-                            .graph()
-                            .intern_preserving_scope(node, SemanticNodeData::Object(surface));
-                        return result.with_return_type(self.graph().as_ref(), closed);
-                    }
-                }
-            }
-            return result;
-        }
         let SemanticNodeData::Union(members) = &*data else {
             return result;
         };
@@ -12545,8 +12520,28 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 _ => None,
             })
             .collect();
+        // Leaf data values cannot evaluate a method body against this object.
+        // Avoid building and populating an unused receiver: reading every
+        // spread surface here would materialise every inferred call prefix.
+        // Contextual/inherited receivers and compound member expressions keep
+        // their existing receiver path, including deferred method retries.
+        let data_only = entries.iter().all(|entry| match entry {
+            verter_session_query::flow::slice::SliceObjectEntry::Spread { .. } => true,
+            verter_session_query::flow::slice::SliceObjectEntry::Member(member) => {
+                member.method_kind.is_none()
+                    && matches!(
+                        member.value,
+                        verter_session_query::flow::slice::SliceExpr::Type(_)
+                            | verter_session_query::flow::slice::SliceExpr::FrameShadowed(_)
+                            | verter_session_query::flow::slice::SliceExpr::Param { .. }
+                            | verter_session_query::flow::slice::SliceExpr::ParamValue { .. }
+                            | verter_session_query::flow::slice::SliceExpr::Local { .. }
+                            | verter_session_query::flow::slice::SliceExpr::SemanticAny
+                    )
+            }
+        });
         let receiver = inherited_receiver.or_else(|| {
-            Some({
+            (!data_only || contextual.is_some() || contextual_this.is_some()).then(|| {
                 std::rc::Rc::new(class_expression::ClassReceiver {
                     binder: contextual_this.unwrap_or_else(|| {
                         self.dispatch.this_binder(

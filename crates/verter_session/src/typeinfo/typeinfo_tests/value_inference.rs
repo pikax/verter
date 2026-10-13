@@ -7,8 +7,10 @@ use verter_session_oracle_macro::oracle_row;
 #[test]
 fn cross_module_spread_returns_preserve_every_literal_and_reuse_each_body() {
     use verter_type_engine::project_semantic_dispatch::flow_return::flow_evaluations_for_tests;
+    use verter_type_engine::semantic_query::object_spread_projection::test_support::work_counts;
 
-    for levels in [20usize, 100, 300] {
+    let mut doubled_control = None;
+    for levels in [20usize, 40, 100, 300] {
         let host = make_host_with_footprint();
         for level in 0..levels {
             let source = if level == 0 {
@@ -31,6 +33,7 @@ fn cross_module_spread_returns_preserve_every_literal_and_reuse_each_body() {
             ),
         );
         let before = flow_evaluations_for_tests();
+        let work_before = work_counts();
         let (result, _) = resolve_expr(
             &host,
             "/fixtures/returns/scenario.ts",
@@ -46,6 +49,25 @@ fn cross_module_spread_returns_preserve_every_literal_and_reuse_each_body() {
             assert!(!property.optional && !property.readonly);
         }
         let cold_evaluations = flow_evaluations_for_tests() - before;
+        let cold_work = work_counts();
+        let visits = cold_work.0 - work_before.0;
+        let comparisons = cold_work.1 - work_before.1;
+        eprintln!("{levels} links: {visits} member visits, {comparisons} collision comparisons");
+        assert!(visits >= levels, "the production member path was observed");
+        assert!(visits <= levels * 4, "only the demanded surface is copied");
+        if levels == 20 {
+            doubled_control = Some((visits, comparisons));
+        } else if levels == 40 {
+            let (base_visits, base_comparisons) = doubled_control.unwrap();
+            assert!(
+                visits <= base_visits * 3,
+                "doubling links must keep member work linear"
+            );
+            assert!(
+                comparisons <= base_comparisons * 3 + levels,
+                "doubling links must keep collision work linear"
+            );
+        }
         assert_eq!(
             cold_evaluations, levels,
             "each function's body is inferred once"
@@ -59,6 +81,15 @@ fn cross_module_spread_returns_preserve_every_literal_and_reuse_each_body() {
         );
         assert_eq!(warm, result);
         assert_eq!(flow_evaluations_for_tests() - before, cold_evaluations);
+        let warm_work = work_counts();
+        assert_eq!(
+            warm_work.1, cold_work.1,
+            "warm reads reuse the inferred projection"
+        );
+        assert!(
+            warm_work.0 - cold_work.0 <= levels,
+            "warm consumer only materialises its final surface"
+        );
         if levels == 20 {
             upsert_ts(
                 &host,
@@ -79,6 +110,32 @@ fn cross_module_spread_returns_preserve_every_literal_and_reuse_each_body() {
                     &props[&format!("k{level}")].ty,
                     if level == 0 { -1.0 } else { level as f64 },
                 );
+            }
+            // A method-bearing consumer still needs the copied members in
+            // its receiver, including source-order overwrites and getters.
+            upsert_ts(
+                &host,
+                "/fixtures/returns/receiver.ts",
+                "import { f19 } from './m-19';\n\
+                 export function withMethod() { return { ...f19(), k0: 999 as const, read() { return this.k0 }, get first() { return this.k1 } }; }\n\
+                 export function withFunction() { return { ...f19(), read: function() { return this.k0 } }; }\n\
+                 type MethodReturn = ReturnType<ReturnType<typeof withMethod>['read']>;\n\
+                 type GetterReturn = ReturnType<typeof withMethod>['first'];\n\
+                 type FunctionReturn = ReturnType<ReturnType<typeof withFunction>['read']>;",
+            );
+            for (name, expected) in [
+                ("MethodReturn", 999.0),
+                ("GetterReturn", 1.0),
+                ("FunctionReturn", -1.0),
+            ] {
+                let (value, _) = resolve_expr(
+                    &host,
+                    "/fixtures/returns/receiver.ts",
+                    name,
+                    &[],
+                    ProjectionMode::Expanded,
+                );
+                assert_number_literal(&value, expected);
             }
         }
     }

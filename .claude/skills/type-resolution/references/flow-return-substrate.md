@@ -1,15 +1,22 @@
 ## Flow-Return Substrate (U6)
 
-A whole-return spread program with one proven closed alternative is projected
-through the shared object-spread query before the flow completion is sealed.
-The resulting object retains its declaring scope and member metadata. Callers
-therefore reuse the inferred surface rather than extending a deferred chain of
-spread programs across modules. Open and correlated formulas retain their
-construction carrier; union returns and nested member types keep their existing
-closure rules. The source reads made by projection remain inside the flow
-proof's evidence, so edits to any contributing module invalidate its callers.
-The cross-module spread-return regression covers 20, 100 and 300 modules and
-warm reuse through the public named-type query.
+Whole-return spread programs retain their immutable construction carriers and
+shared inferred callee operands when the flow completion is sealed. Each body
+is inferred once; no intermediate return prefix is projected into a complete
+surface. Uncontextualised literals containing only leaf data values do not
+allocate or populate an unused object-method receiver; methods, compound values
+and contextual/inherited receiver typing retain their receiver path.
+At a consumer demand, the shared object-spread evaluator peels a
+leading-spread chain with required, public, known-key property tails iteratively
+and applies each copied write once. General operands and non-composable tails
+retain the correlated projection path. Copied metadata and overwrite order
+follow the same named-write policy, and an indexed JS property identity avoids
+scanning the accumulated surface for each collision. Closed materialisation
+remains at the demanding consumer. Union closure, source-edit invalidation,
+open-domain evidence and warm admission retain their existing authorities.
+The public named-type regression covers 20, 40, 100 and 300 modules, exact
+literal answers, warm reuse, upstream edits and member/collision work growth
+when the chain length doubles.
 
 Flow-return reads also consume the dispatcher's existing `own_published_read`
 when its pinned view cannot serve a result that the same dispatcher just

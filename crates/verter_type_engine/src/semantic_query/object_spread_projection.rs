@@ -12,6 +12,22 @@ use super::{
     HashValue, ProjectionReductionContext, PropertyKey, SemanticNodeId, SubstitutionCanonicalHash,
 };
 
+#[cfg(any(test, feature = "test-support"))]
+std::thread_local! {
+    static MEMBER_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static COLLISION_COMPARISONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+pub(crate) fn note_member_visit() {
+    #[cfg(any(test, feature = "test-support"))]
+    MEMBER_VISITS.with(|count| count.set(count.get() + 1));
+}
+
+pub(crate) fn note_collision_comparison() {
+    #[cfg(any(test, feature = "test-support"))]
+    COLLISION_COMPARISONS.with(|count| count.set(count.get() + 1));
+}
+
 /// The finite selector vocabulary of [`super::SemanticQueryKey::ProjectObjectSpread`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ObjectProjectionSelector {
@@ -778,6 +794,7 @@ impl<'a> ClosedObjectProjectionAlternative<'a> {
             .positive
             .iter()
             .map(|fact| {
+                note_member_visit();
                 let ProjectionEvidence::Proven(value) = &fact.value else {
                     return None;
                 };
@@ -1099,6 +1116,14 @@ pub(crate) mod evaluator_support {
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
     use super::*;
+
+    /// Actual member copying/writes and property-identity comparisons on this thread.
+    pub fn work_counts() -> (usize, usize) {
+        (
+            MEMBER_VISITS.with(std::cell::Cell::get),
+            COLLISION_COMPARISONS.with(std::cell::Cell::get),
+        )
+    }
 
     #[must_use]
     pub fn context(

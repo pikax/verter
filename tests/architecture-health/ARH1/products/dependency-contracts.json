@@ -827,6 +827,7 @@
         "external": ["flow_admission_fault_injection", "rustc_hash", "smallvec", "tracing"],
         "crateInternal": [
           "cache_runtime",
+          "fact_signature_helpers",
           "fact_tracing",
           "flow_return_audit",
           "graph_walk",
@@ -1449,6 +1450,7 @@
           "crates/verter_session/src/typeinfo/typeinfo_tests/relation_verdict_oracle.rs",
           "crates/verter_session/src/typeinfo/typeinfo_tests/support.rs",
           "crates/verter_session/src/typeinfo/typeinfo_tests/surface_spans.rs",
+          "crates/verter_session/src/typeinfo/typeinfo_tests/value_inference.rs",
           "crates/verter_session/src/typeinfo/typeinfo_tests/vue_adapter_cache.rs",
           "crates/verter_session/src/typeinfo/typeinfo_tests/vue_adapter_slots.rs",
           "crates/verter_session/src/typeinfo/typeinfo_tests/vue_import_recursion.rs",
@@ -1835,6 +1837,7 @@
               "crates/verter_session/src/typeinfo/typeinfo_tests/relation_verdict_oracle.rs",
               "crates/verter_session/src/typeinfo/typeinfo_tests/support.rs",
               "crates/verter_session/src/typeinfo/typeinfo_tests/surface_spans.rs",
+              "crates/verter_session/src/typeinfo/typeinfo_tests/value_inference.rs",
               "crates/verter_session/src/typeinfo/typeinfo_tests/vue_adapter_cache.rs",
               "crates/verter_session/src/typeinfo/typeinfo_tests/vue_adapter_slots.rs",
               "crates/verter_session/src/typeinfo/typeinfo_tests/vue_import_recursion.rs",
