@@ -12540,16 +12540,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         source: SemanticNodeId,
         key: SemanticNodeId,
     ) -> SemanticNodeId {
-        let (strict_null_checks, exact_optional) = self
+        let strict_null_checks = self
             .graph()
             .node_scope(source)
             .and_then(|scope| scope.canonical_file())
-            .map_or((true, false), |canonical| {
-                let options = self.ctx.semantic_compiler_options_for(&canonical);
-                (
-                    options.strict_null_checks,
-                    options.exact_optional_property_types,
-                )
+            .is_none_or(|canonical| {
+                self.ctx
+                    .semantic_compiler_options_for(&canonical)
+                    .strict_null_checks
             });
         if !strict_null_checks {
             return value;
@@ -12566,9 +12564,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             )
         };
         match mapper.optionality {
-            crate::semantic_query::OptionalityMod::Add
-                if !exact_optional && !arms.iter().any(is_undefined) =>
-            {
+            crate::semantic_query::OptionalityMod::Add if !arms.iter().any(is_undefined) => {
                 let mut arms = arms;
                 arms.push(self.primitive_node(PrimitiveKind::Undefined));
                 self.intern_normalized_union_or_intersection(&arms, true)
@@ -13001,7 +12997,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             && source_keys_are_nameable
             && !homomorphic_over_unprojected_source)
             .then(|| {
-                if source_domain_is_finite {
+                // A shallow infer/type-parameter projection may have no
+                // members while retaining an unresolved keyspace. Only a
+                // directly empty source or successful constraint enumeration
+                // proves that a homomorphic mapping has zero keys.
+                if source_domain_is_finite
+                    && (!source_members.is_empty() || resolved_empty_homomorphic_source)
+                {
                     Some(source_member_keys(&source_members))
                 } else {
                     self.key_literals_from_keyspace_node(mapper.key_space)
