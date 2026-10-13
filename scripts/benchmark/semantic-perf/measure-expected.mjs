@@ -169,12 +169,12 @@ async function main() {
       return null;
     }
   })();
-  const sameMethod = previous?.schema === 3 && JSON.stringify(previous.method) === methodKey;
   const resume = process.argv.includes("--resume");
-  const out = previous && sameMethod && (only.length || resume) ? previous : { scenarios: {} };
+  const retained = previous?.schema === 3 && (only.length || resume);
+  const out = retained ? previous : { scenarios: {} };
   out.schema = 3;
   out.typescript = TYPESCRIPT_VERSION;
-  out.method = method;
+  if (!retained) out.method = method;
   out.measuredWith =
     "tsc -p (CLI) over the benchmark tsconfig (noLib, lib.bench.d.ts as a root file, noErrorTruncation) of the scenario plus the measuring suffix " +
     "(a distributive one-element-tuple wrapper that filters no member, and a never check); the raw print inside the outer tuple of the TS2322 head line is recorded";
@@ -186,7 +186,17 @@ async function main() {
   };
   for (const scenario of selectScenarios(only)) {
     const entry = { sourceSha256: sha256Text(scenario.source), settings: {} };
-    if (resume && out.scenarios[scenario.id]?.sourceSha256 === entry.sourceSha256) {
+    if (JSON.stringify(out.method) !== methodKey) entry.method = method;
+    if (scenario.files)
+      entry.files = Object.fromEntries(
+        Object.entries(scenario.files).map(([file, text]) => [file, sha256Text(text)]),
+      );
+    if (
+      resume &&
+      JSON.stringify(out.scenarios[scenario.id]?.method ?? out.method) === methodKey &&
+      out.scenarios[scenario.id]?.sourceSha256 === entry.sourceSha256 &&
+      JSON.stringify(out.scenarios[scenario.id]?.files) === JSON.stringify(entry.files)
+    ) {
       console.log(`${scenario.id}: kept (already measured on this source by this method)`);
       continue;
     }
@@ -196,7 +206,9 @@ async function main() {
       const source = scenario.source + MEASURING_SUFFIX;
       writeFileSync(join(dir, "lib.bench.d.ts"), lib);
       writeFileSync(join(dir, "scenario.ts"), source);
-      writeFileSync(join(dir, "tsconfig.json"), tsconfigText(setting));
+      for (const [file, text] of Object.entries(scenario.files ?? {}))
+        writeFileSync(join(dir, file), text);
+      writeFileSync(join(dir, "tsconfig.json"), tsconfigText(setting, scenario));
       const tscArgs = ["-p", join(dir, "tsconfig.json")];
       let exit;
       let stdout = "";
@@ -242,10 +254,10 @@ async function main() {
         exit,
         stdoutSha256: sha256Text(stdout),
         stdoutBytes: stdout.length,
-        tsconfigSha256: sha256Text(tsconfigText(setting)),
+        tsconfigSha256: sha256Text(tsconfigText(setting, scenario)),
         sourceSha256: sha256Text(source),
         method: methodKey,
-        termination,
+        termination: exit === 124 || exit === 137 ? termination : null,
       };
       let result;
       if (exit === 124 || exit === 137)

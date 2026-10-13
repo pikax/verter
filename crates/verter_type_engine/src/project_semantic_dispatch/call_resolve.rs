@@ -37,7 +37,7 @@ thread_local! {
     static BINDING_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// Argument acquisition/copy positions and candidate arity parameter visits.
+/// Argument acquisition/copy positions, arity and contextual parameter visits.
 #[cfg(any(test, feature = "test-support"))]
 pub fn argument_work_for_tests() -> usize {
     ARGUMENT_WORK.with(std::cell::Cell::get)
@@ -1527,7 +1527,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let (Some(fixed_signature), Some(partial_signature)) =
             (single(fixed_target), single(partial_target))
         else {
-            return fixed_target;
+            // Non-callable contexts keep their uninferred binders, including
+            // the literal's own part of a contextual receiver.
+            return partial_target;
         };
         let graph = self.graph();
         let Some(SemanticNodeData::Signature { return_type, .. }) =

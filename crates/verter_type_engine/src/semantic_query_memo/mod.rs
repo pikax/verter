@@ -666,7 +666,7 @@ pub struct SemanticGraphStore {
             SemanticNodeId,
             crate::semantic_query::ProjectionReductionContext,
         ),
-        std::sync::Arc<hash_cons_memos::DeferredMemoEntry>,
+        Arc<hash_cons_memos::DeferredEvaluationMemoEntry>,
     >,
     pub(super) evaluate_deferred_memo_fifo: parking_lot::Mutex<
         std::collections::VecDeque<(
@@ -2533,8 +2533,7 @@ impl SemanticGraphStore {
             &self.canonical_to_entries,
             family,
             &populated_slots,
-            &read_set_signature,
-            &dispatch_dep_signature,
+            &reverse_index::ReverseIndexInputs::new(&read_set_signature, &dispatch_dep_signature),
             admission_seq,
         );
         let published = PublishedMemoCandidate {
@@ -2756,8 +2755,10 @@ impl SemanticGraphStore {
             &self.canonical_to_entries,
             family,
             &populated_slots,
-            &read_set_signature,
-            &dispatch_dep_signature_clone,
+            &reverse_index::ReverseIndexInputs::new(
+                &read_set_signature,
+                &dispatch_dep_signature_clone,
+            ),
             admission_seq,
         );
         let admitted = !populated_slots.is_empty();

@@ -33,6 +33,33 @@ use super::{CanonicalToEntries, RegisteredFacts};
 use crate::instant::Instant;
 use crate::semantic_query::DepSignature;
 
+/// One immutable carrier projection, reused by every member of a publication
+/// batch and every populated slot. The facts and their canonical union travel
+/// together so registration cannot accidentally pair different carriers.
+pub(super) struct ReverseIndexInputs {
+    registered_facts: RegisteredFacts,
+    canonicals: Vec<Arc<str>>,
+}
+
+impl ReverseIndexInputs {
+    pub(super) fn new(
+        read_set_signature: &verter_session_query::facts::fact_cache::ReadSetSignature,
+        dispatch_dep_signature: &DepSignature,
+    ) -> Self {
+        let mut canonicals = read_set_signature.canonical_ids();
+        let mut seen: rustc_hash::FxHashSet<_> = canonicals.iter().cloned().collect();
+        for (canonical, _) in dispatch_dep_signature.iter() {
+            if seen.insert(Arc::clone(canonical)) {
+                canonicals.push(Arc::clone(canonical));
+            }
+        }
+        Self {
+            registered_facts: Arc::clone(&read_set_signature.facts),
+            canonicals,
+        }
+    }
+}
+
 /// Register the just-published candidate's reverse-index entries.
 ///
 /// Inserts one `(family, slot, admission_seq) -> registered_facts`
@@ -55,40 +82,19 @@ pub(super) fn register_reverse_index(
     canonical_to_entries: &CanonicalToEntries,
     family: &FamilyKey,
     populated_slots: &[ModeSlot],
-    read_set_signature: &verter_session_query::facts::fact_cache::ReadSetSignature,
-    dispatch_dep_signature: &DepSignature,
+    inputs: &ReverseIndexInputs,
     admission_seq: u64,
 ) {
     let timing_on = verter_execution::request_context::current_timing_enabled();
-    let registered_facts = Arc::clone(&read_set_signature.facts);
-    let mut seen: rustc_hash::FxHashSet<Arc<str>> = rustc_hash::FxHashSet::default();
     for populated in populated_slots {
-        seen.clear();
-        for canonical in read_set_signature.canonical_ids() {
-            if !seen.insert(Arc::clone(&canonical)) {
-                continue;
-            }
-            register_single_canonical(
-                canonical_to_entries,
-                &canonical,
-                family,
-                *populated,
-                admission_seq,
-                &registered_facts,
-                timing_on,
-            );
-        }
-        for (canonical, _) in dispatch_dep_signature.iter() {
-            if !seen.insert(Arc::clone(canonical)) {
-                continue;
-            }
+        for canonical in &inputs.canonicals {
             register_single_canonical(
                 canonical_to_entries,
                 canonical,
                 family,
                 *populated,
                 admission_seq,
-                &registered_facts,
+                &inputs.registered_facts,
                 timing_on,
             );
         }

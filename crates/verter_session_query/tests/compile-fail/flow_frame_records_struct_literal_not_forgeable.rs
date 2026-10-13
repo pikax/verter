@@ -27,6 +27,7 @@ fn context(captures: CaptureScope) -> NestedFlowContext {
     NestedFlowContext {
         captures,
         this: None,
+        lexical_this: false,
     }
 }
 

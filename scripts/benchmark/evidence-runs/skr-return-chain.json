@@ -1,0 +1,40 @@
+{
+  "name": "skr-return-chain",
+  "description": "Cross-module inferred spread returns at 20, 100 and 300 links, with equivalent TypeScript answers and cold latency.",
+  "tier": "standard",
+  "scenarios": ["return-chain-20", "return-chain-100", "return-chain-300"],
+  "settings": ["strict"],
+  "arms": ["verter", "tsc-api"],
+  "modes": ["cold"],
+  "threads": ["default"],
+  "noise": [
+    "docs/contributing/semantic-benchmark.md#verdicts",
+    "docs/contributing/semantic-benchmark.md#schedule"
+  ],
+  "requiredCells": [
+    {
+      "scenario": "return-chain-20",
+      "setting": "strict",
+      "arm": "verter",
+      "mode": "cold",
+      "threads": "default",
+      "metrics": ["coldMs"]
+    },
+    {
+      "scenario": "return-chain-100",
+      "setting": "strict",
+      "arm": "verter",
+      "mode": "cold",
+      "threads": "default",
+      "metrics": ["coldMs"]
+    },
+    {
+      "scenario": "return-chain-300",
+      "setting": "strict",
+      "arm": "verter",
+      "mode": "cold",
+      "threads": "default",
+      "metrics": ["coldMs"]
+    }
+  ]
+}

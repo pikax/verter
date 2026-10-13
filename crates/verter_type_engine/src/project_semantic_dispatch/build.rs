@@ -2242,10 +2242,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     }
                 }
                 let (first, _) = path.split_first()?;
-                let (resolved, route_facts) = self
-                    .ctx
-                    .resolve_imported_type_root_with_facts(&dependency, first);
-                self.ctx.observe_borrowed_signature(&route_facts);
+                let resolved = if assigned.is_none() {
+                    let table = self.ctx.module_export_table(&dependency)?;
+                    self.ctx.observe_borrowed_signature(&table.facts);
+                    match table.bindings.get(first) {
+                        Some(Some(verter_session_query::declarations::module_exports::ModuleExportBinding::Value(root))) => Some(root.clone()),
+                        // Namespace carriers and excluded names project through
+                        // the same whole-module object as indexed access.
+                        _ => None,
+                    }
+                } else {
+                    let (resolved, route_facts) = self
+                        .ctx
+                        .resolve_imported_type_root_with_facts(&dependency, first);
+                    self.ctx.observe_borrowed_signature(&route_facts);
+                    resolved
+                };
                 match (resolved, assigned) {
                     (Some(resolved), _) => (resolved, 1),
                     // A member no namespace merged into X declares is one
@@ -6397,6 +6409,26 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             base_position,
             signature_groups,
         })
+    }
+
+    /// Resolve a named ambient value export through the import value owner.
+    /// Contributor-set and declaration observations join the active fact tracer.
+    pub fn ambient_value_export_root(
+        &self,
+        specifier: &str,
+        name: &str,
+    ) -> Option<ResolvedRootIdentity> {
+        let target = verter_session_query::inputs::shallow::ImportTarget {
+            source_specifier: specifier.to_owned(),
+            imported_name: name.to_owned(),
+            is_namespace: false,
+        };
+        let (root, _) = self.ambient_import_member_root(&target, &[])?;
+        Some(ResolvedRootIdentity::new_in_owner(
+            root.scope.canonical_id,
+            root.scope.owner,
+            root.name,
+        ))
     }
 
     /// The declaration an import of an AMBIENT module names through `path`

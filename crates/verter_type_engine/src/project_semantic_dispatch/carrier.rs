@@ -987,7 +987,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if matches!(
             mode,
             ProjectionMode::Navigate | ProjectionMode::Skeleton | ProjectionMode::Shallow
-        ) {
+        ) || (arg_count == 1
+            && resolved_root.symbol_name.as_ref() == "ThisType"
+            && self
+                .first_global_declaration(
+                    scope
+                        .canonical_file()
+                        .as_deref()
+                        .unwrap_or(&resolved_root.canonical_id),
+                    "ThisType",
+                )
+                .is_some_and(|global| global == resolved_root))
+        {
             if arg_count == 0 {
                 return CarrierResolutionPlan::Ready(self.intern_ref_head_carrier(
                     RefHeadResolution::Resolved(decl_identity),

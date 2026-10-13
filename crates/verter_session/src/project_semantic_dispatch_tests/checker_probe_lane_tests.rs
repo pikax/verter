@@ -602,6 +602,15 @@ pub(super) fn return_failures_in_one_host(
 /// probe is its own function of one probe module, so an answer a row leaves
 /// in the host's shared memo is one the rows after it can read.
 pub(super) fn mismatches_in_one_host(source: &str, rows: &[(&str, &str)]) -> Vec<String> {
+    mismatches_in_one_host_observing(source, rows, |_| {})
+}
+
+/// Observe each completed read on the same host used for the answer checks.
+pub(super) fn mismatches_in_one_host_observing(
+    source: &str,
+    rows: &[(&str, &str)],
+    mut observe: impl FnMut(&ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>),
+) -> Vec<String> {
     let host = probe_host(ProbeProject::default());
     let mut module = format!("{source}\n");
     for (index, (probe, _)) in rows.iter().enumerate() {
@@ -637,6 +646,7 @@ pub(super) fn mismatches_in_one_host(source: &str, rows: &[(&str, &str)]) -> Vec
                 )
                 .into_usable_node()
                 .unwrap_or_else(|| panic!("the probe `{probe}` reduced to a partial demand"));
+            observe(&dispatch);
             (!checker_syntax::matches_node(&dispatch, node, &expected, 0)).then(|| {
                 format!(
                     "`{probe}`: the checker answers `{checker}`, the lane measured `{}`",
