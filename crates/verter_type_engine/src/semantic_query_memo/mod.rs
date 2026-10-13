@@ -666,7 +666,7 @@ pub struct SemanticGraphStore {
             SemanticNodeId,
             crate::semantic_query::ProjectionReductionContext,
         ),
-        std::sync::Arc<hash_cons_memos::DeferredMemoEntry>,
+        Arc<hash_cons_memos::DeferredEvaluationMemoEntry>,
     >,
     pub(super) evaluate_deferred_memo_fifo: parking_lot::Mutex<
         std::collections::VecDeque<(

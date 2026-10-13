@@ -48,6 +48,7 @@ const PRODUCTION_CACHE_KINDS: &[&str] = &[
     "component_meta.results",
     "imported_root_db.roots",
     "route_db.routes",
+    "route_db.module_exports",
 ];
 
 /// For every production cache kind, an empty-signature admission

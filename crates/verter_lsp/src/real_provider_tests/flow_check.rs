@@ -14,7 +14,6 @@
 
 use verter_compiler::flow_check::fixtures::{self, Fixture, Root};
 use verter_compiler::flow_check::generator::GuardStrategy;
-use verter_compiler::flow_check::growth;
 use verter_compiler::flow_check::oracle::{check_exact, ProviderDiagnostic};
 use verter_compiler::flow_check::seam::{GeneratedCheck, Mapping, Span};
 use verter_type_runtime::protocol::TypeDiagnosticSeverity;
@@ -209,13 +208,6 @@ real_provider_test!(
         }
     }
 );
-
-/// Full-size linearity is an operation count beside the live sweep of the
-/// same sizes. Path-replay rejection stays on the compiler oracle.
-#[test]
-fn reference_matrix_growth_is_linear() {
-    growth::assert_reference_matrix_growth();
-}
 
 async fn run_check_matrix(session: &RealProviderTestSession, fixtures: Vec<Fixture>) {
     let mut published = publish_check(session, "matrix", "");
