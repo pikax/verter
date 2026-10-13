@@ -172,6 +172,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 )
             }
         };
+        // An infer declaration is a pattern binder. Preserve its helper
+        // application until the relation owner demands the pattern's shape.
+        if projected_args.iter().any(|&arg| {
+            self.graph()
+                .binder_dependencies_for(arg)
+                .may_declare_infer()
+        }) {
+            return ProjectionFinish::Node(rebuild(projected_args));
+        }
         if base.canonical_id.as_ref() == "__builtin__" {
             if self.is_promise_global_name(base.decl_name.as_ref()) {
                 return ProjectionFinish::Node(rebuild(projected_args));

@@ -33148,3 +33148,45 @@ fn open_conditional_path_sub_dispatch_inherits_outer_terminal_mode() {
         other => panic!("expected wrapper Conditional in result, got {other:?}"),
     }
 }
+
+#[test]
+fn binder_independent_subtrees_skip_argument_specific_substitution_memos() {
+    use verter_type_engine::semantic_query::DeclIdentity;
+    let host = host();
+    let graph = host.project_type_store().semantic_graph();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let binder = |name: &str, index| {
+        graph.intern_node(SemanticNodeData::TypeParam {
+            decl: DeclIdentity::synthetic("Parameters"),
+            param_index: index,
+            constraint: None,
+            default: None,
+            display_name: Arc::from(name),
+        })
+    };
+    let target = binder("Target", 0);
+    let other = binder("Other", 1);
+    let subtree = graph.intern_node(SemanticNodeData::Array {
+        element: other,
+        readonly: false,
+    });
+    let before = graph.stats_snapshot().substitute_memo_misses;
+    for value in 0..64 {
+        let argument = graph.intern_node(SemanticNodeData::Literal(LiteralValue::Number(
+            f64::from(value),
+        )));
+        assert_eq!(
+            dispatch.substitute_semantic_type_param(subtree, target, argument),
+            subtree,
+        );
+    }
+    assert_eq!(
+        graph.stats_snapshot().substitute_memo_misses,
+        before,
+        "a subtree independent of the target binder never probes an argument-specific memo",
+    );
+    let argument = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let changed = dispatch.substitute_semantic_type_param(subtree, other, argument);
+    assert!(matches!(graph.node_data(changed).as_deref(),
+        Some(SemanticNodeData::Array { element, .. }) if *element == argument));
+}

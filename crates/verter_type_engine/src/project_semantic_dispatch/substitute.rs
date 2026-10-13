@@ -75,6 +75,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if let Some(observer) = verter_audit::current_observer() {
             observer.record_event(verter_audit::AuditEvent::SubstituteTopLevelCall);
         }
+        if node != parameter_node && self.binder_dependency_proves_absent(node, parameter_node) {
+            return node;
+        }
         // Hash-cons memo. The store-owned `substitute_memo` collapses
         // identical `(value_expr, parameter_node, arg)` triples that
         // reach this entry-point from different call paths (per-K
@@ -180,24 +183,25 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// anywhere below it: the checker's generic type, whose operators stay
     /// deferred.
     pub(super) fn mentions_binder(&self, node: SemanticNodeId) -> bool {
-        let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
-        let mut stack = vec![node];
-        while let Some(current) = stack.pop() {
-            if !visited.insert(current) {
-                continue;
-            }
-            let Some(data) = self.graph().node_data(current) else {
-                return true;
-            };
-            if matches!(
+        self.graph()
+            .binder_dependencies_for(node)
+            .may_mention_binder()
+    }
+
+    fn binder_dependency_proves_absent(
+        &self,
+        node: SemanticNodeId,
+        target: SemanticNodeId,
+    ) -> bool {
+        self.graph().node_data(target).is_some_and(|data| {
+            matches!(
                 data.as_ref(),
                 SemanticNodeData::TypeParam { .. } | SemanticNodeData::Infer { .. }
-            ) {
-                return true;
-            }
-            let _ = data.for_each_child(|child| stack.push(child));
-        }
-        false
+            ) && self
+                .graph()
+                .binder_dependencies_for(node)
+                .proves_absent(&data, target)
+        })
     }
 
     /// Whether a member read off `node` binds a polymorphic `this`: a
@@ -600,6 +604,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         parameter_node: SemanticNodeId,
         arg: SemanticNodeId,
     ) -> (SemanticNodeId, bool) {
+        if node != parameter_node && self.binder_dependency_proves_absent(node, parameter_node) {
+            return (node, false);
+        }
         // Classification + recursive hash-cons memo probe.
         //
         // Key insight: the recursive helper BYPASSES the
@@ -1839,6 +1846,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// `InferRef` nodes carrying the target declaration's opaque binder count.
     /// Display names never participate.
     pub fn subtree_references_node(&self, root: SemanticNodeId, target: SemanticNodeId) -> bool {
+        if root != target && self.binder_dependency_proves_absent(root, target) {
+            return false;
+        }
         let target_infer_binder = match self.graph().node_data(target).as_deref() {
             Some(SemanticNodeData::Infer { binder, .. }) => Some(binder.clone()),
             _ => None,

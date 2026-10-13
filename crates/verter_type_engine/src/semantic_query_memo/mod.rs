@@ -48,6 +48,7 @@ use crate::semantic_query::{
 };
 
 pub mod arena;
+mod binder_dependencies;
 pub mod delivery_lease;
 pub mod derivation;
 pub mod family;
@@ -654,6 +655,10 @@ pub struct SemanticGraphStore {
     // sidecar deque) so a long-running workspace cannot grow either
     // memo without bound; see `hash_cons_memos.rs` for the
     // eviction contract.
+    pub(super) binder_dependencies:
+        DashMap<SemanticNodeId, binder_dependencies::BinderDependencyEntry>,
+    pub(super) binder_dependencies_fifo:
+        parking_lot::Mutex<std::collections::VecDeque<SemanticNodeId>>,
     pub(super) substitute_memo: DashMap<
         (SemanticNodeId, SemanticNodeId, SemanticNodeId),
         (SemanticNodeId, node_roots::NodeRootSet),
@@ -761,6 +766,8 @@ impl SemanticGraphStore {
             dep_signature_interner: Default::default(),
             memo_budget: Default::default(),
             candidate_admission_seq: Default::default(),
+            binder_dependencies: Default::default(),
+            binder_dependencies_fifo: Default::default(),
             substitute_memo: Default::default(),
             substitute_memo_fifo: Default::default(),
             evaluate_deferred_memo: Default::default(),

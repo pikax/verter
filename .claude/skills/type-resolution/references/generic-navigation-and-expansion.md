@@ -25,3 +25,15 @@ Concrete expectations:
 - Navigating `Box<C>['full']['bar']` resolves `"full"` against the instantiated `Box<C>` meaning, not the unsubstituted generic body.
 - If `ProjectMember(ResolveDecl(Box), "full", [C])` is already cached, a later path reaching the same instantiated query reuses it.
 - Navigating `MyType<T>` with `T` free returns a shape whose body preserves `T` as a parameter reference. Navigating `MyType<string>` returns a shape with `T` substituted, every substituted position carrying a `SubstituteTypeParam` origin edge to the decl's parameter list.
+
+**Binder dependency summaries.** Immutable semantic subtrees carry graph-epoch
+summaries independent of the substitution argument. A complete negative proof
+returns the original subtree before consulting `(node, parameter, argument)`
+memos; binder-presence and pending-substitution guards reuse that proof. Exact
+infer declaration/reference identities participate. Sealed or missing children
+cannot prove absence. Entries retain their graph roots, reserve the shared
+retention budget, and use bounded eviction; graph invalidation clears them.
+Infer declarations within nested signatures or conditionals belong to those
+scopes and do not make an enclosing argument an infer pattern. An actual infer
+pattern keeps its helper application addressable until the relation owner
+requests its shape.
