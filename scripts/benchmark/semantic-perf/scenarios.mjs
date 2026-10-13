@@ -451,6 +451,29 @@ export function allScenarios() {
     );
   }
 
+  for (const n of [20, 100, 400]) {
+    out.push(
+      scenario(
+        `contextual-this-${n}`,
+        "inference",
+        `${n} object methods read data inferred before their contextual ThisType receiver`,
+        "declare global { interface ThisType<T> {} }\n" +
+          "declare function defineComponent<D, M>(o: { data(): D; methods: M & ThisType<D & M> }): { [K in keyof M]: M[K] extends () => infer R ? R : never };\n" +
+          `const comp = defineComponent({ data() { return { ${range(n)
+            .map((i) => `d${i}: ${i} as const`)
+            .join(", ")} }; }, methods: { ${range(n)
+            .map((i) => `m${i}() { return this.d${i}; }`)
+            .join(", ")} } });\n`,
+        "typeof comp",
+        {
+          beyond: `{ ${range(n)
+            .map((i) => `m${i}: ${i};`)
+            .join(" ")} }`,
+        },
+      ),
+    );
+  }
+
   return out;
 }
 
@@ -492,6 +515,9 @@ export const UNCOVERED = [
  * Tiers nest: standard includes quick, stress includes both.
  */
 export const SCENARIO_TIERS = {
+  "contextual-this-20": "quick",
+  "contextual-this-100": "standard",
+  "contextual-this-400": "standard",
   "baseline-empty": "quick",
   "switch-discriminated-128": "quick",
   "switch-discriminated-512": "standard",

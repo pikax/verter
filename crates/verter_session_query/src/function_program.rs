@@ -529,6 +529,8 @@ pub struct FunctionCallSiteRecord {
 pub enum ProgramExpressionSource {
     /// A call-free value expression, lowered lazily from the retained AST.
     Value,
+    /// A declarator literal evaluated under its authored contextual type.
+    VariableInitializer(ProgramInitializerSource),
     /// A direct semantic call/construct record.
     SemanticCall {
         kind: ProgramExpressionCallKind,
