@@ -403,6 +403,8 @@ impl SemanticGraphStore {
             }
         }
 
+        let reverse_index_inputs =
+            reverse_index::ReverseIndexInputs::new(carrier, &dispatch_dep_signature);
         let mut entries = self.entries_lock_diagnosed();
         let root_is_published = entries.get(&required_root.family).is_some_and(|slots| {
             slots
@@ -456,8 +458,7 @@ impl SemanticGraphStore {
                 &member.family,
                 member.entry,
                 member.eviction,
-                carrier,
-                &dispatch_dep_signature,
+                &reverse_index_inputs,
                 member.admission_seq,
             );
             if is_new {
@@ -640,8 +641,7 @@ impl SemanticGraphStore {
         family: &FamilyKey,
         entry: MemoEntry,
         eviction: family::EvictionVictim,
-        carrier: &verter_session_query::facts::fact_cache::ReadSetSignature,
-        dispatch_dep_signature: &DepSignature,
+        reverse_index_inputs: &reverse_index::ReverseIndexInputs,
         admission_seq: u64,
     ) -> NewlyKeyedFamily {
         // Same admission fence as `warm_publish_one`: a member keyed on a
@@ -672,8 +672,7 @@ impl SemanticGraphStore {
             &self.canonical_to_entries,
             family,
             &populated_slots,
-            carrier,
-            dispatch_dep_signature,
+            reverse_index_inputs,
             admission_seq,
         );
         NewlyKeyedFamily(family_was_new && !populated_slots.is_empty())
@@ -719,14 +718,15 @@ impl SemanticGraphStore {
         };
         let mut entry = entry;
         entry.admission_seq = admission_seq;
+        let reverse_index_inputs =
+            reverse_index::ReverseIndexInputs::new(&carrier, &dispatch_dep_signature);
         let mut entries = self.entries_lock_diagnosed();
         let NewlyKeyedFamily(is_new) = self.publish_staged_locked(
             &mut entries,
             &family,
             entry,
             eviction,
-            &carrier,
-            &dispatch_dep_signature,
+            &reverse_index_inputs,
             admission_seq,
         );
         // A seeded ROOT is a lone family, not a component: it takes the

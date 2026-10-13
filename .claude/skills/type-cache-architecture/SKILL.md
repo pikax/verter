@@ -1091,6 +1091,15 @@ allocations use the same pin-to-retained reservation transfer as evidence
 pages, so their charges remain attached when an enclosing cache retains the
 proof after the export table is evicted. Canonical summaries are persistent
 hash tries; their public iteration stays lexical through a byte radix walk.
+Radix ordering consumes common prefixes once per bucket (including small
+insertion buckets) and visits only the occupied bucket range when names
+diverge. Component publication projects its shared carrier's canonical union
+once, outside the memo lock, and reuses that temporary projection for every
+member and populated slot; each candidate still registers its own admission
+identity and the complete fact carrier. Export-table scale tests inspect all
+suffixes through one request context and count proof work
+across construction and those reads; the request's receipt validation memo
+remains responsible for sharing completed validation.
 
 ## Typed SignatureAdmission gate (CRITICAL)
 
