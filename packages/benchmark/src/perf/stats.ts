@@ -78,6 +78,9 @@ function mulberry32(seed: number): () => number {
 /** The statistic a ratio is taken of (the per-side aggregate). */
 export type RatioStatistic = "median" | "mean" | "p50" | "p95" | "p99";
 
+/** Independent scalar observations, or whole-run operation clusters. */
+export type RatioSamples = readonly number[] | readonly (readonly number[])[];
+
 /** The ratio decision for one gated metric. */
 export interface RatioDecision {
   /**
@@ -109,9 +112,9 @@ export interface RatioOptions {
   /**
    * Which statistic to take the ratio of. `"median"`/`"p50"` (default) is
    * robust; `"mean"` suits throughput-style aggregates; `"p95"`/`"p99"` gate
-   * the TAIL of a per-operation latency distribution — the bootstrap resamples
-   * the full distribution and recomputes the percentile each draw, so the tail
-   * is genuinely gated (never collapsed to the median).
+   * the TAIL of a per-operation latency distribution. Each draw resamples whole
+   * runs and recomputes the percentile over their operations, preserving both
+   * the tail and the dependence between operations in the same run.
    */
   readonly statistic?: RatioStatistic;
 }
@@ -140,16 +143,16 @@ function stat(sortedAsc: readonly number[], which: RatioStatistic): number {
 /**
  * Decide whether `candidate` regressed against `baseline` for one metric.
  *
- * The predicate (conservative — thresholded + bootstrap-CI-gated, so pure variance
- * does not trip it; NOT absolute noise immunity — the pooled bootstrap ignores
- * per-run clustering, biasing toward a false RED, never a false green): FAIL only if
+ * The predicate (thresholded + bootstrap-CI-gated, not absolute noise immunity): FAIL only if
  *   `statisticRatio > threshold` AND `lower_bound_95pct(statisticRatio) > threshold`,
  * where `statisticRatio = statistic(candidate) / statistic(baseline)` — a
  * ratio-of-statistics, NOT a paired per-sample median-of-ratios.
  *
  * The CI is a one-sided percentile bootstrap on the ratio-of-statistics: for
- * each of `resamples` iterations, draw a with-replacement resample of each
- * side, take the ratio of their statistics, and read the 2.5th percentile of
+ * each of `resamples` iterations, draw with replacement the original number of
+ * whole-run clusters on each side, preserving every operation in each selected
+ * run. Scalars are singleton clusters. Take the ratio of the pooled statistics
+ * and read the 2.5th percentile of
  * the resampled ratios as the lower bound (and the 97.5th as the upper).
  *
  * Lower values are "better" for latency/time/RSS metrics — the caller passes
@@ -158,39 +161,54 @@ function stat(sortedAsc: readonly number[], which: RatioStatistic): number {
  * ratio > 1; see `throughputRatioDecision`.
  */
 export function ratioDecision(
-  candidate: readonly number[],
-  baseline: readonly number[],
+  candidate: RatioSamples,
+  baseline: RatioSamples,
   threshold: number,
   options: RatioOptions = {},
 ): RatioDecision {
   if (candidate.length === 0 || baseline.length === 0) {
     throw new Error("ratioDecision requires non-empty candidate and baseline samples");
   }
+  const clusters = (samples: RatioSamples): readonly (readonly number[])[] =>
+    samples.map((sample) => (typeof sample === "number" ? [sample] : sample));
+  const candClusters = clusters(candidate);
+  const baseClusters = clusters(baseline);
+  if (
+    candClusters.some((run) => run.length === 0) ||
+    baseClusters.some((run) => run.length === 0)
+  ) {
+    throw new Error("ratioDecision requires non-empty run clusters");
+  }
+  const candValues = candClusters.flat();
+  const baseValues = baseClusters.flat();
   // A NaN/Infinity sample is a broken/missing measurement, never a real datum:
   // `NaN > threshold` is false, so a silent NaN would otherwise read as a pass.
   // Reject it here so the gate cannot decide a regression off non-finite data.
-  if (!candidate.every((v) => Number.isFinite(v)) || !baseline.every((v) => Number.isFinite(v))) {
+  if (
+    !candValues.every((v) => Number.isFinite(v)) ||
+    !baseValues.every((v) => Number.isFinite(v))
+  ) {
     throw new Error("ratioDecision requires finite samples (NaN/Infinity is a broken measurement)");
   }
   const which = options.statistic ?? "median";
-  const candSorted = [...candidate].sort((a, b) => a - b);
-  const baseSorted = [...baseline].sort((a, b) => a - b);
+  const candSorted = candValues.sort((a, b) => a - b);
+  const baseSorted = baseValues.sort((a, b) => a - b);
   const baseStat = stat(baseSorted, which);
   if (baseStat === 0) throw new Error("baseline statistic is zero — cannot form a ratio");
   const statisticRatio = stat(candSorted, which) / baseStat;
 
   const resamples = options.resamples ?? 10_000;
   const rng = mulberry32(options.seed ?? 0x60_07_57_a7);
-  const resampleStat = (src: readonly number[]): number => {
-    const drawn: number[] = new Array(src.length);
-    for (let i = 0; i < src.length; i++) drawn[i] = src[Math.floor(rng() * src.length)];
+  const resampleStat = (src: readonly (readonly number[])[]): number => {
+    const drawn: number[] = [];
+    for (let i = 0; i < src.length; i++) drawn.push(...src[Math.floor(rng() * src.length)]);
     drawn.sort((a, b) => a - b);
     return stat(drawn, which);
   };
   const ratios: number[] = new Array(resamples);
   for (let r = 0; r < resamples; r++) {
-    const b = resampleStat(baseSorted);
-    ratios[r] = b === 0 ? Number.POSITIVE_INFINITY : resampleStat(candSorted) / b;
+    const b = resampleStat(baseClusters);
+    ratios[r] = b === 0 ? Number.POSITIVE_INFINITY : resampleStat(candClusters) / b;
   }
   ratios.sort((a, b) => a - b);
   const lowerBound95 = percentile(ratios, 0.025);
@@ -212,8 +230,8 @@ export function ratioDecision(
  * candidate that is SLOWER (lower throughput) yields a ratio > 1.
  */
 export function throughputRatioDecision(
-  candidate: readonly number[],
-  baseline: readonly number[],
+  candidate: RatioSamples,
+  baseline: RatioSamples,
   threshold: number,
   options: RatioOptions = {},
 ): RatioDecision {
@@ -232,8 +250,8 @@ export function throughputRatioDecision(
  * from tripping it, exactly like the one-sided predicate.
  */
 export function invariantRatioDecision(
-  candidate: readonly number[],
-  baseline: readonly number[],
+  candidate: RatioSamples,
+  baseline: RatioSamples,
   threshold: number,
   options: RatioOptions = {},
 ): RatioDecision {

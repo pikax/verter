@@ -52,6 +52,24 @@ Rust test discovery; Svelte conformance is also a dedicated Cargo/libtest job.
 
 Triggered via `/benchmark` PR comment or manual dispatch. Compares Verter compilation performance against Vue's official compiler.
 
+### Perf Gate (`perf-gate.yml`)
+
+Pull requests run the perf harness correctness specs and corpus manifest check.
+Scheduled and manual comparisons build separate candidate and baseline native
+packages and binaries, then measure them interleaved on the same runner. The
+scheduled baseline is the candidate's immediate parent; manual dispatch may
+supply `baseline-ref`. Both refs resolve once before building. Resolved checkout
+identities belong in the run artifact, never in the committed corpus manifest.
+The gate refuses a baseline equal to the candidate, missing or equal build
+paths, engine mismatches, skipped workloads, incomplete coverage and content
+differences. Immediate-parent comparisons detect changes against that parent;
+they do not establish cumulative performance against a historical release.
+Local predicate self-checks remain labeled as self-checks.
+Both CI lanes build `@verter/lsp-test-client` and import the runtime LSP driver
+before running the harness. The driver's package entry is generated `dist`,
+which a frozen dependency install alone does not produce; Vitest's source alias
+does not verify that runtime prerequisite.
+
 ### LSP Benchmark (`lsp-benchmark.yml`)
 
 Triggered via `/lsp-benchmark` PR comment or manual dispatch. Runs the Verter-vs-Volar LSP benchmark on Linux, macOS, and Windows and reports per-OS values.
@@ -407,9 +425,9 @@ them:
    commit: `release(ide): v<version>`. No tag, no push.
 3. Review the commit, push it on a branch and open a pull request titled
    `release(ide): v<version>`. Its CI runs the lanes and the `Release IDE
-   Check` rehearsal: seven LSP and MCP targets and five napi targets are
+Check` rehearsal: seven LSP and MCP targets and five napi targets are
    cross-compiled and five VSIXes are packaged. Squash-merge it once `CI
-   Required` is green, with the subject exactly `release(ide): v<version>`; as for the monorepo release, a version commit pushed
+Required` is green, with the subject exactly `release(ide): v<version>`; as for the monorepo release, a version commit pushed
    straight to `main` can never publish.
 4. `release-tag.yml` tags `ide/v<version>`.
 5. The tag triggers `release-ide.yml`, which proves the release pull request's
@@ -515,12 +533,12 @@ native -> lsp -> wasm (bindgen + wasm-opt) -> ts packages
 
 ## Required GitHub Secrets
 
-| Secret                 | Purpose                                                                                                                                   |
-| ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| `NETLIFY_AUTH_TOKEN`   | Netlify playground deployment                                                                                                             |
-| `NETLIFY_SITE_ID`      | Netlify site identification                                                                                                               |
-| `NPM_TOKEN`            | npm publishing (with `--provenance`)                                                                                                      |
-| `VSCE_PAT`             | VS Code Marketplace publishing (`verter.verter-vscode`)                                                                                   |
-| `RELEASE_TAG_SSH_KEY`  | the deploy key `release-tag.yml` pushes tags with, so the tag push starts a release workflow (a push made with `GITHUB_TOKEN` never does) |
+| Secret                | Purpose                                                                                                                                   |
+| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `NETLIFY_AUTH_TOKEN`  | Netlify playground deployment                                                                                                             |
+| `NETLIFY_SITE_ID`     | Netlify site identification                                                                                                               |
+| `NPM_TOKEN`           | npm publishing (with `--provenance`)                                                                                                      |
+| `VSCE_PAT`            | VS Code Marketplace publishing (`verter.verter-vscode`)                                                                                   |
+| `RELEASE_TAG_SSH_KEY` | the deploy key `release-tag.yml` pushes tags with, so the tag push starts a release workflow (a push made with `GITHUB_TOKEN` never does) |
 
 The `GITHUB_TOKEN` is automatically provided for GitHub Release creation, nightly asset management, and PR comments.
