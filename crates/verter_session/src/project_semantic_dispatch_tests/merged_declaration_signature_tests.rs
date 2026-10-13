@@ -240,3 +240,241 @@ fn identical_overloads_of_a_merged_method_all_stay() {
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// The project root of a [`program_order_answer`] host.
+const PROGRAM_ROOT: &str = "/program";
+
+/// How each of `count` contributor files declares the merged symbol: file
+/// `i` adds one `emit` overload taking `{ k<j>: 1 }` and returning `j`,
+/// `j = count - 1 - i`, so a call whose argument carries every key returns
+/// the `j` of the declaration it tries first.
+#[derive(Clone, Copy, Debug)]
+enum Contributor {
+    /// A script's global `interface BenchBus`.
+    GlobalInterface,
+    /// A script's global `declare namespace BenchNs`.
+    GlobalNamespace,
+    /// A module's `declare module "./core"` augmenting `core.ts`'s `Props`.
+    ModuleAugmentation,
+}
+
+impl Contributor {
+    fn file(self, i: usize) -> String {
+        match self {
+            Self::GlobalInterface | Self::GlobalNamespace => format!("bus-{i:04}.ts"),
+            Self::ModuleAugmentation => format!("plugin-{i:04}.ts"),
+        }
+    }
+
+    fn source(self, i: usize, answer: usize) -> String {
+        match self {
+            Self::GlobalInterface => {
+                format!("interface BenchBus {{ emit(e: {{ k{i}: 1 }}): {answer}; }}\n")
+            }
+            Self::GlobalNamespace => format!(
+                "declare namespace BenchNs {{ function emit(e: {{ k{i}: 1 }}): {answer}; }}\n"
+            ),
+            Self::ModuleAugmentation => format!(
+                "import './core';\n\
+                 declare module './core' {{ interface Props {{ emit(e: {{ k{i}: 1 }}): {answer}; }} }}\n\
+                 export {{}};\n"
+            ),
+        }
+    }
+
+    fn scenario(self, count: usize) -> String {
+        let keys: Vec<String> = (0..count).map(|key| format!("k{key}: 1")).collect();
+        let (head, call) = match self {
+            Self::GlobalInterface => ("declare const bus: BenchBus;\n", "bus.emit(ev)"),
+            Self::GlobalNamespace => ("", "BenchNs.emit(ev)"),
+            Self::ModuleAugmentation => (
+                "import type { Props } from './core';\ndeclare const bus: Props;\n",
+                "bus.emit(ev)",
+            ),
+        };
+        format!(
+            "{head}declare const ev: {{ {} }};\nconst r = {call};\ntype __Probe = typeof r;\nexport {{}};\n",
+            keys.join("; ")
+        )
+    }
+}
+
+/// The literal `__Probe` settles on in a project whose `tsconfig.json`
+/// lists `lib.bench.d.ts`, the contributor files in `listed` order and
+/// `scenario.ts`; each contributor `i` answers `answers[i]`. The files are
+/// upserted in `upserted` order, then `edits` (`(i, answer)`) are applied
+/// and the probe is read again; returns the answer before and after.
+fn program_order_answer(
+    kind: Contributor,
+    answers: &[usize],
+    listed: &[usize],
+    upserted: &[usize],
+    edits: &[(usize, usize)],
+) -> (f64, f64) {
+    use verter_type_engine::semantic_query::{LiteralValue, ProjectionMode, SemanticNodeData};
+    let mut files: Vec<String> = vec!["lib.bench.d.ts".to_owned()];
+    files.extend(listed.iter().map(|&i| kind.file(i)));
+    files.push("scenario.ts".to_owned());
+    let tsconfig = serde_json::json!({
+        "compilerOptions": { "strict": true, "noLib": true, "noEmit": true },
+        "files": files,
+    })
+    .to_string();
+    let host = crate::VerterHost::new_standalone_with_tsconfig_projects(
+        crate::HostConfig::default(),
+        &[(PROGRAM_ROOT, &tsconfig)],
+    );
+    let upsert = |name: &str, source: &str| {
+        let path = format!("{PROGRAM_ROOT}/{name}");
+        let language = crate::LanguageRegistry::global()
+            .classify_static(&path)
+            .static_resolution();
+        crate::u6_flow_shape_corpus_tests::upsert(&host, &path, source, language);
+    };
+    upsert(
+        "lib.bench.d.ts",
+        "interface Object { toString(): string; }\n",
+    );
+    if matches!(kind, Contributor::ModuleAugmentation) {
+        upsert("core.ts", "export interface Props { base: -1 }\n");
+    }
+    for &i in upserted {
+        upsert(&kind.file(i), &kind.source(i, answers[i]));
+    }
+    let scenario = format!("{PROGRAM_ROOT}/scenario.ts");
+    upsert("scenario.ts", &kind.scenario(answers.len()));
+    let read = || {
+        let node = host
+            .resolve_named_symbol(&scenario, "__Probe", Some(ProjectionMode::Expanded))
+            .expect("the probe answers");
+        let graph = host.project_type_store().semantic_graph();
+        let mut node = node;
+        loop {
+            match graph.node_data(node).as_deref().expect("a live answer") {
+                SemanticNodeData::Alias(inner) => node = *inner,
+                SemanticNodeData::Literal(LiteralValue::Number(value)) => return *value,
+                other => panic!("{kind:?}: `__Probe` is no number literal: {other:?}"),
+            }
+        }
+    };
+    let before = read();
+    for &(i, answer) in edits {
+        upsert(&kind.file(i), &kind.source(i, answer));
+    }
+    (before, read())
+}
+
+/// A deterministic permutation of `0..count`, different per `seed`.
+fn shuffled(count: usize, seed: usize) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..count).collect();
+    let mut state = seed.wrapping_mul(2_654_435_761) | 1;
+    for i in (1..count).rev() {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        order.swap(i, state % (i + 1));
+    }
+    order
+}
+
+/// Declarations of one merged symbol in several files order by the
+/// program's file order — the `files` sequence — never by path: a call
+/// tries the declaration of the file listed LAST first, for a global
+/// interface's members, a global namespace's function overloads and a
+/// module augmentation's members alike.
+///
+/// Measured on TypeScript 7.0.2 with N contributor files each adding one
+/// overload `emit(e: { k<i>: 1 }): N-1-i` in file `i`: listing the files in
+/// reverse path order answers `N-1` (the first file's), in forward order
+/// `0`.
+///
+/// Mutation: ordering contributors by canonical path alone answers `0`
+/// for the reverse listing.
+#[test]
+fn merged_declarations_follow_program_file_order() {
+    for kind in [
+        Contributor::GlobalInterface,
+        Contributor::GlobalNamespace,
+        Contributor::ModuleAugmentation,
+    ] {
+        for count in [10, 100] {
+            let answers: Vec<usize> = (0..count).map(|i| count - 1 - i).collect();
+            let forward: Vec<usize> = (0..count).collect();
+            let reverse: Vec<usize> = forward.iter().rev().copied().collect();
+            assert_eq!(
+                program_order_answer(kind, &answers, &reverse, &forward, &[]).0,
+                (count - 1) as f64,
+                "{kind:?} N={count}: files listed in reverse path order"
+            );
+            assert_eq!(
+                program_order_answer(kind, &answers, &forward, &forward, &[]).0,
+                0.0,
+                "{kind:?} N={count}: files listed in path order"
+            );
+        }
+    }
+}
+
+/// The 500-file reproduction of the global-interface case.
+#[test]
+fn merged_global_interface_follows_program_file_order_at_scale() {
+    let count = 500;
+    let answers: Vec<usize> = (0..count).map(|i| count - 1 - i).collect();
+    let forward: Vec<usize> = (0..count).collect();
+    let reverse: Vec<usize> = forward.iter().rev().copied().collect();
+    assert_eq!(
+        program_order_answer(
+            Contributor::GlobalInterface,
+            &answers,
+            &reverse,
+            &forward,
+            &[]
+        )
+        .0,
+        (count - 1) as f64
+    );
+}
+
+/// The merge order is the program's whatever order the files reach the
+/// host in, and an edit answers what a cold build of the edited files
+/// answers: cold, warm and incremental agree.
+///
+/// Mutation: ordering contributors by upsert (ingestion) order answers a
+/// shuffled host differently from the cold one.
+#[test]
+fn merged_declaration_order_is_independent_of_upsert_order_and_edits() {
+    let count = 24;
+    let answers: Vec<usize> = (0..count).map(|i| count - 1 - i).collect();
+    let forward: Vec<usize> = (0..count).collect();
+    let listed = shuffled(count, 3);
+    for kind in [
+        Contributor::GlobalInterface,
+        Contributor::GlobalNamespace,
+        Contributor::ModuleAugmentation,
+    ] {
+        // The file listed last is tried first; editing its answer moves the
+        // probe, editing an earlier one does not.
+        let last = *listed.last().expect("files");
+        let edits = [(last, 1000), (listed[0], 2000)];
+        let mut edited = answers.clone();
+        for &(i, answer) in &edits {
+            edited[i] = answer;
+        }
+        let (cold, _) = program_order_answer(kind, &answers, &listed, &forward, &[]);
+        let (cold_edited, _) = program_order_answer(kind, &edited, &listed, &forward, &[]);
+        assert_eq!(cold, answers[last] as f64, "{kind:?}: cold answer");
+        assert_eq!(
+            cold_edited, 1000.0,
+            "{kind:?}: cold answer of the edited files"
+        );
+        for seed in [5, 11] {
+            let (warm, incremental) =
+                program_order_answer(kind, &answers, &listed, &shuffled(count, seed), &edits);
+            assert_eq!(warm, cold, "{kind:?} seed {seed}: shuffled upserts");
+            assert_eq!(
+                incremental, cold_edited,
+                "{kind:?} seed {seed}: after editing two contributors"
+            );
+        }
+    }
+}

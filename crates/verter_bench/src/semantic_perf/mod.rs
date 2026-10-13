@@ -370,6 +370,13 @@ fn configure_project(
         Some(tsconfig_path.clone()),
     );
     project.compiler_options = verter_workspace::load_compiler_options(workspace, &tsconfig_path);
+    // The scenario's `files` sequence is its program order, which orders
+    // the declarations of a symbol merged across files.
+    project.membership.spec = verter_workspace::membership_to_spec(
+        &verter_workspace::CanonicalPath::new(PROJECT_ROOT),
+        &verter_workspace::load_project_membership(workspace, &tsconfig_path),
+        &verter_workspace::snapshot_builder::supported_extensions_for(&project.compiler_options),
+    );
     host.configure_projects(vec![project]);
     match lib_mode {
         LibMode::Ambient => workspace

@@ -794,6 +794,15 @@ impl VerterHost {
                 );
                 project.compiler_options =
                     verter_workspace::load_compiler_options(&*workspace, &tsconfig_path);
+                // `files` / `include` / `exclude` are the project's roots and
+                // their order, as the LSP's configured projects load them.
+                project.membership.spec = verter_workspace::membership_to_spec(
+                    &verter_workspace::CanonicalPath::new(&project.root),
+                    &verter_workspace::load_project_membership(&*workspace, &tsconfig_path),
+                    &verter_workspace::snapshot_builder::supported_extensions_for(
+                        &project.compiler_options,
+                    ),
+                );
                 project
             })
             .collect();
