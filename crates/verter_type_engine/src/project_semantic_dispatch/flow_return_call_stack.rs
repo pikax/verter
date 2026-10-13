@@ -25,7 +25,7 @@ use std::sync::Arc;
 use verter_session_query::source::demand::ExpressionSourceDemand as _;
 
 use super::super::call_resolve::ResolveCallStep;
-use super::contextual::{FunctionArgumentMark, FunctionArgumentRequest};
+use super::contextual::{CalleeParameters, FunctionArgumentMark, FunctionArgumentRequest};
 use super::FlowDemandDriver;
 use super::*;
 use verter_session_query::flow::slice::{
@@ -111,6 +111,8 @@ pub(super) struct ResolveCallFrame<'e> {
     /// The call's whole span.
     span: verter_span::Span,
     callee: SemanticNodeId,
+    /// Lazily prepared once; only complete discovery results are retained.
+    contextual_parameters: Option<Option<CalleeParameters>>,
     arguments: &'e SliceCallArguments,
     indexed: Arc<verter_session_query::source::indexed_call::IndexedFlowCallExpression>,
     frame_arguments: Option<Arc<[SliceCallArgument]>>,
@@ -488,6 +490,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             _serve: serve,
             span: site.span(),
             callee,
+            contextual_parameters: None,
             arguments,
             indexed,
             frame_arguments,
@@ -596,12 +599,24 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         None => {
                             let request =
                                 match route.function_arguments.last().and_then(Option::as_ref) {
-                                    Some(expr) if !argument.context_sensitive => self
-                                        .function_argument_request_under_parameter(
-                                            expr,
-                                            route.callee,
-                                            ordinal,
-                                        ),
+                                    Some(
+                                        expr @ SliceExpr::NestedFunctionValue { gap: None, .. },
+                                    ) if !argument.context_sensitive => {
+                                        if route.contextual_parameters.is_none() {
+                                            route.contextual_parameters =
+                                                self.callee_parameter_types(route.callee).ok();
+                                        }
+                                        let parameter = route
+                                            .contextual_parameters
+                                            .as_mut()
+                                            .and_then(Option::as_mut)
+                                            .and_then(|parameters| {
+                                                parameters.at(self.dispatch, ordinal)
+                                            });
+                                        self.function_argument_request_under_parameter(
+                                            expr, parameter,
+                                        )
+                                    }
                                     _ => None,
                                 };
                             if let Some(request) = request {
@@ -694,7 +709,15 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 .and_then(Option::as_ref)
             {
                 Some(SliceExpr::Object { entries, offset }) if argument.context_sensitive => {
-                    let contextual = self.callee_parameter_type(route.callee, ordinal);
+                    if route.contextual_parameters.is_none() {
+                        route.contextual_parameters =
+                            self.callee_parameter_types(route.callee).ok();
+                    }
+                    let contextual = route
+                        .contextual_parameters
+                        .as_mut()
+                        .and_then(Option::as_mut)
+                        .and_then(|parameters| parameters.at(self.dispatch, ordinal));
                     match self.eval_object_literal_first_pass(entries, *offset, contextual) {
                         Positional::Value(node) => Some(node),
                         Positional::Hold | Positional::Unmodeled => None,

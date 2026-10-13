@@ -37,7 +37,7 @@ thread_local! {
     static BINDING_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// Argument acquisition/copy positions and candidate arity parameter visits.
+/// Argument acquisition/copy positions, arity and contextual parameter visits.
 #[cfg(any(test, feature = "test-support"))]
 pub fn argument_work_for_tests() -> usize {
     ARGUMENT_WORK.with(std::cell::Cell::get)
