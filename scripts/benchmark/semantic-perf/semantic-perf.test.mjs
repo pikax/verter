@@ -30,6 +30,7 @@ import {
   tuningEnvironment,
   ROOT,
   TIER_DEFAULTS,
+  materialize,
 } from "./run.mjs";
 import {
   allScenarios,
@@ -39,6 +40,7 @@ import {
   SETTINGS,
   TIERS,
   tsconfigText,
+  projectSources,
 } from "./scenarios.mjs";
 import {
   classifyMeta,
@@ -196,7 +198,7 @@ test("the canonical form fails closed on syntax it does not know", () => {
 
 // ---------------------------------------------------------------- catalog and schedule
 
-test("every scenario is one module declaring __BenchInit and __Probe once", () => {
+test("every scenario entry declares __BenchInit and __Probe once", () => {
   const ids = new Set();
   for (const s of allScenarios()) {
     assert.ok(!ids.has(s.id), `duplicate scenario id ${s.id}`);
@@ -204,6 +206,93 @@ test("every scenario is one module declaring __BenchInit and __Probe once", () =
     assert.equal(s.source.split("type __BenchInit ").length, 2, s.id);
     assert.equal(s.source.split("type __Probe ").length, 2, s.id);
     assert.ok(s.source.startsWith(moduleText("", "x").split("\n")[0]), s.id);
+  }
+});
+
+test("cross-module return scenarios retain every module in both arms and validate its bytes", () => {
+  for (const levels of [20, 100, 300]) {
+    const s = allScenarios().find((s) => s.id === `return-chain-${levels}`);
+    assert.ok(s);
+    const files = projectSources(s);
+    assert.equal(Object.keys(files).length, levels + 1);
+    assert.match(files[`m-${levels - 1}.ts`], /return \{ \.\.\.p,/);
+    assert.deepEqual(JSON.parse(tsconfigText(SETTINGS[0], s)).files, [
+      "lib.bench.d.ts",
+      ...Object.keys(files),
+    ]);
+    const dir = mkdtempSync(join(tmpdir(), "semantic-return-project-"));
+    try {
+      const materialized = materialize(
+        dir,
+        s,
+        SETTINGS[0],
+        { libMode: "root-file", warmRepeats: 1 },
+        "",
+      );
+      assert.deepEqual(materialized.baseJob.files, Object.keys(s.files));
+      for (const [file, text] of Object.entries(s.files)) {
+        for (const path of [file, `cli/${file}`]) {
+          assert.equal(readFileSync(join(materialized.dir, path), "utf8"), text);
+          assert.equal(materialized.inputs[path], sha256Text(text));
+        }
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    const run = syntheticRun({ verterText: s.beyond, tscText: s.beyond });
+    const cell = run.meta.scenarios["synthetic/strict"];
+    const catalog = [{ ...s, id: "synthetic" }];
+    cell.inputs["scenario.ts"] = sha256Text(s.source);
+    cell.inputs["cli/scenario.ts"] = sha256Text(cliSource(s));
+    cell.inputs["tsconfig.json"] = sha256Text(tsconfigText(SETTINGS[0], s));
+    for (const [file, text] of Object.entries(s.files)) {
+      cell.inputs[file] = sha256Text(text);
+      cell.inputs[`cli/${file}`] = sha256Text(text);
+    }
+    for (const inv of run.invocations.filter((inv) => inv.arm === "tsc-api")) {
+      inv.probe.rootFiles.push(...Object.keys(s.files).map((file) => `${cell.dir}/${file}`));
+    }
+    const method = { ...EXPECTED.method, platform: "fixture-worker", tscExeSha256: "fixture-tsc" };
+    const expected = {
+      ...EXPECTED,
+      scenarios: {
+        synthetic: {
+          sourceSha256: sha256Text(s.source),
+          files: Object.fromEntries(
+            Object.entries(s.files).map(([file, text]) => [file, sha256Text(text)]),
+          ),
+          method,
+          settings: {
+            strict: {
+              ...RAW_ONE,
+              printed: `[${s.beyond}]`,
+              receipt: {
+                ...RAW_ONE.receipt,
+                method: JSON.stringify(method),
+                sourceSha256: sha256Text(s.source + MEASURING_SUFFIX),
+                tsconfigSha256: sha256Text(tsconfigText(SETTINGS[0], s)),
+              },
+            },
+          },
+        },
+      },
+    };
+    run.summary = summarize(run, expected, catalog);
+    assert.deepEqual(validateRun(run, expected, catalog).failures, []);
+    assert.equal(run.summary.cells[0].arms.verter.class, "matched");
+    expected.scenarios.synthetic.settings.strict.receipt.method = JSON.stringify(EXPECTED.method);
+    assert.ok(validateRun(run, expected, catalog).failures.some((f) => /another method/.test(f)));
+    expected.scenarios.synthetic.settings.strict.receipt.method = JSON.stringify(method);
+    cell.inputs["m-0.ts"] = "tampered";
+    assert.ok(validateRun(run, expected, catalog).failures.some((f) => /m-0.ts/.test(f)));
+    cell.inputs["m-0.ts"] = sha256Text(s.files["m-0.ts"]);
+    delete cell.inputs["cli/m-0.ts"];
+    assert.ok(validateRun(run, expected, catalog).failures.some((f) => /cli\/m-0.ts/.test(f)));
+    cell.inputs["cli/m-0.ts"] = sha256Text(s.files["m-0.ts"]);
+    run.invocations.find((inv) => inv.arm === "tsc-api").probe.rootFiles.pop();
+    assert.ok(
+      validateRun(run, expected, catalog).failures.some((f) => /tsc program roots/.test(f)),
+    );
   }
 });
 
@@ -1616,14 +1705,32 @@ test("the real quick catalog and invocation manifest validate and reject a missi
         ...INPUTS,
         "scenario.ts": sha256Text(s.source),
         "cli/scenario.ts": sha256Text(cliSource(s)),
+        "tsconfig.json": sha256Text(tsconfigText(SETTINGS[0], s)),
+        ...Object.fromEntries(
+          Object.entries(s.files ?? {}).flatMap(([file, text]) => [
+            [file, sha256Text(text)],
+            [`cli/${file}`, sha256Text(text)],
+          ]),
+        ),
       },
     };
     expected.scenarios[s.id] = {
       sourceSha256: sha256Text(s.source),
+      ...(s.files
+        ? {
+            files: Object.fromEntries(
+              Object.entries(s.files).map(([file, text]) => [file, sha256Text(text)]),
+            ),
+          }
+        : {}),
       settings: {
         strict: {
           ...RAW_ONE,
-          receipt: { ...RAW_ONE.receipt, sourceSha256: sha256Text(s.source + MEASURING_SUFFIX) },
+          receipt: {
+            ...RAW_ONE.receipt,
+            sourceSha256: sha256Text(s.source + MEASURING_SUFFIX),
+            tsconfigSha256: sha256Text(tsconfigText(SETTINGS[0], s)),
+          },
         },
       },
     };
@@ -1641,6 +1748,9 @@ test("the real quick catalog and invocation manifest validate and reject a missi
       probe.rootFiles = [
         join(run.meta.scenarios[p.key].dir, "lib.bench.d.ts"),
         join(run.meta.scenarios[p.key].dir, "scenario.ts"),
+        ...Object.keys(scenarios.find((s) => s.id === scenario).files ?? {}).map((file) =>
+          join(run.meta.scenarios[p.key].dir, file),
+        ),
       ];
     const fixture = syntheticRun().invocations.find(
       (i) => i.arm === (p.arm === "tsc-api" ? "tsc-api" : "verter"),

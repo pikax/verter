@@ -149,6 +149,75 @@ fn key(name: &str) -> PropertyKey {
 }
 
 #[test]
+fn composed_inner_spread_merges_nullable_members_inside_an_outer_union() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = host.project_type_store().semantic_graph();
+    let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let null = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Null));
+    let x = object(graph, [surface_member("x", number, false)]);
+    let z = object(graph, [surface_member("z", number, false)]);
+    let empty = object(graph, []);
+    let nullable = graph.intern_node(SemanticNodeData::Union(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from([
+            x, null,
+        ])),
+    ));
+    for policy in [
+        ExactOptionalPropertyPolicy::Disabled,
+        ExactOptionalPropertyPolicy::Enabled,
+    ] {
+        for general in [true, false] {
+            let mut effects = Vec::new();
+            if general {
+                // An inert leading spread selects the general evaluator.
+                effects.push(ObjectConstructionEffect::Spread(empty));
+            }
+            effects.extend([
+                ObjectConstructionEffect::Spread(nullable),
+                property("y", number, false),
+            ]);
+            let inner = program(graph, effects);
+            let union = graph.intern_node(SemanticNodeData::Union(
+                verter_type_engine::semantic_query::composite::CompositeList::test_fixture(
+                    Arc::from([inner, z]),
+                ),
+            ));
+            let outer = program(graph, [ObjectConstructionEffect::Spread(union)]);
+            let formula = project(&dispatch, outer, ObjectProjectionSelector::Surface, policy);
+            assert_eq!(formula.alternatives().len(), 2, "general={general}");
+            let alternatives = formula.closed().expect("finite closed alternatives");
+            let mut nullable_arms = 0;
+            for alternative in alternatives.alternatives() {
+                if let Some(verter_type_engine::semantic_query::ClosedKeyLookup::Present(y)) =
+                    alternative.lookup(&key("y"))
+                {
+                    nullable_arms += 1;
+                    assert_eq!(y.presence(), PositiveKeyPresence::Required);
+                    assert!(matches!(
+                        alternative.lookup(&key("x")),
+                        Some(verter_type_engine::semantic_query::ClosedKeyLookup::Present(x))
+                            if x.presence() == PositiveKeyPresence::Optional
+                                && *x.value() == ProjectionEvidence::Proven(number)
+                    ));
+                } else {
+                    assert!(matches!(
+                        alternative.lookup(&key("z")),
+                        Some(verter_type_engine::semantic_query::ClosedKeyLookup::Present(z))
+                            if z.presence() == PositiveKeyPresence::Required
+                    ));
+                    assert!(matches!(
+                        alternative.lookup(&key("x")),
+                        Some(verter_type_engine::semantic_query::ClosedKeyLookup::AbsentProven)
+                    ));
+                }
+            }
+            assert_eq!(nullable_arms, 1);
+        }
+    }
+}
+
+#[test]
 fn finite_union_spread_keeps_correlated_alternatives_through_final_overwrite() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -163,10 +232,24 @@ fn finite_union_spread_keeps_correlated_alternatives_through_final_overwrite() {
             left, right,
         ])),
     ));
-    let program = program(
+    let inner = program(
         graph,
         [
             ObjectConstructionEffect::Spread(union),
+            property("x", boolean, false),
+        ],
+    );
+    let copied = program(
+        graph,
+        [
+            ObjectConstructionEffect::Spread(inner),
+            property("y", number, false),
+        ],
+    );
+    let program = program(
+        graph,
+        [
+            ObjectConstructionEffect::Spread(copied),
             property("x", boolean, false),
         ],
     );
@@ -3364,6 +3447,39 @@ fn fold_treats_numeric_and_string_spellings_as_one_js_property() {
                 if fact.value() == &ProjectionEvidence::Proven(number)
         ),
         "a numeric-spelling read must find the colliding string-spelling fact"
+    );
+
+    // Copy a required readonly write through several shared prefixes. Its
+    // metadata becomes a writable property, and the latest spelling wins.
+    let mut readonly = property("1", string, false);
+    let ObjectConstructionEffect::DirectProperty(effect) = &mut readonly else {
+        unreachable!()
+    };
+    effect.readonly = true;
+    let copied = program(graph, [ObjectConstructionEffect::Spread(root), readonly]);
+    let outer = program(
+        graph,
+        [
+            property("1", number, false),
+            ObjectConstructionEffect::Spread(copied),
+        ],
+    );
+    let formula = project(
+        &dispatch,
+        outer,
+        ObjectProjectionSelector::Surface,
+        ExactOptionalPropertyPolicy::Disabled,
+    );
+    let alternative = &formula.alternatives()[0];
+    assert_eq!(alternative.closed().unwrap().iter().unwrap().len(), 1);
+    assert!(matches!(
+        alternative.selected_key(&numeric_property_key(1)),
+        verter_type_engine::semantic_query::OpenSafeKeyEvidence::Positive(fact)
+            if fact.value() == &ProjectionEvidence::Proven(string)
+                && matches!(fact.facets(), ProjectionEvidence::Proven(facets) if !facets.readonly() && facets.method_kind().is_none())
+    ));
+    assert!(
+        matches!(alternative.excess(), ExcessEligibility::Eligible { direct_candidates } if direct_candidates.is_empty())
     );
 }
 

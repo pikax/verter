@@ -33,13 +33,23 @@ fn provider(i: usize) -> String {
 /// One per-source live publish (the production `SourceDelta` shape) of carrier `i`.
 fn publish(store: &CarrierPublishStore, ws: &str, i: usize, revision: u64) -> std::io::Result<u64> {
     let content = format!("export const C{i} = {revision};");
+    publish_content(store, ws, i, revision, &content)
+}
+
+fn publish_content(
+    store: &CarrierPublishStore,
+    ws: &str,
+    i: usize,
+    revision: u64,
+    content: &str,
+) -> std::io::Result<u64> {
     let file = SnapshotFile {
         source_uri: Arc::from(source(i).as_str()),
         provider_uri: Arc::from(provider(i).as_str()),
         role: SnapshotRole::CarrierIde,
         script_kind: ScriptKind::Tsx,
-        content_hash: h16(&content),
-        content: Arc::from(content.as_str()),
+        content_hash: h16(content),
+        content: Arc::from(content),
         map_hash: [0u8; 16],
         map_json: None,
         structure: None,
@@ -116,10 +126,25 @@ struct SessionWork {
 }
 
 fn run_session(n: usize, distinct_sources: usize) -> SessionWork {
+    // Exercise journal growth without creating and fsyncing an unrelated blob
+    // per record. Three payloads share content-addressed blobs across carriers;
+    // revisiting a carrier in the 16-source churn still changes its bytes.
+    const CONTENTS: [&str; 3] = [
+        "export const value = 0;",
+        "export const value = 1;",
+        "export const value = 2;",
+    ];
     let (store, ws, _ut) = fresh();
     let mut reader = PublishedStoreReader::open(store.workspace_dir());
     for k in 0..n {
-        publish(&store, &ws, k % distinct_sources, k as u64).expect("publish");
+        publish_content(
+            &store,
+            &ws,
+            k % distinct_sources,
+            k as u64,
+            CONTENTS[k % CONTENTS.len()],
+        )
+        .expect("publish");
         reader.refresh().expect("refresh");
         assert_eq!(
             reader.epoch(),
@@ -144,71 +169,77 @@ fn publication_work_is_proportional_to_records_with_bounded_compaction() {
     const SIZES: [usize; 4] = [128, 256, 512, 1024];
     // Churn over a fixed carrier set (compaction-heavy) and an ever-growing set
     // (every publication adds a carrier — the whole-manifest worst case).
-    for distinct in [16usize, usize::MAX] {
-        let mut previous: Option<(usize, u64)> = None;
-        for n in SIZES {
-            let work = run_session(n, distinct.min(n));
-            let n64 = n as u64;
-            // The writer never re-reads what it wrote: no base reload, no record
-            // re-applied, exactly one append per publication.
-            assert_eq!(work.writer.snapshot_loads, 0, "n={n}: writer reloaded");
-            assert_eq!(
-                work.writer.records_applied, 0,
-                "n={n}: writer re-read records"
-            );
-            assert_eq!(work.writer.records_appended, n64);
-            // Compaction is bounded: every compaction follows at least FLOOR records
-            // and writes at most as many rows as the records it folded.
-            assert!(
-                work.writer.compactions <= n64 / COMPACTION_FLOOR,
-                "n={n}: {} compactions",
-                work.writer.compactions
-            );
-            assert!(
-                work.writer.compaction_rows_written <= n64,
-                "n={n}: compaction wrote {} rows for {n} records",
-                work.writer.compaction_rows_written
-            );
-            // The reader decodes each record at most once (a record a compaction
-            // folded before the reader looked arrives in the base instead) and
-            // reloads a base only when a compaction changed the generation.
-            assert_eq!(
-                work.reader.records_applied + work.writer.compactions,
-                n64,
-                "n={n}: reader re-read records"
-            );
-            assert_eq!(
-                work.reader.snapshot_loads,
-                work.writer.compactions + 1,
-                "n={n}: reader reloaded a base without a compaction"
-            );
-            assert!(
-                work.reader.snapshot_rows_loaded <= n64,
-                "n={n}: reader loaded {} base rows",
-                work.reader.snapshot_rows_loaded
-            );
-            // Linear growth: doubling the publications at most ~doubles the bytes a
-            // reader reads (a whole-manifest reader would roughly quadruple).
-            let total = work.reader.journal_bytes_read;
-            if let Some((prev_n, prev_total)) = previous {
-                let ratio = total as f64 / prev_total as f64;
-                let scale = n as f64 / prev_n as f64;
-                assert!(
-                    ratio <= scale * 1.25,
-                    "distinct={distinct} {prev_n}->{n}: reader bytes grew {ratio:.2}x \
+    // The two growth series own separate stores. Overlap their durable I/O,
+    // keeping each series' publications and reader refreshes strictly ordered.
+    std::thread::scope(|scope| {
+        for distinct in [16usize, usize::MAX] {
+            scope.spawn(move || {
+                let mut previous: Option<(usize, u64)> = None;
+                for n in SIZES {
+                    let work = run_session(n, distinct.min(n));
+                    let n64 = n as u64;
+                    // The writer never re-reads what it wrote: no base reload, no record
+                    // re-applied, exactly one append per publication.
+                    assert_eq!(work.writer.snapshot_loads, 0, "n={n}: writer reloaded");
+                    assert_eq!(
+                        work.writer.records_applied, 0,
+                        "n={n}: writer re-read records"
+                    );
+                    assert_eq!(work.writer.records_appended, n64);
+                    // Compaction is bounded: every compaction follows at least FLOOR records
+                    // and writes at most as many rows as the records it folded.
+                    assert!(
+                        work.writer.compactions <= n64 / COMPACTION_FLOOR,
+                        "n={n}: {} compactions",
+                        work.writer.compactions
+                    );
+                    assert!(
+                        work.writer.compaction_rows_written <= n64,
+                        "n={n}: compaction wrote {} rows for {n} records",
+                        work.writer.compaction_rows_written
+                    );
+                    // The reader decodes each record at most once (a record a compaction
+                    // folded before the reader looked arrives in the base instead) and
+                    // reloads a base only when a compaction changed the generation.
+                    assert_eq!(
+                        work.reader.records_applied + work.writer.compactions,
+                        n64,
+                        "n={n}: reader re-read records"
+                    );
+                    assert_eq!(
+                        work.reader.snapshot_loads,
+                        work.writer.compactions + 1,
+                        "n={n}: reader reloaded a base without a compaction"
+                    );
+                    assert!(
+                        work.reader.snapshot_rows_loaded <= n64,
+                        "n={n}: reader loaded {} base rows",
+                        work.reader.snapshot_rows_loaded
+                    );
+                    // Linear growth: doubling the publications at most ~doubles the bytes a
+                    // reader reads (a whole-manifest reader would roughly quadruple).
+                    let total = work.reader.journal_bytes_read;
+                    if let Some((prev_n, prev_total)) = previous {
+                        let ratio = total as f64 / prev_total as f64;
+                        let scale = n as f64 / prev_n as f64;
+                        assert!(
+                            ratio <= scale * 1.25,
+                            "distinct={distinct} {prev_n}->{n}: reader bytes grew {ratio:.2}x \
                      for {scale}x publications"
-                );
-            }
-            previous = Some((n, total));
-            if distinct == 16 {
-                assert_eq!(
-                    work.writer.compactions,
-                    n64 / COMPACTION_FLOOR,
-                    "n={n}: churn over a small live set compacts every FLOOR records"
-                );
-            }
+                        );
+                    }
+                    previous = Some((n, total));
+                    if distinct == 16 {
+                        assert_eq!(
+                            work.writer.compactions,
+                            n64 / COMPACTION_FLOOR,
+                            "n={n}: churn over a small live set compacts every FLOOR records"
+                        );
+                    }
+                }
+            });
         }
-    }
+    });
 }
 
 #[test]

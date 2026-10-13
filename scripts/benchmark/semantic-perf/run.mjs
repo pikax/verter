@@ -39,6 +39,7 @@ import { renderMarkdown } from "./report.mjs";
 import {
   allScenarios,
   cliSource,
+  projectSources,
   scenariosForTier,
   SETTINGS,
   TIERS,
@@ -438,17 +439,20 @@ export function sameArchitecture(rustArch, nodeArch) {
   return (map[rustArch] ?? rustArch) === nodeArch;
 }
 
-function materialize(outDir, scenario, setting, opts, libText) {
+export function materialize(outDir, scenario, setting, opts, libText) {
   const dir = join(outDir, "scenarios", scenario.id, setting.id);
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, "lib.bench.d.ts"), libText);
-  writeFileSync(join(dir, "scenario.ts"), scenario.source);
-  writeFileSync(join(dir, "tsconfig.json"), tsconfigText(setting));
+  const sources = projectSources(scenario);
+  for (const [file, text] of Object.entries(sources)) writeFileSync(join(dir, file), text);
+  writeFileSync(join(dir, "tsconfig.json"), tsconfigText(setting, scenario));
   const cliDir = join(dir, "cli");
   mkdirSync(cliDir, { recursive: true });
   writeFileSync(join(cliDir, "lib.bench.d.ts"), libText);
   writeFileSync(join(cliDir, "scenario.ts"), cliSource(scenario));
-  writeFileSync(join(cliDir, "tsconfig.json"), tsconfigText(setting));
+  for (const [file, text] of Object.entries(scenario.files ?? {}))
+    writeFileSync(join(cliDir, file), text);
+  writeFileSync(join(cliDir, "tsconfig.json"), tsconfigText(setting, scenario));
   const baseJob = {
     schema: 1,
     dir,
@@ -456,6 +460,7 @@ function materialize(outDir, scenario, setting, opts, libText) {
     lib: "lib.bench.d.ts",
     libMode: opts.libMode,
     scenario: "scenario.ts",
+    ...(scenario.files ? { files: Object.keys(scenario.files) } : {}),
     initAlias: "__BenchInit",
     probes: ["__Probe"],
     warmRepeats: opts.warmRepeats,
@@ -465,8 +470,14 @@ function materialize(outDir, scenario, setting, opts, libText) {
     inputs: {
       "lib.bench.d.ts": sha256Text(libText),
       "scenario.ts": sha256Text(scenario.source),
-      "tsconfig.json": sha256Text(tsconfigText(setting)),
+      "tsconfig.json": sha256Text(tsconfigText(setting, scenario)),
       "cli/scenario.ts": sha256Text(cliSource(scenario)),
+      ...Object.fromEntries(
+        Object.entries(scenario.files ?? {}).flatMap(([file, text]) => [
+          [file, sha256Text(text)],
+          [`cli/${file}`, sha256Text(text)],
+        ]),
+      ),
     },
     baseJob,
   };

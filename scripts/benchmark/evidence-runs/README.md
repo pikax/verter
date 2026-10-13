@@ -27,7 +27,9 @@ manifests under `scripts/benchmark/evidence-run-fixtures/` (`pnpm test:scripts`)
 
 `scripts/benchmark/evidence-runs/<name>.json`. Each run name has exactly one
 owner: the change that needs the run adds its manifest and no other change
-edits it. Shipped: `skr-perf0-structural`, `switch-discriminated`.
+edits it. Shipped: `skr-perf0-structural`, `switch-discriminated`,
+`skr-callback-cost` (10, 100 and 500 contravariant callbacks; cold Verter time
+and peak memory beside whole-program TypeScript wall time).
 
 | Field                             | Meaning                                                                                                                                                        |
 | --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
