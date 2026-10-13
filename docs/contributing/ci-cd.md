@@ -52,20 +52,6 @@ Rust test discovery; Svelte conformance is also a dedicated Cargo/libtest job.
 
 Triggered via `/benchmark` PR comment or manual dispatch. Compares Verter compilation performance against Vue's official compiler.
 
-### Perf Gate (`perf-gate.yml`)
-
-Pull requests run the perf harness correctness specs and corpus manifest check.
-Scheduled and manual comparisons build separate candidate and baseline native
-packages and binaries, then measure them interleaved on the same runner. The
-scheduled baseline is the candidate's immediate parent; manual dispatch may
-supply `baseline-ref`. Both refs resolve once before building. Resolved checkout
-identities belong in the run artifact, never in the committed corpus manifest.
-The gate refuses a baseline equal to the candidate, missing or equal build
-paths, engine mismatches, skipped workloads, incomplete coverage and content
-differences. Immediate-parent comparisons detect changes against that parent;
-they do not establish cumulative performance against a historical release.
-Local predicate self-checks remain labeled as self-checks.
-
 ### LSP Benchmark (`lsp-benchmark.yml`)
 
 Triggered via `/lsp-benchmark` PR comment or manual dispatch. Runs the Verter-vs-Volar LSP benchmark on Linux, macOS, and Windows and reports per-OS values.

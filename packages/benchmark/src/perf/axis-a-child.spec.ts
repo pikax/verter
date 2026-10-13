@@ -334,6 +334,7 @@ describe("axis-A carrier-content rail fails closed on a MISSING IDE carrier", ()
   ): BaselineManifest {
     return {
       methodologyVersion: "test",
+      baselineRef: "PENDING — test",
       corpusHash: `sha256:${"0".repeat(64)}`,
       tsgoVersion: "typescript@7.0.1-rc",
       samplesPerSide: 7,
