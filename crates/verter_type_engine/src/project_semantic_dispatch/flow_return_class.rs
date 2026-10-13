@@ -26,7 +26,7 @@ pub(super) struct ClassReceiver {
     /// The instance members evaluated so far, in evaluation order.
     pub(super) members: std::cell::RefCell<Vec<SurfaceMember>>,
     /// Every statically named instance member the class declares.
-    pub(super) declared: rustc_hash::FxHashSet<Arc<str>>,
+    pub(super) declared: std::cell::RefCell<rustc_hash::FxHashSet<Arc<str>>>,
     /// The base instance, when the class extends one.
     pub(super) base: Option<SemanticNodeId>,
     /// Literal members supply only the contextual receiver's inferred part.
@@ -355,15 +355,17 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 .dispatch
                 .this_binder(self.canonical, self.owner, &class.name, None),
             members: std::cell::RefCell::new(Vec::new()),
-            declared: class
-                .members
-                .iter()
-                .filter(|member| !member.is_static)
-                .filter_map(|member| match &member.key {
-                    SliceObjectKey::Static(name) => Some(Arc::clone(name)),
-                    SliceObjectKey::Computed { .. } => None,
-                })
-                .collect(),
+            declared: std::cell::RefCell::new(
+                class
+                    .members
+                    .iter()
+                    .filter(|member| !member.is_static)
+                    .filter_map(|member| match &member.key {
+                        SliceObjectKey::Static(name) => Some(Arc::clone(name)),
+                        SliceObjectKey::Computed { .. } => None,
+                    })
+                    .collect(),
+            ),
             base: frame.base.as_ref().and_then(|base| base.instance),
             infer_literal_members: true,
             forward_read: std::cell::Cell::new(false),
@@ -872,7 +874,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     crate::semantic_query::SurfaceView::from_entries(own, None, false),
                 )));
             }
-            if bound.declared.contains(name) {
+            if bound.declared.borrow().contains(name) {
                 bound.forward_read.set(true);
                 return None;
             }

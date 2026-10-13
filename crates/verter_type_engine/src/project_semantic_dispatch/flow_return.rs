@@ -6153,6 +6153,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             dead_written_log: Vec::new(),
             receiver: None,
             contextual_object_this: None,
+            contextual_object_receiver: None,
+            object_first_pass_context: ObjectFirstPassContext::default(),
         };
         evaluator.bind_explicit_this(ir.declared_this.as_ref());
         let holds;
@@ -9319,7 +9321,7 @@ pub(super) trait FlowDemandDriver {
     fn contextual_object_order(
         &self,
         state: &super::call_resolve::ContextualCallState,
-        names: &[Arc<str>],
+        names: &[Option<Arc<str>>],
         canonical: &str,
     ) -> Vec<usize>;
     fn reduce_arms_to_supertypes(
@@ -9859,7 +9861,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
     fn contextual_object_order(
         &self,
         state: &super::call_resolve::ContextualCallState,
-        names: &[Arc<str>],
+        names: &[Option<Arc<str>>],
         canonical: &str,
     ) -> Vec<usize> {
         ProjectSemanticDispatch::contextual_object_order(self, state, names, canonical)
@@ -10486,7 +10488,7 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     fn contextual_object_order(
         &self,
         state: &super::call_resolve::ContextualCallState,
-        names: &[Arc<str>],
+        names: &[Option<Arc<str>>],
         canonical: &str,
     ) -> Vec<usize> {
         self.driver.contextual_object_order(state, names, canonical)
@@ -10981,6 +10983,8 @@ struct FlowEvaluator<'d, 'b, D: FlowDemandDriver> {
     receiver: Option<std::rc::Rc<class_expression::ClassReceiver>>,
     /// The marker in the enclosing contextual object, separate from lexical `this`.
     contextual_object_this: Option<SemanticNodeId>,
+    contextual_object_receiver: Option<std::rc::Rc<class_expression::ClassReceiver>>,
+    object_first_pass_context: ObjectFirstPassContext,
 }
 
 /// The evaluator-recorded structural execution ledger of one run: how
@@ -11994,6 +11998,14 @@ enum ArrayEvalStep<'e> {
     Done(Positional<SemanticNodeId>),
 }
 
+/// Context metadata for the inference-only object pass. It never selects a
+/// runtime receiver or starts contextual method evaluation.
+#[derive(Clone, Copy, Default)]
+struct ObjectFirstPassContext {
+    ty: Option<SemanticNodeId>,
+    marked: bool,
+}
+
 /// An object literal's evaluation in progress, stepped by
 /// [`FlowEvaluator::object_eval_step`]: what [`FlowEvaluator::eval_object_literal`]
 /// keeps across its members, the next entry, and the child it waits on.
@@ -12001,6 +12013,8 @@ struct ObjectEvalFrame<'e> {
     /// Whether this first pass checked an authored value rather than only
     /// producing withheld-function placeholders.
     first_pass_contributes: bool,
+    first_pass_context: ObjectFirstPassContext,
+    withheld_functions: bool,
     inference: Option<&'e mut super::call_resolve::ContextualCallState>,
     entries: &'e [verter_session_query::flow::slice::SliceObjectEntry],
     entry_order: Vec<usize>,
@@ -12009,6 +12023,7 @@ struct ObjectEvalFrame<'e> {
     assignment_fresh: bool,
     contextual: Option<SemanticNodeId>,
     enclosing_contextual_this: Option<SemanticNodeId>,
+    enclosing_contextual_receiver: Option<std::rc::Rc<class_expression::ClassReceiver>>,
     /// Each context-sensitive member reads as the non-inferring `any`
     /// (a call's first inference pass, `SkipContextSensitive`).
     skips_context_sensitive: bool,
@@ -12016,9 +12031,19 @@ struct ObjectEvalFrame<'e> {
     unwidened_members: Vec<crate::semantic_query::SurfaceMember>,
     unwidened_differs: bool,
     effects: Vec<crate::semantic_query::ObjectConstructionEffect>,
+    effect_ordinals: Vec<usize>,
+    retry_spreads: Vec<(
+        usize,
+        usize,
+        usize,
+        &'e verter_session_query::flow::slice::SliceExpr,
+        bool,
+    )>,
+    retry_spread_next: usize,
     spread_seen: bool,
     flushed_members: usize,
     member_effect_positions: rustc_hash::FxHashMap<usize, usize>,
+    receiver_ordinals: rustc_hash::FxHashMap<crate::semantic_query::AuthoredPropertyKey, usize>,
     late_bound: class_expression::ComputedIndexKinds,
     receiver: Option<std::rc::Rc<class_expression::ClassReceiver>>,
     /// The frame's receiver before the literal's, given back when the
@@ -12030,13 +12055,15 @@ struct ObjectEvalFrame<'e> {
     )>,
     /// The next deferred method or accessor to evaluate.
     deferred_next: usize,
-    /// The deferred members that read a member not evaluated yet, to
-    /// evaluate once more after the rest, and the next of them.
+    /// Deferred members waiting for siblings; progress bounds retry rounds.
     again: Vec<(
         usize,
         &'e verter_session_query::flow::slice::SliceObjectMember,
     )>,
     again_next: usize,
+    again_round_end: usize,
+    again_progress: bool,
+    again_stalled: bool,
     next: usize,
     awaiting: ObjectEvalAwait<'e>,
 }
@@ -12049,6 +12076,10 @@ enum ObjectEvalAwait<'e> {
     Spread {
         holds_before: usize,
         readonly: bool,
+        source: &'e verter_session_query::flow::slice::SliceExpr,
+        ordinal: usize,
+        effect_position: Option<(usize, usize)>,
+        degradation: Option<crate::semantic_query::FlowReturnDegradation>,
     },
     /// A data member's value.
     Value {
@@ -12129,7 +12160,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             base: Some(binder),
             infer_literal_members: false,
             members: std::cell::RefCell::new(Vec::new()),
-            declared: rustc_hash::FxHashSet::default(),
+            declared: std::cell::RefCell::new(rustc_hash::FxHashSet::default()),
             forward_read: std::cell::Cell::new(false),
         }));
     }
@@ -12272,7 +12303,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     ) -> Positional<SemanticNodeId> {
         if let verter_session_query::flow::slice::SliceExpr::Object { entries, offset } = expr {
             let mut frame = self.object_eval_frame(entries, *offset, false, Some(contextual));
-            let names: Option<Vec<_>> = entries
+            let names: Vec<_> = entries
                 .iter()
                 .map(|entry| match entry {
                     verter_session_query::flow::slice::SliceObjectEntry::Member(member) => {
@@ -12286,11 +12317,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     _ => None,
                 })
                 .collect();
-            if let Some(names) = names {
-                frame.entry_order =
-                    self.dispatch
-                        .contextual_object_order(state, &names, self.canonical);
-            }
+            frame.entry_order =
+                self.dispatch
+                    .contextual_object_order(state, &names, self.canonical);
             frame.inference = Some(state);
             self.drive_object_literal(&mut frame)
         } else {
@@ -12307,10 +12336,45 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         &mut self,
         entries: &[verter_session_query::flow::slice::SliceObjectEntry],
         offset: u32,
+        contextual: Option<SemanticNodeId>,
     ) -> Positional<SemanticNodeId> {
+        let enclosing = self.object_first_pass_context;
+        self.object_first_pass_context = ObjectFirstPassContext {
+            ty: contextual,
+            marked: contextual.is_some_and(|ty| {
+                self.dispatch
+                    .contextual_object_this_type(ty, self.canonical)
+                    .is_some()
+            }),
+        };
         let mut frame = self.object_eval_frame(entries, offset, false, None);
         frame.skips_context_sensitive = true;
-        self.drive_object_literal(&mut frame)
+        let result = self.drive_object_literal(&mut frame);
+        self.object_first_pass_context = enclosing;
+        result
+    }
+
+    fn object_first_pass_member_context(
+        &self,
+        frame: &ObjectEvalFrame<'_>,
+        member: &verter_session_query::flow::slice::SliceObjectMember,
+    ) -> ObjectFirstPassContext {
+        let ty = frame.first_pass_context.ty.and_then(|context| {
+            let verter_session_query::flow::slice::SliceObjectKey::Static(name) = &member.key
+            else {
+                return None;
+            };
+            self.contextual_property_type(self.dispatch.contextual_carrier_view(context), name)
+        });
+        ObjectFirstPassContext {
+            ty,
+            marked: frame.first_pass_context.marked
+                || ty.is_some_and(|ty| {
+                    self.dispatch
+                        .contextual_object_this_type(ty, self.canonical)
+                        .is_some()
+                }),
+        }
     }
 
     /// Run an object literal's frame with each child evaluated in place.
@@ -12333,9 +12397,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         }
     }
 
-    /// An object literal's evaluation, begun: its receiver (a literal whose
-    /// entries are all members is one its methods and accessors read
-    /// through `this`) made the frame's until the literal completes.
+    /// Begin a literal with a receiver independent of its lexical initializer
+    /// context. Inherited inferred marker receivers retain enclosing members.
     fn object_eval_frame<'e>(
         &mut self,
         entries: &'e [verter_session_query::flow::slice::SliceObjectEntry],
@@ -12344,6 +12407,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         contextual: Option<SemanticNodeId>,
     ) -> ObjectEvalFrame<'e> {
         let enclosing_contextual_this = self.contextual_object_this;
+        let enclosing_contextual_receiver = self.contextual_object_receiver.clone();
         self.contextual_object_this = contextual
             .and_then(|context| {
                 self.dispatch
@@ -12408,49 +12472,60 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             });
         // A literal's methods and accessors run against the object it
         // builds: their bodies read its other members through `this`, so
-        // they evaluate after every other member (and once more after a
-        // read of a sibling not evaluated yet). Spreads retain their
+        // they evaluate after data members. Forward reads retry while sibling
+        // evaluation makes progress; cycles degrade. Spreads retain their
         // construction-effect order while deferred members acquire values.
-        let receiver = (contextual_this.is_some()
-            || entries.iter().all(|entry| {
-                matches!(
-                    entry,
-                    verter_session_query::flow::slice::SliceObjectEntry::Member(_)
-                )
-            }))
-        .then(|| {
-            std::rc::Rc::new(class_expression::ClassReceiver {
-                binder: contextual_this.unwrap_or_else(|| {
-                    self.dispatch.this_binder(
-                        self.canonical,
-                        self.owner,
-                        &Arc::from(super::substitute::object_literal_this_name(offset)),
-                        None,
-                    )
-                }),
-                members: std::cell::RefCell::new(Vec::new()),
-                declared: entries
-                    .iter()
-                    .filter_map(|entry| match entry {
-                        verter_session_query::flow::slice::SliceObjectEntry::Member(member) => {
-                            match &member.key {
-                                verter_session_query::flow::slice::SliceObjectKey::Static(name) => {
-                                    Some(Arc::clone(name))
-                                }
-                                _ => None,
-                            }
+        let inherited_receiver = contextual
+            .is_none()
+            .then(|| enclosing_contextual_receiver.clone())
+            .flatten()
+            .filter(|receiver| {
+                contextual_this.is_some()
+                    && receiver.infer_literal_members
+                    && receiver.base == contextual_this
+            });
+        let declared: rustc_hash::FxHashSet<Arc<str>> = entries
+            .iter()
+            .filter_map(|entry| match entry {
+                verter_session_query::flow::slice::SliceObjectEntry::Member(member) => {
+                    match &member.key {
+                        verter_session_query::flow::slice::SliceObjectKey::Static(name) => {
+                            Some(Arc::clone(name))
                         }
                         _ => None,
-                    })
-                    .collect(),
-                base: contextual_this,
-                infer_literal_members,
-                forward_read: std::cell::Cell::new(false),
+                    }
+                }
+                _ => None,
+            })
+            .collect();
+        let receiver = inherited_receiver.or_else(|| {
+            Some({
+                std::rc::Rc::new(class_expression::ClassReceiver {
+                    binder: contextual_this.unwrap_or_else(|| {
+                        self.dispatch.this_binder(
+                            self.canonical,
+                            self.owner,
+                            &Arc::from(super::substitute::object_literal_this_name(offset)),
+                            None,
+                        )
+                    }),
+                    members: std::cell::RefCell::new(Vec::new()),
+                    declared: std::cell::RefCell::new(rustc_hash::FxHashSet::default()),
+                    base: contextual_this,
+                    infer_literal_members,
+                    forward_read: std::cell::Cell::new(false),
+                })
             })
         });
+        if let Some(receiver) = receiver.as_ref() {
+            receiver.declared.borrow_mut().extend(declared);
+        }
+        self.contextual_object_receiver = receiver.clone();
         let enclosing_receiver = self.receiver.clone();
         ObjectEvalFrame {
             first_pass_contributes: false,
+            first_pass_context: self.object_first_pass_context,
+            withheld_functions: false,
             inference: None,
             skips_context_sensitive: false,
             entries,
@@ -12460,13 +12535,18 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             assignment_fresh,
             contextual,
             enclosing_contextual_this,
+            enclosing_contextual_receiver,
             surface_members: Vec::with_capacity(entries.len()),
             unwidened_members: Vec::with_capacity(entries.len()),
             unwidened_differs: false,
             effects: Vec::new(),
+            effect_ordinals: Vec::new(),
+            retry_spreads: Vec::new(),
+            retry_spread_next: 0,
             spread_seen: false,
             flushed_members: 0,
             member_effect_positions: rustc_hash::FxHashMap::default(),
+            receiver_ordinals: rustc_hash::FxHashMap::default(),
             late_bound: class_expression::ComputedIndexKinds::default(),
             receiver,
             enclosing_receiver: Some(enclosing_receiver),
@@ -12474,6 +12554,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             deferred_next: 0,
             again: Vec::new(),
             again_next: 0,
+            again_round_end: 0,
+            again_progress: false,
+            again_stalled: false,
             next: 0,
             awaiting: ObjectEvalAwait::Nothing,
         }
@@ -12488,30 +12571,116 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         delivered: Option<Positional<SemanticNodeId>>,
     ) -> ObjectEvalStep<'e> {
         if let Some(outcome) = delivered {
+            self.object_first_pass_context = frame.first_pass_context;
             match std::mem::replace(&mut frame.awaiting, ObjectEvalAwait::Nothing) {
                 ObjectEvalAwait::Nothing => unreachable!("an outcome delivered to no request"),
                 ObjectEvalAwait::Spread {
                     holds_before,
                     readonly,
+                    source,
+                    ordinal,
+                    effect_position,
+                    degradation,
                 } => {
                     self.holds.truncate(holds_before);
                     let Positional::Value(operand) = outcome else {
                         return self.object_eval_abandon(frame);
                     };
-                    frame.spread_seen = true;
-                    self.object_eval_flush_effects(frame);
-                    // A const context copies the source's properties
-                    // `readonly`, which a spread's own copy drops: they enter
-                    // as the literal's own readonly properties.
-                    match readonly.then(|| self.readonly_spread_members(operand)) {
-                        Some(Some(members)) => {
-                            frame.effects.extend(members.iter().map(
-                                super::object_spread_program_lowering::direct_effect_from_member,
-                            ))
+                    // A literal containing only withheld functions contributes
+                    // no first-pass candidate. Its placeholder `any` is not an
+                    // authored open-key spread.
+                    let withheld_spread = frame.skips_context_sensitive
+                        && matches!(
+                            source,
+                            verter_session_query::flow::slice::SliceExpr::Object { .. }
+                        )
+                        && matches!(
+                            self.dispatch.graph().node_data(operand).as_deref(),
+                            Some(SemanticNodeData::Primitive(PrimitiveKind::Any))
+                        );
+                    if withheld_spread {
+                        frame.withheld_functions = true;
+                    }
+                    if !withheld_spread {
+                        frame.first_pass_contributes = true;
+                        frame.spread_seen = true;
+                        self.object_eval_flush_effects(frame);
+                        let position =
+                            effect_position.map_or(frame.effects.len(), |(position, _)| position);
+                        let effects = match readonly.then(|| self.readonly_spread_members(operand)) {
+                        Some(Some(members)) => members
+                            .iter()
+                            .map(super::object_spread_program_lowering::direct_effect_from_member)
+                            .collect::<Vec<_>>(),
+                        _ => vec![crate::semantic_query::ObjectConstructionEffect::Spread(
+                            operand,
+                        )],
+                    };
+                        if let Some((_, width)) = effect_position {
+                            // Replace every effect of a const-context spread too.
+                            let difference = effects.len() as isize - width as isize;
+                            frame
+                                .effects
+                                .splice(position..position + width, effects.iter().cloned());
+                            frame.effect_ordinals.splice(
+                                position..position + width,
+                                std::iter::repeat_n(ordinal, effects.len()),
+                            );
+                            if difference != 0 {
+                                for effect in frame
+                                    .member_effect_positions
+                                    .values_mut()
+                                    .filter(|effect| **effect > position)
+                                {
+                                    *effect = effect
+                                        .checked_add_signed(difference)
+                                        .expect("shifted construction slot");
+                                }
+                                for (effect, _, _, _, _) in
+                                    frame.retry_spreads.iter_mut().skip(frame.retry_spread_next)
+                                {
+                                    if *effect > position {
+                                        *effect = effect
+                                            .checked_add_signed(difference)
+                                            .expect("shifted spread slot");
+                                    }
+                                }
+                            }
+                        } else {
+                            if frame
+                                .receiver
+                                .as_ref()
+                                .is_some_and(|receiver| receiver.forward_read.get())
+                            {
+                                self.degradation = degradation;
+                                frame.retry_spreads.push((
+                                    position,
+                                    effects.len(),
+                                    ordinal,
+                                    source,
+                                    readonly,
+                                ));
+                            }
+                            frame
+                                .effect_ordinals
+                                .extend(std::iter::repeat_n(ordinal, effects.len()));
+                            frame.effects.extend(effects);
                         }
-                        _ => frame.effects.push(
-                            crate::semantic_query::ObjectConstructionEffect::Spread(operand),
-                        ),
+                        if let Some(receiver) = frame
+                            .receiver
+                            .as_ref()
+                            .filter(|receiver| !receiver.forward_read.get())
+                        {
+                            if let Some(surface) = self.dispatch.resolve_typeinfo_surface_view(
+                            operand,
+                            crate::semantic_query::ProjectionReductionContext::structural_transit(),
+                        ) {
+                            for member in surface.positive_members() { self.record_object_receiver_member(receiver, &mut frame.receiver_ordinals, member.clone(), ordinal, true); }
+                        }
+                        }
+                        if effect_position.is_some() {
+                            return self.object_eval_methods(frame);
+                        }
                     }
                 }
                 ObjectEvalAwait::Value {
@@ -12569,12 +12738,18 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         self.degradation = degradation;
                         frame.again.push((position, member));
                     } else {
+                        frame.again_progress = true;
                         frame.surface_members[position].value = value;
                         frame.unwidened_members[position].value = value;
-                        receiver
-                            .members
-                            .borrow_mut()
-                            .push(frame.surface_members[position].clone());
+                        if !receiver.forward_read.get() {
+                            self.record_object_receiver_member(
+                                &receiver,
+                                &mut frame.receiver_ordinals,
+                                frame.surface_members[position].clone(),
+                                frame.surface_ordinals[position],
+                                frame.spread_seen,
+                            );
+                        }
                         if let Some(&effect) = frame.member_effect_positions.get(&position) {
                             frame.effects[effect] =
                                 super::object_spread_program_lowering::direct_effect_from_member(
@@ -12594,10 +12769,13 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     && member.context_sensitive
                     && !member.infer_return_eagerly
                 {
+                    frame.withheld_functions = true;
                     if matches!(
                         member.value,
                         verter_session_query::flow::slice::SliceExpr::Object { .. }
                     ) {
+                        self.object_first_pass_context =
+                            self.object_first_pass_member_context(frame, member);
                         frame.awaiting = ObjectEvalAwait::Value {
                             member,
                             member_value: &member.value,
@@ -12623,28 +12801,25 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     continue;
                 }
             }
-            frame.first_pass_contributes = true;
+            frame.first_pass_contributes |= matches!(
+                entry,
+                verter_session_query::flow::slice::SliceObjectEntry::Member(_)
+            );
             if let (Some(_), verter_session_query::flow::slice::SliceObjectEntry::Member(member)) =
                 (frame.receiver.as_ref(), entry)
             {
                 let deferred = matches!(&member.value,
                     verter_session_query::flow::slice::SliceExpr::NestedFunctionValue { context, .. }
-                        if matches!(context.this(), Some(verter_session_query::flow::slice::SliceThis::Receiver)))
+                        if !context.this_is_lexical() && matches!(context.this(), Some(verter_session_query::flow::slice::SliceThis::Receiver)))
                     || member.method_kind.is_some();
-                let deferred = deferred
-                    && matches!(
-                        member.key,
-                        verter_session_query::flow::slice::SliceObjectKey::Static(_)
-                    );
-                if deferred {
+                let deferred_key = deferred.then(|| self.eval_object_member_key(&member.key));
+                if let Some(class_expression::MemberKey::Named(key)) = deferred_key {
+                    if let (Some(receiver), Some(name)) = (frame.receiver.as_ref(), key.as_string())
+                    {
+                        receiver.declared.borrow_mut().insert(Arc::from(name));
+                    }
                     // Placeholder at the member's position, filled below.
                     frame.deferred.push((frame.surface_members.len(), member));
-                    let key = match &member.key {
-                        verter_session_query::flow::slice::SliceObjectKey::Static(name) => {
-                            crate::semantic_query::AuthoredPropertyKey::string(name.as_ref())
-                        }
-                        _ => unreachable!("only a static key defers"),
-                    };
                     let placeholder = crate::semantic_query::SurfaceMember {
                         key,
                         value: self
@@ -12688,10 +12863,18 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     // (`settle_composite_part`): the callee's return is
                     // not this object's value. It cannot become a marker
                     // member either, so it fails the literal closed.
+                    self.object_first_pass_context = frame.first_pass_context;
                     frame.awaiting = ObjectEvalAwait::Spread {
                         holds_before: self.holds.len(),
                         readonly: *readonly,
+                        source,
+                        ordinal,
+                        effect_position: None,
+                        degradation: self.degradation,
                     };
+                    if let Some(receiver) = frame.receiver.as_ref() {
+                        receiver.forward_read.set(false);
+                    }
                     return ObjectEvalStep::Descend(source);
                 }
                 verter_session_query::flow::slice::SliceObjectEntry::Member(member) => member,
@@ -12702,6 +12885,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             // undecided (recursive object construction is beyond the
             // direct same-slot hold the return sites model).
             let holds_before = self.holds.len();
+            if frame.skips_context_sensitive {
+                self.object_first_pass_context =
+                    self.object_first_pass_member_context(frame, member);
+            }
             let member_value = if frame.assignment_fresh {
                 member.assignment_value.as_ref().unwrap_or(&member.value)
             } else {
@@ -12761,23 +12948,48 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
 
     /// An object literal whose data members all evaluated: its methods and
     /// accessors evaluate against it, each a child of the literal's step,
-    /// and one that read a member not evaluated yet once more after the
-    /// rest; then its surface is built.
+    /// retrying forward reads while siblings complete. A stalled round settles
+    /// incomplete bodies with their typed degradation; then build the surface.
     fn object_eval_methods<'e>(&mut self, frame: &mut ObjectEvalFrame<'e>) -> ObjectEvalStep<'e> {
         self.receiver = frame.receiver.clone();
         if frame.receiver.is_some() {
             let (next, again) = if let Some(&next) = frame.deferred.get(frame.deferred_next) {
                 frame.deferred_next += 1;
-                if let Some(receiver) = frame.receiver.as_ref() {
-                    receiver.forward_read.set(false);
-                }
                 (next, false)
-            } else if let Some(&next) = frame.again.get(frame.again_next) {
-                frame.again_next += 1;
-                (next, true)
             } else {
-                return ObjectEvalStep::Done(self.object_eval_finish(frame));
+                if frame.again_next == frame.again_round_end {
+                    frame.again_stalled = frame.again_round_end != 0 && !frame.again_progress;
+                    frame.again_progress = false;
+                    frame.again_round_end = frame.again.len();
+                }
+                if let Some(&next) = frame.again.get(frame.again_next) {
+                    frame.again_next += 1;
+                    (next, frame.again_stalled)
+                } else if let Some(&(position, width, ordinal, source, readonly)) =
+                    frame.retry_spreads.get(frame.retry_spread_next)
+                {
+                    frame.retry_spread_next += 1;
+                    self.receiver = frame
+                        .enclosing_receiver
+                        .as_ref()
+                        .expect("enclosing receiver")
+                        .clone();
+                    frame.awaiting = ObjectEvalAwait::Spread {
+                        holds_before: self.holds.len(),
+                        readonly,
+                        source,
+                        ordinal,
+                        effect_position: Some((position, width)),
+                        degradation: self.degradation,
+                    };
+                    return ObjectEvalStep::Descend(source);
+                } else {
+                    return ObjectEvalStep::Done(self.object_eval_finish(frame));
+                }
             };
+            if let Some(receiver) = frame.receiver.as_ref() {
+                receiver.forward_read.set(false);
+            }
             let (position, member) = next;
             frame.awaiting = ObjectEvalAwait::Method {
                 position,
@@ -12788,13 +13000,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             };
             // A method is typed by the contextual signature its property's
             // contextual type gives it, as a function-valued property is.
-            let member_context = match (&member.key, frame.contextual) {
-                (
-                    verter_session_query::flow::slice::SliceObjectKey::Static(name),
-                    Some(contextual),
-                ) => self.contextual_property_type(contextual, name),
-                _ => None,
-            };
+            let member_context = frame.contextual.and_then(|contextual| {
+                let name = frame.surface_members[position].key.as_string()?;
+                self.contextual_property_type(contextual, name)
+            });
             if let Some(node) = member_context
                 .and_then(|context| self.eval_function_argument_in_context(&member.value, context))
             {
@@ -12884,14 +13093,84 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         }
     }
 
+    fn record_object_receiver_member(
+        &self,
+        receiver: &class_expression::ClassReceiver,
+        ordinals: &mut rustc_hash::FxHashMap<crate::semantic_query::AuthoredPropertyKey, usize>,
+        member: crate::semantic_query::SurfaceMember,
+        ordinal: usize,
+        may_overwrite: bool,
+    ) {
+        let mut members = receiver.members.borrow_mut();
+        let opposite_accessor = |prior: &crate::semantic_query::SurfaceMember| {
+            matches!(
+                (prior.method_kind, member.method_kind),
+                (
+                    Some(verter_type_expr::ObjectMethodKind::Get),
+                    Some(verter_type_expr::ObjectMethodKind::Set)
+                ) | (
+                    Some(verter_type_expr::ObjectMethodKind::Set),
+                    Some(verter_type_expr::ObjectMethodKind::Get)
+                )
+            )
+        };
+        // Evaluation order may differ from construction order. Completing a
+        // deferred method cannot replace a later authored spread's member.
+        if ordinals
+            .get(&member.key)
+            .is_some_and(|prior| *prior > ordinal)
+            && !members
+                .iter()
+                .any(|prior| prior.key == member.key && opposite_accessor(prior))
+        {
+            return;
+        }
+        ordinals
+            .entry(member.key.clone())
+            .and_modify(|prior| *prior = (*prior).max(ordinal))
+            .or_insert(ordinal);
+        if may_overwrite {
+            members.retain(|prior| prior.key != member.key || opposite_accessor(prior));
+        }
+        members.push(member);
+    }
+
     /// Push one evaluated data member of an object literal beside its
     /// unwidened view.
     fn object_eval_push_member(
         &mut self,
         frame: &mut ObjectEvalFrame<'_>,
-        surface_member: crate::semantic_query::SurfaceMember,
-        unwidened: SemanticNodeId,
+        mut surface_member: crate::semantic_query::SurfaceMember,
+        mut unwidened: SemanticNodeId,
     ) {
+        // A checked anonymous spread has one authoritative surface. Use it
+        // consistently for both property inference and the completed argument,
+        // so replaying the argument does not deposit a second carrier candidate.
+        if frame.inference.is_some()
+            && matches!(
+                self.dispatch
+                    .graph()
+                    .node_data(surface_member.value)
+                    .as_deref(),
+                Some(SemanticNodeData::ObjectSpreadProgram(_))
+            )
+        {
+            if let Some(surface) = self.dispatch.resolve_typeinfo_surface_view(
+                surface_member.value,
+                crate::semantic_query::ProjectionReductionContext::structural_transit(),
+            ) {
+                let resolved = self
+                    .dispatch
+                    .graph()
+                    .intern_node(SemanticNodeData::Object(surface));
+                if unwidened == surface_member.value {
+                    unwidened = resolved;
+                }
+                surface_member.value = resolved;
+            } else {
+                self.record_degradation(FlowReturnDegradation::UnmodeledPosition);
+            }
+        }
         if let (Some(name), Some(state)) = (
             surface_member.key.as_string(),
             frame.inference.as_deref_mut(),
@@ -12912,7 +13191,13 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 ..surface_member.clone()
             });
         if let Some(receiver) = frame.receiver.as_ref() {
-            receiver.members.borrow_mut().push(surface_member.clone());
+            self.record_object_receiver_member(
+                receiver,
+                &mut frame.receiver_ordinals,
+                surface_member.clone(),
+                frame.entry_order[frame.next - 1],
+                frame.spread_seen,
+            );
         }
         frame.surface_members.push(surface_member);
         frame
@@ -12974,6 +13259,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
 
     fn object_eval_abandon<'e>(&mut self, frame: &mut ObjectEvalFrame<'e>) -> ObjectEvalStep<'e> {
         self.contextual_object_this = frame.enclosing_contextual_this;
+        self.contextual_object_receiver = frame.enclosing_contextual_receiver.clone();
         self.receiver = frame
             .enclosing_receiver
             .take()
@@ -13030,6 +13316,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             frame
                 .member_effect_positions
                 .insert(position, frame.effects.len());
+            frame.effect_ordinals.push(frame.surface_ordinals[position]);
             frame.effects.push(
                 super::object_spread_program_lowering::direct_effect_from_member(
                     &frame.surface_members[position],
@@ -13046,6 +13333,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         frame: &mut ObjectEvalFrame<'_>,
     ) -> Positional<SemanticNodeId> {
         self.contextual_object_this = frame.enclosing_contextual_this;
+        self.contextual_object_receiver = frame.enclosing_contextual_receiver.clone();
+        if frame.spread_seen {
+            self.object_eval_flush_effects(frame);
+        }
         if frame.inference.is_some() {
             let mut members: Vec<_> = std::mem::take(&mut frame.surface_ordinals)
                 .into_iter()
@@ -13058,15 +13349,17 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 frame.unwidened_members.push(unwidened);
             }
         }
-        if frame.spread_seen {
-            self.object_eval_flush_effects(frame);
-        }
         let entries = frame.entries;
         let offset = frame.offset;
         let mut surface_members = std::mem::take(&mut frame.surface_members);
         let mut unwidened_members = std::mem::take(&mut frame.unwidened_members);
         let unwidened_differs = frame.unwidened_differs;
-        let effects = std::mem::take(&mut frame.effects);
+        let mut effects: Vec<_> = std::mem::take(&mut frame.effect_ordinals)
+            .into_iter()
+            .zip(std::mem::take(&mut frame.effects))
+            .collect();
+        effects.sort_by_key(|(ordinal, _)| *ordinal);
+        let effects: Vec<_> = effects.into_iter().map(|(_, effect)| effect).collect();
         let spread_seen = frame.spread_seen;
         let late_bound = std::mem::take(&mut frame.late_bound);
         let receiver = frame.receiver.take();
@@ -13077,7 +13370,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         // An object containing only withheld functions contributes no
         // inference candidate. Authored `any` values remain real contributions.
         if frame.skips_context_sensitive
-            && !frame.first_pass_contributes
+            && (!frame.first_pass_contributes
+                || (frame.first_pass_context.marked && frame.withheld_functions))
             && !frame.entries.is_empty()
         {
             self.receiver = enclosing_receiver;

@@ -14570,6 +14570,11 @@ impl<'a> Lowerer<'a> {
         ) else {
             return SliceExpr::UnmodeledBinding;
         };
+        let context = if matches!(node, FunctionNode::Arrow(_)) {
+            context.with_lexical_this()
+        } else {
+            context
+        };
         SliceExpr::NestedFunctionValue {
             function: entry.key().clone(),
             context: Arc::new(context),

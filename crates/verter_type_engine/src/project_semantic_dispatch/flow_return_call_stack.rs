@@ -694,7 +694,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 .and_then(Option::as_ref)
             {
                 Some(SliceExpr::Object { entries, offset }) if argument.context_sensitive => {
-                    match self.eval_object_literal_first_pass(entries, *offset) {
+                    let contextual = self.callee_parameter_type(route.callee, ordinal);
+                    match self.eval_object_literal_first_pass(entries, *offset, contextual) {
                         Positional::Value(node) => Some(node),
                         Positional::Hold | Positional::Unmodeled => None,
                     }

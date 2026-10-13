@@ -3423,9 +3423,20 @@ pub struct CaptureScope {
 pub struct NestedFlowContext {
     captures: CaptureScope,
     this: Option<SliceThis>,
+    lexical_this: bool,
 }
 
 impl NestedFlowContext {
+    /// An arrow retains its creating frame's receiver under contextual typing.
+    pub fn with_lexical_this(mut self) -> Self {
+        self.lexical_this = true;
+        self
+    }
+
+    pub fn this_is_lexical(&self) -> bool {
+        self.lexical_this
+    }
+
     /// The lexical chain at the nested function's position.
     #[must_use]
     pub fn captures(&self) -> &CaptureScope {
@@ -4027,6 +4038,7 @@ impl DefiningFrameGate {
                 })),
             },
             this,
+            lexical_this: false,
         })
     }
 

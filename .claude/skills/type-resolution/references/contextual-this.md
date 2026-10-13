@@ -2,11 +2,14 @@
 
 Object-literal methods use the argument of the global `ThisType<T>` marker
 in their contextual type, including intersections, unions and generic aliases.
+Intersections select the first marker in authored order; unions combine the
+marker arguments contributed by their alternatives.
 Nested literals retain the nearest enclosing contextual marker. Without that
 marker they use a concrete contextual type, then the literal's own type.
 `noImplicitThis: false` retains the checker's `any` receiver. Arrow functions
-keep the receiver of their lexical frame. An authored `this` annotation takes
-precedence over the contextual marker and is lowered with the demanded body;
+keep the receiver of their lexical frame. An authored `this` annotation or a
+contextual signature's `this` parameter takes precedence over the contextual
+marker. The authored annotation is lowered with the demanded body;
 lexical contexts carry receiver identity, never annotation contents.
 
 Contextual targets are lowered in carrier mode. Alias applications are
@@ -26,6 +29,10 @@ Their first pass preserves nested object structure, withholds methods that
 need receiver typing, and collects receiver-independent method returns.
 Those checked values already underwent mutable-property widening, so their
 inference deposits preserve authored literal pins.
+The first pass carries contextual marker metadata without selecting a receiver.
+A marked object with withheld methods contributes no partial object candidate,
+even when it contains checked data or spreads. Placeholder-only spread literals
+do not contribute an authored open-key `any` spread.
 Nested first-pass objects use the expression evaluator's explicit stack.
 An object containing only withheld methods contributes no inferred object
 candidate; authored `any` properties still contribute their actual shape.
@@ -36,8 +43,9 @@ property's relation and contextual mapper, then suspends it again before
 evaluating another body. Getters can therefore infer types consumed by later
 actions without restarting the call or replaying earlier contextual properties.
 Receiver dependencies on type parameters order their producing properties
-before their consumers, independently of authored property order. Published
-member order remains authored order; cycles keep source order.
+before their consumers, independently of authored property order. Spreads and
+computed keys do not disable dependencies among known properties. Published
+members and construction effects retain authored order; cycles keep source order.
 The contextual mapper preserves uninferred binders in non-callable contexts;
 fixing them to an empty object would discard the receiver's own method part.
 Final applicability and result publication remain the call executor's work.
@@ -46,10 +54,18 @@ Object construction retains the enclosing receiver while evaluating property
 initializers and selects its own receiver for method bodies. A concrete
 contextual receiver's declared members take precedence over the literal's
 members. A receiver's still-uninferred object binder admits collected literal
-members and forward sibling reads; a concrete marker admits only its declared
-members. Ordinary function-valued properties share method receiver typing;
-arrows retain their lexical receiver. Spreads retain contextual receivers and
-the ordinary construction-effect ordering, including overwrites.
+members and forward sibling reads. Pending methods retry while siblings make
+progress, so acyclic chains resolve independently of source order; stalled
+cycles retain typed degradation. Inherited inferred marker receivers share
+their collected members with spread literals, whose unresolved method sources
+are revisited after the enclosing methods complete. A concrete marker admits
+only its declared members. Ordinary function-valued properties share method receiver typing;
+arrows retain their lexical receiver. Methods with known computed keys use the
+same receiver and contextual signature as static keys. Spreads retain contextual
+receivers and the ordinary construction-effect ordering, including overwrites.
+Provisional spread sources that read pending methods are not projected into the
+receiver. Completed anonymous spreads use the shared projection's surface for
+both property inference and the replayed call argument.
 Partial contextual work remains a typed degradation and cannot
 publish a complete cached result.
 

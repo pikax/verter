@@ -45,9 +45,34 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::super::ProjectSemanti
         contextual: SemanticNodeId,
         canonical: &str,
     ) -> Option<SemanticNodeId> {
-        let mut pending = vec![contextual];
+        enum Work {
+            Visit(SemanticNodeId),
+            Join(SemanticNodeId, Vec<SemanticNodeId>, bool),
+        }
+        let mut pending = vec![Work::Visit(contextual)];
         let mut seen = rustc_hash::FxHashSet::default();
-        while let Some(node) = pending.pop() {
+        let mut receivers = rustc_hash::FxHashMap::default();
+        while let Some(work) = pending.pop() {
+            let node = match work {
+                Work::Visit(node) => node,
+                Work::Join(node, children, union) => {
+                    let found: Vec<_> = children
+                        .iter()
+                        .filter_map(|child| receivers.get(child).copied())
+                        .collect();
+                    if let Some(&first) = found.first() {
+                        receivers.insert(
+                            node,
+                            if union {
+                                self.intern_normalized_union_or_intersection(&found, true)
+                            } else {
+                                first
+                            },
+                        );
+                    }
+                    continue;
+                }
+            };
             if !seen.insert(node) {
                 continue;
             }
@@ -61,22 +86,27 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::super::ProjectSemanti
                             global.canonical_id == base.canonical_id && global.owner == base.owner
                         })
                     {
-                        return Some(args[0]);
+                        receivers.insert(node, args[0]);
                     }
                 }
                 Some(SemanticNodeData::Intersection(members)) => {
-                    pending.extend(members.iter().copied())
+                    pending.push(Work::Join(node, members.to_vec(), false));
+                    pending.extend(members.iter().rev().copied().map(Work::Visit));
                 }
-                Some(SemanticNodeData::Union(members)) => pending.extend(members.iter().copied()),
+                Some(SemanticNodeData::Union(members)) => {
+                    pending.push(Work::Join(node, members.to_vec(), true));
+                    pending.extend(members.iter().rev().copied().map(Work::Visit));
+                }
                 _ => {
                     let resolved = self.contextual_carrier_view(node);
                     if resolved != node {
-                        pending.push(resolved);
+                        pending.push(Work::Join(node, vec![resolved], false));
+                        pending.push(Work::Visit(resolved));
                     }
                 }
             }
         }
-        None
+        receivers.get(&contextual).copied()
     }
 }
 
@@ -98,6 +128,7 @@ pub(super) struct FunctionArgumentMark {
 /// each parameter position and the contextual return type.
 #[derive(Clone)]
 pub(super) struct ContextualSignature {
+    pub(super) receiver: Option<SemanticNodeId>,
     /// The contextual signature's non-rest parameter types, in order.
     parameters: Vec<SemanticNodeId>,
     /// The element type of its rest parameter, when it has one.
@@ -149,6 +180,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
         if !type_parameters.is_empty() {
             return None;
         }
+        let (receiver, params) = crate::semantic_query::split_this_receiver(params);
         let mut parameters = Vec::with_capacity(params.len());
         let mut rest_element = None;
         for param in params.iter() {
@@ -170,6 +202,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
             parameters.push(param.ty);
         }
         Some(ContextualSignature {
+            receiver: receiver.map(|param| param.ty),
             parameters,
             rest_element,
             return_type: *return_type,
@@ -274,7 +307,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
     /// with each of the signature's type parameters read with its
     /// constraint, as a contextual type reads an unfixed type parameter.
     /// `None` for a callee with no call signature or several.
-    fn callee_parameter_type(
+    pub(super) fn callee_parameter_type(
         &self,
         callee: SemanticNodeId,
         ordinal: usize,

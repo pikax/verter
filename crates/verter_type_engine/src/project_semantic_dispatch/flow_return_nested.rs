@@ -564,6 +564,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             use_unknown_in_catch_variables: self.use_unknown_in_catch_variables,
             no_implicit_this: self.no_implicit_this,
             contextual_object_this: None,
+            contextual_object_receiver: None,
+            object_first_pass_context: ObjectFirstPassContext::default(),
             params: &owned.params,
             param_names: &owned.content.params,
             binder_env: &owned.binder_env,
@@ -628,6 +630,24 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             .flatten(),
         });
         let body = &owned.content.body;
+        if owned.content.declared_this.is_none()
+            && !capture_context.this_is_lexical()
+            && matches!(
+                capture_context.this(),
+                Some(verter_session_query::flow::slice::SliceThis::Receiver)
+            )
+        {
+            if let Some(binder) = contextual.as_ref().and_then(|signature| signature.receiver) {
+                evaluator.receiver = Some(std::rc::Rc::new(class_expression::ClassReceiver {
+                    binder,
+                    base: Some(binder),
+                    infer_literal_members: false,
+                    members: std::cell::RefCell::new(Vec::new()),
+                    declared: std::cell::RefCell::new(rustc_hash::FxHashSet::default()),
+                    forward_read: std::cell::Cell::new(false),
+                }));
+            }
+        }
         evaluator.bind_explicit_this(owned.content.declared_this.as_ref());
         evaluator.seed_hoisted_var_declarations(body);
         let run = evaluator.start_region_run(body);

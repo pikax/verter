@@ -20,7 +20,121 @@ fn assert_contextual_receiver(source: &str, probe: &str, expected: &str) {
         &[(probe, expected), (probe, expected)],
         |_| {},
     );
-    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    assert!(failures.is_empty(), "{source}\n{}", failures.join("\n"));
+}
+
+#[test]
+fn contextual_receiver_resolves_transitive_forward_methods() {
+    for methods in [
+        "q(){return this.r()},r(){return this.m()},m(){return this.n}",
+        "m(){return this.n},r(){return this.m()},q(){return this.r()}",
+    ] {
+        assert_contextual_receiver(
+            &format!("declare function defineComponent<D,M>(o:{{data():D;methods:M & ThisType<D & M>}}):{{[K in keyof M]:M[K] extends ()=>infer R?R:never}};
+const comp=defineComponent({{data(){{return {{n:3 as const}}}},methods:{{{methods}}}}});"),
+            "typeof comp.q",
+            "3",
+        );
+    }
+}
+
+#[test]
+fn contextual_receiver_intersections_select_the_first_marker() {
+    for (markers, expected) in [
+        ("ThisType<{n:3}> & ThisType<{n:5}>", "3"),
+        ("ThisType<{n:5}> & ThisType<{n:3}>", "5"),
+    ] {
+        assert_contextual_receiver(
+            &format!("function obj(){{return {{m(){{return this.n}}}} satisfies {markers};}}"),
+            "ReturnType<ReturnType<typeof obj>['m']>",
+            expected,
+        );
+    }
+}
+
+#[test]
+fn contextual_receiver_unions_combine_marker_arguments() {
+    for markers in [
+        "ThisType<{n:3}> | ThisType<{n:5}>",
+        "ThisType<{n:5}> | ThisType<{n:3}>",
+    ] {
+        assert_contextual_receiver(
+            &format!("function obj(){{return {{m(){{return this.n}}}} satisfies {markers};}}"),
+            "ReturnType<ReturnType<typeof obj>['m']>",
+            "3 | 5",
+        );
+    }
+}
+
+#[test]
+fn contextual_receiver_signature_this_precedes_the_marker() {
+    assert_contextual_receiver(
+        "function obj(){return {m(){return this.n}} satisfies {m(this:{n:5}):5} & ThisType<{n:3}>;}",
+        "ReturnType<ReturnType<typeof obj>['m']>",
+        "5",
+    );
+    assert_contextual_receiver(
+        "function outer(){return {n:9 as const,make(){return {m:()=>this.n} satisfies {m(this:{n:5}):9} & ThisType<{n:3}>;}};}",
+        "ReturnType<ReturnType<ReturnType<typeof outer>['make']>['m']>",
+        "9",
+    );
+}
+
+#[test]
+fn contextual_receiver_plain_spreads_supply_literal_members() {
+    for (members, expected) in [
+        ("...{n:3 as const},m(){return this.n}", "3"),
+        ("...{n:3 as const},n:5 as const,m(){return this.n}", "5"),
+        ("n:5 as const,...{n:3 as const},m(){return this.n}", "3"),
+    ] {
+        assert_contextual_receiver(
+            &format!("function obj(){{return {{{members}}};}}"),
+            "ReturnType<ReturnType<typeof obj>['m']>",
+            expected,
+        );
+    }
+}
+
+#[test]
+fn contextual_receiver_binds_computed_methods() {
+    assert_contextual_receiver(
+        "const key='m' as const;function obj(){return {[key](){return this.n}} satisfies ThisType<{n:3}>;}",
+        "ReturnType<ReturnType<typeof obj>['m']>",
+        "3",
+    );
+}
+
+#[test]
+fn contextual_receiver_orders_store_dependencies_across_spreads() {
+    assert_contextual_receiver(
+        "declare function defineStore<S,G,A>(o:{state():S;getters:G & ThisType<S>;actions:A & ThisType<S & A & {[K in keyof G]:G[K] extends ()=>infer R?R:never}>}):S & A;
+const store=defineStore({...{},actions:{read(){return this.double}},getters:{double(){return this.count}},state(){return {count:1 as const}}});",
+        "ReturnType<typeof store.read>",
+        "1",
+    );
+}
+
+#[test]
+fn contextual_receiver_spread_methods_retain_inferred_siblings() {
+    for (methods, expected) in [
+        ("m(){return this.n},...{q(){return this.m()}}", "3"),
+        ("...{q(){return this.m()}},m(){return this.n}", "3"),
+        (
+            "m(){return this.n},...({q(){return this.m()},other:5 as const} as const)",
+            "3",
+        ),
+        (
+            "m(){return this.n},...{m(){return 5 as const}},q(){return this.m()}",
+            "5",
+        ),
+    ] {
+        assert_contextual_receiver(
+            &format!("declare function defineComponent<D,M>(o:{{data():D;methods:M & ThisType<D & M>}}):{{[K in keyof M]:M[K] extends ()=>infer R?R:never}};
+const comp=defineComponent({{data(){{return {{n:3 as const}}}},methods:{{{methods}}}}});"),
+            "typeof comp.q",
+            expected,
+        );
+    }
 }
 
 #[test]

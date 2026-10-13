@@ -121,7 +121,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     pub(in crate::project_semantic_dispatch) fn contextual_object_order(
         &self,
         state: &ContextualCallState,
-        names: &[Arc<str>],
+        names: &[Option<Arc<str>>],
         canonical: &str,
     ) -> Vec<usize> {
         let source_order = || (0..names.len()).collect::<Vec<_>>();
@@ -142,6 +142,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let mut producers: FxHashMap<SemanticNodeId, Vec<usize>> = FxHashMap::default();
         let mut consumers = vec![FxHashSet::default(); names.len()];
         for (index, name) in names.iter().enumerate() {
+            let Some(name) = name else { continue };
             let crate::semantic_query::SurfaceKeyProjection::Exact(member) = surface
                 .project_known_key(&crate::semantic_query::PropertyKey::identifier(
                     name.as_ref(),
