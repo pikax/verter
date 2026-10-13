@@ -64,30 +64,38 @@ producers to consumers:
   no independent applicability evidence. ACT1 migrates this model; LSO8
   supplies authored transactions; ACT2 supplies verification.
 - `verter_lsp::server::aux_features::handle_code_action_attempt` separately
-  calls `macro_code_actions`, `component_code_actions` and
-  `suggest_matching_props` before its ActionEngine bridge. These native
-  producers are distinct consumers (`LRA-C11`, `LRA-C12`), not covered by
+  calls `macro_code_actions`, `component_code_actions`,
+  `suggest_matching_props` and `event_type_hint_actions` before its
+  ActionEngine bridge. These native quickfix producers are distinct consumers
+  (`LRA-C11`, `LRA-C12`, `LRA-C13`), not covered by
   `diagnostics_bridge`. They construct transport-native actions through
   `action_utils`, bypassing the `CodeAction`/`FileEdit` model in `LRA-D05`.
   ACT1 owns their model migration (`LRA-D10`, `ACT1-AC1`), preserving existing
   fixture edits and applying its atomic multi-file and irreversible-map
   refusal contracts (`ACT1-AC2`, `ACT1-AC3`).
-- `action_utils::make_insert_edit` and `make_replace_edit` construct final
-  `WorkspaceEdit`/`TextEdit` values with no document version. Component edits
-  also reach these helpers through `cross_file::ChildComponentContext`;
-  same-file macro anchors already check analysis/live content identity, but
+- `action_utils::make_insert_action`, `make_insert_edit` and
+  `make_replace_edit` construct final `WorkspaceEdit`/`TextEdit` values with
+  no document version. Macro actions use `make_insert_action`, which builds
+  edits inline without calling the other two helpers. Component actions use
+  `make_insert_edit` directly and through `cross_file::ChildComponentContext`;
+  event-type-hint actions use `make_replace_edit` and `make_code_action`.
+  Same-file macro anchors already check analysis/live content identity, but
   that check does not supply a validated transaction basis. LSO8 alone owns
   retirement of direct semantic edit construction (`LRA-D11`, `LSO8-AC1`),
-  including all shared-helper callers, and its replacement with validated
-  authored intents and thin transport projection. ACT1's envelope migration
-  cannot discharge this separate transaction cutover.
+  including the inline builder in `make_insert_action` and every caller of
+  all three shared builders. Their replacement uses validated authored
+  intents and thin transport projection; placeholder URI replacement does
+  not validate a transaction. ACT1's envelope migration cannot discharge
+  this separate transaction cutover.
 
 The finite consumer population is lint configuration, catalog/rule selection,
 analysis and TypeInfo, suppressions, diagnostic publication, action planning,
 LSP, NAPI/WASM/FFI and MCP. The inventory names the live paths for each.
 The LSP audit follows both the ActionEngine bridge and the independent native
-macro/component routes to their action wrappers and current/foreign edit
-builders; completing only `LRA-D04`/`LRA-D05` leaves the latter routes alive.
+macro/component/event-type-hint quickfix routes to their action wrappers and
+current/foreign edit builders, including edits built inline by
+`make_insert_action`; completing only `LRA-D04`/`LRA-D05` or only retiring
+`make_insert_edit`/`make_replace_edit` leaves the macro route alive.
 MCP scoring is included: its direct `Linter::new` call is a consumer even
 though it presents a score instead of individual diagnostics. Rule bodies,
 providers, compiler diagnostics and the component view remain with their
@@ -267,7 +275,8 @@ deletion belongs solely to LNT3, and shared action model migration to ACT1.
   cases; the pack owners receive exact authored fixture equivalence.
   Native LSP parity controls live in
   `crates/verter_lsp/src/features/macro_actions_tests.rs`,
-  `crates/verter_lsp/src/features/component_actions_tests.rs` and the
+  `crates/verter_lsp/src/features/component_actions_tests.rs`,
+  the inline tests in `event_type_hints.rs` and the
   `cross_file.rs` child-anchor/stale-revision tests. ACT1 preserves their
   authored edits while LSO8 adds transaction validation; these existing
   controls do not certify the future alternative or transaction model.

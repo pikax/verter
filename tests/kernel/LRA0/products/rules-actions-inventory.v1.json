@@ -206,6 +206,14 @@
       "implementationOwner": "ACT1",
       "successorPath": ["LRA0", "LSO8", "ACT1"],
       "receivingAcceptance": "ACT1-AC1"
+    },
+    {
+      "id": "LRA-C13",
+      "consumer": "Native LSP event-handler type-hint actions, invoked directly by handle_code_action_attempt independently of ActionEngine",
+      "source": "crates/verter_lsp/src/features/event_type_hints.rs",
+      "implementationOwner": "ACT1",
+      "successorPath": ["LRA0", "LSO8", "ACT1"],
+      "receivingAcceptance": "ACT1-AC1"
     }
   ],
   "displacedRoutes": [
@@ -311,7 +319,7 @@
     {
       "id": "LRA-D10",
       "category": "untagged public identity",
-      "route": "Native macro_code_actions, component_code_actions and suggest_matching_props construct transport-native CodeActionOrCommand through action_utils::{make_code_action,make_insert_action}, bypassing the CodeAction/FileEdit model",
+      "route": "Native macro_code_actions, component_code_actions, suggest_matching_props and event_type_hint_actions construct transport-native CodeActionOrCommand through action_utils::{make_code_action,make_insert_action}, bypassing the CodeAction/FileEdit model",
       "source": "crates/verter_lsp/src/server/aux_features.rs",
       "deletionOwner": "ACT1",
       "successorPath": ["LRA0", "LSO8", "ACT1"],
@@ -322,13 +330,13 @@
     {
       "id": "LRA-D11",
       "category": "untagged coordinate/public identity",
-      "route": "action_utils::{make_insert_edit,make_replace_edit} materialize WorkspaceEdit/TextEdit with version: None; native macro/component producers use these directly, including ChildComponentContext::{make_insert_at_macros,make_insert_into_macro} in cross_file.rs",
+      "route": "action_utils::{make_insert_action,make_insert_edit,make_replace_edit} materialize WorkspaceEdit/TextEdit with version: None. macro_code_actions uses make_insert_action, which inlines edit construction without calling the other two helpers. Component actions use make_insert_edit directly and through ChildComponentContext::{make_insert_at_macros,make_insert_into_macro} in cross_file.rs; event_type_hint_actions uses make_replace_edit",
       "source": "crates/verter_lsp/src/features/action_utils.rs",
       "deletionOwner": "LSO8",
       "successorPath": ["LRA0", "LSO8"],
       "receivingAcceptance": "LSO8-AC1",
       "parentRoute": null,
-      "disposition": "Delete or structurally reject semantic producers' direct WorkspaceEdit/TextEdit construction. Normalize authored intents with exact current/foreign source and mapping preconditions through the sole transaction validator; retain only thin transport projection after validation. Include every caller of the shared helpers when retiring them; ACT1 separately migrates native action envelopes."
+      "disposition": "Delete or structurally reject semantic producers' direct WorkspaceEdit/TextEdit construction, including the inline builder in make_insert_action and every caller of all three shared builders. Normalize authored intents with exact current/foreign source and mapping preconditions through the sole transaction validator; retain only thin transport projection after validation. Placeholder URI replacement and live-content anchor checks do not discharge transaction validation. ACT1 separately migrates native action envelopes; its model cutover cannot discharge this retirement."
     }
   ],
   "referencedRoutes": [
