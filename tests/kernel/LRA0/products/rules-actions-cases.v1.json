@@ -1,0 +1,289 @@
+{
+  "id": "rules-actions-cases.v1",
+  "schema": 1,
+  "contractNode": "LRA0",
+  "companionInventory": "rules-actions-inventory.v1.json",
+  "rule": "Reviewed case specifications and exact authored fixture data only. No executable test or validator is added by LRA0. Existing evidence denotes inspected current controls, not a passing successor implementation; receiving owners execute cases under their own lanes. Fixture release identities come from exact captured profile selection, with real repository dependency/oracle pins preserved.",
+  "cases": [
+    {
+      "id": "RC01",
+      "name": "Absent or inapplicable row",
+      "input": "Svelte profile only; demand a Vue-only rule, then disable an otherwise applicable row.",
+      "required": "Zero body calls, semantic demands, index walks, subprocess launches and rule-owned allocations; applicable neutral rows still run.",
+      "forbidden": "Post-emission filtering or hidden rule work.",
+      "executableOwner": "UAP0",
+      "successorPath": ["LRA0", "UAP0"],
+      "receivingAcceptance": "UAP0-AC-R2",
+      "existingEvidence": [
+        "crates/verter_diagnostics/src/linter.rs::svelte_carrier_selection_drops_vue_only_template_root_rule",
+        "crates/verter_diagnostics/src/linter.rs::carrier_neutral_rule_runs_on_both_carriers"
+      ]
+    },
+    {
+      "id": "RC02",
+      "name": "Same spelling, independent profile epochs",
+      "input": "Two exact profiles register rule x at epochs 1 and 2; reverse provider order.",
+      "required": "Distinct registration/diagnostic/cache keys; unchanged profile never sees the other epoch; canonical rows and output are equal across permutations.",
+      "forbidden": "Family/adapter/string-only keys, last-loaded winner.",
+      "executableOwner": "UAP0",
+      "successorPath": ["LRA0", "UAP0"],
+      "receivingAcceptance": "UAP0-AC-R2",
+      "existingEvidence": []
+    },
+    {
+      "id": "RC03",
+      "name": "Stale and conflicting edits",
+      "input": "Plan at r1; edit a target at r2; separately compose two overlapping replacements and a stale member of a two-file alternative.",
+      "required": "Whole alternative rejected with exact cause; neither file modified; initial non-overlap controls remain applicable.",
+      "forbidden": "Partial apply, offset clamping, overlap text merge or relabelled basis.",
+      "executableOwner": "UAP0",
+      "successorPath": ["LRA0", "UAP0"],
+      "receivingAcceptance": "UAP0-AC-R2",
+      "existingEvidence": []
+    },
+    {
+      "id": "RC04",
+      "name": "Truthful TypeInfo fact quality",
+      "input": "Rule requests a component facet; compare supported-empty, unsupported, NeedInputs and degraded facts.",
+      "required": "Preserve independent guarantees and cause; degraded answers never admitted as complete/warm; use the one ComponentInfo view.",
+      "forbidden": "Empty-success substitution or a rule-local component resolver.",
+      "executableOwner": "LNT2",
+      "successorPath": ["LRA0", "LNTCFG0", "LNT2"],
+      "receivingAcceptance": "LNT2-AC3",
+      "existingEvidence": [
+        "crates/verter_protocol/tests/cases/typeinfo_proto_roundtrip.rs::supported_empty_and_unsupported_empty_decode_to_distinct_states",
+        "crates/verter_session/tests/cases/g_block/framework_surface_executor.rs::a_degraded_framework_surface_never_encodes_exact_resolved"
+      ]
+    },
+    {
+      "id": "RC05",
+      "name": "Diagnostic provenance and deterministic order",
+      "input": "Reverse registration/completion order, change display messages, include equal ranges in different profiles and native/external aliases.",
+      "required": "Canonical typed identity and order; one producing owner per concept; unchanged source/profile/epoch facts stay equal.",
+      "forbidden": "Message or hash iteration ordering; duplicate native/external diagnostic.",
+      "executableOwner": "LNT2",
+      "successorPath": ["LRA0", "LNTCFG0", "LNT2"],
+      "receivingAcceptance": "LNT2-AC2",
+      "existingEvidence": [
+        "crates/verter_language/tests/cases/diagnostic_ordering.rs::display_message_is_not_an_ordering_dimension",
+        "crates/verter_language/tests/cases/diagnostic_ordering.rs::normative_sort_is_stable_across_input_permutations_when_keys_are_distinct"
+      ]
+    },
+    {
+      "id": "RC06",
+      "name": "Authored maps and source provenance",
+      "input": "Non-ASCII and CRLF preceding a virtual/template edit, then a non-reversible map and wrong map revision.",
+      "required": "Checked authored UTF-8 ranges retain source/map chain; transports convert without changing semantic identity; refusal leaves all files untouched.",
+      "forbidden": "Generated coordinate escape, byte/code-unit alias, string-search recovery.",
+      "executableOwner": "LSO8",
+      "successorPath": ["LRA0", "LSO8"],
+      "receivingAcceptance": "LSO8-AC2",
+      "existingEvidence": []
+    },
+    {
+      "id": "RC07",
+      "name": "Applicability separate from safety",
+      "input": "Legacy Safe action inserting an empty expression; a pure formatting action; a behavior-changing URL suggestion.",
+      "required": "Placeholder remains has-placeholders, behavior change needs explicit selection, pure formatting uses formatter; no automatic grant from old safety.",
+      "forbidden": "Format-as-fix or Safe implies machine-applicable.",
+      "executableOwner": "ACT1",
+      "successorPath": ["LRA0", "LSO8", "ACT1"],
+      "receivingAcceptance": "ACT1-AC1",
+      "existingEvidence": [
+        "crates/verter_actions/src/providers/add_component_is.rs::adds_is_binding",
+        "crates/verter_actions/src/providers/remove_unsafe_url.rs::replaces_javascript_url"
+      ]
+    },
+    {
+      "id": "RC08",
+      "name": "Complete overlay verification",
+      "input": "Alternative removes finding but deletes a used import; cancel checker; then omit an affected consumer.",
+      "required": "Maybe-incorrect names blocking/new diagnostic; base cache unchanged; complete safe control can earn machine applicability.",
+      "forbidden": "Partial verification grants automatic apply.",
+      "executableOwner": "ACT2",
+      "successorPath": ["LRA0", "LSO8", "ACT1", "ACT2"],
+      "receivingAcceptance": "ACT2-AC5",
+      "existingEvidence": []
+    },
+    {
+      "id": "RC09",
+      "name": "Receipt dependency/population revalidation",
+      "input": "r1 receipt; r2 unrelated edit; then config change, rule epoch change, source/map edit or newly affected file.",
+      "required": "Unrelated read-set-valid edit mints a new qualified receipt and preserves r1; relevant changes require full reverification.",
+      "forbidden": "Cache keyed only by edit hash/base revision; original receipt relabelled.",
+      "executableOwner": "ACT2",
+      "successorPath": ["LRA0", "LSO8", "ACT1", "ACT2"],
+      "receivingAcceptance": "ACT2-AC6",
+      "existingEvidence": []
+    },
+    {
+      "id": "RC10",
+      "name": "Edit/revert and cancellation",
+      "input": "Warm lint, edit a demanded dependency/config/suppression, compare fresh at each revision, revert; cancel mid-rule.",
+      "required": "Incremental equals fresh including exact provenance and order; cancelled/stale/partial results never warm.",
+      "forbidden": "Warm answer under obsolete epoch/config/membership or partial empty success.",
+      "executableOwner": "LNT2",
+      "successorPath": ["LRA0", "LNTCFG0", "LNT2"],
+      "receivingAcceptance": "LNT2-AC3",
+      "existingEvidence": []
+    },
+    {
+      "id": "RC11",
+      "name": "Suppression identity and consumption",
+      "input": "Two rules in the same range; suppress one alias under one profile; disable/enable, inactive service and missing authored geometry.",
+      "required": "Only the exact matching diagnostic is suppressed; enable caps range; inactive service does not report unused; missing geometry refuses.",
+      "forbidden": "Family-wide suppression, 500-byte guess or unused report without produced diagnostic.",
+      "executableOwner": "LK2",
+      "successorPath": ["LRA0", "LSO8", "ACT1", "LK2"],
+      "receivingAcceptance": "LK2-AC6",
+      "existingEvidence": []
+    },
+    {
+      "id": "RC12",
+      "name": "Representative Vue equivalence",
+      "input": "Authored FV01/FV02 plus their clean and wrong-profile controls.",
+      "required": "Diagnostic rule/range and provider edit bytes preserved on admitted native controls; profile/help/safety metadata qualified; only selected Vue adapters retired.",
+      "forbidden": "Missing fixture edit, false positive on clean binding or premature shared registry deletion.",
+      "executableOwner": "LNTV0",
+      "successorPath": ["LRA0", "LNTCFG0", "LNT2", "LNTV0"],
+      "receivingAcceptance": "LNTV0-AC-R1",
+      "existingEvidence": [
+        "crates/verter_diagnostics/src/rules/vue/require_component_is.rs::component_with_dynamic_is_passes",
+        "crates/verter_actions/src/providers/add_component_is.rs::adds_is_binding",
+        "crates/verter_actions/src/providers/remove_unsafe_url.rs::replaces_javascript_url"
+      ]
+    },
+    {
+      "id": "RC13",
+      "name": "Representative Svelte adoption and retained neutral behavior",
+      "input": "Authored FS01/FS02; active Svelte, inactive Svelte, active Vue and dynamic URL controls.",
+      "required": "BlockLang behavior preserved; selected static URL body/provider adopted under exact Svelte identity; no Vue identity leakage; unsupported cells explicit; shared bodies remain.",
+      "forbidden": "Claiming a current Svelte unsafe-URL baseline, loss of neutral behavior or Vue-shaped global rule row.",
+      "executableOwner": "LNTS0",
+      "successorPath": ["LRA0", "LNTCFG0", "LNT2", "LNTS0"],
+      "receivingAcceptance": "LNTS0-AC-R1",
+      "existingEvidence": [
+        "crates/verter_diagnostics/src/linter.rs::carrier_neutral_rule_runs_on_both_carriers",
+        "crates/verter_actions/src/providers/remove_unsafe_url.rs::replaces_javascript_url"
+      ]
+    },
+    {
+      "id": "RC14",
+      "name": "Shared initial-pack public cutover",
+      "input": "Initial pack fixtures through LSP, NAPI, WASM/FFI and MCP/scoring.",
+      "required": "Equivalent rule identity, severity, authored geometry, provenance and edit bytes on each surface; one shared service; zero legacy registry callers.",
+      "forbidden": "Terminal implementing pack defects, external auto-fix or LSP-only post-filter.",
+      "executableOwner": "LNT3",
+      "successorPath": ["LRA0", "LNTCFG0", "LNT2", "LNTV0", "LNT3"],
+      "receivingAcceptance": "LNT3-AC2",
+      "existingEvidence": []
+    },
+    {
+      "id": "RC15",
+      "name": "Ownership inventory refusal",
+      "input": "Positive complete inventory; remove member, use unknown or pathless owner, conflict assignments, or nominate docs-only deletion owner.",
+      "required": "UAP0-AC-R1 rejects each invalid inventory while accepting the complete single-owner control.",
+      "forbidden": "Text-only blanket completeness assertion or accepting a non-production deletion owner.",
+      "executableOwner": "UAP0",
+      "successorPath": ["LRA0", "UAP0"],
+      "receivingAcceptance": "UAP0-AC-R1",
+      "existingEvidence": []
+    },
+    {
+      "id": "RC16",
+      "name": "Neutral body and external boundary",
+      "input": "Same neutral facts under Vue/Svelte, conflicting external/native concept, untrusted external policy and WASM.",
+      "required": "Same common body without framework branches; one selected authority; denied external execution gives explicit unavailable/refused outcome.",
+      "forbidden": "Third-party code in core, silent fallback or duplicate fixes.",
+      "executableOwner": "LNT2",
+      "successorPath": ["LRA0", "LNTCFG0", "LNT2"],
+      "receivingAcceptance": "LNT2-AC2",
+      "existingEvidence": []
+    }
+  ],
+  "fixtures": [
+    {
+      "id": "FV01",
+      "profile": "Captured admitted exact Vue release",
+      "source": "<template><component></component></template>",
+      "rule": "require-component-is",
+      "diagnostic": {
+        "span": [10, 21],
+        "encoding": "authored UTF-8",
+        "severity": "error"
+      },
+      "provider": "AddComponentIs",
+      "edit": {
+        "span": [20, 20],
+        "replacement": " :is=\"\""
+      },
+      "cleanSource": "<template><component :is=\"View\"></component></template>",
+      "implementationOwner": "LNTV0",
+      "successorPath": ["LRA0", "LNTCFG0", "LNT2", "LNTV0"],
+      "receivingAcceptance": "LNTV0-AC-R1",
+      "note": "Existing body requires dynamic is; provider byte parity is pinned, but empty expression is a placeholder and never machine-applicable. Ordinary div and wrong-profile controls stay quiet."
+    },
+    {
+      "id": "FV02",
+      "profile": "Captured admitted exact Vue release",
+      "source": "<template><a href=\"javascript:alert(1)\">go</a></template>",
+      "rule": "no-unsafe-url",
+      "diagnostic": {
+        "span": [13, 39],
+        "encoding": "authored UTF-8",
+        "severity": "error"
+      },
+      "provider": "RemoveUnsafeUrl",
+      "existingProviderInputSpan": [18, 39],
+      "edit": {
+        "span": [18, 39],
+        "replacement": "\"#\""
+      },
+      "cleanSource": "<template><a href=\"https://example.test\">go</a></template>",
+      "implementationOwner": "LNTV0",
+      "successorPath": ["LRA0", "LNTCFG0", "LNT2", "LNTV0"],
+      "receivingAcceptance": "LNTV0-AC-R1",
+      "note": "Provider fixture pins its supplied quoted-value diagnostic span, as existing provider tests do. This is not evidence that current rule-to-provider span composition is correct: the rule reports attr.span. The receiving pack must bind parsed attribute/value geometry and test the integrated route without deleting or blessing either semantic test."
+    },
+    {
+      "id": "FS01",
+      "profile": "Captured admitted exact Svelte release",
+      "source": "<script>let n = 1;</script><p>{n}</p>",
+      "rule": "block-lang",
+      "diagnostic": {
+        "span": [0, 8],
+        "encoding": "authored UTF-8",
+        "severity": "warning"
+      },
+      "provider": null,
+      "edit": null,
+      "cleanSource": "<script lang=\"ts\">let n = 1;</script><p>{n}</p>",
+      "implementationOwner": "LNTS0",
+      "successorPath": ["LRA0", "LNTCFG0", "LNT2", "LNTS0"],
+      "receivingAcceptance": "LNTS0-AC-R1",
+      "note": "Existing carrier-neutral block fact behavior; no current fix provider, so action applicability is none with a reason. Svelte identity and common-body ownership must remain distinct."
+    },
+    {
+      "id": "FS02",
+      "profile": "Captured admitted exact Svelte release",
+      "source": "<a href=\"javascript:alert(1)\">go</a>",
+      "rule": "no-unsafe-url",
+      "diagnostic": {
+        "span": [3, 29],
+        "encoding": "authored UTF-8",
+        "severity": "error"
+      },
+      "provider": "RemoveUnsafeUrl",
+      "existingProviderInputSpan": [8, 29],
+      "edit": {
+        "span": [8, 29],
+        "replacement": "\"#\""
+      },
+      "cleanSource": "<a href=\"https://example.test\">go</a>",
+      "implementationOwner": "LNTS0",
+      "successorPath": ["LRA0", "LNTCFG0", "LNT2", "LNTS0"],
+      "receivingAcceptance": "LNTS0-AC-R1",
+      "note": "Selected new Svelte row adopts existing static URL body/provider behavior. No active Svelte-specific row exists at this head. Dynamic href={url} and inactive-profile controls stay quiet; pointer geometry is parser-owned, not recovered by scanning strings. Quote-preserving provider twins retain their own existing tests."
+    }
+  ]
+}

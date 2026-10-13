@@ -1,0 +1,440 @@
+{
+  "id": "rules-actions-inventory.v1",
+  "schema": 1,
+  "contractNode": "LRA0",
+  "describesHead": {
+    "landingTitle": "docs(arch): define atomic contribution and candidate contracts (#879)",
+    "date": "2026-10-13"
+  },
+  "currentOwner": "framework-shaped host/session registries and untagged public boundaries",
+  "finalOwner": "typed immutable universal catalog and demand-selected kernel services",
+  "companionFiles": ["rules-actions-cases.v1.json"],
+  "inventoryRule": "This is reviewed data, not an executable schema or a DAG/ledger mirror. Each outcome and consumer has one implementation owner; every displaced route has one production-capable deletion/rejection owner. UAP0-AC-R1 validates coverage and bindings. Imported routes retain their original owner/path; their prerequisite owner need not be a successor of LRA0.",
+  "outcomes": [
+    {
+      "id": "LRA-O01",
+      "outcome": "Exact rule/oracle cells, profile release, native/equivalent/external/unsupported claims",
+      "implementationOwner": "LNT0",
+      "successorPath": ["LRA0", "LNT0"],
+      "receivingAcceptance": "LNT0-AC2"
+    },
+    {
+      "id": "LRA-O02",
+      "outcome": "Captured effective lint configuration, aliases and provenance",
+      "implementationOwner": "LNTCFG0",
+      "successorPath": ["LRA0", "LNTCFG0"],
+      "receivingAcceptance": "LNTCFG0-AC2"
+    },
+    {
+      "id": "LRA-O03",
+      "outcome": "Demand-selected typed facts; zero inapplicable rule work",
+      "implementationOwner": "LNT2",
+      "successorPath": ["LRA0", "LNTCFG0", "LNT2"],
+      "receivingAcceptance": "LNT2-AC4"
+    },
+    {
+      "id": "LRA-O04",
+      "outcome": "Diagnostic identity, independent quality, canonical order, single native/external owner",
+      "implementationOwner": "LNT2",
+      "successorPath": ["LRA0", "LNTCFG0", "LNT2"],
+      "receivingAcceptance": "LNT2-AC2"
+    },
+    {
+      "id": "LRA-O05",
+      "outcome": "Immutable T08 rule/action registration and sole initial shared invocation cutover",
+      "implementationOwner": "LNT3",
+      "successorPath": ["LRA0", "LNTCFG0", "LNT2", "LNTV0", "LNT3"],
+      "receivingAcceptance": "LNT3-AC1"
+    },
+    {
+      "id": "LRA-O06",
+      "outcome": "Selected Vue rows/fixes and authored fixture equivalence",
+      "implementationOwner": "LNTV0",
+      "successorPath": ["LRA0", "LNTCFG0", "LNT2", "LNTV0"],
+      "receivingAcceptance": "LNTV0-AC-R1"
+    },
+    {
+      "id": "LRA-O07",
+      "outcome": "Selected Svelte rows/fixes and authored fixture equivalence",
+      "implementationOwner": "LNTS0",
+      "successorPath": ["LRA0", "LNTCFG0", "LNT2", "LNTS0"],
+      "receivingAcceptance": "LNTS0-AC-R1"
+    },
+    {
+      "id": "LRA-O08",
+      "outcome": "Profile-qualified suppression geometry and consumption provenance",
+      "implementationOwner": "LK2",
+      "successorPath": ["LRA0", "LSO8", "ACT1", "LK2"],
+      "receivingAcceptance": "LK2-AC1"
+    },
+    {
+      "id": "LRA-O09",
+      "outcome": "Alternatives, help, secondary spans, independent applicability and behavioral safety",
+      "implementationOwner": "ACT1",
+      "successorPath": ["LRA0", "LSO8", "ACT1"],
+      "receivingAcceptance": "ACT1-AC1"
+    },
+    {
+      "id": "LRA-O10",
+      "outcome": "Exact-basis authored multi-file transactions and rejection",
+      "implementationOwner": "LSO8",
+      "successorPath": ["LRA0", "LSO8"],
+      "receivingAcceptance": "LSO8-AC2"
+    },
+    {
+      "id": "LRA-O11",
+      "outcome": "Overlay verification, completeness, current-basis receipt and fixpoint",
+      "implementationOwner": "ACT2",
+      "successorPath": ["LRA0", "LSO8", "ACT1", "ACT2"],
+      "receivingAcceptance": "ACT2-AC5"
+    },
+    {
+      "id": "LRA-O12",
+      "outcome": "Cross-surface exact-basis public envelopes and truthful capabilities",
+      "implementationOwner": "PUB0T",
+      "successorPath": ["LRA0", "PUB0", "PUB0T"],
+      "receivingAcceptance": "PUB0T-AC2"
+    },
+    {
+      "id": "LRA-O13",
+      "outcome": "Executable contract ownership validator",
+      "implementationOwner": "UAP0",
+      "successorPath": ["LRA0", "UAP0"],
+      "receivingAcceptance": "UAP0-AC-R1"
+    },
+    {
+      "id": "LRA-O14",
+      "outcome": "Executable zero-work, different-profile epochs and stale/conflicting edits",
+      "implementationOwner": "UAP0",
+      "successorPath": ["LRA0", "UAP0"],
+      "receivingAcceptance": "UAP0-AC-R2"
+    }
+  ],
+  "consumers": [
+    {
+      "id": "LRA-C01",
+      "consumer": "Configuration readers",
+      "source": "crates/verter_diagnostics/src/config.rs",
+      "implementationOwner": "LNTCFG0",
+      "successorPath": ["LRA0", "LNTCFG0"],
+      "receivingAcceptance": "LNTCFG0-AC2"
+    },
+    {
+      "id": "LRA-C02",
+      "consumer": "Rule enumeration and registration",
+      "source": "crates/verter_diagnostics/src/rules/mod.rs",
+      "implementationOwner": "LNT3",
+      "successorPath": ["LRA0", "LNTCFG0", "LNT2", "LNTV0", "LNT3"],
+      "receivingAcceptance": "LNT3-AC2"
+    },
+    {
+      "id": "LRA-C03",
+      "consumer": "Analysis/index/TypeInfo fact consumers in lint",
+      "source": "crates/verter_diagnostics/src/linter.rs",
+      "implementationOwner": "LNT2",
+      "successorPath": ["LRA0", "LNTCFG0", "LNT2"],
+      "receivingAcceptance": "LNT2-AC2"
+    },
+    {
+      "id": "LRA-C04",
+      "consumer": "Comment suppression and diagnostic presentation",
+      "source": "crates/verter_diagnostics/src/comment_directives.rs",
+      "implementationOwner": "LK2",
+      "successorPath": ["LRA0", "LSO8", "ACT1", "LK2"],
+      "receivingAcceptance": "LK2-AC6"
+    },
+    {
+      "id": "LRA-C05",
+      "consumer": "Action provider and assist consumers",
+      "source": "crates/verter_actions/src/engine.rs",
+      "implementationOwner": "ACT1",
+      "successorPath": ["LRA0", "LSO8", "ACT1"],
+      "receivingAcceptance": "ACT1-AC1"
+    },
+    {
+      "id": "LRA-C06",
+      "consumer": "LSP diagnostics and code-action bridge",
+      "source": "crates/verter_lsp/src/features/diagnostics_bridge.rs",
+      "implementationOwner": "LNT3",
+      "successorPath": ["LRA0", "LNTCFG0", "LNT2", "LNTV0", "LNT3"],
+      "receivingAcceptance": "LNT3-AC2"
+    },
+    {
+      "id": "LRA-C07",
+      "consumer": "NAPI lint and action entrypoints",
+      "source": "crates/verter_napi/src/lib.rs",
+      "implementationOwner": "LNT3",
+      "successorPath": ["LRA0", "LNTCFG0", "LNT2", "LNTV0", "LNT3"],
+      "receivingAcceptance": "LNT3-AC2"
+    },
+    {
+      "id": "LRA-C08",
+      "consumer": "WASM lint and action entrypoints",
+      "source": "crates/verter_wasm/src/lib.rs",
+      "implementationOwner": "LNT3",
+      "successorPath": ["LRA0", "LNTCFG0", "LNT2", "LNTV0", "LNT3"],
+      "receivingAcceptance": "LNT3-AC2"
+    },
+    {
+      "id": "LRA-C09",
+      "consumer": "FFI diagnostic/action converters",
+      "source": "crates/verter_ffi/src/convert/actions.rs",
+      "implementationOwner": "PUB0T",
+      "successorPath": ["LRA0", "PUB0", "PUB0T"],
+      "receivingAcceptance": "PUB0T-AC2"
+    },
+    {
+      "id": "LRA-C10",
+      "consumer": "MCP diagnostics and scoring",
+      "source": "crates/verter_mcp/src/tools/scoring.rs",
+      "implementationOwner": "LNT3",
+      "successorPath": ["LRA0", "LNTCFG0", "LNT2", "LNTV0", "LNT3"],
+      "receivingAcceptance": "LNT3-AC2"
+    }
+  ],
+  "displacedRoutes": [
+    {
+      "id": "LRA-D01",
+      "category": "central framework switch",
+      "route": "Mutable RuleRegistry::{new,register,builtin,for_carrier}; register_builtin_rules; LintRule::applicability default Vue",
+      "source": "crates/verter_diagnostics/src/rules/mod.rs",
+      "deletionOwner": "LNT3",
+      "successorPath": ["LRA0", "LNTCFG0", "LNT2", "LNTV0", "LNT3"],
+      "receivingAcceptance": "LNT3-AC1",
+      "parentRoute": "CAT-D05",
+      "disposition": "Replace shared registry/invocation with immutable T08 rows exactly once after initial pack parity. Pack owners retire only their selected rows."
+    },
+    {
+      "id": "LRA-D02",
+      "category": "central framework switch",
+      "route": "Direct Linter construction/invocation in NAPI, WASM, LSP and MCP scoring",
+      "source": "crates/verter_diagnostics/src/linter.rs",
+      "deletionOwner": "LNT3",
+      "successorPath": ["LRA0", "LNTCFG0", "LNT2", "LNTV0", "LNT3"],
+      "receivingAcceptance": "LNT3-AC1",
+      "parentRoute": "CAT-D05",
+      "disposition": "Route all initial public consumers through LNT2's service at the shared cutover; no post-emission framework filter."
+    },
+    {
+      "id": "LRA-D03",
+      "category": "untagged public identity",
+      "route": "LintDiagnostic unqualified rule and byte span; DiagnosticSet insertion order",
+      "source": "crates/verter_diagnostics/src/diagnostic.rs",
+      "deletionOwner": "LNT2",
+      "successorPath": ["LRA0", "LNTCFG0", "LNT2"],
+      "receivingAcceptance": "LNT2-AC2",
+      "parentRoute": null,
+      "disposition": "Produce profile/epoch-qualified diagnostic facts and canonical order from exact semantic/read-set basis."
+    },
+    {
+      "id": "LRA-D04",
+      "category": "central framework switch",
+      "route": "ActionEngine::{builtin,register,fixes_for,actions_at} provider-wide dispatch",
+      "source": "crates/verter_actions/src/engine.rs",
+      "deletionOwner": "ACT1",
+      "successorPath": ["LRA0", "LSO8", "ACT1"],
+      "receivingAcceptance": "ACT1-AC1",
+      "parentRoute": null,
+      "disposition": "Migrate provider dispatch onto the single qualified action model; never a second registry beside T08."
+    },
+    {
+      "id": "LRA-D05",
+      "category": "untagged coordinate/public identity",
+      "route": "CodeAction/FileEdit lacks authored revision/map basis; AutofixSafety conflates applicability",
+      "source": "crates/verter_actions/src/types.rs",
+      "deletionOwner": "ACT1",
+      "successorPath": ["LRA0", "LSO8", "ACT1"],
+      "receivingAcceptance": "ACT1-AC2",
+      "parentRoute": null,
+      "disposition": "Replace with alternatives consuming LSO8 transactions; retain bytes on fixtures, reject unbound or non-reversible edits."
+    },
+    {
+      "id": "LRA-D06",
+      "category": "untagged public identity",
+      "route": "Disable-to-EOF, no-op Enable and 500-byte fallback geometry",
+      "source": "crates/verter_diagnostics/src/comment_directives.rs",
+      "deletionOwner": "LK2",
+      "successorPath": ["LRA0", "LSO8", "ACT1", "LK2"],
+      "receivingAcceptance": "LK2-AC2",
+      "parentRoute": null,
+      "disposition": "Replace with paired profile-qualified authored directives and truthful geometry refusal."
+    },
+    {
+      "id": "LRA-D07",
+      "category": "central framework switch",
+      "route": "RequireComponentIs and AddComponentIs legacy representative registration rows",
+      "source": "crates/verter_actions/src/providers/add_component_is.rs",
+      "deletionOwner": "LNTV0",
+      "successorPath": ["LRA0", "LNTCFG0", "LNT2", "LNTV0"],
+      "receivingAcceptance": "LNTV0-AC-R1",
+      "parentRoute": null,
+      "disposition": "Retire only selected Vue rows/adapters after fixture parity; body/model and shared registry keep their separate owners."
+    },
+    {
+      "id": "LRA-D08",
+      "category": "central framework switch",
+      "route": "NoUnsafeUrl and RemoveUnsafeUrl selected Vue registration rows",
+      "source": "crates/verter_actions/src/providers/remove_unsafe_url.rs",
+      "deletionOwner": "LNTV0",
+      "successorPath": ["LRA0", "LNTCFG0", "LNT2", "LNTV0"],
+      "receivingAcceptance": "LNTV0-AC-R1",
+      "parentRoute": null,
+      "disposition": "Retire selected Vue registration adapter, preserve shared body and Svelte consumer."
+    },
+    {
+      "id": "LRA-D09",
+      "category": "central framework switch",
+      "route": "BlockLang legacy Svelte selection via common filtered registry; absent Svelte unsafe-URL row",
+      "source": "crates/verter_diagnostics/src/rules/vue/block_lang.rs",
+      "deletionOwner": "LNTS0",
+      "successorPath": ["LRA0", "LNTCFG0", "LNT2", "LNTS0"],
+      "receivingAcceptance": "LNTS0-AC-R1",
+      "parentRoute": null,
+      "disposition": "Replace the Svelte selection adapter with qualified rows. Refuse Vue rule identity on Svelte; absent Svelte-specific row is an empty population, not a deletion."
+    }
+  ],
+  "referencedRoutes": [
+    {
+      "id": "D01-D08",
+      "route": "Central grammar/registration and conflated carrier/adapter identity",
+      "deletionOwner": "CPF1",
+      "successorPath": ["UAK0", "UAK1", "CAT0", "CPF1"],
+      "receivingAcceptance": "CPF1-AC1",
+      "owningContract": "tests/kernel/UAK0/products/deletion-retag-ledger.v1.json",
+      "disposition": "Reference only; original owner retires production. LRA0 adds no second owner."
+    },
+    {
+      "id": "D09-D11",
+      "route": "Capability/global framework gates and per-consumer branches",
+      "deletionOwner": "COX0",
+      "successorPath": ["UAK0", "UAK1", "CAT0", "DEM0", "COX0"],
+      "receivingAcceptance": "COX0-AC1",
+      "owningContract": "tests/kernel/UAK0/products/deletion-retag-ledger.v1.json",
+      "disposition": "Reference only; original owner retires production. LRA0 adds no second owner."
+    },
+    {
+      "id": "D16",
+      "route": "Non-editor public coordinate conversion",
+      "deletionOwner": "ENCF0",
+      "successorPath": ["ENC0", "ENCF0"],
+      "receivingAcceptance": "ENCF0-AC1",
+      "owningContract": "tests/kernel/UAK0/products/deletion-retag-ledger.v1.json",
+      "disposition": "Reference only; original owner retires production. LRA0 adds no second owner."
+    },
+    {
+      "id": "D17",
+      "route": "Editor public coordinate conversion",
+      "deletionOwner": "ENCL0",
+      "successorPath": ["ENC0", "ENCL0"],
+      "receivingAcceptance": "ENCL0-AC1",
+      "owningContract": "tests/kernel/UAK0/products/deletion-retag-ledger.v1.json",
+      "disposition": "Reference only; original owner retires production. LRA0 adds no second owner."
+    },
+    {
+      "id": "D12-D15",
+      "route": "Duplicate component-meta resolver/cache/public projection and legacy TypeInfo DTO authority",
+      "deletionOwner": "TIF1",
+      "successorPath": ["TIF1D", "TIF1"],
+      "receivingAcceptance": "TIF1-AC1",
+      "owningContract": "docs/arch/kernel/tif1d-componentinfo-view.md",
+      "disposition": "Reference only; original owner retires production. LRA0 adds no second owner."
+    },
+    {
+      "id": "D18",
+      "route": "Per-request component discovery",
+      "deletionOwner": "IDX0",
+      "successorPath": ["IDX0D", "IDX0"],
+      "receivingAcceptance": "IDX0-AC1",
+      "owningContract": "docs/arch/kernel/idx0d-contributions.md",
+      "disposition": "Reference only; original owner retires production. LRA0 adds no second owner."
+    }
+  ],
+  "importedBoundaryOwners": [
+    {
+      "boundary": "CarrierProfileId, FrameworkProfileId and ProjectProfileId",
+      "implementationOwner": "VID0T",
+      "successorPath": ["VID0", "VID0T"],
+      "receivingAcceptance": "VID0T-AC1",
+      "owningContract": "docs/arch/kernel/identities.md"
+    },
+    {
+      "boundary": "CatalogSnapshot construction and identity; T08 row contents stay LNT3",
+      "implementationOwner": "CPF1",
+      "successorPath": ["CAT0", "CPF1"],
+      "receivingAcceptance": "CPF1-AC2",
+      "owningContract": "docs/arch/kernel/catalog.md"
+    },
+    {
+      "boundary": "DemandPlan selection and submission; lint fact scheduling stays LNT2",
+      "implementationOwner": "COX0",
+      "successorPath": ["DEM0", "COX0"],
+      "receivingAcceptance": "COX0-AC2",
+      "owningContract": "docs/arch/kernel/demand-activation.md"
+    },
+    {
+      "boundary": "TypeInfoRequest component view and facet consumption",
+      "implementationOwner": "TIF1",
+      "successorPath": ["TIF1D", "TIF1"],
+      "receivingAcceptance": "TIF1-AC2",
+      "owningContract": "docs/arch/kernel/tif1d-componentinfo-view.md"
+    }
+  ],
+  "surfaceReferences": [
+    {
+      "surface": "crates/verter_identity/src",
+      "boundaries": ["SourceUnitId", "SourceRevision", "ContentId", "MapRevision"],
+      "disposition": "Imported existing source basis and VID0 successor profile types; no rule authority or new identity implementation here."
+    },
+    {
+      "surface": "crates/verter_language/src",
+      "boundaries": ["LanguageDiagnostic", "LanguageDiagnosticOrderKey", "CarrierProfileId"],
+      "disposition": "Retain carrier diagnostics and exact parse identity; CPF1/VID0T own imported carrier/profile cutover."
+    },
+    {
+      "surface": "crates/verter_session/src",
+      "boundaries": [
+        "CatalogSnapshot",
+        "DemandPlan",
+        "TypeInfoRequest",
+        "ComponentInfo",
+        "ContributionSnapshot"
+      ],
+      "consumers": ["LRA-C03"],
+      "disposition": "LNT2 consumes the existing shared owners; TIF1/IDX0 own imported duplicate authority retirement."
+    },
+    {
+      "surface": "crates/verter_protocol/src",
+      "boundaries": ["TypeInfoRequest", "DiagnosticFact", "action alternatives"],
+      "consumers": ["LRA-C06", "LRA-C07", "LRA-C08", "LRA-C09", "LRA-C10"],
+      "disposition": "PUB0T owns shared envelopes; initial lint parity remains LNT3; ENC owners retain conversions."
+    }
+  ],
+  "emptyPopulations": [
+    {
+      "id": "LRA-E01",
+      "population": "Live exact-release T08 rule/action rows, successor profile newtypes and lint service",
+      "reason": "Current code has adapter filtering and mutable registries; docs-only predecessor decisions do not implement their successor types."
+    },
+    {
+      "id": "LRA-E02",
+      "population": "Native Svelte-specific diagnostic/fix rows",
+      "reason": "No Svelte rule module is registered at this head. BlockLang is carrier-neutral; NoUnsafeUrl still defaults to Vue. LNTS0 receives explicit representative adoption controls."
+    },
+    {
+      "id": "LRA-E03",
+      "population": "Machine-applicable verification receipts and isolated fix-all",
+      "reason": "Current CodeAction safety has no independent applicability/verification model; ACT1/ACT2 implement it."
+    },
+    {
+      "id": "LRA-E04",
+      "population": "Registered third-party executable rule code",
+      "reason": "Forbidden. External execution is LNT2's explicit trusted-host boundary; data contributions cannot execute code."
+    }
+  ],
+  "acceptance": {
+    "LRA0-AC1": "Inventory and paths above; UAP0-AC-R1 owns executable omission, unknown/pathless/conflicting owner rejection.",
+    "LRA0-AC2": "Identity, provenance, independent completeness and canonical ordering law in rules-actions.md plus existing tests and receiving cases.",
+    "LRA0-AC3": "Runtime comparison not applicable to zero-production docs; existing cache/publication/cancellation authority is untouched. Cases preserve receiving incremental and degraded non-admission obligations.",
+    "LRA0-AC4": "Runtime measurements not applicable: no parser, resolver, planner, emit, copy, allocation or retained candidate change. UAP0/LNT2 receive exact zero-work obligations."
+  }
+}
