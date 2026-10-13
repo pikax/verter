@@ -26556,18 +26556,28 @@ fn typeof_instantiation_args_do_not_clobber_same_name_infer_declaration() {
         &verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
         "the explicit `<string>` argument substitutes into the check operand"
     );
-    // …the `infer T` declaration inside the extends carrier survives…
+    // The structural argument keeps the helper application addressable;
+    // its infer declaration is still the exact argument, never outer T.
+    let verter_type_expr::TypeExpr::Ref {
+        name,
+        type_arguments,
+    } = extends.as_ref()
+    else {
+        panic!("expected the structural Boxed carrier, got {extends:?}");
+    };
+    assert_eq!(name.as_ref(), "Boxed");
+    assert_eq!(type_arguments.len(), 1);
     assert_eq!(
-        expect_object_property(extends, "boxed", "extends carrier surface"),
-        verter_type_expr::TypeExpr::Infer {
+        &type_arguments[0],
+        &verter_type_expr::TypeExpr::Infer {
             name: "T".to_string(),
             constraint: None,
         },
         "the `infer T` declaration survives in the extends position"
     );
     assert_ne!(
-        expect_object_property(extends, "boxed", "extends carrier surface"),
-        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+        &type_arguments[0],
+        &verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
         "the published extends must NOT contain the argument where the infer binds"
     );
     // …and the false branch is intact.
@@ -29438,7 +29448,10 @@ fn evaluate_deferred_memo_does_not_publish_budget_tainted_result() {
     // completed before the budget trip and stays legitimately warm.
     assert!(
         graph
-            .peek_evaluate_deferred_memo_for_tests(inner, context)
+            .peek_evaluate_deferred_memo_for_tests(
+                inner,
+                context.into_structural_transit_with_mode(ProjectionMode::Navigate),
+            )
             .is_some(),
         "the clean sub-evaluation (inner) must remain cached; only the tainted entry is withheld"
     );

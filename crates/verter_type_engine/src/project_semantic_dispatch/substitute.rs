@@ -756,7 +756,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             if self.cancellation.is_cancelled() {
                 return self.opaque(QueryError::Miss);
             }
-            if !self.mentions_any(result, &[param]) {
+            if !self.subtree_references_node(result, param) {
                 continue;
             }
             // The conditional may already have demanded this indexed type
