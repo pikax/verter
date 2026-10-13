@@ -6954,7 +6954,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// files is ONE variable whose type is its first declaration's (the
     /// checker requires every later declaration to repeat it, TS2403), so
     /// only that one is listed; a function declared in several files is
-    /// one function whose overloads are every file's, so all are. `None`
+    /// one function whose overloads are every file's, so all are; an enum
+    /// declared in several files is one enum, listed by its first
+    /// declaration, which carries every file's members. `None`
     /// when neither declares such a global value, or when this lane cannot
     /// address it:
     ///
@@ -7071,9 +7073,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let is_function = |kind: &ValueDeclKind| {
                 matches!(kind, ValueDeclKind::Function | ValueDeclKind::AsyncFunction)
             };
+            // An enum declared in several files is ONE enum too, whose
+            // first declaration carries every file's members
+            // (`enum_blocks`).
             if declarations
                 .iter()
                 .all(|(_, kind)| *kind == ValueDeclKind::Var)
+                || declarations
+                    .iter()
+                    .all(|(_, kind)| *kind == ValueDeclKind::Enum)
             {
                 declarations.truncate(1);
             } else if !declarations.iter().all(|(_, kind)| is_function(kind)) {
