@@ -243,14 +243,17 @@ fn barrel_chain_proofs_and_folding_grow_with_the_answer() {
         });
         let signature_before =
             verter_session_query::facts::fact_read_set::signature_work_for_tests();
-        let root = host.module_export_table("/wb/m0.ts").expect("root table");
+        let view = host.resolver_store_view_read().into_owned_view();
+        let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+        let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &view, overlay);
+        let root = host_ctx
+            .module_export_table("/wb/m0.ts")
+            .expect("root table");
         assert_eq!(root.bindings.len(), count);
-        let proof_work = verter_session_query::facts::fact_read_set::signature_work_for_tests()
-            - signature_before;
         let mut owned_slots = root.owned_binding_slots;
         let mut proof_entries = 0;
         for i in 0..count {
-            let table = host
+            let table = host_ctx
                 .module_export_table(&format!("/wb/m{i}.ts"))
                 .expect("shared suffix");
             assert_eq!(table.bindings.len(), count - i);
@@ -259,6 +262,12 @@ fn barrel_chain_proofs_and_folding_grow_with_the_answer() {
                 owned_slots += table.owned_binding_slots;
             }
         }
+        let proof_work = verter_session_query::facts::fact_read_set::signature_work_for_tests()
+            - signature_before;
+        // Every suffix read belongs to the same request, so shared evidence is
+        // validated once instead of rebuilding a store view for each module.
+        drop(host_ctx);
+        drop(view);
         let source = "import * as ns from './m0'; type __Probe = (typeof ns)[keyof typeof ns];";
         crate::u6_flow_shape_corpus_tests::upsert(
             &host,

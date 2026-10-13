@@ -1,7 +1,7 @@
 /**
  * The self-referential perf-regression gate (the CI perf gate).
  *
- * Runs a CANDIDATE Verter build against a PINNED-BASELINE Verter build on the
+ * Runs a CANDIDATE Verter build against a separately built baseline Verter build on the
  * SAME runner / job / corpus / tsgo / thread count, INTERLEAVED, and compares
  * the RATIO of each side's statistic (median for time/throughput/RSS, the named
  * percentile for tail latency) with a bootstrap 95% CI — never absolute
@@ -39,6 +39,7 @@
  *   node --import tsx src/perf/gate.ts
  *     [--candidate-bin <dir>] [--baseline-bin <dir>]          # binary builds
  *     [--candidate-native <pkgRoot>] [--baseline-native <pkgRoot>]  # axis-A native
+ *     [--baseline-root <dir>] [--baseline-ref <resolved checkout identity>]
  *     [--samples N] [--threads N] [--ops N] [--smoke] [--out <artifact.json>]
  */
 import { availableParallelism, tmpdir } from "node:os";
@@ -158,7 +159,6 @@ export interface DeferredMetric {
 
 export interface BaselineManifest {
   methodologyVersion: string;
-  baselineRef: string;
   corpusHash: string;
   tsgoVersion: string;
   samplesPerSide: number;
@@ -239,7 +239,7 @@ export function validateManifest(raw: unknown): BaselineManifest {
   if (!isPlainObject(raw)) {
     throw new Error("perf manifest: not an object");
   }
-  for (const key of ["methodologyVersion", "baselineRef", "corpusHash", "tsgoVersion"] as const) {
+  for (const key of ["methodologyVersion", "corpusHash", "tsgoVersion"] as const) {
     const v = raw[key];
     if (typeof v !== "string" || v.length === 0) {
       throw new Error(
@@ -432,6 +432,8 @@ export interface GateEvaluationInput {
   readonly workloads: readonly WorkloadEvaluationInput[];
   readonly smoke: boolean;
   readonly selfCheck: boolean;
+  /** Resolved baseline checkout identity supplied by this measurement run. */
+  readonly baselineRef?: string;
   /** Engine resolved from the CANDIDATE workspace. */
   readonly engineResolved: string;
   /** Engine resolved from the BASELINE worktree (== candidate in self-check). */
@@ -806,48 +808,25 @@ export function evaluateGate(input: GateEvaluationInput): GateReport {
     else failures.push(msg);
   };
 
-  // Armed mode requires a PINNED, immutable baseline: a full 40-hex commit hash.
-  // The PENDING placeholder is the ONLY sanctioned unarmed sentinel; any other
-  // non-SHA value ("", "TODO", a branch name, a moving tag) is an unpinned ref
-  // that must NEVER arm the gate (it would float the baseline). Both force
-  // self-check mode; a non-self-check (distinct-side) run against an unpinned
-  // baseline is a hard fail — physically incapable of a green armed verdict.
-  const isPendingRef = /^\s*PENDING/i.test(manifest.baselineRef);
-  const isPinnedSha = /^[0-9a-f]{40}$/i.test(manifest.baselineRef.trim());
-  const armedExpected = isPinnedSha;
+  // Checkout identities are supplied by the run, never pinned in the corpus
+  // manifest. Resolve moving refs before building so both sides stay fixed
+  // throughout this measurement; a missing side must never become self-check.
+  const baselineRef = input.baselineRef?.trim() ?? "";
+  const armedExpected = /^[0-9a-f]{40}$/i.test(baselineRef);
   const mode: "self-check" | "armed" = selfCheck || !armedExpected ? "self-check" : "armed";
-
-  // Arming discipline — an unarmed run is a loud self-check, never a green armed gate.
   if (!armedExpected) {
-    if (isPendingRef) {
-      warnings.push(
-        "perf gate NOT ARMED — baselineRef is PENDING; this is a same-commit predicate self-check only " +
-          "(not a regression gate). Arm via a `perf: refresh baseline` change that pins a 40-hex baseline SHA.",
-      );
-    } else {
-      warnings.push(
-        `perf gate NOT ARMED — baselineRef ${JSON.stringify(manifest.baselineRef)} is not a full 40-hex commit hash; ` +
-          "an unpinned/moving ref (a branch, a tag, a placeholder) cannot arm the gate. Pin it to the baseline commit hash via a `perf: refresh baseline` change.",
-      );
-    }
-    // An unpinned baseline handed DISTINCT side paths (a non-self-check
-    // invocation) is a misconfiguration: there is no pinned baseline build to
-    // compare against, so it can ONLY run as a same-commit self-check. Hard-fail
-    // rather than silently present a green gate on an unpinned baseline.
+    warnings.push(
+      "perf gate NOT ARMED — no resolved runtime baseline identity; predicate self-check only.",
+    );
     if (!selfCheck) {
-      const why = isPendingRef
-        ? "PENDING (unarmed)"
-        : `not a pinned 40-hex SHA (${JSON.stringify(manifest.baselineRef)})`;
       failures.push(
-        `baselineRef is ${why} but the gate ran in non-self-check mode — an unpinned baseline can only run as a same-commit self-check, never an armed comparison; refusing a false green.`,
+        "non-self-check comparison requires a resolved 40-hex runtime baseline identity — refusing a false green.",
       );
     }
   }
-  // An armed manifest that fell back to self-check ⇒ the pinned baseline build is
-  // missing ⇒ refuse a false green.
   if (armedExpected && selfCheck) {
     failures.push(
-      "baselineRef is armed but the gate ran in self-check mode (the pinned baseline build is absent) — refusing a false green.",
+      "runtime baseline is armed but the gate ran in self-check mode (the baseline build is absent) — refusing a false green.",
     );
   }
   // An armed (real-ref, non-self-check) comparison MUST resolve the baseline tsgo
@@ -1121,7 +1100,7 @@ export function evaluateGate(input: GateEvaluationInput): GateReport {
     pass: failures.length === 0,
     mode,
     corpusHash: input.meta.corpusHash,
-    baselineRef: manifest.baselineRef,
+    baselineRef: baselineRef || "(self-check)",
     candidateBin: input.meta.candidateBin ?? "(workspace target/)",
     baselineBin: input.meta.baselineBin ?? "(workspace target/)",
     candidateNative: input.meta.candidateNative ?? "(packages/native)",
@@ -1140,6 +1119,8 @@ export function evaluateGate(input: GateEvaluationInput): GateReport {
 
 // ── Measurement orchestration ────────────────────────────────────────────────
 interface GateOptions {
+  /** Resolved baseline checkout identity for this run. */
+  baselineRef?: string;
   candidateBin?: string;
   baselineBin?: string;
   candidateNative?: string;
@@ -1168,6 +1149,7 @@ function parseArgs(argv: string[]): GateOptions {
     else if (a === "--baseline-bin") o.baselineBin = argv[++i];
     else if (a === "--candidate-native") o.candidateNative = argv[++i];
     else if (a === "--baseline-native") o.baselineNative = argv[++i];
+    else if (a === "--baseline-ref") o.baselineRef = argv[++i];
     else if (a === "--baseline-root") o.baselineRoot = argv[++i];
     else if (a === "--samples") o.samples = Number(argv[++i]);
     else if (a === "--threads") o.threads = Number(argv[++i]);
@@ -1359,6 +1341,7 @@ export async function runGate(options: GateOptions): Promise<GateReport> {
     workloads: workloadInputs,
     smoke: options.smoke,
     selfCheck,
+    baselineRef: options.baselineRef,
     engineResolved: resolveEngineVersion(),
     baselineEngineResolved,
     meta: {
@@ -1385,7 +1368,7 @@ export async function runGate(options: GateOptions): Promise<GateReport> {
 function printGate(report: GateReport): void {
   const W = 92;
   console.log("\n" + "═".repeat(W));
-  console.log(" Self-referential perf-regression gate (candidate vs pinned baseline)");
+  console.log(" Self-referential perf-regression gate (candidate vs runtime baseline)");
   console.log("═".repeat(W));
   console.log(
     `  mode        : ${report.mode}${report.mode === "self-check" ? "  (candidate === baseline)" : ""}`,

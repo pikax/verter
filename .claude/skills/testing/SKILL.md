@@ -182,6 +182,15 @@ Tests are evidence, not a quota. At preflight, map each changed contract to the 
 - Incremental, cancellation, stale-publication, counter, allocation, soak, and performance evidence applies only when the change touches the corresponding authority or hot path. Otherwise record it as not applicable with a terse boundary-based rationale.
 - New features and bug fixes still require adequate regression evidence. Refactors must keep applicable existing coverage green; they do not earn new tests merely by changing structure.
 
+### Whole-module growth probes
+
+Read export-table suffixes through one `HostResolverContext` and its request
+view, as production does. The test-only `VerterHost` route adapter captures a
+fresh view per call, so using it for every suffix repeats dependency validation
+and snapshot setup. Include those suffix reads in proof-work accounting; a
+counter sampled only after the root build cannot detect that quadratic replay.
+Keep every suffix's binding/proof assertions and the final literal-value probe.
+
 ### LSP request barriers
 
 Reuse one server for read-only fixture matrices. Batch independent edit cases
