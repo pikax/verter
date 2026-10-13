@@ -9,12 +9,13 @@ const LIMITS: &[&str] = &["--mem-mb", "512", "--timeout-ms", "30000"];
 
 #[test]
 #[cfg(target_os = "macos")]
-fn exit_notifications_preserve_exact_three_generation_cpu() {
+fn exit_notifications_attribute_three_generation_cpu_or_report_bounds() {
     let dir = scratch("exit-sampled-cpu");
     let mut limits = LIMITS.to_vec();
     // Longer than the run deadline: exits must be observed without a
     // periodic sweep, independently of this worker's scheduling speed.
-    // cpu-tree reaps with wait as soon as each child exits.
+    // cpu-tree reaps immediately, with no sampler handshake, so attribution
+    // can remain unobserved even when every exit notification is delivered.
     limits.extend(["--sample-ms", "60000"]);
     let run = supervise_in(&dir, &limits, &["cpu-tree", "2", "50"], &[]);
     assert_eq!(run.code, Some(0), "stderr: {}", run.stderr);
@@ -22,20 +23,83 @@ fn exit_notifications_preserve_exact_three_generation_cpu() {
     let measured: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(run.dir.join("result.stdout.log")).unwrap())
             .unwrap();
-    let user = run.result["cpuUserMs"]
-        .as_f64()
-        .expect("exit-sampled user CPU");
+    assert_exit_cpu_accounting(&run.result, &measured);
+}
+
+fn assert_exit_cpu_accounting(result: &serde_json::Value, measured: &serde_json::Value) {
     let actual = measured["userMs"].as_f64().unwrap();
     assert!(actual > 0.0);
-    assert!(
-        (user - actual).abs() / actual <= 0.10,
-        "sampled {user}, reaped tree {actual}"
-    );
-    assert!(run.result["cpuKernelMs"]
-        .as_f64()
-        .is_some_and(|kernel| kernel >= measured["kernelMs"].as_f64().unwrap()));
-    assert!(run.result.get("cpuUserMsBounds").is_none());
-    assert!(run.result.get("cpuKernelMsBounds").is_none());
+    match (result["cpuUserMs"].as_f64(), result["cpuKernelMs"].as_f64()) {
+        (Some(user), Some(kernel)) => {
+            assert!(
+                (user - actual).abs() / actual <= 0.10,
+                "sampled {user}, reaped tree {actual}"
+            );
+            assert!(kernel >= measured["kernelMs"].as_f64().unwrap());
+            assert!(result.get("cpuUserMsBounds").is_none());
+            assert!(result.get("cpuKernelMsBounds").is_none());
+        }
+        (None, None) => {
+            // Rapid nested exits can hide whether the parent reaped the
+            // grandchild. Those runs must withhold both totals, not guess.
+            for field in ["cpuUserMs", "cpuKernelMs"] {
+                assert_eq!(result.get(field), Some(&serde_json::Value::Null));
+                let bounds = &result[format!("{field}Bounds")];
+                let lower = bounds["lower"].as_f64().expect("CPU lower bound");
+                let upper = bounds["upper"].as_f64().expect("CPU upper bound");
+                assert!(lower.is_finite() && upper.is_finite());
+                assert!(0.0 <= lower && lower <= upper, "{field}: {bounds}");
+            }
+        }
+        other => panic!("CPU totals must be available or unavailable together: {other:?}"),
+    }
+}
+
+#[test]
+fn exit_cpu_contract_accepts_exact_or_bounded_unavailable_totals() {
+    let measured = serde_json::json!({"userMs": 150.0, "kernelMs": 75.0});
+    let exact = serde_json::json!({"cpuUserMs": 150.0, "cpuKernelMs": 75.0});
+    assert_exit_cpu_accounting(&exact, &measured);
+    let unavailable = serde_json::json!({
+        "cpuUserMs": null,
+        "cpuKernelMs": null,
+        "cpuUserMsBounds": {"lower": 100.0, "upper": 200.0},
+        "cpuKernelMsBounds": {"lower": 50.0, "upper": 100.0}
+    });
+    assert_exit_cpu_accounting(&unavailable, &measured);
+
+    for (field, value) in [
+        ("cpuUserMs", serde_json::json!(150.0)),
+        ("cpuKernelMs", serde_json::json!(75.0)),
+        ("cpuUserMs", serde_json::json!("unknown")),
+        ("cpuUserMsBounds", serde_json::Value::Null),
+        ("cpuKernelMsBounds", serde_json::Value::Null),
+        (
+            "cpuUserMsBounds",
+            serde_json::json!({"lower": -1.0, "upper": 200.0}),
+        ),
+        (
+            "cpuKernelMsBounds",
+            serde_json::json!({"lower": 100.0, "upper": 50.0}),
+        ),
+        ("cpuKernelMsBounds", serde_json::json!({"lower": 50.0})),
+    ] {
+        let mut invalid = unavailable.clone();
+        invalid[field] = value;
+        assert!(
+            std::panic::catch_unwind(|| assert_exit_cpu_accounting(&invalid, &measured)).is_err(),
+            "invalid accounting accepted: {invalid}"
+        );
+    }
+    for (field, value) in [("cpuUserMs", 100.0), ("cpuKernelMs", 50.0)] {
+        let mut inaccurate = exact.clone();
+        inaccurate[field] = serde_json::json!(value);
+        assert!(
+            std::panic::catch_unwind(|| assert_exit_cpu_accounting(&inaccurate, &measured))
+                .is_err(),
+            "inaccurate accounting accepted: {inaccurate}"
+        );
+    }
 }
 
 #[test]
