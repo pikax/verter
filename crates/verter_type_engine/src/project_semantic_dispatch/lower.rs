@@ -1206,15 +1206,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // arguments now lower mode-independently, so the same
                 // reference reached from a `Navigate` and an `Expanded`
                 // demand populates ONE family slot instead of two.
-                let context = reduction_context
-                    .into_structural_provenance()
-                    .into_structural_transit_with_mode(match reduction_context.mode {
-                        crate::semantic_query::ProjectionMode::Expanded
-                        | crate::semantic_query::ProjectionMode::Identity => {
-                            crate::semantic_query::ProjectionMode::Navigate
-                        }
-                        other => other,
-                    });
+                let context = self.reference_argument_context(
+                    &continuation,
+                    reduction_context.into_structural_transit_with_mode(ProjectionMode::Navigate),
+                );
                 match type_arguments.first() {
                     None => LowerStep::Value(
                         self.finish_carrier_resolution(continuation, Arc::from(Vec::new())),
@@ -1933,17 +1928,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         reduction_context: ProjectionReductionContext,
         scope: &NodeScopeId,
     ) -> SemanticNodeId {
-        use crate::semantic_query::IndexKey;
         let graph = self.graph();
-        let should_defer = matches!(index_key, IndexKey::Computed(_))
-            || !matches!(
-                graph.node_data(obj_id).as_deref(),
-                Some(SemanticNodeData::Object(_))
-            )
-            // A terminal that reads a named declaration (`(typeof
-            // C)['prototype']` is `C`) stays the access: each
-            // consumer reads it at its own altitude, and a printed
-            // answer keeps the name.
+        let should_defer = !crate::semantic_query::may_reduce_operator(reduction_context)
             || self.indexed_access_reads_named_declaration(obj_id, &index_key);
         if should_defer {
             graph.intern_node_with_scope(

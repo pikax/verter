@@ -380,9 +380,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         type_args,
                     ));
                 }
-                let type_args = self
-                    .paid_instantiation_arguments(&type_args)
-                    .unwrap_or(type_args);
                 CarrierFinish::Instantiate(SemanticQueryKey::Instantiate(
                     crate::semantic_query::InstantiateKey::new(
                         self.type_slot_for(
@@ -413,9 +410,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 {
                     return CarrierFinish::Node(self.recursive_ref_sentinel(&identity, type_args));
                 }
-                let type_args = self
-                    .paid_instantiation_arguments(&type_args)
-                    .unwrap_or(type_args);
                 CarrierFinish::Instantiate(SemanticQueryKey::Instantiate(
                     crate::semantic_query::InstantiateKey::new(
                         self.type_slot_for(

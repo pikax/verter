@@ -4492,8 +4492,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> InstantiateStart {
         verter_audit::attribute_scope!(Instantiate);
         verter_audit::attribute_n!(Substitute, args.len());
-        let normalized_args = self.paid_instantiation_arguments(args);
-        let args = normalized_args.as_ref().unwrap_or(args);
         // The key carries an `InstantiateContext` (embedded
         // projection-reduction identity + the `resolve_env_hash` env dim).
         // Destructure into the embedded `ProjectionReductionContext` so the
@@ -9557,7 +9555,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // Bounded loop: exact-identity cycle detection plus the shared
         // connected work envelope, both typed-partial on trip.
         loop {
-            let mut original_args = None;
             let (slot, inst_args, owner_canonical) =
                 match self.graph().node_data(current).as_deref() {
                     Some(SemanticNodeData::DeclRef { identity }) => (
@@ -9569,21 +9566,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
                         Arc::clone(&identity.canonical_id),
                     ),
-                    Some(SemanticNodeData::InstantiationRef { base, args }) => {
-                        let normalized = self.paid_instantiation_arguments(args);
-                        if normalized.is_some() {
-                            original_args = Some(Arc::clone(args));
-                        }
-                        (
-                            self.type_slot_for(
-                                Arc::clone(&base.canonical_id),
-                                base.owner,
-                                Arc::clone(&base.decl_name),
-                            ),
-                            normalized.unwrap_or_else(|| Arc::clone(args)),
+                    Some(SemanticNodeData::InstantiationRef { base, args }) => (
+                        self.type_slot_for(
                             Arc::clone(&base.canonical_id),
-                        )
-                    }
+                            base.owner,
+                            Arc::clone(&base.decl_name),
+                        ),
+                        Arc::clone(args),
+                        Arc::clone(&base.canonical_id),
+                    ),
                     // Settled (non-carrier) — the stable stop; checked BEFORE the
                     // work budget so a chain that settles on exactly the last
                     // permitted step is never falsely partial.
@@ -9615,19 +9606,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 QueryResult::Value(id) => id,
                 _ => return current,
             };
-            if let Some(arguments) = original_args {
-                // Sharing an already demanded argument's value does not erase
-                // the original application or its authored argument sources.
-                self.graph().record_origin_edge(
-                    next,
-                    OriginEdgeKind::Instantiate,
-                    std::iter::once(current)
-                        .chain(arguments.iter().copied())
-                        .collect(),
-                    OriginMeta::None,
-                    self.project_generation_signature(),
-                );
-            }
             if next == current {
                 return current;
             }

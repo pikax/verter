@@ -47,13 +47,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         .with_authored_resolution_debt(inputs.authored_resolution_debt);
         match self.plan_bare_ref_head(&resolver_context, &name, type_args.len()) {
             CarrierResolutionPlan::Ready(value) => ReferenceProjectionPlan::Ready(value),
-            CarrierResolutionPlan::NeedsArgs(continuation) => ReferenceProjectionPlan::NeedsArgs {
-                continuation,
-                args: type_args,
-                argument_context: context
-                    .into_structural_provenance()
-                    .into_structural_transit_with_mode(ProjectionMode::Navigate),
-            },
+            CarrierResolutionPlan::NeedsArgs(continuation) => {
+                let argument_context = self.reference_argument_context(&continuation, context);
+                ReferenceProjectionPlan::NeedsArgs {
+                    continuation,
+                    args: type_args,
+                    argument_context,
+                }
+            }
         }
     }
 
@@ -93,11 +94,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             type_args.len(),
         ) {
             CarrierResolutionPlan::Ready(value) => ReferenceProjectionPlan::Ready(value),
-            CarrierResolutionPlan::NeedsArgs(continuation) => ReferenceProjectionPlan::NeedsArgs {
-                continuation,
-                args: type_args,
-                argument_context: context,
-            },
+            CarrierResolutionPlan::NeedsArgs(continuation) => {
+                let argument_context = self.reference_argument_context(&continuation, context);
+                ReferenceProjectionPlan::NeedsArgs {
+                    continuation,
+                    args: type_args,
+                    argument_context,
+                }
+            }
         }
     }
 
@@ -141,12 +145,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         ancestors: &[ProjectionFrame],
     ) -> ProjectionFinish {
         let graph = self.graph();
-        let argument_context = context
-            .into_structural_provenance()
-            .into_structural_transit_with_mode(ProjectionMode::Navigate);
+        let argument_context = self.instantiation_argument_context(base, context);
         let projected_args: Arc<[SemanticNodeId]> = Arc::from(
             args.iter()
-                .map(|argument| projected(memo, *argument, argument_context))
+                .map(|argument| {
+                    projected(
+                        memo,
+                        *argument,
+                        self.argument_operand_context(*argument, argument_context),
+                    )
+                })
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
         );
@@ -187,10 +195,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             if build_carrier {
                 return ProjectionFinish::Node(rebuild(projected_args));
             }
-            let projected_args = self
-                .paid_instantiation_arguments(args)
-                .or_else(|| self.paid_instantiation_arguments(&projected_args))
-                .unwrap_or(projected_args);
             return ProjectionFinish::Instantiate(SemanticQueryKey::Instantiate(
                 crate::semantic_query::InstantiateKey::new(
                     self.type_slot_for(
@@ -222,10 +226,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // eagerly it is instantiated below.
             ProjectionFinish::Node(self.recursive_ref_sentinel(base, projected_args))
         } else {
-            let projected_args = self
-                .paid_instantiation_arguments(args)
-                .or_else(|| self.paid_instantiation_arguments(&projected_args))
-                .unwrap_or(projected_args);
             ProjectionFinish::Instantiate(SemanticQueryKey::Instantiate(
                 crate::semantic_query::InstantiateKey::new(
                     self.type_slot_for(
@@ -689,20 +689,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 .unwrap_or_else(|| self.normalized_index_key_node(projected))
                         }),
                 };
-                // Intermediate computed accesses usually retain their carrier.
-                // A proven empty domain must still reduce before a following
-                // hop, and that hop must preserve the absorbing never result.
-                let empty_index = matches!(&index, IndexKey::Computed(node)
-                    if self.index_keys_from_keyspace_node(*node).is_some_and(|keys| keys.is_empty()));
-                let never_object = matches!(
-                    graph.node_data(object_id).as_deref(),
-                    Some(SemanticNodeData::Primitive(PrimitiveKind::Never))
-                );
-                let should_defer = !empty_index && !never_object && (matches!(index, IndexKey::Computed(_))
-                    || !matches!(
-                        graph.node_data(object_id).as_deref(),
-                        Some(SemanticNodeData::Object(_))
-                    ));
+                let should_defer = !may_reduce_operator(context);
                 if should_defer {
                     graph.intern_preserving_scope(
                         node,

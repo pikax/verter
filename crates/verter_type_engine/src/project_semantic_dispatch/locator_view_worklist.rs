@@ -275,7 +275,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// Whether the checker defers instantiating the type arguments of an
     /// application of `declaration`: an interface's or a class's (a
     /// library one included), never an alias's.
-    fn defers_type_arguments(&self, declaration: &crate::semantic_query::DeclIdentity) -> bool {
+    pub(super) fn defers_type_arguments(
+        &self,
+        declaration: &crate::semantic_query::DeclIdentity,
+    ) -> bool {
         use verter_session_query::declarations::TypeDeclKind;
         if declaration.canonical_id.as_ref() == "__builtin__" {
             return true;
@@ -284,6 +287,51 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             self.prepared_decl_kind(declaration),
             Some(TypeDeclKind::Alias)
         )
+    }
+
+    /// Arguments are projected at the caller's altitude. The continuation
+    /// stack classifies recursive applications with `in_deferred_position`:
+    /// alias arguments are eager; class and interface arguments are deferred.
+    pub(super) fn instantiation_argument_context(
+        &self,
+        _declaration: &crate::semantic_query::DeclIdentity,
+        context: ProjectionReductionContext,
+    ) -> ProjectionReductionContext {
+        context.into_structural_provenance()
+    }
+
+    pub(super) fn argument_operand_context(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+    ) -> ProjectionReductionContext {
+        if matches!(
+            self.graph().node_data(node).as_deref(),
+            Some(SemanticNodeData::Mapped { .. })
+        ) {
+            context.into_structural_transit_with_mode(ProjectionMode::Navigate)
+        } else {
+            context
+        }
+    }
+
+    pub(super) fn reference_argument_context(
+        &self,
+        continuation: &CarrierArgsContinuation,
+        context: ProjectionReductionContext,
+    ) -> ProjectionReductionContext {
+        use super::carrier::RefHeadResolution;
+        match continuation {
+            CarrierArgsContinuation::Instantiate { identity, .. }
+            | CarrierArgsContinuation::Builtin { identity, .. }
+            | CarrierArgsContinuation::Intern {
+                head: RefHeadResolution::Resolved(identity) | RefHeadResolution::Builtin(identity),
+                ..
+            } => self.instantiation_argument_context(identity, context),
+            _ => context
+                .into_structural_provenance()
+                .into_structural_transit_with_mode(ProjectionMode::Navigate),
+        }
     }
 
     #[inline(always)]
@@ -1031,7 +1079,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 } => {
                     if state.next_arg < state.args.len() {
                         let argument = state.args[state.next_arg];
-                        let argument_context = state.argument_context;
+                        let argument_context =
+                            self.argument_operand_context(argument, state.argument_context);
                         state.next_arg += 1;
                         frames.push(ProjectionFrame::ReferenceArgsResume {
                             node,
@@ -1047,7 +1096,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             state
                                 .args
                                 .iter()
-                                .map(|argument| projected(memo, *argument, state.argument_context))
+                                .map(|argument| {
+                                    projected(
+                                        memo,
+                                        *argument,
+                                        self.argument_operand_context(
+                                            *argument,
+                                            state.argument_context,
+                                        ),
+                                    )
+                                })
                                 .collect::<Vec<_>>()
                                 .into_boxed_slice(),
                         );
@@ -1606,10 +1664,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     _ => None,
                 }
             }
-            SemanticNodeData::InstantiationRef { args, .. } => {
-                let argument_context = context.into_structural_provenance().into_structural_transit_with_mode(ProjectionMode::Navigate);
+            SemanticNodeData::InstantiationRef { base, args } => {
+                let argument_context = self.instantiation_argument_context(base, context);
                 args.get(index)
-                    .map(|argument| (*argument, argument_context))
+                    .map(|argument| (*argument, self.argument_operand_context(*argument, argument_context)))
             }
             SemanticNodeData::Primitive(_)
             | SemanticNodeData::Literal(_)
@@ -1650,12 +1708,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 expressions: children,
                 ..
             } => ProjectionChildPlan::Uniform { children, context },
-            SemanticNodeData::InstantiationRef { args, .. } => ProjectionChildPlan::Uniform {
-                children: args,
-                context: context
-                    .into_structural_provenance()
-                    .into_structural_transit_with_mode(ProjectionMode::Navigate),
-            },
+            SemanticNodeData::InstantiationRef { .. } => {
+                ProjectionChildPlan::General { data, context }
+            }
             SemanticNodeData::Object(view) => ProjectionChildPlan::Object { view, context },
             SemanticNodeData::Signature {
                 params,

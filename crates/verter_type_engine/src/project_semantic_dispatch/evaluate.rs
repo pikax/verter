@@ -1272,9 +1272,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         Arc::clone(&base.decl_name),
                     );
                     let owner_canonical = Arc::clone(&base.canonical_id);
-                    let normalized = self.paid_instantiation_arguments(args);
-                    let original_args = normalized.as_ref().map(|_| Arc::clone(args));
-                    let args = normalized.unwrap_or_else(|| Arc::clone(args));
+                    let args: Arc<[SemanticNodeId]> = args
+                        .iter()
+                        .map(|&arg| {
+                            let outcome = self.evaluate_deferred_outcome(
+                                arg,
+                                self.argument_operand_context(arg, context),
+                            );
+                            completeness = completeness.merge(outcome.completeness);
+                            outcome.node
+                        })
+                        .collect();
                     drop(data);
                     let read = self.execute_read(SemanticQueryKey::Instantiate(
                         crate::semantic_query::InstantiateKey::new(
@@ -1291,20 +1299,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     completeness = completeness
                         .or_partial_if(read.result_is_partial, read.partial_reason_classes());
                     match read.value {
-                        QueryResult::Value(id) => {
-                            if let Some(arguments) = original_args {
-                                self.graph().record_origin_edge(
-                                    id,
-                                    crate::semantic_query::OriginEdgeKind::Instantiate,
-                                    std::iter::once(n)
-                                        .chain(arguments.iter().copied())
-                                        .collect(),
-                                    crate::semantic_query::OriginMeta::None,
-                                    self.project_generation_signature(),
-                                );
-                            }
-                            id
-                        }
+                        QueryResult::Value(id) => id,
                         QueryResult::Recursive(_) => {
                             break Some(PartialReasonSet::SAME_PATH_RECURSION)
                         }
