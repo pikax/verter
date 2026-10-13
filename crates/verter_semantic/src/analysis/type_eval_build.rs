@@ -4690,7 +4690,7 @@ fn lower_identifier_variable_parts(
         }
 
         if type_annotation.is_none()
-            && value_type_derives_from_a_call(init, source)
+            && (value_type_derives_from_a_call(init, source) || contextual_object_initializer(init))
             && !has_authoritative_value_assertion(init)
         {
             expression_source_offset = Some(init.span().start);
@@ -7019,6 +7019,26 @@ pub fn indexed_literal_mode(expr: Option<&Expression<'_>>) -> IndexedValueLitera
             | Expression::ArrayExpression(_),
         ) => IndexedValueLiteralMode::Widened,
         _ => IndexedValueLiteralMode::Literal,
+    }
+}
+
+/// A contextual declarator whose method bodies need the initializer's flow
+/// evaluation. Facts and function discovery use this same classification.
+pub(super) fn contextual_object_initializer(mut expression: &Expression<'_>) -> bool {
+    let mut contextual = false;
+    loop {
+        expression = match expression {
+            Expression::ParenthesizedExpression(parenthesized) => &parenthesized.expression,
+            Expression::TSSatisfiesExpression(satisfies) => {
+                contextual = true;
+                &satisfies.expression
+            }
+            _ => {
+                return contextual
+                    && matches!(expression, Expression::ObjectExpression(_))
+                    && indexed_context_sensitive(Some(expression))
+            }
+        };
     }
 }
 

@@ -26,9 +26,11 @@ pub(super) struct ClassReceiver {
     /// The instance members evaluated so far, in evaluation order.
     pub(super) members: std::cell::RefCell<Vec<SurfaceMember>>,
     /// Every statically named instance member the class declares.
-    pub(super) declared: rustc_hash::FxHashSet<Arc<str>>,
+    pub(super) declared: std::cell::RefCell<rustc_hash::FxHashSet<Arc<str>>>,
     /// The base instance, when the class extends one.
     pub(super) base: Option<SemanticNodeId>,
+    /// Literal members supply only the contextual receiver's inferred part.
+    pub(super) infer_literal_members: bool,
     /// Set when a member body read a declared member not evaluated yet.
     pub(super) forward_read: std::cell::Cell<bool>,
 }
@@ -376,16 +378,19 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 .dispatch
                 .this_binder(self.canonical, self.owner, &class.name, None),
             members: std::cell::RefCell::new(Vec::new()),
-            declared: class
-                .members
-                .iter()
-                .filter(|member| !member.is_static)
-                .filter_map(|member| match &member.key {
-                    SliceObjectKey::Static(name) => Some(Arc::clone(name)),
-                    SliceObjectKey::Computed { .. } => None,
-                })
-                .collect(),
+            declared: std::cell::RefCell::new(
+                class
+                    .members
+                    .iter()
+                    .filter(|member| !member.is_static)
+                    .filter_map(|member| match &member.key {
+                        SliceObjectKey::Static(name) => Some(Arc::clone(name)),
+                        SliceObjectKey::Computed { .. } => None,
+                    })
+                    .collect(),
+            ),
             base: frame.base.as_ref().and_then(|base| base.instance),
+            infer_literal_members: true,
             forward_read: std::cell::Cell::new(false),
         });
         frame.enclosing_receiver = Some(self.receiver.replace(receiver.clone()));
@@ -846,7 +851,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     .graph()
                     .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any)),
             ),
-            verter_session_query::flow::slice::SliceThis::Receiver => match &self.receiver {
+            verter_session_query::flow::slice::SliceThis::Receiver
+            | verter_session_query::flow::slice::SliceThis::Explicit => match &self.receiver {
                 Some(receiver) => Positional::Value(receiver.binder),
                 None => {
                     self.record_degradation(
@@ -899,6 +905,14 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             .as_ref()
             .filter(|bound| bound.binder == receiver)
         {
+            // A contextual object receiver is the supplied type itself.
+            // Literal members cannot replace that type's declared members.
+            if bound.base == Some(bound.binder)
+                && (!bound.infer_literal_members
+                    || self.contextual_property_type(bound.binder, name).is_some())
+            {
+                return bound.base;
+            }
             // A class expression's own member reads the value its class
             // evaluated for it; one not evaluated yet is a forward read the
             // class retries; an inherited one reads off the base instance,
@@ -917,7 +931,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     crate::semantic_query::SurfaceView::from_entries(own, None, false),
                 )));
             }
-            if bound.declared.contains(name) {
+            if bound.declared.borrow().contains(name) {
                 bound.forward_read.set(true);
                 return None;
             }

@@ -1,0 +1,40 @@
+{
+  "name": "skr-thistype",
+  "description": "Generic contextual ThisType receivers at 20, 100 and 400 methods.",
+  "tier": "standard",
+  "scenarios": ["contextual-this"],
+  "settings": ["strict"],
+  "arms": ["verter"],
+  "modes": ["cold"],
+  "threads": ["default"],
+  "noise": [
+    "docs/contributing/semantic-benchmark.md#verdicts",
+    "docs/contributing/semantic-benchmark.md#schedule"
+  ],
+  "requiredCells": [
+    {
+      "scenario": "contextual-this-20",
+      "setting": "strict",
+      "arm": "verter",
+      "mode": "cold",
+      "threads": "default",
+      "metrics": ["firstTypeMs", "coldMs", "peakBytes"]
+    },
+    {
+      "scenario": "contextual-this-100",
+      "setting": "strict",
+      "arm": "verter",
+      "mode": "cold",
+      "threads": "default",
+      "metrics": ["firstTypeMs", "coldMs", "peakBytes"]
+    },
+    {
+      "scenario": "contextual-this-400",
+      "setting": "strict",
+      "arm": "verter",
+      "mode": "cold",
+      "threads": "default",
+      "metrics": ["firstTypeMs", "coldMs", "peakBytes"]
+    }
+  ]
+}

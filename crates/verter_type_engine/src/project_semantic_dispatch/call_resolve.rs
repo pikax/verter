@@ -1619,7 +1619,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let (Some(fixed_signature), Some(partial_signature)) =
             (single(fixed_target), single(partial_target))
         else {
-            return fixed_target;
+            // Non-callable contexts keep their uninferred binders, including
+            // the literal's own part of a contextual receiver.
+            return partial_target;
         };
         let graph = self.graph();
         let Some(SemanticNodeData::Signature { return_type, .. }) =

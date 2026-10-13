@@ -123,6 +123,48 @@ mod branches;
 mod class_expression;
 use branches::{arm_statements, LoopLower, LowerAcc, LowerEntered, LowerStep};
 
+/// A receiver-independent return contributes to the outer call's inference
+/// before methods that need a contextual receiver are checked.
+fn method_return_is_context_independent(
+    walks: &verter_semantic::analysis::walk_stack::ProgramWalkStack<'_>,
+    expression: &Expression<'_>,
+) -> bool {
+    let Expression::FunctionExpression(function) = expression else {
+        return false;
+    };
+    if function
+        .params
+        .items
+        .iter()
+        .any(|param| param.type_annotation.is_none())
+        || function
+            .params
+            .rest
+            .as_ref()
+            .is_some_and(|param| param.type_annotation.is_none())
+    {
+        return false;
+    }
+    struct ThisRead(bool);
+    impl<'a> Visit<'a> for ThisRead {
+        fn visit_this_expression(&mut self, _: &oxc_ast::ast::ThisExpression) {
+            self.0 = true;
+        }
+        // Ordinary nested functions own their `this`; arrows inherit it.
+        fn visit_function(
+            &mut self,
+            _: &oxc_ast::ast::Function<'a>,
+            _: oxc_syntax::scope::ScopeFlags,
+        ) {
+        }
+    }
+    let mut reads = ThisRead(false);
+    if let Some(body) = function.body.as_ref() {
+        walks.with_node_stack(body.span, || reads.visit_function_body(body));
+    }
+    !reads.0
+}
+
 // ---------------------------------------------------------------------------
 // Guards — the narrowing facts a conditional test establishes
 // ---------------------------------------------------------------------------
@@ -972,6 +1014,7 @@ pub(crate) fn build_flow_slice_content(
         Ok(params) => params,
         Err(reason) => {
             return Some(SliceContent {
+                declared_this: None,
                 bindings,
                 declared_return,
                 declared_predicate,
@@ -1056,7 +1099,17 @@ pub(crate) fn build_flow_slice_content(
             FunctionNode::Function(function)
                 if function.is_declaration() && function.this_param.is_none()
         );
-    let this = match context {
+    let declared_this = match &node {
+        FunctionNode::Function(function) => function
+            .this_param
+            .as_ref()
+            .and_then(|param| param.type_annotation.as_ref())
+            .map(|annotation| {
+                signature_scope.gate(lower_ts_type(&annotation.type_annotation, source))
+            }),
+        _ => None,
+    };
+    let this = declared_this.as_ref().map(|_| SliceThis::Explicit).or_else(|| match context {
         Some(context) => context.this().cloned(),
         None if untyped_declaration_this => Some(SliceThis::Untyped),
         None => resolved.enclosing_this.and_then(|this| {
@@ -1095,7 +1148,7 @@ pub(crate) fn build_flow_slice_content(
                 }
             })
         }),
-    };
+    });
     let mut lowerer = Lowerer {
         frame_gate,
         bindings: &bindings,
@@ -1308,6 +1361,7 @@ pub(crate) fn build_flow_slice_content(
     let decided_above_call_spans = lowerer.decided_above_call_spans;
     let call_arguments = lowerer.call_arguments;
     Some(SliceContent {
+        declared_this,
         bindings,
         declared_return,
         declared_predicate,
@@ -13624,6 +13678,7 @@ impl<'a> Lowerer<'a> {
                     readonly: policy.readonly(),
                     spans,
                     accessor_annotated: false,
+                    infer_return_eagerly: false,
                     context_sensitive: !is_accessor(method_kind)
                         && verter_semantic::analysis::type_eval_build::indexed_context_sensitive(
                             Some(value_expression),
@@ -13635,7 +13690,7 @@ impl<'a> Lowerer<'a> {
         // function value (its return evaluates inline through
         // the same flow machinery); a method without a body
         // keeps the whole-literal leaf lowering.
-        if method_kind.is_some() {
+        if method_kind.is_some() || matches!(value_expression, Expression::FunctionExpression(_)) {
             let accessor_annotated = match (method_kind, value_expression) {
                 (
                     Some(verter_type_expr::ObjectMethodKind::Get),
@@ -13682,9 +13737,13 @@ impl<'a> Lowerer<'a> {
                     // A method / accessor member is never `readonly`,
                     // under `as const` or otherwise: the modifier applies
                     // to data properties.
-                    readonly: false,
+                    readonly: method_kind.is_none() && policy.readonly(),
                     spans,
                     accessor_annotated,
+                    infer_return_eagerly: method_return_is_context_independent(
+                        &self.walks,
+                        value_expression,
+                    ),
                     // An accessor is no context-sensitive member.
                     context_sensitive: !is_accessor(method_kind)
                         && verter_semantic::analysis::type_eval_build::indexed_context_sensitive(
@@ -13726,6 +13785,7 @@ impl<'a> Lowerer<'a> {
                     spans,
                     accessor_annotated: false,
                     context_sensitive: false,
+                    infer_return_eagerly: false,
                 })));
             return None;
         }
@@ -13823,6 +13883,7 @@ impl<'a> Lowerer<'a> {
                 spans,
                 accessor_annotated: false,
                 context_sensitive,
+                infer_return_eagerly: false,
             })));
     }
 
@@ -14514,6 +14575,11 @@ impl<'a> Lowerer<'a> {
             },
         ) else {
             return SliceExpr::UnmodeledBinding;
+        };
+        let context = if matches!(node, FunctionNode::Arrow(_)) {
+            context.with_lexical_this()
+        } else {
+            context
         };
         SliceExpr::NestedFunctionValue {
             function: entry.key().clone(),
