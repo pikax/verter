@@ -1921,6 +1921,22 @@ impl SemanticGraphStore {
             .map(narrow_cache_read)
     }
 
+    /// A warm-only read whose receipt must be admitted before it can observe
+    /// facts. It keeps the ordinary point, epoch and self-root validation.
+    pub(crate) fn get_validated_if<C: crate::resolver_core::ResolverCapabilities>(
+        &self,
+        key: &SemanticQueryKey,
+        ctx: &dyn crate::resolver_core::ResolverContext<C>,
+        admits: &dyn Fn(&crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt) -> bool,
+    ) -> Option<CacheRead<QueryResult<SemanticNodeId>>> {
+        let (family, slot) = family_and_slot(key);
+        let requested = crate::semantic_query::demand::MaterializedPoint::new(
+            family::point_for_slot(slot, &requested_path_for_key(key)),
+        );
+        self.get_validated_value_if(&family, slot, &requested, ctx, None, None, true, admits)
+            .map(narrow_cache_read)
+    }
+
     /// Prepared-token variant of [`Self::get_validated`] — reads the
     /// family / slot / requested point off the token instead of
     /// re-projecting the key. Used by the cooperative slow path's
@@ -1973,6 +1989,34 @@ impl SemanticGraphStore {
         >,
         record_miss: bool,
     ) -> Option<CacheRead<QueryResult<SemanticQueryValue>>> {
+        self.get_validated_value_if(
+            family,
+            slot,
+            requested,
+            ctx,
+            operand_evidence,
+            deferred_carrier,
+            record_miss,
+            &|_| true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn get_validated_value_if<C: crate::resolver_core::ResolverCapabilities>(
+        &self,
+        family: &FamilyKey,
+        slot: ModeSlot,
+        requested: &crate::semantic_query::demand::MaterializedPoint,
+        ctx: &dyn crate::resolver_core::ResolverContext<C>,
+        operand_evidence: Option<
+            &mut Option<crate::semantic_query::operand::SemanticOperandEvidence>,
+        >,
+        deferred_carrier: Option<
+            &mut Option<verter_session_query::facts::fact_cache::ReadSetSignature>,
+        >,
+        record_miss: bool,
+        admits: &dyn Fn(&crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt) -> bool,
+    ) -> Option<CacheRead<QueryResult<SemanticQueryValue>>> {
         // Snapshot the candidate list under the lock, then validate
         // OUTSIDE the lock. Holding `entries` across `MemoEntry::validate`
         // — which walks the path-precise fact rail against the resolver
@@ -1991,8 +2035,9 @@ impl SemanticGraphStore {
         let validated = snapshot.and_then(|list| {
             let back = list.len().checked_sub(1); // the freshest in LRU order
             let mut candidates = list.into_iter().enumerate();
-            let (index, hit) =
-                candidates.find(|(_, entry)| self.warm_candidate_serves(entry, requested, ctx))?;
+            let (index, hit) = candidates.find(|(_, entry)| {
+                admits(&entry.cost_receipt) && self.warm_candidate_serves(entry, requested, ctx)
+            })?;
             Some((Some(index) != back, hit))
         });
         if let Some((true, entry)) = &validated {

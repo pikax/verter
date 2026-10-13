@@ -991,7 +991,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             result
                         } else {
                             match self.graph().node_data(source_id).as_deref() {
-                                Some(SemanticNodeData::Opaque(_)) | None => {
+                                None => self.opaque(QueryError::Miss),
+                                _ if super::raise::node_is_unknown_materializing_failure(
+                                    self, source_id,
+                                ) =>
+                                {
                                     self.opaque(QueryError::Miss)
                                 }
                                 _ => self.graph().intern_preserving_scope(
@@ -1595,14 +1599,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 object,
                 index: index_key,
             } => {
-                let object_context = if matches!(
-                    self.graph().node_data(*object).as_deref(),
-                    Some(SemanticNodeData::IndexedAccess { .. })
-                ) {
-                    context.with_mode(ProjectionMode::Navigate)
-                } else {
-                    context
-                };
+                let object_context = super::raise::indexed_access_object_context(context);
                 match (index, index_key) {
                     (0, _) => Some((*object, object_context)),
                     (1, IndexKey::Computed(index)) => Some((*index, context)),
@@ -1610,7 +1607,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
             SemanticNodeData::InstantiationRef { args, .. } => {
-                let argument_context = context.into_structural_provenance();
+                let argument_context = context.into_structural_provenance().into_structural_transit_with_mode(ProjectionMode::Navigate);
                 args.get(index)
                     .map(|argument| (*argument, argument_context))
             }
@@ -1655,7 +1652,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             } => ProjectionChildPlan::Uniform { children, context },
             SemanticNodeData::InstantiationRef { args, .. } => ProjectionChildPlan::Uniform {
                 children: args,
-                context: context.into_structural_provenance(),
+                context: context
+                    .into_structural_provenance()
+                    .into_structural_transit_with_mode(ProjectionMode::Navigate),
             },
             SemanticNodeData::Object(view) => ProjectionChildPlan::Object { view, context },
             SemanticNodeData::Signature {

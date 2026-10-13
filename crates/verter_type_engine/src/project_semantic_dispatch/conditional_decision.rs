@@ -601,6 +601,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     SemanticNodeData::Alias(_)
                     | SemanticNodeData::DeclRef { .. }
                     | SemanticNodeData::InstantiationRef { .. }
+                    | SemanticNodeData::IndexedAccess { .. }
                     | SemanticNodeData::TypeOf(_)
                     | SemanticNodeData::BareRef(_)
                     | SemanticNodeData::ImportType(_)

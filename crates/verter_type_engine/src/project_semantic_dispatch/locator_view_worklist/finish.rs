@@ -50,7 +50,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             CarrierResolutionPlan::NeedsArgs(continuation) => ReferenceProjectionPlan::NeedsArgs {
                 continuation,
                 args: type_args,
-                argument_context: context.into_structural_provenance(),
+                argument_context: context
+                    .into_structural_provenance()
+                    .into_structural_transit_with_mode(ProjectionMode::Navigate),
             },
         }
     }
@@ -139,7 +141,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         ancestors: &[ProjectionFrame],
     ) -> ProjectionFinish {
         let graph = self.graph();
-        let argument_context = context.into_structural_provenance();
+        let argument_context = context
+            .into_structural_provenance()
+            .into_structural_transit_with_mode(ProjectionMode::Navigate);
         let projected_args: Arc<[SemanticNodeId]> = Arc::from(
             args.iter()
                 .map(|argument| projected(memo, *argument, argument_context))
@@ -183,6 +187,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             if build_carrier {
                 return ProjectionFinish::Node(rebuild(projected_args));
             }
+            let projected_args = self
+                .paid_instantiation_arguments(args)
+                .or_else(|| self.paid_instantiation_arguments(&projected_args))
+                .unwrap_or(projected_args);
             return ProjectionFinish::Instantiate(SemanticQueryKey::Instantiate(
                 crate::semantic_query::InstantiateKey::new(
                     self.type_slot_for(
@@ -214,6 +222,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // eagerly it is instantiated below.
             ProjectionFinish::Node(self.recursive_ref_sentinel(base, projected_args))
         } else {
+            let projected_args = self
+                .paid_instantiation_arguments(args)
+                .or_else(|| self.paid_instantiation_arguments(&projected_args))
+                .unwrap_or(projected_args);
             ProjectionFinish::Instantiate(SemanticQueryKey::Instantiate(
                 crate::semantic_query::InstantiateKey::new(
                     self.type_slot_for(
@@ -647,7 +659,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     }
                 } else {
                     match graph.node_data(base_id).as_deref() {
-                        Some(SemanticNodeData::Opaque(_)) | None => self.opaque(QueryError::Miss),
+                        None => self.opaque(QueryError::Miss),
+                        _ if super::super::raise::node_is_unknown_materializing_failure(self, base_id) => self.opaque(QueryError::Miss),
                         _ if base_id == *base => node,
                         _ => graph.intern_preserving_scope(
                             node,
@@ -657,14 +670,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
             SemanticNodeData::IndexedAccess { object, index } => {
-                let object_context = if matches!(
-                    graph.node_data(*object).as_deref(),
-                    Some(SemanticNodeData::IndexedAccess { .. })
-                ) {
-                    context.with_mode(ProjectionMode::Navigate)
-                } else {
-                    context
-                };
+                let object_context = super::super::raise::indexed_access_object_context(context);
                 let object_id = projected(memo, *object, object_context);
                 let index = match index {
                     IndexKey::String(value) => IndexKey::String(Arc::clone(value)),

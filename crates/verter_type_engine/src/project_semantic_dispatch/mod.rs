@@ -1168,11 +1168,24 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         CacheRead<QueryResult<SemanticQueryValue>>,
         verter_session_query::facts::fact_cache::ReadSetSignature,
     )> {
+        self.own_published_read_if(key, nesting, &|_| true)
+    }
+
+    pub(super) fn own_published_read_if(
+        &self,
+        key: &SemanticQueryKey,
+        nesting: cost_receipt::Nesting,
+        admits: &dyn Fn(&cost_receipt::DemandCostReceipt) -> bool,
+    ) -> Option<(
+        CacheRead<QueryResult<SemanticQueryValue>>,
+        verter_session_query::facts::fact_cache::ReadSetSignature,
+    )> {
         let (read, carrier) = {
             let published = self.published_results.borrow();
             let result = published.get(key)?;
             if result.published_at != self.workspace_edit()
                 || !self.graph().serves_stored_value(&result.read.value)
+                || !admits(result.read.receipt.priced()?)
             {
                 return None;
             }

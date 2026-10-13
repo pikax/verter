@@ -1262,11 +1262,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     }
                 }
                 // Residual InstantiationRef → the shared `Instantiate` query
-                // (the `relation::record_target_shape` shape generalised): args
-                // evaluate carrier-shaped under the caller's context (their
-                // completeness merges into the demand outcome), the slot is
-                // the base decl's type slot, and the instantiate context derives
-                // from the caller's context.
+                // with the authored argument carriers intact. The body owns
+                // argument demand: evaluating all arguments here would force
+                // unused mapped values and losing conditional branches. The
+                // slot is the base decl's type slot, and the instantiate
+                // context derives from the caller's context.
                 //
                 // The carrier-preserving peel (`instantiate_instantiation_refs
                 // == false`) never reaches this arm — `is_residual` classified
@@ -1279,16 +1279,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         Arc::clone(&base.decl_name),
                     );
                     let owner_canonical = Arc::clone(&base.canonical_id);
-                    let args: Arc<[SemanticNodeId]> = Arc::from(
-                        args.iter()
-                            .map(|arg| {
-                                let arg_outcome = self.evaluate_deferred_outcome(*arg, context);
-                                completeness = completeness.merge(arg_outcome.completeness);
-                                arg_outcome.node
-                            })
-                            .collect::<Vec<_>>()
-                            .into_boxed_slice(),
-                    );
+                    let normalized = self.paid_instantiation_arguments(args);
+                    let original_args = normalized.as_ref().map(|_| Arc::clone(args));
+                    let args = normalized.unwrap_or_else(|| Arc::clone(args));
                     drop(data);
                     let read = self.execute_read(SemanticQueryKey::Instantiate(
                         crate::semantic_query::InstantiateKey::new(
@@ -1305,7 +1298,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     completeness = completeness
                         .or_partial_if(read.result_is_partial, read.partial_reason_classes());
                     match read.value {
-                        QueryResult::Value(id) => id,
+                        QueryResult::Value(id) => {
+                            if let Some(arguments) = original_args {
+                                self.graph().record_origin_edge(
+                                    id,
+                                    crate::semantic_query::OriginEdgeKind::Instantiate,
+                                    std::iter::once(n)
+                                        .chain(arguments.iter().copied())
+                                        .collect(),
+                                    crate::semantic_query::OriginMeta::None,
+                                    self.project_generation_signature(),
+                                );
+                            }
+                            id
+                        }
                         QueryResult::Recursive(_) => {
                             break Some(PartialReasonSet::SAME_PATH_RECURSION)
                         }
@@ -2219,7 +2225,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 frame.stage = DeferredEvaluationStage::AwaitKeyOfBase;
                                 DeferredEvaluationAction::Push {
                                     node: *base,
-                                    context: frame.context,
+                                    context: frame.context.into_structural_transit_with_mode(
+                                        ProjectionMode::Navigate,
+                                    ),
                                 }
                             }
                             SemanticNodeData::IndexedAccess { object, index } => {
@@ -2229,7 +2237,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 };
                                 DeferredEvaluationAction::Push {
                                     node: *object,
-                                    context: frame.context.with_mode(ProjectionMode::Navigate),
+                                    context: super::raise::indexed_access_object_context(
+                                        frame.context,
+                                    ),
                                 }
                             }
                             SemanticNodeData::Mapped { source, mapper } => {

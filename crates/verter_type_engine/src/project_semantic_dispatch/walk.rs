@@ -2592,6 +2592,103 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
 
     /// Project a finite key set from an already reduced object in one pass.
     /// Unknown keys retain the ordinary walker path (including index signatures).
+    pub(super) fn finite_mapped_index_values(
+        &mut self,
+        object: SemanticNodeId,
+        source: SemanticNodeId,
+        mapper: &crate::semantic_query::MapperKey,
+        keys: &[IndexKey],
+    ) -> Option<Vec<SemanticNodeId>> {
+        if mapper.name_remap.is_some()
+            || matches!(mapper.kind, crate::semantic_query::MapperKind::Identity)
+            || !keys.iter().all(|key| matches!(key, IndexKey::String(_)))
+        {
+            return None;
+        }
+        // A homomorphic primitive/array/tuple is mapped by its container owner.
+        if mapper.over_type_variable {
+            let subject = self
+                .dispatch
+                .normalize_node_for_structural_fact_demand(
+                    source,
+                    self.context
+                        .into_structural_transit_with_mode(ProjectionMode::Navigate),
+                )
+                .into_complete_node()?;
+            if !matches!(
+                self.graph().node_data(subject).as_deref(),
+                Some(SemanticNodeData::Object(_))
+            ) {
+                return None;
+            }
+        }
+        // Prove membership once for the whole finite batch. A dictionary,
+        // remapping or open domain retains the ordinary per-key walker.
+        let domain = self
+            .dispatch
+            .key_literals_from_keyspace_node(mapper.key_space)?;
+        let admitted: rustc_hash::FxHashSet<_> = domain.into_iter().map(|key| key.key).collect();
+        if !keys.iter().all(|key| match key {
+            IndexKey::String(name) => admitted.contains(&PropertyKey::String(Arc::clone(name))),
+            _ => false,
+        }) {
+            return None;
+        }
+        self.original_path_non_empty = true;
+        self.origin_file = self
+            .graph()
+            .node_scope(object)
+            .and_then(|scope| scope.canonical_file());
+        let mut values = Vec::with_capacity(keys.len());
+        for key in keys {
+            if let Err(reasons) = self.dispatch.charge_connected_work() {
+                self.mark_partial_with(reasons);
+                return None;
+            }
+            let IndexKey::String(name) = key else {
+                unreachable!("finite string keys checked above")
+            };
+            let argument = self.graph().intern_node(SemanticNodeData::Literal(
+                crate::semantic_query::LiteralValue::String(name.to_string()),
+            ));
+            let value = self
+                .dispatch
+                .materialize_selected_key_mapped_value_with_node(
+                    mapper,
+                    argument,
+                    // Selected values use the same publication context as
+                    // ordinary single-key projection, including its structural
+                    // provenance and authored merge role.
+                    self.context_from_template(
+                        crate::semantic_query::ProjectionReductionContext::published(self.mode()),
+                    ),
+                );
+            let value = self
+                .dispatch
+                .mapped_member_optionality(mapper, value, source, argument);
+            self.graph().record_origin_edge(
+                value,
+                OriginEdgeKind::ProjectIndex,
+                Arc::from([object, source, mapper.key_space]),
+                OriginMeta::Index(key.clone()),
+                Arc::clone(self.fence),
+            );
+            self.visited_aliases.clear();
+            self.visited_nodes.clear();
+            let value = self.finish_path_terminal(value);
+            if matches!(
+                self.graph().node_data(value).as_deref(),
+                Some(SemanticNodeData::Opaque(QueryError::Miss))
+            ) {
+                return None;
+            }
+            values.push(value);
+        }
+        Some(values)
+    }
+
+    /// Project a finite key set from an already reduced object in one pass.
+    /// Unknown keys retain the ordinary walker path (including index signatures).
     pub(super) fn finite_object_index_values(
         &mut self,
         subject: SemanticNodeId,

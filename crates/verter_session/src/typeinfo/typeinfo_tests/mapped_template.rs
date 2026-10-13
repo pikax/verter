@@ -227,6 +227,7 @@ fn generic_mapped_index_keeps_the_access_and_alias_arguments() {
 #[test]
 fn recursive_mapped_index_publishes_dotted_paths_across_modules() {
     for (count, groups) in [(20, 3), (100, 5), (300, 5)] {
+        let started = std::time::Instant::now();
         let mut files = vec![(
             "/paths/utils.ts".to_string(),
             "export interface Meta<T> { tag: T; created: number }\n\
@@ -294,6 +295,18 @@ fn recursive_mapped_index_publishes_dotted_paths_across_modules() {
             &[],
             ProjectionMode::Expanded,
         );
+        let stats = host.project_type_store().semantic_graph().stats_snapshot();
+        assert!(
+            stats.instantiate_count <= u64::try_from(count * 15 + 20).unwrap(),
+            "recursive applications must share already demanded property types: {count} entities used {} instantiations",
+            stats.instantiate_count,
+        );
+        eprintln!(
+            "layout={count}/{groups} elapsed={:?} instantiates={} evaluations={}",
+            started.elapsed(),
+            stats.instantiate_count,
+            stats.evaluate_deferred_memo_misses
+        );
         let mut expected = BTreeSet::new();
         for i in 0..count {
             expected.insert(format!("e{i}"));
@@ -323,6 +336,74 @@ fn recursive_mapped_index_publishes_dotted_paths_across_modules() {
             .collect::<BTreeSet<_>>();
         assert_eq!(actual, expected, "{count} entities/{groups} modules");
     }
+}
+
+#[test]
+fn mapped_index_selected_key_does_not_materialize_sibling_values() {
+    let host = make_host_with_footprint();
+    upsert_ts(&host, "/selected.ts", "type Input = { wanted: 1; a: 2; b: 3; c: 4 }; type Select<S> = { [K in keyof S]: K extends 'wanted' ? 'yes' : 'no' }['wanted']; export type Probe = Select<Input>;");
+    let graph = host.project_type_store().semantic_graph();
+    let before = graph.stats_snapshot().mapped_per_k_materializations;
+    let (answer, _) = resolve_expr(
+        &host,
+        "/selected.ts",
+        "Probe",
+        &[],
+        ProjectionMode::Expanded,
+    );
+    assert_string_literal(&answer, "yes");
+    assert_eq!(
+        graph.stats_snapshot().mapped_per_k_materializations - before,
+        1,
+        "a selected mapped key must not evaluate sibling values"
+    );
+}
+
+#[test]
+fn unused_mapped_argument_does_not_materialize_values() {
+    let host = make_host_with_footprint();
+    upsert_ts(
+        &host,
+        "/unused.ts",
+        "type Ignore<T> = 'yes'; export type Probe = Ignore<{ [K in 'a' | 'b']: K }>;",
+    );
+    let graph = host.project_type_store().semantic_graph();
+    let before = graph.stats_snapshot().mapped_per_k_materializations;
+    let (answer, _) = resolve_expr(&host, "/unused.ts", "Probe", &[], ProjectionMode::Expanded);
+    assert_string_literal(&answer, "yes");
+    assert_eq!(
+        graph.stats_snapshot().mapped_per_k_materializations - before,
+        0,
+        "an unused type argument must not evaluate mapped values"
+    );
+}
+
+#[test]
+fn finite_mapped_index_shares_projection_bookkeeping() {
+    let entries = [4, 64].map(|count| {
+        let host = make_host_with_footprint();
+        let names: Vec<_> = (0..count).map(|i| format!("k{i}")).collect();
+        let keys = names
+            .iter()
+            .map(|name| format!("'{name}'"))
+            .collect::<Vec<_>>()
+            .join(" | ");
+        upsert_ts(
+            &host,
+            "/batch.ts",
+            &format!("export type Probe = {{ [K in {keys}]: K }}[{keys}];"),
+        );
+        let (answer, _) = resolve_expr(&host, "/batch.ts", "Probe", &[], ProjectionMode::Expanded);
+        let expected: Vec<_> = names.iter().map(String::as_str).collect();
+        assert_literal_union(&answer, &expected);
+        host.project_type_store()
+            .semantic_graph()
+            .memo_entry_count()
+    });
+    assert!(
+        entries[1] <= entries[0] + 4,
+        "key selection must share query bookkeeping: {entries:?}"
+    );
 }
 
 #[test]

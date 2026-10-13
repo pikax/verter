@@ -4480,6 +4480,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> InstantiateStart {
         verter_audit::attribute_scope!(Instantiate);
         verter_audit::attribute_n!(Substitute, args.len());
+        let normalized_args = self.paid_instantiation_arguments(args);
+        let args = normalized_args.as_ref().unwrap_or(args);
         // The key carries an `InstantiateContext` (embedded
         // projection-reduction identity + the `resolve_env_hash` env dim).
         // Destructure into the embedded `ProjectionReductionContext` so the
@@ -9523,6 +9525,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // Bounded loop: exact-identity cycle detection plus the shared
         // connected work envelope, both typed-partial on trip.
         loop {
+            let mut original_args = None;
             let (slot, inst_args, owner_canonical) =
                 match self.graph().node_data(current).as_deref() {
                     Some(SemanticNodeData::DeclRef { identity }) => (
@@ -9534,15 +9537,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
                         Arc::clone(&identity.canonical_id),
                     ),
-                    Some(SemanticNodeData::InstantiationRef { base, args }) => (
-                        self.type_slot_for(
+                    Some(SemanticNodeData::InstantiationRef { base, args }) => {
+                        let normalized = self.paid_instantiation_arguments(args);
+                        if normalized.is_some() {
+                            original_args = Some(Arc::clone(args));
+                        }
+                        (
+                            self.type_slot_for(
+                                Arc::clone(&base.canonical_id),
+                                base.owner,
+                                Arc::clone(&base.decl_name),
+                            ),
+                            normalized.unwrap_or_else(|| Arc::clone(args)),
                             Arc::clone(&base.canonical_id),
-                            base.owner,
-                            Arc::clone(&base.decl_name),
-                        ),
-                        Arc::clone(args),
-                        Arc::clone(&base.canonical_id),
-                    ),
+                        )
+                    }
                     // Settled (non-carrier) — the stable stop; checked BEFORE the
                     // work budget so a chain that settles on exactly the last
                     // permitted step is never falsely partial.
@@ -9574,6 +9583,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 QueryResult::Value(id) => id,
                 _ => return current,
             };
+            if let Some(arguments) = original_args {
+                // Sharing an already demanded argument's value does not erase
+                // the original application or its authored argument sources.
+                self.graph().record_origin_edge(
+                    next,
+                    OriginEdgeKind::Instantiate,
+                    std::iter::once(current)
+                        .chain(arguments.iter().copied())
+                        .collect(),
+                    OriginMeta::None,
+                    self.project_generation_signature(),
+                );
+            }
             if next == current {
                 return current;
             }
@@ -10982,35 +11004,34 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             _ => subject,
         };
-        {
-            if let Some(data) = self.graph().node_data(object) {
-                if let SemanticNodeData::Object(surface) = data.as_ref() {
-                    let fence = self.project_generation_signature();
-                    let mut walker = PathWalker::new(self, context, &fence);
-                    if let Some(values) =
-                        walker.finite_object_index_values(base, object, surface, &keys)
-                    {
-                        let norm = self.execute_read(SemanticQueryKey::ReduceUnion {
-                            members: Arc::from(values.into_boxed_slice()),
-                            nullability:
-                                verter_session_query::flow::policy::NullabilityPolicy::Strict,
-                        });
-                        if let QueryResult::Value(id) = norm.value {
-                            let mut out =
-                                crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
-                                    QueryResult::Value(id),
-                                    Arc::clone(&fence),
-                                ))
-                                .with_observed_self_roots(
-                                    self.observed_self_roots_from_nodes([base, object]),
-                                );
-                            out.fold_partial(norm.result_is_partial);
-                            out.merge_completeness(walker.completeness);
-                            out.cache_suppress |= walker.cache_suppress;
-                            out.walker_diagnostics = std::mem::take(&mut walker.walker_diagnostics);
-                            return Some(out);
-                        }
-                    }
+        if let Some(data) = self.graph().node_data(object) {
+            let fence = self.project_generation_signature();
+            let mut walker = PathWalker::new(self, context, &fence);
+            let values = match data.as_ref() {
+                SemanticNodeData::Object(surface) => {
+                    walker.finite_object_index_values(base, object, surface, &keys)
+                }
+                SemanticNodeData::Mapped { source, mapper } => {
+                    walker.finite_mapped_index_values(object, *source, mapper, &keys)
+                }
+                _ => None,
+            };
+            if let Some(values) = values {
+                let norm = self.execute_read(SemanticQueryKey::ReduceUnion {
+                    members: Arc::from(values.into_boxed_slice()),
+                    nullability: verter_session_query::flow::policy::NullabilityPolicy::Strict,
+                });
+                if let QueryResult::Value(id) = norm.value {
+                    let mut out = crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+                        QueryResult::Value(id),
+                        Arc::clone(&fence),
+                    ))
+                    .with_observed_self_roots(self.observed_self_roots_from_nodes([base, object]));
+                    out.fold_partial(norm.result_is_partial);
+                    out.merge_completeness(walker.completeness);
+                    out.cache_suppress |= walker.cache_suppress;
+                    out.walker_diagnostics = std::mem::take(&mut walker.walker_diagnostics);
+                    return Some(out);
                 }
             }
         }
@@ -12530,7 +12551,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// A mapped member's value read at its key under its optionality
     /// modifier, as the checker types a mapped symbol's property under
     /// `strictNullChecks` (`resolveMappedTypeMembers`): `+?` adds `undefined`
-    /// unless the value holds it, and `-?` removes the `undefined` an
+    /// unless the value holds it, Keep inherits the source's optionality,
+    /// and `-?` removes the `undefined` an
     /// optional source member `key` added (`removeMissingOrUndefinedType`).
     /// Without `strictNullChecks` the value is unchanged.
     pub(super) fn mapped_member_optionality(
@@ -12565,6 +12587,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         };
         match mapper.optionality {
             crate::semantic_query::OptionalityMod::Add if !arms.iter().any(is_undefined) => {
+                let mut arms = arms;
+                arms.push(self.primitive_node(PrimitiveKind::Undefined));
+                self.intern_normalized_union_or_intersection(&arms, true)
+            }
+            crate::semantic_query::OptionalityMod::Keep
+                if !arms.iter().any(is_undefined)
+                    && source != mapper.key_space
+                    && self.mapped_source_member_optional(source, key) == Some(true) =>
+            {
                 let mut arms = arms;
                 arms.push(self.primitive_node(PrimitiveKind::Undefined));
                 self.intern_normalized_union_or_intersection(&arms, true)

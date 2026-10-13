@@ -1758,8 +1758,9 @@ fn is_whole_surface_published(ctx: ProjectionReductionContext) -> bool {
 /// body and the indexed access can pick `'a'` out of it.
 ///
 /// Under any `Published` parent → demote the object operand to
-/// [`ProjectionMode::Navigate`] (demand + provenance + merge_role
-/// preserved). The object operand is the INTERMEDIATE hop of the
+/// `StructuralTransit(Navigate)` (provenance + merge_role preserved).
+/// Keeping Published demand would still expand mapped values before the
+/// index selects them. The object operand is the INTERMEDIATE hop of the
 /// indexed-access path (`Root['a']` in `Root['a']['b']`): it must be
 /// navigated (followed through aliases / generic bodies so the outer
 /// `IndexedAccess` dispatch can look up the index) but NOT expanded.
@@ -1782,7 +1783,7 @@ pub(crate) fn indexed_access_object_context(
     parent_context: ProjectionReductionContext,
 ) -> ProjectionReductionContext {
     if matches!(parent_context.demand, ReductionDemand::Published) {
-        parent_context.with_mode(ProjectionMode::Navigate)
+        parent_context.into_structural_transit_with_mode(ProjectionMode::Navigate)
     } else {
         structural_operand_context(parent_context)
     }

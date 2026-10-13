@@ -2320,6 +2320,457 @@ fn host() -> VerterHost {
     })
 }
 
+#[test]
+fn conditional_applications_reuse_demanded_arguments_and_keep_origins() {
+    use verter_type_engine::semantic_query::DeclIdentity;
+    let host = host();
+    upsert_ts(
+        &host,
+        "/closed-arguments.ts",
+        "export interface Source { left: string; right: string } type Label<T> = T extends string ? 'yes' : 'no'; export type Tag<T> = T extends string ? Label<T> : 'no';",
+    );
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let identity = DeclIdentity {
+        canonical_id: Arc::from("/closed-arguments.ts"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        whole_hash: host
+            .ensure_indexed_ready("/closed-arguments.ts")
+            .unwrap()
+            .whole_hash,
+        decl_name: Arc::from("Tag"),
+    };
+    let source = graph.intern_node(SemanticNodeData::DeclRef {
+        identity: DeclIdentity {
+            decl_name: Arc::from("Source"),
+            ..identity.clone()
+        },
+    });
+    let before = graph.stats_snapshot().instantiate_count;
+    for key in ["left", "right"] {
+        let argument = graph.intern_node(SemanticNodeData::IndexedAccess {
+            object: source,
+            index: IndexKey::String(Arc::from(key)),
+        });
+        let application = graph.intern_node(SemanticNodeData::InstantiationRef {
+            base: identity.clone(),
+            args: Arc::from([argument]),
+        });
+        let read = dispatch.execute_read(SemanticQueryKey::TemplateLiteralReduce {
+            pattern: Arc::from([Arc::from("prefix:"), Arc::from("")]),
+            args: Arc::from([application]),
+            context: dispatch.template_literal_reduce_context(),
+        });
+        assert!(!read.result_is_partial && !read.cache_suppress);
+        let QueryResult::Value(result) = read.value else {
+            panic!("template must reduce")
+        };
+        assert!(matches!(graph.node_data(result).as_deref(),
+            Some(SemanticNodeData::Literal(LiteralValue::String(text))) if text == "prefix:yes"));
+        assert!(
+            graph
+                .export_all_origin_edges()
+                .iter()
+                .any(|(body, kind, edge)| {
+                    *kind == OriginEdgeKind::Instantiate
+                        && edge.sources.contains(&argument)
+                        && matches!(graph.node_data(*body).as_deref(),
+                            Some(SemanticNodeData::Literal(LiteralValue::String(text))) if text == "yes")
+                }),
+            "the application must retain its authored indexed argument origin"
+        );
+    }
+    assert_eq!(
+        graph.stats_snapshot().instantiate_count - before,
+        4,
+        "two authored applications and one source share one demanded inner application"
+    );
+}
+
+#[test]
+fn demanded_imported_arguments_share_their_defining_scope() {
+    use verter_type_engine::semantic_query::DeclIdentity;
+    let host = host();
+    upsert_ts(&host, "/shared.ts", "export interface Shared { value: string } export interface Source { value: Shared; child: { value: Shared } } type Label<T> = 'yes'; export type Tag<T> = T extends object ? Label<T> : 'no';");
+    for path in ["/left.ts", "/right.ts"] {
+        upsert_ts(&host, path, "export type Placeholder = string;");
+    }
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let identity = DeclIdentity {
+        canonical_id: Arc::from("/shared.ts"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        whole_hash: host.ensure_indexed_ready("/shared.ts").unwrap().whole_hash,
+        decl_name: Arc::from("Shared"),
+    };
+    let (_guard, _) = dispatch.enter_connected_demand(false);
+    let warm = dispatch.execute_read(SemanticQueryKey::Instantiate(
+        verter_type_engine::semantic_query::InstantiateKey::new(
+            dispatch.type_slot_for(
+                Arc::clone(&identity.canonical_id),
+                identity.owner,
+                Arc::from("Source"),
+            ),
+            Arc::from([]),
+            dispatch.instantiate_context_for(
+                &identity.canonical_id,
+                ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
+            ),
+        ),
+    ));
+    assert!(
+        matches!(warm.value, QueryResult::Value(_))
+            && !warm.result_is_partial
+            && !warm.cache_suppress
+    );
+    let mut after_first = None;
+    for (path, nested, named) in [
+        ("/left.ts", false, false),
+        ("/right.ts", false, false),
+        ("/left.ts", true, false),
+        ("/right.ts", true, false),
+        ("/left.ts", false, true),
+        ("/right.ts", true, true),
+    ] {
+        let imported = graph.intern_node_with_scope(
+            SemanticNodeData::DeclRef {
+                identity: identity.clone(),
+            },
+            NodeScopeId::File {
+                canonical_id: Arc::from(path),
+                owner: identity.owner,
+                whole_hash: host.ensure_indexed_ready(path).unwrap().whole_hash,
+                local_scope: None,
+            },
+        );
+        let source = if named {
+            graph.intern_node_with_scope(
+                SemanticNodeData::DeclRef {
+                    identity: DeclIdentity {
+                        decl_name: Arc::from("Source"),
+                        ..identity.clone()
+                    },
+                },
+                graph.node_scope(imported).unwrap(),
+            )
+        } else {
+            simple_object(&graph, &[("value", imported)])
+        };
+        let source = if nested {
+            let outer = if named {
+                source
+            } else {
+                simple_object(&graph, &[("child", source)])
+            };
+            graph.intern_node(SemanticNodeData::IndexedAccess {
+                object: outer,
+                index: IndexKey::String(Arc::from("child")),
+            })
+        } else {
+            source
+        };
+        let argument = graph.intern_node(SemanticNodeData::IndexedAccess {
+            object: source,
+            index: IndexKey::String(Arc::from("value")),
+        });
+        let application = graph.intern_node(SemanticNodeData::InstantiationRef {
+            base: DeclIdentity {
+                decl_name: Arc::from("Tag"),
+                ..identity.clone()
+            },
+            args: Arc::from([argument]),
+        });
+        let read = dispatch.execute_read(SemanticQueryKey::TemplateLiteralReduce {
+            pattern: Arc::from([Arc::from("prefix:"), Arc::from("")]),
+            args: Arc::from([application]),
+            context: dispatch.template_literal_reduce_context(),
+        });
+        assert!(!read.result_is_partial && !read.cache_suppress);
+        let QueryResult::Value(result) = read.value else {
+            panic!("template must reduce")
+        };
+        assert!(matches!(graph.node_data(result).as_deref(),
+            Some(SemanticNodeData::Literal(LiteralValue::String(text))) if text == "prefix:yes"));
+        let env = rustc_hash::FxHashMap::default();
+        let names = rustc_hash::FxHashMap::default();
+        let scope = NodeScopeId::Global;
+        let shadowing = verter_type_engine::resolver_core::scope_shadowing::ScopeShadowing::empty();
+        let inputs = super::locator_view::LocatorViewInputs {
+            env: &env,
+            scope: &scope,
+            name_resolution: &names,
+            scope_payload: None,
+            shadowing: &shadowing,
+            authored_resolution_debt: None,
+            self_value: None,
+        };
+        let projected = dispatch.project_view_node_worklist(
+            application,
+            ProjectionReductionContext::published(ProjectionMode::Expanded),
+            &inputs,
+            &mut Vec::new(),
+            &mut super::locator_view::ViewMemo::default(),
+        );
+        assert!(!projected.completeness.is_partial());
+        assert!(matches!(graph.node_data(projected.node).as_deref(),
+            Some(SemanticNodeData::Literal(LiteralValue::String(text))) if text == "yes"));
+        let count = graph.stats_snapshot().instantiate_count;
+        if let Some(before) = after_first {
+            assert_eq!(count - before, 0, "the required member is already available: {path}, nested={nested}, named={named} must reuse its generic applications");
+        }
+        after_first = Some(count);
+    }
+}
+
+#[test]
+fn finite_mapped_index_matches_single_key_publication_context() {
+    use verter_type_engine::semantic_query::{
+        composite::CompositeList, DeclIdentity, MemberMergeRole,
+    };
+    for context in [
+        ProjectionReductionContext::published_macro_type_arg_body(ProjectionMode::Expanded)
+            .with_merge_role(MemberMergeRole::OwnBody),
+        ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Expanded),
+    ] {
+        let host = host();
+        upsert_ts(
+            &host,
+            "/mapped-values.ts",
+            "export type Box<K> = { value: { [P in K & string]: P } };",
+        );
+        let graph = Arc::clone(host.project_type_store().semantic_graph());
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let whole_hash = host
+            .ensure_indexed_ready("/mapped-values.ts")
+            .unwrap()
+            .whole_hash;
+        let parameter = graph.intern_node(SemanticNodeData::TypeParam {
+            decl: DeclIdentity::synthetic("K"),
+            param_index: 0,
+            constraint: None,
+            default: None,
+            display_name: Arc::from("K"),
+        });
+        let keys = ["left", "right"].map(|key| {
+            graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+                key.to_string(),
+            )))
+        });
+        let key_space = graph.intern_node(SemanticNodeData::Union(CompositeList::test_fixture(
+            Arc::from(keys),
+        )));
+        let value = graph.intern_node(SemanticNodeData::InstantiationRef {
+            base: DeclIdentity {
+                canonical_id: Arc::from("/mapped-values.ts"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                whole_hash,
+                decl_name: Arc::from("Box"),
+            },
+            args: Arc::from([parameter]),
+        });
+        let mapped = graph.intern_node(SemanticNodeData::Mapped {
+            source: simple_object(&graph, &[]),
+            mapper: MapperKey {
+                parameter_node: parameter,
+                key_space,
+                value_expr: value,
+                over_type_variable: false,
+                name_remap: None,
+                optionality: OptionalityMod::Keep,
+                readonly: ReadonlyMod::Keep,
+                kind: verter_type_engine::semantic_query::MapperKind::Computed,
+            },
+        });
+        let project = |index| {
+            let read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
+                base: mapped,
+                path: Arc::from([PathSegment::Index(index)]),
+                context,
+            });
+            assert!(!read.result_is_partial && !read.cache_suppress);
+            let QueryResult::Value(value) = read.value else {
+                panic!("mapped key must project");
+            };
+            value
+        };
+        let singles = ["left", "right"].map(|key| project(IndexKey::String(Arc::from(key))));
+        for (key, single) in ["left", "right"].into_iter().zip(singles) {
+            let data = graph.node_data(single).expect("Box result exists");
+            let SemanticNodeData::Object(surface) = data.as_ref() else {
+                panic!("Box is an object");
+            };
+            let inner = graph
+                .node_data(surface.positive_members()[0].value)
+                .unwrap();
+            let SemanticNodeData::Object(inner) = inner.as_ref() else {
+                panic!("Box value mapping must publish");
+            };
+            assert_eq!(inner.positive_members()[0].string_name().unwrap(), key);
+        }
+        let expected = dispatch.execute_read(SemanticQueryKey::ReduceUnion {
+            members: Arc::from(singles),
+            nullability: verter_session_query::flow::policy::NullabilityPolicy::Strict,
+        });
+        let QueryResult::Value(expected) = expected.value else {
+            panic!("single projections reduce");
+        };
+        let batched = project(IndexKey::Computed(key_space));
+        assert_eq!(
+            batched, expected,
+            "finite union selection must use the same value context as separate keys: {context:?}"
+        );
+    }
+}
+
+#[test]
+fn conditional_branch_keeps_an_argument_cached_by_a_closed_demand() {
+    use verter_type_engine::semantic_query::{DeclIdentity, InstantiateKey};
+    let host = host();
+    let canonical = "/closed-demand.ts";
+    upsert_ts(&host, canonical, "export interface Source { value: string } export type Ignore<T> = 'yes'; export type Outer<T> = 1 extends number ? Ignore<T> : never;");
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let identity = DeclIdentity {
+        canonical_id: Arc::from(canonical),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        whole_hash: host.ensure_indexed_ready(canonical).unwrap().whole_hash,
+        decl_name: Arc::from("Source"),
+    };
+    let source = graph.intern_node(SemanticNodeData::DeclRef { identity });
+    let argument = graph.intern_node(SemanticNodeData::IndexedAccess {
+        object: source,
+        index: IndexKey::String(Arc::from("value")),
+    });
+    let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
+    let (_, completeness, suppressed) =
+        dispatch.evaluate_deferred_outcome_for_tests(argument, context);
+    assert!(!completeness.is_partial() && !suppressed);
+    let instantiate = |name| {
+        dispatch.execute_read(SemanticQueryKey::Instantiate(InstantiateKey::new(
+            dispatch.type_slot_for(
+                Arc::from(canonical),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                Arc::from(name),
+            ),
+            Arc::from([argument]),
+            dispatch.instantiate_context_for(canonical, context),
+        )))
+    };
+    let outer = instantiate("Outer");
+    assert!(!outer.result_is_partial && !outer.cache_suppress);
+    let QueryResult::Value(value) = outer.value else {
+        panic!("the outer application must resolve");
+    };
+    assert!(matches!(graph.node_data(value).as_deref(),
+        Some(SemanticNodeData::Literal(LiteralValue::String(text))) if text == "yes"));
+    let before = graph.stats_snapshot().instantiate_count;
+    let inner = instantiate("Ignore");
+    assert!(!inner.result_is_partial && !inner.cache_suppress);
+    assert_eq!(
+        graph.stats_snapshot().instantiate_count,
+        before,
+        "the dormant inner application keeps the authored argument identity"
+    );
+}
+
+#[test]
+fn residual_template_application_does_not_force_unused_mapped_argument() {
+    use verter_type_engine::semantic_query::{composite::CompositeList, DeclIdentity};
+    let host = host();
+    upsert_ts(
+        &host,
+        "/template-argument.ts",
+        "export type Ignore<T> = 'yes';",
+    );
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let whole_hash = host
+        .ensure_indexed_ready("/template-argument.ts")
+        .unwrap()
+        .whole_hash;
+    let parameter = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: DeclIdentity::synthetic("K"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("K"),
+    });
+    let keys = ["left", "right"].map(|key| {
+        graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+            key.to_string(),
+        )))
+    });
+    let key_space = graph.intern_node(SemanticNodeData::Union(CompositeList::test_fixture(
+        Arc::from(keys),
+    )));
+    let source = simple_object(&graph, &[]);
+    let mapper = MapperKey {
+        parameter_node: parameter,
+        key_space,
+        value_expr: parameter,
+        over_type_variable: false,
+        name_remap: None,
+        optionality: OptionalityMod::Keep,
+        readonly: ReadonlyMod::Keep,
+        kind: verter_type_engine::semantic_query::MapperKind::Computed,
+    };
+    let mapped = graph.intern_node(SemanticNodeData::Mapped {
+        source,
+        mapper: mapper.clone(),
+    });
+    let application = graph.intern_node(SemanticNodeData::InstantiationRef {
+        base: DeclIdentity {
+            canonical_id: Arc::from("/template-argument.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            whole_hash,
+            decl_name: Arc::from("Ignore"),
+        },
+        args: Arc::from([mapped]),
+    });
+    let before = graph.stats_snapshot().mapped_per_k_materializations;
+    let normalized = dispatch
+        .normalize_node_for_structural_fact_demand(
+            application,
+            ProjectionReductionContext::published(ProjectionMode::Expanded),
+        )
+        .into_complete_node()
+        .expect("the application must settle without using its argument");
+    assert!(matches!(graph.node_data(normalized).as_deref(),
+        Some(SemanticNodeData::Literal(LiteralValue::String(value))) if value == "yes"));
+    assert_eq!(
+        graph.stats_snapshot().mapped_per_k_materializations - before,
+        0,
+        "structural demand must let the generic body choose its live arguments"
+    );
+    let read = dispatch.execute_read(SemanticQueryKey::TemplateLiteralReduce {
+        pattern: Arc::from([Arc::from("prefix:"), Arc::from("")]),
+        args: Arc::from([application]),
+        context: dispatch.template_literal_reduce_context(),
+    });
+    assert!(!read.result_is_partial && !read.cache_suppress);
+    let QueryResult::Value(result) = read.value else {
+        panic!("closed interpolation must reduce");
+    };
+    assert!(matches!(graph.node_data(result).as_deref(),
+        Some(SemanticNodeData::Literal(LiteralValue::String(value))) if value == "prefix:yes"));
+    assert_eq!(
+        graph.stats_snapshot().mapped_per_k_materializations - before,
+        0,
+        "resolving a residual generic application must let its body demand the arguments it uses"
+    );
+    let control = dispatch.execute_read(SemanticQueryKey::MappedType {
+        source,
+        mapper,
+        context: ProjectionReductionContext::published(ProjectionMode::Expanded),
+    });
+    assert!(matches!(control.value, QueryResult::Value(_)) && !control.result_is_partial);
+    assert_eq!(
+        graph.stats_snapshot().mapped_per_k_materializations - before,
+        2,
+        "directly demanding the same mapped argument must materialize both values"
+    );
+}
+
 fn upsert_ts(host: &VerterHost, id: &str, source: &str) {
     let _ = host
         .upsert(UpsertRequest {
