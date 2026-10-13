@@ -11,6 +11,8 @@
 
 use std::sync::Arc;
 
+use verter_session_query::facts::fact_read_set::FactReadSetFinalise;
+
 use super::ProjectSemanticDispatch;
 use crate::semantic_query::{
     CacheRead, IndexKey, LiteralValue, PartialReasonSet, PrimitiveKind, ProjectionMode,
@@ -300,7 +302,6 @@ enum DeferredEvaluationStage {
 }
 
 struct DeferredEvaluationFrame {
-    tracer: std::rc::Rc<crate::resolver_core::resolver_context::OwnedFactTracer>,
     entry_node: SemanticNodeId,
     node: SemanticNodeId,
     context: ProjectionReductionContext,
@@ -318,18 +319,10 @@ struct DeferredEvaluationFrame {
 }
 
 impl DeferredEvaluationFrame {
-    fn new(
-        node: SemanticNodeId,
-        context: ProjectionReductionContext,
-        budget_epoch: u64,
-        basis: verter_session_query::facts::fact_cache::AggregateGenerations,
-    ) -> Self {
+    fn new(node: SemanticNodeId, context: ProjectionReductionContext, budget_epoch: u64) -> Self {
         let mut visited = rustc_hash::FxHashSet::default();
         visited.insert(node);
         Self {
-            tracer: std::rc::Rc::new(
-                crate::resolver_core::resolver_context::OwnedFactTracer::new(basis),
-            ),
             entry_node: node,
             node,
             context,
@@ -1963,34 +1956,37 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
-    fn evaluation_fact_basis(
-        &self,
-    ) -> verter_session_query::facts::fact_cache::AggregateGenerations {
-        verter_session_query::facts::fact_cache::AggregateGenerations::from_seed(
-            &verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
-            &self.snapshot.clocks().live(),
-        )
-    }
-
     fn finish_deferred_evaluation_frame(
         &self,
         mut frame: DeferredEvaluationFrame,
         result: SemanticNodeId,
-        parent: Option<&DeferredEvaluationFrame>,
+        finalise: FactReadSetFinalise,
     ) -> EvaluateDeferredOutcome {
-        let tracer = std::rc::Rc::try_unwrap(frame.tracer)
-            .unwrap_or_else(|_| unreachable!("a completed evaluation owns its tracer"));
-        let signature = verter_session_query::facts::fact_cache::SignatureAdmission::from_finalise(
-            tracer.into_read_set().finalise(),
-        )
-        .into_cacheable();
-        if let Some(signature) = &signature {
-            use crate::fact_signature_helpers::ReadSetSignatureExt as _;
-            let _parent_scope = parent.map(|parent| parent.tracer.install());
-            signature.bubble(self.ctx);
-        } else {
-            frame.cache_suppress = true;
-        }
+        let evidence = match finalise {
+            FactReadSetFinalise::Ok(facts) => {
+                use verter_session_query::facts::fact_cache::{signature_entries, FactVersionRef};
+
+                let mut roots = self.observed_self_roots_from_nodes([frame.entry_node, result]);
+                // This memo has no single file owner. Every consumed
+                // declaration and augmentation contributor is a strict root,
+                // including whole-file facts retained on evidence pages.
+                roots.extend(signature_entries(&facts).filter_map(|fact| match fact {
+                    FactVersionRef::FileWholeHash { canonical_id, hash } => {
+                        Some((Arc::from(canonical_id.as_str()), *hash))
+                    }
+                    _ => None,
+                }));
+                self.ctx.complete_graph_signature(&roots, &facts).ok()
+            }
+            FactReadSetFinalise::NonCacheable(_) => None,
+            FactReadSetFinalise::MutationUnstable => {
+                frame.completeness = frame.completeness.merge(ResultCompleteness::partial(
+                    PartialReasonSet::UNSTABLE_STATE,
+                ));
+                None
+            }
+        };
+        frame.cache_suppress |= evidence.is_none();
         // A recovery made under the evaluation — an inline relation, a
         // canonical construction — makes it a resource partial, never a
         // published memo entry, even where no read carried its reason here.
@@ -2027,15 +2023,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             self.connected_demand
                 .record_prerequisite(receipt, super::cost_receipt::Nesting::InPlace);
         }
-        if let (true, false, Some(receipt), Some(signature)) =
-            (complete, frame.cache_suppress, receipt, signature)
+        if let (true, false, Some(receipt), Some(evidence)) =
+            (complete, frame.cache_suppress, receipt, evidence)
         {
             self.graph().evaluate_deferred_memo_publish(
                 frame.entry_node,
                 frame.context,
                 result,
                 receipt,
-                signature,
+                evidence,
             );
         }
         EvaluateDeferredOutcome {
@@ -2075,7 +2071,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             node,
             reduction_context,
             self.operation_budget_epoch.get(),
-            self.evaluation_fact_basis(),
         );
         self.connected_demand.open_cost_scope(
             super::cost_receipt::CostIdentity::of_key((node, reduction_context)).with_roots(
@@ -2087,6 +2082,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         root.memo_checked = true;
         root.recording = true;
         let mut frames = vec![root];
+        // Tracers live beside the frames so a step can mutate its frame.
+        // Only the current frame is installed; a completed child replays
+        // its proof into its parent. Deep operands do not install or copy
+        // an entire stack of tracers on every step.
+        let mut tracers = vec![crate::fact_signature_helpers::StepwiseFactTracer::new(
+            crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(self.ctx),
+        )];
         let mut completed_child: Option<EvaluateDeferredOutcome> = None;
 
         loop {
@@ -2099,9 +2101,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 return aborted_evaluation_outcome(&frames, completed_child.as_ref(), reasons);
             }
 
-            let frame_tracer =
-                std::rc::Rc::clone(&frames.last().expect("active evaluator frame").tracer);
-            let tracer_scope = frame_tracer.install();
+            let scope = tracers
+                .last_mut()
+                .expect("active evaluation tracer")
+                .install();
             let action = if let Some(child) = completed_child.take() {
                 let frame = frames
                     .last_mut()
@@ -2368,9 +2371,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     }
                 }
             };
-            drop(tracer_scope);
-            drop(frame_tracer);
 
+            drop(scope);
             match action {
                 DeferredEvaluationAction::Continue => {}
                 DeferredEvaluationAction::Push { node, context } => {
@@ -2378,24 +2380,60 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         node,
                         context,
                         self.operation_budget_epoch.get(),
-                        self.evaluation_fact_basis(),
+                    ));
+                    tracers.push(crate::fact_signature_helpers::StepwiseFactTracer::new(
+                        crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(self.ctx),
                     ));
                 }
                 DeferredEvaluationAction::Finish(result) => {
                     let frame = frames.pop().expect("finishing an active evaluator frame");
-                    let outcome =
-                        self.finish_deferred_evaluation_frame(frame, result, frames.last());
+                    let tracer = tracers.pop().expect("each evaluation owns a tracer");
+                    let finalise = tracer.finish();
+                    if let Some(parent) = tracers.last_mut() {
+                        let _scope = parent.install();
+                        match &finalise {
+                            FactReadSetFinalise::Ok(facts)
+                            | FactReadSetFinalise::NonCacheable(facts) => {
+                                self.ctx.observe_borrowed_signature(facts)
+                            }
+                            FactReadSetFinalise::MutationUnstable => {}
+                        }
+                    }
+                    let outcome = self.finish_deferred_evaluation_frame(frame, result, finalise);
                     if frames.is_empty() {
                         return outcome;
                     }
                     completed_child = Some(outcome);
                 }
                 DeferredEvaluationAction::Cached(cached) => {
-                    let frame = frames
+                    let finalise = tracers
+                        .pop()
+                        .expect("each evaluation owns a tracer")
+                        .finish();
+                    if let Some(parent) = tracers.last_mut() {
+                        let _scope = parent.install();
+                        match &finalise {
+                            FactReadSetFinalise::Ok(facts)
+                            | FactReadSetFinalise::NonCacheable(facts) => {
+                                self.ctx.observe_borrowed_signature(facts)
+                            }
+                            FactReadSetFinalise::MutationUnstable => {}
+                        }
+                    }
+                    frames
                         .pop()
                         .expect("a memo hit belongs to an active evaluator frame");
-                    let outcome =
-                        self.finish_deferred_evaluation_frame(frame, cached, frames.last());
+                    let mut outcome = EvaluateDeferredOutcome::complete(cached);
+                    match finalise {
+                        FactReadSetFinalise::Ok(_) => {}
+                        FactReadSetFinalise::NonCacheable(_) => outcome.cache_suppress = true,
+                        FactReadSetFinalise::MutationUnstable => {
+                            outcome = EvaluateDeferredOutcome::partial(
+                                cached,
+                                PartialReasonSet::UNSTABLE_STATE,
+                            )
+                        }
+                    }
                     if frames.is_empty() {
                         return outcome;
                     }
