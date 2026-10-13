@@ -8883,33 +8883,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             args.as_ref(),
         ) {
             let source_resolved = self.resolve_signature_source_carrier(*subject, context);
-            let mut result = self
+            let result = self
                 .resolve_signature_utility(utility, source_resolved, context)
                 .unwrap_or_else(|| self.opaque(QueryError::Miss));
-            // The signature result is the demanded value. Resolve a returned
-            // reference at publication altitude without forcing all inputs
-            // or re-evaluating an authored conditional return pattern.
-            if context.mode == crate::semantic_query::ProjectionMode::Expanded
-                && crate::semantic_query::may_reduce_operator(context)
-                && matches!(
-                    self.graph().node_data(result).as_deref(),
-                    Some(
-                        SemanticNodeData::DeclRef { .. }
-                            | SemanticNodeData::InstantiationRef { .. }
-                            | SemanticNodeData::IndexedAccess { .. }
-                    )
-                )
-            {
-                result = self.resolve_signature_source_carrier(result, context);
-            }
-            if crate::semantic_query::may_reduce_operator(context)
-                && matches!(
-                    self.graph().node_data(result).as_deref(),
-                    Some(SemanticNodeData::Array { .. } | SemanticNodeData::Tuple { .. })
-                )
-            {
-                result = self.reduce_instantiated_operators(result);
-            }
             record_utility_edges(result);
             return (QueryResult::Value(result), fence, false);
         }
