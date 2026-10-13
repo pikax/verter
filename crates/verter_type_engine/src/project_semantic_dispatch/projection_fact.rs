@@ -47,6 +47,7 @@ pub(crate) fn adopt_projection_result(
 ) -> (QueryResult<SemanticQueryValue>, FactStatus) {
     match result {
         QueryResult::Value(value) => {
+            let mut interpretation = guarantee;
             if let SemanticQueryValue::TypeNode(node) = &value {
                 if let Some(crate::semantic_query::SemanticNodeData::Opaque(error)) =
                     graph.node_data(*node).as_deref()
@@ -80,6 +81,20 @@ pub(crate) fn adopt_projection_result(
                 }
                 SemanticQueryValue::TypeNode(node) => match graph.node_data(node).as_deref() {
                     Some(crate::semantic_query::SemanticNodeData::Opaque(error))
+                        if super::query_error_disposition::classify_query_error(error).disposition
+                            == super::query_error_disposition::QueryErrorDisposition::BudgetRecovery =>
+                    {
+                        // The root itself witnesses the checker's recovery after
+                        // an exhausted allowance. A fresh projection cannot make
+                        // that resource-limited answer exact or reusable.
+                        interpretation = Some(ProjectionInterpretation::CheckerRecovery);
+                        FactResult::approximate(
+                            SemanticQueryValue::TypeNode(node),
+                            NonEmptyReasons::of(PartialReason::OperationBudget)
+                                .with(observed.reasons()),
+                        )
+                    }
+                    Some(crate::semantic_query::SemanticNodeData::Opaque(error))
                         if matches!(
                             super::query_error_disposition::classify_query_error(error).disposition,
                             super::query_error_disposition::QueryErrorDisposition::OptionalAbsence
@@ -99,7 +114,7 @@ pub(crate) fn adopt_projection_result(
                 },
                 value => projection_fact(Some(value), observed, guarantee),
             };
-            let status = fact.status().with_interpretation(guarantee);
+            let status = fact.status().with_interpretation(interpretation);
             let result = match fact {
                 FactResult::Complete(value) | FactResult::Approximate { value, .. } => {
                     QueryResult::Value(value)

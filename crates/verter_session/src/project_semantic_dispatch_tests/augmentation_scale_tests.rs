@@ -585,3 +585,104 @@ fn global_interface_added_parameters_keep_explicit_arguments() {
         }
     }
 }
+
+#[test]
+fn merged_global_instantiation_preserves_approximation_from_every_declaration() {
+    use super::ProjectSemanticDispatch;
+    use verter_type_engine::semantic_query::{
+        FactInterpretation, FactStatus, InstantiateKey, ProjectionReductionContext, QueryResult,
+        SemanticQueryKey,
+    };
+    for partial in [true, false] {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        let gap = if partial {
+            "ReturnType<typeof makeGap>"
+        } else {
+            "string"
+        };
+        upsert_ts(
+            &host,
+            "/a.ts",
+            &format!(
+                "function makeGap() {{ let q = 'x'; (() => {{ q = 'y' }})(); return {{ q }} }} \
+                 interface Shared {{ known: 1; gap: {gap} }}"
+            ),
+        );
+        upsert_ts(&host, "/b.ts", "interface Shared { sibling: 2 }");
+        for file in ["/a.ts", "/b.ts"] {
+            host.ensure_indexed_ready(file).unwrap();
+        }
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
+        let mut first = None;
+        for file in ["/a.ts", "/b.ts", "/a.ts"] {
+            let key = SemanticQueryKey::Instantiate(InstantiateKey::new(
+                dispatch.type_slot_for(
+                    Arc::from(file),
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    Arc::from("Shared"),
+                ),
+                Arc::from([]),
+                dispatch.instantiate_context_for(file, context),
+            ));
+            let read = dispatch.execute_read(key.clone());
+            if partial {
+                assert!(
+                    matches!(
+                        read.fact_status,
+                        FactStatus::Approximate(_, Some(FactInterpretation::Positional))
+                    ),
+                    "{file}: {read:?}"
+                );
+                assert!(read.cache_suppress);
+                assert!(dispatch.graph().get_validated(&key, dispatch.ctx).is_none());
+            } else {
+                assert_eq!(read.fact_status, FactStatus::Complete, "{file}: {read:?}");
+                assert!(dispatch.graph().get_validated(&key, dispatch.ctx).is_some());
+            }
+            let QueryResult::Value(node) = read.value else {
+                panic!("{file}: {read:?}")
+            };
+            let mut pending = vec![node];
+            let mut members = rustc_hash::FxHashMap::default();
+            while let Some(contributor) = pending.pop() {
+                let data = dispatch.graph().node_data(contributor).unwrap();
+                match data.as_ref() {
+                    SemanticNodeData::MergedDecl { contributors } => {
+                        pending.extend(contributors.iter().copied())
+                    }
+                    SemanticNodeData::Object(surface) => {
+                        for member in surface.positive_members() {
+                            members
+                                .insert(member.key.as_string().unwrap().to_owned(), member.value);
+                        }
+                    }
+                    other => panic!("{file}: {other:?}"),
+                }
+            }
+            assert_eq!(members.len(), 3);
+            for (name, expected) in [("known", 1), ("sibling", 2)] {
+                assert!(
+                    matches!(dispatch.graph().node_data(members[name]).as_deref(), Some(SemanticNodeData::Literal(LiteralValue::Number(value))) if *value == f64::from(expected))
+                );
+            }
+            if !partial {
+                assert!(matches!(
+                    dispatch.graph().node_data(members["gap"]).as_deref(),
+                    Some(SemanticNodeData::Primitive(
+                        verter_type_engine::semantic_query::PrimitiveKind::String
+                    ))
+                ));
+            }
+            let answer = (node, read.fact_status);
+            if let Some(first) = first {
+                assert_eq!(
+                    answer, first,
+                    "the anchor cannot change availability or causes"
+                );
+            } else {
+                first = Some(answer);
+            }
+        }
+    }
+}

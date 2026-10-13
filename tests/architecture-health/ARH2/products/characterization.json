@@ -198,6 +198,42 @@
               "test": "abandonment_respects_the_commit_boundary"
             }
           ]
+        },
+        {
+          "behavior": "root reprojection keeps budget checker recovery approximate and unretained, while certified recovery stays complete and reusable",
+          "crate": "verter_session",
+          "command": "cargo nextest run -p verter_session budget_recovery_root_reprojection_remains_approximate_and_unretained",
+          "filter": "budget_recovery_root_reprojection_remains_approximate_and_unretained",
+          "witnesses": [
+            {
+              "file": "crates/verter_session/src/project_semantic_dispatch_tests/tests.rs",
+              "test": "budget_recovery_root_reprojection_remains_approximate_and_unretained"
+            }
+          ]
+        },
+        {
+          "behavior": "carrier normalization and enclosing conditionals preserve the adopted checker-recovery interpretation and independently exact controls",
+          "crate": "verter_session",
+          "command": "cargo nextest run -p verter_session carrier_normalization_preserves_recovery_interpretation_when_forwarded",
+          "filter": "carrier_normalization_preserves_recovery_interpretation_when_forwarded",
+          "witnesses": [
+            {
+              "file": "crates/verter_session/src/project_semantic_dispatch_tests/tests.rs",
+              "test": "carrier_normalization_preserves_recovery_interpretation_when_forwarded"
+            }
+          ]
+        },
+        {
+          "behavior": "merged global declarations preserve identical usable approximation, causes and exact sibling members through each declaring anchor",
+          "crate": "verter_session",
+          "command": "cargo nextest run -p verter_session merged_global_instantiation_preserves_approximation_from_every_declaration",
+          "filter": "merged_global_instantiation_preserves_approximation_from_every_declaration",
+          "witnesses": [
+            {
+              "file": "crates/verter_session/src/project_semantic_dispatch_tests/augmentation_scale_tests.rs",
+              "test": "merged_global_instantiation_preserves_approximation_from_every_declaration"
+            }
+          ]
         }
       ]
     },

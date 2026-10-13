@@ -86,6 +86,14 @@ codes and incidental markers elsewhere in a value:
   positional guarantee and is never offered as a usable value.
 - A root `CheckerRecovery` outcome carries the checker's explicit recovery and
   diagnostic, including TS2589/TS2590; an arbitrary budget reason does not.
+  Reprojecting that root preserves its typed basis: `Budget` remains
+  `Approximate(CheckerRecovery)` with its operation-budget cause and is never
+  admitted, even when the new walk observed no additional limitation.
+  `Certified` remains exact under a complete read. Carrier normalization and
+  merged-global declaration delegation retain the adopted interpretation when
+  joining their own causes; an anchor change cannot withhold a usable surface.
+- A found declaration placeholder is an exact expandable source, not a failed
+  normalization. Its shared path walker still owns the demanded instantiation.
 - An independently evaluated flow return retains the guarantee described above,
   even when preparation refused its proof. Cancellation or invalid provenance
   still takes the abort channel and supplies no value.

@@ -3329,11 +3329,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // Cold settlement already adopted a bounded producer guarantee.
             // Joining the same normalization causes cannot discard it. A warm
             // complete scalar has no such guarantee for this incomplete basis.
-            if matches!(
-                cache_read.fact_status,
-                crate::semantic_query::FactStatus::Approximate(_, _)
-            ) {
-                cache_read.fact_status = crate::semantic_query::FactStatus::approximate(reasons);
+            if let crate::semantic_query::FactStatus::Approximate(_, interpretation) =
+                cache_read.fact_status
+            {
+                cache_read.fact_status = crate::semantic_query::FactStatus::approximate(reasons)
+                    .with_interpretation(interpretation);
             } else {
                 cache_read.fact_status = crate::semantic_query::FactStatus::unavailable(reasons);
                 if matches!(cache_read.value, QueryResult::Value(_)) {

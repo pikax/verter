@@ -32845,3 +32845,165 @@ fn open_conditional_path_sub_dispatch_inherits_outer_terminal_mode() {
         other => panic!("expected wrapper Conditional in result, got {other:?}"),
     }
 }
+
+#[test]
+fn budget_recovery_root_reprojection_remains_approximate_and_unretained() {
+    use verter_type_engine::semantic_query::{
+        CheckerDiagnostic, CheckerDiagnosticCode, CheckerDiagnosticOperation, FactInterpretation,
+        FactStatus, RecoveryBasis,
+    };
+    for basis in [RecoveryBasis::Budget, RecoveryBasis::Certified] {
+        let host = host();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = dispatch.graph();
+        let recovery = graph.intern_node(SemanticNodeData::Opaque(QueryError::CheckerRecovery {
+            diagnostic: CheckerDiagnostic {
+                code: CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
+                operation: CheckerDiagnosticOperation::ConditionalTail,
+            },
+            basis,
+            origin: None,
+        }));
+        let key = SemanticQueryKey::ProjectPath {
+            base: recovery,
+            path: Arc::from([]),
+            context: ProjectionReductionContext::published(ProjectionMode::Expanded),
+        };
+        for _ in 0..2 {
+            let read = dispatch.execute_read(key.clone());
+            assert!(
+                matches!(read.value, QueryResult::Value(node) if node == recovery),
+                "{read:?}"
+            );
+            if basis == RecoveryBasis::Budget {
+                assert!(
+                    matches!(
+                        read.fact_status,
+                        FactStatus::Approximate(_, Some(FactInterpretation::CheckerRecovery))
+                    ),
+                    "{read:?}"
+                );
+                assert!(read.partial_reasons().contains(
+                    verter_type_engine::semantic_query::PartialReasonSet::OPERATION_BUDGET
+                ));
+                assert!(read.cache_suppress);
+                assert!(graph.get_validated(&key, dispatch.ctx).is_none());
+                assert_eq!(graph.slot_candidate_count_for_tests(&key), 0);
+            } else {
+                assert_eq!(read.fact_status, FactStatus::Complete);
+                assert!(!read.cache_suppress);
+                assert_eq!(
+                    graph.get_validated(&key, dispatch.ctx).unwrap().fact_status,
+                    FactStatus::Complete
+                );
+                assert_eq!(graph.slot_candidate_count_for_tests(&key), 1);
+            }
+        }
+    }
+}
+
+#[test]
+fn carrier_normalization_preserves_recovery_interpretation_when_forwarded() {
+    use verter_type_engine::semantic_query::{FactInterpretation, FactStatus};
+    let host = host();
+    upsert_ts(&host, "/recovery.ts", "type Loop<T> = T extends 0 ? Loop<[T]> : Loop<[T]>; type E = Loop<0>; type Forwarded = E extends 0 ? 'yes' : 'no'; type Good = number; type GoodForwarded = Good extends number ? 1 : 2;");
+    let _budget = super::connected_demand::TailBudgetForTests::install(100);
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let context = ProjectionReductionContext::vue_runtime_object_surface(
+        ProjectionMode::Expanded,
+        verter_type_engine::semantic_query::SurfaceProvenanceContext::Structural,
+    );
+    let scope = NodeScopeId::File {
+        canonical_id: Arc::from("/recovery.ts"),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        whole_hash: host.shallow_file_state("/recovery.ts").unwrap().whole_hash,
+        local_scope: None,
+    };
+    // Establish the independently exact controls before the resource-limited
+    // demands, then read them warm again after the recovery round trips.
+    for name in [
+        "Good",
+        "GoodForwarded",
+        "E",
+        "Forwarded",
+        "Loop",
+        "E",
+        "Loop",
+        "Good",
+        "GoodForwarded",
+    ] {
+        let args = if name == "Loop" {
+            Arc::from([dispatch
+                .graph()
+                .intern_node(SemanticNodeData::Literal(LiteralValue::Number(0.0)))])
+        } else {
+            Arc::from([])
+        };
+        let base = dispatch.graph().intern_node_with_scope(
+            SemanticNodeData::new_bare_ref(Arc::from(name), scope.clone(), args),
+            scope.clone(),
+        );
+        let key = SemanticQueryKey::ProjectPath {
+            base,
+            path: Arc::from([]),
+            context,
+        };
+        let read = dispatch.execute_read(key.clone());
+        if name.starts_with("Good") {
+            assert_eq!(read.fact_status, FactStatus::Complete, "{name}: {read:?}");
+            let QueryResult::Value(node) = read.value else {
+                panic!("{name}: {read:?}")
+            };
+            let expected = if name == "Good" {
+                SemanticNodeData::Primitive(PrimitiveKind::Number)
+            } else {
+                SemanticNodeData::Literal(LiteralValue::Number(1.0))
+            };
+            assert_eq!(dispatch.graph().node_data(node).as_deref(), Some(&expected));
+        } else {
+            assert!(
+                matches!(
+                    read.fact_status,
+                    FactStatus::Approximate(_, Some(FactInterpretation::CheckerRecovery))
+                ),
+                "{name}: {read:?}"
+            );
+            let QueryResult::Value(node) = read.value else {
+                panic!("{name}: {read:?}")
+            };
+            assert!(matches!(
+                dispatch.graph().node_data(node).as_deref(),
+                Some(SemanticNodeData::Opaque(QueryError::CheckerRecovery {
+                    basis: verter_type_engine::semantic_query::RecoveryBasis::Budget,
+                    ..
+                }))
+            ));
+            let root_key = SemanticQueryKey::ProjectPath {
+                base: node,
+                path: Arc::from([]),
+                context,
+            };
+            assert!(read.cache_suppress);
+            assert!(dispatch.graph().get_validated(&key, dispatch.ctx).is_none());
+            assert_eq!(dispatch.graph().slot_candidate_count_for_tests(&key), 0);
+            let root = dispatch.execute_read(root_key.clone());
+            assert!(
+                matches!(
+                    root.fact_status,
+                    FactStatus::Approximate(_, Some(FactInterpretation::CheckerRecovery))
+                ),
+                "{root:?}"
+            );
+            assert!(read.partial_reasons().contains(root.partial_reasons()));
+            assert!(root.cache_suppress);
+            assert!(dispatch
+                .graph()
+                .get_validated(&root_key, dispatch.ctx)
+                .is_none());
+            assert_eq!(
+                dispatch.graph().slot_candidate_count_for_tests(&root_key),
+                0
+            );
+        }
+    }
+}

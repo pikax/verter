@@ -5039,12 +5039,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         ),
                     ));
                     let completeness = read.fact_status.completeness();
+                    let approximation = read.fact_status.interpretation();
                     let mut out = crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
                         read.value,
                         self.dep_signature_for(decl_canonical, decl_whole_hash),
                     ))
                     .with_observed_self_roots([(Arc::clone(decl_canonical), decl_whole_hash)]);
                     out.merge_completeness(completeness);
+                    out.approximation = approximation;
                     out.walker_diagnostics = read.walker_diagnostics.to_vec();
                     out.cache_suppress = read.cache_suppress;
                     return InstantiateStart::Done(Box::new(out));
