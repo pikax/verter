@@ -1,5 +1,8 @@
 import { create, toBinary } from "@bufbuild/protobuf";
-import { ComponentMetaPayloadSchema, type ComponentMetaPayloadInit } from "@verter/proto";
+import {
+  LegacyComponentMetaPayloadSchema as ComponentMetaPayloadSchema,
+  type LegacyComponentMetaPayloadInit as ComponentMetaPayloadInit,
+} from "@verter/proto";
 
 type TestPrimitiveName =
   | "string"

@@ -26,6 +26,7 @@ pub mod class_fields;
 pub mod header_index;
 pub mod headers;
 pub mod metadata;
+pub mod module_exports;
 
 use std::sync::Arc;
 

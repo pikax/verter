@@ -31,6 +31,7 @@ verter_language = { path = "../verter_language" }
 log = "0.4"
 
 [dev-dependencies]
+prost = "0.14.3"
 serde_json = { workspace = true }
-verter_session = { path = "../verter_session", features = ["test-util"] }
+verter_session = { path = "../verter_session", features = ["test-util", "test-support"] }
 verter_macro_dto = { path = "../verter_macro_dto" }

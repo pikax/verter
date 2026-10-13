@@ -1375,6 +1375,21 @@ impl RealProviderTestSession {
 pub(crate) struct PublishedWorkspaceFile(std::path::PathBuf);
 
 impl PublishedWorkspaceFile {
+    /// Replace a fixture's bytes atomically while retaining the same project
+    /// member and cleanup owner. A watcher never observes a partially written
+    /// source, and a matrix can change content without adding a root per case.
+    pub(crate) fn replace_contents(&self, content: &str) {
+        use std::io::Write;
+        let mut staged = tempfile::NamedTempFile::new_in(self.0.parent().expect("fixture parent"))
+            .expect("stage replacement fixture bytes");
+        staged
+            .write_all(content.as_bytes())
+            .expect("write replacement fixture bytes");
+        staged
+            .persist(&self.0)
+            .expect("publish replacement fixture bytes");
+    }
+
     /// Delete the file now, as an external tool would.
     pub(crate) fn delete_from_disk(&self) {
         std::fs::remove_file(&self.0).expect("delete the published workspace file");

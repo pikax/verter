@@ -84,6 +84,13 @@ pub struct DocumentRegistry {
     document_lanes: Arc<crate::document_sync_lane::DocumentSyncLanes>,
     /// Signalled on every document registration (a request racing `did_open` waits on it).
     pub(crate) registration: registration_signal::RegistrationSignal,
+    /// Test-only execution fence shared by all snapshot-drain producers.
+    /// A writer observes completion of existing drains and excludes new ones.
+    #[cfg(test)]
+    pub(crate) snapshot_drain_barrier: tokio::sync::RwLock<()>,
+    #[cfg(test)]
+    pub(crate) snapshot_drain_pause:
+        parking_lot::Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
     /// Full Verter semantic enrichment is deliberately isolated from the
     /// editor-critical projection host. The host is created lazily only when the
     /// client opts in, owns a single CPU worker, and is never queried inline by an
@@ -609,6 +616,10 @@ impl DocumentRegistry {
             provider_surfaces: crate::provider_surface_store::ProviderSurfaceStore::new(),
             document_lanes: Arc::new(crate::document_sync_lane::DocumentSyncLanes::default()),
             registration: registration_signal::RegistrationSignal::default(),
+            #[cfg(test)]
+            snapshot_drain_barrier: tokio::sync::RwLock::new(()),
+            #[cfg(test)]
+            snapshot_drain_pause: parking_lot::Mutex::new(None),
             semantic_host: RwLock::new(None),
             semantic_workspace: RwLock::new(None),
             semantic_enabled: std::sync::atomic::AtomicBool::new(false),

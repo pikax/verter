@@ -130,6 +130,20 @@ and version), weak edges, dependency defaults, and dev unification controls.
 The bounded repository guards are held to the standard nextest speed gate and
 are not on its known-slow list.
 
+Generated component-meta corpus chunks retain a 10-second slow warning and a
+20-second termination deadline in both nextest profiles, including the local
+profile while its unrelated known-slow list remains. Apply policy to the whole
+chunk namespace so regenerated chunks cannot inherit a longer base watchdog.
+The compiled session policy guard probes nextest's override precedence and
+profile inheritance, with an unrelated base-policy control. The corpus
+probe uses manifest-only Cargo metadata (`--no-deps --locked --offline`) for
+workspace package selectors and an empty temporary `CARGO_HOME` for metadata
+and nextest children, so a compiled archive consumer needs no registry cache.
+The corpus layout and generator-parity guards preserve complete fixture coverage,
+authored overrides and fresh host state per logical row. Set `VERTER_CORPUS_AUDIT_TIMING=1`
+when running the chunk inventory to collect pool and row timings; report these
+as evidence without asserting machine-dependent elapsed times.
+
 ### TDD Workflow
 
 Behavioral code changes use TDD. Documentation, generated projections, formatting, and mechanical metadata changes use their owning freshness/validation evidence unless they also change executable behavior.
@@ -147,6 +161,16 @@ Test file/module/test names, comments, fixtures, snapshots, assertion messages, 
 A comment may supplement that durable explanation with a GitHub issue only when the issue records a specific independently reported product defect and is outside the DAG-controlled issue mappings. Never cite a DAG-managed issue, PR, node, charter, or ledger row in code or tests; the DAG coordinates delivery and is not the defect contract.
 
 ### Test Economy
+
+The Svelte projection profile gates run one solution build per pinned
+TypeScript engine. Every profile and corruption/publication twin remains a
+separate project with its original checking options, globals, consumer and
+declaration directory. Batch diagnostics must be attributed by project, and
+unassigned errors and missing per-project build receipts fail the gate. One
+dirty project must never make another appear dirty or mask a clean consumer.
+Engine pins and fixture populations remain authoritative. Launcher counts are
+work evidence; elapsed times are
+samples rather than portable performance thresholds.
 
 Tests are evidence, not a quota. At preflight, map each changed contract to the smallest sufficient proof before proposing new tests:
 
@@ -167,7 +191,11 @@ foreground work. The coordinator's `block_in_place` path requires a multithreade
 runtime, which cannot use Tokio's paused clock. After proving the edit publications
 finished, its test-only dispatch barrier can hold subsequent background revalidation
 while foreground counters are sampled; already-dispatched diagnostics must finish
-before sampling. For queued-waiter cancellation, poll the acquire future to
+before sampling. Snapshot provider drains have a test-only execution fence on
+the document registry: hold its write guard after taking the import-publication
+lanes to observe running drains finish and exclude successor passes throughout
+foreground sampling. Aborting the fixture's outbound writer does not stop those
+producers. For queued-waiter cancellation, poll the acquire future to
 `Pending`, assert participant registration, then drop the future; a zero-duration
 timeout still pays a timer turn. Concurrency regressions
 should force the relevant orders and observe lock ownership at the decision
@@ -261,6 +289,21 @@ group serialises slow rows (serialised, the three reversed-union rows alone
 outran the 30-minute core step).
 Real-provider tests run through dedicated serial libtest jobs, while compile-fail
 fixtures run through standalone Cargo binaries rather than nextest test targets.
+The local live-provider timeout override uses the structural CI ownership
+selectors for LSP and type-runtime tests. The LSP
+`mock_completion_inventory_and_effective_nextest_policy` test reads compiled
+libtest discovery and checks Core selection and serial groups with nextest
+under both profiles. The native probes reuse the running test binary through
+nextest's build-metadata inputs and one Cargo workspace metadata query; they
+never compile a synthetic workspace. One Core-filtered group listing per
+profile proves both selection and serialization. It projects every
+timeout-bearing override onto a test group in a temporary configuration so nextest's own precedence and inheritance
+expose any exemption matching a mock, including package-wide overrides. Original
+timeout values remain present for native validation, and compiled live-provider
+controls must retain their exemption. Mock child-contract completion variants
+keep Core ownership,
+their serial test group, and each profile's ordinary watchdog even when their
+names include `tsgo` or `tsserver`.
 
 The semantic gateway privacy rails remain in the core nextest inventory. They
 type-check their foreign-crate fixtures directly with rustc, preserving the
@@ -359,6 +402,41 @@ provider state. The tsserver job installs the workspace and builds exactly
 The tsgo job installs the pinned local engine before running its serial lane with
 `VERTER_REQUIRE_TSGO=1`. Provider runner failures are hard failures; there is no
 skip or freshness tolerance in the core gate.
+
+The serial provider runner emits advisory `PROVIDER TEST TIME` lines and saves
+`provider-timings/{tsserver,tsgo}.json` below the Cargo target directory. CI
+uploads that directory. Stable libtest rejects its advertised `--report-time`
+flag, so durations use the flushed test-name and terminal-status stdout edges;
+pipe batching can round short tests down to zero. Timing persistence never
+changes the test verdict, selectors, watchdogs, or serial lifecycle.
+
+Real-provider fixtures stage authored sources per process and materialize their
+pinned dependency closure once per staged root, only after every supplier
+succeeds. Failed initialization remains retryable. Content corpora whose claim
+does not concern root membership retain one configured-project member and
+atomically replace its bytes between cases. Each case still runs the real
+watched-file/open/close lifecycle and its complete semantic oracle; a file lease
+outlives document cleanup, including cleanup after an assertion panic.
+
+The flow corpus separates provider semantics from compiler growth. Live
+`LIVE_MATRIX_SIZES` retain all valid/broken shapes, exact diagnostics, mapped
+spans and every callback at sizes 16–128, including nested loop frames. Native
+`MATRIX_SIZES` remain 128–1024:
+`chains_and_nested_scopes_grow_linearly` counts generated bytes, transform
+operations, references, conditions, links and callbacks;
+`flat_and_nested_matrices_grow_linearly` and
+`nested_component_tags_grow_linearly` read production `FlowWork` at operation
+sites and require every callback and condition plus ≤2.2× growth per doubling.
+`restored_path_replay_fails_the_growth_oracle` retains the quadratic negative
+control. Run these native proofs alongside the live leg when changing its size
+range; a smaller provider corpus alone is not growth evidence.
+
+Provider-free LSP flow growth and semantic-suite coverage tests live in
+`crates/verter_lsp/src/flow_fixture_tests.rs`, alongside the partition builder
+shared by the live semantic tests. Keep `real_provider_tests::` reserved for
+paired live-provider variants: archive partition verification rejects tests
+there without an explicit tsserver or tsgo selector. Native guards remain on
+the provider-free core lane.
 
 **Conformance-harness preflight — real work, before Cargo.** Before the archive
 build, the core gate runs only the harness-owned

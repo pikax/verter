@@ -26,6 +26,8 @@ pub type ExpansionExecutionStatus = ExecutionStatus;
 )]
 #[serde(rename_all = "camelCase")]
 pub struct ExpandedObjectShape {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain_guarantee: Option<crate::analysis::component_meta::MetadataFactGuarantee>,
     pub properties: Vec<ExpandedProperty>,
     pub index_signatures: Vec<ExpandedIndexSignature>,
     pub call_signatures: Vec<ExpandedCallSignature>,
@@ -221,6 +223,7 @@ pub enum ExpansionStopReason {
 impl ExpandedObjectShape {
     pub fn empty() -> Self {
         Self {
+            domain_guarantee: None,
             properties: Vec::new(),
             index_signatures: Vec::new(),
             call_signatures: Vec::new(),

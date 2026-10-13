@@ -638,6 +638,18 @@ pub struct CacheabilityProbe<'t, W> {
 }
 
 impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone> CacheabilityProbe<'_, W> {
+    /// Recheck the live basis and preserve why this scope cannot publish.
+    pub fn non_admission_reason(&self) -> Option<verter_audit::NonAdmissionReason> {
+        note_basis_recheck_on_cell(self.source, self.cell);
+        if self.cell.mutation_unstable() {
+            Some(verter_audit::NonAdmissionReason::MutationUnstable)
+        } else if self.cell.non_cacheable_read_observed() {
+            Some(verter_audit::NonAdmissionReason::UnresolvedProvenance)
+        } else {
+            None
+        }
+    }
+
     /// `true` when the enclosing scope's compute MUST NOT warm any shared
     /// cache. TWO INDEPENDENT non-admission conditions fold into it:
     ///
@@ -669,8 +681,7 @@ impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone> Cacheabili
     /// carries the refusal, not its taxonomy.
     #[inline]
     pub fn non_cacheable(&self) -> bool {
-        note_basis_recheck_on_cell(self.source, self.cell);
-        self.cell.mutation_unstable() || self.cell.non_cacheable_read_observed()
+        self.non_admission_reason().is_some()
     }
 }
 

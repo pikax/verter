@@ -318,6 +318,7 @@ fn expanded_shape_from_surface_view(
     }
 
     ExpandedObjectShape {
+        domain_guarantee: None,
         properties,
         index_signatures,
         call_signatures,

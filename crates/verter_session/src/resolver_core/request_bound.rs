@@ -325,6 +325,13 @@ impl IndexedInputs for crate::VerterHost {
 
 #[cfg(any(test, feature = "test-support"))]
 impl RouteLookup for crate::VerterHost {
+    fn module_export_table(
+        &self,
+        canonical: &str,
+    ) -> Option<Arc<verter_session_query::declarations::module_exports::ModuleExportTable>> {
+        let view = self.resolver_store_view().into_owned_view();
+        self.module_export_table_with_context(self, &view, canonical)
+    }
     fn reverse_dependency_canonicals(&self, canonical: &str) -> Vec<String> {
         self.workspace().reverse_deps_for(canonical)
     }
@@ -970,6 +977,15 @@ impl<L: RequestBoundLifecycle> RouteLookup for RequestBoundAdapter<L>
 where
     Self: sealed::Sealed + sealed::RequestBoundSealed,
 {
+    fn module_export_table(
+        &self,
+        canonical: &str,
+    ) -> Option<Arc<verter_session_query::declarations::module_exports::ModuleExportTable>> {
+        verter_type_engine::count_resolver_context_call!("RouteLookup::module_export_table");
+        self.0
+            .host()
+            .module_export_table_with_context(self, self.0.request_view(), canonical)
+    }
     fn reverse_dependency_canonicals(&self, canonical: &str) -> Vec<String> {
         verter_type_engine::count_resolver_context_call!(
             "RouteLookup::reverse_dependency_canonicals"

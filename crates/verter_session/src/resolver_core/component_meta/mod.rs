@@ -435,6 +435,9 @@ pub(crate) fn component_meta_resolved_macros(
                     )
                     .collect(),
                 default_keys: Vec::new(),
+                props_guarantee: None,
+                events_guarantee: None,
+                slots_guarantee: None,
             },
         );
     }
@@ -460,6 +463,9 @@ pub(crate) fn component_meta_resolved_macros(
             slot_return_publications: Vec::new(),
             exposed: Vec::new(),
             default_keys: Vec::new(),
+            props_guarantee: None,
+            events_guarantee: None,
+            slots_guarantee: None,
         };
         for source in [
             SvelteSurfaceSource::RunesProps,
@@ -517,6 +523,22 @@ pub(crate) fn component_meta_resolved_macros(
             native
                 .slot_return_publications
                 .extend_from_slice(dtos.slot_return_publications());
+            let lane = match source {
+                SvelteSurfaceSource::RunesProps | SvelteSurfaceSource::LegacyExportLet => {
+                    &mut native.props_guarantee
+                }
+                SvelteSurfaceSource::CallbackPropEvents | SvelteSurfaceSource::LegacyDispatcher => {
+                    &mut native.events_guarantee
+                }
+                SvelteSurfaceSource::SnippetProps | SvelteSurfaceSource::LegacySlotInventory => {
+                    &mut native.slots_guarantee
+                }
+                SvelteSurfaceSource::Bindable | SvelteSurfaceSource::InstanceExports => continue,
+            };
+            verter_session_query::analysis::component_meta::MetadataFactGuarantee::absorb_option(
+                lane,
+                dtos.domain_guarantee.clone(),
+            );
         }
         inputs.push(native);
     }

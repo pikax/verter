@@ -1,14 +1,49 @@
 import { create, toBinary } from "@bufbuild/protobuf";
 import { describe, expect, it } from "vitest";
 import {
-  ComponentMetaPayloadSchema,
-  createTestComponentMetaPayload,
+  LegacyComponentMetaPayloadSchema as ComponentMetaPayloadSchema,
+  ComponentMetaPayloadSchema as FactPayloadSchema,
+  createTestComponentMetaPayload as factFixture,
+  createLegacyTestComponentMetaPayload as createTestComponentMetaPayload,
   OriginGraphSchema,
   SurfacePartialReasonSchema,
 } from "@verter/proto";
+import {
+  BoolFactSchema,
+  ExposedMetaSchema,
+  ModelMetaSchema,
+  TypeRegistryEntrySchema,
+} from "../../proto/src/gen/verter/v1/component_meta_pb.js";
 import { decodeTypedComponentMetaPayload } from "./type-graph-proto-decode.js";
 
 describe("decodeTypedComponentMetaPayload", () => {
+  it("publishes independent semantic facts", () => {
+    const fixture = factFixture();
+    const result = decodeTypedComponentMetaPayload(
+      toBinary(FactPayloadSchema, create(FactPayloadSchema, fixture)),
+    );
+    expect(result).toMatchObject({
+      facts: { props: { kind: "complete" }, events: { kind: "complete" } },
+    });
+  });
+  it.each([1, 2])("does not infer domain closure from legacy summary %d", (kind) => {
+    const current = createTestComponentMetaPayload();
+    const payload = create(ComponentMetaPayloadSchema, {
+      ...current,
+      body: {
+        ...current.body!,
+        props: [],
+        resultCompleteness: { kind, partialReasons: kind === 2 ? [14] : [] },
+      },
+    });
+    const result = decodeTypedComponentMetaPayload(toBinary(ComponentMetaPayloadSchema, payload));
+    expect(result.facts!.props).toMatchObject({
+      kind: kind === 1 ? "complete" : "approximate",
+      open: true,
+      value: [],
+    });
+    expect(result.facts!.events).toMatchObject({ open: true });
+  });
   it("accepts the current schema version and rejects an older response", () => {
     const current = createTestComponentMetaPayload();
     expect(current.schemaVersion).toBe(12);
@@ -19,7 +54,7 @@ describe("decodeTypedComponentMetaPayload", () => {
           create(ComponentMetaPayloadSchema, { ...current, schemaVersion: 7 }),
         ),
       ),
-    ).toThrow(/expected 12, found 7/);
+    ).toThrow(/expected 13, found 7/);
   });
 
   it("decodes supported contract type references from the shared graph", () => {
@@ -440,7 +475,8 @@ describe("typed property keys", () => {
 
   it("decodes every property-key kind", async () => {
     const { create, toBinary } = await import("@bufbuild/protobuf");
-    const { ComponentMetaPayloadSchema } = await import("@verter/proto");
+    const { LegacyComponentMetaPayloadSchema: ComponentMetaPayloadSchema } =
+      await import("@verter/proto");
     const payload = create(
       ComponentMetaPayloadSchema,
       payloadWithMembers([
@@ -483,7 +519,8 @@ describe("typed property keys", () => {
 
   it("resolves display names for string, number, and symbol keys through the bridge", async () => {
     const { create, toBinary } = await import("@bufbuild/protobuf");
-    const { ComponentMetaPayloadSchema } = await import("@verter/proto");
+    const { LegacyComponentMetaPayloadSchema: ComponentMetaPayloadSchema } =
+      await import("@verter/proto");
     const { nativeTypeRegistryToMap } = await import("./native-component-meta.js");
     const { decodeComponentMetaPayload } = await import("./type-graph.js");
     const payload = create(
@@ -513,13 +550,14 @@ describe("typed property keys", () => {
 
   it("rejects a schema-4 payload with the typed version error", async () => {
     const { create, toBinary } = await import("@bufbuild/protobuf");
-    const { ComponentMetaPayloadSchema } = await import("@verter/proto");
+    const { LegacyComponentMetaPayloadSchema: ComponentMetaPayloadSchema } =
+      await import("@verter/proto");
     const payload = create(ComponentMetaPayloadSchema, {
       ...payloadWithMembers([]),
       schemaVersion: 4,
     });
     const bytes = toBinary(ComponentMetaPayloadSchema, payload);
-    expect(() => decodeTypedComponentMetaPayload(bytes)).toThrow(/expected 12, found 4/);
+    expect(() => decodeTypedComponentMetaPayload(bytes)).toThrow(/expected 13, found 4/);
   });
 });
 
@@ -658,5 +696,424 @@ describe("result completeness fail-closed branches", () => {
 
   it("still accepts the well-formed complete surface", () => {
     expect(decodeCompletenessOf({ kind: 1, partialReasons: [] })).toEqual({ kind: "complete" });
+  });
+
+  it("stamps a schema-12 failed publication without dropping the healthy sibling", async () => {
+    const base = createTestComponentMetaPayload();
+    const healthy = base.body!.props![0]!;
+    base.body!.props!.push({
+      ...healthy,
+      nameId: 6,
+      typeNodeId: 0,
+      publication: {
+        ...healthy.publication!,
+        kind: 1,
+        failure: 1,
+        provenance: 1,
+      },
+      terminalDisplay: { textId: 0 },
+    });
+    const result = decodeTypedComponentMetaPayload(
+      toBinary(ComponentMetaPayloadSchema, create(ComponentMetaPayloadSchema, base)),
+    );
+    expect(result.facts!.props.kind).not.toBe("unavailable");
+    expect(result.props.map((prop) => prop.name)).toEqual(["root", "label"]);
+    expect(result.props[1]?.typeFact).toEqual({ kind: "unavailable", causes: [102] });
+    expect(result.props[0]?.typeFact?.kind).toBe("complete");
+    const { nativeComponentMetaToComponentMeta } = await import("./native-component-meta.js");
+    const projected = nativeComponentMetaToComponentMeta(result);
+    expect(projected.props.map((prop) => prop.name)).toEqual(["root"]);
+  });
+
+  it("localizes a schema-12 invalid node without turning bool fields into facts", async () => {
+    const base = createTestComponentMetaPayload();
+    base.typeGraph!.nodes[0].kind = {
+      case: "array",
+      value: { $typeName: "verter.v1.ArrayNode", elementNodeId: 999, readonly: false },
+    };
+    const first = base.body!.props![0]!;
+    first.typeNodeId = 1;
+    base.body!.props!.push({ ...first, nameId: 6, typeNodeId: 2 });
+    const result = decodeTypedComponentMetaPayload(
+      toBinary(ComponentMetaPayloadSchema, create(ComponentMetaPayloadSchema, base)),
+    );
+    expect(result.props.map((prop) => prop.name)).toEqual(["root", "label"]);
+    expect(result.props[0]?.typeFact).toEqual({ kind: "unavailable", causes: [102] });
+    expect(result.props[0]?.required).toBe(true);
+    expect(result.props[0]?.requiredFact).toBeUndefined();
+    expect(result.props[1]?.typeFact?.kind).toBe("complete");
+    expect(result.props[1]?.type).toBeDefined();
+    const { nativeComponentMetaToComponentMeta } = await import("./native-component-meta.js");
+    const projected = nativeComponentMetaToComponentMeta(result);
+    expect(projected.props.map((prop) => prop.name)).toEqual(["label"]);
+  });
+});
+
+describe("independent component facts", () => {
+  const fixture = () => create(FactPayloadSchema, factFixture());
+  const decode = (payload: ReturnType<typeof fixture>) =>
+    decodeTypedComponentMetaPayload(toBinary(FactPayloadSchema, payload));
+
+  it("retains unknown causes and isolates unavailable facts from exact siblings", () => {
+    const payload = fixture();
+    payload.body!.facts!.events = {
+      ...payload.body!.facts!.events!,
+      guarantee: { $typeName: "verter.v1.FactGuarantee", kind: 3, causes: [9001] },
+      value: undefined,
+    };
+    const result = decode(payload);
+    expect(result.facts!.events).toEqual({ kind: "unavailable", causes: [9001] });
+    expect(result.facts!.props.kind).toBe("complete");
+    expect(result.props[0]?.typeFact?.kind).toBe("complete");
+    expect(result.resultCompleteness).toEqual({ kind: "partial", reasons: ["propagated"] });
+    expect(result.events).toEqual([]);
+  });
+
+  it("preserves false, proven absence, and a complete open membership domain", () => {
+    const payload = fixture();
+    payload.body!.facts!.props!.value!.open = true;
+    payload.body!.facts!.props!.value!.entries[0].requiredFact!.value = false;
+    const result = decode(payload);
+    expect(result.facts!.props).toMatchObject({ kind: "complete", open: true });
+    expect(result.props[0]?.required).toBe(false);
+    expect(result.props[0]?.hasDefault).toBe(false);
+    expect(result.props[0]?.requiredFact).toEqual({ kind: "complete", value: false });
+    expect(result.props[0]?.hasDefaultFact).toEqual({ kind: "complete", value: false });
+    expect(result.facts!.publicInstance).toEqual({ kind: "complete", value: undefined });
+  });
+
+  it.each(["approximateWithoutCauses", "unavailableWithValue"] as const)(
+    "refuses a contradictory %s without poisoning siblings",
+    (mode) => {
+      const payload = fixture();
+      payload.body!.facts!.props!.guarantee!.kind = mode === "approximateWithoutCauses" ? 2 : 3;
+      const result = decode(payload);
+      expect(result.facts!.props).toEqual({ kind: "unavailable", causes: [100] });
+      expect(result.facts!.events.kind).toBe("complete");
+    },
+  );
+
+  it("propagates an invalid shared node only to dependent value facts", async () => {
+    const payload = fixture();
+    payload.typeGraph!.nodes[0].kind = {
+      case: "array",
+      value: { $typeName: "verter.v1.ArrayNode", elementNodeId: 999, readonly: false },
+    };
+    const first = payload.body!.facts!.props!.value!.entries[0];
+    payload.body!.facts!.props!.value!.entries.push({ ...first, nameId: 6, typeNodeId: 2 });
+    const result = decode(payload);
+    expect(result.facts!.props.kind).toBe("complete");
+    expect(result.props[0]?.typeFact).toEqual({ kind: "unavailable", causes: [100] });
+    expect(result.props[0]?.type).toBeUndefined();
+    expect(result.props[1]?.typeFact?.kind).toBe("complete");
+    expect(result.slots[0]?.bindings[0]?.typeFact?.kind).toBe("unavailable");
+    expect(result.facts!.events.kind).toBe("complete");
+    const { nativeComponentMetaToComponentMeta } = await import("./native-component-meta.js");
+    const projected = nativeComponentMetaToComponentMeta(result);
+    expect(projected.props.map((prop) => prop.name)).toEqual([result.props[1].name]);
+    expect(projected.slots[0].bindings).toEqual([]);
+    expect(projected.facts!.props.kind).toBe("complete");
+  });
+
+  it("keeps a public-instance fact when one member type node is invalid", async () => {
+    const payload = fixture();
+    payload.typeGraph!.nodes[0].kind = {
+      case: "array",
+      value: { $typeName: "verter.v1.ArrayNode", elementNodeId: 999, readonly: false },
+    };
+    const instance = payload.body!.facts!.publicInstance!;
+    instance.absent = false;
+    instance.value = {
+      $typeName: "verter.v1.PublicInstanceMeta",
+      completeness: 1,
+      members: [
+        {
+          $typeName: "verter.v1.PublicInstanceMemberMeta",
+          nameId: 6,
+          kind: 3,
+          typeNodeId: 1,
+          rawTypeId: 0,
+          descriptionId: 0,
+          tags: [],
+        },
+        {
+          $typeName: "verter.v1.PublicInstanceMemberMeta",
+          nameId: 7,
+          kind: 3,
+          typeNodeId: 2,
+          rawTypeId: 0,
+          descriptionId: 0,
+          tags: [],
+        },
+      ],
+    };
+    const result = decode(payload);
+    expect(result.facts!.publicInstance.kind).not.toBe("unavailable");
+    expect(result.publicInstance?.members.map((member) => member.name)).toEqual(["label", "next"]);
+    expect(result.publicInstance?.members[0]?.typeFact).toEqual({
+      kind: "unavailable",
+      causes: [100],
+    });
+    expect(result.publicInstance?.members[1]?.type).toBeDefined();
+    const { nativeComponentMetaToComponentMeta } = await import("./native-component-meta.js");
+    const projected = nativeComponentMetaToComponentMeta(result);
+    expect(projected.publicInstance?.members.map((member) => member.name)).toEqual(["next"]);
+  });
+
+  it("localizes a string literal whose string id is zero", async () => {
+    const payload = fixture();
+    payload.typeGraph!.nodes[0].kind = {
+      case: "literal",
+      value: { $typeName: "verter.v1.LiteralNode", literalKind: 1, stringId: 0 },
+    };
+    const props = payload.body!.facts!.props!.value!.entries;
+    props[0].typeNodeId = 1;
+    props.push({ ...props[0], nameId: 6, typeNodeId: 2 });
+    const result = decode(payload);
+    expect(result.props[0]?.typeFact).toEqual({ kind: "unavailable", causes: [100] });
+    expect(result.props[1]?.typeFact?.kind).toBe("complete");
+    const { nativeComponentMetaToComponentMeta } = await import("./native-component-meta.js");
+    const projected = nativeComponentMetaToComponentMeta(result);
+    expect(projected.props.map((prop) => prop.name)).toEqual(["label"]);
+  });
+
+  it("keeps constrained binders distinct and renders their constraints", async () => {
+    const { typeExprToDescriptor } = await import("./type-expr-bridge.js");
+    const payload = fixture();
+    payload.typeGraph!.nodes.push({
+      $typeName: "verter.v1.TypeNode",
+      kind: {
+        case: "infer",
+        value: { $typeName: "verter.v1.InferNode", nameId: 2, constraintNodeId: 1 },
+      },
+    });
+    payload.typeGraph!.nodes.push({
+      $typeName: "verter.v1.TypeNode",
+      kind: {
+        case: "infer",
+        value: { $typeName: "verter.v1.InferNode", nameId: 2, constraintNodeId: 2 },
+      },
+    });
+    const first = payload.body!.facts!.props!.value!.entries[0];
+    first.typeNodeId = 6;
+    payload.body!.facts!.props!.value!.entries.push({ ...first, nameId: 6, typeNodeId: 7 });
+    const result = decode(payload);
+    expect(typeExprToDescriptor(result.props[0].type!)).toMatchObject({
+      rawType: "infer TreeNode extends string",
+    });
+    expect(typeExprToDescriptor(result.props[1].type!)).toMatchObject({
+      rawType: "infer TreeNode extends undefined",
+    });
+  });
+
+  it("keeps healthy models and registry entries when one value node is invalid", async () => {
+    const payload = fixture();
+    payload.typeGraph!.nodes[0].kind = {
+      case: "array",
+      value: { $typeName: "verter.v1.ArrayNode", elementNodeId: 999, readonly: false },
+    };
+    payload.body!.facts!.models!.value!.entries.push(
+      create(ModelMetaSchema, { nameId: 6, typeNodeId: 1 }),
+      create(ModelMetaSchema, { nameId: 7, typeNodeId: 2 }),
+    );
+    payload.body!.facts!.exposed!.value!.entries.push(
+      create(ExposedMetaSchema, { nameId: 6, typeNodeId: 1, descriptionId: 0, tags: [] }),
+      create(ExposedMetaSchema, { nameId: 7, typeNodeId: 2, descriptionId: 0, tags: [] }),
+    );
+    payload.body!.facts!.typeRegistry!.value!.entries.push(
+      create(TypeRegistryEntrySchema, { nameId: 6, typeNodeId: 1, rawTypeId: 0 }),
+      create(TypeRegistryEntrySchema, { nameId: 7, typeNodeId: 2, rawTypeId: 0 }),
+    );
+    const result = decode(payload);
+    expect(result.facts!.models.kind).toBe("complete");
+    expect(result.models.map((model) => model.name)).toEqual(["label", "next"]);
+    expect(result.models[0]?.typeFact).toEqual({ kind: "unavailable", causes: [100] });
+    expect(result.models[1]?.typeFact?.kind).toBe("complete");
+    expect(result.models[1]?.type).toBeDefined();
+    expect(result.facts!.exposed.kind).toBe("complete");
+    expect(result.exposed.map((entry) => entry.name)).toEqual(["label", "next"]);
+    expect(result.exposed[0]?.typeFact?.kind).toBe("unavailable");
+    expect(result.exposed[1]?.type).toBeDefined();
+    expect(result.facts!.typeRegistry.kind).toBe("complete");
+    expect(result.typeRegistry.map((entry) => entry.name)).toEqual(["TreeNode", "label", "next"]);
+    expect(result.typeRegistry.find((entry) => entry.name === "next")?.typeFact?.kind).toBe(
+      "complete",
+    );
+    const { nativeComponentMetaToComponentMeta, nativeTypeRegistryToMap } =
+      await import("./native-component-meta.js");
+    const projected = nativeComponentMetaToComponentMeta(result);
+    expect(projected.models.map((model) => model.name)).toEqual(["next"]);
+    expect(projected.exposed.map((entry) => entry.name)).toEqual(["next"]);
+    expect([...(nativeTypeRegistryToMap(result)?.keys() ?? [])]).toEqual(["next"]);
+  });
+
+  it("projects an unavailable boolean fact as absence, not false", async () => {
+    const payload = fixture();
+    const props = payload.body!.facts!.props!.value!.entries;
+    const unavailableBool = () =>
+      create(BoolFactSchema, {
+        guarantee: { kind: 3, causes: [104] },
+      });
+    const falseBool = () =>
+      create(BoolFactSchema, {
+        guarantee: { kind: 1, causes: [] },
+        value: false,
+      });
+    props[0].requiredFact = unavailableBool();
+    props[0].hasDefaultFact = unavailableBool();
+    props.push({ ...props[0], nameId: 6 });
+    props[1].requiredFact = falseBool();
+    props[1].hasDefaultFact = falseBool();
+    const result = decode(payload);
+    expect(result.facts!.props.kind).toBe("complete");
+    expect(result.props.map((prop) => prop.name)).toEqual(["root", "label"]);
+    expect(result.props[0]?.required).toBeUndefined();
+    expect(result.props[0]?.hasDefault).toBeUndefined();
+    expect(result.props[0]?.requiredFact).toEqual({ kind: "unavailable", causes: [104] });
+    expect(result.props[1]?.required).toBe(false);
+    expect(result.props[1]?.hasDefault).toBe(false);
+    const { nativeComponentMetaToComponentMeta } = await import("./native-component-meta.js");
+    const { propsToJsonSchema } = await import("./adapters/json-schema.js");
+    const { propsToZodString } = await import("./adapters/zod.js");
+    const projected = nativeComponentMetaToComponentMeta(result);
+    expect(projected.props.map((prop) => prop.name)).toEqual(["root", "label"]);
+    expect(projected.props[0]?.required).toBeUndefined();
+    expect(projected.props[1]?.required).toBe(false);
+    const schema = propsToJsonSchema(projected);
+    expect(schema.properties).toHaveProperty("root");
+    expect(schema.properties).toHaveProperty("label");
+    expect(schema.required ?? []).not.toContain("root");
+    expect(schema.required ?? []).not.toContain("label");
+    const zod = propsToZodString(projected);
+    expect(zod).toContain('"root"');
+    expect(zod).toContain('"label"');
+    expect(zod).toContain(".optional()");
+  });
+
+  it("keeps failed accepted and fallthrough values from aborting projection", async () => {
+    const result = decode(fixture());
+    const type = result.props[0].type!;
+    const publication = result.props[0].publication;
+    const terminalDisplay = result.props[0].terminalDisplay;
+    const failedPublication = {
+      kind: "failed" as const,
+      failure: "unrepresentableRequiredMemberValue" as const,
+      provenance: "semanticEvaluator" as const,
+    };
+    const jsonMember = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
+    result.acceptedProps = [
+      jsonMember({
+        name: "bad",
+        type: null,
+        publication: failedPublication,
+        terminalDisplay: {},
+        required: true,
+        provenance: { kind: "declared" },
+        availability: { kind: "always" },
+        kind: "declaredProp",
+      }),
+      {
+        name: "ok",
+        type,
+        typeFact: { kind: "complete", value: type },
+        publication,
+        terminalDisplay,
+        required: false,
+        provenance: { kind: "declared" },
+        availability: { kind: "always" },
+        kind: "declaredProp",
+      },
+    ];
+    result.acceptedEvents = [
+      jsonMember({
+        name: "bad",
+        payload: null,
+        provenance: { kind: "declared" },
+        availability: { kind: "always" },
+        kind: "listener",
+      }),
+      {
+        name: "ok",
+        payload: type,
+        typeFact: { kind: "complete", value: type },
+        provenance: { kind: "declared" },
+        availability: { kind: "always" },
+        kind: "declaredEmit",
+      },
+    ];
+    result.fallthroughSurface = {
+      kind: "branches",
+      branches: [
+        {
+          branchKey: "root",
+          props: [
+            jsonMember({
+              name: "bad",
+              type: null,
+              publication: failedPublication,
+              terminalDisplay: {},
+              sources: [],
+            }),
+            {
+              name: "ok",
+              type,
+              typeFact: { kind: "complete", value: type },
+              publication,
+              terminalDisplay,
+              sources: [],
+            },
+          ],
+          events: [
+            jsonMember({ name: "bad", payload: null, sources: [] }),
+            {
+              name: "ok",
+              payload: type,
+              typeFact: { kind: "complete", value: type },
+              sources: [],
+            },
+          ],
+          rootChain: [],
+          status: { kind: "resolved" },
+        },
+      ],
+    };
+    const { nativeComponentMetaToComponentMeta } = await import("./native-component-meta.js");
+    const projected = nativeComponentMetaToComponentMeta(result);
+    expect(result.acceptedProps.map((prop) => prop.name)).toEqual(["bad", "ok"]);
+    expect(projected.facts).toBe(result.facts);
+    expect(projected.acceptedProps.map((prop) => prop.name)).toEqual(["ok"]);
+    expect(projected.acceptedEvents.map((event) => event.name)).toEqual(["ok"]);
+    if (projected.fallthroughSurface.kind !== "branches") {
+      throw new Error("expected fallthrough branches");
+    }
+    expect(projected.fallthroughSurface.branches[0].props.map((prop) => prop.name)).toEqual(["ok"]);
+    expect(projected.fallthroughSurface.branches[0].events.map((event) => event.name)).toEqual([
+      "ok",
+    ]);
+  });
+
+  it("ignores a conflicting legacy summary and preserves the delivery refusal", () => {
+    const payload = fixture();
+    payload.body!.facts!.delivery!.kind = 3;
+    payload.body!.facts!.delivery!.causes = [20];
+    const result = decode(payload);
+    expect(result.facts!.delivery).toEqual({ kind: "unavailable", causes: [20] });
+    expect(result.resultCompleteness).toEqual({ kind: "partial", reasons: ["operationBudget"] });
+    expect(result.facts!.props.kind).toBe("complete");
+  });
+
+  it("keeps an unavailable adapter distinct from component-meta absence", () => {
+    const payload = fixture();
+    payload.body!.facts!.componentPublicContract = {
+      $typeName: "verter.v1.ComponentContractFact",
+      guarantee: { $typeName: "verter.v1.FactGuarantee", kind: 3, causes: [106] },
+      absent: false,
+    };
+    const result = decode(payload);
+    expect(result.componentPublicContract).toMatchObject({
+      kind: "unsupported",
+      reason: { kind: "adapterUnavailable" },
+    });
+    expect(result.facts!.props.kind).toBe("complete");
   });
 });

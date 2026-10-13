@@ -471,12 +471,12 @@ impl FactReadSet {
 
     /// Record one observed fact.
     ///
-    /// Same-fact adjacent duplicates are short-circuited inline; the
+    /// Exact duplicates in a bounded recent window are short-circuited; the
     /// finalisation pass performs the full sort + dedup across all
     /// observations.
     #[inline]
     pub fn observe(&mut self, fact: FactVersionRef) {
-        if self.observations.last() == Some(&fact) {
+        if self.recently_observed(&fact) {
             return;
         }
         self.observations.push(fact);
@@ -486,14 +486,29 @@ impl FactReadSet {
     ///
     /// Used when a higher-tier cold compute consumes a lower-tier
     /// cached result: the caller "inherits" the callee's observed
-    /// facts by appending the callee's signature into the current
-    /// tracer. The finalisation pass dedups across the merged set.
+    /// facts into the current tracer. A bounded recent window prevents
+    /// repeated small witnesses from growing live storage per warm read;
+    /// finalisation dedups observations outside that window.
     #[inline]
     pub fn observe_borrowed_signature(&mut self, sig: &[FactVersionRef]) {
         self.observations.reserve(sig.len());
         for fact in sig {
-            self.observations.push(fact.clone());
+            if !self.recently_observed(fact) {
+                self.observations.push(fact.clone());
+            }
         }
+    }
+
+    #[inline]
+    fn recently_observed(&self, fact: &FactVersionRef) -> bool {
+        self.observations
+            .iter()
+            .rev()
+            .take(INLINE_CAPACITY)
+            .any(|observed| {
+                record_signature_work(1);
+                observed == fact
+            })
     }
 
     /// Absorb an ALREADY-CANONICAL signature — the output of a previous
@@ -900,7 +915,28 @@ pub fn seal_canonical_signature(mut facts: Vec<FactVersionRef>) -> Arc<[FactVers
 ///   same fact set emit byte-identical signatures.
 #[inline]
 fn compare_fact_refs(a: &FactVersionRef, b: &FactVersionRef) -> std::cmp::Ordering {
+    record_signature_work(1);
     a.cmp(b)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static SIGNATURE_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Actual proof ordering, summary and visitation work, independent of the
+/// solver's query-step counter. No observability state exists in production.
+#[inline]
+pub(crate) fn record_signature_work(units: usize) {
+    #[cfg(any(test, feature = "test-support"))]
+    SIGNATURE_WORK.with(|work| work.set(work.get().saturating_add(units)));
+    #[cfg(not(any(test, feature = "test-support")))]
+    let _ = units;
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn signature_work_for_tests() -> usize {
+    SIGNATURE_WORK.with(std::cell::Cell::get)
 }
 
 /// TRUE when `run` is strictly increasing under [`compare_fact_refs`] —
@@ -955,6 +991,27 @@ mod finalise_tests {
             canonical_id: format!("/fact-{index}.ts"),
             hash: [(index & 0xff) as u8; 16],
         }
+    }
+
+    #[test]
+    fn repeated_small_signatures_keep_bounded_live_observations() {
+        let mut read_set = FactReadSet::new();
+        let signature = [fact(1), fact(2), fact(3)];
+        for _ in 0..10_000 {
+            read_set.observe_borrowed_signature(&signature);
+        }
+        assert_eq!(read_set.len(), signature.len());
+        let mut changed = fact(2);
+        if let FactVersionRef::FileWholeHash { hash, .. } = &mut changed {
+            *hash = [99; 16];
+        }
+        read_set.observe_borrowed_signature(&[changed.clone()]);
+        assert_eq!(read_set.len(), signature.len() + 1);
+        let FactReadSetFinalise::Ok(facts) = read_set.finalise() else {
+            panic!("stable signature replay must remain cacheable");
+        };
+        assert!(facts.contains(&changed));
+        assert!(signature.iter().all(|fact| facts.contains(fact)));
     }
 
     #[test]

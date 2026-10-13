@@ -492,7 +492,16 @@ impl WideArtifactNode {
     }
 
     fn with_valid_signature(mut self, host: &VerterHost) -> Self {
-        let facts = (0..2 * verter_session_query::facts::fact_read_set::FACT_PAGE_WIDTH + 3)
+        self.signature = ReadSetSignature::new(
+            verter_session_query::facts::fact_read_set::seal_canonical_signature(
+                Self::valid_dependency_facts(host),
+            ),
+        );
+        self
+    }
+
+    fn valid_dependency_facts(host: &VerterHost) -> Vec<FactVersionRef> {
+        (0..2 * verter_session_query::facts::fact_read_set::FACT_PAGE_WIDTH + 3)
             .map(|index| {
                 let canonical_id = format!("/wide/{index:05}.ts");
                 let _ = host
@@ -515,11 +524,7 @@ impl WideArtifactNode {
                     .whole_hash;
                 FactVersionRef::FileWholeHash { canonical_id, hash }
             })
-            .collect();
-        self.signature = ReadSetSignature::new(
-            verter_session_query::facts::fact_read_set::seal_canonical_signature(facts),
-        );
-        self
+            .collect()
     }
 
     fn page_classes(&self) -> Vec<Option<verter_session_query::retention::ChargeClass>> {
@@ -723,6 +728,9 @@ fn query_retention_refusal_preserves_delivery_validation_and_lowering() {
     use verter_session_query::retention::{RetentionLimits, SemanticRetentionAccount};
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = host.as_ref();
+    // Admit the identical dependency files only once. Seal fresh pages for
+    // each case so its retention account owns independent signature storage.
+    let facts = WideArtifactNode::valid_dependency_facts(&host);
     for (limit, stale, lower) in [
         (usize::MAX, false, false),
         (1, false, false),
@@ -734,8 +742,10 @@ fn query_retention_refusal_preserves_delivery_validation_and_lowering() {
         let mut artifact = WideArtifactNode::new(SemanticRetentionAccount::new(RetentionLimits {
             max_entry_bytes: limit,
             ..RetentionLimits::defaults()
-        }))
-        .with_valid_signature(&host);
+        }));
+        artifact.signature = ReadSetSignature::new(
+            verter_session_query::facts::fact_read_set::seal_canonical_signature(facts.clone()),
+        );
         if stale {
             let host = Arc::clone(&host);
             artifact.during_compute = Some(Arc::new(move || {
