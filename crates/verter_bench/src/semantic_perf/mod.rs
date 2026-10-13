@@ -90,6 +90,9 @@ pub struct Job {
     pub lib_mode: LibMode,
     /// The scenario module (relative to `dir`).
     pub scenario: String,
+    /// Supporting modules (relative to `dir`), also listed by the tsconfig.
+    #[serde(default)]
+    pub files: Vec<String>,
     /// The alias every scenario declares for the init request.
     pub init_alias: String,
     /// The demanded aliases, in request order.
@@ -421,6 +424,16 @@ fn open_project(
         workspace,
         host,
     )?;
+    for file in &job.files {
+        let source = read(&job.dir, file)?;
+        upsert(
+            host,
+            format!("{PROJECT_ROOT}/{file}"),
+            &source,
+            FileLanguage::script_ts(),
+        )
+        .map_err(|err| JobError(format!("upsert supporting module {file}: {err}")))?;
+    }
     let scenario = read(&job.dir, &job.scenario)?;
     let scenario_id = format!("{PROJECT_ROOT}/{}", job.scenario);
     upsert(

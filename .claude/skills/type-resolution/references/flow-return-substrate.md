@@ -1,5 +1,23 @@
 ## Flow-Return Substrate (U6)
 
+A whole-return spread program with one proven closed alternative is projected
+through the shared object-spread query before the flow completion is sealed.
+The resulting object retains its declaring scope and member metadata. Callers
+therefore reuse the inferred surface rather than extending a deferred chain of
+spread programs across modules. Open and correlated formulas retain their
+construction carrier; union returns and nested member types keep their existing
+closure rules. The source reads made by projection remain inside the flow
+proof's evidence, so edits to any contributing module invalidate its callers.
+The cross-module spread-return regression covers 20, 100 and 300 modules and
+warm reuse through the public named-type query.
+
+Flow-return reads also consume the dispatcher's existing `own_published_read`
+when its pinned view cannot serve a result that the same dispatcher just
+published. The shared workspace-edit fence, cost receipt admission and fact
+replay apply unchanged. Locator lowering and a subsequent signature utility
+therefore reuse one inferred body result within the request, while a source
+edit still forces a fresh inference.
+
 Literal switch narrowing partitions the entering parent union once in
 `flow_return_branches.rs`. When every projected discriminant and case test is
 an exact concrete unit, each clause reuses its matching parent member(s), and

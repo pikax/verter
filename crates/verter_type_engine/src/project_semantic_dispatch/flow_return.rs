@@ -2490,8 +2490,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// The warm, carrier-validated memo read of `key` under this
     /// dispatch's view: step (2) of [`Self::execute_flow_return`].
     pub fn warm_flow_return_read(&self, key: &FlowReturnKey) -> Option<FlowReturnResult> {
-        let served = self.graph().get_flow_return_result(self.ctx, key)?;
-        self.admits_served(&served.receipt).then_some(served.value)
+        if let Some(served) = self.graph().get_flow_return_result(self.ctx, key) {
+            return self.admits_served(&served.receipt).then_some(served.value);
+        }
+        // A return inferred while lowering a locator can be newer than
+        // this dispatcher's pinned view. Its own published read has the
+        // same edit fence, priced receipt and fact replay as other queries;
+        // use it when a signature utility demands that return again.
+        let (read, carrier) = self.own_published_read(
+            &SemanticQueryKey::FlowReturn(Box::new(key.clone())),
+            super::cost_receipt::Nesting::InPlace,
+        )?;
+        let QueryResult::Value(SemanticQueryValue::FlowReturn(result)) = read.value else {
+            return None;
+        };
+        crate::fact_signature_helpers::ReadSetSignatureExt::bubble_via_tls(&carrier);
+        Some((*result).clone())
     }
 
     /// The proven value of `key` when it already completed on this
@@ -3143,7 +3157,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// storage, no `MergedDecl` or other ordered merge carrier, no
     /// already-sealed completion, and no display path.
     ///
-    /// Scope is deliberately the TOP-LEVEL composite only — the join flow
+    /// Scope is deliberately the TOP-LEVEL return only. A spread program
+    /// with one proven closed alternative becomes its inferred object
+    /// surface through the shared spread query, so callers reuse the
+    /// surface without traversing a chain of construction programs. Open
+    /// and correlated programs keep their carrier. The join flow
     /// construction derives is UNION-kinded, and "normalization normalizes
     /// only the already-demanded semantic portion". A UNION top re-closes
     /// through the canonical authority (flatten, lattice absorption,
@@ -3196,6 +3214,31 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let Some(data) = self.graph().node_data(node) else {
             return result;
         };
+        if matches!(&*data, SemanticNodeData::ObjectSpreadProgram(_)) {
+            drop(data);
+            // Reuse a callee's inferred surface rather than retaining a
+            // construction chain through every caller. The shared spread
+            // query remains the authority for overwrite and member policy.
+            // Correlated or open formulas keep their original carrier.
+            if let QueryResult::Value(formula) = self.project_object_spread_for_consumer(
+                node,
+                crate::semantic_query::ObjectProjectionSelector::Surface,
+                crate::semantic_query::ProjectionReductionContext::structural_transit(),
+            ) {
+                if let [only] = formula.alternatives() {
+                    if let Some(surface) = only
+                        .closed()
+                        .and_then(|closed| closed.to_closed_surface_view())
+                    {
+                        let closed = self
+                            .graph()
+                            .intern_preserving_scope(node, SemanticNodeData::Object(surface));
+                        return result.with_return_type(self.graph().as_ref(), closed);
+                    }
+                }
+            }
+            return result;
+        }
         let SemanticNodeData::Union(members) = &*data else {
             return result;
         };

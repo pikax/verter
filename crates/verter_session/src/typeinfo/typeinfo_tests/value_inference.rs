@@ -4,6 +4,86 @@ use super::oracle;
 use super::support::*;
 use verter_session_oracle_macro::oracle_row;
 
+#[test]
+fn cross_module_spread_returns_preserve_every_literal_and_reuse_each_body() {
+    use verter_type_engine::project_semantic_dispatch::flow_return::flow_evaluations_for_tests;
+
+    for levels in [20usize, 100, 300] {
+        let host = make_host_with_footprint();
+        for level in 0..levels {
+            let source = if level == 0 {
+                "export function f0() { return { k0: 0 as const }; }".to_string()
+            } else {
+                let previous = level - 1;
+                format!(
+                    "import {{ f{previous} }} from './m-{previous}';\n\
+                     export function f{level}() {{ const p = f{previous}(); return {{ ...p, k{level}: {level} as const }}; }}"
+                )
+            };
+            upsert_ts(&host, &format!("/fixtures/returns/m-{level}.ts"), &source);
+        }
+        upsert_ts(
+            &host,
+            "/fixtures/returns/scenario.ts",
+            &format!(
+                "import {{ f{last} }} from './m-{last}'; type Result = ReturnType<typeof f{last}>;",
+                last = levels - 1
+            ),
+        );
+        let before = flow_evaluations_for_tests();
+        let (result, _) = resolve_expr(
+            &host,
+            "/fixtures/returns/scenario.ts",
+            "Result",
+            &[],
+            ProjectionMode::Expanded,
+        );
+        let props = object_props(&result);
+        assert_eq!(props.len(), levels, "every module contributes one property");
+        for level in 0..levels {
+            let property = &props[&format!("k{level}")];
+            assert_number_literal(&property.ty, level as f64);
+            assert!(!property.optional && !property.readonly);
+        }
+        let cold_evaluations = flow_evaluations_for_tests() - before;
+        assert_eq!(
+            cold_evaluations, levels,
+            "each function's body is inferred once"
+        );
+        let (warm, _) = resolve_expr(
+            &host,
+            "/fixtures/returns/scenario.ts",
+            "Result",
+            &[],
+            ProjectionMode::Expanded,
+        );
+        assert_eq!(warm, result);
+        assert_eq!(flow_evaluations_for_tests() - before, cold_evaluations);
+        if levels == 20 {
+            upsert_ts(
+                &host,
+                "/fixtures/returns/m-0.ts",
+                "export function f0() { return { k0: -1 as const }; }",
+            );
+            let (edited, _) = resolve_expr(
+                &host,
+                "/fixtures/returns/scenario.ts",
+                "Result",
+                &[],
+                ProjectionMode::Expanded,
+            );
+            let props = object_props(&edited);
+            assert_eq!(props.len(), levels);
+            for level in 0..levels {
+                assert_number_literal(
+                    &props[&format!("k{level}")].ty,
+                    if level == 0 { -1.0 } else { level as f64 },
+                );
+            }
+        }
+    }
+}
+
 fn upsert_value_fixture(host: &crate::VerterHost) {
     upsert_ts(host, "/fixtures/value-inference.ts", VALUE_INFERENCE);
 }
