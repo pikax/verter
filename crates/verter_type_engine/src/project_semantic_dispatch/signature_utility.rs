@@ -352,12 +352,15 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     }) => (*return_type, return_carrier.clone()),
                     _ => return None,
                 };
-                // The signature's structural lowering may have declined an
-                // eager body probe. Demand the authoritative return source
-                // here, rather than reading its provisional placeholder.
+                // A deferred source has no value slot. An evaluated flow slot
+                // has a value, but its enclosing construction's adopted fact
+                // does not travel in this utility's node-only argument. Demand
+                // that same owned source here so its actual quality is adopted
+                // by this result, instead of treating the stored slot as exact.
                 let demand_source = matches!(
                     carrier,
                     crate::semantic_query::SignatureReturnCarrier::DeferredFlow(_)
+                        | crate::semantic_query::SignatureReturnCarrier::EvaluatedFlow(_)
                 ) || matches!(
                     self.graph().node_data(return_type).as_deref(),
                     Some(SemanticNodeData::Opaque(QueryError::Miss))
@@ -385,7 +388,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 // constraints: `ReturnType<typeof id>` over `id<T>(x: T): T`
                 // is `unknown`, over `id<T extends string>(x: T): T` it is
                 // `string`.
-                Some(self.instantiate_signature_params_at_base_constraints(signature, return_type))
+                let result =
+                    self.instantiate_signature_params_at_base_constraints(signature, return_type);
+                Some(result)
             }
             SignatureUtilityProjection::ParameterTuple => {
                 let signature = inferred?;

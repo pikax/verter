@@ -7153,7 +7153,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 let transit = ProjectionReductionContext::structural_transit();
                 let (resolved, _, _) =
                     self.resolve_carrier_subject_node_capturing_suppress(normalized, transit);
-                resolved
+                if matches!(
+                    resolved.status,
+                    crate::semantic_query::FactStatus::Unavailable(_)
+                ) {
+                    return None;
+                }
+                resolved.node
             }
             _ => normalized,
         };

@@ -462,6 +462,29 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         })
     }
 
+    /// Demand the selected return VALUE fact through the source producer.
+    /// A finite source certificate can prove this value independently of the
+    /// whole frame's runtime capture contract; inherited read failures and
+    /// execution aborts still prevent an exact answer.
+    pub fn execute_flow_return_value_fact(
+        &self,
+        key: crate::semantic_query::FlowReturnKey,
+    ) -> Result<FactResult<crate::semantic_query::SemanticNodeId>, ExecutionAbort> {
+        let read = self.observe_flow_return_value(key.clone());
+        let independent = matches!(read.value(), FlowReturnStep::Complete(result)
+            if result.independent_member(&key).is_some());
+        let fact = if independent && read.observations_are_complete() {
+            let FlowReturnStep::Complete(result) = read.value() else {
+                unreachable!()
+            };
+            FactResult::Complete(result.return_type())
+        } else {
+            read.fact()?.map(|result| result.return_type())
+        };
+        read.adopt(self)?;
+        Ok(fact)
+    }
+
     /// A key-domain demand consumes only the source's certified static keys.
     /// Whole-return value limitations remain on the separate value fact.
     pub(super) fn observe_flow_return_key_domain(
@@ -586,6 +609,19 @@ impl<T> ObservedRead<T> {
             && !self.frame.result_is_partial
             && self.frame.partial_reasons.is_empty()
             && self.degraded_member_reads == 0
+    }
+
+    /// Reuse restrictions and roots belong to the observed source even when
+    /// its optional diagnostic quality is declined.
+    pub(super) fn preserve_reuse_evidence<C: crate::resolver_core::ResolverCapabilities>(
+        &self,
+        dispatch: &ProjectSemanticDispatch<'_, C>,
+    ) {
+        dispatch.fold_observed_frame_into_top(&BuildLocalTaint {
+            cache_suppress: self.frame.cache_suppress,
+            observed_self_roots: self.frame.observed_self_roots.clone(),
+            ..BuildLocalTaint::default()
+        });
     }
 
     pub(super) fn value(&self) -> &T {

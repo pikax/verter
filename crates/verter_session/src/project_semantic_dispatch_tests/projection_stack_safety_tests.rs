@@ -747,9 +747,19 @@ fn runaway_generic_returns_work_partial_one_root_diagnostic_and_seals_its_refusa
     );
     assert!(first.result_is_partial());
     assert!(first.cache_suppress);
-    let QueryResult::Value(_carrier) = first.value else {
-        panic!("a work trip must preserve a safe typed carrier");
-    };
+    assert!(
+        matches!(
+            first.value,
+            QueryResult::Error(
+                verter_type_engine::semantic_query::QueryError::IncompleteSemanticOperand { .. }
+            )
+        ),
+        "a stopped demand must supply no usable source: {first:?}"
+    );
+    assert!(matches!(
+        first.fact_status,
+        verter_type_engine::semantic_query::FactStatus::Unavailable(_)
+    ));
     let [ShallowDiagnostic::ProjectionWorkLimit {
         root: diagnostic_root,
     }] = first.walker_diagnostics.as_ref()
@@ -820,9 +830,19 @@ fn connected_query_depth_limit_is_distinct_diagnostic_and_seals_its_refusal() {
     };
     assert!(reasons.contains(PartialReasonSet::CONNECTED_QUERY_DEPTH_LIMIT));
     assert!(!reasons.contains(PartialReasonSet::PROJECTION_WORK_LIMIT));
-    let QueryResult::Value(_carrier) = first.value else {
-        panic!("query-depth exhaustion must preserve a safe carrier");
-    };
+    assert!(
+        matches!(
+            first.value,
+            QueryResult::Error(
+                verter_type_engine::semantic_query::QueryError::IncompleteSemanticOperand { .. }
+            )
+        ),
+        "a stopped demand must supply no usable source: {first:?}"
+    );
+    assert!(matches!(
+        first.fact_status,
+        verter_type_engine::semantic_query::FactStatus::Unavailable(_)
+    ));
     let [ShallowDiagnostic::ConnectedQueryDepthLimit {
         root: diagnostic_root,
     }] = first.walker_diagnostics.as_ref()

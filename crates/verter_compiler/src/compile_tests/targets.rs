@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn vmrs_ide_rejects_noncomplete_runtime_semantics_without_registering_bindings() {
+fn vmrs_ide_requires_macro_identity_but_preserves_checking_with_unavailable_names() {
     use std::sync::Arc;
     use verter_macro_dto::{
         MacroFailure, MacroPartialReason, MacroRuntimeBundle, MacroRuntimeEntry,
@@ -16,7 +16,7 @@ defineProps<{ title: string }>()
         (
             "unavailable",
             VueMacroSemanticInput::Unavailable,
-            "XMissingMacroSemanticBundle",
+            Some("XMissingMacroSemanticBundle"),
         ),
         (
             "partial",
@@ -30,7 +30,7 @@ defineProps<{ title: string }>()
                     )),
                 }],
             })),
-            "XUnavailableMacroSemanticResult",
+            None,
         ),
         (
             "unknown syntax entry",
@@ -46,12 +46,12 @@ defineProps<{ title: string }>()
                     )],
                 ),
             ])),
-            "XMissingMacroSemanticBundle",
+            Some("XMissingMacroSemanticBundle"),
         ),
         (
             "TSC-only",
             VueMacroSemanticInput::Tsc(Arc::new(verter_macro_dto::MacroTscBundle::default())),
-            "XMissingMacroSemanticBundle",
+            Some("XMissingMacroSemanticBundle"),
         ),
     ];
 
@@ -69,15 +69,25 @@ defineProps<{ title: string }>()
             &alloc,
         );
 
-        assert!(
-            result
-                .errors
-                .iter()
-                .any(|diagnostic| diagnostic.code == expected_code),
-            "{case} must fail closed with {expected_code}: {:?}",
-            result.errors
-        );
+        if let Some(expected_code) = expected_code {
+            assert!(
+                result
+                    .errors
+                    .iter()
+                    .any(|diagnostic| diagnostic.code == expected_code),
+                "{case} must reject invalid identity with {expected_code}: {:?}",
+                result.errors
+            );
+        } else {
+            assert!(
+                result.errors.is_empty(),
+                "an unavailable name domain must preserve authored IDE checking: {:?}",
+                result.errors
+            );
+        }
         let code = result.tsx.expect("IDE output remains available").code;
+        assert!(code.contains("Prettify<{ title: string }>"), "{code}");
+        assert!(code.contains("___VERTER___instance.title"), "{code}");
         assert!(
             !code.contains("__props.title"),
             "{case} must not publish an unvalidated prop binding: {code}"

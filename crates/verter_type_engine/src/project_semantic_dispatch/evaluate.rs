@@ -204,6 +204,15 @@ impl EvaluateDeferredOutcome {
         }
     }
 
+    fn aborted(node: SemanticNodeId, abort: crate::semantic_query::ExecutionAbort) -> Self {
+        Self {
+            node,
+            completeness: ResultCompleteness::partial(abort.reason_class()),
+            availability: crate::semantic_query::FactStatus::unavailable(abort.reason_class()),
+            cache_suppress: true,
+        }
+    }
+
     /// The build-scoped escape from the typed outcome: fold the exact
     /// completeness into the ACTIVE query-build propagation channels, then
     /// return the carrier-stop node.
@@ -1066,6 +1075,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         instantiate_instantiation_refs: bool,
         resolve_declaration_refs: bool,
     ) -> BegunDemand<'_> {
+        if let Some(abort) = crate::request_context::current_execution_abort() {
+            return BegunDemand::Finished(StructuralFactDemandOutcome::Partial(
+                abort.reason_class(),
+            ));
+        }
         let (connected_guard, initial_trip) = self.enter_connected_demand(false);
         if let Some(reasons) = initial_trip {
             self.fold_local_partial_completeness(reasons);
@@ -2057,6 +2071,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         result: SemanticNodeId,
         finalise: FactReadSetFinalise,
     ) -> EvaluateDeferredOutcome {
+        let mutation_unstable = matches!(&finalise, FactReadSetFinalise::MutationUnstable);
         let evidence = match finalise {
             FactReadSetFinalise::Ok(facts) => {
                 use verter_session_query::facts::fact_cache::{signature_entries, FactVersionRef};
@@ -2075,13 +2090,24 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             FactReadSetFinalise::NonCacheable(_) => None,
             FactReadSetFinalise::MutationUnstable => {
-                frame.completeness = frame.completeness.merge(ResultCompleteness::partial(
-                    PartialReasonSet::UNSTABLE_STATE,
-                ));
+                crate::request_context::observe_execution_abort(
+                    crate::semantic_query::ExecutionAbort::Superseded,
+                );
                 None
             }
         };
         frame.cache_suppress |= evidence.is_none();
+        if let Some(abort) = crate::request_context::current_execution_abort()
+            .or(mutation_unstable.then_some(crate::semantic_query::ExecutionAbort::Superseded))
+        {
+            if frame.recording {
+                self.connected_demand.abandon_cost_scope();
+            }
+            return EvaluateDeferredOutcome::aborted(
+                self.opaque(QueryError::ExecutionAborted(abort)),
+                abort,
+            );
+        }
         // A recovery made under the evaluation — an inline relation, a
         // canonical construction — makes it a resource partial, never a
         // published memo entry, even where no read carried its reason here.
@@ -2164,6 +2190,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         node: SemanticNodeId,
         reduction_context: ProjectionReductionContext,
     ) -> EvaluateDeferredOutcome {
+        if let Some(abort) = crate::request_context::current_execution_abort() {
+            return EvaluateDeferredOutcome::aborted(
+                self.opaque(QueryError::ExecutionAborted(abort)),
+                abort,
+            );
+        }
         // Continuations live on the heap. Authored structural depth has no
         // cap here; only connected operational limits can stop evaluation.
         let (_connected_guard, initial_trip) = self.enter_connected_demand(false);
@@ -2476,7 +2508,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                     observed.partial_reasons,
                                 );
                                 frame.cache_suppress |= observed.cache_suppress;
-                                frame.advance_or_finish(resolved)
+                                frame.availability = frame.availability.join(resolved.status);
+                                frame.advance_or_finish(resolved.node)
                             }
                             _ => DeferredEvaluationAction::Finish(current),
                         }
@@ -2546,11 +2579,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         FactReadSetFinalise::Ok(_) => {}
                         FactReadSetFinalise::NonCacheable(_) => outcome.cache_suppress = true,
                         FactReadSetFinalise::MutationUnstable => {
-                            outcome = EvaluateDeferredOutcome::partial(
-                                cached,
-                                PartialReasonSet::UNSTABLE_STATE,
-                            )
+                            crate::request_context::observe_execution_abort(
+                                crate::semantic_query::ExecutionAbort::Superseded,
+                            );
+                            let abort = crate::request_context::current_execution_abort()
+                                .unwrap_or(crate::semantic_query::ExecutionAbort::Superseded);
+                            outcome = EvaluateDeferredOutcome::aborted(
+                                self.opaque(QueryError::ExecutionAborted(abort)),
+                                abort,
+                            );
                         }
+                    }
+                    if let Some(abort) = crate::request_context::current_execution_abort() {
+                        outcome = EvaluateDeferredOutcome::aborted(
+                            self.opaque(QueryError::ExecutionAborted(abort)),
+                            abort,
+                        );
                     }
                     if frames.is_empty() {
                         return outcome;
@@ -3258,11 +3302,118 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 }
 
-#[cfg(test)]
-mod forwarding_tests {
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub mod forwarding_tests {
     use super::*;
+    #[cfg(test)]
     use crate::semantic_query::surface_resolution::NonEmptyReasons;
+    #[cfg(test)]
     use crate::semantic_query::{FactInterpretation, FactStatus, SemanticQueryValue};
+
+    /// Exercise the evaluator's actual close and discard boundaries with the
+    /// outcome of a host-owned live read, rather than injecting an abort.
+    pub fn assert_deferred_close_preserves_execution_validity<
+        C: crate::resolver_core::ResolverCapabilities,
+    >(
+        dispatch: &ProjectSemanticDispatch<'_, C>,
+        finalise: FactReadSetFinalise,
+        moved: bool,
+    ) {
+        use crate::semantic_query::ExecutionAbort;
+
+        let graph = dispatch.graph();
+        let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let source = graph.intern_node(SemanticNodeData::Alias(number));
+        let context = ProjectionReductionContext::structural_transit();
+        assert!(matches!(
+            dispatch.normalize_node_for_structural_fact_demand(source, context),
+            StructuralFactDemandOutcome::Complete(node) if node == number
+        ));
+        assert!(
+            graph
+                .evaluate_deferred_memo_get(source, context, dispatch.ctx)
+                .is_some(),
+            "the fixture must exercise an actual warm memo"
+        );
+        let before = graph.memo_entry_count();
+        let unscoped = dispatch.finish_deferred_evaluation_frame(
+            DeferredEvaluationFrame::new(source, context, dispatch.operation_budget_epoch.get()),
+            number,
+            finalise.clone(),
+        );
+        if moved {
+            assert!(
+                matches!(
+                    unscoped.availability,
+                    crate::semantic_query::FactStatus::Unavailable(_)
+                ),
+                "a direct close without a request scope must still reject torn evidence"
+            );
+            assert!(matches!(
+                graph.node_data(unscoped.node).as_deref(),
+                Some(SemanticNodeData::Opaque(QueryError::ExecutionAborted(
+                    ExecutionAbort::Superseded
+                )))
+            ));
+            assert_eq!(graph.memo_entry_count(), before);
+        } else {
+            assert!(unscoped.availability.is_complete());
+        }
+        let _validity = crate::request_context::ExecutionValidityScope::enter();
+        let before = graph.memo_entry_count();
+        let observation = dispatch.observe_read(|| {
+            dispatch.finish_deferred_evaluation_frame(
+                DeferredEvaluationFrame::new(
+                    source,
+                    context,
+                    dispatch.operation_budget_epoch.get(),
+                ),
+                number,
+                finalise,
+            )
+        });
+        let discarded = observation.discard();
+        // Demand a separate exact position after declining the probe. It has
+        // no dependency on the source whose execution was superseded.
+        let read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
+            base: number,
+            path: Arc::from([]),
+            context: ProjectionReductionContext::published(ProjectionMode::Expanded),
+        });
+        if moved {
+            assert!(
+                matches!(
+                    dispatch.normalize_node_for_structural_fact_demand(source, context),
+                    StructuralFactDemandOutcome::Partial(_)
+                ),
+                "a warmed direct consumer must reject an already aborted execution"
+            );
+            assert!(
+                matches!(discarded, Err(ExecutionAbort::Superseded)),
+                "declining quality must not discard a locally detected execution failure"
+            );
+            assert!(
+                matches!(
+                    read.value,
+                    QueryResult::Error(QueryError::ExecutionAborted(ExecutionAbort::Superseded))
+                ),
+                "the enclosing demand must carry no value: {read:?}"
+            );
+            assert_eq!(
+                graph.memo_entry_count(),
+                before,
+                "an execution aborted by a declined probe must admit no candidate"
+            );
+        } else {
+            assert!(discarded.is_ok(), "a stable close must remain discardable");
+            assert!(
+                matches!(read.value, QueryResult::Value(node) if node == number),
+                "{read:?}"
+            );
+            assert!(read.fact_status.is_complete(), "{read:?}");
+        }
+    }
 
     #[test]
     fn a_deferred_forwarder_preserves_presence_only_instead_of_certifying_positions() {

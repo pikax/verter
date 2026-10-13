@@ -8,7 +8,7 @@
 //! 1. Constructs a hermetic host with a deliberately tight operational
 //!    budget.
 //! 2. Issues a demand that exceeds the budget, asserting typed partial
-//!    completeness, a safe result carrier, and cache suppression.
+//!    completeness, unavailable disposition, and cache suppression.
 //! 3. Re-issues the SAME key on the SAME host. The cold counter MUST
 //!    increment (the partial result was NOT promoted to the warm
 //!    cache); the warm counter MUST NOT increment.
@@ -31,6 +31,35 @@ use verter_type_engine::semantic_query::{
     ResultCompleteness, SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey,
     SurfaceMember,
 };
+
+/// A stopped projection retains its source only in the typed diagnostic.
+fn assert_unavailable_projection(
+    read: &verter_type_engine::semantic_query::CacheRead<QueryResult<SemanticNodeId>>,
+) -> SemanticNodeId {
+    assert!(
+        matches!(
+            read.value,
+            QueryResult::Error(verter_type_engine::semantic_query::QueryError::IncompleteSemanticOperand { reasons })
+                if reasons.contains(PartialReasonSet::PROJECTION_WORK_LIMIT)
+        ),
+        "an unevaluated source must supply no value: {read:?}"
+    );
+    assert!(
+        matches!(
+            read.fact_status,
+            verter_type_engine::semantic_query::FactStatus::Unavailable(causes)
+                if causes.get().contains(PartialReasonSet::PROJECTION_WORK_LIMIT)
+        ),
+        "the adopted fact must retain its work-limit cause: {read:?}"
+    );
+    assert!(read.result_is_partial() && read.cache_suppress, "{read:?}");
+    let [verter_type_engine::project_semantic_dispatch::walk::ShallowDiagnostic::ProjectionWorkLimit { root }] =
+        read.walker_diagnostics.as_ref()
+    else {
+        panic!("one typed work-limit diagnostic is required: {read:?}")
+    };
+    *root
+}
 
 /// Build a hermetic host with `depth_budget = 2` so a 3-segment path
 /// projection trips the budget-exceeded sentinel.
@@ -169,10 +198,11 @@ fn request_projection_budget_caps_distinct_dispatch_cold_builds() {
 
     let second = dispatch.execute_read(second_key);
     assert!(
-        matches!(second.value, QueryResult::Value(_))
+        matches!(second.value, QueryResult::Error(verter_type_engine::semantic_query::QueryError::IncompleteSemanticOperand { .. }))
+            && matches!(second.fact_status, verter_type_engine::semantic_query::FactStatus::Unavailable(_))
             && second.result_is_partial()
             && second.cache_suppress,
-        "the limited projection must retain a safe carrier and typed partial rails; got {second:?}"
+        "the limited projection must withhold its source and retain typed partial rails; got {second:?}"
     );
     assert!(matches!(
         current_cold_compute_completeness(),
@@ -186,7 +216,7 @@ fn request_projection_budget_caps_distinct_dispatch_cold_builds() {
 }
 
 /// Post-trip projection-op queries early-exit at the dispatcher entry without
-/// entering cooperative admission. They preserve a safe value carrier,
+/// entering cooperative admission. They withhold their unevaluated source,
 /// `Partial(PROJECTION_WORK_LIMIT)`, one typed diagnostic, and cache
 /// suppression.
 ///
@@ -254,10 +284,17 @@ fn post_trip_projection_op_queries_bypass_cooperative_admission() {
         context,
     });
     assert!(
-        matches!(second_keyof.value, QueryResult::Value(_))
-            && second_keyof.result_is_partial()
+        matches!(
+            second_keyof.value,
+            QueryResult::Error(
+                verter_type_engine::semantic_query::QueryError::IncompleteSemanticOperand { .. }
+            )
+        ) && matches!(
+            second_keyof.fact_status,
+            verter_type_engine::semantic_query::FactStatus::Unavailable(_)
+        ) && second_keyof.result_is_partial()
             && second_keyof.cache_suppress,
-        "2nd keyof should trip to a safe typed partial carrier (got {second_keyof:?})"
+        "2nd keyof should trip to a typed unavailable result (got {second_keyof:?})"
     );
     assert!(matches!(
         current_cold_compute_completeness(),
@@ -280,10 +317,17 @@ fn post_trip_projection_op_queries_bypass_cooperative_admission() {
         let key = SemanticQueryKey::KeyOf { base, context };
         let result = dispatch.execute_read(key);
         assert!(
-            matches!(result.value, QueryResult::Value(_))
-                && result.result_is_partial()
+            matches!(
+                result.value,
+                QueryResult::Error(
+                    verter_type_engine::semantic_query::QueryError::IncompleteSemanticOperand { .. }
+                )
+            ) && matches!(
+                result.fact_status,
+                verter_type_engine::semantic_query::FactStatus::Unavailable(_)
+            ) && result.result_is_partial()
                 && result.cache_suppress,
-            "post-trip query #{i} must retain a safe typed partial carrier (got {result:?})"
+            "post-trip query #{i} must retain a typed unavailable result (got {result:?})"
         );
         assert!(matches!(
             result.walker_diagnostics.as_ref(),
@@ -355,10 +399,17 @@ fn post_trip_typeof_early_exit_attributes_to_typeof_cold_counter() {
         context,
     });
     assert!(
-        matches!(second.value, QueryResult::Value(_))
-            && second.result_is_partial()
+        matches!(
+            second.value,
+            QueryResult::Error(
+                verter_type_engine::semantic_query::QueryError::IncompleteSemanticOperand { .. }
+            )
+        ) && matches!(
+            second.fact_status,
+            verter_type_engine::semantic_query::FactStatus::Unavailable(_)
+        ) && second.result_is_partial()
             && second.cache_suppress,
-        "2nd keyof should trip to a safe typed partial carrier (got {second:?})"
+        "2nd keyof should trip to a typed unavailable result (got {second:?})"
     );
 
     // Post-trip TypeOf dispatch: counts toward the budget, so it takes
@@ -386,8 +437,15 @@ fn post_trip_typeof_early_exit_attributes_to_typeof_cold_counter() {
     };
     let result = dispatch.execute_read(typeof_key);
     assert!(
-        matches!(result.value, QueryResult::Value(_))
-            && result.result_is_partial()
+        matches!(
+            result.value,
+            QueryResult::Error(
+                verter_type_engine::semantic_query::QueryError::IncompleteSemanticOperand { .. }
+            )
+        ) && matches!(
+            result.fact_status,
+            verter_type_engine::semantic_query::FactStatus::Unavailable(_)
+        ) && result.result_is_partial()
             && result.cache_suppress,
         "post-trip TypeOf must take the typed-partial budget early-exit (got {result:?})"
     );
@@ -454,10 +512,17 @@ fn post_trip_non_projection_queries_still_dispatch_normally() {
         context,
     });
     assert!(
-        matches!(trip.value, QueryResult::Value(_))
-            && trip.result_is_partial()
+        matches!(
+            trip.value,
+            QueryResult::Error(
+                verter_type_engine::semantic_query::QueryError::IncompleteSemanticOperand { .. }
+            )
+        ) && matches!(
+            trip.fact_status,
+            verter_type_engine::semantic_query::FactStatus::Unavailable(_)
+        ) && trip.result_is_partial()
             && trip.cache_suppress,
-        "2nd keyof should trip the fuse to a safe typed partial (got {trip:?})"
+        "2nd keyof should trip the fuse to a typed unavailable result (got {trip:?})"
     );
 
     // Snapshot cooperative-admission entry count after the trip.
@@ -1080,9 +1145,7 @@ fn budget_trip_conditional_suppresses_and_does_not_warm() {
     // (2)+(3) second distinct build trips + suppresses.
     let second_scope = ColdComputeCompletenessScope::enter();
     let second = dispatch.execute_read(key_second.clone());
-    let QueryResult::Value(second_carrier) = second.value else {
-        panic!("a work-limited Conditional must preserve a safe carrier");
-    };
+    let second_carrier = assert_unavailable_projection(&second);
     assert!(matches!(
         current_cold_compute_completeness(),
         ResultCompleteness::Partial(reasons)
@@ -1164,10 +1227,9 @@ fn budget_trip_conditional_suppresses_and_does_not_warm() {
 /// returns a `Value` instead of `BudgetExceeded`).
 #[test]
 fn budget_trip_instantiate_suppresses_and_does_not_warm() {
-    // `projection_op_budget = 1`: the FIRST decidable `Partial<{ … }>`
-    // cold build lands within the budget (it counts exactly one
-    // budget-gated Instantiate op at the dispatch entry) and the SECOND
-    // distinct build trips the fuse, returning a typed partial safe carrier.
+    // Isolate one Instantiate operation: unlike Partial, NonNullable over
+    // a primitive needs no nested KeyOf or MappedType projection. The first
+    // query is exact within the one-operation budget; the second is unavailable.
     let host = Arc::new(VerterHost::new_standalone(HostConfig {
         analysis_level: crate::types::AnalysisLevel::Full,
         projection_op_budget: 1,
@@ -1176,22 +1238,27 @@ fn budget_trip_instantiate_suppresses_and_does_not_warm() {
     let dispatch = host.semantic_dispatch();
     // Two DISTINCT builtin instantiations (distinct argument shapes) so
     // each is its own cold build.
-    let arg_first = intern_single_member_object(&host, "inst_arg_first");
-    let arg_second = intern_single_member_object(&host, "inst_arg_second");
-    let partial_slot = dispatch.builtin_type_slot("Partial");
+    let graph = host.project_type_store().semantic_graph();
+    let arg_first = graph.intern_node(SemanticNodeData::Primitive(
+        verter_type_engine::semantic_query::PrimitiveKind::Number,
+    ));
+    let arg_second = graph.intern_node(SemanticNodeData::Primitive(
+        verter_type_engine::semantic_query::PrimitiveKind::String,
+    ));
+    let non_nullable_slot = dispatch.builtin_type_slot("NonNullable");
     let context = dispatch.instantiate_context_for(
         "__builtin__",
         ProjectionReductionContext::published(ProjectionMode::Expanded),
     );
     let key_first =
         SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
-            partial_slot.clone(),
+            non_nullable_slot.clone(),
             Arc::from(vec![arg_first].into_boxed_slice()),
             context,
         ));
     let key_second =
         SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
-            partial_slot,
+            non_nullable_slot,
             Arc::from(vec![arg_second].into_boxed_slice()),
             context,
         ));
@@ -1210,7 +1277,8 @@ fn budget_trip_instantiate_suppresses_and_does_not_warm() {
 
     let first = dispatch.execute_read(key_first);
     assert!(
-        matches!(first.value, QueryResult::Value(_)),
+        matches!(first.value, QueryResult::Value(node) if node == arg_first)
+            && !first.result_is_partial(),
         "1st Instantiate within budget must succeed (got {:?})",
         first.value
     );
@@ -1222,9 +1290,7 @@ fn budget_trip_instantiate_suppresses_and_does_not_warm() {
 
     let second_scope = ColdComputeCompletenessScope::enter();
     let second = dispatch.execute_read(key_second.clone());
-    let QueryResult::Value(second_carrier) = second.value else {
-        panic!("a work-limited Instantiate must preserve a safe carrier");
-    };
+    let second_carrier = assert_unavailable_projection(&second);
     assert!(matches!(
         current_cold_compute_completeness(),
         ResultCompleteness::Partial(reasons)

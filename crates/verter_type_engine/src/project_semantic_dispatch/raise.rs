@@ -4130,8 +4130,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> OpenWalk<'a, C> {
         // the check/extends operands terminates bounded instead of
         // diverging.
         let dispatch = self.dispatch;
-        if let Some(super::conditional_decision::ConditionalReading::Reduced(selected)) =
-            super::conditional_decision::exact_reading(dispatch.conditional_outcome(node))
+        if let Some(super::conditional_decision::ConditionalReading::Reduced(selected)) = dispatch
+            .probe_optional(|| {
+                super::conditional_decision::exact_reading(dispatch.conditional_outcome(node))
+            })
         {
             return self.node_is_open(ctx, selected);
         }
@@ -4337,8 +4339,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> OpenWalk<'a, C> {
     /// Bounded ONE-HOP reduction fallback behind the builtin registry rule.
     ///
     /// Resolves a `__builtin__` instantiation the per-utility output-key
-    /// rule could not prove closed through a shallow source-domain demand
-    /// (`ProjectPath` — the residual-`InstantiationRef` `Instantiate` hop: bounded,
+    /// rule could not prove closed through a structural source-domain demand
+    /// (the residual-`InstantiationRef` `Instantiate` hop: bounded,
     /// fail-closed, dep-signature facts recorded into the active tracer),
     /// then classifies the REDUCED node with this same walk at the
     /// key-domain position. Returns `false` (not provably closed) on a
@@ -4356,16 +4358,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> OpenWalk<'a, C> {
             return false;
         }
         self.budget -= 1;
-        // Key closure consumes a source domain, not its member values.
+        // Demand the utility's shallow structural result, not a projected
+        // positive-member surface. A flow-backed signature utility can supply
+        // its independently certified exact key domain here, retaining each
+        // unfinished value as a deferred member demand. Structural transit
+        // instead consumes its whole return, whose value limitations cannot
+        // establish whether the keys themselves are complete.
         // A partial presence subset alone cannot prove a closed domain.
-        let read = self.dispatch.execute_read(SemanticQueryKey::ProjectPath {
-            base: node,
-            path: Arc::from([]),
-            context: ProjectionReductionContext::published(ProjectionMode::Shallow),
-        });
-        let reduced = match read.value {
-            QueryResult::Value(reduced) if read.fact_status.is_complete() => reduced,
-            _ => return false,
+        let Some(reduced) = self.dispatch.probe_optional(|| {
+            self.dispatch
+                .normalize_node_for_structural_fact_demand(
+                    node,
+                    ProjectionReductionContext::published(ProjectionMode::Shallow),
+                )
+                .into_complete_node()
+        }) else {
+            return false;
         };
         if reduced == node {
             return false;

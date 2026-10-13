@@ -466,15 +466,37 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             .borrow_mut()
             .relation
             .last_relation_unreliable = false;
-        let related = match self.execute_relate(self.relate_key_for(source, target)) {
-            super::dispatch_txn::RelationStep::Assignable { .. } => Some(true),
-            super::dispatch_txn::RelationStep::NotAssignable => Some(false),
-            _ => None,
+        let observation = self.observe_read(|| {
+            let step = self.execute_relate(self.relate_key_for(source, target));
+            let unreliable = self.dispatch_txn.borrow().relation.last_relation_unreliable;
+            (step, unreliable)
+        });
+        let accepted = observation.observations_are_complete()
+            && matches!(
+                observation.value().0,
+                super::dispatch_txn::RelationStep::Assignable { .. }
+                    | super::dispatch_txn::RelationStep::NotAssignable
+            );
+        let result = if accepted {
+            observation.adopt(self)
+        } else {
+            // An unmeasurable marker comparison contributes no variance
+            // proof. The caller relates the original structures instead.
+            observation.discard()
         };
-        (
-            related,
-            self.dispatch_txn.borrow().relation.last_relation_unreliable,
-        )
+        let Ok((step, unreliable)) = result else {
+            return (None, false);
+        };
+        let related = if accepted {
+            match step {
+                super::dispatch_txn::RelationStep::Assignable { .. } => Some(true),
+                super::dispatch_txn::RelationStep::NotAssignable => Some(false),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        (related, unreliable)
     }
 
     /// Record, on the relation frame on top of the stack, that its

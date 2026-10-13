@@ -1155,6 +1155,8 @@ fn reversed_relation_key(
 struct RootAnswer {
     /// The relation's outcome, or the class of the refusal it answered.
     answer: String,
+    status: verter_type_engine::semantic_query::FactStatus,
+    has_value: bool,
     partial: bool,
     reasons: verter_type_engine::semantic_query::PartialReasonSet,
     work: usize,
@@ -1209,6 +1211,8 @@ fn root_read_with_context(
     };
     RootAnswer {
         answer,
+        status: read.fact_status,
+        has_value: matches!(read.value, QueryResult::Value(_)),
         partial: read.result_is_partial(),
         reasons: read.partial_reason_classes(),
         work: dispatch.connected_demand().work_used_for_tests(),
@@ -1355,7 +1359,13 @@ fn object_union_comparison_refusal_precedes_apparent_read() {
                 cold.refusals, expected_refusals,
                 "TS2859 subjects: {cold:?}"
             );
-            (cold.answer, cold.partial, cold.reasons)
+            (
+                cold.answer,
+                cold.partial,
+                cold.reasons,
+                cold.status,
+                cold.has_value,
+            )
         })
     };
     for (ambient, comparisons, work) in [
@@ -1366,19 +1376,31 @@ fn object_union_comparison_refusal_precedes_apparent_read() {
         (true, 100, 1_000),
     ] {
         let ordinary = observe(true, ambient, comparisons, work);
-        assert_eq!(
-            ordinary.0,
-            if comparisons <= 2 {
-                "BudgetExceeded(RelationBudget)"
-            } else {
-                "NotAssignable"
-            },
-            "the ordinary path's recovery outcome"
-        );
+        if comparisons <= 2 {
+            assert!(
+                matches!(
+                    ordinary.3,
+                    verter_type_engine::semantic_query::FactStatus::Unavailable(_)
+                ),
+                "an exhausted comparison has no scalar judgement: {ordinary:?}"
+            );
+            assert!(
+                !ordinary.4,
+                "the refusal must carry no usable payload: {ordinary:?}"
+            );
+        } else {
+            assert_eq!(ordinary.0, "NotAssignable", "the exact ordinary verdict");
+        }
         if comparisons == 100 {
             assert_eq!(
                 ordinary,
-                ("NotAssignable".to_owned(), false, PartialReasonSet::empty())
+                (
+                    "NotAssignable".to_owned(),
+                    false,
+                    PartialReasonSet::empty(),
+                    verter_type_engine::semantic_query::FactStatus::Complete,
+                    true
+                )
             );
         } else {
             assert!(ordinary.1, "the checker refusal is partial");

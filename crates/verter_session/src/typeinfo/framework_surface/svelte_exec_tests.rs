@@ -307,6 +307,42 @@ fn a_resolved_empty_props_type_still_publishes_supported_empty() {
     );
 }
 
+#[test]
+fn a_local_callback_alias_retains_complete_props_and_shallow_type() {
+    let outcome = runes_props_surface(
+        "/Callbacks.svelte",
+        r#"<script lang="ts">
+type Handler = (id: string) => void;
+interface Props {
+  onMove: (x: number, y: number) => void;
+  onToggle?: (on?: boolean) => void;
+  onSelect: Handler;
+  label: string;
+}
+let { onMove, onToggle, onSelect, label = "untitled" }: Props = $props();
+</script>
+<div>{label}</div>"#,
+    );
+    let ResolvedOutcome::Resolved(dtos) = outcome else {
+        panic!("authored callback types must remain complete: {outcome:?}");
+    };
+    let props = dtos.props.as_ref().expect("the authored props surface");
+    assert_eq!(props.fields.len(), 4);
+    assert!(props
+        .fields
+        .iter()
+        .all(|field| field.callable_role == verter_type_expr::PropCallableRole::Other));
+    let selected = props
+        .fields
+        .iter()
+        .find(|field| field.analysis.name == "onSelect")
+        .unwrap();
+    assert_eq!(
+        selected.analysis.type_annotation.as_deref(),
+        Some("Handler")
+    );
+}
+
 /// An UNRESOLVABLE callback-prop event source (`$props()` typed by a missing
 /// import) must not publish an EMPTY emits surface as SUPPORTED/exact — the
 /// `on*` callback inventory could not be enumerated at all.

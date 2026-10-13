@@ -136,6 +136,8 @@ pub(super) struct FinishRoute {
     function_arguments: Vec<Option<SliceExpr>>,
     argument_observations: Vec<Option<super::super::flow_return_fact::ObservedRead<()>>>,
     step_observations: super::super::flow_return_fact::ObservedRead<()>,
+    /// Relation observations owned by this executor attempt, excluding arguments.
+    undecided_relations: u64,
     declared_result: Option<super::super::call_resolve::DeclaredCallResult>,
     step: Positional<ResolveCallStep>,
     contextual: super::super::call_resolve::ContextualCallState,
@@ -852,10 +854,15 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             context: self.dispatch.resolve_call_context_for(self.canonical),
         };
         let mut contextual = super::super::call_resolve::ContextualCallState::default();
+        let relations_before = self.dispatch.call_undecided_relations();
         let read = self.dispatch.observe_read(|| {
             self.dispatch
                 .execute_contextual_call(key.clone(), &mut contextual)
         });
+        let undecided_relations = self
+            .dispatch
+            .call_undecided_relations()
+            .saturating_sub(relations_before);
         let complete = read.observations_are_complete();
         let Ok(((step, declared_result), step_observations)) = read.split() else {
             self.adopt_argument_observations(&mut argument_observations);
@@ -869,6 +876,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             function_arguments,
             argument_observations,
             step_observations,
+            undecided_relations,
             declared_result: declared_result.filter(|_| complete),
             step,
             contextual,
@@ -954,6 +962,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             if let Some(old) = finish.argument_observations[position].take() {
                 let _ = old.discard();
             }
+            self.dispatch
+                .discard_call_relation_observations(finish.undecided_relations);
+            let relations_before = self.dispatch.call_undecided_relations();
             let read = self.dispatch.observe_read(|| {
                 self.dispatch.resume_contextual_call(
                     &mut finish.key,
@@ -962,6 +973,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     &mut finish.contextual,
                 )
             });
+            finish.undecided_relations = self
+                .dispatch
+                .call_undecided_relations()
+                .saturating_sub(relations_before);
             let complete = read.observations_are_complete();
             let Ok(((step, proof), observations)) = read.split() else {
                 return RetypeRound::Progress(Box::new(ResolveCallProgress::Done(
@@ -1021,12 +1036,32 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             retyped,
             mut argument_observations,
             step_observations,
+            undecided_relations,
             declared_result,
             key,
             ..
         } = finish;
         self.adopt_argument_observations(&mut argument_observations);
-        if self.dispatch.adopt_read(step_observations).is_err() {
+        // A declined executor does not own the fixed declared result read by
+        // the direct-call route. Its failed applicability probes are not that
+        // route's evidence; authored argument observations remain adopted.
+        let declined = !retyped
+            && matches!(
+                step,
+                Positional::Value(ResolveCallStep::Degraded(
+                    crate::semantic_query::ResolveCallFailure::Undecidable
+                        | crate::semantic_query::ResolveCallFailure::Budget
+                ))
+            )
+            && !self.undecided_call_return_reads_clause(key.callee);
+        let validity = if declined {
+            self.dispatch
+                .discard_call_relation_observations(undecided_relations);
+            step_observations.discard()
+        } else {
+            self.dispatch.adopt_read(step_observations)
+        };
+        if validity.is_err() {
             return None;
         }
         if let Some(proof) = declared_result {
@@ -1044,20 +1079,26 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         .constructive_values
                         .iter()
                         .filter_map(|(node, value)| match value {
-                            super::ConstructiveValue::Class { instance } => {
-                                Some((*node, *instance))
-                            }
+                            super::ConstructiveValue::Class {
+                                instance,
+                                declaration,
+                            } => Some((*node, *instance, declaration.clone())),
                             _ => None,
                         })
                         .collect();
-                    for (source, instance) in sources {
+                    for (source, instance, declaration) in sources {
                         let substituted = self.dispatch.substitute_canonical(source, substitution);
                         if substituted == result {
                             let instance =
                                 self.dispatch.substitute_canonical(instance, substitution);
                             self.heritage_self_roots.extend_from_slice(proof.roots());
-                            self.constructive_values
-                                .insert(result, super::ConstructiveValue::Class { instance });
+                            self.constructive_values.insert(
+                                result,
+                                super::ConstructiveValue::Class {
+                                    instance,
+                                    declaration,
+                                },
+                            );
                             break;
                         }
                     }
@@ -1067,7 +1108,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 && key.args.is_empty()
                 && key.explicit_type_args.is_empty()
             {
-                if let (Some((_, result)), Some(super::ConstructiveValue::Class { instance })) = (
+                if let (Some((_, result)), Some(super::ConstructiveValue::Class { instance, .. })) = (
                     proof.result(&key),
                     self.constructive_values.get(&key.callee),
                 ) {

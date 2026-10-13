@@ -71,6 +71,16 @@ derive from it. Retained complete repeats carry `Complete`. An unavailable
 fact delivers `IncompleteSemanticOperand` without a usable candidate, and
 neither approximate nor unavailable facts enter the family memo.
 
+A successful, complete lookup may return a typed negative carrier for a proven
+absent member or stable unresolved authored reference. Settlement preserves that
+exact carrier and its reuse evidence. A failed query supplies no value; an
+incomplete lookup cannot establish absence. A completed positional value may
+retain the unresolved position as an approximate gap, while a failed lookup or
+presence-only subset remains Unavailable. No gap establishes an exact negative.
+An unmodelled value position has the distinct `UnsupportedPosition` disposition:
+it cannot prove absence or publish an exact standalone type. Its enclosing
+completed structural producer may preserve it as a positional typed gap.
+
 The producer must establish the usable interpretation, independently of cause
 codes and incidental markers elsewhere in a value:
 
@@ -167,9 +177,12 @@ forcing the return. Values retained by signature construction use `Function(Flow
 remain visible to unresolved-value checking. Return demands, call substitution,
 signature result recipes and source roots use the same existing flow source.
 After a value demand, `SignatureReturnCarrier::EvaluatedFlow` retains the
-same source and lexical images beside the evaluated slot. Value readers use
-that slot; call equations still apply the source images once to their newly
-inferred body result. The deferred state survives signature substitution and
+same source and lexical images beside the evaluated slot. A signature utility
+result demand receiving only that node re-reads the owned flow source to adopt
+its actual fact in the utility's scope; the stored slot alone cannot prove
+exactness. Header-only utilities continue reading parameters without forcing
+a body. Call equations apply the source images once to their newly inferred
+body result. The deferred state survives signature substitution and
 structural rebuilding.
 It retains sorted lexical clause names and the header images supplied by the
 actual lowering environment, excluding the signature's own clause parameters.
@@ -288,8 +301,42 @@ supplies a result witness only from an actually completed selected
 declared recipe; a provisional seed is insufficient. Its actual substituted
 constructor and result must match the sealed class source. Closed tuples
 compose only certified elements; holes and spreads do not certify. A completed
-unconditional return can consume this separate type evidence while the full
-runtime capture proof remains refused. Roots and reuse suppression survive.
+unconditional return can consume this separate type evidence. A selected local
+class binding's exact served declaration identity must match the actual
+producer-certified constructor to supply binding source evidence. This proves
+its finite type source, never the class's runtime capture set: the full Capture
+obligation remains an accepted typed gap and the whole frame never admits warm.
+Class expressions carry no declaration identity. Unsupported class members,
+effects and uncorrelated captures retain their required observations.
+
+A finite object data literal can compose a type certificate only when every
+actual data value completed, static keys form its whole surface, and no spread,
+method, recursion, withheld inference, hold, degradation or incomplete read was
+adopted. The enclosing completed walk and binding products certify a selected
+return value separately from runtime capture completion. Selected value readers
+use `execute_flow_return_value_fact` through the same source producer; a whole
+flow-frame observer still sees its capture refusal. Roots, reuse suppression and
+execution aborts survive that independent value demand.
+
+A body-degradation read adopts its observations only when the callee's actual
+degradation is copied. A declined diagnostic probe cannot contaminate the
+separately adopted return-value source; its reuse refusal, roots and execution
+aborts still propagate.
+
+A direct call may decline an undecided executor when its declared return is
+independent of the callee's clause. That fixed result has its own producer;
+the declined executor's applicability observations and exact undecided-relation
+delta do not belong to its proof. Authored argument observations remain adopted.
+Retyping similarly discards the replaced executor attempt before adopting the
+new one. Execution aborts propagate through both adoption and discard; an
+argument-dependent, retyped or unsupported result receives no exemption.
+
+Transient indexed call arguments attach each callback's exact served return
+source by canonical program point and matching authored signature span before
+signature lowering. Both expression and flow-call demands use the same source
+linker. Inferred body-return spellings then use the existing flow producer
+rather than resolving callback-local names in file scope. Authored TS return
+annotations and parameter reads keep their own required evidence.
 
 Forward receiver reads in object and class methods hold each stepped attempt's
 observations separately. A replaced first attempt discards its observations;
@@ -347,3 +394,39 @@ value represents that call as a positional gap. Independently certified sibling
 values keep their separate observations. A qualified `typeof` demand uses the
 shared root-and-path lookup; a failed member lookup cannot retry a joined name
 that bypasses the namespace's excluded-export fact.
+
+
+A completed path walk may forward a child's Positional interpretation only
+when it returns that adopted child's actual node and every incomplete child
+supplied its own positional guarantee. Local stops, unavailable dependencies,
+surface failures and open spreads cannot mint this forwarding guarantee.
+Variance marker comparisons are optional proof probes: only complete binary
+comparisons contribute measured variance; declined or incomplete measurements
+leave the original structural comparison responsible for the answer.
+Macro carrier-discrimination probes preserve their walker diagnostics even
+when no surface value can be published. Their availability and diagnostic
+channels are independent.
+Full metadata normalization preserves every named row when its required member
+source is unavailable, while that typed source-construction failure degrades
+the enclosing metadata DTO and prevents warm admission. An exact key domain
+does not certify all of its required value positions. A shallow output
+vocabulary limit alone does not establish such a semantic failure.
+
+Runtime classification consumes Complete subject facts. A macro's incomplete
+whole payload is an optional probe when its original source independently
+certifies the demanded member: that Complete member fact replaces the declined
+payload's quality, while aborts remain authoritative. No flow-reason allowlist
+authorizes classification or prevents the independent member demand.
+
+Nested carrier and deferred-evaluator fact finalization treats a live-domain
+mutation as `Superseded`, including direct reads without a request scope. A
+declined quality probe cannot discard this execution failure. Direct cold and
+warm structural demands both check the active abort before serving a value;
+a cached independent source cannot bypass execution validity.
+
+The sealed resolved-surface token carries Svelte's captured props body into
+shared member-source construction. Required source validation precedes the
+member-path publication for both adapters. A failed source is never temporarily
+published and repaired after it has contaminated the enclosing fact. Inline
+callback signatures retain their exact source; named callback aliases stay
+shallow. Bindable rows use the same captured body.

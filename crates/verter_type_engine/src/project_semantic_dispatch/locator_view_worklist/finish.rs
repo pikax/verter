@@ -46,7 +46,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         )
         .with_authored_resolution_debt(inputs.authored_resolution_debt);
         match self.plan_bare_ref_head(&resolver_context, &name, type_args.len()) {
-            CarrierResolutionPlan::Ready(value) => ReferenceProjectionPlan::Ready(value),
+            CarrierResolutionPlan::Ready(value) => ReferenceProjectionPlan::Ready(value.node),
             CarrierResolutionPlan::NeedsArgs(continuation) => ReferenceProjectionPlan::NeedsArgs {
                 continuation,
                 args: type_args,
@@ -90,7 +90,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             typeof_query,
             type_args.len(),
         ) {
-            CarrierResolutionPlan::Ready(value) => ReferenceProjectionPlan::Ready(value),
+            CarrierResolutionPlan::Ready(value) => ReferenceProjectionPlan::Ready(value.node),
             CarrierResolutionPlan::NeedsArgs(continuation) => ReferenceProjectionPlan::NeedsArgs {
                 continuation,
                 args: type_args,

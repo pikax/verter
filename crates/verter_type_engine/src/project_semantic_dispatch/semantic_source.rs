@@ -106,6 +106,7 @@ impl SourceRaiseOutcome {
             }
             QueryErrorDisposition::ControlCarrier
             | QueryErrorDisposition::UnsupportedSurface
+            | QueryErrorDisposition::UnsupportedPosition
             | QueryErrorDisposition::Partial
             | QueryErrorDisposition::Failure => Self::Failed(err),
         }

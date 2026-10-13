@@ -761,9 +761,14 @@ fn independent_return_expression(expr: &verter_session_query::flow::slice::Slice
 /// tuple producers below. It travels with their actual semantic value.
 #[derive(Clone)]
 enum ConstructiveValue {
-    Class { instance: SemanticNodeId },
+    Class {
+        instance: SemanticNodeId,
+        declaration: Option<verter_session_query::function_program::FlowBindingIdentity>,
+    },
     Instance,
     Tuple,
+    /// A finite data literal composed from actual completed member positions.
+    Object,
 }
 
 fn closed_type_operand(ty: &verter_type_expr::TypeExpr, env: Option<&FlowBinderEnv>) -> bool {
@@ -4383,8 +4388,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// - RELATION bases additionally require every relation outcome the
     ///   occurrence's resolution consumed to be DECIDED (`Unknown` /
     ///   `BudgetExceeded` are not evidence);
-    /// - gap-installed bases (`UnmodeledBinding` / `Capture`) are never
-    ///   claimed.
+    /// - a local class binding may retain its completed finite type source,
+    ///   while its separate runtime capture obligation remains refused;
+    /// - unsupported capture and binding bases are never claimed.
     ///
     /// An obligation without evaluator-produced evidence stays unclaimed,
     /// so the demand cannot seal and finalizes unproven (`ReturnOnly`).
@@ -4435,6 +4441,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             relations_decided
         };
+        // Class declarations, like local function declarations, are read
+        // from their owned source rather than a mutable slot product. Only
+        // their actual completed constructor can supply this source evidence.
+        let class_certificate = |binding| {
+            let identity = witness.bindings.identity(binding)?;
+            witness
+                .constructed_values
+                .iter()
+                .find_map(|(constructor, value)| match value {
+                    ConstructiveValue::Class {
+                        declaration: Some(source),
+                        ..
+                    } if source == identity => Some(*constructor),
+                    _ => None,
+                })
+        };
         let entries = carrier
             .plan
             .obligation_specs()
@@ -4469,6 +4491,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     witness
                         .executed_selection
                         .is_some_and(|selection| selection.is_selected(*node))
+                }
+                FlowObligationBasis::Binding { node, slot }
+                    if matches!(&slot.binding, FlowProductSubject::Local(binding)
+                        if class_certificate(*binding).is_some()) =>
+                {
+                    witness.executed_selection.is_some_and(|selection| selection.is_selected(*node))
                 }
                 FlowObligationBasis::Binding { node, slot } => {
                     witness
@@ -6615,6 +6643,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let independent_members;
         let independent_returns;
         let constructive_return;
+        let constructed_values;
         let (contributors, body_falls_through) = {
             evaluator.seed_hoisted_var_declarations(&ir.body);
             let (outcome, body_falls_through) = evaluator.eval_region(&ir.body);
@@ -6632,6 +6661,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .filter(|values| values.len() == 1)
                 .and_then(|values| evaluator.constructive_values.get(&values[0].node))
                 .cloned();
+            constructed_values = std::mem::take(&mut evaluator.constructive_values);
             call_evidence = std::mem::take(&mut evaluator.call_evidence);
             executed_walk = std::mem::take(&mut evaluator.executed_walk);
             let finished = evaluator.products.finish(evaluator.plan.as_deref());
@@ -6781,6 +6811,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             bindings: &frame_bindings,
             product_evidence: frame_product_evidence.as_ref(),
             products: &frame_products,
+            constructed_values: &constructed_values,
         };
         let contributors = match contributors {
             Ok(contributors) => contributors,
@@ -6915,7 +6946,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             && products_finished
             && (constructive_return.is_some()
                 || independent_returns.is_some_and(|count| count > 0))
-            && unconditional_closed_return;
+            && (unconditional_closed_return
+                || (matches!(constructive_return, Some(ConstructiveValue::Object))
+                    && witness.executed_selection.is_some()));
         let whole_value_proof = whole_return_point
             && independent_returns.is_some_and(|count| count > 0)
             && witness.executed_selection.is_some()
@@ -9650,6 +9683,7 @@ pub(super) trait FlowDemandDriver {
     fn probe_optional<T>(&self, probe: impl FnOnce() -> Option<T>) -> Option<T>;
     fn observe_read<T>(&self, read: impl FnOnce() -> T)
         -> super::flow_return_fact::ObservedRead<T>;
+    fn preserve_read_reuse_evidence<T>(&self, read: &super::flow_return_fact::ObservedRead<T>);
     fn begin_read_observation(&self) -> super::flow_return_fact::ReadObservationScope<'_>;
     fn adopt_read<T>(
         &self,
@@ -9994,6 +10028,7 @@ pub(super) trait FlowDemandDriver {
     ) -> bool;
     fn arena(&self) -> super::arena_ops::ArenaOps<'_>;
     fn call_undecided_relations(&self) -> u64;
+    fn discard_call_relation_observations(&self, count: u64);
     fn pending_obligation_count(&self) -> usize;
     fn enter_lexical_demand(&self, canonical: Arc<str>) -> super::LexicalDemandScopeGuard<'_>;
     fn presence_intersection_for_flow(
@@ -10032,6 +10067,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         read: impl FnOnce() -> T,
     ) -> super::flow_return_fact::ObservedRead<T> {
         ProjectSemanticDispatch::observe_read(self, read)
+    }
+    fn preserve_read_reuse_evidence<T>(&self, read: &super::flow_return_fact::ObservedRead<T>) {
+        read.preserve_reuse_evidence(self);
     }
     fn begin_read_observation(&self) -> super::flow_return_fact::ReadObservationScope<'_> {
         ProjectSemanticDispatch::begin_read_observation(self)
@@ -10614,6 +10652,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
     fn call_undecided_relations(&self) -> u64 {
         self.dispatch_txn.borrow().call.undecided_relations
     }
+    fn discard_call_relation_observations(&self, count: u64) {
+        let mut txn = self.dispatch_txn.borrow_mut();
+        txn.call.undecided_relations = txn.call.undecided_relations.saturating_sub(count);
+    }
     fn pending_obligation_count(&self) -> usize {
         self.dispatch_txn
             .borrow()
@@ -10715,6 +10757,9 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
         read: impl FnOnce() -> T,
     ) -> super::flow_return_fact::ObservedRead<T> {
         self.driver.observe_read(read)
+    }
+    fn preserve_read_reuse_evidence<T>(&self, read: &super::flow_return_fact::ObservedRead<T>) {
+        self.driver.preserve_read_reuse_evidence(read);
     }
     fn begin_read_observation(&self) -> super::flow_return_fact::ReadObservationScope<'_> {
         self.driver.begin_read_observation()
@@ -11273,6 +11318,9 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     fn call_undecided_relations(&self) -> u64 {
         self.driver.call_undecided_relations()
     }
+    fn discard_call_relation_observations(&self, count: u64) {
+        self.driver.discard_call_relation_observations(count);
+    }
     fn pending_obligation_count(&self) -> usize {
         self.driver.pending_obligation_count()
     }
@@ -11747,6 +11795,8 @@ struct FlowExecutionWitness<'w> {
     /// product evidence its own bindings rest on.
     product_evidence: Option<&'w FlowProductEvidence>,
     products: &'w FlowProductStore,
+    /// Successful finite class construction certificates, tied to actual nodes.
+    constructed_values: &'w rustc_hash::FxHashMap<SemanticNodeId, ConstructiveValue>,
 }
 
 /// One operand of a union the checker subtype-reduces: its value, the
@@ -12669,6 +12719,8 @@ struct ObjectFirstPassContext {
 /// [`FlowEvaluator::object_eval_step`]: what [`FlowEvaluator::eval_object_literal`]
 /// keeps across its members, the next entry, and the child it waits on.
 struct ObjectEvalFrame<'e> {
+    /// Every delivered data value completed at its actual authored position.
+    values_completed: bool,
     /// Whether this first pass checked an authored value rather than only
     /// producing withheld-function placeholders.
     first_pass_contributes: bool,
@@ -13206,6 +13258,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         self.contextual_object_receiver = receiver.clone();
         let enclosing_receiver = self.receiver.clone();
         ObjectEvalFrame {
+            values_completed: true,
             first_pass_contributes: false,
             first_pass_context: self.object_first_pass_context,
             withheld_functions: false,
@@ -13375,6 +13428,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     holds_before,
                     widens_unique_symbols,
                 } => {
+                    frame.values_completed &=
+                        matches!(outcome, Positional::Value(_)) && self.holds.len() == holds_before;
                     if frame.skips_context_sensitive
                         && member.context_sensitive
                         && matches!(
@@ -14171,6 +14226,21 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             )
         };
         let node = identify(intern(surface_members));
+        if frame.values_completed
+            && !frame.skips_context_sensitive
+            && !frame.withheld_functions
+            && !recursive
+            && index_signatures.is_empty()
+            && entries.iter().all(|entry| matches!(entry,
+                verter_session_query::flow::slice::SliceObjectEntry::Member(member)
+                    if member.method_kind.is_none()
+                        && matches!(member.key, verter_session_query::flow::slice::SliceObjectKey::Static(_))))
+            && self.degradation.is_none()
+            && !crate::request_context::current_cold_compute_completeness().is_partial()
+            && crate::request_context::current_execution_abort().is_none()
+        {
+            self.constructive_values.insert(node, ConstructiveValue::Object);
+        }
         if unwidened_differs {
             let unwidened = identify(intern(unwidened_members));
             self.unwidened_views.insert(node, unwidened);
@@ -27904,9 +27974,25 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         };
         drop(data);
         let key = self.dispatch.flow_return_key_for(&identity);
-        if let FlowReturnStep::Complete(callee) = self.dispatch.execute_flow_return(key) {
-            if let Some(degradation) = callee.degradation() {
-                self.record_degradation(degradation);
+        // This read owns only the diagnostic that is actually copied. The
+        // return-value source has separately adopted its own fact; a refused
+        // whole-body proof cannot taint it through an unused diagnostic probe.
+        let driver = self.dispatch;
+        let read = driver.observe_read(|| driver.execute_flow_return(key));
+        let copied = matches!(read.value(), FlowReturnStep::Complete(value) if value.degradation().is_some());
+        let step = if copied {
+            driver.adopt_read(read)
+        } else {
+            // Declining diagnostic quality cannot authorize persistent reuse
+            // of a transaction-local or provisional callee source.
+            driver.preserve_read_reuse_evidence(&read);
+            read.discard()
+        };
+        if let Ok(FlowReturnStep::Complete(callee)) = step {
+            if copied {
+                if let Some(degradation) = callee.degradation() {
+                    self.record_degradation(degradation);
+                }
             }
         }
     }

@@ -81,6 +81,35 @@ pub(crate) fn adopt_projection_result(
                 }
                 SemanticQueryValue::TypeNode(node) => match graph.node_data(node).as_deref() {
                     Some(crate::semantic_query::SemanticNodeData::Opaque(error))
+                        if observed.is_partial()
+                            && guarantee == Some(ProjectionInterpretation::Positional)
+                            && super::query_error_disposition::classify_query_error(error)
+                                .disposition
+                                .is_positional_gap() =>
+                    {
+                        // Completed positional evaluation may deliver a gap at
+                        // the root position too. Both its producer guarantee
+                        // and adopted incomplete evidence are required; the
+                        // marker alone cannot establish this interpretation.
+                        FactResult::approximate(
+                            SemanticQueryValue::TypeNode(node),
+                            NonEmptyReasons::from_query_error(error).with(observed.reasons()),
+                        )
+                    }
+                    Some(crate::semantic_query::SemanticNodeData::Opaque(error))
+                        if !observed.is_partial()
+                            && super::query_error_disposition::classify_query_error(error)
+                                .disposition
+                                == super::query_error_disposition::QueryErrorDisposition::OptionalAbsence =>
+                    {
+                        // A successful producer can establish an exact negative
+                        // carrier (an absent member or stable unresolved source).
+                        // Its completed lookup is the evidence. An incomplete
+                        // presence lookup cannot prove absence; a completed
+                        // positional structure offers only a gap instead.
+                        FactResult::complete(SemanticQueryValue::TypeNode(node))
+                    }
+                    Some(crate::semantic_query::SemanticNodeData::Opaque(error))
                         if super::query_error_disposition::classify_query_error(error).disposition
                             == super::query_error_disposition::QueryErrorDisposition::BudgetRecovery =>
                     {
@@ -98,6 +127,7 @@ pub(crate) fn adopt_projection_result(
                         if matches!(
                             super::query_error_disposition::classify_query_error(error).disposition,
                             super::query_error_disposition::QueryErrorDisposition::OptionalAbsence
+                                | super::query_error_disposition::QueryErrorDisposition::UnsupportedPosition
                                 | super::query_error_disposition::QueryErrorDisposition::Partial
                                 | super::query_error_disposition::QueryErrorDisposition::Failure
                         ) =>

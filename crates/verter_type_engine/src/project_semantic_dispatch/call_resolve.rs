@@ -2907,7 +2907,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         .obligations
                         .pending()
                         .pending_len();
-                    let read = self.observe_read(|| self.execute_flow_return(flow_key.clone()));
+                    let read = self.observe_flow_return_value(flow_key.clone());
                     let provisional = self
                         .dispatch_txn
                         .borrow()
@@ -3029,8 +3029,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                     .obligations
                                     .pending()
                                     .pending_len();
-                                let read =
-                                    self.observe_read(|| self.execute_flow_return(binder_key));
+                                let read = self.observe_flow_return_value(binder_key);
                                 let exact = read.observations_are_complete()
                                     && matches!(read.value(), crate::semantic_query::FlowReturnStep::Complete(value) if value.fact().status().is_complete())
                                     && self
@@ -3131,8 +3130,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                     .obligations
                                     .pending()
                                     .pending_len();
-                                let read =
-                                    self.observe_read(|| self.execute_flow_return(widened_key));
+                                let read = self.observe_flow_return_value(widened_key);
                                 let retained = self
                                     .dispatch_txn
                                     .borrow()
