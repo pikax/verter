@@ -18,6 +18,7 @@ use dashmap::mapref::entry::Entry;
 
 use super::SemanticGraphStore;
 use crate::fact_signature_helpers::ReadSetSignatureExt;
+use crate::project_semantic_dispatch::evaluate::DeferredEvaluationDemand;
 use crate::semantic_query::{ProjectionReductionContext, SemanticNodeId};
 
 /// Entry cap for the substitution and deferred-evaluation FIFO stores.
@@ -114,13 +115,14 @@ impl SemanticGraphStore {
     /// A deferred operator can read declarations and export routes. Its
     /// interned input is immutable, but its evaluated answer needs the
     /// complete read proof to validate against this request's view.
-    pub fn evaluate_deferred_memo_get(
+    pub(crate) fn evaluate_deferred_memo_get(
         &self,
         node: SemanticNodeId,
         context: ProjectionReductionContext,
+        demand: DeferredEvaluationDemand,
         ctx: &dyn crate::resolver_core::fact_validation_port::FactValidation,
     ) -> Option<crate::semantic_query::CacheRead<SemanticNodeId>> {
-        self.read_deferred_evaluation(node, context, |entry| {
+        self.read_deferred_evaluation(node, context, demand, |entry| {
             verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::clone(
                 &entry.evidence.0,
             ))
@@ -132,11 +134,12 @@ impl SemanticGraphStore {
         &self,
         node: SemanticNodeId,
         context: ProjectionReductionContext,
+        demand: DeferredEvaluationDemand,
         validate: impl FnOnce(&DeferredEvaluationMemoEntry) -> bool,
     ) -> Option<crate::semantic_query::CacheRead<SemanticNodeId>> {
         let entry = self
             .evaluate_deferred_memo
-            .get(&(node, context))
+            .get(&(node, context, demand))
             .map(|entry| Arc::clone(entry.value()));
         let hit = entry
             .filter(|entry| {
@@ -144,7 +147,9 @@ impl SemanticGraphStore {
                     true
                 } else {
                     self.evaluate_deferred_memo
-                        .remove_if(&(node, context), |_, current| Arc::ptr_eq(current, entry));
+                        .remove_if(&(node, context, demand), |_, current| {
+                            Arc::ptr_eq(current, entry)
+                        });
                     false
                 }
             })
@@ -179,6 +184,7 @@ impl SemanticGraphStore {
         &self,
         node: SemanticNodeId,
         context: ProjectionReductionContext,
+        demand: DeferredEvaluationDemand,
         result: SemanticNodeId,
         receipt: Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
         evidence: crate::fact_signature_helpers::StructuralCarrierReadSet,
@@ -213,7 +219,7 @@ impl SemanticGraphStore {
             lease: super::delivery_lease::SemanticDeliveryLease::from_roots(roots),
             _retention: retention,
         });
-        let key = (node, context);
+        let key = (node, context, demand);
         match self.evaluate_deferred_memo.entry(key) {
             Entry::Occupied(mut slot) => {
                 slot.insert(entry);
@@ -243,7 +249,7 @@ impl SemanticGraphStore {
         context: ProjectionReductionContext,
     ) -> Option<()> {
         self.evaluate_deferred_memo
-            .contains_key(&(node, context))
+            .contains_key(&(node, context, DeferredEvaluationDemand::Shell))
             .then_some(())
     }
 

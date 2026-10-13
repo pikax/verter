@@ -665,6 +665,7 @@ pub struct SemanticGraphStore {
         (
             SemanticNodeId,
             crate::semantic_query::ProjectionReductionContext,
+            crate::project_semantic_dispatch::evaluate::DeferredEvaluationDemand,
         ),
         Arc<hash_cons_memos::DeferredEvaluationMemoEntry>,
     >,
@@ -672,6 +673,7 @@ pub struct SemanticGraphStore {
         std::collections::VecDeque<(
             SemanticNodeId,
             crate::semantic_query::ProjectionReductionContext,
+            crate::project_semantic_dispatch::evaluate::DeferredEvaluationDemand,
         )>,
     >,
     // Member-ordinal index sidecar for large interned `Object` surfaces —

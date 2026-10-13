@@ -129,6 +129,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             inputs,
             substitutions,
             memo,
+            self.in_deferred_interior(ancestors),
         ))
     }
 
@@ -149,11 +150,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let projected_args: Arc<[SemanticNodeId]> = Arc::from(
             args.iter()
                 .map(|argument| {
-                    projected(
+                    self.canonical_argument_carrier(projected(
                         memo,
                         *argument,
-                        self.argument_operand_context(*argument, argument_context),
-                    )
+                        self.argument_operand_context(*argument, argument_context, Some(base)),
+                    ))
                 })
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
@@ -249,6 +250,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         _inputs: &LocatorViewInputs<'_>,
         _substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
         memo: &ViewMemo,
+        deferred_position: bool,
     ) -> SemanticNodeId {
         let graph = self.graph();
         match data {
@@ -689,7 +691,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 .unwrap_or_else(|| self.normalized_index_key_node(projected))
                         }),
                 };
-                let should_defer = !may_reduce_operator(context);
+                let should_defer = !may_reduce_operator(context) || deferred_position;
                 if should_defer {
                     graph.intern_preserving_scope(
                         node,

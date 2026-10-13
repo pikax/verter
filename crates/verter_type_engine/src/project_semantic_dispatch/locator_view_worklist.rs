@@ -250,7 +250,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             _ => false,
         });
-        tail || ancestors.iter().any(|frame| match frame {
+        tail || self.in_deferred_interior(ancestors)
+    }
+
+    fn in_deferred_interior(&self, ancestors: &[ProjectionFrame]) -> bool {
+        ancestors.iter().any(|frame| match frame {
             // Both branches of an undecided conditional are projected here;
             // the checker instantiates neither.
             ProjectionFrame::ConditionalAfterTrue { .. }
@@ -304,15 +308,57 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         node: SemanticNodeId,
         context: ProjectionReductionContext,
+        declaration: Option<&crate::semantic_query::DeclIdentity>,
     ) -> ProjectionReductionContext {
-        if matches!(
-            self.graph().node_data(node).as_deref(),
-            Some(SemanticNodeData::Mapped { .. })
-        ) {
-            context.into_structural_transit_with_mode(ProjectionMode::Navigate)
-        } else {
-            context
+        match self.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::Mapped { .. }) => {
+                context.into_structural_transit_with_mode(ProjectionMode::Navigate)
+            }
+            Some(SemanticNodeData::IndexedAccess { .. }) => {
+                // A constructor body stores its operand for a later member
+                // demand. A value-producing alias consumes its index now,
+                // without expanding the declaration the property names.
+                let stored = declaration
+                    .and_then(|d| self.declared_alias_body(d))
+                    .flatten()
+                    .is_some_and(|body| {
+                        matches!(
+                            self.graph().node_data(body).as_deref(),
+                            Some(
+                                SemanticNodeData::Object(_)
+                                    | SemanticNodeData::Array { .. }
+                                    | SemanticNodeData::Tuple { .. }
+                                    | SemanticNodeData::Signature { .. }
+                            )
+                        )
+                    });
+                if stored {
+                    context.into_structural_transit_with_mode(ProjectionMode::Navigate)
+                } else {
+                    context.with_mode(ProjectionMode::Navigate)
+                }
+            }
+            _ => context,
         }
+    }
+
+    fn reference_argument_operand_context(
+        &self,
+        continuation: &CarrierArgsContinuation,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+    ) -> ProjectionReductionContext {
+        use super::carrier::RefHeadResolution;
+        let identity = match continuation {
+            CarrierArgsContinuation::Instantiate { identity, .. }
+            | CarrierArgsContinuation::Builtin { identity, .. }
+            | CarrierArgsContinuation::Intern {
+                head: RefHeadResolution::Resolved(identity) | RefHeadResolution::Builtin(identity),
+                ..
+            } => Some(identity),
+            _ => None,
+        };
+        self.argument_operand_context(node, context, identity)
     }
 
     pub(super) fn reference_argument_context(
@@ -1079,8 +1125,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 } => {
                     if state.next_arg < state.args.len() {
                         let argument = state.args[state.next_arg];
-                        let argument_context =
-                            self.argument_operand_context(argument, state.argument_context);
+                        let argument_context = self.reference_argument_operand_context(
+                            &state.continuation,
+                            argument,
+                            state.argument_context,
+                        );
                         state.next_arg += 1;
                         frames.push(ProjectionFrame::ReferenceArgsResume {
                             node,
@@ -1097,14 +1146,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 .args
                                 .iter()
                                 .map(|argument| {
-                                    projected(
+                                    self.canonical_argument_carrier(projected(
                                         memo,
                                         *argument,
-                                        self.argument_operand_context(
+                                        self.reference_argument_operand_context(
+                                            &state.continuation,
                                             *argument,
                                             state.argument_context,
                                         ),
-                                    )
+                                    ))
                                 })
                                 .collect::<Vec<_>>()
                                 .into_boxed_slice(),
@@ -1667,7 +1717,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             SemanticNodeData::InstantiationRef { base, args } => {
                 let argument_context = self.instantiation_argument_context(base, context);
                 args.get(index)
-                    .map(|argument| (*argument, self.argument_operand_context(*argument, argument_context)))
+                    .map(|argument| (*argument, self.argument_operand_context(*argument, argument_context, Some(base))))
             }
             SemanticNodeData::Primitive(_)
             | SemanticNodeData::Literal(_)

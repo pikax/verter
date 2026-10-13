@@ -4286,8 +4286,8 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                             LiteralKey::String(name) => PropertyKey::string_literal(name.as_ref()),
                             LiteralKey::Number(number) => PropertyKey::from_js_number(*number),
                         };
-                        if self.dispatch.base_member_admission_non_emitting(subject, &needle) == Some(true) {
-                            key_admission = MappedKeyAdmission::Admitted;
+                        if let Some(admits) = self.dispatch.base_member_admission_non_emitting(subject, &needle) {
+                            key_admission = if admits { MappedKeyAdmission::Admitted } else { MappedKeyAdmission::AbsentProven };
                         }
                         }
                     }
@@ -5165,6 +5165,11 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                             return;
                         }
                     }
+                }
+                SemanticNodeData::Primitive(PrimitiveKind::Never) => {
+                    // The empty type absorbs every remaining projection hop.
+                    results.push(current);
+                    return;
                 }
                 // A primitive's members are its apparent wrapper's
                 // (`string['length']` is `String['length']`, `number`),
@@ -6122,6 +6127,17 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             // handle DeclRef/InstantiationRef under demand-bounded
             // intermediate-vs-terminal selection; the empty-path
             // terminal expander does not need a duplicate arm.
+            SemanticNodeData::DeclRef { .. } | SemanticNodeData::InstantiationRef { .. }
+                if self.original_path_non_empty =>
+            {
+                drop(data);
+                let resolved = self.resolve_expanded_terminal_carrier(node);
+                if resolved == node {
+                    results.push(node);
+                } else {
+                    work.push(ExpandFrame::Expand(resolved));
+                }
+            }
             SemanticNodeData::Mapped { source, mapper }
                 if matches!(self.mode(), ProjectionMode::Expanded) =>
             {

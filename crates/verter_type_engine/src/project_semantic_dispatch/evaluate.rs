@@ -290,6 +290,14 @@ pub fn force_partial_closed_operator_evaluation_for_tests() -> impl Drop {
     Restore(FORCE_PARTIAL_CLOSED_EVALUATION.replace(true))
 }
 
+/// Shell evaluation follows only operator operands. A selected result also
+/// reads value composition, and whole publication reads surface interiors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum DeferredEvaluationDemand {
+    Shell,
+    SelectedValue,
+}
+
 /// Heap-owned continuation for one deferred-operator evaluation entry. A
 /// frame advances alias/fix-point hops in place and suspends only when the
 /// current operator needs an operand evaluated first. No frame is represented
@@ -297,14 +305,24 @@ pub fn force_partial_closed_operator_evaluation_for_tests() -> impl Drop {
 enum DeferredEvaluationStage {
     EvaluateCurrent,
     AwaitKeyOfBase,
-    AwaitIndexedObject { index: IndexKey },
-    AwaitIndexedIndex { object: SemanticNodeId },
+    AwaitIndexedObject {
+        index: IndexKey,
+    },
+    AwaitIndexedIndex {
+        object: SemanticNodeId,
+    },
+    AwaitValueChildren {
+        data: Arc<SemanticNodeData>,
+        children: Vec<SemanticNodeId>,
+        values: Vec<SemanticNodeId>,
+    },
 }
 
 struct DeferredEvaluationFrame {
     entry_node: SemanticNodeId,
     node: SemanticNodeId,
     context: ProjectionReductionContext,
+    demand: DeferredEvaluationDemand,
     memo_checked: bool,
     visited: rustc_hash::FxHashSet<SemanticNodeId>,
     completeness: ResultCompleteness,
@@ -319,13 +337,19 @@ struct DeferredEvaluationFrame {
 }
 
 impl DeferredEvaluationFrame {
-    fn new(node: SemanticNodeId, context: ProjectionReductionContext, budget_epoch: u64) -> Self {
+    fn new(
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+        budget_epoch: u64,
+        demand: DeferredEvaluationDemand,
+    ) -> Self {
         let mut visited = rustc_hash::FxHashSet::default();
         visited.insert(node);
         Self {
             entry_node: node,
             node,
             context,
+            demand,
             memo_checked: false,
             visited,
             completeness: ResultCompleteness::Complete,
@@ -1277,10 +1301,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         .map(|&arg| {
                             let outcome = self.evaluate_deferred_outcome(
                                 arg,
-                                self.argument_operand_context(arg, context),
+                                self.argument_operand_context(arg, context, None),
                             );
                             completeness = completeness.merge(outcome.completeness);
-                            outcome.node
+                            self.canonical_argument_carrier(outcome.node)
                         })
                         .collect();
                     drop(data);
@@ -2035,6 +2059,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             self.graph().evaluate_deferred_memo_publish(
                 frame.entry_node,
                 frame.context,
+                frame.demand,
                 result,
                 receipt,
                 evidence,
@@ -2052,6 +2077,25 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         node: SemanticNodeId,
         reduction_context: ProjectionReductionContext,
     ) -> EvaluateDeferredOutcome {
+        self.evaluate_deferred_demand(node, reduction_context, DeferredEvaluationDemand::Shell)
+    }
+
+    pub(super) fn evaluate_selected_value_with_context(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+    ) -> SemanticNodeId {
+        self.evaluate_deferred_demand(node, context, DeferredEvaluationDemand::SelectedValue)
+            .into_complete_active_query_build_node(self)
+            .unwrap_or(node)
+    }
+
+    fn evaluate_deferred_demand(
+        &self,
+        node: SemanticNodeId,
+        reduction_context: ProjectionReductionContext,
+        demand: DeferredEvaluationDemand,
+    ) -> EvaluateDeferredOutcome {
         // Continuations live on the heap. Authored structural depth has no
         // cap here; only connected operational limits can stop evaluation.
         let (_connected_guard, initial_trip) = self.enter_connected_demand(false);
@@ -2063,7 +2107,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // memo; one this demand cannot pay for is evaluated here.
         if let Some(served) =
             self.graph()
-                .evaluate_deferred_memo_get(node, reduction_context, self.ctx)
+                .evaluate_deferred_memo_get(node, reduction_context, demand, self.ctx)
         {
             if self.admits_served(&served.receipt) {
                 return EvaluateDeferredOutcome::complete(served.value);
@@ -2077,13 +2121,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             node,
             reduction_context,
             self.operation_budget_epoch.get(),
+            demand,
         );
         self.connected_demand.open_cost_scope(
-            super::cost_receipt::CostIdentity::of_key((node, reduction_context)).with_roots(
-                self.graph()
-                    .root_existing_nodes(vec![node])
-                    .expect("evaluation operand is live"),
-            ),
+            super::cost_receipt::CostIdentity::of_key((node, reduction_context, demand))
+                .with_roots(
+                    self.graph()
+                        .root_existing_nodes(vec![node])
+                        .expect("evaluation operand is live"),
+                ),
         );
         root.memo_checked = true;
         root.recording = true;
@@ -2169,6 +2215,28 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         let fallback = self.opaque(QueryError::Miss);
                         self.deferred_read_action(frame, read, fallback)
                     }
+                    DeferredEvaluationStage::AwaitValueChildren {
+                        data,
+                        children,
+                        mut values,
+                    } => {
+                        values.push(child.node);
+                        if let Some(&next) = children.get(values.len()) {
+                            frame.stage = DeferredEvaluationStage::AwaitValueChildren {
+                                data,
+                                children,
+                                values,
+                            };
+                            DeferredEvaluationAction::Push {
+                                node: next,
+                                context: frame.context,
+                            }
+                        } else {
+                            let rebuilt =
+                                self.rebuild_evaluated_value(frame.node, &data, &children, &values);
+                            DeferredEvaluationAction::Finish(rebuilt)
+                        }
+                    }
                     DeferredEvaluationStage::EvaluateCurrent => {
                         unreachable!("only a suspended frame can receive an operand")
                     }
@@ -2184,7 +2252,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 };
                 let memo_hit = if check_memo {
                     self.graph()
-                        .evaluate_deferred_memo_get(entry_node, context, self.ctx)
+                        .evaluate_deferred_memo_get(entry_node, context, demand, self.ctx)
                         .filter(|served| self.admits_served(&served.receipt))
                         .map(|served| served.value)
                 } else {
@@ -2193,7 +2261,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 if check_memo && memo_hit.is_none() {
                     // The frame evaluates: its charges are its own.
                     self.connected_demand.open_cost_scope(
-                        super::cost_receipt::CostIdentity::of_key((entry_node, context))
+                        super::cost_receipt::CostIdentity::of_key((entry_node, context, demand))
                             .with_roots(
                                 self.graph()
                                     .root_existing_nodes(vec![entry_node])
@@ -2214,6 +2282,29 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         .node;
                     if let Some(data) = self.graph().node_data(current) {
                         match data.as_ref() {
+                            _ if demand == DeferredEvaluationDemand::SelectedValue
+                                && self
+                                    .selected_value_children(data.as_ref(), context)
+                                    .is_some() =>
+                            {
+                                let children = self
+                                    .selected_value_children(data.as_ref(), context)
+                                    .expect("selected child topology");
+                                if let Some(&first) = children.first() {
+                                    let frame = frames.last_mut().expect("active evaluator frame");
+                                    frame.stage = DeferredEvaluationStage::AwaitValueChildren {
+                                        data: Arc::clone(&data),
+                                        children,
+                                        values: Vec::new(),
+                                    };
+                                    DeferredEvaluationAction::Push {
+                                        node: first,
+                                        context,
+                                    }
+                                } else {
+                                    DeferredEvaluationAction::Finish(current)
+                                }
+                            }
                             SemanticNodeData::Alias(target) => frames
                                 .last_mut()
                                 .expect("active evaluator frame")
@@ -2390,6 +2481,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         node,
                         context,
                         self.operation_budget_epoch.get(),
+                        demand,
                     ));
                     tracers.push(crate::fact_signature_helpers::StepwiseFactTracer::new(
                         crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(self.ctx),
@@ -2451,6 +2543,113 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
         }
+    }
+
+    fn selected_value_children(
+        &self,
+        data: &SemanticNodeData,
+        context: ProjectionReductionContext,
+    ) -> Option<Vec<SemanticNodeId>> {
+        let whole = crate::semantic_query::may_reduce_operator(context)
+            && context.mode == ProjectionMode::Expanded;
+        match data {
+            SemanticNodeData::Union(arms) => Some(arms.iter().copied().collect()),
+            SemanticNodeData::Array { element, .. } if whole => Some(vec![*element]),
+            SemanticNodeData::Tuple { elements, .. } if whole => {
+                Some(elements.iter().map(|e| e.value).collect())
+            }
+            SemanticNodeData::Object(surface) if whole => {
+                Some(surface.positive_members().iter().map(|m| m.value).collect())
+            }
+            SemanticNodeData::Signature {
+                params,
+                return_type,
+                return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(_),
+                ..
+            } if whole => Some(
+                params
+                    .iter()
+                    .map(|p| p.ty)
+                    .chain(std::iter::once(*return_type))
+                    .collect(),
+            ),
+            _ => None,
+        }
+    }
+
+    fn rebuild_evaluated_value(
+        &self,
+        node: SemanticNodeId,
+        data: &SemanticNodeData,
+        children: &[SemanticNodeId],
+        values: &[SemanticNodeId],
+    ) -> SemanticNodeId {
+        if children == values {
+            return node;
+        }
+        let rebuilt = match data {
+            SemanticNodeData::Union(_) => {
+                return self.intern_normalized_union_or_intersection(values, true)
+            }
+            SemanticNodeData::Array { readonly, .. } => SemanticNodeData::Array {
+                element: values[0],
+                readonly: *readonly,
+            },
+            SemanticNodeData::Tuple { elements, readonly } => {
+                let elements = elements
+                    .iter()
+                    .zip(values)
+                    .map(|(e, &value)| crate::semantic_query::TupleElement { value, ..e.clone() })
+                    .collect();
+                SemanticNodeData::Tuple {
+                    elements,
+                    readonly: *readonly,
+                }
+            }
+            SemanticNodeData::Object(surface) => {
+                let members = surface
+                    .positive_members()
+                    .iter()
+                    .zip(values)
+                    .map(|(m, &value)| crate::semantic_query::SurfaceMember { value, ..m.clone() })
+                    .collect();
+                SemanticNodeData::Object(surface.clone().with_positive_members(members))
+            }
+            SemanticNodeData::Signature {
+                kind,
+                params,
+                type_parameters,
+                occurrence,
+                signature_span,
+                return_type_span,
+                predicate,
+                is_abstract,
+                ..
+            } => {
+                let params = params
+                    .iter()
+                    .zip(values)
+                    .map(|(p, &ty)| crate::semantic_query::FunctionParam { ty, ..p.clone() })
+                    .collect();
+                let return_type = values[values.len() - 1];
+                SemanticNodeData::Signature {
+                    kind: *kind,
+                    params,
+                    return_type,
+                    type_parameters: Arc::clone(type_parameters),
+                    occurrence: occurrence.clone(),
+                    return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(
+                        return_type,
+                    ),
+                    signature_span: *signature_span,
+                    return_type_span: *return_type_span,
+                    predicate: *predicate,
+                    is_abstract: *is_abstract,
+                }
+            }
+            _ => unreachable!("only selected value composition is rebuilt"),
+        };
+        self.graph().intern_preserving_scope(node, rebuilt)
     }
 
     /// The union or intersection `node` reduced over its arms' RESOLVED

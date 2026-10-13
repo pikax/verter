@@ -9414,9 +9414,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // canonical shape before the nullish filter; a genuinely
                 // unsettled operand returns its carrier and keeps the
                 // deferred shell below.
-                let arg = self
-                    .evaluate_deferred_semantic_node_with_context(args[0], context)
-                    .into_active_query_build_node(self);
+                let arg = self.resolve_signature_source_carrier(args[0], context);
                 // `NonNullable<T>` is `T & {}`: `unknown & {}` collapses to
                 // the empty-object base (the trap row — NOT `unknown`, NOT
                 // `never`). `any`/`never` pass through the settled arms
@@ -9540,79 +9538,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         node: SemanticNodeId,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> SemanticNodeId {
-        let mut current = self
-            .evaluate_deferred_semantic_node_with_context(node, context)
-            .into_active_query_build_node(self);
-        // Sound termination on the residual chain: a `visited` set detects
-        // exact resolution cycles, and the connected work envelope bounds
-        // fresh-node regrowth the visited set cannot (each `Instantiate` step
-        // can mint a NEW node id). Both
-        // abnormal stops are TYPED: they fold a partial into the enclosing
-        // query build's taint frame (refusing warm admission) instead of
-        // silently returning an intermediate carrier the signature-utility
-        // caller would classify as settled.
-        let mut visited = rustc_hash::FxHashSet::default();
-        // Bounded loop: exact-identity cycle detection plus the shared
-        // connected work envelope, both typed-partial on trip.
-        loop {
-            let (slot, inst_args, owner_canonical) =
-                match self.graph().node_data(current).as_deref() {
-                    Some(SemanticNodeData::DeclRef { identity }) => (
-                        self.type_slot_for(
-                            Arc::clone(&identity.canonical_id),
-                            identity.owner,
-                            Arc::clone(&identity.decl_name),
-                        ),
-                        Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-                        Arc::clone(&identity.canonical_id),
-                    ),
-                    Some(SemanticNodeData::InstantiationRef { base, args }) => (
-                        self.type_slot_for(
-                            Arc::clone(&base.canonical_id),
-                            base.owner,
-                            Arc::clone(&base.decl_name),
-                        ),
-                        Arc::clone(args),
-                        Arc::clone(&base.canonical_id),
-                    ),
-                    // Settled (non-carrier) — the stable stop; checked BEFORE the
-                    // work budget so a chain that settles on exactly the last
-                    // permitted step is never falsely partial.
-                    _ => return current,
-                };
-            if !visited.insert(current) {
-                // Residual-carrier resolution cycle: the chain can never
-                // settle — typed partial, never a silent carrier return.
-                self.fold_local_partial_completeness(
-                    crate::semantic_query::PartialReasonSet::SAME_PATH_RECURSION,
-                );
-                return current;
-            }
-            if let Err(reasons) = self.charge_connected_work() {
-                // Fresh-node regrowth exhausted the shared connected envelope.
-                self.fold_local_partial_completeness(reasons);
-                return current;
-            }
-            let read = self.execute_read(SemanticQueryKey::Instantiate(
-                crate::semantic_query::InstantiateKey::new(
-                    slot,
-                    inst_args,
-                    self.instantiate_context_for(&owner_canonical, context),
-                ),
-            ));
-            // A2 signal-split: fold a genuinely-incomplete carrier resolve.
-            crate::request_context::observe_component_meta_read_suppress(&read);
-            let next = match read.value {
-                QueryResult::Value(id) => id,
-                _ => return current,
-            };
-            if next == current {
-                return current;
-            }
-            current = self
-                .evaluate_deferred_semantic_node_with_context(next, context)
-                .into_active_query_build_node(self);
-        }
+        self.normalize_node_for_structural_fact_demand(node, context)
+            .into_usable_node()
+            .unwrap_or(node)
     }
 
     /// Registry classification: `name` is the global lib `Promise` type
@@ -12660,7 +12588,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // The instantiated template reduces the operators its
                 // instantiation closed wherever they sit (`{ v: T[K] }`
                 // over `[1, 2]` at `"0"` is `{ v: 1 }`).
-                self.reduce_instantiated_operators(instantiated)
+                self.evaluate_selected_value_with_context(instantiated, context)
             }
         };
         let value = self
@@ -13531,7 +13459,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             self.graph().node_data(substituted).as_deref(),
             Some(SemanticNodeData::Union(_) | SemanticNodeData::TemplateLiteral { .. })
         ) {
-            self.reduce_instantiated_operators(substituted)
+            self.evaluate_selected_value_with_context(substituted, context)
         } else {
             substituted
         };
@@ -13679,7 +13607,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // The selected value reduces the operators its key closes
         // wherever they sit (`() => T[K]` over `{ a: 1 }` at `"a"` is
         // `() => 1`).
-        let substituted = self.reduce_instantiated_operators(substituted);
+        let substituted = self.evaluate_selected_value_with_context(substituted, context);
         let evaluated = self
             .evaluate_deferred_semantic_node_with_context(substituted, context)
             .into_active_query_build_node(self);
@@ -13763,7 +13691,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         mapper: &crate::semantic_query::MapperKey,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> SemanticNodeId {
-        let value_expr = self.reduce_instantiated_operators(mapper.value_expr);
+        let value_expr = self.evaluate_selected_value_with_context(mapper.value_expr, context);
         let evaluated = self
             .evaluate_deferred_semantic_node_with_context(value_expr, context)
             .into_active_query_build_node(self);
@@ -14007,7 +13935,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> (SemanticNodeId, crate::semantic_query::PartialReasonSet) {
         let graph = self.graph();
         let mut reasons = crate::semantic_query::PartialReasonSet::empty();
-        let value_expr = self.reduce_instantiated_operators(mapper.value_expr);
+        let value_expr = self.evaluate_selected_value_with_context(mapper.value_expr, context);
         let evaluated = self
             .evaluate_deferred_semantic_node_with_context(value_expr, context)
             .into_active_query_build_node(self);
