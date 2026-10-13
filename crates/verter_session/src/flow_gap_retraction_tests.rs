@@ -692,23 +692,42 @@ fn a_let_capture_outside_its_container_is_complete_and_warm() {
 
 #[test]
 fn flow_gap_known_gap_results_are_typed_partial_and_never_warm() {
-    let fixtures = [
-        (
-            "g11_sequence",
-            "function makeProps() { return (0, () => \"a\" as const) }",
-            FlowGap::UnmodeledExpression,
-        ),
-        (
-            "g11_this",
-            "function makeProps(this: { value: \"a\" }) { return () => this.value }",
-            FlowGap::UnmodeledExpression,
-        ),
-    ];
+    let fixtures = [(
+        "g11_sequence",
+        "function makeProps() { return (0, () => \"a\" as const) }",
+        FlowGap::UnmodeledExpression,
+    )];
 
     for (id, script, gap) in fixtures {
         let trace = run(id, script, "makeProps");
         record_trace(id, &trace);
         assert_partial(&trace, gap);
+    }
+}
+
+#[test]
+fn declared_receivers_in_returned_arrows_are_complete_and_warm() {
+    let fixtures = [
+        (
+            "explicit_receiver",
+            "function makeProps(this: { value: \"a\" }) { return () => this.value }",
+            r#"{"kind":"function","parameters":[],"returnType":{"kind":"literal","literalKind":"string","value":"a"}}"#,
+        ),
+        (
+            "nested_arrows",
+            "function makeProps(this: { value: \"a\" }) { return () => () => this.value }",
+            r#"{"kind":"function","parameters":[],"returnType":{"kind":"function","parameters":[],"returnType":{"kind":"literal","literalKind":"string","value":"a"}}}"#,
+        ),
+        (
+            "ordinary_function_receiver",
+            "function makeProps(this: { value: \"a\" }) { return function(this: { value: \"b\" }) { return () => this.value } }",
+            r#"{"kind":"function","parameters":[],"returnType":{"kind":"function","parameters":[],"returnType":{"kind":"literal","literalKind":"string","value":"b"}}}"#,
+        ),
+    ];
+    for (id, script, expected) in fixtures {
+        let trace = run(id, script, "makeProps");
+        record_trace(id, &trace);
+        assert_complete_warm(&trace, Some(expected));
     }
 }
 

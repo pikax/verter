@@ -125,7 +125,10 @@ use branches::{arm_statements, LoopLower, LowerAcc, LowerEntered, LowerStep};
 
 /// A receiver-independent return contributes to the outer call's inference
 /// before methods that need a contextual receiver are checked.
-fn method_return_is_context_independent(expression: &Expression<'_>) -> bool {
+fn method_return_is_context_independent(
+    walks: &verter_semantic::analysis::walk_stack::ProgramWalkStack<'_>,
+    expression: &Expression<'_>,
+) -> bool {
     let Expression::FunctionExpression(function) = expression else {
         return false;
     };
@@ -157,7 +160,7 @@ fn method_return_is_context_independent(expression: &Expression<'_>) -> bool {
     }
     let mut reads = ThisRead(false);
     if let Some(body) = function.body.as_ref() {
-        reads.visit_function_body(body);
+        walks.with_node_stack(body.span, || reads.visit_function_body(body));
     }
     !reads.0
 }
@@ -13737,7 +13740,10 @@ impl<'a> Lowerer<'a> {
                     readonly: method_kind.is_none() && policy.readonly(),
                     spans,
                     accessor_annotated,
-                    infer_return_eagerly: method_return_is_context_independent(value_expression),
+                    infer_return_eagerly: method_return_is_context_independent(
+                        &self.walks,
+                        value_expression,
+                    ),
                     // An accessor is no context-sensitive member.
                     context_sensitive: !is_accessor(method_kind)
                         && verter_semantic::analysis::type_eval_build::indexed_context_sensitive(
