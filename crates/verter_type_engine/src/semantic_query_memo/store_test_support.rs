@@ -322,8 +322,7 @@ impl SemanticGraphStore {
             &self.canonical_to_entries,
             &family,
             &populated_slots,
-            &read_set_signature,
-            &dispatch_dep_signature,
+            &reverse_index::ReverseIndexInputs::new(&read_set_signature, &dispatch_dep_signature),
             admission_seq,
         );
         drop(entries);

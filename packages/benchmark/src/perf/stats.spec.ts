@@ -146,6 +146,24 @@ describe("ratioDecision — the gate predicate", () => {
 });
 
 describe("ratioDecision honors percentile statistics (real tail latency)", () => {
+  it("preserves tails within whole-run clusters and all metric directions", () => {
+    const baseline = Array.from({ length: 7 }, () => Array<number>(50).fill(100));
+    const candidate = baseline.map((run) => run.slice(0, 45).concat(Array<number>(5).fill(400)));
+    const snapshot = candidate.map((run) => [...run]);
+    const options = { statistic: "p99", resamples: 1500 } as const;
+    const tail = ratioDecision(candidate, baseline, 1.1, options);
+    expect(tail.statisticRatio).toBe(4);
+    expect(tail.lowerBound95).toBe(4);
+    expect(tail.fail).toBe(true);
+    expect(ratioDecision(candidate, baseline, 1.1, { statistic: "median" }).fail).toBe(false);
+    expect(throughputRatioDecision(baseline, candidate, 1.1, options).fail).toBe(true);
+    expect(invariantRatioDecision(baseline, candidate, 1.1, options).fail).toBe(true);
+    expect(candidate).toEqual(snapshot);
+    expect(ratioDecision(candidate, baseline, 1.1, options)).toEqual(tail);
+    expect(() => ratioDecision([[1], []], baseline, 1.1)).toThrow(/non-empty run/);
+    expect(() => ratioDecision([[1], [NaN]], baseline, 1.1)).toThrow(/finite/);
+  });
+
   it("a p99 statistic reflects a tail spike the median ignores", () => {
     // Baseline: a tight distribution. Candidate: identical body, a heavy tail
     // (~4-5× the body). The MEDIAN ratio is ~1.0 (the body is unchanged); the

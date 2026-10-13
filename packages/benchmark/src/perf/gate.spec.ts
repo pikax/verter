@@ -27,12 +27,8 @@ import type { EnsuredCorpus } from "./corpus.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-/**
- * A syntactically-valid pinned baseline: a full 40-hex commit hash. Armed mode
- * REQUIRES this shape — a non-SHA value (a branch, a tag, a placeholder) can
- * never arm the gate (see the "armed mode requires a pinned 40-hex SHA" spec).
- */
-const PINNED_BASELINE_SHA = "0123456789abcdef0123456789abcdef01234567";
+/** Synthetic resolved checkout identity; never a historical proof pin. */
+const RUNTIME_BASELINE_ID = "0123456789abcdef0123456789abcdef01234567";
 
 describe("validateManifest hard-fails a malformed perf manifest (no silent gate disable)", () => {
   // A malformed metric must never silently DISABLE a gate: an unknown `statistic`
@@ -48,7 +44,6 @@ describe("validateManifest hard-fails a malformed perf manifest (no silent gate 
   });
   const validRaw = (workloadOver: Record<string, unknown> = {}): Record<string, unknown> => ({
     methodologyVersion: "1.0.0",
-    baselineRef: "PENDING",
     corpusHash: `sha256:${"0".repeat(64)}`,
     tsgoVersion: "typescript@7.0.1-rc",
     samplesPerSide: 7,
@@ -453,7 +448,6 @@ describe("evaluateGate — discriminating gate evaluation", () => {
   ): BaselineManifest {
     return {
       methodologyVersion: "test",
-      baselineRef: "PENDING — test",
       corpusHash: `sha256:${"0".repeat(64)}`,
       tsgoVersion: "typescript@7.0.1-rc",
       samplesPerSide: 7,
@@ -462,11 +456,8 @@ describe("evaluateGate — discriminating gate evaluation", () => {
     };
   }
   function gateInput(over: Partial<GateEvaluationInput>): GateEvaluationInput {
-    // The default models a same-commit self-check against the PENDING manifest
-    // (the shipped, unarmed state): metric/correctness/behavioral evaluation is
-    // mode-independent, so these tests assert evaluation results without arming.
-    // The arming-discipline tests (PENDING-never-armed, baseline-root, distinct
-    // sides) override `selfCheck`/`baselineRef`/`meta` explicitly.
+    // Metric/correctness/behavioral checks are independent of arming. Tests
+    // exercising distinct builds supply their runtime identity explicitly.
     return {
       manifest: manifestOf({}),
       workloads: [],
@@ -688,6 +679,59 @@ describe("evaluateGate — discriminating gate evaluation", () => {
     expect(ok.pass).toBe(true);
   });
 
+  it("bootstraps whole runs so correlated operations do not manufacture confidence", () => {
+    const spec: WorkloadSpec = {
+      axis: "B",
+      title: "correlated edits",
+      gated: {
+        latency: {
+          threshold: 1.1,
+          direction: "lower-is-better",
+          statistic: "median",
+          source: { kind: "distribution", key: "editLatency" },
+        },
+      },
+    };
+    const runs = (values: number[]) =>
+      side(
+        values.map((value) =>
+          sample({
+            expectedOps: 50,
+            distributions: { editLatency: Array<number>(50).fill(value) },
+          }),
+        ),
+      );
+    const wl: WorkloadEvaluationInput = {
+      id: "edit",
+      spec,
+      available: true,
+      candidate: runs([1, 1, 1, 2, 2, 2, 2]),
+      baseline: runs([1, 1, 1, 1, 1, 1, 1]),
+    };
+    const report = evaluateGate(
+      gateInput({ manifest: manifestOf({ edit: spec }), workloads: [wl] }),
+    );
+    const decision = report.results[0].metrics[0].decision!;
+    expect(decision.statisticRatio).toBe(2);
+    expect(decision.lowerBound95).toBe(1);
+    expect(report.pass).toBe(true);
+    expect(report.results[0].metrics[0].candidateClusters).toEqual(
+      wl.candidate.samples.map((run) => run.distributions!.editLatency),
+    );
+
+    // Consistent between-run regression still fails; widening uncertainty must
+    // not disable the predicate or discard the operation distribution.
+    const regressed = { ...wl, candidate: runs([2, 2, 2, 2, 2, 2, 2]) };
+    expect(
+      evaluateGate(
+        gateInput({
+          manifest: manifestOf({ edit: spec }),
+          workloads: [regressed],
+        }),
+      ).pass,
+    ).toBe(false);
+  });
+
   it("FAILS on a candidate/baseline diagnostic-SET or exit-code mismatch; PASSES on equality", () => {
     const spec: WorkloadSpec = { axis: "B", title: "cold", gated: {}, correctnessGated: true };
 
@@ -877,11 +921,19 @@ describe("evaluateGate — discriminating gate evaluation", () => {
     ).toBe(true);
   });
 
-  it("does NOT present a green armed-gate when baselineRef is PENDING; FAILS an armed run that fell back to self-check", () => {
-    // Unarmed (PENDING) self-check: a labeled self-check, a loud warning, no fail.
+  it("compares distinct builds using a runtime baseline identity without a committed history pin", () => {
+    const input = gateInput({ selfCheck: false, baselineRef: RUNTIME_BASELINE_ID });
+    const report = evaluateGate(input);
+    expect(report.mode).toBe("armed");
+    expect(report.pass).toBe(true);
+    expect(report.baselineRef).toBe(RUNTIME_BASELINE_ID);
+  });
+
+  it("does NOT present a green armed-gate when baselineRef is unresolved; FAILS an armed run that fell back to self-check", () => {
+    // Unarmed (unresolved) self-check: a labeled self-check, a loud warning, no fail.
     const unarmed = evaluateGate(
       gateInput({
-        manifest: manifestOf({}, { baselineRef: "PENDING — not armed" }),
+        baselineRef: "",
         selfCheck: true,
       }),
     );
@@ -893,7 +945,7 @@ describe("evaluateGate — discriminating gate evaluation", () => {
     // missing ⇒ this must FAIL, never a silent green.
     const armedButSelfCheck = evaluateGate(
       gateInput({
-        manifest: manifestOf({}, { baselineRef: PINNED_BASELINE_SHA }),
+        baselineRef: RUNTIME_BASELINE_ID,
         selfCheck: true,
       }),
     );
@@ -903,19 +955,16 @@ describe("evaluateGate — discriminating gate evaluation", () => {
     // Armed + a real comparison ⇒ mode armed.
     const armed = evaluateGate(
       gateInput({
-        manifest: manifestOf({}, { baselineRef: PINNED_BASELINE_SHA }),
+        baselineRef: RUNTIME_BASELINE_ID,
         selfCheck: false,
       }),
     );
     expect(armed.mode).toBe("armed");
   });
 
-  it("a NON-SHA non-PENDING baselineRef can NEVER arm: distinct sides + selfCheck=false FAILS (forced self-check)", () => {
-    // A value that is neither PENDING nor a full 40-hex commit hash ("", "TODO", a
-    // branch name, a moving tag, a 39-hex near-miss) is an UNPINNED ref. A `!PENDING`
-    // check would read it as armed and a distinct-side run would produce a green armed
-    // gate; instead it is forced to self-check and a non-self-check (distinct-side)
-    // run HARD-FAILS — physically incapable of a green armed verdict.
+  it("an unresolved runtime ref cannot arm a distinct-build comparison", () => {
+    // Moving refs must be resolved before building. Invalid runtime identities
+    // cannot describe a fixed comparison, even with distinct side paths.
     const armedMeta = {
       corpusHash: `sha256:${"0".repeat(64)}`,
       candidateBin: "cand-bin",
@@ -935,20 +984,20 @@ describe("evaluateGate — discriminating gate evaluation", () => {
     ]) {
       const attempt = evaluateGate(
         gateInput({
-          manifest: manifestOf({}, { baselineRef: ref }),
-          selfCheck: false, // distinct sides handed to an unpinned baseline
+          baselineRef: ref,
+          selfCheck: false, // distinct sides handed to an unresolved baseline
           meta: armedMeta,
         }),
       );
       expect(attempt.mode).toBe("self-check"); // never "armed"
       expect(attempt.mode).not.toBe("armed");
       expect(attempt.pass).toBe(false);
-      expect(attempt.warnings.join(" ")).toMatch(/not armed|40-hex|pinned/i);
+      expect(attempt.warnings.join(" ")).toMatch(/not armed|40-hex|resolved/i);
     }
-    // The control: a full 40-hex SHA with the same distinct sides DOES arm green.
+    // The control: a resolved runtime identity with the same distinct sides arms green.
     const armedSha = evaluateGate(
       gateInput({
-        manifest: manifestOf({}, { baselineRef: PINNED_BASELINE_SHA }),
+        baselineRef: RUNTIME_BASELINE_ID,
         selfCheck: false,
         meta: armedMeta,
       }),
@@ -1260,7 +1309,7 @@ describe("evaluateGate — discriminating gate evaluation", () => {
     // Equal natives ⇒ axis A would self-compare while reporting armed.
     const equalNative = evaluateGate(
       gateInput({
-        manifest: manifestOf({}, { baselineRef: PINNED_BASELINE_SHA }),
+        baselineRef: RUNTIME_BASELINE_ID,
         selfCheck: false,
         meta: armedMeta({ baselineNative: "cand-native" }),
       }),
@@ -1271,7 +1320,7 @@ describe("evaluateGate — discriminating gate evaluation", () => {
     // Missing baseline bin ⇒ axis B would self-compare.
     const missingBin = evaluateGate(
       gateInput({
-        manifest: manifestOf({}, { baselineRef: PINNED_BASELINE_SHA }),
+        baselineRef: RUNTIME_BASELINE_ID,
         selfCheck: false,
         meta: armedMeta({ baselineBin: undefined }),
       }),
@@ -1281,7 +1330,7 @@ describe("evaluateGate — discriminating gate evaluation", () => {
     // Distinct, present sides ⇒ no self-comparison failure.
     const distinct = evaluateGate(
       gateInput({
-        manifest: manifestOf({}, { baselineRef: PINNED_BASELINE_SHA }),
+        baselineRef: RUNTIME_BASELINE_ID,
         selfCheck: false,
         meta: armedMeta({}),
       }),
@@ -1309,7 +1358,7 @@ describe("evaluateGate — discriminating gate evaluation", () => {
     const armed = (over: Record<string, string | undefined>) =>
       evaluateGate(
         gateInput({
-          manifest: manifestOf({}, { baselineRef: PINNED_BASELINE_SHA }),
+          baselineRef: RUNTIME_BASELINE_ID,
           selfCheck: false,
           meta: armedMeta(over),
         }),
@@ -1631,35 +1680,35 @@ describe("evaluateGate — discriminating gate evaluation", () => {
     expect(evalAxisA(candBlind, baseBlind).pass).toBe(true);
   });
 
-  // ── A PENDING baseline can NEVER produce a green armed gate ────────────────
-  it("a PENDING baseline run handed DISTINCT side paths FAILS and is labeled self-check — never a green armed gate", () => {
-    const pendingMeta = {
+  // ── An unresolved baseline can NEVER produce a green armed gate ────────────────
+  it("an unresolved baseline run handed DISTINCT side paths FAILS and is labeled self-check — never a green armed gate", () => {
+    const unresolvedMeta = {
       corpusHash: `sha256:${"0".repeat(64)}`,
       candidateBin: "cand",
       baselineBin: "base",
       candidateNative: "cand-native",
       baselineNative: "base-native",
-      baselineRoot: "base-root", // present, so the failure is the PENDING rule, isolated
+      baselineRoot: "base-root", // present, so the failure is the unresolved rule, isolated
       threads: 4,
       samplesPerSide: 7,
     };
     const armedAttempt = evaluateGate(
       gateInput({
-        manifest: manifestOf({}, { baselineRef: "PENDING — set on first arm" }),
-        selfCheck: false, // distinct sides handed to an UNPINNED baseline
-        meta: pendingMeta,
+        baselineRef: "",
+        selfCheck: false, // distinct sides handed to an unresolved baseline
+        meta: unresolvedMeta,
       }),
     );
     // Physically incapable of an "armed" verdict: forced to self-check + HARD-FAIL.
     expect(armedAttempt.mode).toBe("self-check");
     expect(armedAttempt.mode).not.toBe("armed");
     expect(armedAttempt.pass).toBe(false);
-    expect(armedAttempt.failures.join(" ")).toMatch(/pending|non-self-check|self-check/i);
+    expect(armedAttempt.failures.join(" ")).toMatch(/resolved|non-self-check|self-check/i);
 
-    // The legitimate PENDING self-check still passes with a loud NOT-ARMED warning.
+    // The legitimate unresolved self-check still passes with a loud NOT-ARMED warning.
     const selfCheck = evaluateGate(
       gateInput({
-        manifest: manifestOf({}, { baselineRef: "PENDING — set on first arm" }),
+        baselineRef: "",
         selfCheck: true,
       }),
     );
@@ -1682,7 +1731,7 @@ describe("evaluateGate — discriminating gate evaluation", () => {
     };
     const noRoot = evaluateGate(
       gateInput({
-        manifest: manifestOf({}, { baselineRef: PINNED_BASELINE_SHA }),
+        baselineRef: RUNTIME_BASELINE_ID,
         selfCheck: false,
         meta: armedMetaSansRoot,
       }),
@@ -1693,7 +1742,7 @@ describe("evaluateGate — discriminating gate evaluation", () => {
     // With --baseline-root present, the baseline-root rule does not fire.
     const withRoot = evaluateGate(
       gateInput({
-        manifest: manifestOf({}, { baselineRef: PINNED_BASELINE_SHA }),
+        baselineRef: RUNTIME_BASELINE_ID,
         selfCheck: false,
         meta: { ...armedMetaSansRoot, baselineRoot: "base-root" },
       }),
@@ -1704,7 +1753,7 @@ describe("evaluateGate — discriminating gate evaluation", () => {
     // Self-check + smoke need no baseline root (the baseline IS the candidate root).
     const selfCheckSansRoot = evaluateGate(
       gateInput({
-        manifest: manifestOf({}, { baselineRef: "PENDING — self-check" }),
+        baselineRef: "",
         selfCheck: true,
         meta: { ...armedMetaSansRoot, candidateBin: "x", baselineBin: "x" },
       }),
@@ -2143,7 +2192,8 @@ describe("evaluateGate — discriminating gate evaluation", () => {
     const axisASpec = readBaselineManifest().workloads["axis-a-codegen"];
     const armed = (cand: WorkloadSample[], base: WorkloadSample[]) =>
       evaluateGate({
-        manifest: manifestOf({ "axis-a-codegen": axisASpec }, { baselineRef: PINNED_BASELINE_SHA }),
+        manifest: manifestOf({ "axis-a-codegen": axisASpec }),
+        baselineRef: RUNTIME_BASELINE_ID,
         workloads: [
           {
             id: "axis-a-codegen",
