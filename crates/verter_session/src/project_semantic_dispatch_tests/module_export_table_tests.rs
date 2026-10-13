@@ -241,19 +241,22 @@ fn barrel_chain_proofs_and_folding_grow_with_the_answer() {
             files: &files,
             ..ProbeProject::default()
         });
+        // Inspect the shared suffixes through one request, as namespace
+        // consumers do, so completed proofs validate once in that view.
+        let table_view = host.resolver_store_view_read().into_owned_view();
+        let table_overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+        let table_ctx =
+            crate::resolver_core::HostResolverContext::new(&host, &table_view, table_overlay);
         let signature_before =
             verter_session_query::facts::fact_read_set::signature_work_for_tests();
-        let view = host.resolver_store_view_read().into_owned_view();
-        let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &view, overlay);
-        let root = host_ctx
+        let root = table_ctx
             .module_export_table("/wb/m0.ts")
             .expect("root table");
         assert_eq!(root.bindings.len(), count);
         let mut owned_slots = root.owned_binding_slots;
         let mut proof_entries = 0;
         for i in 0..count {
-            let table = host_ctx
+            let table = table_ctx
                 .module_export_table(&format!("/wb/m{i}.ts"))
                 .expect("shared suffix");
             assert_eq!(table.bindings.len(), count - i);
@@ -264,10 +267,8 @@ fn barrel_chain_proofs_and_folding_grow_with_the_answer() {
         }
         let proof_work = verter_session_query::facts::fact_read_set::signature_work_for_tests()
             - signature_before;
-        // Every suffix read belongs to the same request, so shared evidence is
-        // validated once instead of rebuilding a store view for each module.
-        drop(host_ctx);
-        drop(view);
+        drop(table_ctx);
+        drop(table_view);
         let source = "import * as ns from './m0'; type __Probe = (typeof ns)[keyof typeof ns];";
         crate::u6_flow_shape_corpus_tests::upsert(
             &host,

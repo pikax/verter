@@ -63,10 +63,32 @@ pub(crate) fn sort_bytes<T>(items: &mut [T], key: impl Fn(&T) -> &[u8]) -> usize
     const SMALL_BUCKET: usize = 16;
     let mut pending = vec![(0, items.len(), 0)];
     let mut work = 0;
-    while let Some((start, end, byte)) = pending.pop() {
+    while let Some((start, end, mut byte)) = pending.pop() {
         if end - start < 2 {
             continue;
         }
+        // Consume a bucket's common prefix once, including for insertion
+        // buckets whose comparisons would otherwise reread it per pair.
+        let first_key = key(&items[start]);
+        let mut prefix_end = first_key.len();
+        for item in &items[start + 1..end] {
+            if prefix_end == byte {
+                break;
+            }
+            let other = key(item);
+            work += 1;
+            let limit = prefix_end.min(other.len());
+            let mut at = byte;
+            while at < limit {
+                work += 1;
+                if first_key[at] != other[at] {
+                    break;
+                }
+                at += 1;
+            }
+            prefix_end = at;
+        }
+        byte = prefix_end;
         if end - start <= SMALL_BUCKET {
             for at in start + 1..end {
                 let mut at = at;
@@ -93,18 +115,28 @@ pub(crate) fn sort_bytes<T>(items: &mut [T], key: impl Fn(&T) -> &[u8]) -> usize
         }
         let symbol = |item: &T| key(item).get(byte).map_or(0, |b| usize::from(*b) + 1);
         let mut counts = [0usize; 257];
+        let mut first = 256;
+        let mut last = 0;
         for item in &items[start..end] {
-            counts[symbol(item)] += 1;
+            let bucket = symbol(item);
+            counts[bucket] += 1;
+            first = first.min(bucket);
+            last = last.max(bucket);
             work += 1;
         }
+        // A uniform bucket after the common prefix consists of equal names
+        // that have all terminated; it needs no distribution.
+        if first == last {
+            continue;
+        }
         let mut starts = [0usize; 258];
-        starts[0] = start;
-        for bucket in 0..257 {
+        starts[first] = start;
+        for bucket in first..=last {
             starts[bucket + 1] = starts[bucket] + counts[bucket];
             work += 1;
         }
         let mut next = starts;
-        for bucket in 0..257 {
+        for bucket in first..=last {
             work += 1;
             while next[bucket] < starts[bucket + 1] {
                 let destination = symbol(&items[next[bucket]]);
@@ -133,6 +165,23 @@ pub enum ModuleExportBinding {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn byte_order_work_tracks_names_with_a_long_shared_prefix() {
+        let prefix = "shared/".repeat(32);
+        for count in [16, 40] {
+            let expected: Vec<_> = (0..count).map(|i| format!("{prefix}{i:02}")).collect();
+            let mut names = expected.clone();
+            names.reverse();
+            let visits = super::sort_bytes(&mut names, |name| name.as_bytes());
+            assert_eq!(names, expected);
+            let bytes: usize = names.iter().map(String::len).sum();
+            assert!(
+                visits <= 4 * bytes,
+                "{visits} visits for {bytes} name bytes"
+            );
+        }
+    }
+
+    #[test]
     fn byte_order_keeps_prefixes_terminators_and_unicode() {
         let mut names = [
             "中", "a\0b", "aa", "é", "b", "a", "", "a\0", "a", "e", "zz", "000", "00", "0", "AAA",
@@ -147,5 +196,10 @@ mod tests {
             ]
         );
         assert!(visits > 0);
+        for name in ["", "same"] {
+            let mut equal = [name; 32];
+            super::sort_bytes(&mut equal, |name| name.as_bytes());
+            assert_eq!(equal, [name; 32], "equal names terminate together");
+        }
     }
 }
