@@ -2486,8 +2486,7 @@ impl SemanticGraphStore {
             &self.canonical_to_entries,
             family,
             &populated_slots,
-            &read_set_signature,
-            &dispatch_dep_signature,
+            &reverse_index::ReverseIndexInputs::new(&read_set_signature, &dispatch_dep_signature),
             admission_seq,
         );
         let published = PublishedMemoCandidate {
@@ -2709,8 +2708,10 @@ impl SemanticGraphStore {
             &self.canonical_to_entries,
             family,
             &populated_slots,
-            &read_set_signature,
-            &dispatch_dep_signature_clone,
+            &reverse_index::ReverseIndexInputs::new(
+                &read_set_signature,
+                &dispatch_dep_signature_clone,
+            ),
             admission_seq,
         );
         let admitted = !populated_slots.is_empty();
