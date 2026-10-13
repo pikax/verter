@@ -2490,8 +2490,28 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// The warm, carrier-validated memo read of `key` under this
     /// dispatch's view: step (2) of [`Self::execute_flow_return`].
     pub fn warm_flow_return_read(&self, key: &FlowReturnKey) -> Option<FlowReturnResult> {
-        let served = self.graph().get_flow_return_result(self.ctx, key)?;
-        self.admits_served(&served.receipt).then_some(served.value)
+        if let Some(served) = self.graph().get_flow_return_result(self.ctx, key) {
+            return self.admits_served(&served.receipt).then_some(served.value);
+        }
+        // A completed transaction member owns its recorded reads and refusal.
+        // Let transaction reuse replay them before consulting a publication
+        // retained by this dispatcher after the shared candidate was evicted.
+        if self.dispatch_txn.borrow().flow.results.contains(key) {
+            return None;
+        }
+        // A return inferred while lowering a locator can be newer than
+        // this dispatcher's pinned view. Its own published read has the
+        // same edit fence, priced receipt and fact replay as other queries;
+        // use it when a signature utility demands that return again.
+        let (read, carrier) = self.own_published_read(
+            &SemanticQueryKey::FlowReturn(Box::new(key.clone())),
+            super::cost_receipt::Nesting::InPlace,
+        )?;
+        let QueryResult::Value(SemanticQueryValue::FlowReturn(result)) = read.value else {
+            return None;
+        };
+        crate::fact_signature_helpers::ReadSetSignatureExt::bubble_via_tls(&carrier);
+        Some((*result).clone())
     }
 
     /// The proven value of `key` when it already completed on this
@@ -3143,7 +3163,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// storage, no `MergedDecl` or other ordered merge carrier, no
     /// already-sealed completion, and no display path.
     ///
-    /// Scope is deliberately the TOP-LEVEL composite only — the join flow
+    /// Scope is deliberately the TOP-LEVEL composite only. Spread programs
+    /// retain their immutable shared operands: projecting each inferred
+    /// prefix here would copy every inherited member at every call link.
+    /// The shared spread query materialises them at the consumer demand.
+    /// The join flow
     /// construction derives is UNION-kinded, and "normalization normalizes
     /// only the already-demanded semantic portion". A UNION top re-closes
     /// through the canonical authority (flatten, lattice absorption,
@@ -12502,8 +12526,28 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 _ => None,
             })
             .collect();
+        // Leaf data values cannot evaluate a method body against this object.
+        // Avoid building and populating an unused receiver: reading every
+        // spread surface here would materialise every inferred call prefix.
+        // Contextual/inherited receivers and compound member expressions keep
+        // their existing receiver path, including deferred method retries.
+        let data_only = entries.iter().all(|entry| match entry {
+            verter_session_query::flow::slice::SliceObjectEntry::Spread { .. } => true,
+            verter_session_query::flow::slice::SliceObjectEntry::Member(member) => {
+                member.method_kind.is_none()
+                    && matches!(
+                        member.value,
+                        verter_session_query::flow::slice::SliceExpr::Type(_)
+                            | verter_session_query::flow::slice::SliceExpr::FrameShadowed(_)
+                            | verter_session_query::flow::slice::SliceExpr::Param { .. }
+                            | verter_session_query::flow::slice::SliceExpr::ParamValue { .. }
+                            | verter_session_query::flow::slice::SliceExpr::Local { .. }
+                            | verter_session_query::flow::slice::SliceExpr::SemanticAny
+                    )
+            }
+        });
         let receiver = inherited_receiver.or_else(|| {
-            Some({
+            (!data_only || contextual.is_some() || contextual_this.is_some()).then(|| {
                 std::rc::Rc::new(class_expression::ClassReceiver {
                     binder: contextual_this.unwrap_or_else(|| {
                         self.dispatch.this_binder(

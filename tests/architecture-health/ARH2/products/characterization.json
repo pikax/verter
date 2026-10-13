@@ -666,6 +666,7 @@
           "crates/verter_session/src/typeinfo/typeinfo_tests/relation_verdict_oracle.rs",
           "crates/verter_session/src/typeinfo/typeinfo_tests/support.rs",
           "crates/verter_session/src/typeinfo/typeinfo_tests/surface_spans.rs",
+          "crates/verter_session/src/typeinfo/typeinfo_tests/value_inference.rs",
           "crates/verter_session/src/typeinfo/typeinfo_tests/vue_adapter_cache.rs",
           "crates/verter_session/src/typeinfo/typeinfo_tests/vue_adapter_slots.rs",
           "crates/verter_session/src/typeinfo/typeinfo_tests/vue_import_recursion.rs",

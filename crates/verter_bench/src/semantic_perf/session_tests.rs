@@ -76,6 +76,43 @@ fn complete_session_journal_contains_each_real_answer_in_order() {
 }
 
 #[test]
+fn scenario_probe_loads_supporting_modules_before_the_return_demand() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("tsconfig.json"), r#"{"compilerOptions":{"strict":true,"noLib":true},"files":["lib.d.ts","base.ts","scenario.ts"]}"#).unwrap();
+    std::fs::write(dir.path().join("lib.d.ts"), "type ReturnType<T extends (...args: any) => any> = T extends (...args: any) => infer R ? R : any;").unwrap();
+    std::fs::write(
+        dir.path().join("base.ts"),
+        "export function base() { return { id: 7 as const }; }",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("scenario.ts"), "import { base } from './base'; type __BenchInit = 0; function f() { const p = base(); return { ...p, tag: 9 as const }; } type __Probe = ReturnType<typeof f>;").unwrap();
+    let mut job: super::Job = serde_json::from_value(serde_json::json!({
+        "schema": super::JOB_SCHEMA,
+        "dir": dir.path(),
+        "tsconfig": "tsconfig.json",
+        "lib": "lib.d.ts",
+        "libMode": "root-file",
+        "scenario": "scenario.ts",
+        "files": ["base.ts"],
+        "initAlias": "__BenchInit",
+        "probes": ["__Probe"],
+        "warmRepeats": 1
+    }))
+    .unwrap();
+    let out = dir.path().join("result.json");
+    let result = super::run_job(&job, None, &Sink::new(&out)).unwrap();
+    let probe = &result.probes[0];
+    assert_eq!(probe.cold.outcome, super::RequestOutcome::Value);
+    let observation = probe.observation.as_ref().unwrap();
+    assert_eq!(observation.unknown_leaves, 0);
+    let text = observation.text.as_deref().unwrap();
+    assert!(text.contains("id: 7") && text.contains("tag: 9"), "{text}");
+    assert_eq!(probe.warm[0].same_answer_as_cold, Some(true));
+    job.files[0] = "missing.ts".into();
+    assert!(super::run_job(&job, None, &Sink::new(&out)).is_err());
+}
+
+#[test]
 #[ignore = "fixture subprocess; launched by the supervised memory-kill test"]
 fn session_memory_child() {
     let out = std::env::var_os(CHILD_OUT).expect("child output path");
