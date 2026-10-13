@@ -190,6 +190,22 @@
       "implementationOwner": "LNT3",
       "successorPath": ["LRA0", "LNTCFG0", "LNT2", "LNTV0", "LNT3"],
       "receivingAcceptance": "LNT3-AC2"
+    },
+    {
+      "id": "LRA-C11",
+      "consumer": "Native LSP macro actions, invoked directly by handle_code_action_attempt independently of ActionEngine",
+      "source": "crates/verter_lsp/src/features/macro_actions.rs",
+      "implementationOwner": "ACT1",
+      "successorPath": ["LRA0", "LSO8", "ACT1"],
+      "receivingAcceptance": "ACT1-AC1"
+    },
+    {
+      "id": "LRA-C12",
+      "consumer": "Native LSP component-contract actions and matching-prop suggestions, invoked directly by handle_code_action_attempt independently of ActionEngine",
+      "source": "crates/verter_lsp/src/features/component_actions.rs",
+      "implementationOwner": "ACT1",
+      "successorPath": ["LRA0", "LSO8", "ACT1"],
+      "receivingAcceptance": "ACT1-AC1"
     }
   ],
   "displacedRoutes": [
@@ -291,6 +307,28 @@
       "receivingAcceptance": "LNTS0-AC-R1",
       "parentRoute": null,
       "disposition": "Replace the Svelte selection adapter with qualified rows. Refuse Vue rule identity on Svelte; absent Svelte-specific row is an empty population, not a deletion."
+    },
+    {
+      "id": "LRA-D10",
+      "category": "untagged public identity",
+      "route": "Native macro_code_actions, component_code_actions and suggest_matching_props construct transport-native CodeActionOrCommand through action_utils::{make_code_action,make_insert_action}, bypassing the CodeAction/FileEdit model",
+      "source": "crates/verter_lsp/src/server/aux_features.rs",
+      "deletionOwner": "ACT1",
+      "successorPath": ["LRA0", "LSO8", "ACT1"],
+      "receivingAcceptance": "ACT1-AC1",
+      "parentRoute": null,
+      "disposition": "Migrate the native action producers onto the same qualified alternatives/applicability/safety model as ActionEngine, preserving their existing fixture edits. ACT1-AC2 and ACT1-AC3 require atomic multi-file alternatives and whole-alternative refusal for irreversible maps. This action-model cutover does not own LSO8's direct edit-builder retirement."
+    },
+    {
+      "id": "LRA-D11",
+      "category": "untagged coordinate/public identity",
+      "route": "action_utils::{make_insert_edit,make_replace_edit} materialize WorkspaceEdit/TextEdit with version: None; native macro/component producers use these directly, including ChildComponentContext::{make_insert_at_macros,make_insert_into_macro} in cross_file.rs",
+      "source": "crates/verter_lsp/src/features/action_utils.rs",
+      "deletionOwner": "LSO8",
+      "successorPath": ["LRA0", "LSO8"],
+      "receivingAcceptance": "LSO8-AC1",
+      "parentRoute": null,
+      "disposition": "Delete or structurally reject semantic producers' direct WorkspaceEdit/TextEdit construction. Normalize authored intents with exact current/foreign source and mapping preconditions through the sole transaction validator; retain only thin transport projection after validation. Include every caller of the shared helpers when retiring them; ACT1 separately migrates native action envelopes."
     }
   ],
   "referencedRoutes": [
