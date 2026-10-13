@@ -173,6 +173,45 @@ fn contextual_this_marker_is_inherited_by_nested_literals() {
 }
 
 #[test]
+fn contextual_this_marker_stops_at_expression_boundaries() {
+    for (nested, projection) in [
+        ("[{n:5 as const,m(){return this.n}}]", "[number]"),
+        ("hold({n:5 as const,m(){return this.n}})", ""),
+        (
+            "flag ? {n:5 as const,m(){return this.n}} : {n:5 as const,m(){return this.n}}",
+            "",
+        ),
+    ] {
+        let source = format!(
+            "declare function hold<T>(o:T):T;
+function obj(flag:boolean){{return {{nested:{nested},m(){{return this.n}}}} satisfies ThisType<{{n:3}}>;}}"
+        );
+        assert_contextual_receiver(
+            &source,
+            &format!("ReturnType<ReturnType<typeof obj>['nested']{projection}['m']>"),
+            "5",
+        );
+        assert_contextual_receiver(&source, "ReturnType<ReturnType<typeof obj>['m']>", "3");
+    }
+}
+
+#[test]
+fn contextual_receiver_keeps_array_members_out_of_inferred_siblings() {
+    assert_contextual_receiver(
+        "declare function defineComponent<D,M>(o:{data():D;methods:M & ThisType<D & M>}):M;
+const comp=defineComponent({data(){return {n:3 as const}},methods:{nested:[{n:5 as const,m(){return this.n}}],m(){return this.n}}});",
+        "ReturnType<typeof comp.nested[number]['m']>",
+        "5",
+    );
+    assert_contextual_receiver(
+        "declare function defineComponent<D,M>(o:{data():D;methods:M & ThisType<D & M>}):M;
+const comp=defineComponent({data(){return {n:3 as const}},methods:{nested:[{n:5 as const,m(){return this.n}}],m(){return this.n}}});",
+        "ReturnType<typeof comp.m>",
+        "3",
+    );
+}
+
+#[test]
 fn contextual_this_marker_survives_object_spreads() {
     for spread in ["{}", "extra"] {
         assert_contextual_receiver(

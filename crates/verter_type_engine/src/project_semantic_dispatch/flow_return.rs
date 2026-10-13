@@ -6154,6 +6154,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             receiver: None,
             contextual_object_this: None,
             contextual_object_receiver: None,
+            inherits_contextual_object_receiver: false,
             object_first_pass_context: ObjectFirstPassContext::default(),
         };
         evaluator.bind_explicit_this(ir.declared_this.as_ref());
@@ -10984,6 +10985,9 @@ struct FlowEvaluator<'d, 'b, D: FlowDemandDriver> {
     /// The marker in the enclosing contextual object, separate from lexical `this`.
     contextual_object_this: Option<SemanticNodeId>,
     contextual_object_receiver: Option<std::rc::Rc<class_expression::ClassReceiver>>,
+    /// One-shot eligibility supplied by a literal's direct child descent.
+    /// Other expression forms cannot lend its marker or collected members.
+    inherits_contextual_object_receiver: bool,
     object_first_pass_context: ObjectFirstPassContext,
 }
 
@@ -12408,12 +12412,13 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     ) -> ObjectEvalFrame<'e> {
         let enclosing_contextual_this = self.contextual_object_this;
         let enclosing_contextual_receiver = self.contextual_object_receiver.clone();
+        let inherits_receiver = std::mem::take(&mut self.inherits_contextual_object_receiver);
         self.contextual_object_this = contextual
             .and_then(|context| {
                 self.dispatch
                     .contextual_object_this_type(context, self.canonical)
             })
-            .or(enclosing_contextual_this);
+            .or(enclosing_contextual_this.filter(|_| inherits_receiver));
         let contextual_this = self
             .no_implicit_this
             .then(|| {
@@ -12475,8 +12480,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         // they evaluate after data members. Forward reads retry while sibling
         // evaluation makes progress; cycles degrade. Spreads retain their
         // construction-effect order while deferred members acquire values.
-        let inherited_receiver = contextual
-            .is_none()
+        let inherited_receiver = (inherits_receiver && contextual.is_none())
             .then(|| enclosing_contextual_receiver.clone())
             .flatten()
             .filter(|receiver| {
@@ -12782,7 +12786,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                             holds_before: self.holds.len(),
                             widens_unique_symbols: false,
                         };
-                        return ObjectEvalStep::Descend(&member.value);
+                        return self.object_eval_child(&member.value);
                     }
                     let any = self
                         .dispatch
@@ -12875,7 +12879,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     if let Some(receiver) = frame.receiver.as_ref() {
                         receiver.forward_read.set(false);
                     }
-                    return ObjectEvalStep::Descend(source);
+                    return self.object_eval_child(source);
                 }
                 verter_session_query::flow::slice::SliceObjectEntry::Member(member) => member,
             };
@@ -12914,6 +12918,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             // A mutable member with no contextual type widens a `unique
             // symbol` value to `symbol`.
             let widens_unique_symbols = member_context.is_none() && !member.readonly;
+            self.inherits_contextual_object_receiver = matches!(
+                member.value,
+                verter_session_query::flow::slice::SliceExpr::Object { .. }
+            );
             match member_context {
                 Some(member_context) if !frame.assignment_fresh => {
                     let outcome = self.eval_in_context(
@@ -12939,11 +12947,25 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         holds_before,
                         widens_unique_symbols,
                     };
-                    return ObjectEvalStep::Descend(member_value);
+                    return self.object_eval_child(member_value);
                 }
             }
         }
         self.object_eval_methods(frame)
+    }
+
+    /// Direct property values and anonymous spread literals retain their
+    /// construction context. Array elements, call arguments and conditional
+    /// arms start independent literal frames.
+    fn object_eval_child<'e>(
+        &mut self,
+        child: &'e verter_session_query::flow::slice::SliceExpr,
+    ) -> ObjectEvalStep<'e> {
+        self.inherits_contextual_object_receiver = matches!(
+            child,
+            verter_session_query::flow::slice::SliceExpr::Object { .. }
+        );
+        ObjectEvalStep::Descend(child)
     }
 
     /// An object literal whose data members all evaluated: its methods and
@@ -12982,7 +13004,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         effect_position: Some((position, width)),
                         degradation: self.degradation,
                     };
-                    return ObjectEvalStep::Descend(source);
+                    return self.object_eval_child(source);
                 } else {
                     return ObjectEvalStep::Done(self.object_eval_finish(frame));
                 }
@@ -13009,7 +13031,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             {
                 return ObjectEvalStep::Deliver(Positional::Value(node));
             }
-            return ObjectEvalStep::Descend(&member.value);
+            return self.object_eval_child(&member.value);
         }
         ObjectEvalStep::Done(self.object_eval_finish(frame))
     }
@@ -13083,7 +13105,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     surface_member: Box::new(surface_member),
                     value,
                 };
-                Some(ObjectEvalStep::Descend(expr))
+                Some(self.object_eval_child(expr))
             }
             None => {
                 let unwidened = self.literal_view(member_value, value).unwrap_or(value);

@@ -565,6 +565,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             no_implicit_this: self.no_implicit_this,
             contextual_object_this: None,
             contextual_object_receiver: None,
+            inherits_contextual_object_receiver: false,
             object_first_pass_context: ObjectFirstPassContext::default(),
             params: &owned.params,
             param_names: &owned.content.params,

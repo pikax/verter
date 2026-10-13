@@ -4,8 +4,10 @@ Object-literal methods use the argument of the global `ThisType<T>` marker
 in their contextual type, including intersections, unions and generic aliases.
 Intersections select the first marker in authored order; unions combine the
 marker arguments contributed by their alternatives.
-Nested literals retain the nearest enclosing contextual marker. Without that
-marker they use a concrete contextual type, then the literal's own type.
+Direct property-value literals retain the nearest enclosing contextual marker.
+Array elements, call arguments and conditional arms start independent receivers;
+their own contextual marker still applies. Without a marker they use a concrete
+contextual type, then the literal's own type.
 `noImplicitThis: false` retains the checker's `any` receiver. Arrow functions
 keep the receiver of their lexical frame. An authored `this` annotation or a
 contextual signature's `this` parameter takes precedence over the contextual
@@ -56,10 +58,13 @@ contextual receiver's declared members take precedence over the literal's
 members. A receiver's still-uninferred object binder admits collected literal
 members and forward sibling reads. Pending methods retry while siblings make
 progress, so acyclic chains resolve independently of source order; stalled
-cycles retain typed degradation. Inherited inferred marker receivers share
-their collected members with spread literals, whose unresolved method sources
-are revisited after the enclosing methods complete. A concrete marker admits
-only its declared members. Ordinary function-valued properties share method receiver typing;
+cycles retain typed degradation. Direct child descent grants receiver inheritance
+once, so literals reached through another expression cannot add members to the
+enclosing receiver or reset its forward-read state. Inherited inferred marker
+receivers share their collected members with direct spread literals, whose
+unresolved method sources are revisited after the enclosing methods complete.
+A concrete marker admits only its declared members. Ordinary function-valued
+properties share method receiver typing;
 arrows retain their lexical receiver. Methods with known computed keys use the
 same receiver and contextual signature as static keys. Spreads retain contextual
 receivers and the ordinary construction-effect ordering, including overwrites.
@@ -73,4 +78,5 @@ Coverage lives in `class_self_reference_tests`: inferred data at three widths,
 cold and warm answers, relation growth, nested marker intersections, lexical
 arrows, ordinary receivers, non-strict `this`, getters consumed by earlier or
 later actions, forward siblings, generic aliases, enclosing markers, spreads,
-explicit annotations and top-level contextual literals.
+explicit annotations, top-level contextual literals and receiver isolation
+across array, call and conditional expression boundaries.
