@@ -226,7 +226,19 @@ fn generic_mapped_index_keeps_the_access_and_alias_arguments() {
 
 #[test]
 fn recursive_mapped_index_publishes_dotted_paths_across_modules() {
-    for (count, groups) in [(20, 3), (100, 5), (300, 5)] {
+    // Two entities per module cover cyclic imports and recursive path depth
+    // without repeating identical path shapes hundreds of times. Explicit
+    // full-size recipes reuse this generator and every path-union assertion.
+    let layouts: &[(usize, usize)] = match std::env::var("VERTER_RECURSIVE_MAPPED_INDEX_LAYOUT")
+        .as_deref()
+    {
+        Err(std::env::VarError::NotPresent) => &[(6, 3), (10, 5)],
+        Ok("20x3") => &[(20, 3)],
+        Ok("100x5") => &[(100, 5)],
+        Ok("300x5") => &[(300, 5)],
+        other => panic!("expected recursive mapped-index layout 20x3, 100x5 or 300x5: {other:?}"),
+    };
+    for &(count, groups) in layouts {
         let mut files = vec![(
             "/paths/utils.ts".to_string(),
             "export interface Meta<T> { tag: T; created: number }\n\
@@ -275,12 +287,12 @@ fn recursive_mapped_index_publishes_dotted_paths_across_modules() {
             .map(|(path, source)| (path.as_str(), source.as_str()))
             .collect::<Vec<_>>();
         // Complete enumeration of the larger closures needs an explicit
-        // request allowance; the smallest layout exercises the default fuse.
+        // request allowance; small layouts exercise the default fuse.
         let host = make_host_with_workspace_files_config(
             &borrowed,
             crate::HostConfig {
                 audit_enabled: true,
-                projection_op_budget: if count == 20 { 0 } else { 50_000 },
+                projection_op_budget: if count <= 20 { 0 } else { 50_000 },
                 ..crate::HostConfig::default()
             },
         );
@@ -322,6 +334,7 @@ fn recursive_mapped_index_publishes_dotted_paths_across_modules() {
             })
             .collect::<BTreeSet<_>>();
         assert_eq!(actual, expected, "{count} entities/{groups} modules");
+        println!("{count} entities/{groups} modules: {} paths", actual.len());
     }
 }
 
