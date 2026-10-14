@@ -30373,7 +30373,7 @@ fn real_query_deep_finite_nested_demand_completes_and_warms() {
 
     assert!(
         graph
-            .peek_evaluate_deferred_memo_for_tests(deep_value, context)
+            .peek_selected_value_memo_for_tests(deep_value, context)
             .is_some(),
         "a complete deep finite evaluation must be eligible for the shared deferred memo"
     );

@@ -334,6 +334,23 @@ impl Drop for ComponentMetaSpanGuard {
     }
 }
 
+/// Capture all connected work across the roots of one test request without
+/// installing or changing its request context. The ledger owns the charges;
+/// capture uses its existing scoped telemetry and panic cleanup.
+#[cfg(any(test, feature = "test-support"))]
+pub fn with_connected_work_capture_for_tests<R>(body: impl FnOnce() -> R) -> (R, DemandUsage) {
+    let guard = ComponentMetaSpanGuard::enter();
+    let result = body();
+    let span = guard.finish();
+    (
+        result,
+        DemandUsage {
+            work: span.work,
+            bytes: span.bytes,
+        },
+    )
+}
+
 fn pop_component_meta_span() -> ComponentMetaSpan {
     let span = COMPONENT_META_SPANS.with(|spans| spans.borrow_mut().pop().unwrap_or_default());
     let empty = COMPONENT_META_SPANS.with(|spans| spans.borrow().is_empty());

@@ -611,6 +611,23 @@ impl<T> ObservedRead<T> {
             && self.degraded_member_reads == 0
     }
 
+    /// Completion rails of a started computation, forwarded before adoption.
+    pub(super) fn result_completeness(&self) -> ResultCompleteness {
+        self.completeness
+            .or_partial_if(self.frame.result_is_partial, self.frame.partial_reasons)
+            .or_partial_if(
+                self.degraded_member_reads > 0,
+                crate::semantic_query::PartialReasonSet::PROPAGATED,
+            )
+            .or_partial_if(
+                self.abort.is_some(),
+                self.abort
+                    .map_or(crate::semantic_query::PartialReasonSet::empty(), |abort| {
+                        abort.reason_class()
+                    }),
+            )
+    }
+
     /// Reuse restrictions and roots belong to the observed source even when
     /// its optional diagnostic quality is declined.
     pub(super) fn preserve_reuse_evidence<C: crate::resolver_core::ResolverCapabilities>(

@@ -837,6 +837,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     let mut closed = !(surface.closed().has_index_signature()
                         && surface.index_signatures.is_empty());
                     for member in surface.positive_members() {
+                        if let Err(reasons) = self.charge_connected_work() {
+                            self.fold_local_partial_completeness(reasons);
+                            return None;
+                        }
                         if !member.visibility.is_public() {
                             if surface.closed().has_index_signature() {
                                 closed = false;
@@ -910,6 +914,27 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     pub(super) fn key_space_domain(&self, node: SemanticNodeId) -> Option<Arc<KeySpaceDomain>> {
         if let Some(domain) = self.known_key_space_domain(node) {
             return Some(domain);
+        }
+        // Resolve one source view and enumerate its indexed headers. This is
+        // a domain demand, so it never publishes a wide keyof value union.
+        if let Some(SemanticNodeData::KeyOf { base }) = self.graph().node_data(node).as_deref() {
+            let object = match self.normalize_node_for_structural_fact_demand(
+                *base,
+                crate::semantic_query::ProjectionReductionContext::structural_transit(),
+            ) {
+                super::evaluate::StructuralFactDemandOutcome::Complete(node) => node,
+                super::evaluate::StructuralFactDemandOutcome::Recovered { reasons, .. }
+                | super::evaluate::StructuralFactDemandOutcome::Partial(reasons) => {
+                    self.fold_local_partial_completeness(reasons);
+                    return None;
+                }
+            };
+            if matches!(
+                self.graph().node_data(object).as_deref(),
+                Some(SemanticNodeData::Object(_))
+            ) {
+                return self.known_key_space_domain(object);
+            }
         }
         // Key-set reads stay in structural transit. The explicit stack also
         // carries alias followups, so authored nesting cannot grow the stack.

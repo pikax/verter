@@ -240,25 +240,29 @@ impl SemanticGraphStore {
         }
     }
 
-    /// Admission inspection for tests; production reads always validate facts.
-    /// An entry admitted under either evaluation demand counts: a mapped
-    /// key's selected value and an operator shell memoize separately.
+    /// Inspect admission under the shell demand; selected values have a
+    /// separate identity and cannot establish shell admission.
     #[cfg(any(test, feature = "test-support"))]
     pub fn peek_evaluate_deferred_memo_for_tests(
         &self,
         node: SemanticNodeId,
         context: ProjectionReductionContext,
     ) -> Option<()> {
-        [
-            DeferredEvaluationDemand::Shell,
-            DeferredEvaluationDemand::SelectedValue,
-        ]
-        .into_iter()
-        .any(|demand| {
-            self.evaluate_deferred_memo
-                .contains_key(&(node, context, demand))
-        })
-        .then_some(())
+        self.evaluate_deferred_memo
+            .contains_key(&(node, context, DeferredEvaluationDemand::Shell))
+            .then_some(())
+    }
+
+    /// Inspect admission of a selected value, independently of its shell.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn peek_selected_value_memo_for_tests(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+    ) -> Option<()> {
+        self.evaluate_deferred_memo
+            .contains_key(&(node, context, DeferredEvaluationDemand::SelectedValue))
+            .then_some(())
     }
 
     /// Release both stores during explicit graph invalidation. Ordinary

@@ -2362,9 +2362,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         node: SemanticNodeId,
         context: ProjectionReductionContext,
     ) -> SemanticNodeId {
+        self.evaluate_selected_value_outcome(node, context)
+            .into_active_query_build_node(self)
+    }
+
+    pub(super) fn evaluate_selected_value_outcome(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+    ) -> EvaluateDeferredOutcome {
         self.evaluate_deferred_demand(node, context, DeferredEvaluationDemand::SelectedValue)
-            .into_complete_active_query_build_node(self)
-            .unwrap_or(node)
     }
 
     fn evaluate_deferred_demand(
@@ -2709,6 +2716,31 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                         args: Arc::clone(expressions),
                                         context: self.template_literal_reduce_context(),
                                     });
+                                let frame = frames.last_mut().expect("active evaluator frame");
+                                self.deferred_read_action(frame, read, current)
+                            }
+                            SemanticNodeData::InstantiationRef { base, args }
+                                if demand == DeferredEvaluationDemand::SelectedValue
+                                    && !matches!(
+                                        self.prepared_decl_kind(base),
+                                        Some(
+                                            verter_session_query::declarations::TypeDeclKind::Interface
+                                                | verter_session_query::declarations::TypeDeclKind::Class
+                                        )
+                                    ) =>
+                            {
+                                let slot = self.type_slot_for(
+                                    Arc::clone(&base.canonical_id),
+                                    base.owner,
+                                    Arc::clone(&base.decl_name),
+                                );
+                                let read = self.execute_read(SemanticQueryKey::Instantiate(
+                                    crate::semantic_query::InstantiateKey::new(
+                                        slot,
+                                        Arc::clone(args),
+                                        self.instantiate_context_for(&base.canonical_id, context),
+                                    ),
+                                ));
                                 let frame = frames.last_mut().expect("active evaluator frame");
                                 self.deferred_read_action(frame, read, current)
                             }

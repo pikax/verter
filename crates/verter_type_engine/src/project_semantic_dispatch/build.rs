@@ -11332,20 +11332,26 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let IndexKey::Computed(index_node) = index else {
             return None;
         };
-        let resolved = self
-            .evaluate_deferred_semantic_node_with_context(*index_node, context)
-            .into_active_query_build_node(self);
+        // A key-domain demand consumes the source index, not a published
+        // keyof union that would be sorted only to enumerate it again.
+        let domain_keys = matches!(
+            self.graph().node_data(*index_node).as_deref(),
+            Some(SemanticNodeData::KeyOf { .. })
+        )
+        .then(|| self.index_keys_from_keyspace_node(*index_node))
+        .flatten();
+        let resolved = if domain_keys.is_some() {
+            *index_node
+        } else {
+            self.evaluate_deferred_semantic_node_with_context(*index_node, context)
+                .into_active_query_build_node(self)
+        };
         match self.graph().node_data(resolved).as_deref() {
             Some(SemanticNodeData::Literal(_)) => return None,
-            // An access by `never` — the empty key set — reads nothing:
-            // `T[never]` IS `never` (the checker's `getIndexedAccessType`
-            // over an empty index union).
             Some(SemanticNodeData::Primitive(PrimitiveKind::Never)) => {
-                let never = self
-                    .graph()
-                    .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
+                let never = self.primitive_node(PrimitiveKind::Never);
                 return Some(
-                    crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+                    super::walk::QueryBuildOutput::from((
                         QueryResult::Value(never),
                         self.project_generation_signature(),
                     ))
@@ -11354,8 +11360,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             _ => {}
         }
-        let keys = self
-            .finite_index_keys(resolved)
+        let keys = domain_keys
+            .or_else(|| self.finite_index_keys(resolved))
             .or_else(|| self.index_keys_from_keyspace_node(resolved))?;
         if keys.is_empty() {
             let never = self.primitive_node(PrimitiveKind::Never);
@@ -11396,10 +11402,40 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     walker.finite_object_index_values(base, object, surface, &keys)
                 }
                 SemanticNodeData::Mapped { source, mapper } => {
-                    walker.finite_mapped_index_values(object, *source, mapper, &keys)
+                    match walker.finite_mapped_index_values(
+                        object,
+                        *source,
+                        mapper,
+                        &keys,
+                        *index_node,
+                    ) {
+                        super::walk::FiniteMappedIndexValues::NotApplicable => None,
+                        super::walk::FiniteMappedIndexValues::Complete(values) => Some(values),
+                        super::walk::FiniteMappedIndexValues::Stopped(output) => {
+                            return Some(*output)
+                        }
+                    }
                 }
                 _ => None,
             };
+            if walker.completeness.is_partial() {
+                let carrier = self.graph().intern_preserving_scope(
+                    base,
+                    SemanticNodeData::IndexedAccess {
+                        object: base,
+                        index: index.clone(),
+                    },
+                );
+                let mut out = super::walk::QueryBuildOutput::from((
+                    QueryResult::Value(carrier),
+                    Arc::clone(&fence),
+                ))
+                .with_observed_self_roots(self.observed_self_roots_from_nodes([base, object]));
+                out.merge_completeness(walker.completeness);
+                out.cache_suppress = true;
+                out.walker_diagnostics = std::mem::take(&mut walker.walker_diagnostics);
+                return Some(out);
+            }
             if let Some(values) = values {
                 let norm = self.execute_read(SemanticQueryKey::ReduceUnion {
                     members: Arc::from(values.into_boxed_slice()),
@@ -14115,60 +14151,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
-    /// Per-key Mapped member value materialiser with explicit
-    /// **Selected-Key Transit Realization**: drives one extra
-    /// evaluate dispatch after the per-K substitution so a generic
-    /// helper body that lowers to a `Conditional` reduces to its
-    /// realised arm before reaching the publication boundary.
-    ///
-    /// Extends [`Self::materialize_mapped_member_value_for_key`] by
-    /// dispatching one more
-    /// [`Self::evaluate_deferred_semantic_node_with_context`] on the
-    /// post-`Instantiate` body. The Instantiate of a Conditional-bodied
-    /// generic helper (e.g.
-    /// `ExtendSlotWithPlan<TPlan, K> = PricingPlanSlots[K] extends
-    /// (props: infer P) => unknown ? ... : ...`) returns the body
-    /// `Conditional` carrier WITHOUT triggering Conditional reduction;
-    /// the per-key materialiser's caller would see a shell where
-    /// `Function` was expected. The trailing evaluate dispatches the
-    /// evaluator's `Conditional` arm
-    /// ([`crate::project_semantic_dispatch::evaluate`]: 142) →
-    /// `SemanticQueryKey::Conditional` →
-    /// [`Self::build_conditional`]'s **infer-binding path**
-    /// (build.rs: 2266) → `evaluate_deferred_semantic_node(check)`
-    /// at default `Published(Expanded)` → IndexedAccess evaluator arm
-    /// (evaluate.rs: 95) which hard-codes `ProjectionMode::Navigate`
-    /// for the index re-dispatch, so the `PricingPlanSlots["badge"]`
-    /// **selected-index / path projection** reduces independently of
-    /// the caller's `StructuralTransit(Navigate)` demand. The infer
-    /// binding then closes the conditional to a `Function`.
-    ///
-    /// dispatch chain (slot fixture):
-    /// ```text
-    /// DefineSlots payload lowered StructuralTransit(Navigate)
-    ///   → ProjectPath([], Published(Shallow))
-    ///     → InstantiationRef body
-    ///       → Mapped shallow synthesis
-    ///         → selected key "badge"
-    ///           → substitute K = "badge"
-    ///             → instantiate ExtendSlotWithPlan<PricingPlan, "badge">
-    ///                                      under StructuralTransit(Navigate)
-    ///               → conditional check resolves PricingPlanSlots["badge"]
-    ///                            through selected-index/path projection
-    ///                 → infer binds P
-    ///                   → true branch becomes a Function.
-    /// ```
-    ///
-    /// `Opaque` fallback policy: when the trailing evaluate returns
-    /// `Opaque`, the result is whatever the inner per-key materialiser
-    /// produced (which already falls back to the substituted carrier on
-    /// its own Opaque-handling — the free mapper binder is never
-    /// leaked).
-    ///
-    /// Call sites (publication-only):
-    /// - [`crate::project_semantic_dispatch::walk::ProjectPathContext::synthesise_mapped_surface`]
-    /// - [`crate::project_semantic_dispatch::walk::PathWalker`]'s
-    ///   mapped-type literal-key narrowing arm (walk.rs ≈ 980).
+    /// Substitute one selected key, then evaluate its value through the
+    /// shared continuation runtime. Instantiation and conditional reduction
+    /// retain the full publication context and typed completion outcome.
     pub(super) fn materialize_selected_key_mapped_value(
         &self,
         mapper: &crate::semantic_query::MapperKey,
@@ -14181,30 +14166,61 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         self.materialize_selected_key_mapped_value_with_node(mapper, key_arg, context)
     }
 
-    /// Node-keyed variant of
-    /// [`Self::materialize_selected_key_mapped_value`] — the PathWalker
-    /// mapped-type literal-key narrowing arm passes a pre-interned key
-    /// literal node so the String / Number kind survives substitution
-    /// (G4-series soundness — `M[1]` substitutes
-    /// `K = Literal::Number(1)`, NOT `Literal::String("1")`).
-    ///
-    /// Factors the common substrate path with
-    /// [`Self::materialize_mapped_member_value_for_key`] so both
-    /// publication-side callers (synthesise + PathWalker narrowing)
-    /// route through the same substitute → evaluate → Instantiate →
-    /// **trailing Conditional reduction** chain. The trailing
-    /// evaluate is what distinguishes the selected-key helper from
-    /// the plain mapped-value materialiser: the plain helper stops at
-    /// the Instantiate boundary, leaving the body's Conditional shell
-    /// addressable by re-dispatch but unrealised; this selected-key
-    /// helper drives Conditional reduction inline so consumers see
-    /// the closed `Function` (or projected member).
+    /// Node-keyed selected value; numeric and nominal keys retain their
+    /// original identity during substitution. The active build adopts the
+    /// typed evaluation rails before receiving a node.
     pub(super) fn materialize_selected_key_mapped_value_with_node(
         &self,
         mapper: &crate::semantic_query::MapperKey,
         key_arg: SemanticNodeId,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> SemanticNodeId {
+        self.materialize_selected_key_mapped_value_outcome(mapper, key_arg, context)
+            .into_active_query_build_node(self)
+    }
+
+    /// Index expressions in this template that read this exact source at the
+    /// mapper binder. Their selected member evidence can be reused after the
+    /// batch has validated one source view. Other expressions retain the
+    /// ordinary evaluator; no source or binder is matched by spelling.
+    pub(super) fn mapped_index_source_reads(
+        &self,
+        mapper: &crate::semantic_query::MapperKey,
+        source: SemanticNodeId,
+        resolved_source: SemanticNodeId,
+    ) -> Result<Vec<SemanticNodeId>, crate::semantic_query::PartialReasonSet> {
+        let mut reads = Vec::new();
+        let mut seen = FxHashSet::default();
+        let mut pending = vec![mapper.value_expr];
+        while let Some(node) = pending.pop() {
+            if !seen.insert(node) {
+                continue;
+            }
+            self.charge_connected_work()?;
+            let Some(data) = self.graph().node_data(node) else {
+                return Err(crate::semantic_query::PartialReasonSet::MISSING_SEMANTIC_NODE_DATA);
+            };
+            if matches!(data.as_ref(), SemanticNodeData::IndexedAccess {
+                object, index: crate::semantic_query::IndexKey::Computed(index),
+            } if (*object == source || *object == resolved_source) && *index == mapper.parameter_node)
+            {
+                reads.push(node);
+                continue;
+            }
+            let _ = data.for_each_child(|child| pending.push(child));
+        }
+        Ok(reads)
+    }
+
+    /// One selected-value demand retains its exact completion and availability.
+    /// The evaluator owns instantiation and conditional continuations; callers
+    /// never restart an incomplete value through a shell evaluation.
+    pub(super) fn materialize_selected_key_mapped_value_outcome(
+        &self,
+        mapper: &crate::semantic_query::MapperKey,
+        key_arg: SemanticNodeId,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> super::evaluate::EvaluateDeferredOutcome {
         self.graph().record_mapped_per_k_materialization();
         // Instrumentation — selected-key variant.
         if let Some(ctx) = crate::request_context::current_request_context() {
@@ -14220,137 +14236,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
         let substituted =
             self.substitute_semantic_type_param(mapper.value_expr, mapper.parameter_node, key_arg);
-        // The selected value reduces the operators its key closes
-        // wherever they sit (`() => T[K]` over `{ a: 1 }` at `"a"` is
-        // `() => 1`).
-        let substituted = self.evaluate_selected_value_with_context(substituted, context);
-        let evaluated = self
-            .evaluate_deferred_semantic_node_with_context(substituted, context)
-            .into_active_query_build_node(self);
-        let resolved = match self.graph().node_data(evaluated).as_deref() {
-            Some(SemanticNodeData::InstantiationRef { base, args }) => {
-                let slot = self.type_slot_for(
-                    Arc::clone(&base.canonical_id),
-                    base.owner,
-                    Arc::clone(&base.decl_name),
-                );
-                let inst_ctx = self.instantiate_context_for(&base.canonical_id, context);
-                let args = Arc::clone(args);
-                let read = self.execute_read(SemanticQueryKey::Instantiate(
-                    crate::semantic_query::InstantiateKey::new(slot, args, inst_ctx),
-                ));
-                // Two-signal fold: fold a genuinely-incomplete nested
-                // Instantiate onto the request's sticky partial flag.
-                crate::request_context::observe_component_meta_read_suppress(&read);
-                match read.value {
-                    QueryResult::Value(id) => id,
-                    _ => evaluated,
-                }
-            }
-            _ => evaluated,
-        };
-        // Selected-Key Transit Realization: drive Conditional
-        // reduction on the post-Instantiate body. The evaluator's
-        // Conditional arm dispatches `SemanticQueryKey::Conditional`,
-        // which routes through `build_conditional`'s nested-infer
-        // binding path — the check operand evaluates via
-        // `evaluate_deferred_semantic_node` (default
-        // `Published(Expanded)`) which dispatches `IndexedAccess` in
-        // `Navigate` mode. The check operand (e.g.
-        // `PricingPlanSlots["badge"]`) reduces to a `Function` even
-        // though the caller's demand is `StructuralTransit`, and the
-        // nested-infer arm binds the `infer P` then substitutes into
-        // the true branch — closing the conditional to a `Function`
-        // so consumers see the realised body rather than the shell.
-        let realized = self
-            .evaluate_deferred_semantic_node_with_context(resolved, context)
-            .into_active_query_build_node(self);
-        if matches!(
-            self.graph().node_data(realized).as_deref(),
-            Some(SemanticNodeData::Opaque(_))
-        ) {
-            // Trailing Conditional reduction stalled (e.g. the
-            // relation engine could not bind / the check operand was
-            // not yet enumerable). Preserve the per-key
-            // `materialize_mapped_member_value_for_key` substrate's
-            // Opaque-fallback contract: hand the substituted carrier
-            // back to the caller so the free mapper binder is never
-            // leaked but the value stays addressable by re-dispatch.
-            if matches!(
-                self.graph().node_data(resolved).as_deref(),
-                Some(SemanticNodeData::Opaque(_))
-            ) {
-                substituted
-            } else {
-                resolved
-            }
-        } else {
-            realized
-        }
+        self.evaluate_selected_value_outcome(substituted, context)
     }
 
-    /// K-independent variant of
-    /// [`Self::materialize_selected_key_mapped_value`] — used by the
-    /// Shallow walker's `synthesise_mapped_surface` hoist path when
-    /// `mapper.value_expr` contains no structural reference to the
-    /// binder. Substitution would be the identity, so the helper skips
-    /// substitution entirely and dispatches the same evaluate →
-    /// Instantiate → trailing Conditional reduction chain on
-    /// `mapper.value_expr` directly. The Opaque fallback returns the
-    /// original `mapper.value_expr` (the per-K materialiser's
-    /// "substituted carrier" reduces to `value_expr` for the
-    /// K-independent case), keeping the surface value addressable by
-    /// re-dispatch without leaking the free binder — which cannot
-    /// leak because there is no reference to leak in the first place.
+    /// A binder-independent selected value uses the same typed evaluator,
+    /// with no substitution and no second forcing route.
     pub(super) fn materialize_selected_key_mapped_value_k_independent(
         &self,
         mapper: &crate::semantic_query::MapperKey,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> SemanticNodeId {
-        let value_expr = self.evaluate_selected_value_with_context(mapper.value_expr, context);
-        let evaluated = self
-            .evaluate_deferred_semantic_node_with_context(value_expr, context)
-            .into_active_query_build_node(self);
-        let resolved = match self.graph().node_data(evaluated).as_deref() {
-            Some(SemanticNodeData::InstantiationRef { base, args }) => {
-                let slot = self.type_slot_for(
-                    Arc::clone(&base.canonical_id),
-                    base.owner,
-                    Arc::clone(&base.decl_name),
-                );
-                let inst_ctx = self.instantiate_context_for(&base.canonical_id, context);
-                let args = Arc::clone(args);
-                let read = self.execute_read(SemanticQueryKey::Instantiate(
-                    crate::semantic_query::InstantiateKey::new(slot, args, inst_ctx),
-                ));
-                // Two-signal fold: fold a genuinely-incomplete nested
-                // Instantiate onto the request's sticky partial flag.
-                crate::request_context::observe_component_meta_read_suppress(&read);
-                match read.value {
-                    QueryResult::Value(id) => id,
-                    _ => evaluated,
-                }
-            }
-            _ => evaluated,
-        };
-        let realized = self
-            .evaluate_deferred_semantic_node_with_context(resolved, context)
-            .into_active_query_build_node(self);
-        if matches!(
-            self.graph().node_data(realized).as_deref(),
-            Some(SemanticNodeData::Opaque(_))
-        ) {
-            if matches!(
-                self.graph().node_data(resolved).as_deref(),
-                Some(SemanticNodeData::Opaque(_))
-            ) {
-                mapper.value_expr
-            } else {
-                resolved
-            }
-        } else {
-            realized
-        }
+        self.evaluate_selected_value_outcome(mapper.value_expr, context)
+            .into_active_query_build_node(self)
     }
 
     /// Source-surface enumeration for the Shallow walker's
@@ -14549,49 +14446,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         mapper: &crate::semantic_query::MapperKey,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> (SemanticNodeId, crate::semantic_query::PartialReasonSet) {
-        let graph = self.graph();
-        let mut reasons = crate::semantic_query::PartialReasonSet::empty();
-        let value_expr = self.evaluate_selected_value_with_context(mapper.value_expr, context);
-        let evaluated = self
-            .evaluate_deferred_semantic_node_with_context(value_expr, context)
-            .into_active_query_build_node(self);
-        let resolved = match graph.node_data(evaluated).as_deref() {
-            Some(SemanticNodeData::InstantiationRef { base, args }) => {
-                let slot = self.type_slot_for(
-                    Arc::clone(&base.canonical_id),
-                    base.owner,
-                    Arc::clone(&base.decl_name),
-                );
-                let inst_ctx = self.instantiate_context_for(&base.canonical_id, context);
-                let args = Arc::clone(args);
-                let inst_read = self.execute_read(SemanticQueryKey::Instantiate(
-                    crate::semantic_query::InstantiateKey::new(slot, args, inst_ctx),
-                ));
-                if inst_read.result_is_partial() {
-                    reasons = reasons.union(inst_read.partial_reason_classes());
-                }
-                match inst_read.value {
-                    QueryResult::Value(id) => id,
-                    _ => evaluated,
-                }
-            }
-            _ => evaluated,
+        let output = self
+            .evaluate_selected_value_outcome(mapper.value_expr, context)
+            .into_query_build_output(self);
+        let reasons = output.completeness.reasons();
+        let node = match output.result {
+            QueryResult::Value(node) | QueryResult::Recursive(node) => node,
+            QueryResult::Error(error) => self.opaque(error),
         };
-        let final_value = if matches!(
-            graph.node_data(resolved).as_deref(),
-            Some(SemanticNodeData::Opaque(_))
-        ) {
-            // Mirror the materialiser's `Opaque` fallback. For the
-            // K-independent case the substituted carrier IS
-            // `value_expr` itself (substitution is the identity), so
-            // reusing `value_expr` here matches the per-K materialiser
-            // exactly: the free binder cannot leak because there is no
-            // reference to leak in the first place.
-            mapper.value_expr
-        } else {
-            resolved
-        };
-        (final_value, reasons)
+        (node, reasons)
     }
 
     /// Key-domain PREIMAGE of one demanded PRODUCED name through a
