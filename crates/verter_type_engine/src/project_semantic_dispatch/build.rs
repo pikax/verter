@@ -12595,7 +12595,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         };
         match graph.node_data(resolved).as_deref()? {
             SemanticNodeData::Object(surface) => {
-                match surface.project_known_key(&crate::semantic_query::PropertyKey::String(name)) {
+                let key = crate::semantic_query::PropertyKey::String(name);
+                let member = if surface.positive_members().len()
+                    > crate::semantic_query_memo::member_index::MEMBER_ORDINAL_INDEX_LINEAR_SCAN_MAX
+                {
+                    surface
+                        .key_index_from_ordinals(graph.member_ordinal_index(resolved, surface))
+                        .project_known_key(&key)
+                } else {
+                    surface.project_known_key(&key)
+                };
+                match member {
                     crate::semantic_query::SurfaceKeyProjection::Exact(member) => {
                         Some(member.optional)
                     }

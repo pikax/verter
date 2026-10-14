@@ -205,9 +205,9 @@ pub(super) fn with_probe_on_host<R>(
     ) -> R,
 ) -> R {
     with_probe_outcome_on_host(host, project, source, probe, |dispatch, outcome| {
-        let node = outcome
-            .into_usable_node()
-            .unwrap_or_else(|| panic!("the probe `{probe}` reduced to a partial demand"));
+        let node = outcome.into_usable_node().unwrap_or_else(|| {
+            panic!("the probe `{probe}` reduced to a partial demand: {outcome:?}")
+        });
         read(dispatch, node)
     })
 }

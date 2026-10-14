@@ -1297,6 +1297,7 @@
           "crates/verter_session/src/project_semantic_dispatch_tests/closedness_evaluator_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/closure_narrowing_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/conditional_tail_tests.rs",
+          "crates/verter_session/src/project_semantic_dispatch_tests/homomorphic_mapped_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/connected_demand_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/const_literal_widening_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/continuation_depth_tests.rs",
@@ -1712,6 +1713,7 @@
               "crates/verter_session/src/project_semantic_dispatch_tests/closedness_evaluator_tests.rs",
               "crates/verter_session/src/project_semantic_dispatch_tests/closure_narrowing_tests.rs",
               "crates/verter_session/src/project_semantic_dispatch_tests/conditional_tail_tests.rs",
+              "crates/verter_session/src/project_semantic_dispatch_tests/homomorphic_mapped_tests.rs",
               "crates/verter_session/src/project_semantic_dispatch_tests/const_literal_widening_tests.rs",
               "crates/verter_session/src/project_semantic_dispatch_tests/continuation_depth_tests.rs",
               "crates/verter_session/src/project_semantic_dispatch_tests/cost_receipt_tests.rs",
@@ -1921,7 +1923,7 @@
               "crates/verter_session/tests/cases/typeinfo_ignored_test_manifest.rs",
               "crates/verter_type_engine/tests/allocation_cases/flow_literal_provenance.rs"
             ],
-            "note": "the cross-crate population outside verter_session imports only the retained ten types; retaining a type alone does not retain its methods, so PartialReasonSet::{empty,is_empty,iter,PROPAGATED,SEMANTIC_QUERY_FAULT}, ResultCompleteness::partial and ScopeId::file stay pub for the ffi/napi/wasm production consumers, and PartialReasonSet::{contains,CONNECTED_MEMORY_LIMIT,UNDECIDED_CONDITIONAL} and ResultCompleteness::is_partial stay pub for the verter_session files that import only retained types; the 302 recorded consumer files each import at least one narrowed name (the verter_session sources reach the engine across the crate boundary, and its integration tests, benches and examples compile as separate crates); the test files migrate to the existing for_tests test-support surface pattern in the same change as the narrowing, and the verter_session production sources need a retained session-facing surface rather than pub(crate)"
+            "note": "the cross-crate population outside verter_session imports only the retained ten types; retaining a type alone does not retain its methods, so PartialReasonSet::{empty,is_empty,iter,PROPAGATED,SEMANTIC_QUERY_FAULT}, ResultCompleteness::partial and ScopeId::file stay pub for the ffi/napi/wasm production consumers, and PartialReasonSet::{contains,CONNECTED_MEMORY_LIMIT,UNDECIDED_CONDITIONAL} and ResultCompleteness::is_partial stay pub for the verter_session files that import only retained types; the recorded consumer files each import at least one narrowed name (the verter_session sources reach the engine across the crate boundary, and its integration tests, benches and examples compile as separate crates); the test files migrate to the existing for_tests test-support surface pattern in the same change as the narrowing, and the verter_session production sources need a retained session-facing surface rather than pub(crate)"
           }
         ],
         "rationale": "one authority (semantic_query.rs) with the cross-crate surface cut to exactly the imported envelope types and their used assoc items; the inline pub mods stay pub inside the module",

@@ -2540,7 +2540,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
     ) -> Option<SemanticNodeId> {
         let cached_index = (index.is_none()
             && surface.positive_members().len()
-                > crate::semantic_query_memo::MEMBER_ORDINAL_INDEX_LINEAR_SCAN_MAX)
+                > crate::semantic_query_memo::member_index::MEMBER_ORDINAL_INDEX_LINEAR_SCAN_MAX)
             .then(|| {
                 surface.key_index_from_ordinals(self.graph().member_ordinal_index(object, surface))
             });

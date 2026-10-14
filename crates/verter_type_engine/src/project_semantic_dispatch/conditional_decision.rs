@@ -407,12 +407,15 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         }
         // The check consumes its indexed operand. Retain the authored
         // application's argument, but use the demanded value in its winner.
-        // This is a fresh receipt-backed demand, independent of prior work.
+        // A generic indexed check must retain its binder until substitution:
+        // projecting `Big[K]` with an unbound K would erase it into a miss.
+        // A closed check is a fresh receipt-backed demand.
         let authored_check = check;
         let check = if matches!(
             self.graph().node_data(check).as_deref(),
             Some(SemanticNodeData::IndexedAccess { .. })
-        ) {
+        ) && !self.conditional_is_deferred(check, extends)
+        {
             let evaluated = self
                 .evaluate_deferred_semantic_node_with_context(
                     check,
