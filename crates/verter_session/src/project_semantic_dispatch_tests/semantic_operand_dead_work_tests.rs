@@ -380,22 +380,11 @@ fn run_matrix_row(row: &MatrixRow) {
     }
     for (counter, expected) in &row.expected_counters {
         let observed = counter_delta(&stats_before, &stats_after, *counter);
-        if matches!(counter, Counter::SubstituteMisses) {
-            // This is the live substitution envelope. Skipping a parameter
-            // absent from the selected body reduces it; dead-key dispatches,
-            // dependency reads and the selected answer remain pinned separately.
-            assert!(
-                observed <= *expected,
-                "row {}: counter {counter:?} delta {observed} exceeds live envelope {expected}",
-                row.label
-            );
-        } else {
-            assert_eq!(
-                observed, *expected,
-                "row {}: counter {counter:?} delta",
-                row.label
-            );
-        }
+        assert_eq!(
+            observed, *expected,
+            "row {}: counter {:?} delta",
+            row.label, counter
+        );
     }
 
     assert!(
@@ -550,9 +539,10 @@ fn row_conditional_dead_branch() -> MatrixRow {
             (Counter::ConditionalDecided, 1),
             (Counter::BranchTrue, 1),
             (Counter::BranchFalse, 0),
-            // Bound the conditional's live substitutions. Parameters absent
-            // from the winner need no rewrite; the dead branch contributes none.
-            (Counter::SubstituteMisses, 6),
+            // The conditional's live substitutions: parameters absent from
+            // the winning branch need no rewrite, and the dead branch
+            // contributes none.
+            (Counter::SubstituteMisses, 2),
             // The force family entry itself (authored Instantiate).
             (Counter::Instantiations, 1),
             (Counter::DeferredMisses, 0),
@@ -741,7 +731,7 @@ fn row_remap_dropped_value() -> MatrixRow {
             // The remap key domain and the survivor's value body
             // substitute their binders — the DROPPED keys' value bodies
             // contribute none of these substitutions.
-            (Counter::SubstituteMisses, 19),
+            (Counter::SubstituteMisses, 9),
             (Counter::Instantiations, 2),
             // One memo probe per deferred evaluation that misses.
             (Counter::DeferredMisses, 5),
