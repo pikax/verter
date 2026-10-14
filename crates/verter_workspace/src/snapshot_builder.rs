@@ -380,6 +380,8 @@ pub fn configured_membership_from_raw(
 /// read through `ws`: its compiler options and its `files` / `include` /
 /// `exclude` membership — the program's root files and their order. The
 /// materialized set is left empty (see [`configured_membership_from_raw`]).
+/// Native only: the tsconfig loaders it reads through are.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn configured_ide_project(
     ws: &dyn crate::traits::WorkspaceRead,
     root: String,

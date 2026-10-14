@@ -197,12 +197,12 @@ pub use resolution_currency::{
     ResolutionQueryKey, ResolveContextId,
 };
 pub use resolver::ide_project_config;
+pub use snapshot_builder::build_workspace_snapshot_simple;
 #[cfg(not(target_arch = "wasm32"))]
 pub use snapshot_builder::{
-    build_selected_project_snapshot, build_workspace_snapshot, configured_project,
-    membership_to_spec, SnapshotBuildResult,
+    build_selected_project_snapshot, build_workspace_snapshot, configured_ide_project,
+    configured_project, membership_to_spec, SnapshotBuildResult,
 };
-pub use snapshot_builder::{build_workspace_snapshot_simple, configured_ide_project};
 pub use traits::{
     EmptyResolverSnapshot, ResolverSnapshot, SourceLoader, WorkspaceAccess, WorkspaceRead,
     WorkspaceResourceSnapshot,
