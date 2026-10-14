@@ -3308,6 +3308,7 @@ name = "verter_audit"
 version = "0.0.1-beta.6"
 dependencies = [
  "clap",
+ "memchr",
  "oxc_allocator",
  "oxc_ast",
  "oxc_parser",

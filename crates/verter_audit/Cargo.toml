@@ -55,8 +55,13 @@ web-time = "1.1"
 # from `packages/component-meta/src/published-surface.ts` — see
 # [[oxc-is-the-ts-parser]]. Dev-only: production audit code has
 # no parser dependency.
+#
+# `memchr` backs the provenance guard's corpus prefilter: as a dependency it
+# builds at the dev profile's dependency opt-level, where the test crate's own
+# `str::contains` instantiation would scan the whole tree at opt-level 0.
 [dev-dependencies]
 verter_test_support = { path = "../verter_test_support" }
+memchr = "2.8.0"
 oxc_allocator = { workspace = true }
 oxc_ast = { workspace = true }
 oxc_parser = { workspace = true }
