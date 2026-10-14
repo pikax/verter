@@ -203,8 +203,10 @@ function concurrent() {
 
 // Two global interfaces, each merged from its own script contributors (a
 // file per member, the shape of the augment-global scenarios), demanded
-// smaller first in one engine: what the engine holds after the larger answer
-// is comparable with a cold augment-global-2000 probe's.
+// smaller first in one engine. The retained figures, read once after both
+// answers, include the first registry's answer and its contributors' caches,
+// which stay live: they are not comparable with a cold augment-global-2000
+// probe, whose program holds one registry of 2,000 contributors.
 const GROWTH_SIZES = [500, 2000];
 const growthRegistry = (n) => `GrowthRegistry${n}`;
 const growthAlias = (n) => `__Probe${n}`;

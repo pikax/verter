@@ -139,21 +139,29 @@ pub struct ParsedEvalProgram {
     had_errors: bool,
 }
 
-/// The arena's own first chunk when it is created empty.
+/// The first chunk an empty arena takes: `oxc_allocator`'s
+/// `FIRST_ALLOCATION_GOAL` (16 KiB, `src/arena/create.rs`). Any chunk the
+/// arena adds later is at least this size.
 const ARENA_FIRST_CHUNK_BYTES: usize = 16 * 1024;
+
+/// Arena bytes per source byte a parse needs at most for the dense
+/// TypeScript a small file holds: declarations with method and function
+/// signatures parse to 19 to 23 arena bytes per source byte, so this bound
+/// leaves a margin above the densest.
+const ARENA_BYTES_PER_SOURCE_BYTE_BOUND: usize = 32;
 
 /// The arena a retained parse of `source_len` bytes allocates into.
 ///
 /// The arena lives as long as the snapshot's lease, so its unused tail is
-/// retained memory. An empty arena's first chunk is a fixed 16 KiB, which
-/// for a declaration-only file is many times its AST; a file whose expected
-/// AST fits below that starts from a chunk sized to it instead. When the
-/// estimate runs short, the arena grows by its own rule, as it would have.
+/// retained memory, and a 16 KiB first chunk is many times a small file's
+/// AST. A file whose bounded AST fits below that chunk starts from a chunk
+/// of that bound instead. The bound must hold: a parse that outgrows a
+/// pre-sized chunk adds a full default chunk beside it and retains more
+/// than an empty arena would have.
 fn retained_arena(source_len: usize) -> oxc_allocator::Allocator {
-    let expected = source_len
-        .saturating_mul(verter_session_query::retention::PARSE_SNAPSHOT_BYTES_PER_SOURCE_BYTE);
-    if expected < ARENA_FIRST_CHUNK_BYTES {
-        oxc_allocator::Allocator::with_capacity(expected)
+    let bound = source_len.saturating_mul(ARENA_BYTES_PER_SOURCE_BYTE_BOUND);
+    if bound < ARENA_FIRST_CHUNK_BYTES {
+        oxc_allocator::Allocator::with_capacity(bound)
     } else {
         oxc_allocator::Allocator::new()
     }
@@ -358,5 +366,78 @@ impl ParsedEvalProgram {
     /// for any walker consuming this program.
     pub fn source_type(&self) -> oxc_span::SourceType {
         self.cell.borrow_owner().source_type
+    }
+
+    /// Bytes the retained arena holds, used or not.
+    #[cfg(test)]
+    fn arena_capacity(&self) -> usize {
+        self.cell.borrow_owner().allocator.capacity()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The capacity an empty arena holds once it has allocated.
+    fn default_capacity() -> usize {
+        let probe = oxc_allocator::Allocator::new();
+        probe.alloc(0u8);
+        probe.capacity()
+    }
+
+    fn retained_capacity(source: String) -> usize {
+        ParsedEvalProgram::parse(Arc::from(source), oxc_span::SourceType::ts())
+            .expect("the fixture parses")
+            .arena_capacity()
+    }
+
+    /// A small file never retains more arena than an empty arena would have
+    /// taken, whatever its density: a pre-sized chunk the parse outgrows
+    /// would keep both itself and the default chunk added beside it.
+    #[test]
+    fn a_small_file_never_retains_more_arena_than_the_default_chunk() {
+        let default_capacity = default_capacity();
+        let interfaces = |n: usize| {
+            (0..n)
+                .map(|i| {
+                    format!("export interface I{i} {{ a{i}: string; b{i}?: number; c{i}(x: number): void }}\n")
+                })
+                .collect::<String>()
+        };
+        let functions = |n: usize| {
+            (0..n)
+                .map(|i| {
+                    format!("export function f{i}(a: number, b: string): number {{ return a; }}\n")
+                })
+                .collect::<String>()
+        };
+        for source in [
+            interfaces(1),
+            interfaces(5),
+            interfaces(8),
+            functions(4),
+            functions(8),
+        ] {
+            let len = source.len();
+            let capacity = retained_capacity(source);
+            assert!(
+                capacity <= default_capacity,
+                "a {len}-byte file retains {capacity} arena bytes, above the {default_capacity} an empty arena takes"
+            );
+        }
+    }
+
+    /// A declaration-only file small enough to pre-size retains a chunk of
+    /// its bound, not the default chunk.
+    #[test]
+    fn a_tiny_declaration_file_retains_less_than_the_default_chunk() {
+        let default_capacity = default_capacity();
+        let capacity =
+            retained_capacity("interface BenchRegistry { r0: { id: 0; tag: \"t0\" } }\n".into());
+        assert!(
+            capacity * 4 < default_capacity,
+            "a one-line declaration retains {capacity} arena bytes of {default_capacity}"
+        );
     }
 }
