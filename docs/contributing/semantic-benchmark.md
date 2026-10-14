@@ -531,6 +531,7 @@ and an ordered script of steps, run in ONE live engine per invocation:
 | `incremental-edits` | INCREMENTAL | demand an alias that depends on a leaf through an intermediate generic; edit the leaf, the intermediate type and an unrelated file, re-requesting after each |
 | `editor-session` | EDITOR SESSION | an InputMenu-equivalent Vue component (props composed from a picked base, events from a tuple map, both imported from a types module): hover-like demands on its types and its component metadata, cold, then across an edit to the types and an edit to the file being hovered |
 | `concurrent-demands` | CONCURRENT | eight demands in eight files issued at once (one thread each for Verter; all in flight together through tsc's asynchronous API), cold, then again |
+| `augmentation-growth` | AUGMENTATION GROWTH | indexed access over every member of a global interface merged from 500 script contributors, then of a second one merged from 2,000, in one engine (standard tier): the engine's retained memory after the larger answer, beside a cold `augment-global-2000` probe's |
 
 Every demand carries the answer the type system defines at that point of the
 script, derived from the construction: tsc's answer must equal it (a run

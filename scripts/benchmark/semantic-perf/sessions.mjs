@@ -199,9 +199,52 @@ function concurrent() {
   };
 }
 
+// ---------------------------------------------------------------- AUGMENTATION GROWTH
+
+// Two global interfaces, each merged from its own script contributors (a
+// file per member, the shape of the augment-global scenarios), demanded
+// smaller first in one engine: what the engine holds after the larger answer
+// is comparable with a cold augment-global-2000 probe's.
+const GROWTH_SIZES = [500, 2000];
+const growthRegistry = (n) => `GrowthRegistry${n}`;
+const growthAlias = (n) => `__Probe${n}`;
+
+function augmentationGrowth() {
+  const files = {
+    "growth.ts":
+      `type ${INIT_ALIAS} = 0;\n` +
+      GROWTH_SIZES.map(
+        (n) =>
+          `type ${growthAlias(n)} = ${growthRegistry(n)}[keyof ${growthRegistry(n)}]["tag"];\n`,
+      ).join("") +
+      "export {};\n",
+  };
+  for (const n of GROWTH_SIZES)
+    for (const i of range(n))
+      files[`grow${n}-${i}.ts`] =
+        `interface ${growthRegistry(n)} { r${i}: { id: ${i}; tag: "t${i}" } }\n`;
+  return {
+    id: "augmentation-growth",
+    family: "augmentation",
+    note: `indexed access over every member of a global interface merged from ${GROWTH_SIZES.join(", then ")} script contributors, one engine`,
+    files,
+    initFile: "growth.ts",
+    steps: GROWTH_SIZES.map((n) => ({
+      kind: "demand",
+      requests: [
+        {
+          file: "growth.ts",
+          alias: growthAlias(n),
+          expect: union(range(n).map((i) => `"t${i}"`)),
+        },
+      ],
+    })),
+  };
+}
+
 /** Every session, in catalog order. */
 export function allSessions() {
-  return [incremental(), editorSession(), concurrent()];
+  return [incremental(), editorSession(), concurrent(), augmentationGrowth()];
 }
 
 /** Each session's tier (tiers nest as the scenarios' do). */
@@ -209,6 +252,7 @@ export const SESSION_TIERS = {
   "incremental-edits": "quick",
   "editor-session": "quick",
   "concurrent-demands": "quick",
+  "augmentation-growth": "standard",
 };
 
 /** The files tsc's program lists: every TypeScript file (a Vue SFC is Verter-only). */
