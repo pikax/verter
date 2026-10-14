@@ -65,7 +65,10 @@ fn identity_u128<T: Hash>(value: &T) -> u128 {
 /// there (the stable keys of `(x: 249) => void` and `(x: 511) => void`, whose
 /// number literals differ in the high bytes of an `f64`) agree on them far
 /// more often than chance; the finalizer spreads every hashed bit over the
-/// bits the key keeps.
+/// bits the key keeps. The finalizer is SplitMix64's output mix (Steele,
+/// Lea and Flood, "Fast Splittable Pseudorandom Number Generators",
+/// OOPSLA 2014; shift/multiply constants from Stafford's "Mix13" variant of
+/// the MurmurHash3 `fmix64` finalizer).
 fn space_key_of<T: Hash>(value: &T) -> u64 {
     let mut mixed = hash_u64(value);
     mixed ^= mixed >> 30;
