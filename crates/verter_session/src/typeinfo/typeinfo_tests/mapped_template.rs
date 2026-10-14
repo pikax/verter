@@ -406,7 +406,7 @@ fn recursive_mapped_index_budget_refusal_does_not_warm() {
             "a stopped walk cannot publish an evaluated value: {:?}",
             read.value
         );
-        assert!(graph.get_unvalidated(&memo_key).is_none());
+        assert!(!graph.contains_key(&memo_key));
     }
     let bytes = host.project_node_to_type_expr_json_bytes(node).unwrap();
     let answer: TypeExpr = serde_json::from_slice(&bytes).unwrap();
@@ -478,7 +478,7 @@ fn recursive_mapped_index_budget_refusal_does_not_warm() {
         panic!("the roomy request must publish paths: {answer:?}");
     };
     assert_eq!(paths.len(), 3 * 18);
-    assert!(graph.get_unvalidated(&memo_key).is_some());
+    assert!(graph.contains_key(&memo_key));
 }
 
 /// A host holding `Paths<Api>` over `count` entities spread across `groups`
