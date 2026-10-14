@@ -1621,12 +1621,56 @@ pub mod flow_obligation_state {
     #[derive(Debug)]
     pub(super) struct InstalledFlowDemand {
         basis: FlowDemandBasis,
+        /// One record per planned spec, in plan order: the record of
+        /// obligation `id` sits at index `id.0` (see [`record_of`]).
         obligations: Vec<FlowObligationRecord>,
+        /// How many records are still `Pending` or `Running` — maintained by
+        /// every state write, so closing the expansion frontier is a
+        /// constant-time check instead of a scan per transition.
+        open: usize,
         convergence: FlowConvergenceObservation,
         phase: FlowDemandPhase,
     }
 
+    /// Whether `state` keeps the expansion frontier open.
+    fn is_open(state: &ObligationState) -> bool {
+        matches!(state, ObligationState::Pending | ObligationState::Running)
+    }
+
+    /// The record of obligation `id` in an installed demand's records.
+    /// The planner mints obligation ids densely in spec order and the
+    /// runtime installs one record per spec in that order, so the record
+    /// of `id` is the one at index `id.0`; a record whose spec carries a
+    /// different id there is not this obligation, and the lookup fails
+    /// closed rather than scanning.
+    pub fn record_of(
+        records: &[FlowObligationRecord],
+        id: FlowObligationId,
+    ) -> Option<&FlowObligationRecord> {
+        records
+            .get(id.0 as usize)
+            .filter(|record| record.spec.id == id)
+    }
+
     impl InstalledFlowDemand {
+        fn new(
+            basis: FlowDemandBasis,
+            obligations: Vec<FlowObligationRecord>,
+            convergence: FlowConvergenceObservation,
+            phase: FlowDemandPhase,
+        ) -> Self {
+            let open = obligations
+                .iter()
+                .filter(|record| is_open(&record.state))
+                .count();
+            Self {
+                basis,
+                obligations,
+                open,
+                convergence,
+                phase,
+            }
+        }
         /// The phase gate for obligation transitions: once convergence has
         /// begun (or the demand is sealed), no obligation expansion or
         /// transition is legal.
@@ -1642,31 +1686,34 @@ pub mod flow_obligation_state {
             &self,
             id: FlowObligationId,
         ) -> Result<&FlowObligationRecord, FlowTransitionError> {
-            self.obligations
-                .iter()
-                .find(|r| r.spec.id == id)
-                .ok_or(FlowTransitionError::UnknownObligation)
+            record_of(&self.obligations, id).ok_or(FlowTransitionError::UnknownObligation)
         }
-        fn record_mut(
+        /// Replace obligation `id`'s state, keeping the open count exact,
+        /// and close the expansion frontier when nothing is left open.
+        fn set_state(
             &mut self,
             id: FlowObligationId,
-        ) -> Result<&mut FlowObligationRecord, FlowTransitionError> {
-            self.obligations
-                .iter_mut()
-                .find(|r| r.spec.id == id)
-                .ok_or(FlowTransitionError::UnknownObligation)
+            state: ObligationState,
+        ) -> Result<(), FlowTransitionError> {
+            self.record(id)?;
+            let record = &mut self.obligations[id.0 as usize];
+            let was_open = is_open(&record.state);
+            let now_open = is_open(&state);
+            record.state = state;
+            match (was_open, now_open) {
+                (true, false) => self.open -= 1,
+                (false, true) => self.open += 1,
+                _ => {}
+            }
+            self.refresh_expansion_closure();
+            Ok(())
         }
         /// Advance `Discharging` → `ExpansionClosed` once every obligation
         /// is terminal (the expansion frontier is closed).
         fn refresh_expansion_closure(&mut self) {
             if self.phase == FlowDemandPhase::Discharging
                 && !self.obligations.is_empty()
-                && self.obligations.iter().all(|record| {
-                    !matches!(
-                        record.state,
-                        ObligationState::Pending | ObligationState::Running
-                    )
-                })
+                && self.open == 0
             {
                 self.phase = FlowDemandPhase::ExpansionClosed;
             }
@@ -1856,7 +1903,7 @@ pub mod flow_obligation_state {
                 };
                 records.push(FlowObligationRecord { spec: spec.clone(), state });
             }
-            let phase = if !records.is_empty() && records.iter().all(|record| !matches!(record.state, ObligationState::Pending | ObligationState::Running)) {
+            let phase = if !records.is_empty() && records.iter().all(|record| !is_open(&record.state)) {
                 FlowDemandPhase::ExpansionClosed
             } else {
                 FlowDemandPhase::Discharging
@@ -1865,12 +1912,12 @@ pub mod flow_obligation_state {
                 index: u32::try_from(self.flow_demands.len()).unwrap_or(u32::MAX),
                 identity: self.instance_identity,
             };
-            self.flow_demands.push(InstalledFlowDemand {
-                basis: plan.basis().clone(),
-                obligations: records,
-                convergence: FlowConvergenceObservation { policy: plan.convergence(), iterations: 0, stable: false },
+            self.flow_demands.push(InstalledFlowDemand::new(
+                plan.basis().clone(),
+                records,
+                FlowConvergenceObservation { policy: plan.convergence(), iterations: 0, stable: false },
                 phase,
-            });
+            ));
             handle
         }
 
@@ -1888,12 +1935,12 @@ pub mod flow_obligation_state {
                 index: u32::try_from(self.flow_demands.len()).unwrap_or(u32::MAX),
                 identity: self.instance_identity,
             };
-            self.flow_demands.push(InstalledFlowDemand {
-                basis: plan.basis().clone(),
-                obligations: Vec::new(),
-                convergence: FlowConvergenceObservation { policy: plan.convergence(), iterations: 0, stable: false },
-                phase: FlowDemandPhase::Discharging,
-            });
+            self.flow_demands.push(InstalledFlowDemand::new(
+                plan.basis().clone(),
+                Vec::new(),
+                FlowConvergenceObservation { policy: plan.convergence(), iterations: 0, stable: false },
+                FlowDemandPhase::Discharging,
+            ));
             handle
         }
 
@@ -1951,10 +1998,7 @@ pub mod flow_obligation_state {
                 ancestry: basis.ancestry,
                 dependencies, suboperations,
             };
-            let demand = &mut self.flow_demands[index];
-            demand.record_mut(id)?.state = ObligationState::Discharged(evidence);
-            demand.refresh_expansion_closure();
-            Ok(())
+            self.flow_demands[index].set_state(id, ObligationState::Discharged(evidence))
         }
         /// Transition Pending|Running → Gap. Test surface: production
         /// gaps install at plan-install time, never mid-solve.
@@ -2123,11 +2167,8 @@ pub mod flow_obligation_state {
         fn transition(&mut self, handle: FlowDemandHandle, id: FlowObligationId, next: impl FnOnce(&ObligationState) -> Option<ObligationState>) -> Result<(), FlowTransitionError> {
             let Some(demand) = self.flow_demand_mut(handle) else { return Err(FlowTransitionError::NoDemandInstalled) };
             demand.ensure_obligations_mutable()?;
-            let record = demand.record_mut(id)?;
-            let Some(state) = next(&record.state) else { return Err(FlowTransitionError::IllegalTransition) };
-            record.state = state;
-            demand.refresh_expansion_closure();
-            Ok(())
+            let Some(state) = next(&demand.record(id)?.state) else { return Err(FlowTransitionError::IllegalTransition) };
+            demand.set_state(id, state)
         }
     }
 }

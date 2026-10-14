@@ -64,6 +64,25 @@ fn assert_literals(
     assert_eq!(numbers, (1..count).collect());
 }
 
+/// Scale tests prove growth from work counters at sizes a debug build runs in
+/// about a second: between two sizes a counter may grow at most 1.5x faster
+/// than the input. A quadratic term grows 25x over a 5x step, so it fails this
+/// once it is a material share of the counter at the larger size; a small
+/// quadratic term under a large linear one is left to the absolute per-name
+/// bounds each test also asserts.
+fn assert_proportional_growth<const N: usize>(
+    smaller: (usize, [(&str, usize); N]),
+    larger: (usize, [(&str, usize); N]),
+) {
+    let ((small, before), (large, after)) = (smaller, larger);
+    for ((what, before), (_, after)) in before.into_iter().zip(after) {
+        assert!(
+            2 * after * small <= 3 * before * large,
+            "{what} grew from {before} at {small} to {after} at {large}"
+        );
+    }
+}
+
 #[test]
 fn namespace_barrel_probes_keep_every_literal_at_scale() {
     for count in [100, 500] {
@@ -216,9 +235,10 @@ fn exported_ambient_imports_keep_their_namespace_values() {
 
 #[test]
 fn barrel_chain_proofs_and_folding_grow_with_the_answer() {
-    for count in [100, 500] {
-        check_barrel_chain_proofs_and_folding(count);
-    }
+    assert_proportional_growth(
+        (100, check_barrel_chain_proofs_and_folding(100)),
+        (500, check_barrel_chain_proofs_and_folding(500)),
+    );
 }
 
 #[test]
@@ -226,7 +246,7 @@ fn large_barrel_chain_retains_every_suffix_proof_and_literal() {
     check_barrel_chain_proofs_and_folding(2_000);
 }
 
-fn check_barrel_chain_proofs_and_folding(count: usize) {
+fn check_barrel_chain_proofs_and_folding(count: usize) -> [(&'static str, usize); 4] {
     use verter_session_query::facts::fact_cache::signature_entries;
     use verter_type_engine::resolver_core::request_ports::RouteLookup;
 
@@ -349,6 +369,12 @@ fn check_barrel_chain_proofs_and_folding(count: usize) {
         "{proof_work} proof work for {count} names"
     );
     println!("chain_names={count} owned_slots={owned_slots} proof_entries={proof_entries} fold_work={work} proof_work={proof_work}");
+    [
+        ("owned binding slots", owned_slots),
+        ("retained proof entries", proof_entries),
+        ("folding work", work as usize),
+        ("proof work", proof_work),
+    ]
 }
 
 #[test]
@@ -430,9 +456,10 @@ fn export_tables_under_retention_pressure_answer_without_admission() {
 
 #[test]
 fn export_tables_and_namespace_evaluation_have_linear_work() {
-    for count in [100, 500] {
-        check_export_table_and_namespace_work(count);
-    }
+    assert_proportional_growth(
+        (100, check_export_table_and_namespace_work(100)),
+        (500, check_export_table_and_namespace_work(500)),
+    );
 }
 
 #[test]
@@ -440,7 +467,7 @@ fn large_namespace_evaluation_retains_linear_work_and_every_literal() {
     check_export_table_and_namespace_work(2_000);
 }
 
-fn check_export_table_and_namespace_work(count: usize) {
+fn check_export_table_and_namespace_work(count: usize) -> [(&'static str, usize); 3] {
     let owned = barrel_files(count);
     let files: Vec<_> = owned
         .iter()
@@ -539,6 +566,11 @@ fn check_export_table_and_namespace_work(count: usize) {
             .load(Ordering::Relaxed),
         table_work
     );
+    [
+        ("table work", table_work as usize),
+        ("probe work", query_work),
+        ("proof work", proof_work),
+    ]
 }
 
 #[test]
@@ -731,7 +763,8 @@ fn a_namespace_reexport_can_refer_to_its_own_module() {
 fn a_growing_namespace_shares_unchanged_tables_and_retains_linear_nodes() {
     let host = probe_host(ProbeProject::default());
     let mut first_group = None;
-    for count in [500, 2_000] {
+    let mut previous_nodes = None;
+    for count in [100, 500] {
         let files = barrel_files(count);
         let borrowed_files: Vec<_> = files
             .iter()
@@ -809,6 +842,10 @@ fn a_growing_namespace_shares_unchanged_tables_and_retains_linear_nodes() {
             nodes <= 12 * count,
             "retained {nodes} nodes for {count} leaves"
         );
+        let retained = (count, [("retained nodes", nodes)]);
+        if let Some(previous) = previous_nodes.replace(retained) {
+            assert_proportional_growth(previous, retained);
+        }
         println!(
             "session_leaves={count} elapsed={:?} rss_bytes={} nodes={nodes}",
             started.elapsed(),

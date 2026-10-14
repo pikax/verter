@@ -1138,6 +1138,7 @@ impl ProjectTypeStore {
             None,
             verter_session_query::retention::StoreAccount::default(),
             verter_execution::tasks::TaskRegistry::default(),
+            verter_type_engine::semantic_query_memo::MemoFamilyBound::Production,
         )
         .0
     }
@@ -1155,6 +1156,7 @@ impl ProjectTypeStore {
             None,
             verter_session_query::retention::StoreAccount::new(retention_account),
             verter_execution::tasks::TaskRegistry::default(),
+            verter_type_engine::semantic_query_memo::MemoFamilyBound::Production,
         )
         .0
     }
@@ -1181,7 +1183,8 @@ impl ProjectTypeStore {
     /// [`MetaProvenance`](crate::meta_provenance::MetaProvenance) so the embedded
     /// [`SemanticGraphStore`] reports its contention instrumentation
     /// counters through the shared provenance surface, and to the
-    /// composition root's `task_registry` cycle authority. Returns the
+    /// composition root's `task_registry` cycle authority, with the semantic
+    /// graph's family memo bounded by `memo_family_bound`. Returns the
     /// engine grants beside the store; the store keeps neither. Test-only
     /// `ProjectTypeStore::new()` callers stay uninstrumented
     /// (semantic-graph stats remain visible through their own
@@ -1190,11 +1193,13 @@ impl ProjectTypeStore {
     pub(crate) fn compose(
         provenance: Arc<crate::meta_provenance::MetaProvenance>,
         task_registry: verter_execution::tasks::TaskRegistry,
+        memo_family_bound: verter_type_engine::semantic_query_memo::MemoFamilyBound,
     ) -> (Self, EngineGrants) {
         Self::build(
             Some(provenance),
             verter_session_query::retention::StoreAccount::default(),
             task_registry,
+            memo_family_bound,
         )
     }
 
@@ -1202,6 +1207,7 @@ impl ProjectTypeStore {
         provenance: Option<Arc<crate::meta_provenance::MetaProvenance>>,
         store_account: verter_session_query::retention::StoreAccount,
         task_registry: verter_execution::tasks::TaskRegistry,
+        memo_family_bound: verter_type_engine::semantic_query_memo::MemoFamilyBound,
     ) -> (Self, EngineGrants) {
         let retention_account = store_account.clone();
         let counters = ProjectTypeStoreCounters::default();
@@ -1227,11 +1233,12 @@ impl ProjectTypeStore {
         // leave as grants for the composition root: the output authority
         // behind its lease.
         let (engine, output_authority, surface_claims) =
-            verter_type_engine::project_semantic_dispatch::engine_resources::EngineStores::create(
+            verter_type_engine::project_semantic_dispatch::engine_resources::EngineStores::create_with_memo_family_bound(
                 provenance.map(|provenance| Arc::clone(&provenance.engine)),
                 store_account,
                 &counters.component_meta_cache_live,
                 task_registry,
+                memo_family_bound,
             );
         let verter_type_engine::project_semantic_dispatch::engine_resources::EngineStores {
             graph: semantic_graph,

@@ -29,7 +29,7 @@ use crate::component_meta_caches::{
 };
 use crate::semantic_query::surface_resolution::SurfaceClaimAuthority;
 use crate::semantic_query::{ProjectionReductionContext, SemanticNodeId};
-use crate::semantic_query_memo::SemanticGraphStore;
+use crate::semantic_query_memo::{MemoFamilyBound, SemanticGraphStore};
 
 /// One engine's shared stores, freshly constructed together.
 pub struct EngineStores {
@@ -61,13 +61,33 @@ impl EngineStores {
         cache_live: &Arc<AtomicU64>,
         task_registry: verter_execution::tasks::TaskRegistry,
     ) -> (Self, OutputAuthority, SurfaceClaimAuthority) {
+        Self::create_with_memo_family_bound(
+            provenance,
+            store_account,
+            cache_live,
+            task_registry,
+            MemoFamilyBound::Production,
+        )
+    }
+
+    /// [`Self::create`] with the semantic graph's family memo bounded by
+    /// `memo_family_bound` at construction.
+    #[must_use]
+    pub fn create_with_memo_family_bound(
+        provenance: Option<Arc<crate::engine_provenance::EngineProvenance>>,
+        store_account: verter_session_query::retention::StoreAccount,
+        cache_live: &Arc<AtomicU64>,
+        task_registry: verter_execution::tasks::TaskRegistry,
+        memo_family_bound: MemoFamilyBound,
+    ) -> (Self, OutputAuthority, SurfaceClaimAuthority) {
         let retention_account = Arc::clone(store_account.get());
         let graph = Arc::new(
             match provenance {
                 Some(prov) => SemanticGraphStore::with_provenance(prov, store_account),
                 None => SemanticGraphStore::with_account(store_account),
             }
-            .with_task_registry(task_registry),
+            .with_task_registry(task_registry)
+            .with_memo_family_bound(memo_family_bound),
         );
         let authority = OutputAuthority {
             engine: EngineIdentity(Arc::downgrade(&graph)),

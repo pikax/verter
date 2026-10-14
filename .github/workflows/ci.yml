@@ -399,6 +399,14 @@ jobs:
         with:
           name: rust-nextest-archive
           path: artifacts
+      # The dependency guards resolve the real workspace with Cargo
+      # (`cargo metadata`/`cargo tree`), which needs every locked package's
+      # manifest. On this runner's empty registry the first such test would
+      # download them all inside its own time budget while holding Cargo's
+      # package-cache lock, which also stalls every concurrent Cargo-calling
+      # test. Fetch once here, off every test's clock.
+      - name: Fetch locked Cargo dependencies
+        run: cargo fetch --locked
       # nextest bounds each test (slow-timeout), but not the `--list` pass every
       # binary runs first; the step limit keeps a binary that never returns
       # from it from spending the whole job budget. A shard runs in about

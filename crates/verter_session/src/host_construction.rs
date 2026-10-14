@@ -16,6 +16,7 @@
 //! types ([`HostResolverState`], [`WorkspaceSourceLoader`],
 //! [`next_host_instance_id`]) live here.
 use verter_type_engine::project_semantic_dispatch::relation_knobs::RelationHostKnobs;
+use verter_type_engine::semantic_query_memo::MemoFamilyBound;
 
 use std::sync::Arc;
 
@@ -346,6 +347,7 @@ impl VerterHost {
             workspace,
             scheduler_config,
             HostWorkerPoolSource::Fresh,
+            MemoFamilyBound::Production,
         )
     }
 
@@ -368,6 +370,7 @@ impl VerterHost {
             workspace,
             scheduler_config,
             HostWorkerPoolSource::Shared(worker_pools),
+            MemoFamilyBound::Production,
         )
     }
 
@@ -376,6 +379,7 @@ impl VerterHost {
         workspace: Arc<dyn verter_workspace::WorkspaceAccess>,
         scheduler_config: verter_scheduler::scheduler::SchedulerConfig,
         worker_pool_source: HostWorkerPoolSource,
+        memo_family_bound: MemoFamilyBound,
     ) -> Self {
         #[cfg(test)]
         configure_workspace_test_projects(workspace.as_ref());
@@ -575,6 +579,7 @@ impl VerterHost {
             crate::project_type_store::ProjectTypeStore::compose(
                 Arc::clone(&provenance),
                 task_registry,
+                memo_family_bound,
             );
         let project_type_store = Arc::new(project_type_store);
         // Retained artifacts own their canonical's freshness evidence in the
@@ -763,6 +768,28 @@ impl VerterHost {
             verter_workspace::MemoryOptions::default(),
         ));
         Self::new(config, workspace)
+    }
+
+    /// Test support: a standalone host whose semantic family memo retains
+    /// at most `memo_family_cap` families, fixed at construction. Eviction
+    /// past the bound is the production FIFO eviction; only the bound is
+    /// smaller, so a test overruns the memo without first answering the
+    /// production bound's worth of distinct questions.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn new_standalone_with_memo_family_cap_for_test(
+        config: HostConfig,
+        memo_family_cap: usize,
+    ) -> Self {
+        let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        Self::new_with_scheduler_config_and_worker_pool_source(
+            config,
+            workspace,
+            verter_scheduler::scheduler::SchedulerConfig::default(),
+            HostWorkerPoolSource::Fresh,
+            MemoFamilyBound::ForTest(memo_family_cap),
+        )
     }
 
     /// TEST-ONLY: a standalone host over an in-memory workspace whose

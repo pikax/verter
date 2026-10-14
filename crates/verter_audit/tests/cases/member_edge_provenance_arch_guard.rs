@@ -46,23 +46,32 @@ fn walk_rust(dir: &Path, out: &mut Vec<PathBuf>) {
 /// All three rules cover the same Rust corpus (including test emit sites for
 /// the construction rules). Read it once and retain only possible matches;
 /// the individual rules still apply their own scopes and exclusions.
+///
+/// The prefilter searches raw bytes with `memchr::memmem`, which is built at
+/// the dependency opt-level: the whole `crates/` tree is scanned for every
+/// needle, and a `str::contains` monomorphized into this opt-level-0 test
+/// crate made that scan the test's entire cost. Only the few matching files
+/// pay UTF-8 validation; a non-UTF-8 file is skipped, as before.
 fn provenance_sources() -> &'static [(PathBuf, String)] {
     static SOURCES: std::sync::OnceLock<Vec<(PathBuf, String)>> = std::sync::OnceLock::new();
     SOURCES.get_or_init(|| {
+        let needles = [
+            "OriginMeta::MemberName",
+            "OriginMeta::ProjectedMember",
+            "OriginEdgeMetaDto::ProjectMember",
+        ]
+        .map(memchr::memmem::Finder::new);
         let mut files = Vec::new();
         walk_rust(&workspace_root().join("crates"), &mut files);
         files
             .into_iter()
             .filter_map(|file| {
-                let body = fs::read_to_string(&file).ok()?;
-                [
-                    "OriginMeta::MemberName",
-                    "OriginMeta::ProjectedMember",
-                    "OriginEdgeMetaDto::ProjectMember",
-                ]
-                .iter()
-                .any(|needle| body.contains(needle))
-                .then_some((file, body))
+                let bytes = fs::read(&file).ok()?;
+                if !needles.iter().any(|needle| needle.find(&bytes).is_some()) {
+                    return None;
+                }
+                let body = String::from_utf8(bytes).ok()?;
+                Some((file, body))
             })
             .collect()
     })
