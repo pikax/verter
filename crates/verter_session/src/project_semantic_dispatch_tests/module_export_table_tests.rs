@@ -64,6 +64,21 @@ fn assert_literals(
     assert_eq!(numbers, (1..count).collect());
 }
 
+/// Scale tests prove growth from work counters at sizes a debug build runs in
+/// about a second: between two sizes a counter may grow at most 1.5x faster
+/// than the input, which a quadratic counter (25x over a 5x step) cannot meet
+/// whatever its constant.
+fn assert_proportional_growth(
+    what: &str,
+    (smaller, before): (usize, usize),
+    (larger, after): (usize, usize),
+) {
+    assert!(
+        2 * after * smaller <= 3 * before * larger,
+        "{what} grew from {before} at {smaller} to {after} at {larger}"
+    );
+}
+
 #[test]
 fn namespace_barrel_probes_keep_every_literal_at_scale() {
     for count in [100, 500] {
@@ -219,7 +234,8 @@ fn barrel_chain_proofs_and_folding_grow_with_the_answer() {
     use verter_session_query::facts::fact_cache::signature_entries;
     use verter_type_engine::resolver_core::request_ports::RouteLookup;
 
-    for count in [100, 500, 2_000] {
+    let mut previous: Option<(usize, [(&str, usize); 4])> = None;
+    for count in [100, 500] {
         let owned: Vec<_> = (0..count)
             .map(|i| {
                 let star = if i + 1 == count {
@@ -340,6 +356,18 @@ fn barrel_chain_proofs_and_folding_grow_with_the_answer() {
             "{proof_work} proof work for {count} names"
         );
         println!("chain_names={count} owned_slots={owned_slots} proof_entries={proof_entries} fold_work={work} proof_work={proof_work}");
+        let counters = [
+            ("owned binding slots", owned_slots),
+            ("retained proof entries", proof_entries),
+            ("folding work", work as usize),
+            ("proof work", proof_work),
+        ];
+        if let Some((smaller, before)) = previous {
+            for ((what, before), (_, after)) in before.into_iter().zip(counters) {
+                assert_proportional_growth(what, (smaller, before), (count, after));
+            }
+        }
+        previous = Some((count, counters));
     }
 }
 
@@ -422,7 +450,8 @@ fn export_tables_under_retention_pressure_answer_without_admission() {
 
 #[test]
 fn export_tables_and_namespace_evaluation_have_linear_work() {
-    for count in [100, 500, 2_000] {
+    let mut previous: Option<(usize, [(&str, usize); 3])> = None;
+    for count in [100, 500] {
         let owned = barrel_files(count);
         let files: Vec<_> = owned
             .iter()
@@ -507,6 +536,17 @@ fn export_tables_and_namespace_evaluation_have_linear_work() {
             proof_work <= 4096 * count,
             "proof work {proof_work} for {count} leaves"
         );
+        let counters = [
+            ("table work", table_work as usize),
+            ("probe work", query_work),
+            ("proof work", proof_work),
+        ];
+        if let Some((smaller, before)) = previous {
+            for ((what, before), (_, after)) in before.into_iter().zip(counters) {
+                assert_proportional_growth(what, (smaller, before), (count, after));
+            }
+        }
+        previous = Some((count, counters));
         // A new request shares every table: there is no second table build.
         let warm = ProjectSemanticDispatch::new(&host_ctx);
         let table = warm
@@ -715,7 +755,8 @@ fn a_namespace_reexport_can_refer_to_its_own_module() {
 fn a_growing_namespace_shares_unchanged_tables_and_retains_linear_nodes() {
     let host = probe_host(ProbeProject::default());
     let mut first_group = None;
-    for count in [500, 2_000] {
+    let mut previous_nodes = None;
+    for count in [100, 500] {
         for (name, source) in barrel_files(count) {
             crate::u6_flow_shape_corpus_tests::upsert(
                 &host,
@@ -795,6 +836,10 @@ fn a_growing_namespace_shares_unchanged_tables_and_retains_linear_nodes() {
             nodes <= 12 * count,
             "retained {nodes} nodes for {count} leaves"
         );
+        if let Some(before) = previous_nodes {
+            assert_proportional_growth("retained nodes", before, (count, nodes));
+        }
+        previous_nodes = Some((count, nodes));
         println!(
             "session_leaves={count} elapsed={:?} rss_bytes={} nodes={nodes}",
             started.elapsed(),
