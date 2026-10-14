@@ -1067,14 +1067,19 @@ fn drive_det_05_partial_resident_cache() {
         .from_cache
     };
 
-    let host = Arc::new(VerterHost::new_standalone(HostConfig {
-        audit_enabled: true,
-        ..HostConfig::default()
-    }));
-    let memo = host.project_type_store().semantic_graph();
-    memo.set_memo_family_cap_before_admission_for_test(PARTIAL_CACHE_FAMILY_CAP);
+    let host = Arc::new(VerterHost::new_standalone_with_memo_family_cap_for_test(
+        HostConfig {
+            audit_enabled: true,
+            ..HostConfig::default()
+        },
+        PARTIAL_CACHE_FAMILY_CAP,
+    ));
     assert!(
-        FAMILY_EVICTION_FLOOD > memo.memo_family_cap_for_test(),
+        FAMILY_EVICTION_FLOOD
+            > host
+                .project_type_store()
+                .semantic_graph()
+                .memo_family_cap_for_test(),
         "DET-05: precondition — the flood outnumbers the families the memo retains"
     );
     upsert(&host, canonical, EDIT_ORIGINAL_TS);

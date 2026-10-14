@@ -71,7 +71,7 @@
 //! Mutex`, victim slot lock taken last — no AB-BA).
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -137,10 +137,8 @@ pub struct GlobalRetentionBudget<K> {
     /// FIFO ledger of admitted entries, oldest at the front.
     ledger: parking_lot::Mutex<VecDeque<(u64, K)>>,
     /// Maximum number of live admitted entries retained. Exceeding it on
-    /// an admission returns the oldest keys for eviction. Fixed at
-    /// construction in production; test support may re-bound a budget
-    /// that has admitted nothing yet ([`Self::set_cap_before_admission_for_test`]).
-    cap: AtomicUsize,
+    /// an admission returns the oldest keys for eviction.
+    cap: usize,
 }
 
 impl<K> GlobalRetentionBudget<K>
@@ -154,30 +152,14 @@ where
     pub fn new(cap: usize) -> Self {
         Self {
             ledger: parking_lot::Mutex::new(VecDeque::new()),
-            cap: AtomicUsize::new(cap.max(1)),
+            cap: cap.max(1),
         }
     }
 
     /// The configured total cap.
     #[must_use]
     pub fn cap(&self) -> usize {
-        self.cap.load(Ordering::Relaxed)
-    }
-
-    /// Re-bound a budget that has not admitted anything yet. Lets a test
-    /// drive this budget's FIFO eviction with a host built through the
-    /// production constructors, without first admitting the production
-    /// cap's worth of entries. Panics when the ledger already holds an
-    /// admission: re-bounding a live ledger would strand or skip victims
-    /// the owning cache has to evict.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn set_cap_before_admission_for_test(&self, cap: usize) {
-        let ledger = self.ledger.lock();
-        assert!(
-            ledger.is_empty(),
-            "a retention budget is re-bounded only before its first admission"
-        );
-        self.cap.store(cap.max(1), Ordering::Relaxed);
+        self.cap
     }
 
     /// Record one freshly-admitted entry. Returns the oldest `(seq, key)`
@@ -197,7 +179,7 @@ where
     pub fn record_admission(&self, seq: u64, key: K) -> Vec<(u64, K)> {
         let mut ledger = self.ledger.lock();
         ledger.push_back((seq, key));
-        Self::trim_locked(&mut ledger, self.cap(), &|_| false)
+        Self::trim_locked(&mut ledger, self.cap, &|_| false)
     }
 
     /// Record a GROUP of freshly-admitted entries as ONE budget step, with
@@ -234,7 +216,7 @@ where
     ) -> Vec<(u64, K)> {
         let mut ledger = self.ledger.lock();
         ledger.extend(admissions);
-        Self::trim_locked(&mut ledger, self.cap(), exempt)
+        Self::trim_locked(&mut ledger, self.cap, exempt)
     }
 
     /// Bring a held ledger back within `cap` by removing the oldest
