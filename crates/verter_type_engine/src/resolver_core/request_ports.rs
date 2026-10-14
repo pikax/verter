@@ -717,6 +717,15 @@ pub trait OwnedLowering {
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
     ) -> verter_session_query::inputs::prepared::PreparedTypeDeclResolution;
+    /// Lower the type declarations of `demands` that are not lowered yet as
+    /// one batch — one lowering-service rendezvous per occupied worker
+    /// shard instead of one per declaration — registering each one's facts
+    /// as a single demand would and keeping its body for the locator read
+    /// that follows while the returned guard lives.
+    fn batch_type_bodies(
+        &self,
+        demands: &[verter_session_query::source::demand::TypeBodyBatchDemand<'_>],
+    ) -> verter_session_query::source::demand::BatchedBodies;
     fn prepare_augmentation_type(
         &self,
         input: &PreparedInputRecord,

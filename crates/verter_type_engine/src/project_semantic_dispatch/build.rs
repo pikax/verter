@@ -125,6 +125,20 @@ pub(super) struct EnumContribution {
     pub(super) members: Arc<[verter_type_expr::facts::EnumMemberEntry]>,
 }
 
+/// One contributor of an augmentation fold, read before the fold so its
+/// type bodies can be lowered as one batch: its served source, and for an
+/// augmenter its artifact answer and the blocks that contribute to the
+/// folded declaration (raw specifier, owner, retained scope).
+struct ContributorPrefetch {
+    indexed: Arc<verter_session_query::inputs::indexed::IndexedInputRecord>,
+    art: Option<crate::resolver_core::request_ports::AugmenterArtifactAnswer>,
+    matched: Vec<(
+        String,
+        verter_type_expr::TopLevelOwnerId,
+        verter_session_query::declarations::AugmentationScopeKind,
+    )>,
+}
+
 /// Shared return shape of the augmenter-fold path
 /// ([`ProjectSemanticDispatch::collect_augmentation_contributions`]): the
 /// ordered augmenter contributor nodes, one [`AugmentationContributorRoot`]
@@ -5966,13 +5980,144 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // declares another project's enum of the name.
         let request_project = (contribution == AugmentationContribution::EnumBlocks)
             .then(|| self.ctx.project_stable_key_for_canonical(request_canonical));
-        for candidate in ordered.iter().copied() {
-            let canonical = match candidate {
+        let candidate_canonical = |candidate: OrderedOrigin| -> &str {
+            match candidate {
                 OrderedOrigin::Augmenter(i) => augmenter_set.entries[i].canonical().as_ref(),
                 OrderedOrigin::FileScope(i) => {
                     population_hit.entries[i].artifact_key.canonical.as_ref()
                 }
+            }
+        };
+        // Which declaration blocks of an augmenter contribute to
+        // `decl_name`: each `ModuleAugmentationFact` of the block that
+        // targets this declaration, as its raw specifier (the key its typed
+        // inner body is retained under) and its owner.
+        let matched_augmentations =
+            |augmenter_canonical: &str,
+             art: &crate::resolver_core::request_ports::AugmenterArtifactAnswer|
+             -> Vec<(
+                String,
+                verter_type_expr::TopLevelOwnerId,
+                AugmentationScopeKind,
+            )> {
+                let mut matched_specs: Vec<(
+                    String,
+                    verter_type_expr::TopLevelOwnerId,
+                    AugmentationScopeKind,
+                )> = Vec::new();
+                for fact in art.augmentations.iter() {
+                    if fact.augmented_name.as_ref() != decl_name {
+                        continue;
+                    }
+                    if contribution != AugmentationContribution::TypeBody
+                        && fact.space != verter_session_query::facts::registry::SymbolSpace::Value
+                    {
+                        continue;
+                    }
+                    let relative = if matches!(key.target, verter_session_query::resolution::AugmentationTargetKind::ResolvedRelativeCanonical(_))
+                    && verter_session_query::resolution::is_relative_specifier(fact.specifier.as_ref()) {
+                    resolve_rel(augmenter_canonical, fact.specifier.as_ref())
+                } else { None };
+                    if !verter_session_query::source::augmentation::augmenter_matches_target(
+                        fact,
+                        &key,
+                        relative.as_deref(),
+                    ) {
+                        continue;
+                    }
+                    let spec = fact.specifier.as_ref();
+                    if matched_specs
+                        .iter()
+                        .any(|(matched, owner, _)| matched == spec && *owner == fact.owner)
+                    {
+                        continue;
+                    }
+                    // A `declare global` augmenter is indexed under the global
+                    // tag; its retained body lives in the GLOBAL augmentation
+                    // scope, not in a module scope named after the tag.
+                    let scope = if spec
+                        == verter_session_query::source::augmentation::GLOBAL_AUGMENTATION_TAG
+                    {
+                        AugmentationScopeKind::Global
+                    } else {
+                        AugmentationScopeKind::Module(spec.to_string())
+                    };
+                    matched_specs.push((spec.to_string(), fact.owner, scope));
+                }
+                matched_specs
             };
+        // Every contributor's source, artifact answer and contributing
+        // blocks, read once up front so the type bodies the fold lowers can
+        // be lowered as ONE batch — one lowering-service rendezvous per
+        // worker shard — before the fold reads them one by one.
+        let mut prefetched: Vec<Option<ContributorPrefetch>> = Vec::with_capacity(ordered.len());
+        for candidate in ordered.iter().copied() {
+            let canonical = candidate_canonical(candidate);
+            if excluded_contributor == Some(canonical) || request_project.is_some() {
+                prefetched.push(None);
+                continue;
+            }
+            let Some(indexed) = self
+                .ctx
+                .ensure_indexed_ready_serve(canonical)
+                .map(|serve| serve.indexed)
+            else {
+                prefetched.push(None);
+                continue;
+            };
+            let mut prefetch = ContributorPrefetch {
+                indexed,
+                art: None,
+                matched: Vec::new(),
+            };
+            if let OrderedOrigin::Augmenter(augmenter_idx) = candidate {
+                let declares_from_script =
+                    matches!(target, AugmentationTargetKind::GlobalAugmentation)
+                        && verter_session_query::inputs::contributors::classify_shallow_module_kind(
+                            &prefetch.indexed.shallow_state,
+                        ) == verter_session_query::inputs::contributors::FileModuleKind::Script;
+                if !declares_from_script {
+                    let augmenter = &augmenter_set.entries[augmenter_idx];
+                    if let Some(art) = self.ctx.augmenter_artifact_answer(
+                        &augmenter.artifact_key,
+                        prefetch.indexed.whole_hash,
+                    ) {
+                        prefetch.matched = matched_augmentations(canonical, &art);
+                        prefetch.art = Some(art);
+                    }
+                }
+            }
+            prefetched.push(Some(prefetch));
+        }
+        let _batched_bodies = (contribution == AugmentationContribution::TypeBody).then(|| {
+            let mut demands: Vec<verter_session_query::source::demand::TypeBodyBatchDemand<'_>> =
+                Vec::new();
+            for (candidate, prefetch) in ordered.iter().zip(&prefetched) {
+                let Some(prefetch) = prefetch else {
+                    continue;
+                };
+                let source = &*prefetch.indexed.shallow_state;
+                if let OrderedOrigin::FileScope(i) = *candidate {
+                    demands.push(verter_session_query::source::demand::TypeBodyBatchDemand {
+                        source,
+                        owner: population_hit.entries[i].owner,
+                        name: decl_name,
+                        scope: None,
+                    });
+                }
+                for (_, owner, scope) in &prefetch.matched {
+                    demands.push(verter_session_query::source::demand::TypeBodyBatchDemand {
+                        source,
+                        owner: *owner,
+                        name: decl_name,
+                        scope: Some(scope),
+                    });
+                }
+            }
+            self.ctx.batch_type_bodies(&demands)
+        });
+        for (position, candidate) in ordered.iter().copied().enumerate() {
+            let canonical = candidate_canonical(candidate);
             if excluded_contributor == Some(canonical) {
                 base_position.get_or_insert(contributor_nodes.len());
                 continue;
@@ -5983,15 +6128,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     continue;
                 }
             }
+            let prefetch = prefetched[position].take();
             match candidate {
                 OrderedOrigin::Augmenter(augmenter_idx) => {
                     let augmenter = &augmenter_set.entries[augmenter_idx];
                     let augmenter_canonical = augmenter.canonical();
-                    let Some(indexed) = self
-                        .ctx
-                        .ensure_indexed_ready_serve(augmenter_canonical.as_ref())
-                        .map(|serve| serve.indexed)
-                    else {
+                    let (prefetched_art, prefetched_matched, prefetched_indexed) = match prefetch {
+                        Some(prefetch) => {
+                            (prefetch.art, Some(prefetch.matched), Some(prefetch.indexed))
+                        }
+                        None => (None, None, None),
+                    };
+                    let Some(indexed) = prefetched_indexed.or_else(|| {
+                        self.ctx
+                            .ensure_indexed_ready_serve(augmenter_canonical.as_ref())
+                            .map(|serve| serve.indexed)
+                    }) else {
                         // A set member the live view cannot serve is a torn state:
                         // its contribution (and source-env identity) cannot be
                         // observed coherently — the parent result must not warm. The
@@ -6025,16 +6177,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     // augmentation. `ensure_indexed_ready_serve` above already materialised
                     // the augmenter's CURRENT version, so `indexed.whole_hash` is the
                     // scheduler-authoritative current content hash.
-                    let Some(art) = self
-                        .ctx
-                        .augmenter_artifact_answer(&augmenter.artifact_key, indexed.whole_hash)
-                    else {
-                        // Unhealable captured key: the augmenter's exact artifact
-                        // identity is unobservable — refuse warm admission. The
-                        // generalized non-cacheability rail is fanned ONCE at the
-                        // consumer (see the unservable arm above).
-                        source_env_unobservable = true;
-                        continue;
+                    let (art, matched_specs) = match prefetched_art {
+                        Some(art) => (art, prefetched_matched.unwrap_or_default()),
+                        None => {
+                            let Some(art) = self.ctx.augmenter_artifact_answer(
+                                &augmenter.artifact_key,
+                                indexed.whole_hash,
+                            ) else {
+                                // Unhealable captured key: the augmenter's exact artifact
+                                // identity is unobservable — refuse warm admission. The
+                                // generalized non-cacheability rail is fanned ONCE at the
+                                // consumer (see the unservable arm above).
+                                source_env_unobservable = true;
+                                continue;
+                            };
+                            let matched = matched_augmentations(augmenter_canonical.as_ref(), &art);
+                            (art, matched)
+                        }
                     };
                     // The EXACT key the contributor read serves from (the healed
                     // current key when the captured one was stale).
@@ -6044,35 +6203,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         .unwrap_or_else(|| augmenter.artifact_key.clone());
                     if let Some(refreshed_key) = refreshed_key {
                         refreshed_keys.push((augmenter_idx, refreshed_key));
-                    }
-                    let mut matched_specs: Vec<(String, verter_type_expr::TopLevelOwnerId)> =
-                        Vec::new();
-                    for fact in art.augmentations.iter() {
-                        if fact.augmented_name.as_ref() != decl_name {
-                            continue;
-                        }
-                        if contribution != AugmentationContribution::TypeBody
-                            && fact.space
-                                != verter_session_query::facts::registry::SymbolSpace::Value
-                        {
-                            continue;
-                        }
-                        let relative = if matches!(key.target, verter_session_query::resolution::AugmentationTargetKind::ResolvedRelativeCanonical(_))
-                            && verter_session_query::resolution::is_relative_specifier(fact.specifier.as_ref()) {
-                            resolve_rel(augmenter_canonical.as_ref(), fact.specifier.as_ref())
-                        } else { None };
-                        if !verter_session_query::source::augmentation::augmenter_matches_target(
-                            fact,
-                            &key,
-                            relative.as_deref(),
-                        ) {
-                            continue;
-                        }
-                        let spec = fact.specifier.as_ref().to_string();
-                        let matched = (spec, fact.owner);
-                        if !matched_specs.contains(&matched) {
-                            matched_specs.push(matched);
-                        }
                     }
                     if matched_specs.is_empty() {
                         continue;
@@ -6085,7 +6215,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     };
 
                     let mut any_contribution = false;
-                    for (spec, contributor_owner) in &matched_specs {
+                    for (spec, contributor_owner, _) in &matched_specs {
                         let aug_scope = NodeScopeId::File {
                             canonical_id: Arc::clone(augmenter_canonical),
                             owner: *contributor_owner,
@@ -6336,11 +6466,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 {
                     let entry = &population_hit.entries[file_scope_idx];
                     let canonical = entry.artifact_key.canonical.as_ref();
-                    let Some(indexed) = self
-                        .ctx
-                        .ensure_indexed_ready_serve(canonical)
-                        .map(|serve| serve.indexed)
-                    else {
+                    let Some(indexed) = prefetch.map(|prefetch| prefetch.indexed).or_else(|| {
+                        self.ctx
+                            .ensure_indexed_ready_serve(canonical)
+                            .map(|serve| serve.indexed)
+                    }) else {
                         source_env_unobservable = true;
                         continue;
                     };
@@ -6386,11 +6516,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 OrderedOrigin::FileScope(file_scope_idx) => {
                     let entry = &population_hit.entries[file_scope_idx];
                     let canonical = entry.artifact_key.canonical.as_ref();
-                    let Some(indexed) = self
-                        .ctx
-                        .ensure_indexed_ready_serve(canonical)
-                        .map(|serve| serve.indexed)
-                    else {
+                    let Some(indexed) = prefetch.map(|prefetch| prefetch.indexed).or_else(|| {
+                        self.ctx
+                            .ensure_indexed_ready_serve(canonical)
+                            .map(|serve| serve.indexed)
+                    }) else {
                         source_env_unobservable = true;
                         continue;
                     };

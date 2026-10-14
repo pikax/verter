@@ -20,7 +20,10 @@ fn upsert_ts(host: &VerterHost, canonical: &str, source: &str) {
         .expect("upsert contributor");
 }
 
-fn probe(size: usize, global: bool) -> (usize, usize, usize, usize) {
+/// A host holding `size` contributors of one merged interface — global
+/// script declarations, or module augmentations of `./core` — in a
+/// shuffled tsconfig `files` order, and the scenario reading it.
+fn contributor_host(size: usize, global: bool) -> VerterHost {
     let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(
         verter_workspace::MemoryOptions::default(),
     ));
@@ -88,6 +91,11 @@ fn probe(size: usize, global: bool) -> (usize, usize, usize, usize) {
         "import type { Props } from './core'; type Probe = Props[keyof Props];"
     };
     upsert_ts(&host, "/scenario.ts", source);
+    host
+}
+
+fn probe(size: usize, global: bool) -> (usize, usize, usize, usize) {
+    let host = contributor_host(size, global);
     let graph = host.project_type_store().semantic_graph();
     let before_scans = verter_type_engine::semantic_query::key_scan_comparisons_for_tests();
     let before_roots = verter_type_engine::fact_signature_helpers::root_fact_visits_for_tests();
@@ -208,6 +216,47 @@ fn merged_interface_indexed_access_work_is_linear() {
                 "collection plus completed probe work must be linear: {completed_work:?}"
             );
         }
+    }
+}
+
+/// A cold read of a merged interface lowers each contributing statement
+/// once — its facts and its body come from one lowering — and hands the
+/// contributors' lowering to the decl-lowering workers in batches: the
+/// rendezvous count stays flat as the contributor count grows. A warm
+/// repeat lowers nothing and hands nothing off.
+#[test]
+fn contributor_bodies_lower_once_in_batches_per_shard() {
+    for global in [false, true] {
+        let mut handoffs = Vec::new();
+        for size in [64, 256] {
+            let host = contributor_host(size, global);
+            let read = |host: &VerterHost| {
+                let statements = host.provenance().snapshot().decl_statements_lowered;
+                let rendezvous = host.decl_lowering.handoff_count();
+                host.resolve_named_symbol("/scenario.ts", "Probe", Some(ProjectionMode::Expanded))
+                    .expect("probe answers");
+                (
+                    host.provenance().snapshot().decl_statements_lowered - statements,
+                    host.decl_lowering.handoff_count() - rendezvous,
+                )
+            };
+            let (statements, rendezvous) = read(&host);
+            assert!(
+                statements as usize <= size + 8,
+                "size={size}, global={global}: every contributing statement lowers once, \
+                 lowered {statements}"
+            );
+            handoffs.push(rendezvous);
+            assert_eq!(
+                read(&host),
+                (0, 0),
+                "size={size}, global={global}: a warm repeat lowers nothing"
+            );
+        }
+        assert!(
+            handoffs[1] <= handoffs[0] + 16,
+            "global={global}: worker rendezvous must not grow with the contributors: {handoffs:?}"
+        );
     }
 }
 

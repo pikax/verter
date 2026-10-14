@@ -570,6 +570,12 @@ pub struct DeclLoweringService {
     /// figure follows the lease objects themselves, not the shard entries
     /// (several leases may share one retained snapshot).
     live_leases: std::sync::atomic::AtomicUsize,
+    /// Caller-blocking worker rendezvous performed so far: one per job
+    /// sent to a worker shard and awaited (a lease acquisition, a single
+    /// lowering run, or one shard's share of a batch). The deterministic
+    /// work count that shows demands batching per occupied shard instead
+    /// of paying one handoff per declaration.
+    handoffs: std::sync::atomic::AtomicU64,
     // On `wasm32` the shard itself lives in the
     // `WASM_DECL_LOWERING_SHARD` thread-local, never here, so the
     // service stays `Send + Sync` without any `unsafe impl`; only the
@@ -606,6 +612,11 @@ pub struct DeclLoweringCounters {
     /// declaration closure; a whole-file env demand (fallthrough /
     /// runtime values) lowers the file's full declaration set once.
     pub decl_bodies_lowered: std::sync::atomic::AtomicU64,
+    /// Declaration statements lowered from OXC syntax by the demanded
+    /// body lowering and its transient body re-borrow — one per statement
+    /// per lowering. A cold body demanded for its facts and then for its
+    /// body lowers each contributing statement ONCE.
+    pub decl_statements_lowered: std::sync::atomic::AtomicU64,
     /// Class elements lowered by selective class-body lowering: one per raw
     /// `ClassBody.body` element a member demand lowered. A demand for one
     /// class member lowers only the elements declaring it, never the
@@ -684,6 +695,7 @@ impl DeclLoweringService {
             profile: global_handoff_stats().cloned(),
             account,
             live_leases: std::sync::atomic::AtomicUsize::new(0),
+            handoffs: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -711,6 +723,7 @@ impl DeclLoweringService {
         Self {
             account,
             live_leases: std::sync::atomic::AtomicUsize::new(0),
+            handoffs: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -774,6 +787,7 @@ impl DeclLoweringService {
             // service was constructed lazily (`batch_typecheck`).
             let workers = self.workers();
             let shard_index = shard_index(key, workers.len());
+            self.count_handoff();
             let key_for_job = key.clone();
             let source = Arc::clone(source);
             match self.profile.as_ref() {
@@ -843,6 +857,107 @@ impl DeclLoweringService {
         }
     }
 
+    /// [`Self::acquire_lease`] followed by [`Self::run_leased`] under the
+    /// lease just acquired, in ONE worker rendezvous: the parse a cold
+    /// artifact build pins and the index job it runs over that parse share
+    /// one handoff instead of two. `job` does not run when the parse was
+    /// refused for want of stack (the answer is then `None`, as the
+    /// refusal in the returned [`LeaseOutcome`] says); otherwise it runs
+    /// over the retained program (`None` for a fatal parse) exactly as a
+    /// lease-only run would. A job panic is re-raised on the caller after
+    /// the lease is taken, so the pin is released as the panic unwinds. The
+    /// same purity contract applies: `job` never re-enters this service or
+    /// the host.
+    pub fn acquire_lease_and_run<R, F>(
+        self: &Arc<Self>,
+        key: &SnapshotKey,
+        source: &Arc<str>,
+        source_type: oxc_span::SourceType,
+        job: F,
+    ) -> (LeaseOutcome, Option<R>)
+    where
+        F: FnOnce(Option<&crate::parsed_eval_program::ParsedEvalProgram>) -> R + Send + 'static,
+        R: Send + 'static,
+    {
+        verter_audit::attribute!(ArtifactPinAcquire);
+        #[cfg(not(target_arch = "wasm32"))]
+        let ((parsed_now, refused), result) = {
+            use std::panic::AssertUnwindSafe;
+
+            let workers = self.workers();
+            let shard_index = shard_index(key, workers.len());
+            self.count_handoff();
+            let key_for_job = key.clone();
+            let source = Arc::clone(source);
+            let account = Arc::clone(&self.account);
+            let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+            let submitted = self.profile.as_ref().map(|_| std::time::Instant::now());
+            let worker_job: WorkerJob = Box::new(move |shard| {
+                let started = std::time::Instant::now();
+                let acquired = shard.acquire(&account, &key_for_job, &source, source_type);
+                let result = if acquired.1.is_none() {
+                    shard.snapshot_leased(&key_for_job).map(|parsed| {
+                        std::panic::catch_unwind(AssertUnwindSafe(|| job(parsed.as_deref())))
+                    })
+                } else {
+                    None
+                };
+                let _ = result_tx.send((acquired, result, started, std::time::Instant::now()));
+            });
+            workers[shard_index]
+                .jobs
+                .send(worker_job)
+                .expect("decl-lowering worker channel must outlive the service");
+            let (acquired, result, started, finished) = result_rx
+                .recv()
+                .expect("decl-lowering worker must answer every acquire");
+            if let (Some(stats), Some(submitted)) = (self.profile.as_ref(), submitted) {
+                stats.record_acquire(
+                    submitted,
+                    started,
+                    finished,
+                    std::time::Instant::now(),
+                    acquired.0,
+                );
+            }
+            (acquired, result)
+        };
+        #[cfg(target_arch = "wasm32")]
+        let ((parsed_now, refused), result) = WASM_DECL_LOWERING_SHARD.with(|cell| {
+            let acquired = cell
+                .borrow_mut()
+                .acquire(&self.account, key, source, source_type);
+            let result = if acquired.1.is_none() {
+                let shard = cell.borrow();
+                shard
+                    .snapshot_leased(key)
+                    .map(|parsed| std::thread::Result::Ok(job(parsed.as_deref())))
+            } else {
+                None
+            };
+            (acquired, result)
+        });
+
+        self.live_leases
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let outcome = LeaseOutcome {
+            lease: SnapshotLease {
+                key: key.clone(),
+                service: Arc::clone(self),
+            },
+            parsed_now,
+            refused,
+        };
+        match result {
+            None => (outcome, None),
+            Some(Ok(value)) => (outcome, Some(value)),
+            Some(Err(panic_payload)) => {
+                drop(outcome);
+                std::panic::resume_unwind(panic_payload)
+            }
+        }
+    }
+
     /// Number of live [`SnapshotLease`]s: the retained-parse object count
     /// a long-session retention measurement compares across quiesced
     /// checkpoints. Every lease pins one retained snapshot for as long as
@@ -852,6 +967,18 @@ impl DeclLoweringService {
     #[must_use]
     pub fn live_lease_count(&self) -> usize {
         self.live_leases.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Caller-blocking worker rendezvous performed so far (see the field).
+    #[must_use]
+    pub fn handoff_count(&self) -> u64 {
+        self.handoffs.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn count_handoff(&self) {
+        self.handoffs
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Release one pin on `key`. Fire-and-forget: dropping a lease must
@@ -1010,6 +1137,7 @@ impl DeclLoweringService {
             // set through the same single authority as every other operation.
             let workers = self.workers();
             let shard_index = shard_index(key, workers.len());
+            self.count_handoff();
             let key = key.clone();
             let result = match self.profile.as_ref() {
                 None => {
@@ -1073,6 +1201,107 @@ impl DeclLoweringService {
             })
         }
     }
+    /// Run every job of `jobs` against the LEASE-RETAINED eval program of
+    /// its key — exactly what [`Self::run_leased`] does for one job — with
+    /// one worker rendezvous per occupied shard instead of one per job.
+    ///
+    /// Every shard's share is submitted before the caller waits for any of
+    /// them, so the shards lower in parallel; within a shard the jobs run in
+    /// the order given, and the results come back in `jobs` order. A job
+    /// whose key has no live lease does not run and answers `None`, as
+    /// [`Self::run_leased`] does; a job that panics is caught on its worker,
+    /// the rest of the batch still runs, and the first panic is re-raised on
+    /// the caller once every shard has answered. The same purity contract
+    /// applies: a job never re-enters this service or the host.
+    pub fn run_leased_batch<R>(&self, jobs: Vec<LeasedJob<R>>) -> Vec<Option<R>>
+    where
+        R: Send + 'static,
+    {
+        if jobs.is_empty() {
+            return Vec::new();
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use std::panic::AssertUnwindSafe;
+
+            type ShardAnswer<R> = Vec<(usize, Option<std::thread::Result<R>>)>;
+            let count = jobs.len();
+            let workers = self.workers();
+            let mut per_shard: Vec<Vec<(usize, LeasedJob<R>)>> =
+                (0..workers.len()).map(|_| Vec::new()).collect();
+            for (index, job) in jobs.into_iter().enumerate() {
+                per_shard[shard_index(&job.key, workers.len())].push((index, job));
+            }
+            let mut answers = Vec::new();
+            for (shard, share) in per_shard.into_iter().enumerate() {
+                if share.is_empty() {
+                    continue;
+                }
+                self.count_handoff();
+                let (result_tx, result_rx) = std::sync::mpsc::sync_channel::<ShardAnswer<R>>(1);
+                let worker_job: WorkerJob = Box::new(move |shard_state| {
+                    let answer: ShardAnswer<R> = share
+                        .into_iter()
+                        .map(|(index, job)| {
+                            let LeasedJob { key, run } = job;
+                            let result = shard_state.snapshot_leased(&key).map(|parsed| {
+                                std::panic::catch_unwind(AssertUnwindSafe(
+                                    || run(parsed.as_deref()),
+                                ))
+                            });
+                            (index, result)
+                        })
+                        .collect();
+                    let _ = result_tx.send(answer);
+                });
+                workers[shard]
+                    .jobs
+                    .send(worker_job)
+                    .expect("decl-lowering worker channel must outlive the service");
+                answers.push(result_rx);
+            }
+            let mut results: Vec<Option<R>> = (0..count).map(|_| None).collect();
+            let mut panic_payload = None;
+            for answer in answers {
+                for (index, result) in answer
+                    .recv()
+                    .expect("decl-lowering worker must answer every batch")
+                {
+                    match result {
+                        None => {}
+                        Some(Ok(value)) => results[index] = Some(value),
+                        Some(Err(payload)) => {
+                            panic_payload.get_or_insert(payload);
+                        }
+                    }
+                }
+            }
+            if let Some(payload) = panic_payload {
+                std::panic::resume_unwind(payload);
+            }
+            results
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            WASM_DECL_LOWERING_SHARD.with(|cell| {
+                let shard = cell.borrow();
+                jobs.into_iter()
+                    .map(|LeasedJob { key, run }| {
+                        shard
+                            .snapshot_leased(&key)
+                            .map(|parsed| run(parsed.as_deref()))
+                    })
+                    .collect()
+            })
+        }
+    }
+}
+
+/// One job of a [`DeclLoweringService::run_leased_batch`]: a pure lowering
+/// closure over the retained eval program of `key`.
+pub struct LeasedJob<R> {
+    pub key: SnapshotKey,
+    pub run: Box<dyn FnOnce(Option<&crate::parsed_eval_program::ParsedEvalProgram>) -> R + Send>,
 }
 
 #[cfg(test)]
@@ -1281,6 +1510,130 @@ mod tests {
             after.is_none(),
             "run_leased misses after the lease drops — it never re-parses"
         );
+    }
+
+    /// A cold build's parse and the index job over it are one worker
+    /// rendezvous: the job reads the program the acquisition parsed, the
+    /// lease keeps it retained for later lease-only runs, and a job panic
+    /// reaches the caller with the pin it took released.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn acquire_and_run_is_one_rendezvous_that_pins_its_parse() {
+        let service = Arc::new(DeclLoweringService::new());
+        let source: Arc<str> = Arc::from("type A = { a: 1 };\ntype B = 2;\n");
+        let k = key("/ws/acquire-run.ts", 1);
+        let st = oxc_span::SourceType::ts();
+
+        let before = service.handoff_count();
+        let (lease, statements) = service.acquire_lease_and_run(&k, &source, st, |program| {
+            program.map(|program| program.borrow_dependent().body.len())
+        });
+        assert!(lease.parsed_now, "the acquisition parses");
+        assert_eq!(
+            statements,
+            Some(Some(2)),
+            "the job reads the parsed program"
+        );
+        assert_eq!(
+            service.handoff_count() - before,
+            1,
+            "the parse and its job share one rendezvous"
+        );
+        assert_eq!(
+            service.run_leased(&k, |program| program.is_some()),
+            Some(true),
+            "the lease retains the parse for lease-only runs"
+        );
+        drop(lease.lease);
+        assert_eq!(service.live_lease_count(), 0);
+
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            service.acquire_lease_and_run(&k, &source, st, |_| -> () { panic!("job bug") })
+        }));
+        assert!(panicked.is_err(), "the job panic must reach the caller");
+        assert_eq!(
+            service.live_lease_count(),
+            0,
+            "the panicking job's pin is released"
+        );
+        assert!(
+            service
+                .run_leased(&k, |program| program.is_some())
+                .is_none(),
+            "nothing stays retained once the pin is released"
+        );
+    }
+
+    /// A batch of lease-only jobs answers in the order given, a job without
+    /// a live lease answers `None` without running, and the whole batch costs
+    /// one rendezvous per occupied shard however many jobs it carries. A job
+    /// panic still reaches the caller once every shard has answered.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn leased_batch_answers_in_order_with_one_rendezvous_per_shard() {
+        let service = Arc::new(DeclLoweringService::new());
+        let st = oxc_span::SourceType::ts();
+        let leased: Vec<(SnapshotKey, LeaseOutcome)> = (0..24u8)
+            .map(|i| {
+                let k = key(&format!("/ws/batch-{i}.ts"), i);
+                let source: Arc<str> =
+                    Arc::from("type A = 1;\n".repeat(usize::from(i) + 1).as_str());
+                let lease = service.acquire_lease(&k, &source, st);
+                (k, lease)
+            })
+            .collect();
+        let unleased = key("/ws/unleased.ts", 99);
+        let mut jobs: Vec<LeasedJob<usize>> = leased
+            .iter()
+            .map(|(k, _)| LeasedJob {
+                key: k.clone(),
+                run: Box::new(|program| {
+                    program.map_or(0, |program| program.borrow_dependent().body.len())
+                }),
+            })
+            .collect();
+        jobs.insert(
+            3,
+            LeasedJob {
+                key: unleased.clone(),
+                run: Box::new(|_| unreachable!("a job without a lease never runs")),
+            },
+        );
+        let occupied: std::collections::BTreeSet<usize> = jobs
+            .iter()
+            .map(|job| shard_index(&job.key, service.workers().len()))
+            .collect();
+
+        let before = service.handoff_count();
+        let answers = service.run_leased_batch(jobs);
+        assert_eq!(
+            service.handoff_count() - before,
+            occupied.len() as u64,
+            "one rendezvous per occupied shard"
+        );
+        let mut expected: Vec<Option<usize>> = (1..=24).map(Some).collect();
+        expected.insert(3, None);
+        assert_eq!(answers, expected, "answers follow the jobs' order");
+
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            service.run_leased_batch(vec![
+                LeasedJob {
+                    key: leased[0].0.clone(),
+                    run: Box::new(|_| -> usize { panic!("job bug") }),
+                },
+                LeasedJob {
+                    key: leased[1].0.clone(),
+                    run: Box::new(|_| 1),
+                },
+            ])
+        }));
+        assert!(panicked.is_err(), "a job panic must reach the caller");
+        assert_eq!(
+            service.run_leased(&leased[1].0, |program| program.is_some()),
+            Some(true),
+            "the workers survive a panicking batch with their retention intact"
+        );
+        drop(leased);
     }
 
     /// An UN-LEASED run parses transiently and retains nothing: a second

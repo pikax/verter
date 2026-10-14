@@ -895,6 +895,33 @@ macro_rules! owned_lowering_from_source_inputs {
                 };
                 bundle.prepared_type_decls.get_in(owner, name)
             }
+            fn batch_type_bodies(
+                &self,
+                demands: &[verter_session_query::source::demand::TypeBodyBatchDemand<'_>],
+            ) -> verter_session_query::source::demand::BatchedBodies {
+                verter_type_engine::count_resolver_context_call!("OwnedLowering::batch_type_bodies");
+                let sources: Vec<_> = demands
+                    .iter()
+                    .map(|demand| SourceInputProvider::source(self, demand.source))
+                    .collect();
+                let batch: Vec<_> = demands
+                    .iter()
+                    .zip(&sources)
+                    .filter_map(|(demand, source)| {
+                        source.as_ref().map(|source| {
+                            verter_semantic_source::decl_body_memo::TypeBodyDemand {
+                                memo: source.decl_bodies(),
+                                owner: demand.owner,
+                                name: demand.name,
+                                scope: demand.scope,
+                            }
+                        })
+                    })
+                    .collect();
+                verter_session_query::source::demand::BatchedBodies::new(Box::new(
+                    verter_semantic_source::decl_body_memo::prime_type_bodies(&batch),
+                ))
+            }
             fn prepared_type_for_projection(
                 &self,
                 input: &verter_session_query::inputs::prepared::PreparedInputRecord,
