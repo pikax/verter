@@ -837,10 +837,14 @@ fn every_base_borrows_one_augmentation_collection_order() {
         let snapshot = store.global_contributor_index().snapshot();
         let contributors = snapshot.lookup(&key.target, "Shared", None, true);
         let lookup = |order: &Arc<ProgramFileOrder>| {
-            let (view, observed) =
-                snapshot.augmentation_order(&key, &augmenters, "Shared", &contributors, |_| {
-                    Some(Arc::clone(order))
-                });
+            let (view, observed) = snapshot.augmentation_order(
+                &key,
+                &augmenters,
+                "Shared",
+                &contributors,
+                verter_session_query::inputs::contributors::FileScopeContribution::TypeBody,
+                |_| Some(Arc::clone(order)),
+            );
             assert!(observed.is_some_and(|observed| Arc::ptr_eq(&observed, order)));
             view
         };

@@ -13,7 +13,8 @@
 //! that symbol's contributor fingerprint, including a proved-empty set.
 use verter_session_query::inputs::contributors::{
     classify_shallow_module_kind, fingerprint_of, is_automatic_lib_canonical,
-    AugmentationCandidate, ContributorEntry, ContributorOrigin, FileModuleKind, SymbolContributors,
+    AugmentationCandidate, ContributorEntry, ContributorOrigin, FileModuleKind,
+    FileScopeContribution, SymbolContributors,
 };
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -110,6 +111,7 @@ struct ProjectViewKey {
 struct CollectionViewKey {
     target: crate::file_artifact_store::AugmentationTargetKey,
     name: Arc<str>,
+    selection: FileScopeContribution,
     augmenters: Hash16,
     contributors: Hash16,
     /// Fingerprint of the program order the view is sorted by; `None`
@@ -315,13 +317,15 @@ impl GlobalContributorPopulation {
     /// program order. Each declaring base borrows the same slot order. The
     /// order is read through `order`, given every candidate file — `None`
     /// when they need none — and returned for the reader to observe. A
-    /// library the program does not load contributes nothing.
+    /// library the program does not load contributes nothing. `selection`
+    /// names the file-scope declarations ordered beside the augmenters.
     pub(crate) fn augmentation_order(
         &self,
         key: &crate::file_artifact_store::AugmentationTargetKey,
         augmenters: &verter_session_query::resolution::AugmenterSet,
         name: &str,
         contributors: &SymbolContributors,
+        selection: FileScopeContribution,
         order: impl FnOnce(&mut dyn Iterator<Item = &str>) -> Option<Arc<ProgramFileOrder>>,
     ) -> (
         Arc<[verter_session_query::inputs::contributors::AugmentationCandidate]>,
@@ -347,6 +351,7 @@ impl GlobalContributorPopulation {
         let view_key = CollectionViewKey {
             target: key.clone(),
             name: Arc::from(name),
+            selection,
             augmenters: augmenters.fingerprint,
             contributors: contributors.fingerprint,
             program_order: order.as_ref().map(|order| order.fingerprint()),
@@ -390,13 +395,18 @@ impl GlobalContributorPopulation {
                                     order.loads_library(&entry.artifact_key.canonical)
                                 })
                         })
-                        .filter(|(_, entry)| {
-                            entry.origin == ContributorOrigin::FileScopeInterface
-                                || (entry.origin == ContributorOrigin::FileScopeNamespace
-                                    && !interface_declarers.contains(&(
-                                        entry.artifact_key.canonical.as_ref(),
-                                        entry.symbol.as_ref(),
-                                    )))
+                        .filter(|(_, entry)| match selection {
+                            FileScopeContribution::TypeBody => {
+                                entry.origin == ContributorOrigin::FileScopeInterface
+                                    || (entry.origin == ContributorOrigin::FileScopeNamespace
+                                        && !interface_declarers.contains(&(
+                                            entry.artifact_key.canonical.as_ref(),
+                                            entry.symbol.as_ref(),
+                                        )))
+                            }
+                            FileScopeContribution::EnumBlock => {
+                                entry.origin == ContributorOrigin::FileScopeValue
+                            }
                         })
                         .map(|(i, entry)| {
                             (

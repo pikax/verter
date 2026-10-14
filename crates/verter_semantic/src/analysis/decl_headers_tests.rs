@@ -1172,3 +1172,71 @@ declare global { namespace GN { function gf(): 6; } namespace GX { function gx()
         .keys()
         .any(|key| key.name.as_ref() == "EN.f"));
 }
+
+/// An enum an ambient block declares — directly, or in a namespace nested
+/// in the block — is indexed into that block scope's tables only: a type
+/// and a value header of its (qualified) name and its member names with
+/// their declared positions, in order, ambient; the file's own tables, the
+/// file's enum of the same name included, keep only the file's own enum.
+///
+/// Mutation: indexing only a `declare global` block's own enums leaves
+/// `N.E` and the `declare module` block's `E` without headers; indexing an
+/// augmentation enum into the file's tables lists `B` among the file's own
+/// `E`'s members.
+#[test]
+fn an_ambient_blocks_enum_indexes_into_its_scope_with_its_member_positions() {
+    use verter_type_expr::{DeclBindingKey, TopLevelOwnerId};
+    let source = "export enum E { X = 9 }\n\
+        declare global { enum E { B = 2, C } namespace N { enum E { D } } }\n\
+        declare module \"./a\" { enum E { F = 1 } }\n";
+    let index = assert_name_parity_as(source, oxc_span::SourceType::ts());
+    let owner = TopLevelOwnerId::ordinary_file();
+    let global = AugmentationScopeKind::Global;
+    let module = AugmentationScopeKind::Module("./a".to_owned());
+    let at = |needle: &str| u32::try_from(source.find(needle).expect("member")).expect("offset");
+    for (scope, name, members) in [
+        (&global, "E", vec![("B", "B = 2"), ("C", "C }")]),
+        (&global, "N.E", vec![("D", "D }")]),
+        (&module, "E", vec![("F", "F = 1")]),
+    ] {
+        let header = index
+            .enum_header_in(Some(scope), owner, name)
+            .unwrap_or_else(|| panic!("{scope:?} enum `{name}`"));
+        assert_eq!(
+            header.member_names,
+            members
+                .iter()
+                .map(|(member, _)| (*member).to_owned())
+                .collect::<Vec<_>>(),
+            "{scope:?} `{name}` members"
+        );
+        assert_eq!(
+            header.member_positions,
+            members
+                .iter()
+                .map(|(_, written)| EnumMemberPosition {
+                    start: at(written),
+                    ambient: true,
+                })
+                .collect::<Vec<_>>(),
+            "{scope:?} `{name}` member positions"
+        );
+        assert!(index
+            .augmentation_type_header_in(scope, owner, name)
+            .is_some());
+        assert_eq!(
+            index
+                .augmentation_value_header_in(scope, owner, name)
+                .map(|header| header.kind),
+            Some(ValueDeclKind::Enum)
+        );
+    }
+    let own = index
+        .enum_header_in(None, owner, "E")
+        .expect("the file's own enum");
+    assert_eq!(own.member_names, vec!["X".to_owned()]);
+    assert!(index
+        .value_headers
+        .keys()
+        .all(|key| *key == DeclBindingKey::new(owner, "E")));
+}

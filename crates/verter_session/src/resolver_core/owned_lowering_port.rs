@@ -724,11 +724,12 @@ macro_rules! owned_lowering_from_source_inputs {
                 augmenters: &verter_session_query::resolution::AugmenterSet,
                 name: &str,
                 contributors: &verter_session_query::inputs::contributors::SymbolContributors,
+                selection: verter_session_query::inputs::contributors::FileScopeContribution,
             ) -> Arc<[verter_session_query::inputs::contributors::AugmentationCandidate]> {
                 verter_type_engine::count_resolver_context_call!("OwnedLowering::augmentation_contributor_order");
                 let host = SourceInputProvider::source_host(self);
                 let (ordered, order) = host.project_type_store().indexed().global_contributor_index().snapshot()
-                    .augmentation_order(key, augmenters, name, contributors,
+                    .augmentation_order(key, augmenters, name, contributors, selection,
                         |candidates| {
                             let candidates: Vec<&str> = candidates.collect();
                             host.declaration_order(anchor, candidates.iter().copied())

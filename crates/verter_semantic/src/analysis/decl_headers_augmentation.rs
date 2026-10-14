@@ -145,6 +145,15 @@ pub(super) fn index_augmentation_block(
                     Declaration::ClassDeclaration(cls) => {
                         index_augmentation_class_value(cls, ctx, index, scope);
                     }
+                    Declaration::TSEnumDeclaration(enum_decl) => {
+                        index_augmentation_enum(
+                            enum_decl,
+                            enum_decl.id.name.as_str(),
+                            ctx,
+                            index,
+                            scope,
+                        );
+                    }
                     Declaration::TSNamespaceDeclaration(module) => {
                         index_augmentation_module_declaration(module, ctx, index, scope, None);
                     }
@@ -169,6 +178,9 @@ pub(super) fn index_augmentation_block(
             }
             Statement::ClassDeclaration(cls) => {
                 index_augmentation_class_value(cls, ctx, index, scope);
+            }
+            Statement::TSEnumDeclaration(enum_decl) => {
+                index_augmentation_enum(enum_decl, enum_decl.id.name.as_str(), ctx, index, scope);
             }
             // A namespace nested inside an ambient augmentation block
             // (`declare global { namespace JSX { ... } }`) registers its inner
@@ -344,6 +356,10 @@ fn index_namespaced_statement_into_augmentation(
                 .or_default();
             index_function_in(func, ctx, scoped, Some(namespace));
         }
+        Statement::TSEnumDeclaration(enum_decl) if implicit_export => {
+            let name = format!("{namespace}.{}", enum_decl.id.name);
+            index_augmentation_enum(enum_decl, &name, ctx, index, scope);
+        }
         _ => {}
     }
 }
@@ -392,8 +408,43 @@ fn index_namespaced_declaration_into_augmentation(
                 .or_default();
             index_function_in(func, ctx, scoped, Some(namespace));
         }
+        Declaration::TSEnumDeclaration(enum_decl) => {
+            let name = format!("{namespace}.{}", enum_decl.id.name);
+            index_augmentation_enum(enum_decl, &name, ctx, index, scope);
+        }
         _ => {}
     }
+}
+
+/// An enum an ambient block declares (`name` qualified by the namespaces
+/// of the block it is nested in) is a block of the enum of that name the
+/// block's scope augments: its member names and positions, and its type and
+/// value headers, index into the scope's tables as `index_enum` indexes a
+/// file's own enum, never into the file's. The block is ambient.
+fn index_augmentation_enum(
+    enum_decl: &TSEnumDeclaration<'_>,
+    name: &str,
+    ctx: HeaderStatementContext<'_>,
+    index: &mut DeclHeaderIndex,
+    scope: &AugmentationScopeKind,
+) {
+    let DeclHeaderIndex {
+        augmentation_enum_headers,
+        augmentation_type_headers,
+        augmentation_value_headers,
+        ..
+    } = index;
+    super::index_enum_into(
+        enum_decl,
+        name,
+        ctx,
+        true,
+        super::EnumHeaderTables {
+            enums: augmentation_enum_headers.entry(scope.clone()).or_default(),
+            types: augmentation_type_headers.entry(scope.clone()).or_default(),
+            values: augmentation_value_headers.entry(scope.clone()).or_default(),
+        },
+    );
 }
 
 /// An ambient-augmentation class contributes its value side and the
