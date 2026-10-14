@@ -12795,9 +12795,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
-    /// Whether the member of the mapped type's `source` at the literal
-    /// `key` is optional; `None` when the source's surface or the key does
-    /// not read.
+    /// Whether the member of the mapped type's `source` at the binder
+    /// argument `key` is optional; `None` when the source's surface or the
+    /// key does not read.
     fn mapped_source_member_optional(
         &self,
         source: SemanticNodeId,
@@ -12812,48 +12812,64 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         source: SemanticNodeId,
         key: SemanticNodeId,
     ) -> Option<SurfaceMember> {
-        let graph = self.graph();
-        let name: Arc<str> = match graph.node_data(key).as_deref()? {
-            SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String(text)) => {
-                Arc::from(text.as_str())
-            }
+        let key = self.mapped_binder_property_key(key)?;
+        let object = self.mapped_source_object(source)?;
+        match self.graph().node_data(object).as_deref()? {
+            SemanticNodeData::Object(surface) => match surface.project_known_key(&key) {
+                crate::semantic_query::SurfaceKeyProjection::Exact(member) => Some(member.clone()),
+                crate::semantic_query::SurfaceKeyProjection::AbsentProven => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// The property a mapped binder argument addresses: a string or number
+    /// literal, or the nominal type of a `unique symbol` key. Other keys
+    /// (broad primitives, patterns) address no single member.
+    pub(super) fn mapped_binder_property_key(
+        &self,
+        key: SemanticNodeId,
+    ) -> Option<crate::semantic_query::PropertyKey> {
+        let data = self.graph().node_data(key)?;
+        match data.as_ref() {
+            SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String(text)) => Some(
+                crate::semantic_query::PropertyKey::String(Arc::from(text.as_str())),
+            ),
             SemanticNodeData::Literal(crate::semantic_query::LiteralValue::Number(number)) => {
-                Arc::from(crate::semantic_query::index_key::js_number_to_string(*number).as_str())
+                Some(crate::semantic_query::PropertyKey::String(Arc::from(
+                    crate::semantic_query::index_key::js_number_to_string(*number).as_str(),
+                )))
             }
-            _ => return None,
-        };
+            SemanticNodeData::TypeOfNominal(_) => data
+                .typeof_nominal_identity()
+                .map(|identity| crate::semantic_query::PropertyKey::UniqueSymbol(identity.clone())),
+            _ => None,
+        }
+    }
+
+    /// The object surface a mapped type's `source` reads its authored
+    /// member modifiers from, resolved once for any number of keys.
+    pub(super) fn mapped_source_object(&self, source: SemanticNodeId) -> Option<SemanticNodeId> {
         // Read authored modifiers before a relation's apparent-type view can
         // replace them with the member's read type.
-        let resolved = if matches!(
-            graph.node_data(source).as_deref(),
+        if matches!(
+            self.graph().node_data(source).as_deref(),
             Some(SemanticNodeData::Object(_))
         ) {
-            source
-        } else {
-            let read = self.execute_read(SemanticQueryKey::ProjectPath {
-                base: source,
-                path: Arc::from([]),
-                context: crate::semantic_query::ProjectionReductionContext::published(
-                    ProjectionMode::Shallow,
-                ),
-            });
-            if !read.fact_status.is_complete() {
-                return None;
-            }
-            let QueryResult::Value(resolved) = read.value else {
-                return None;
-            };
-            resolved
-        };
-        match graph.node_data(resolved).as_deref()? {
-            SemanticNodeData::Object(surface) => {
-                match surface.project_known_key(&crate::semantic_query::PropertyKey::String(name)) {
-                    crate::semantic_query::SurfaceKeyProjection::Exact(member) => {
-                        Some(member.clone())
-                    }
-                    crate::semantic_query::SurfaceKeyProjection::AbsentProven => None,
-                }
-            }
+            return Some(source);
+        }
+        let read = self.execute_read(SemanticQueryKey::ProjectPath {
+            base: source,
+            path: Arc::from([]),
+            context: crate::semantic_query::ProjectionReductionContext::published(
+                ProjectionMode::Shallow,
+            ),
+        });
+        if !read.fact_status.is_complete() {
+            return None;
+        }
+        match read.value {
+            QueryResult::Value(resolved) => Some(resolved),
             _ => None,
         }
     }
@@ -12871,6 +12887,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         value: SemanticNodeId,
         source: SemanticNodeId,
         key: SemanticNodeId,
+    ) -> SemanticNodeId {
+        self.mapped_member_optionality_with(mapper, value, source, || {
+            self.mapped_source_member_optional(source, key)
+        })
+    }
+
+    /// [`Self::mapped_member_optionality`] with the source member's
+    /// optionality read by the caller, which may answer many keys from one
+    /// index over the source surface.
+    pub(super) fn mapped_member_optionality_with(
+        &self,
+        mapper: &crate::semantic_query::MapperKey,
+        value: SemanticNodeId,
+        source: SemanticNodeId,
+        source_optional: impl Fn() -> Option<bool>,
     ) -> SemanticNodeId {
         let (strict_null_checks, exact_optional) = self
             .graph()
@@ -12909,7 +12940,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 if !exact_optional
                     && !arms.iter().any(is_undefined)
                     && source != mapper.key_space
-                    && self.mapped_source_member_optional(source, key) == Some(true) =>
+                    && source_optional() == Some(true) =>
             {
                 let mut arms = arms;
                 arms.push(self.primitive_node(PrimitiveKind::Undefined));
@@ -12918,7 +12949,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             crate::semantic_query::OptionalityMod::Remove
                 if !exact_optional
                     && arms.iter().any(is_undefined)
-                    && self.mapped_source_member_optional(source, key) == Some(true) =>
+                    && source_optional() == Some(true) =>
             {
                 let kept: Vec<SemanticNodeId> =
                     arms.into_iter().filter(|arm| !is_undefined(arm)).collect();

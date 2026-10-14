@@ -113,6 +113,94 @@ fn mapped_index_equal_template_pattern_binds_the_value() {
 }
 
 #[test]
+fn mapped_index_assignable_template_pattern_binds_the_value() {
+    let host = make_host_with_footprint();
+    upsert_ts(&host, "/indices.ts", "export type Numbered = `a${number}`; export type Constant = { [K in `a${string}`]: 1 }[`a${number}`]; export type Identity = { [K in `a${string}`]: K }[`a${number}`]; export type Open<T extends string> = { [K in `a${string}`]: 1 }[`a${T}`];");
+    let free = Arc::new(TypeExpr::TypeParameter(verter_type_expr::TypeParam {
+        name: "Free".into(),
+        constraint: None,
+        default: None,
+        is_const: false,
+    }));
+    for _ in 0..2 {
+        assert_eq!(
+            mapped_index_wire_answer(&host, "Constant", &[]),
+            TypeExpr::Literal(verter_type_expr::LiteralValue::Number(1.0))
+        );
+        assert_eq!(
+            mapped_index_wire_answer(&host, "Identity", &[]),
+            mapped_index_wire_answer(&host, "Numbered", &[])
+        );
+        let open = mapped_index_wire_answer(&host, "Open", &[Arc::clone(&free)]);
+        assert!(
+            matches!(open, TypeExpr::IndexedAccess { .. }),
+            "an open interpolant must keep the deferred access: {open:?}"
+        );
+    }
+}
+
+/// `1 | undefined`, in either union order.
+fn assert_one_or_undefined(answer: &TypeExpr, label: &str) {
+    let TypeExpr::Union(arms) = answer else {
+        panic!("{label}: an optional source member must read `1 | undefined`, got {answer:?}");
+    };
+    assert_eq!(arms.len(), 2, "{label}: {answer:?}");
+    assert!(
+        arms.contains(&TypeExpr::Literal(verter_type_expr::LiteralValue::Number(
+            1.0
+        ))) && arms.contains(&TypeExpr::Primitive(PrimitiveName::Undefined)),
+        "{label}: {answer:?}"
+    );
+}
+
+#[test]
+fn mapped_index_unique_symbol_key_keeps_source_optionality() {
+    let host = make_host_with_footprint();
+    upsert_ts(&host, "/indices.ts", "declare const tag: unique symbol; interface Optional { [tag]?: 1 } interface Required { [tag]: 1 } export type OptionalSymbol = { [K in keyof Optional]: 1 }[keyof Optional]; export type RequiredSymbol = { [K in keyof Required]: 1 }[keyof Required];");
+    for _ in 0..2 {
+        assert_one_or_undefined(
+            &mapped_index_wire_answer(&host, "OptionalSymbol", &[]),
+            "OptionalSymbol",
+        );
+        assert_eq!(
+            mapped_index_wire_answer(&host, "RequiredSymbol", &[]),
+            TypeExpr::Literal(verter_type_expr::LiteralValue::Number(1.0))
+        );
+    }
+}
+
+#[test]
+fn mapped_index_optional_source_modifiers_read_in_linear_work() {
+    let mut scans = Vec::new();
+    for count in [32usize, 64, 128] {
+        let host = make_host_with_footprint();
+        let members = (0..count)
+            .map(|i| format!("k{i}?: {i};"))
+            .collect::<String>();
+        upsert_ts(
+            &host,
+            "/indices.ts",
+            &format!(
+                "interface S {{ {members} }} export type Probe = {{ [K in keyof S]: 1 }}[keyof S];"
+            ),
+        );
+        let before = verter_type_engine::semantic_query::key_scan_comparisons_for_tests();
+        let answer = mapped_index_wire_answer(&host, "Probe", &[]);
+        scans.push(verter_type_engine::semantic_query::key_scan_comparisons_for_tests() - before);
+        assert_one_or_undefined(&answer, &format!("{count} optional keys"));
+    }
+    // Reading every key's source modifier scans the source surface once:
+    // doubling the key count at most doubles the comparisons (a per-key
+    // scan quadruples them).
+    for pair in scans.windows(2) {
+        assert!(
+            pair[1] <= 2 * pair[0] + 8,
+            "source modifier reads must stay linear in the key count: {scans:?}"
+        );
+    }
+}
+
+#[test]
 fn mapped_index_empty_filtered_domains_are_never() {
     let host = make_host_with_footprint();
     upsert_ts(&host, "/indices.ts", "interface Numeric { 0: 1 } interface Empty {} export type NumericOnly = { [K in keyof Numeric & string]: Numeric[K] }[keyof Numeric & string]; export type NoKeys = { [K in keyof Empty & string]: Empty[K] }[keyof Empty & string]; export type Disjoint = { [K in string & number]: K }[string & number]; export type FilteredHop = { [K in keyof Numeric & string]: { value: 1 } }[keyof Numeric & string]['value']; export type NeverHop = { [K in never]: { value: 1 } }[never]['value'];");
