@@ -550,7 +550,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
 
     /// Each named root's `typeof`; a root with no value (a type-only
     /// export) is no member.
-    fn typeof_members(
+    pub(super) fn typeof_members(
         &self,
         members: Vec<(Arc<str>, ValueRootKey)>,
         context: crate::semantic_query::ProjectionReductionContext,
@@ -591,7 +591,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         )
     }
 
-    fn module_member(name: Arc<str>, value: SemanticNodeId, origin: &str) -> SurfaceMember {
+    pub(super) fn module_member(
+        name: Arc<str>,
+        value: SemanticNodeId,
+        origin: &str,
+    ) -> SurfaceMember {
         SurfaceMember {
             key: crate::semantic_query::AuthoredPropertyKey::String(name),
             value,

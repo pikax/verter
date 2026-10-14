@@ -2247,6 +2247,13 @@ fn collect_augmentation_block(
                 let decl = &export.declaration;
                 collect_augmentation_declaration(decl, source, out, &scope);
             }
+            // A `declare global` enum is a block of the global enum, both a
+            // type and a value of the block's scope; the block is ambient.
+            Statement::TSEnumDeclaration(decl) if scope == AugmentationScopeKind::Global => {
+                let mut inner = LoweredStatementParts::reading(&out.class_fields);
+                collect_enum(decl, decl.id.name.to_string(), true, &mut inner);
+                move_value_parts_into_augmentation(inner, out, &scope);
+            }
             // Value-space declarations (`const`/`let`/`var`, `function`,
             // `class`) augment the target module's VALUE surface. Reuse the
             // file-scope lowering so the full retained parts are built exactly
@@ -2304,6 +2311,11 @@ fn collect_augmentation_declaration(
         | Declaration::ClassDeclaration(_) => {
             let mut inner = LoweredStatementParts::reading(&out.class_fields);
             collect_from_declaration(decl, source, true, &mut inner);
+            move_value_parts_into_augmentation(inner, out, scope);
+        }
+        Declaration::TSEnumDeclaration(decl) if *scope == AugmentationScopeKind::Global => {
+            let mut inner = LoweredStatementParts::reading(&out.class_fields);
+            collect_enum(decl, decl.id.name.to_string(), true, &mut inner);
             move_value_parts_into_augmentation(inner, out, scope);
         }
         Declaration::TSNamespaceDeclaration(module) => {

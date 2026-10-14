@@ -818,8 +818,9 @@ const MERGED_C: &str = "enum NE { B = NE.A + 1 }\n";
 /// checker evaluates it: auto-increment continues after a constant member
 /// computed from another block (`C` is 7), a string member concatenates
 /// another block's, a `const enum` merges like any other, a namespace
-/// merged with the enum adds no member, and a member initialized with
-/// `Math.random()` is computed — its template is `string`.
+/// merged with the enum adds no member but its exported value is a property
+/// of the enum object, and a member initialized with `Math.random()` is
+/// computed — its template is `string`.
 ///
 /// Measured on TypeScript 7.0.2 (`tsc --ignoreConfig --strict` over
 /// `a.ts b.ts c.ts`, each read off a TS2322 against `never`):
@@ -827,14 +828,16 @@ const MERGED_C: &str = "enum NE { B = NE.A + 1 }\n";
 /// "abc"`, `` `${CE}` `` `"1" | "2" | "3"`, `` `${NE}` `` `"1" | "2"`,
 /// `` `${Rand}` `` `string`, `AutoInc.C` `AutoInc.C`, `Rand` `Rand`,
 /// `Rand.F` `Rand.F`, `1 extends Rand.F`, `AutoInc.C extends 7` and
-/// `CE.C extends 3` `"y"`, `keyof typeof NE` `"A" | "B" | "x"`. These
+/// `CE.C extends 3` `"y"`, `keyof typeof NE` `"A" | "B" | "x"`, `typeof
+/// NE.x` `2`. These
 /// declarations raise no diagnostic. Two blocks omitting their first
 /// initializer raise TS2432 and still number from `0` (`` `${Two}` `` is
 /// `"0" | "1"`); a bare member after `Math.random()` raises TS1061 and is
 /// computed (`1 extends Bad.S` is `"y"`, `` `${Bad}` `` `string`).
 ///
 /// Mutation: reading each enum's first block alone answers `` `${AutoInc}`
-/// `` `"3"` and `AutoInc.C` an unresolved member.
+/// `` `"3"` and `AutoInc.C` an unresolved member; an enum object of its
+/// members alone answers `keyof typeof NE` `"A" | "B"`.
 #[test]
 fn global_enum_blocks_evaluate_as_the_checker_evaluates_them() {
     let yes = |probe: &'static str| (probe, "\"y\"");
@@ -847,6 +850,8 @@ fn global_enum_blocks_evaluate_as_the_checker_evaluates_them() {
             ("`${Str}`", "\"a\" | \"ab\" | \"abc\""),
             ("`${CE}`", "\"1\" | \"2\" | \"3\""),
             ("`${NE}`", "\"1\" | \"2\""),
+            ("keyof typeof NE", "\"A\" | \"B\" | \"x\""),
+            ("typeof NE.x", "2"),
             ("`${Rand}`", "string"),
             ("AutoInc.C", "AutoInc.C"),
             ("Rand", "Rand"),
@@ -944,4 +949,73 @@ fn editing_one_block_of_a_merged_enum_matches_a_cold_build() {
         "the edited warm host answers as a cold build"
     );
     assert_ne!(warm_after, unedited, "the edit changes the answer");
+}
+
+/// A global enum is merged wherever its blocks are declared: the enum a
+/// script's namespace exports (`namespace N { export enum E {} }` in two
+/// scripts is one `N.E`), and a module's `declare global` block of a
+/// script's enum, whichever file declares first; an enum declared with a
+/// namespace in one file carries the namespace's exported values.
+///
+/// Measured on TypeScript 7.0.2 (`tsc --ignoreConfig --strict` over the
+/// fixture files, each read off a TS2322 against `never`; the fixtures
+/// raise no other diagnostic): over the two namespace blocks
+/// `` `${N.E}` `` is `"1" | "2" | "3"`, `keyof typeof N.E` `"A" | "B" |
+/// "C"` and `N.E.C extends 3` `"y"`; over the script block and the
+/// `declare global` block, in either file order, `` `${E}` `` is `"1" |
+/// "2" | "6"`, `keyof typeof E` `"A" | "B" | "C"`, `E.B` `E.B` and `E.C
+/// extends 6` `"y"`; over one file declaring `NE` and its namespace,
+/// `keyof typeof NE` is `"A" | "f" | "x"` and `typeof NE.x` `2`.
+///
+/// Mutation: merging only a script's top-level enum answers `` `${N.E}`
+/// `` `"1"` and `` `${E}` `` `"1"`; leaving a `declare global` enum
+/// unindexed leaves the module-first `E` unresolved; an enum object of its
+/// members alone answers `keyof typeof NE` `"A"`.
+#[test]
+fn a_global_enum_merges_every_block_and_its_namespace() {
+    let mut failures = Vec::new();
+    let namespace_blocks = [
+        ("a.ts", "namespace N { export enum E { A = 1 } }\n"),
+        (
+            "b.ts",
+            "namespace N { export enum E { B = N.E.A + 1, C } }\n",
+        ),
+    ];
+    failures.extend(mismatches_in(
+        enum_project(&namespace_blocks),
+        "export {};\n",
+        &[
+            ("`${N.E}`", "\"1\" | \"2\" | \"3\""),
+            ("keyof typeof N.E", "\"A\" | \"B\" | \"C\""),
+            ("N.E.C extends 3 ? \"y\" : \"n\"", "\"y\""),
+        ],
+    ));
+    let script = "enum E { A = 1 }\n";
+    let augmentation = "export {};\ndeclare global { enum E { B = 2, C = E.A + 5 } }\n";
+    for files in [
+        [("a.ts", script), ("m.ts", augmentation)],
+        [("g.ts", augmentation), ("z.ts", script)],
+    ] {
+        failures.extend(mismatches_in(
+            enum_project(&files),
+            "export {};\n",
+            &[
+                ("`${E}`", "\"1\" | \"2\" | \"6\""),
+                ("keyof typeof E", "\"A\" | \"B\" | \"C\""),
+                ("E.B", "E.B"),
+                ("E.C extends 6 ? \"y\" : \"n\"", "\"y\""),
+            ],
+        ));
+    }
+    let with_namespace = "enum NE { A = 1 }\n\
+        namespace NE { export const x = 2; export function f() { return 1 as const } }\n";
+    failures.extend(mismatches_in(
+        enum_project(&[("a.ts", with_namespace)]),
+        "export {};\n",
+        &[
+            ("keyof typeof NE", "\"A\" | \"f\" | \"x\""),
+            ("typeof NE.x", "2"),
+        ],
+    ));
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
