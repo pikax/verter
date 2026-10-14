@@ -3,6 +3,8 @@
 Date: 2026-10-08
 Verdict: RESCOPE
 
+Status: the prerequisite SKR-ABORT-1 has landed. The stand-down disposition and the documentation-only verification below described the candidate while that prerequisite was outstanding; they no longer govern it. The resumed implementation is held to the Acceptance section (R1.1–R1.7), and this record is retained as its decision record.
+
 ## Context
 
 The projection classifier discards its availability arm at production delivery. The initial implementation withheld aborts inferred from accumulated reason classes and exempted flow returns; that implementation has already been withdrawn from the captured candidate. The existing flow preparation path also uses UNSTABLE_STATE when preparation refuses but an independent evaluation produces a usable value. Direct function-return and audited flow consumers do not all pass through flow_return_fact. Thus neither blanket withholding nor the exemption satisfies the required distinction.
