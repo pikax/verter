@@ -174,12 +174,6 @@ enum ProjectionFrame {
         data: Arc<SemanticNodeData>,
         source: SemanticNodeId,
     },
-    MappedAfterValue {
-        state: Box<MappedContinuationState>,
-    },
-    MappedFinish {
-        state: Box<MappedContinuationState>,
-    },
     ReferenceArgsResume {
         node: SemanticNodeId,
         context: ProjectionReductionContext,
@@ -245,14 +239,6 @@ pub(super) enum ProjectionPoll {
 pub(super) enum ProjectionFinish {
     Node(SemanticNodeId),
     Instantiate(SemanticQueryKey),
-}
-
-struct MappedContinuationState {
-    node: SemanticNodeId,
-    context: ProjectionReductionContext,
-    data: Arc<SemanticNodeData>,
-    source_id: SemanticNodeId,
-    key_space: SemanticNodeId,
 }
 
 struct ReferenceArgsState {
@@ -328,7 +314,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             _ => false,
         });
-        tail || ancestors.iter().any(|frame| match frame {
+        tail || self.in_deferred_interior(ancestors)
+    }
+
+    fn in_deferred_interior(&self, ancestors: &[ProjectionFrame]) -> bool {
+        ancestors.iter().any(|frame| match frame {
             // Both branches of an undecided conditional are projected here;
             // the checker instantiates neither.
             ProjectionFrame::ConditionalAfterTrue { .. }
@@ -353,15 +343,95 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// Whether the checker defers instantiating the type arguments of an
     /// application of `declaration`: an interface's or a class's (a
     /// library one included), never an alias's.
-    fn defers_type_arguments(&self, declaration: &crate::semantic_query::DeclIdentity) -> bool {
+    pub(super) fn defers_type_arguments(
+        &self,
+        declaration: &crate::semantic_query::DeclIdentity,
+    ) -> bool {
         use verter_session_query::declarations::TypeDeclKind;
         if declaration.canonical_id.as_ref() == "__builtin__" {
-            return true;
+            // Utility intrinsics model aliases; the remaining builtin
+            // carriers model interfaces and classes (including ThisType).
+            return verter_session_query::type_solver::builtin::BuiltinUtility::from_name(
+                &declaration.decl_name,
+            )
+            .is_none();
         }
         !matches!(
             self.prepared_decl_kind(declaration),
             Some(TypeDeclKind::Alias)
         )
+    }
+
+    /// Arguments are projected at the caller's altitude. The continuation
+    /// stack classifies recursive applications with `in_deferred_position`:
+    /// alias arguments are eager; class and interface arguments are deferred.
+    pub(super) fn instantiation_argument_context(
+        &self,
+        declaration: &crate::semantic_query::DeclIdentity,
+        context: ProjectionReductionContext,
+    ) -> ProjectionReductionContext {
+        let context = context.into_structural_provenance();
+        if self.defers_type_arguments(declaration) && may_reduce_operator(context) {
+            context.into_structural_transit_with_mode(ProjectionMode::Navigate)
+        } else {
+            context
+        }
+    }
+
+    pub(super) fn argument_operand_context(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+    ) -> ProjectionReductionContext {
+        match self.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::Mapped { .. }) => {
+                context.into_structural_transit_with_mode(ProjectionMode::Navigate)
+            }
+            Some(SemanticNodeData::IndexedAccess { .. }) => {
+                // The application keeps its authored operand identity. The
+                // conditional or member reader owns the value demand.
+                context.into_structural_transit_with_mode(ProjectionMode::Navigate)
+            }
+            Some(SemanticNodeData::DeclRef { identity })
+                if self.defers_type_arguments(identity) =>
+            {
+                context.into_structural_transit_with_mode(ProjectionMode::Navigate)
+            }
+            Some(SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
+                context.with_mode(ProjectionMode::Navigate)
+            }
+            _ => context,
+        }
+    }
+
+    fn conditional_check_context(
+        context: ProjectionReductionContext,
+    ) -> ProjectionReductionContext {
+        // Branch selection reads the check's type, not its member values.
+        context.with_mode(if context.mode == ProjectionMode::Skeleton {
+            ProjectionMode::Skeleton
+        } else {
+            ProjectionMode::Navigate
+        })
+    }
+
+    pub(super) fn reference_argument_context(
+        &self,
+        continuation: &CarrierArgsContinuation,
+        context: ProjectionReductionContext,
+    ) -> ProjectionReductionContext {
+        use super::carrier::RefHeadResolution;
+        match continuation {
+            CarrierArgsContinuation::Instantiate { identity, .. }
+            | CarrierArgsContinuation::Builtin { identity, .. }
+            | CarrierArgsContinuation::Intern {
+                head: RefHeadResolution::Resolved(identity) | RefHeadResolution::Builtin(identity),
+                ..
+            } => self.instantiation_argument_context(identity, context),
+            _ => context
+                .into_structural_provenance()
+                .into_structural_transit_with_mode(ProjectionMode::Navigate),
+        }
     }
 
     #[inline(always)]
@@ -847,7 +917,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     data,
                     check,
                 } => {
-                    let check_id = projected(memo, check, context);
+                    let check_id = projected(memo, check, Self::conditional_check_context(context));
                     let check_is_object_relation_subject = matches!(
                         self.graph().node_data(check_id).as_deref(),
                         Some(
@@ -898,7 +968,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         unreachable!("conditional staging frame must carry a conditional")
                     };
                     let decision_shell = SemanticNodeData::Conditional {
-                        check: projected(memo, *check, context),
+                        check: projected(memo, *check, Self::conditional_check_context(context)),
                         extends: projected(memo, *extends, extends_context),
                         true_branch_ref: *true_branch_ref,
                         false_branch_ref: *false_branch_ref,
@@ -907,7 +977,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     };
                     work_credit.settle();
                     let selected = match self.execute_type_node(SemanticQueryKey::Conditional {
-                        check: projected(memo, *check, context),
+                        check: projected(memo, *check, Self::conditional_check_context(context)),
                         extends: projected(memo, *extends, extends_context),
                         true_branch: *true_branch_ref,
                         false_branch: *false_branch_ref,
@@ -1014,7 +1084,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     };
                     work_credit.settle();
                     let result = match self.execute_type_node(SemanticQueryKey::Conditional {
-                        check: projected(memo, *check, context),
+                        check: projected(memo, *check, Self::conditional_check_context(context)),
                         extends: projected(memo, *extends, extends_context),
                         true_branch: projected(memo, *true_branch_ref, context),
                         false_branch: projected(memo, *false_branch_ref, context),
@@ -1075,7 +1145,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             result
                         } else {
                             match self.graph().node_data(source_id).as_deref() {
-                                Some(SemanticNodeData::Opaque(_)) | None => {
+                                None => self.opaque(QueryError::Miss),
+                                _ if super::raise::node_is_unknown_materializing_failure(
+                                    self, source_id,
+                                ) =>
+                                {
                                     self.opaque(QueryError::Miss)
                                 }
                                 _ => self.graph().intern_preserving_scope(
@@ -1087,64 +1161,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     } else {
                         source_id
                     };
-                    let value_expr = mapper.value_expr;
-                    frames.push(ProjectionFrame::MappedAfterValue {
-                        state: Box::new(MappedContinuationState {
-                            node,
-                            context,
-                            data,
-                            source_id,
-                            key_space,
-                        }),
-                    });
-                    frames.push(ProjectionFrame::Enter {
-                        node: value_expr,
-                        context,
-                    });
-                }
-                ProjectionFrame::MappedAfterValue { state } => {
-                    let SemanticNodeData::Mapped { mapper, .. } = state.data.as_ref() else {
-                        unreachable!("mapped staging frame must carry a mapped node")
-                    };
-                    if let Some(name_remap) = mapper.name_remap {
-                        let context = state.context;
-                        frames.push(ProjectionFrame::MappedFinish { state });
-                        frames.push(ProjectionFrame::Enter {
-                            node: name_remap,
-                            context,
-                        });
-                    } else {
-                        work_credit.settle();
-                        let result = self.finish_mapped_projection(
-                            state.node,
-                            state.context,
-                            state.data.as_ref(),
-                            state.source_id,
-                            state.key_space,
-                            memo,
-                        );
-                        if let Err(reasons) = work_credit.refresh() {
-                            trip = Some(reasons.into());
-                            break;
-                        }
-                        self.memoize_projected(memo, state.node, state.context, result);
-                    }
-                }
-                ProjectionFrame::MappedFinish { state } => {
                     work_credit.settle();
                     let result = self.finish_mapped_projection(
-                        state.node,
-                        state.context,
-                        state.data.as_ref(),
-                        state.source_id,
-                        state.key_space,
-                        memo,
+                        node,
+                        context,
+                        data.as_ref(),
+                        source_id,
+                        key_space,
                     );
                     if let Err(reasons) = work_credit.refresh() {
                         trip = Some(reasons.into());
                         break;
                     }
-                    self.memoize_projected(memo, state.node, state.context, result);
+                    self.memoize_projected(memo, node, context, result);
                 }
                 ProjectionFrame::AwaitInstantiation { .. } => {
                     unreachable!("an awaiting node resumes only with its delivery")
@@ -1156,7 +1185,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 } => {
                     if state.next_arg < state.args.len() {
                         let argument = state.args[state.next_arg];
-                        let argument_context = state.argument_context;
+                        let argument_context =
+                            self.argument_operand_context(argument, state.argument_context);
                         state.next_arg += 1;
                         frames.push(ProjectionFrame::ReferenceArgsResume {
                             node,
@@ -1172,7 +1202,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             state
                                 .args
                                 .iter()
-                                .map(|argument| projected(memo, *argument, state.argument_context))
+                                .map(|argument| {
+                                    self.canonical_argument_carrier(projected(
+                                        memo,
+                                        *argument,
+                                        self.argument_operand_context(
+                                            *argument,
+                                            state.argument_context,
+                                        ),
+                                    ))
+                                })
                                 .collect::<Vec<_>>()
                                 .into_boxed_slice(),
                         );
@@ -1461,13 +1500,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         data: &SemanticNodeData,
         source_id: SemanticNodeId,
         key_space: SemanticNodeId,
-        memo: &ViewMemo,
     ) -> SemanticNodeId {
         let SemanticNodeData::Mapped { mapper, .. } = data else {
             unreachable!("mapped finish frame must carry a mapped node")
         };
-        let value_expr = projected(memo, mapper.value_expr, context);
-        let name_remap = mapper.name_remap.map(|name| projected(memo, name, context));
+        // Outer parameters have already substituted into this shape. The
+        // mapped binder is still unbound: value and remap evaluation belongs
+        // to the per-key materializer, after it supplies the selected key.
+        let value_expr = mapper.value_expr;
+        let name_remap = mapper.name_remap;
         let projected_mapper = MapperKey {
             parameter_node: mapper.parameter_node,
             key_space,
@@ -1476,14 +1517,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             readonly: mapper.readonly,
             over_type_variable: mapper.over_type_variable,
             name_remap,
-            kind: crate::semantic_query::MapperKind::classify_value_expr(
-                self.graph(),
-                value_expr,
-                source_id,
-                mapper.parameter_node,
-            ),
+            kind: mapper.kind,
         };
-        if super::raise::mapped_type_is_open_or_unknown(self, source_id, &projected_mapper) {
+        if !may_reduce_operator(context)
+            || super::raise::mapped_type_is_open_or_unknown(self, source_id, &projected_mapper)
+        {
             self.graph().intern_preserving_scope(
                 node,
                 SemanticNodeData::Mapped {
@@ -1552,7 +1590,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 });
                 frames.push(ProjectionFrame::Enter {
                     node: check,
-                    context,
+                    context: Self::conditional_check_context(context),
                 });
                 Ok(true)
             }
@@ -1726,29 +1764,25 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     .filter(|_| remaining == 0)
                     .map(|target| (target, context))
             }
-            SemanticNodeData::KeyOf { base } => (index == 0).then_some((*base, context)),
+            SemanticNodeData::KeyOf { base } => (index == 0).then_some((
+                *base,
+                context.into_structural_transit_with_mode(ProjectionMode::Navigate),
+            )),
             SemanticNodeData::IndexedAccess {
                 object,
                 index: index_key,
             } => {
-                let object_context = if matches!(
-                    self.graph().node_data(*object).as_deref(),
-                    Some(SemanticNodeData::IndexedAccess { .. })
-                ) {
-                    context.with_mode(ProjectionMode::Navigate)
-                } else {
-                    context
-                };
+                let object_context = self.indexed_access_operand_context(*object, context);
                 match (index, index_key) {
                     (0, _) => Some((*object, object_context)),
                     (1, IndexKey::Computed(index)) => Some((*index, context)),
                     _ => None,
                 }
             }
-            SemanticNodeData::InstantiationRef { args, .. } => {
-                let argument_context = context.into_structural_provenance();
+            SemanticNodeData::InstantiationRef { base, args } => {
+                let argument_context = self.instantiation_argument_context(base, context);
                 args.get(index)
-                    .map(|argument| (*argument, argument_context))
+                    .map(|argument| (*argument, self.argument_operand_context(*argument, argument_context)))
             }
             SemanticNodeData::Primitive(_)
             | SemanticNodeData::Literal(_)
@@ -1789,10 +1823,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 expressions: children,
                 ..
             } => ProjectionChildPlan::Uniform { children, context },
-            SemanticNodeData::InstantiationRef { args, .. } => ProjectionChildPlan::Uniform {
-                children: args,
-                context: context.into_structural_provenance(),
-            },
+            SemanticNodeData::InstantiationRef { .. } => {
+                ProjectionChildPlan::General { data, context }
+            }
             SemanticNodeData::Object(view) => ProjectionChildPlan::Object { view, context },
             SemanticNodeData::Signature {
                 params,

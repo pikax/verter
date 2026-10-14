@@ -808,6 +808,89 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         Some((declaration, args))
     }
 
+    /// The interface or class reference a type-alias application stands
+    /// for, when the other operand is a reference to that declaration.
+    ///
+    /// The checker resolves an alias reference where it is written: the
+    /// application IS the type its body instantiates to, and when that type
+    /// is a reference to a generic interface or class, two references to
+    /// one declaration infer from and relate by their type arguments
+    /// (`MessageBase<X> extends UIMessage<infer M>` infers through the
+    /// `UIMessage<…>` the alias selects, never through its members).
+    /// `None` when `node` applies no alias, when its instantiation is not a
+    /// reference, or when that reference names a declaration other than
+    /// `other`'s.
+    pub(super) fn alias_application_reference_to(
+        &self,
+        node: SemanticNodeId,
+        other: SemanticNodeId,
+    ) -> Option<SemanticNodeId> {
+        use verter_session_query::declarations::TypeDeclKind;
+        let declaration_of = |node: SemanticNodeId| -> Option<DeclIdentity> {
+            match self.graph().node_data(node)?.as_ref() {
+                SemanticNodeData::DeclRef { identity } => Some(identity.clone()),
+                SemanticNodeData::InstantiationRef { base, .. } => Some(base.clone()),
+                _ => None,
+            }
+        };
+        let is_alias = |declaration: &DeclIdentity| {
+            self.ctx
+                .prepared_type_decl_return_only(
+                    declaration.canonical_id.as_ref(),
+                    declaration.owner,
+                    declaration.decl_name.as_ref(),
+                )
+                .is_some_and(|prepared| prepared.kind == TypeDeclKind::Alias)
+        };
+        let target = declaration_of(other)?;
+        if is_alias(&target) {
+            return None;
+        }
+        let transit = crate::semantic_query::ProjectionReductionContext::structural_transit();
+        let mut current = node;
+        let mut visited = rustc_hash::FxHashSet::default();
+        while visited.insert(current) {
+            if let Some(SemanticNodeData::Alias(inner)) = self.graph().node_data(current).as_deref()
+            {
+                current = *inner;
+                continue;
+            }
+            let (declaration, args) = match self.graph().node_data(current)?.as_ref() {
+                SemanticNodeData::DeclRef { identity } => (identity.clone(), Arc::from([])),
+                SemanticNodeData::InstantiationRef { base, args } => {
+                    (base.clone(), Arc::clone(args))
+                }
+                _ => return None,
+            };
+            if same_declaration(&declaration, &target) {
+                return (current != node).then_some(current);
+            }
+            if !is_alias(&declaration) {
+                return None;
+            }
+            let key = crate::semantic_query::SemanticQueryKey::Instantiate(
+                crate::semantic_query::InstantiateKey::new(
+                    self.type_slot_for(
+                        Arc::clone(&declaration.canonical_id),
+                        declaration.owner,
+                        Arc::clone(&declaration.decl_name),
+                    ),
+                    args,
+                    self.instantiate_context_for(&declaration.canonical_id, transit),
+                ),
+            );
+            let crate::semantic_query::QueryResult::Value(output) =
+                crate::semantic_query::SemanticQueryApi::execute_type_node(self, key)
+            else {
+                return None;
+            };
+            current = self
+                .evaluate_deferred_semantic_node_with_context(output.value, transit)
+                .into_active_query_build_node(self);
+        }
+        None
+    }
+
     fn raw_generic_reference(
         &self,
         node: SemanticNodeId,

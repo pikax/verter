@@ -18,6 +18,7 @@ use dashmap::mapref::entry::Entry;
 
 use super::SemanticGraphStore;
 use crate::fact_signature_helpers::ReadSetSignatureExt;
+use crate::project_semantic_dispatch::evaluate::DeferredEvaluationDemand;
 use crate::semantic_query::{ProjectionReductionContext, SemanticNodeId};
 
 /// Entry cap for the substitution and deferred-evaluation FIFO stores.
@@ -114,13 +115,14 @@ impl SemanticGraphStore {
     /// A deferred operator can read declarations and export routes. Its
     /// interned input is immutable, but its evaluated answer needs the
     /// complete read proof to validate against this request's view.
-    pub fn evaluate_deferred_memo_get(
+    pub(crate) fn evaluate_deferred_memo_get(
         &self,
         node: SemanticNodeId,
         context: ProjectionReductionContext,
+        demand: DeferredEvaluationDemand,
         ctx: &dyn crate::resolver_core::fact_validation_port::FactValidation,
     ) -> Option<crate::semantic_query::CacheRead<SemanticNodeId>> {
-        self.read_deferred_evaluation(node, context, |entry| {
+        self.read_deferred_evaluation(node, context, demand, |entry| {
             verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::clone(
                 &entry.evidence.0,
             ))
@@ -132,11 +134,12 @@ impl SemanticGraphStore {
         &self,
         node: SemanticNodeId,
         context: ProjectionReductionContext,
+        demand: DeferredEvaluationDemand,
         validate: impl FnOnce(&DeferredEvaluationMemoEntry) -> bool,
     ) -> Option<crate::semantic_query::CacheRead<SemanticNodeId>> {
         let entry = self
             .evaluate_deferred_memo
-            .get(&(node, context))
+            .get(&(node, context, demand))
             .map(|entry| Arc::clone(entry.value()));
         let hit = entry
             .filter(|entry| {
@@ -144,12 +147,14 @@ impl SemanticGraphStore {
                     true
                 } else {
                     self.evaluate_deferred_memo
-                        .remove_if(&(node, context), |_, current| Arc::ptr_eq(current, entry));
+                        .remove_if(&(node, context, demand), |_, current| {
+                            Arc::ptr_eq(current, entry)
+                        });
                     false
                 }
             })
             .map(|entry| {
-                crate::fact_signature_helpers::bubble_fact_signature_via_tls(&entry.evidence.0);
+                crate::fact_tracing::tracing::observe_fan_out_canonical(&entry.evidence.0);
                 crate::semantic_query::CacheRead {
                     lease: entry.lease.clone(),
                     value: entry.result,
@@ -178,6 +183,7 @@ impl SemanticGraphStore {
         &self,
         node: SemanticNodeId,
         context: ProjectionReductionContext,
+        demand: DeferredEvaluationDemand,
         result: SemanticNodeId,
         receipt: Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
         evidence: crate::fact_signature_helpers::StructuralCarrierReadSet,
@@ -212,7 +218,7 @@ impl SemanticGraphStore {
             lease: super::delivery_lease::SemanticDeliveryLease::from_roots(roots),
             _retention: retention,
         });
-        let key = (node, context);
+        let key = (node, context, demand);
         match self.evaluate_deferred_memo.entry(key) {
             Entry::Occupied(mut slot) => {
                 slot.insert(entry);
@@ -235,21 +241,34 @@ impl SemanticGraphStore {
     }
 
     /// Admission inspection for tests; production reads always validate facts.
+    /// An entry admitted under either evaluation demand counts: a mapped
+    /// key's selected value and an operator shell memoize separately.
     #[cfg(any(test, feature = "test-support"))]
     pub fn peek_evaluate_deferred_memo_for_tests(
         &self,
         node: SemanticNodeId,
         context: ProjectionReductionContext,
     ) -> Option<()> {
-        self.evaluate_deferred_memo
-            .contains_key(&(node, context))
-            .then_some(())
+        [
+            DeferredEvaluationDemand::Shell,
+            DeferredEvaluationDemand::SelectedValue,
+        ]
+        .into_iter()
+        .any(|demand| {
+            self.evaluate_deferred_memo
+                .contains_key(&(node, context, demand))
+        })
+        .then_some(())
     }
 
     /// Release both stores during explicit graph invalidation. Ordinary
     /// evaluation reads establish freshness through their retained facts;
     /// correctness does not depend on this cleanup running after an edit.
     pub(super) fn clear_hash_cons_memos(&self) {
+        self.structural_domains.clear();
+        self.structural_domains_fifo.lock().clear();
+        self.binder_dependencies.clear();
+        self.binder_dependencies_fifo.lock().clear();
         self.substitute_memo.clear();
         self.substitute_memo_fifo.lock().clear();
         self.evaluate_deferred_memo.clear();

@@ -1617,16 +1617,16 @@ impl ReadSetSignatureExt for ReadSetSignature {
     /// tracer on the current TLS stack. No-op when the tracer stack
     /// is empty or `facts` is empty.
     #[inline]
-    fn bubble(&self, ctx: &dyn crate::resolver_core::fact_validation_port::FactValidation) {
-        bubble_fact_signature(ctx, &self.facts);
+    fn bubble(&self, _ctx: &dyn crate::resolver_core::fact_validation_port::FactValidation) {
+        self.bubble_via_tls();
     }
 
     /// Bubble via TLS only — for fast-path warm hits that don't
-    /// thread a `ResolverContext` reference. Equivalent to
-    /// `bubble_fact_signature_via_tls(&self.facts)`.
+    /// thread a `ResolverContext` reference. Retain the witness as a verified
+    /// canonical run instead of sorting its facts again in each consumer.
     #[inline]
     fn bubble_via_tls(&self) {
-        bubble_fact_signature_via_tls(&self.facts);
+        crate::fact_tracing::tracing::observe_fan_out_canonical(&self.facts);
     }
 }
 

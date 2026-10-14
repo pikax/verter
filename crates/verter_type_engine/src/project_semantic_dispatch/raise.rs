@@ -3539,6 +3539,11 @@ struct OpenMemoKey {
     role: OpenRole,
 }
 
+enum OpenNodeStep {
+    Verdict(bool),
+    Children(Vec<(SemanticNodeId, OperandPosition)>),
+}
+
 impl<'a, C: crate::resolver_core::ResolverCapabilities> OpenWalk<'a, C> {
     /// Construct an [`OpenWalk`] for `role` with the given bound binder
     /// (`None` for roles that bind no mapper binder), starting at
@@ -3691,36 +3696,64 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> OpenWalk<'a, C> {
         ctx: &dyn crate::resolver_core::ResolverContext<C>,
         node: SemanticNodeId,
     ) -> bool {
-        let memo_key = OpenMemoKey {
-            node,
-            position: self.position,
-            role: self.role,
-        };
-        if let Some(&verdict) = self.memo.get(&memo_key) {
-            // Completed verdict: return it VERBATIM. The hash-consed graph
-            // shares one `SemanticNodeId` per structure, and the
-            // `InstantiationRef` per-argument collect does not
-            // short-circuit — a revisited OPEN node must stay `true`
-            // (`Pick<Foo<T, T>, K>`: arg1 revisits arg0's `T`), or the
-            // per-argument vector would prove a key-positioned open param
-            // CLOSED and re-open the storm class behind the fuse. The
-            // position + role key keeps verdicts for the same node under
-            // different operand positions / policy roles independent.
-            return verdict;
+        struct Pending {
+            key: OpenMemoKey,
+            children: std::vec::IntoIter<(SemanticNodeId, OperandPosition)>,
         }
-        if !self.in_flight.insert(memo_key) {
-            // IN-FLIGHT back-edge — a genuine cycle on the current walk
-            // frontier. Closed for THIS revisit only (the cycle
-            // contributes no new openness signal); never memoized, so a
-            // later completed verdict for the node wins. Defensive: the
-            // intern-only hash-consed semantic graph is a DAG today, so
-            // this back-edge cannot fire at this layer.
-            return false;
+        let surrounding = self.position;
+        let mut next = (node, surrounding);
+        let mut pending: Vec<Pending> = Vec::new();
+        'walk: loop {
+            self.position = next.1;
+            let key = OpenMemoKey {
+                node: next.0,
+                position: next.1,
+                role: self.role,
+            };
+            let verdict = if let Some(&verdict) = self.memo.get(&key) {
+                verdict
+            } else if !self.in_flight.insert(key) {
+                // A back edge contributes no new openness signal and is never
+                // memoized before the active node obtains its real verdict.
+                false
+            } else {
+                match self.node_openness_step(ctx, next.0) {
+                    OpenNodeStep::Verdict(verdict) => {
+                        self.in_flight.remove(&key);
+                        self.memo.insert(key, verdict);
+                        verdict
+                    }
+                    OpenNodeStep::Children(children) => {
+                        let mut children = children.into_iter();
+                        if let Some(child) = children.next() {
+                            pending.push(Pending { key, children });
+                            next = child;
+                            continue;
+                        }
+                        self.in_flight.remove(&key);
+                        self.memo.insert(key, false);
+                        false
+                    }
+                }
+            };
+            // Finish the OR in source order, stopping at its first open child.
+            // Every parent retains its own role/position-qualified memo key.
+            loop {
+                let Some(mut parent) = pending.pop() else {
+                    self.position = surrounding;
+                    return verdict;
+                };
+                if !verdict {
+                    if let Some(child) = parent.children.next() {
+                        pending.push(parent);
+                        next = child;
+                        continue 'walk;
+                    }
+                }
+                self.in_flight.remove(&parent.key);
+                self.memo.insert(parent.key, verdict);
+            }
         }
-        let verdict = self.node_openness_uncached(ctx, node);
-        self.in_flight.remove(&memo_key);
-        self.memo.insert(memo_key, verdict);
-        verdict
     }
 
     /// Recurse into `node` AT the given operand position, restoring the
@@ -3743,11 +3776,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> OpenWalk<'a, C> {
     /// Single-node verdict compute behind [`Self::node_is_open`]'s
     /// memoization. Never call directly — the memo/in-flight discipline
     /// lives in the wrapper.
-    fn node_openness_uncached(
+    fn node_openness_step(
         &mut self,
         ctx: &dyn crate::resolver_core::ResolverContext<C>,
         node: SemanticNodeId,
-    ) -> bool {
+    ) -> OpenNodeStep {
         if self.budget == 0 {
             // Walk budget exhausted. The KEY-DOMAIN question is
             // conservatively undecidable ⇒ open; the
@@ -3756,7 +3789,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> OpenWalk<'a, C> {
             // question NO (closed), and the armed runaway fuse remains the
             // depth backstop. Over-firing the carrier-stop on a deep
             // CLOSED value would be the worse failure.
-            return self.role.question().undecidable_is_open();
+            return OpenNodeStep::Verdict(self.role.question().undecidable_is_open());
         }
         self.budget -= 1;
 
@@ -3765,8 +3798,111 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> OpenWalk<'a, C> {
             // it as open (not provably finite); the
             // outer-generic-reachability question treats it as closed (a
             // missing node carries no outer generic).
-            return self.role.question().undecidable_is_open();
+            return OpenNodeStep::Verdict(self.role.question().undecidable_is_open());
         };
+        let position = self.position;
+        let descend =
+            self.role.descend_value_surfaces() || position == OperandPosition::ValueSensitive;
+        let mut children = Vec::new();
+        match data.as_ref() {
+            SemanticNodeData::Alias(target) => children.push((*target, position)),
+            SemanticNodeData::ClassExpressionInstance { surface, .. } => {
+                children.push((*surface, position))
+            }
+            SemanticNodeData::KeyOf { base } => children.push((*base, OperandPosition::KeyDomain)),
+            SemanticNodeData::IndexedAccess { object, index } => {
+                children.push((*object, OperandPosition::ValueSensitive));
+                if let crate::semantic_query::IndexKey::Computed(node) = index {
+                    children.push((*node, OperandPosition::KeyDomain));
+                }
+            }
+            SemanticNodeData::TemplateLiteral { expressions, .. } => {
+                children.extend(expressions.iter().map(|node| (*node, position)))
+            }
+            SemanticNodeData::Object(view) => {
+                children.extend(
+                    view.index_signatures
+                        .iter()
+                        .map(|signature| (signature.key_type, position)),
+                );
+                if descend {
+                    children.extend(
+                        view.positive_members()
+                            .iter()
+                            .map(|member| (member.value, position)),
+                    );
+                    children.extend(view.call_signatures.iter().map(|node| (*node, position)));
+                    children.extend(
+                        view.construct_signatures
+                            .iter()
+                            .map(|node| (*node, position)),
+                    );
+                    children.extend(
+                        view.index_signatures
+                            .iter()
+                            .map(|signature| (signature.value_type, position)),
+                    );
+                }
+            }
+            SemanticNodeData::Signature {
+                params,
+                return_type,
+                predicate,
+                ..
+            } => {
+                if descend {
+                    children.extend(params.iter().map(|param| (param.ty, position)));
+                    children.push((*return_type, position));
+                    children.extend(
+                        predicate
+                            .as_ref()
+                            .and_then(|predicate| predicate.ty)
+                            .map(|node| (node, position)),
+                    );
+                }
+            }
+            SemanticNodeData::Array { element, .. } => {
+                if descend {
+                    children.push((*element, position));
+                }
+            }
+            SemanticNodeData::Tuple { elements, .. } => {
+                children.extend(
+                    elements
+                        .iter()
+                        .filter(|element| element.rest)
+                        .map(|element| (element.value, OperandPosition::KeyDomain)),
+                );
+                if descend {
+                    children.extend(elements.iter().map(|element| (element.value, position)));
+                }
+            }
+            composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
+                children.extend(
+                    composite
+                        .composite_members()
+                        .expect("composite arm")
+                        .iter()
+                        .map(|node| (*node, position)),
+                )
+            }
+            SemanticNodeData::MergedDecl { contributors } => {
+                children.extend(contributors.iter().map(|node| (*node, position)))
+            }
+            _ => {
+                return OpenNodeStep::Verdict(self.node_openness_leaf(ctx, node, data));
+            }
+        }
+        OpenNodeStep::Children(children)
+    }
+
+    /// Declaration and scoped-binder leaves of the ordered openness walk.
+    fn node_openness_leaf(
+        &mut self,
+        ctx: &dyn crate::resolver_core::ResolverContext<C>,
+        node: SemanticNodeId,
+        data: Arc<SemanticNodeData>,
+    ) -> bool {
         match data.as_ref() {
             // --- type parameter: open unless BOUND for this walk ---
             // An unsubstituted outer `TypeParam` is an unbound generic;
@@ -3834,23 +3970,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> OpenWalk<'a, C> {
             // instantiation argument opens them) plus BOTH branches under
             // the surrounding position.
             SemanticNodeData::Conditional { .. } => self.conditional_is_open(ctx, node, &data),
-            // `keyof`'s value IS its base's KEY SET — the base re-enters
-            // the `KeyDomain` position even under a value-sensitive
-            // operand, matching the TypeExpr arm.
-            SemanticNodeData::KeyOf { base } => {
-                self.node_is_open_at(ctx, *base, OperandPosition::KeyDomain)
-            }
-            // An indexed access is open when EITHER the object OR the index
-            // key space is open. The OBJECT operand is VALUE-sensitive:
-            // `Wrap<T>['a']` IS the member VALUE `a` (e.g. `BigOpen<T>` —
-            // an open surface), so a per-argument-closed-but-any-arg-open
-            // object must OPEN the access. The INDEX stays a key/keyspace
-            // question; a `TypeParam`-keyed access (`T[K]` with open `K`)
-            // is just as undecidable as an open object.
-            SemanticNodeData::IndexedAccess { object, index } => {
-                self.node_is_open_at(ctx, *object, OperandPosition::ValueSensitive)
-                    || self.index_key_is_open(ctx, index)
-            }
             // A nested mapped type splits BY ROLE per operand. Its `source`
             // / mapper `key_space` are KEY-PRODUCTION proof operands
             // ([`OpenRole::KeyDomainProof`]); its `as`-clause `name_remap` is
@@ -3872,9 +3991,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> OpenWalk<'a, C> {
             // binder + role scope is local to each operand, hence a scoped
             // child walk per role (shared budget threaded, fresh memo).
             SemanticNodeData::Mapped { .. } => self.mapped_is_open(ctx, &data),
-            SemanticNodeData::TemplateLiteral { expressions, .. } => {
-                expressions.iter().any(|e| self.node_is_open(ctx, *e))
-            }
+
             // An instantiation's openness depends on the walk's question.
             // The KEY-DOMAIN walks (`Pick`/`Omit` enumeration domain AND
             // the mapped source / key space) judge per-argument: an open
@@ -3898,13 +4015,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> OpenWalk<'a, C> {
                 self.instantiation_is_open(ctx, node, &data)
             }
 
-            // --- carriers we can follow one transparent hop ---
-            SemanticNodeData::Alias(target) => self.node_is_open(ctx, *target),
-            // A class expression's instance surface may reach the outer
-            // type parameters of the declaration it is authored under.
-            SemanticNodeData::ClassExpressionInstance { surface, .. } => {
-                self.node_is_open(ctx, *surface)
-            }
             SemanticNodeData::DeclRef { identity } => {
                 // For the outer-generic-reachability question a declaration
                 // reference cannot carry the mapper's outer generic
@@ -3935,97 +4045,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> OpenWalk<'a, C> {
                 .is_closed()
             }
 
-            // --- finite value surfaces ---
-            // Under the key-domain policies these are closed leaves
-            // (their NAMED members' presence makes the KEY space
-            // enumerable) — EXCEPT an index signature's KEY type, which is
-            // key-domain reachable in every policy: a key over an unbound
-            // generic / undecidable structure leaves the produced key set
-            // open even though the named-member set is fixed, while a
-            // concrete key (`[k: string]`) is the bounded Record-class
-            // signature surface and stays closed. The mapped value-body
-            // policy — and ANY walk standing at a `ValueSensitive`
-            // operand (the enclosing operator consumes these surfaces'
-            // VALUES) — DESCENDS the value surfaces to find an unbound
-            // generic nested in a member value / function parameter /
-            // element type.
-            SemanticNodeData::Object(view) => {
-                if view
-                    .index_signatures
-                    .iter()
-                    .any(|s| self.node_is_open(ctx, s.key_type))
-                {
-                    return true;
-                }
-                (self.role.descend_value_surfaces()
-                    || self.position == OperandPosition::ValueSensitive)
-                    && (view
-                        .positive_members()
-                        .iter()
-                        .any(|m| self.node_is_open(ctx, m.value))
-                        || view
-                            .call_signatures
-                            .iter()
-                            .any(|s| self.node_is_open(ctx, *s))
-                        || view
-                            .construct_signatures
-                            .iter()
-                            .any(|s| self.node_is_open(ctx, *s))
-                        || view
-                            .index_signatures
-                            .iter()
-                            .any(|s| self.node_is_open(ctx, s.value_type)))
-            }
-            SemanticNodeData::Signature {
-                params,
-                return_type,
-                predicate,
-                ..
-            } => {
-                (self.role.descend_value_surfaces()
-                    || self.position == OperandPosition::ValueSensitive)
-                    && (params.iter().any(|p| self.node_is_open(ctx, p.ty))
-                        || self.node_is_open(ctx, *return_type)
-                        || predicate
-                            .and_then(|predicate| predicate.ty)
-                            .is_some_and(|target| self.node_is_open(ctx, target)))
-            }
-            SemanticNodeData::Array { element, .. } => {
-                (self.role.descend_value_surfaces()
-                    || self.position == OperandPosition::ValueSensitive)
-                    && self.node_is_open(ctx, *element)
-            }
-            // A tuple's index KEY domain is fixed by its arity — EXCEPT
-            // a `rest` element (`[string, ...T]`), whose arity
-            // contribution depends on the rest TYPE: rest elements are
-            // judged at `KeyDomain` in every position (an open rest
-            // element leaves the index set undecidable ⇒ open), while
-            // non-rest elements stay undescended closed leaves at
-            // `KeyDomain`. No tuple-arity algebra: a rest element whose
-            // type closes at `KeyDomain` conservatively keeps the
-            // domain closed. Matches the TypeExpr `Tuple` arm.
-            SemanticNodeData::Tuple { elements, .. } => {
-                if elements.iter().any(|e| {
-                    e.rest && self.node_is_open_at(ctx, e.value, OperandPosition::KeyDomain)
-                }) {
-                    return true;
-                }
-                (self.role.descend_value_surfaces()
-                    || self.position == OperandPosition::ValueSensitive)
-                    && elements.iter().any(|e| self.node_is_open(ctx, e.value))
-            }
             SemanticNodeData::Primitive(_)
             | SemanticNodeData::Literal(_)
             | SemanticNodeData::EnumLiteral(_) => false,
-
-            // --- composites: open iff any arm is open ---
-            composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
-                let arms = composite.composite_members().expect("composite arm");
-                arms.iter().any(|a| self.node_is_open(ctx, *a))
-            }
-            SemanticNodeData::MergedDecl { contributors } => {
-                contributors.iter().any(|a| self.node_is_open(ctx, *a))
-            }
 
             // --- unresolved / fidelity carriers ---
             // A `typeof X` value-rooted lookup is NOT a resolvable
@@ -4101,10 +4123,24 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> OpenWalk<'a, C> {
             // The sealed callable carrier is a concrete indexed callable
             // position — closed for both open-ness questions.
             SemanticNodeData::DeferredCallable(_) => false,
+            SemanticNodeData::Alias(_)
+            | SemanticNodeData::ClassExpressionInstance { .. }
+            | SemanticNodeData::KeyOf { .. }
+            | SemanticNodeData::IndexedAccess { .. }
+            | SemanticNodeData::TemplateLiteral { .. }
+            | SemanticNodeData::Object(_)
+            | SemanticNodeData::Signature { .. }
+            | SemanticNodeData::Array { .. }
+            | SemanticNodeData::Tuple { .. }
+            | SemanticNodeData::Union(_)
+            | SemanticNodeData::Intersection(_)
+            | SemanticNodeData::MergedDecl { .. } => {
+                unreachable!("structural openness is driven by the worklist")
+            }
         }
     }
 
-    /// [`Self::node_openness_uncached`]'s conditional arm (a function of its
+    /// [`Self::node_openness_step`]'s conditional arm (a function of its
     /// own, so a level of the walk carries only the arm it takes).
     #[inline(never)]
     fn conditional_is_open(
@@ -4150,7 +4186,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> OpenWalk<'a, C> {
             )
     }
 
-    /// [`Self::node_openness_uncached`]'s mapped arm.
+    /// [`Self::node_openness_step`]'s mapped arm.
     #[inline(never)]
     fn mapped_is_open(
         &mut self,
@@ -4184,7 +4220,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> OpenWalk<'a, C> {
         open
     }
 
-    /// [`Self::node_openness_uncached`]'s instantiation arm.
+    /// [`Self::node_openness_step`]'s instantiation arm.
     #[inline(never)]
     fn instantiation_is_open(
         &mut self,
@@ -4304,7 +4340,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> OpenWalk<'a, C> {
         .is_closed()
     }
 
-    /// [`Self::node_openness_uncached`]'s unresolved-carrier arm.
+    /// [`Self::node_openness_step`]'s unresolved-carrier arm.
     #[inline(never)]
     fn carrier_ref_is_open(
         &mut self,
@@ -4379,26 +4415,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> OpenWalk<'a, C> {
             return false;
         }
         !self.node_is_open_at(ctx, reduced, OperandPosition::KeyDomain)
-    }
-
-    /// Whether an [`IndexKey`](crate::semantic_query::IndexKey) index
-    /// operand is OPEN. Literal string / number keys are concrete
-    /// (closed); a `TypeNode` key is open iff its referenced node is open
-    /// under the same bounded walk — always AT the `KeyDomain` position
-    /// (the index is a key/keyspace question even when the enclosing
-    /// access sits in a value-sensitive operand).
-    fn index_key_is_open(
-        &mut self,
-        ctx: &dyn crate::resolver_core::ResolverContext<C>,
-        index: &crate::semantic_query::IndexKey,
-    ) -> bool {
-        use crate::semantic_query::IndexKey;
-        match index {
-            IndexKey::String(_) | IndexKey::Number(_) | IndexKey::UniqueSymbol(_) => false,
-            IndexKey::Computed(node) => {
-                self.node_is_open_at(ctx, *node, OperandPosition::KeyDomain)
-            }
-        }
     }
 }
 

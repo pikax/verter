@@ -1732,16 +1732,17 @@ fn lower_indexed_access_chain_budget_trip_folds_partial_through_chokepoint_and_r
         projection_op_budget: 2,
         ..HostConfig::default()
     }));
-    // A nested object alias plus a deep indexed-access alias. Lowering
-    // `Deep`'s body dispatches one `IndexedAccess` per hop through
-    // `lower.rs:1476`; the third hop trips `projection_op_budget = 2`.
+    // The conditional consumes three indexed hops rather than returning
+    // their deferred shell; the constrained request refuses a nested read.
     let _ = host
         .upsert(UpsertRequest {
             canonical_id: None,
             input_id: "/w/lower_chain.ts".to_string(),
             source: Arc::from(
-                "export type Box = { a: number; b: string; c: boolean }\n\
-                 export type Deep = keyof Partial<Required<Box>>\n",
+                "export interface Leaf { c: string }\n\
+                 export interface Branch { b: Leaf }\n\
+                 export interface Box { a: Branch }\n\
+                 export type Deep = Box['a']['b']['c'] extends string ? 'yes' : 'no'\n",
             ),
             file_language: FileLanguage::script_ts(),
             aliases: Vec::new(),
@@ -1754,15 +1755,13 @@ fn lower_indexed_access_chain_budget_trip_folds_partial_through_chokepoint_and_r
         verter_type_expr::TopLevelOwnerId::ordinary_file(),
         Arc::from("Deep"),
     );
-    let resolve_env = dispatch.resolve_env_hash_for("/w/lower_chain.ts");
     let instantiate_key =
         SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
             deep_slot,
             Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-            verter_type_engine::semantic_query::InstantiateContext::non_file(
+            dispatch.instantiate_context_for(
+                "/w/lower_chain.ts",
                 ProjectionReductionContext::published(ProjectionMode::Expanded),
-                resolve_env,
-                verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
         ));
 
@@ -1775,9 +1774,13 @@ fn lower_indexed_access_chain_budget_trip_folds_partial_through_chokepoint_and_r
         None,
         host.config.projection_op_budget,
     );
-    let _ctx_guard = RequestContextGuard::install(ctx);
+    let _ctx_guard = RequestContextGuard::install(Arc::clone(&ctx));
 
     let read = dispatch.execute_read(instantiate_key.clone());
+    assert!(
+        ctx.projection_budget.is_exhausted(),
+        "the fixture must exercise an actual nested budget refusal"
+    );
     assert!(
         read.result_is_partial(),
         "the deep indexed-access chain's nested IndexedAccess budget trip MUST fold \
@@ -1798,7 +1801,7 @@ fn lower_indexed_access_chain_budget_trip_folds_partial_through_chokepoint_and_r
     let graph = host.project_type_store().semantic_graph();
     assert!(
         graph.get_unvalidated(&instantiate_key).is_none(),
-        "the partial Instantiate(Deep) MUST NOT be admitted to the family memo (Finding B closure)"
+        "the partial Instantiate(Deep) MUST NOT be admitted to the family memo"
     );
 }
 

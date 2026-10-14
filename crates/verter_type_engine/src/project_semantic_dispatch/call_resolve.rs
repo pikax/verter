@@ -2892,7 +2892,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 };
                 let instantiated =
                     self.substitute_canonical(*declared, widened.as_ref().unwrap_or(&substitution));
-                concrete_seeds.push(self.reduce_instantiated_operators(instantiated));
+                concrete_seeds.push(self.evaluate_selected_value_with_context(
+                    instantiated,
+                    crate::semantic_query::ProjectionReductionContext::published(
+                        crate::semantic_query::ProjectionMode::Expanded,
+                    ),
+                ));
             }
             crate::semantic_query::SignatureResultSource::Function(source) => match source {
                 verter_type_expr::facts::FunctionReturnSource::Flow(identity) => {

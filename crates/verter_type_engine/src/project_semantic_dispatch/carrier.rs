@@ -369,6 +369,60 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
+    /// A resolved argument has one defining scope when its checking environment
+    /// agrees with the reference site. Keep distinct environments and local
+    /// scopes; reuse canonical declaration carriers without reading a member.
+    pub(super) fn canonical_argument_carrier(&self, node: SemanticNodeId) -> SemanticNodeId {
+        let Some(data) = self.graph().node_data(node) else {
+            return node;
+        };
+        let identity = match data.as_ref() {
+            SemanticNodeData::DeclRef { identity } => identity,
+            SemanticNodeData::InstantiationRef { base, .. } => base,
+            _ => return node,
+        };
+        let Some(NodeScopeId::File {
+            canonical_id,
+            local_scope: None,
+            ..
+        }) = self.graph().node_scope(node)
+        else {
+            return node;
+        };
+        if self.ctx.semantic_compiler_options_for(&canonical_id)
+            != self
+                .ctx
+                .semantic_compiler_options_for(&identity.canonical_id)
+            || self.ctx.host_view_env_hashes_for(&canonical_id)
+                != self.ctx.host_view_env_hashes_for(&identity.canonical_id)
+            || self.ctx.host_view_project_identity_for(&canonical_id)
+                != self
+                    .ctx
+                    .host_view_project_identity_for(&identity.canonical_id)
+        {
+            return node;
+        }
+        let result = self.graph().intern_node_with_scope(
+            data.as_ref().clone(),
+            NodeScopeId::File {
+                canonical_id: Arc::clone(&identity.canonical_id),
+                owner: identity.owner,
+                whole_hash: identity.whole_hash,
+                local_scope: None,
+            },
+        );
+        if result != node {
+            self.graph().record_origin_edge(
+                result,
+                crate::semantic_query::OriginEdgeKind::Normalize,
+                Arc::from([node]),
+                crate::semantic_query::OriginMeta::None,
+                self.project_generation_signature(),
+            );
+        }
+        result
+    }
+
     /// How a resolved head finishes over its lowered arguments: a carrier or
     /// reduced node, or the instantiation whose node it is.
     /// `in_deferred_position` answers whether the reference sits where the

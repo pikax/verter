@@ -677,8 +677,9 @@ fn recursive_applications_in_deferred_positions_stay_lazy() {
 /// below is TS2589.
 #[test]
 fn recursive_applications_in_eager_positions_reach_verters_budget() {
-    const EAGER: [&str; 3] = [
+    const EAGER: [&str; 4] = [
         "type Id<Y> = Y; type X<T> = T extends any ? Id<X<[T]>> : never;",
+        "type X<T> = T extends any ? Exclude<X<[T]>, never> : never;",
         "type W<Y> = { w: Y }; type X<T> = T extends any ? W<X<[T]>> : never;",
         "type W<Y> = Y[]; type X<T> = T extends any ? W<X<[T]>> : never;",
     ];

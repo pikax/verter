@@ -36,6 +36,44 @@ export function callH() { return h('s' as string); }
 ";
 
 #[test]
+fn mapped_index_reads_values_in_the_selected_key_domain() {
+    let source = "interface Src { readonly a: 1; b?: 'two'; c: boolean }\n\
+        type Values<T> = { [K in keyof T]: T[K] }[keyof T];\n\
+        type Tags<T> = { [K in keyof T]: T[K] extends number ? 'n' : 's' }[keyof T];\n\
+        declare const marker: unique symbol;\n\
+        interface Mixed { text: 1; 0: 2; [marker]: 3 }";
+    let failures = mismatches(
+        source,
+        &[
+            (
+                "{ [K in keyof Src]: K }[keyof Src]",
+                "\"a\" | \"b\" | \"c\" | undefined",
+            ),
+            ("{ [K in keyof Src]: K }['a' | 'c']", "\"a\" | \"c\""),
+            (
+                "{ [K in keyof Src & string]: K }[keyof Src & string]",
+                "\"a\" | \"b\" | \"c\"",
+            ),
+            ("Values<Src>", "1 | \"two\" | boolean | undefined"),
+            ("Tags<{ a: 1; b: 'two' }>", "\"n\" | \"s\""),
+            (
+                "{ [K in keyof Mixed & string]: Mixed[K] }[keyof Mixed & string]",
+                "1",
+            ),
+            (
+                "{ [K in keyof Mixed & number]: Mixed[K] }[keyof Mixed & number]",
+                "2",
+            ),
+            (
+                "{ [K in keyof Mixed & symbol]: Mixed[K] }[keyof Mixed & symbol]",
+                "3",
+            ),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
 fn removing_object_optionality_preserves_authored_undefined_in_exact_mode() {
     let exact = ProbeProject {
         compiler_options: Some(r#"{ "strict": true, "exactOptionalPropertyTypes": true }"#),

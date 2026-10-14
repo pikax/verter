@@ -5469,8 +5469,59 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return RelationResult::Unknown;
         };
         let bindings_len = bindings.len();
-        let template =
+        let mut template =
             self.substitute_semantic_type_param(spec.template, spec.mapper_parameter, key);
+        // The selected key closes the helper's arguments. Unwrap its authored
+        // body before registering projection holes, preserving indexed holes
+        // as patterns rather than evaluating them as ordinary member reads.
+        let mut seen_templates = FxHashSet::default();
+        loop {
+            if !seen_templates.insert(template) {
+                self.relation_session_rollback(&property_checkpoint);
+                return RelationResult::Unknown;
+            }
+            let identity_and_args = match self.graph().node_data(template).as_deref() {
+                Some(SemanticNodeData::Alias(inner)) => {
+                    template = *inner;
+                    continue;
+                }
+                Some(SemanticNodeData::InstantiationRef { base, args }) => {
+                    Some((base.clone(), Arc::clone(args)))
+                }
+                Some(SemanticNodeData::DeclRef { identity }) => {
+                    Some((identity.clone(), Arc::from([])))
+                }
+                _ => None,
+            };
+            let Some((identity, args)) = identity_and_args else {
+                break;
+            };
+            let read = self.execute_read(SemanticQueryKey::Instantiate(
+                crate::semantic_query::InstantiateKey::new(
+                    self.type_slot_for(
+                        Arc::clone(&identity.canonical_id),
+                        identity.owner,
+                        Arc::clone(&identity.decl_name),
+                    ),
+                    args,
+                    self.instantiate_context_for(
+                        &identity.canonical_id,
+                        ProjectionReductionContext::structural_transit(),
+                    ),
+                ),
+            ));
+            if read.result_is_partial() {
+                self.relation_session_rollback(&property_checkpoint);
+                return RelationResult::Unknown;
+            }
+            template = match read.value {
+                QueryResult::Value(value) => value,
+                _ => {
+                    self.relation_session_rollback(&property_checkpoint);
+                    return RelationResult::Unknown;
+                }
+            };
+        }
         let projection_probe = self.graph().intern_node(SemanticNodeData::IndexedAccess {
             object: spec.base_infer,
             index: IndexKey::Computed(spec.mapper_parameter),
@@ -8259,6 +8310,25 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if let Some(result) = self.relate_by_variance(source, target, bindings) {
             let _ = concrete_read.discard();
             return result;
+        }
+        // An alias application on one side stands for the type its body
+        // instantiates to: a reference to the other side's declaration
+        // relates by type arguments as that reference would.
+        let through_alias = [
+            self.alias_application_reference_to(source, target)
+                .map(|resolved| (resolved, target)),
+            self.alias_application_reference_to(target, source)
+                .map(|resolved| (source, resolved)),
+        ];
+        for (source, target) in through_alias.into_iter().flatten() {
+            if let Some(result) = self.infer_from_type_arguments(source, target, bindings) {
+                let _ = concrete_read.discard();
+                return result;
+            }
+            if let Some(result) = self.relate_by_variance(source, target, bindings) {
+                let _ = concrete_read.discard();
+                return result;
+            }
         }
         let _ = concrete_read.adopt(self);
         if let Some(r) = self.try_object_vs_record_relation(source, target, bindings) {

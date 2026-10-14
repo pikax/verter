@@ -102,12 +102,6 @@ const PLAN_BUDGET: u32 = 256;
 /// 200 levels, 861,701 at 400).
 const WORK_BUDGET: usize = 100_000;
 
-/// The connected-demand work budget a mapped-type nest is read under: the
-/// nest's work grows by four units a level (813 at 200, 1,613 at 400,
-/// 4,013 at 1,000), so [`BUDGET_DEPTH`] levels charge past this, where a
-/// nest a quarter as deep answers.
-const MAPPED_WORK_BUDGET: usize = 1_000;
-
 /// The depth a form that lowers inside a type alias, or is walked at index
 /// time — on a worker's 8 MiB — is checked at.
 const WORKER_DEPTH: usize = 10_000;
@@ -1194,24 +1188,39 @@ fn mapped_types(depth: usize) -> String {
     format!("type D = {};\n", wrap(depth, "{ [K in \"a\"]: ", " }"))
 }
 
-/// Mapped types nested deep lower as frames of the locator lowering's
-/// stack (their binder frames a shared chain) and are judged open by a
-/// walk whose levels carry only the arm they take. Past the
-/// connected-demand work budget ([`MAPPED_WORK_BUDGET`]: the nest's work
-/// grows by four units a level) the probe returns the budget's typed
-/// failure, the plan budget at its production default — read on
-/// [`MAPPED_STACK`], as reading `keyof D` over the nest needs.
+/// The connected work reading `keyof D` over a mapped-type nest charges: it
+/// reads only the nest's key domain, never an unrequested mapped value, so
+/// the charge does not grow with the nest's depth.
+const MAPPED_KEY_DOMAIN_WORK: usize = 16;
+
+/// Reading `keyof D` over a mapped-type nest answers under
+/// [`MAPPED_KEY_DOMAIN_WORK`] at a quarter of [`BUDGET_DEPTH`] as at the
+/// full depth, and one unit less returns the budget's typed failure, the
+/// plan budget at its production default — read on [`MAPPED_STACK`], as
+/// reading `keyof D` over the nest needs.
 #[test]
 fn mapped_types_nested_past_the_work_budget_return() {
     in_a_fresh_process(test_path!(), || {
-        assert_returns_past_a_work_budget(
-            format!(
+        for depth in [BUDGET_DEPTH / 4, BUDGET_DEPTH] {
+            let source = format!(
                 "{}export function pf() {{ const p: keyof D = null as any; return p; }}\n",
-                mapped_types(BUDGET_DEPTH)
-            ),
-            MAPPED_WORK_BUDGET,
-            MAPPED_STACK,
-        );
+                mapped_types(depth)
+            );
+            let answered = {
+                let source = source.clone();
+                on_a_stack(MAPPED_STACK, move || {
+                    let _work = super::connected_demand::WorkBudgetForTests::install(
+                        MAPPED_KEY_DOMAIN_WORK,
+                    );
+                    audited_return_on(&footprint_host(), &source).0
+                })
+            };
+            assert_eq!(
+                answered, RETURNS_ITS_VALUE,
+                "a {depth}-level nest answers within the key domain's work"
+            );
+            assert_returns_past_a_work_budget(source, MAPPED_KEY_DOMAIN_WORK - 1, MAPPED_STACK);
+        }
     });
 }
 

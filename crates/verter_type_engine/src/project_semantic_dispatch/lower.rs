@@ -1213,14 +1213,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // arguments now lower mode-independently, so the same
                 // reference reached from a `Navigate` and an `Expanded`
                 // demand populates ONE family slot instead of two.
-                let context = reduction_context.into_structural_provenance().with_mode(
-                    match reduction_context.mode {
-                        crate::semantic_query::ProjectionMode::Expanded
-                        | crate::semantic_query::ProjectionMode::Identity => {
-                            crate::semantic_query::ProjectionMode::Navigate
-                        }
-                        other => other,
-                    },
+                let context = self.reference_argument_context(
+                    &continuation,
+                    reduction_context.into_structural_provenance().with_mode(
+                        match reduction_context.mode {
+                            ProjectionMode::Expanded | ProjectionMode::Identity => {
+                                ProjectionMode::Navigate
+                            }
+                            other => other,
+                        },
+                    ),
                 );
                 match type_arguments.first() {
                     None => LowerStep::Value(
@@ -1316,37 +1318,41 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 frames.push(LowerFrame::KeyOf {
                     context: reduction_context,
                 });
-                LowerStep::Descend(operand, reduction_context)
+                LowerStep::Descend(
+                    operand,
+                    reduction_context.into_structural_transit_with_mode(ProjectionMode::Navigate),
+                )
             }
             // Indexed access at shell level routes through the IndexedAccess
             // dispatch. The path walker materialises `T[K]` via
             // `ProjectPath` semantics.
             TypeExpr::IndexedAccess { object, index } => {
-                // Path-precision rule (mirrors `evaluate.rs`): in a NESTED
-                // `A['a']['b']`, the OUTER `['b']` access has an `object`
-                // operand that is ITSELF a `TypeExpr::IndexedAccess`
-                // (`A['a']`) — an INTERMEDIATE hop. That intermediate
-                // operand reduction demotes to `ProjectionMode::Navigate`
-                // so its sibling members are NOT eagerly expanded when the
-                // caller demanded `Expanded`; only the consumed TERMINAL
-                // segment (`['b']`) runs in the caller's mode (the
-                // eager-projection arm of [`Self::finish_indexed_access_lowering`]).
-                //
-                // When the `object` operand is NOT itself an indexed access
-                // (a `Ref` / generic instantiation / inline object — e.g.
-                // `ComponentSurface<T>['status']`), THIS access is the
-                // single consumed terminal hop, so the object base keeps
-                // the caller's mode. Demoting it unconditionally would lower
-                // the base to a shallow carrier, flip the `should_defer`
-                // shape gate to a deferred shell, and leave a demanded
-                // `Expanded` single-hop terminal unreduced.
-                let object_context = if matches!(
-                    object.as_ref(),
-                    TypeExpr::IndexedAccess { .. } | TypeExpr::Ref { .. }
+                // The object is an operand, including on a single-hop read.
+                // Keep mapped values and declaration interiors deferred until
+                // the index selects them; the terminal retains the caller's
+                // context in finish_indexed_access_lowering.
+                let mut object_head = object.as_ref();
+                while let TypeExpr::Parenthesized(inner) = object_head {
+                    object_head = inner;
+                }
+                let object_context = if matches!(object_head, TypeExpr::Mapped { .. }) {
+                    // The selected index, rather than object navigation,
+                    // owns substitution and evaluation of mapped values.
+                    reduction_context.into_structural_transit_with_mode(ProjectionMode::Navigate)
+                } else if matches!(
+                    object_head,
+                    TypeExpr::Ref { .. } | TypeExpr::IndexedAccess { .. }
                 ) {
+                    // Lowering still needs the generic carrier's navigation
+                    // context. The raise reducer's default transit/Shallow
+                    // operand context would hide callable argument bindings.
                     reduction_context.with_mode(ProjectionMode::Navigate)
-                } else {
+                } else if matches!(object_head, TypeExpr::TypeOf { .. }) {
+                    // A value-root lookup owns its module export domain,
+                    // including stable absence; it is not a type-argument hop.
                     reduction_context
+                } else {
+                    super::raise::indexed_access_object_context(reduction_context)
                 };
                 frames.push(LowerFrame::IndexedObject {
                     index,
@@ -1938,7 +1944,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
         } else {
             match graph.node_data(base_id).as_deref() {
-                Some(SemanticNodeData::Opaque(_)) | None => self.opaque(QueryError::Miss),
+                None => self.opaque(QueryError::Miss),
+                _ if super::raise::node_is_unknown_materializing_failure(self, base_id) => {
+                    self.opaque(QueryError::Miss)
+                }
                 _ => graph.intern_node_with_scope(
                     SemanticNodeData::KeyOf { base: base_id },
                     scope.clone(),
@@ -1955,17 +1964,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         reduction_context: ProjectionReductionContext,
         scope: &NodeScopeId,
     ) -> SemanticNodeId {
-        use crate::semantic_query::IndexKey;
         let graph = self.graph();
-        let should_defer = matches!(index_key, IndexKey::Computed(_))
+        // Operand lowering preserves the operator. Only its value demand may
+        // select the member; a transit read must retain both path segments.
+        let should_defer = !crate::semantic_query::may_reduce_operator(reduction_context)
+            || reduction_context.mode == ProjectionMode::Skeleton
             || !matches!(
                 graph.node_data(obj_id).as_deref(),
                 Some(SemanticNodeData::Object(_))
             )
-            // A terminal that reads a named declaration (`(typeof
-            // C)['prototype']` is `C`) stays the access: each
-            // consumer reads it at its own altitude, and a printed
-            // answer keeps the name.
             || self.indexed_access_reads_named_declaration(obj_id, &index_key);
         if should_defer {
             graph.intern_node_with_scope(
@@ -1976,9 +1983,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 scope.clone(),
             )
         } else {
-            // The terminal projection uses the caller's mode. Intermediate
-            // indexed accesses and named source carriers are lowered in
-            // Navigate so the selected member is demanded before siblings.
+            // Path-precision rule: the literal `T[K]` single-hop
+            // is the TERMINAL projection of THIS indexed access,
+            // so it runs in the CALLER's mode (not a hardcoded
+            // `Navigate`). Its object was lowered at operand altitude;
+            // only this selected terminal can expand.
+            // A structural-transit caller keeps transit/Navigate via
+            // its own `reduction_context.mode`.
             match self.execute_type_node(SemanticQueryKey::IndexedAccess {
                 base: obj_id,
                 index: index_key,
@@ -2356,7 +2367,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             }
                         } else {
                             match graph.node_data(inner_id).as_deref() {
-                                Some(SemanticNodeData::Opaque(_)) | None => {
+                                None => self.opaque(QueryError::Miss),
+                                _ if super::raise::node_is_unknown_materializing_failure(
+                                    self, inner_id,
+                                ) =>
+                                {
                                     self.opaque(QueryError::Miss)
                                 }
                                 _ => graph.intern_node_with_scope(
@@ -2409,6 +2424,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
                 mapper_env.insert(parameter.clone(), parameter_id);
 
+                // The binder is not a selected key yet. Keep helper
+                // applications and operators intact until per-key substitution.
                 let value_sem = self.lower_type_expr_with_infer_factory(
                     infer_binders,
                     value,
@@ -2418,7 +2435,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     scope_payload,
                     shadowing,
                     substitutions,
-                    reduction_context,
+                    reduction_context.into_structural_transit_with_mode(ProjectionMode::Navigate),
                 );
 
                 let optionality = match optional {
@@ -2442,7 +2459,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         scope_payload,
                         shadowing,
                         substitutions,
-                        reduction_context,
+                        reduction_context
+                            .into_structural_transit_with_mode(ProjectionMode::Navigate),
                     )
                 });
 
@@ -2496,9 +2514,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // path-precisely under a publication demand. The shared
                 // open-mapped predicate decides openness (no second
                 // walker).
-                if crate::project_semantic_dispatch::raise::mapped_type_is_open_or_unknown(
-                    self, source_sem, &mapper,
-                ) {
+                if !crate::semantic_query::may_reduce_operator(reduction_context)
+                    || crate::project_semantic_dispatch::raise::mapped_type_is_open_or_unknown(
+                        self, source_sem, &mapper,
+                    )
+                {
                     return graph.intern_node_with_scope(
                         SemanticNodeData::Mapped {
                             source: source_sem,

@@ -2879,14 +2879,7 @@ const LIFTED_ROW_OVERRIDES = new Map([
     {
       mech: "MappedTemplateRemap",
       proof: "ProofRequirement::Ts7Oracle(OracleId::MappedTemplate)",
-      semantic_queries: [
-        "ResolveDecl",
-        "Instantiate",
-        "KeyOf",
-        "MappedType",
-        "ProjectPath",
-        "LowerLocator",
-      ],
+      semantic_queries: ["ResolveDecl", "Instantiate", "KeyOf", "MappedType", "LowerLocator"],
       consumed_mechanisms: ["QueryValueDomainFoundation", "IndexedAccessUnionDistribution"],
       unblocker:
         "lifted by U2.MAPPED_TEMPLATE: `AllRequired<{ a?: string; b?: number }>` " +
@@ -2926,14 +2919,7 @@ const LIFTED_ROW_OVERRIDES = new Map([
     {
       mech: "MappedTemplateRemap",
       proof: "ProofRequirement::Ts7Oracle(OracleId::UtilityComposition)",
-      semantic_queries: [
-        "ResolveDecl",
-        "Instantiate",
-        "KeyOf",
-        "MappedType",
-        "ProjectPath",
-        "LowerLocator",
-      ],
+      semantic_queries: ["ResolveDecl", "Instantiate", "KeyOf", "MappedType", "LowerLocator"],
       consumed_mechanisms: ["QueryValueDomainFoundation", "IndexedAccessUnionDistribution"],
       unblocker:
         "lifted by U2.MAPPED_TEMPLATE: `Required<T>` is the library mapped " +
@@ -2947,14 +2933,7 @@ const LIFTED_ROW_OVERRIDES = new Map([
     {
       mech: "MappedTemplateRemap",
       proof: "ProofRequirement::Ts7Oracle(OracleId::UtilityComposition)",
-      semantic_queries: [
-        "ResolveDecl",
-        "Instantiate",
-        "KeyOf",
-        "MappedType",
-        "ProjectPath",
-        "LowerLocator",
-      ],
+      semantic_queries: ["ResolveDecl", "Instantiate", "KeyOf", "MappedType", "LowerLocator"],
       consumed_mechanisms: ["QueryValueDomainFoundation", "IndexedAccessUnionDistribution"],
       unblocker:
         "lifted by U2.MAPPED_TEMPLATE: `Readonly<Required<T>>` composes two " +

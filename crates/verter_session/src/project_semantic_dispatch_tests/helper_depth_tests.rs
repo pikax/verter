@@ -124,6 +124,22 @@ fn index_key_unions_enumerate_at_any_depth() {
     );
 }
 
+#[test]
+fn index_key_intersections_filter_at_any_depth() {
+    let keys = on_a_small_stack(|dispatch| {
+        let graph = dispatch.graph();
+        let string = primitive(dispatch, PrimitiveKind::String);
+        let mut domain = literal(dispatch, "selected");
+        for _ in 0..DEPTH {
+            domain = graph.intern_node(SemanticNodeData::Intersection(
+                CompositeList::test_fixture(Arc::from([domain, string])),
+            ));
+        }
+        dispatch.finite_index_keys_for_tests(domain)
+    });
+    assert_eq!(keys, Some(vec![IndexKey::String(Arc::from("selected"))]));
+}
+
 /// Intersections nested `depth` deep down to `object` are a valid base
 /// type; with `string` at the bottom they are not.
 #[test]

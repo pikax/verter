@@ -409,9 +409,40 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         if self.cancellation.is_cancelled() {
             return self.cancelled_build_output();
         }
-        let operand_read = self.observe_read(|| self.conditional_operands(check, extends));
+        // Capture the indexed value demand and operand settlement together:
+        // selection adopts their exact facts and execution validity as one read.
+        let authored_check = check;
+        let operand_read = self.observe_read(|| {
+            let check = if matches!(
+                self.graph().node_data(check).as_deref(),
+                Some(SemanticNodeData::IndexedAccess { .. })
+            ) {
+                let evaluated = self
+                    .evaluate_deferred_semantic_node_with_context(
+                        check,
+                        crate::semantic_query::ProjectionReductionContext::published(
+                            crate::semantic_query::ProjectionMode::Navigate,
+                        ),
+                    )
+                    .into_complete_active_query_build_node(self)
+                    // An access the evaluation could not read (an open
+                    // generic's element, an absent key) keeps the authored,
+                    // deferred access rather than relating a miss sentinel.
+                    .filter(|node| {
+                        !matches!(
+                            self.graph().node_data(*node).as_deref(),
+                            Some(SemanticNodeData::Opaque(_))
+                        )
+                    })
+                    .unwrap_or(check);
+                self.canonical_argument_carrier(evaluated)
+            } else {
+                check
+            };
+            (check, self.conditional_operands(check, extends))
+        });
         let operands_complete = operand_read.observations_are_complete();
-        let operands = match operand_read.adopt(self) {
+        let (check, operands) = match operand_read.adopt(self) {
             Ok(operands) => operands,
             Err(abort) => {
                 return super::walk::QueryBuildOutput::from((
@@ -434,7 +465,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 return self.cancelled_build_output();
             };
             return self.keep_conditional(
-                check,
+                authored_check,
                 extends,
                 (true_branch, false_branch),
                 distributive,
@@ -442,6 +473,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 ConditionalBranchSelection::Undecided,
             );
         }
+        let demanded_check = check;
         let extends = operands.extends;
         if let Some(absorbed) = self.absorb_conditional(
             operands.absorbed_check,
@@ -522,6 +554,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             ConditionalBranchSelection::True | ConditionalBranchSelection::False => {
                 let take_true = selection == ConditionalBranchSelection::True;
                 let winner = branches.branch(self, take_true);
+                let winner = if authored_check != demanded_check {
+                    self.substitute_semantic_type_param(winner, authored_check, demanded_check)
+                } else {
+                    winner
+                };
                 let mut output = self.commit_conditional_winner(
                     check,
                     extends,
@@ -787,6 +824,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     SemanticNodeData::Alias(_)
                     | SemanticNodeData::DeclRef { .. }
                     | SemanticNodeData::InstantiationRef { .. }
+                    | SemanticNodeData::IndexedAccess { .. }
                     | SemanticNodeData::TypeOf(_)
                     | SemanticNodeData::BareRef(_)
                     | SemanticNodeData::ImportType(_)
@@ -844,10 +882,19 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         &self,
         operand: SemanticNodeId,
     ) -> Option<SemanticNodeId> {
-        match self.normalize_node_for_structural_fact_demand(
-            operand,
-            crate::semantic_query::ProjectionReductionContext::structural_transit(),
+        // An indexed operand consumed by the conditional needs its value,
+        // rather than a shallow apparent surface that merges union arms.
+        let context = if matches!(
+            self.graph().node_data(operand).as_deref(),
+            Some(SemanticNodeData::IndexedAccess { .. })
         ) {
+            crate::semantic_query::ProjectionReductionContext::published(
+                crate::semantic_query::ProjectionMode::Expanded,
+            )
+        } else {
+            crate::semantic_query::ProjectionReductionContext::structural_transit()
+        };
+        match self.normalize_node_for_structural_fact_demand(operand, context) {
             super::evaluate::StructuralFactDemandOutcome::Complete(node) => Some(node),
             super::evaluate::StructuralFactDemandOutcome::Recovered { node, .. }
                 if self.is_conditional_checker_recovery(node) =>

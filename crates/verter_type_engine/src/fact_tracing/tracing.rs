@@ -282,6 +282,18 @@ pub(crate) fn observe_fan_out(fact: FactVersionRef) {
 /// Fan a borrowed signature into **every** active tracer on the stack.
 #[inline]
 pub(crate) fn observe_fan_out_borrowed(sig: &[FactVersionRef]) {
+    observe_signature_consumers(sig, |cell| cell.observe_borrowed_signature(sig));
+}
+
+/// Replay a completed compute's canonical witness to every active consumer.
+/// The read set verifies its order and falls back for an unordered witness.
+#[inline]
+pub(crate) fn observe_fan_out_canonical(sig: &std::sync::Arc<[FactVersionRef]>) {
+    observe_signature_consumers(sig, |cell| cell.absorb_canonical_signature(sig));
+}
+
+#[inline]
+fn observe_signature_consumers(sig: &[FactVersionRef], observe: impl Fn(&FactReadSetCell)) {
     if sig.is_empty() {
         return;
     }
@@ -298,7 +310,7 @@ pub(crate) fn observe_fan_out_borrowed(sig: &[FactVersionRef]) {
     for ptr in ptrs {
         if !ptr.is_null() {
             // SAFETY: see module-level SAFETY contract.
-            unsafe { &*ptr }.observe_borrowed_signature(sig);
+            observe(unsafe { &*ptr });
         }
     }
 }
@@ -420,6 +432,55 @@ mod recorder_tests {
 #[cfg(test)]
 mod fan_out_tests {
     use super::*;
+
+    #[test]
+    fn canonical_fan_out_preserves_every_consumer_without_resorting() {
+        use verter_session_query::facts::fact_read_set::{
+            seal_canonical_signature, signature_work_for_tests, FactReadSetFinalise,
+        };
+        let signature = seal_canonical_signature(
+            (0..16)
+                .map(|i| FactVersionRef::FileWholeHash {
+                    canonical_id: format!("/fact-{i}.ts"),
+                    hash: [i; 16],
+                })
+                .collect(),
+        );
+        let recorder = FactReadRecorder::default();
+        let before = signature_work_for_tests();
+        let (inner, outer) = crate::resolver_core::resolver_context::with_fact_tracer_cell(
+            Default::default(),
+            |_| {
+                crate::resolver_core::resolver_context::with_fact_tracer_cell(Default::default(), |_| {
+                    let _scope = install_recorder(&recorder);
+                    for _ in 0..4 {
+                        observe_fan_out_canonical(&signature);
+                    }
+                    apply_non_cacheable_propagation(
+                        verter_session_query::facts::fact_read_set::NonCacheablePropagation::Transitive,
+                    );
+                })
+                .1
+            },
+        );
+        let inner = inner.finalise();
+        let outer = outer.finalise();
+        let work = signature_work_for_tests() - before;
+        println!("canonical_replay_work={work}");
+        for result in [inner, outer] {
+            let FactReadSetFinalise::NonCacheable(facts) = result else {
+                panic!("canonical replay must retain refusal: {result:?}");
+            };
+            assert_eq!(facts, signature);
+        }
+        let (facts, non_cacheable) = recorder.into_parts();
+        assert_eq!(facts.as_slice(), signature.as_ref());
+        assert!(non_cacheable);
+        assert!(
+            work <= 16 * signature.len(),
+            "canonical replay proof_work={work}"
+        );
+    }
 
     /// One owned fan-out must reach EVERY active tracer on the stack —
     /// pins the fan-out against a last-only / first-only regression
