@@ -43,13 +43,12 @@ fn main() {
         let host = VerterHost::new(HostConfig::default(), workspace.clone());
         let start = Instant::now();
         workspace.inject_file("/open/tsconfig.json".into(), config.clone());
-        let mut project = verter_workspace::ide_project_config(
+        let project = verter_workspace::configured_ide_project(
+            workspace.as_ref(),
             "/open".into(),
             "/open".into(),
-            Some("/open/tsconfig.json".into()),
+            "/open/tsconfig.json",
         );
-        project.compiler_options =
-            verter_workspace::load_compiler_options(workspace.as_ref(), "/open/tsconfig.json");
         host.configure_projects(vec![project]);
         for (canonical, source) in &files {
             workspace.inject_file(canonical.clone(), source.clone());

@@ -767,21 +767,16 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         && entry.module_kind == FileModuleKind::Script
                         && entry.origin == ContributorOrigin::FileScopeNamespace
                 })
-                .map(|entry| {
-                    (
-                        self.ctx
-                            .declaration_sequence_rank(entry.artifact_key.canonical.as_ref()),
-                        Arc::clone(&entry.artifact_key.canonical),
-                        entry.owner,
-                    )
-                })
+                .map(|entry| (Arc::clone(&entry.artifact_key.canonical), entry.owner))
                 .collect();
-            entries.sort_by(|left, right| (left.0, &left.1).cmp(&(right.0, &right.1)));
-            files = entries
-                .into_iter()
-                .map(|(_, file, file_owner)| (file, file_owner))
-                .collect();
-            files.dedup();
+            self.sort_in_program_order(
+                canonical,
+                &mut entries,
+                |(file, _)| file.as_ref(),
+                |_, _| std::cmp::Ordering::Equal,
+            );
+            entries.dedup();
+            files = entries;
         }
         let mut seen: rustc_hash::FxHashSet<&str> =
             members.iter().map(|entry| entry.name.as_str()).collect();

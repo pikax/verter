@@ -73,6 +73,136 @@ impl StaticMembershipSpec {
         // Step 3: exclude only filters what include found
         !self.exclude.iter().any(|glob| glob.matches(path))
     }
+
+    /// The program's ROOT files in TypeScript's order
+    /// (`getFileNamesFromConfigSpecs`): the `files` entries as listed, then
+    /// the `include` matches among `candidates`, grouped by the first
+    /// authored `include` entry each matches and, within one entry, in
+    /// directory-walk order ([`directory_walk_order`]). A wildcard match
+    /// yields to a same-named file with a higher-priority extension
+    /// (`a.ts` over `a.d.ts`, `a.ts` over `a.js`) — except that a
+    /// `.d.ts` never shadows a `.js` / `.jsx` file, which stays a root
+    /// beside it (`hasFileWithHigherPriorityExtension`).
+    ///
+    /// `candidates` is every file the workspace knows; their order is
+    /// irrelevant.
+    pub fn program_root_files<'p>(
+        &self,
+        candidates: impl IntoIterator<Item = &'p CanonicalPath>,
+    ) -> Vec<CanonicalPath> {
+        let mut roots: Vec<CanonicalPath> = Vec::with_capacity(self.files.len());
+        let mut literal: FxHashSet<&str> = FxHashSet::default();
+        for file in &self.files {
+            if literal.insert(file.as_str()) {
+                roots.push(file.clone());
+            }
+        }
+        let mut matched: Vec<(u32, &CanonicalPath)> = candidates
+            .into_iter()
+            .filter(|path| !literal.contains(path.as_str()))
+            .filter_map(|path| Some((self.include_entry_of(path)?, path)))
+            .collect();
+        matched.sort_by(|(left_entry, left), (right_entry, right)| {
+            left_entry
+                .cmp(right_entry)
+                .then_with(|| directory_walk_order(left.as_str(), right.as_str()))
+        });
+        matched.dedup_by(|(_, left), (_, right)| left == right);
+        // `wildcardFileMap`: insertion-ordered, a later higher-priority
+        // sibling replaces (and moves after) a lower-priority one.
+        let mut wildcard: Vec<Option<&CanonicalPath>> = Vec::with_capacity(matched.len());
+        let mut wildcard_slots: FxHashMap<&str, usize> = FxHashMap::default();
+        for (_, path) in matched {
+            let Some((stem, group, priority)) = extension_priority(path.as_str()) else {
+                wildcard_slots.insert(path.as_str(), wildcard.len());
+                wildcard.push(Some(path));
+                continue;
+            };
+            let sibling = |extension: &str| format!("{stem}{extension}");
+            let javascript = path.as_str().ends_with(".js") || path.as_str().ends_with(".jsx");
+            let outranked = group[..priority].iter().any(|extension| {
+                if javascript && *extension == ".d.ts" {
+                    return false;
+                }
+                let name = sibling(extension);
+                literal.contains(name.as_str()) || wildcard_slots.contains_key(name.as_str())
+            });
+            if outranked {
+                continue;
+            }
+            for extension in &group[priority + 1..] {
+                if let Some(slot) = wildcard_slots.remove(sibling(extension).as_str()) {
+                    wildcard[slot] = None;
+                }
+            }
+            wildcard_slots.insert(path.as_str(), wildcard.len());
+            wildcard.push(Some(path));
+        }
+        roots.extend(wildcard.into_iter().flatten().cloned());
+        roots
+    }
+
+    /// The first authored `include` entry `path` matches, when exclude does
+    /// not filter it.
+    fn include_entry_of(&self, path: &CanonicalPath) -> Option<u32> {
+        let entry = self
+            .include
+            .iter()
+            .filter(|glob| glob.matches(path))
+            .map(CompiledGlob::include_entry)
+            .min()?;
+        (!self.exclude.iter().any(|glob| glob.matches(path))).then_some(entry)
+    }
+}
+
+/// TypeScript's extension groups (`getSupportedExtensions` with JavaScript
+/// allowed), highest priority first. A member of a group shadows the
+/// lower-priority members of the same stem.
+const EXTENSION_PRIORITY_GROUPS: [&[&str]; 3] = [
+    &[".ts", ".tsx", ".d.ts", ".js", ".jsx"],
+    &[".cts", ".d.cts", ".cjs"],
+    &[".mts", ".d.mts", ".mjs"],
+];
+
+/// `(stem, group, index in group)` of `path`'s extension; the longest
+/// matching extension wins, so `a.d.ts` is `.d.ts`, never `.ts`.
+fn extension_priority(path: &str) -> Option<(&str, &'static [&'static str], usize)> {
+    EXTENSION_PRIORITY_GROUPS
+        .iter()
+        .flat_map(|group| {
+            group
+                .iter()
+                .enumerate()
+                .map(move |(index, extension)| (*group, index, *extension))
+        })
+        .filter(|(_, _, extension)| path.ends_with(extension))
+        .max_by_key(|(_, _, extension)| extension.len())
+        .map(|(group, index, extension)| (&path[..path.len() - extension.len()], group, index))
+}
+
+/// TypeScript's `matchFiles` walk order: within a directory, its files in
+/// ordinal name order first, then its subdirectories in ordinal name order,
+/// each walked depth-first.
+pub fn directory_walk_order(left: &str, right: &str) -> std::cmp::Ordering {
+    let mut left_parts = left.split('/').peekable();
+    let mut right_parts = right.split('/').peekable();
+    loop {
+        match (left_parts.next(), right_parts.next()) {
+            (Some(l), Some(r)) if l == r => continue,
+            (Some(l), Some(r)) => {
+                let left_is_file = left_parts.peek().is_none();
+                let right_is_file = right_parts.peek().is_none();
+                return match (left_is_file, right_is_file) {
+                    (true, false) => std::cmp::Ordering::Less,
+                    (false, true) => std::cmp::Ordering::Greater,
+                    _ => l.as_bytes().cmp(r.as_bytes()),
+                };
+            }
+            (None, None) => return std::cmp::Ordering::Equal,
+            (None, Some(_)) => return std::cmp::Ordering::Less,
+            (Some(_), None) => return std::cmp::Ordering::Greater,
+        }
+    }
 }
 
 /// Configured project membership: static spec + materialized file set.

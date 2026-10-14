@@ -100,7 +100,18 @@ pub trait IndexedInputs {
         &self,
         canonical: &str,
     ) -> Option<verter_session_query::resolution::ProjectId>;
-    fn declaration_sequence_rank(&self, canonical: &str) -> u32;
+    /// The file order of the program the requesting file `anchor` belongs
+    /// to — or, when no configured project owns it, the program of the
+    /// canonically first of `ordered` (the files being ordered) one owns —
+    /// which orders the declarations of a symbol merged across files. A
+    /// reader that orders contributors from two or more files by it
+    /// observes its
+    /// [`ProgramFileOrder::fact`](verter_session_query::inputs::program_order::ProgramFileOrder::fact).
+    fn program_file_order(
+        &self,
+        anchor: &str,
+        ordered: &mut dyn Iterator<Item = &str>,
+    ) -> Arc<verter_session_query::inputs::program_order::ProgramFileOrder>;
     fn engine_policy(&self) -> crate::project_semantic_dispatch::EnginePolicy;
 
     // -------- Identity --------------------------------------------
@@ -619,15 +630,25 @@ pub trait OwnedLowering {
         name: &str,
         space: verter_session_query::facts::SymbolSpace,
     ) -> ContributorAnswer;
+    /// The contributors of `name` to `target`, read for `anchor`, the
+    /// requesting file: every library among them, for
+    /// [`Self::augmentation_contributor_order`] to keep the ones `anchor`'s
+    /// program loads. The population read already holds every file the
+    /// program's library and file order reached.
     fn contributor_answer(
         &self,
+        anchor: &str,
         target: &verter_session_query::resolution::AugmentationTargetKind,
         name: &str,
-        allow_automatic_libs: bool,
         space: Option<verter_session_query::facts::SymbolSpace>,
     ) -> ContributorAnswer;
+    /// The augmenters and file-scope contributors of `name` in declaration
+    /// precedence order — by the order of `anchor`'s program when they
+    /// include a library or span two or more program files, which the read
+    /// then observes — without the libraries that program does not load.
     fn augmentation_contributor_order(
         &self,
+        anchor: &str,
         key: &verter_session_query::resolution::AugmentationTargetKey,
         augmenters: &verter_session_query::resolution::AugmenterSet,
         name: &str,

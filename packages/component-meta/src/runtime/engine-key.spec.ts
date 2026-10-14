@@ -4,8 +4,9 @@ import {
   dirnamePath,
   normalizePath,
   resolvePath,
+  inlineConfigHash,
   stableHash,
-  stableSelectiveConfigHash,
+  tsconfigConfigHash,
 } from "./engine-key.js";
 import type { EngineKeyInput } from "./engine-key.js";
 
@@ -120,13 +121,13 @@ describe("computeEngineKey", () => {
   });
 });
 
-describe("stableSelectiveConfigHash", () => {
-  it("ignores include when selective loading is the default", () => {
-    const hashA = stableSelectiveConfigHash({
+describe("inlineConfigHash", () => {
+  it("ignores include: an inline project is match-all, include only filters discovery", () => {
+    const hashA = inlineConfigHash({
       include: ["src/A.vue"],
       compilerOptions: { baseUrl: "." },
     });
-    const hashB = stableSelectiveConfigHash({
+    const hashB = inlineConfigHash({
       include: ["src/B.vue"],
       compilerOptions: { baseUrl: "." },
     });
@@ -135,13 +136,33 @@ describe("stableSelectiveConfigHash", () => {
   });
 
   it("still changes when analysis-affecting config changes", () => {
-    const hashA = stableSelectiveConfigHash({
+    const hashA = inlineConfigHash({
       compilerOptions: { baseUrl: "." },
     });
-    const hashB = stableSelectiveConfigHash({
+    const hashB = inlineConfigHash({
       compilerOptions: { baseUrl: "./src" },
     });
 
     expect(hashA).not.toBe(hashB);
+  });
+});
+
+describe("tsconfigConfigHash", () => {
+  it("distinguishes the order of a tsconfig's files: they are the program's roots", () => {
+    const forward = tsconfigConfigHash({ files: ["a.ts", "b.ts"] });
+    const reverse = tsconfigConfigHash({ files: ["b.ts", "a.ts"] });
+
+    expect(forward).not.toBe(reverse);
+  });
+
+  it("distinguishes include and exclude", () => {
+    const base = { compilerOptions: { baseUrl: "." }, include: ["src/**/*.vue"] };
+
+    expect(tsconfigConfigHash(base)).not.toBe(
+      tsconfigConfigHash({ ...base, include: ["src/**/*.ts", "src/**/*.vue"] }),
+    );
+    expect(tsconfigConfigHash(base)).not.toBe(
+      tsconfigConfigHash({ ...base, exclude: ["src/legacy"] }),
+    );
   });
 });

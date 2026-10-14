@@ -11,9 +11,11 @@ export {
   normalizePath,
   resolvePath,
   stableHash,
-  stableSelectiveConfigHash,
+  inlineConfigHash,
+  tsconfigConfigHash,
 } from "./engine-key.js";
 export type { EngineKeyInput } from "./engine-key.js";
+export { hashTsconfigConfig } from "./tsconfig.js";
 
 export { ProjectEngine, generateLeaseId } from "./project-engine.js";
 export type {
@@ -28,6 +30,11 @@ export { ProjectSession } from "./project-session.js";
 export { createMetaRuntime, getMetaRuntime, shutdownMetaRuntime } from "./meta-runtime.js";
 export type { MetaRuntimeImpl, BootstrapFn, EngineBootstrapResult } from "./meta-runtime.js";
 
-export { parseTsconfig, extractPathAliases, discoverVueFiles } from "./discovery.js";
+export {
+  parseTsconfig,
+  extractPathAliases,
+  tsconfigProjectConfig,
+  discoverVueFiles,
+} from "./discovery.js";
 
 export { IDLE_TTL_MS, SWEEP_INTERVAL_MS, POOL_CAP } from "./constants.js";

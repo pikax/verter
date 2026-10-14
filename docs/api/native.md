@@ -57,7 +57,15 @@ const resolved = await ws.resolveImport("/src/App.vue", "./Child.vue");
 // phase: "codegen" | "provider"  —  kind: "esm" | "type" | "require" | "src"
 const types = await ws.resolveImport("/src/App.vue", "pkg", "provider", "type");
 
-// Project configuration
+// Project configuration from a tsconfig: the native loader reads its
+// compiler options and its files/include/exclude membership (the program's
+// root files, in authored order). Explicit fields below layer on top.
+ws.configureProjects([
+  { root: "/project", workspaceRoot: "/project", tsconfigPath: "/project/tsconfig.json" },
+]);
+
+// Without `tsconfigPath` the project is unconfigured: it owns every file
+// under `root` (match-all) and carries only the explicit options given.
 ws.configureProjects([
   {
     root: "/project",

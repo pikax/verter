@@ -5,15 +5,18 @@
 //! source surfaces, spans, or resolution logic. Ambiguity and cross-file
 //! target selection belong to the semantic/session route authority.
 use verter_session_query::analysis::route_inventory::{
-    RouteCapability, RouteImportForm, RouteImportedName, ScriptExportAssignmentRoute,
-    ScriptImportRoute, ScriptLocalExportRoute, ScriptReexportRoute, ScriptRouteInventory,
-    ScriptSideEffectImport, ScriptWildcardRoute,
+    ProgramReferences, RouteCapability, RouteImportForm, RouteImportedName,
+    ScriptExportAssignmentRoute, ScriptImportRoute, ScriptLocalExportRoute, ScriptReexportRoute,
+    ScriptRouteInventory, ScriptSideEffectImport, ScriptWildcardRoute,
 };
 
 use oxc_ast::ast::{
-    BindingPattern, Declaration, ExportDefaultDeclarationKind, Expression,
-    ImportDeclarationSpecifier, ImportOrExportKind, Program, Statement,
+    Argument, BindingPattern, CallExpression, Declaration, ExportDefaultDeclarationKind,
+    Expression, ImportDeclarationSpecifier, ImportExpression, ImportOrExportKind, Program,
+    Statement, TSImportType,
 };
+use oxc_ast_visit::Visit;
+use oxc_span::GetSpan;
 use verter_type_expr::TopLevelOwnerId;
 
 /// The routing capability an import's kind grants.
@@ -309,7 +312,264 @@ where
     inventory.counts.wildcard_reexport_count = inventory.wildcard_reexports.len();
     inventory.counts.local_export_count = inventory.local_exports.len();
     inventory.counts.export_assignment_count = inventory.export_assignments.len();
+    inventory.program_references = build_program_references(program, inventory.has_module_syntax);
     inventory
+}
+
+/// The files `program` pulls into its TypeScript program, in the order
+/// TypeScript's program construction visits them (`findSourceFile`):
+/// triple-slash `path`, `types` and `lib` references from the file's leading
+/// comments, then the module names `collectExternalModuleReferences`
+/// gathers — import / re-export / `import x = require(…)` specifiers in
+/// statement order (an ambient `declare module "m" { … }` body contributes
+/// its non-relative specifiers), dynamic `import("m")` calls and
+/// `import("m")` types in source order (plus `require("m")` in a JavaScript
+/// file).
+///
+/// The names of `declare module "m"` augmentations are not among them:
+/// TypeScript resolves an augmentation's name to find the module it merges
+/// into, but adds only imported files to the program
+/// (`processImportedModules` adds a resolution only below
+/// `file.imports.length`), so an augmentation alone never places its
+/// target.
+///
+/// `is_external_module` is whether the file has top-level module syntax: a
+/// `declare module "m"` in a module augments `m`, in a script it declares
+/// an ambient module whose body may import.
+#[must_use]
+pub fn build_program_references(
+    program: &Program<'_>,
+    is_external_module: bool,
+) -> ProgramReferences {
+    let mut references = ProgramReferences::default();
+    collect_triple_slash_references(program, &mut references);
+    collect_module_references(
+        &program.body,
+        false,
+        is_external_module,
+        program.source_type.is_typescript_definition(),
+        &mut references.module_names,
+    );
+    let mut dynamic = DynamicModuleNames {
+        javascript: program.source_type.is_javascript(),
+        names: Vec::new(),
+    };
+    // A walk refused its stack collects nothing; the operation around it is
+    // refused with the refusal.
+    let _ = crate::oxc_parse::leased_program_walk(program, || dynamic.visit_program(program));
+    dynamic.names.sort_by_key(|(start, _)| *start);
+    references
+        .module_names
+        .extend(dynamic.names.into_iter().map(|(_, name)| name));
+    references
+}
+
+/// TypeScript reads `/// <reference …/>` pragmas only from the comments
+/// before the file's first token (`getLeadingCommentRanges(text, 0)`, which
+/// steps over a hashbang).
+fn collect_triple_slash_references(program: &Program<'_>, references: &mut ProgramReferences) {
+    let first_token = program
+        .directives
+        .first()
+        .map(|directive| directive.span.start)
+        .into_iter()
+        .chain(program.body.first().map(|statement| statement.span().start))
+        .min()
+        .unwrap_or(program.span.end);
+    for comment in program.comments.iter() {
+        if comment.span.end > first_token {
+            break;
+        }
+        if !comment.is_line() {
+            continue;
+        }
+        let Some(text) = program
+            .source_text
+            .get(comment.span.start as usize..comment.span.end as usize)
+        else {
+            continue;
+        };
+        let Some(arguments) = reference_pragma_arguments(text) else {
+            continue;
+        };
+        // `processPragmasIntoFields`: one directive names one reference,
+        // preferring `no-default-lib`, then `types`, `lib`, `path`.
+        if named_pragma_argument(arguments, "no-default-lib").is_some_and(|value| value == "true") {
+            continue;
+        }
+        if let Some(types) = named_pragma_argument(arguments, "types") {
+            references.types.push(types.to_owned());
+        } else if let Some(lib) = named_pragma_argument(arguments, "lib") {
+            references.libs.push(lib.to_owned());
+        } else if let Some(path) = named_pragma_argument(arguments, "path") {
+            references.paths.push(path.to_owned());
+        }
+    }
+}
+
+/// The text after `<reference` of a `/// <reference … />` comment —
+/// TypeScript's `^\/\/\/\s*<(\S+)\s.*?\/>` with the element named
+/// `reference` (case-insensitively) — or `None` for any other comment.
+fn reference_pragma_arguments(comment: &str) -> Option<&str> {
+    let rest = comment.strip_prefix("///")?.trim_start();
+    let rest = rest.strip_prefix('<')?;
+    let name_end = rest.find(char::is_whitespace)?;
+    if !rest[..name_end].eq_ignore_ascii_case("reference") {
+        return None;
+    }
+    let arguments = &rest[name_end..];
+    arguments.contains("/>").then_some(arguments)
+}
+
+/// The value of the first `name="…"` / `name='…'` argument preceded by
+/// whitespace — TypeScript's `(\s{name}\s*=\s*)(?:'([^']*)'|"([^"]*)")`,
+/// matched case-insensitively.
+fn named_pragma_argument<'t>(arguments: &'t str, name: &str) -> Option<&'t str> {
+    let bytes = arguments.as_bytes();
+    let mut from = 0;
+    while from < bytes.len() {
+        let at = from + arguments[from..].find(|c: char| c.is_whitespace())?;
+        let mut cursor = at + arguments[at..].chars().next()?.len_utf8();
+        from = cursor;
+        let Some(candidate) = arguments.get(cursor..cursor + name.len()) else {
+            continue;
+        };
+        if !candidate.eq_ignore_ascii_case(name) {
+            continue;
+        }
+        cursor += name.len();
+        let after_name = arguments[cursor..].trim_start();
+        let Some(after_equals) = after_name.strip_prefix('=') else {
+            continue;
+        };
+        let value = after_equals.trim_start();
+        let Some(quote) = value.chars().next().filter(|c| *c == '"' || *c == '\'') else {
+            continue;
+        };
+        let body = &value[1..];
+        if let Some(end) = body.find(quote) {
+            return Some(&body[..end]);
+        }
+    }
+    None
+}
+
+/// `collectModuleReferences`: import-like statements in order, descending
+/// into an ambient module body of a script (whose relative specifiers are
+/// ignored); a module's `declare module "m"` (or an ambient module nested
+/// in one) is an augmentation of `m`.
+fn collect_module_references(
+    statements: &[Statement<'_>],
+    in_ambient_module: bool,
+    is_external_module: bool,
+    is_declaration_file: bool,
+    imports: &mut Vec<String>,
+) {
+    let push_import = |imports: &mut Vec<String>, name: &str| {
+        if !name.is_empty() && (!in_ambient_module || !is_relative_module_name(name)) {
+            imports.push(name.to_owned());
+        }
+    };
+    for statement in statements {
+        let module = match statement {
+            Statement::ImportDeclaration(declaration) => {
+                push_import(imports, &declaration.source.value);
+                continue;
+            }
+            Statement::TSImportEqualsDeclaration(declaration) => {
+                if let oxc_ast::ast::TSModuleReference::ExternalModuleReference(reference) =
+                    &declaration.module_reference
+                {
+                    push_import(imports, &reference.expression.value);
+                }
+                continue;
+            }
+            Statement::ExportFromDeclaration(declaration) => {
+                push_import(imports, &declaration.source.value);
+                continue;
+            }
+            Statement::ExportAllDeclaration(declaration) => {
+                push_import(imports, &declaration.source.value);
+                continue;
+            }
+            Statement::TSExternalModuleDeclaration(module) => module,
+            Statement::ExportDeclaration(declaration) => match &declaration.declaration {
+                Declaration::TSExternalModuleDeclaration(module) => module,
+                _ => continue,
+            },
+            _ => continue,
+        };
+        if !(in_ambient_module || module.declare || is_declaration_file) {
+            continue;
+        }
+        // A module augmentation (`declare module "m"` in a module, or a
+        // non-relative one nested in an ambient module) imports nothing; an
+        // ambient module a script declares may.
+        if !is_external_module && !in_ambient_module {
+            if let Some(body) = &module.body {
+                collect_module_references(
+                    &body.body,
+                    true,
+                    is_external_module,
+                    is_declaration_file,
+                    imports,
+                );
+            }
+        }
+    }
+}
+
+/// `isExternalModuleNameRelative`.
+fn is_relative_module_name(name: &str) -> bool {
+    let rooted =
+        name.starts_with('/') || name.starts_with('\\') || name.as_bytes().get(1) == Some(&b':');
+    rooted || name.starts_with("./") || name.starts_with("../") || name == "." || name == ".."
+}
+
+/// `collectDynamicImportOrRequireOrJsDocImportCalls`: dynamic `import()`
+/// calls and `import()` types naming a string literal, and `require()` in
+/// a JavaScript file, keyed by source position.
+struct DynamicModuleNames {
+    javascript: bool,
+    names: Vec<(u32, String)>,
+}
+
+impl<'a> Visit<'a> for DynamicModuleNames {
+    fn visit_import_expression(&mut self, it: &ImportExpression<'a>) {
+        let name = match &it.source {
+            Expression::StringLiteral(literal) => Some(literal.value.to_string()),
+            Expression::TemplateLiteral(template) => {
+                template.single_quasi().map(|quasi| quasi.to_string())
+            }
+            _ => None,
+        };
+        if let Some(name) = name {
+            self.names.push((it.span.start, name));
+        }
+        oxc_ast_visit::walk::walk_import_expression(self, it);
+    }
+
+    fn visit_ts_import_type(&mut self, it: &TSImportType<'a>) {
+        self.names
+            .push((it.span.start, it.source.value.to_string()));
+        oxc_ast_visit::walk::walk_ts_import_type(self, it);
+    }
+
+    fn visit_call_expression(&mut self, it: &CallExpression<'a>) {
+        if self.javascript && it.is_require_call() {
+            let name = match it.arguments.first() {
+                Some(Argument::StringLiteral(literal)) => Some(literal.value.to_string()),
+                Some(Argument::TemplateLiteral(template)) => {
+                    template.single_quasi().map(|quasi| quasi.to_string())
+                }
+                _ => None,
+            };
+            if let Some(name) = name {
+                self.names.push((it.span.start, name));
+            }
+        }
+        oxc_ast_visit::walk::walk_call_expression(self, it);
+    }
 }
 
 fn record_exported_declaration(

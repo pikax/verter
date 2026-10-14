@@ -979,6 +979,10 @@ pub struct FileArtifactStore {
     /// artifact ingestion. Lookup of a global symbol reads the
     /// snapshot rather than scanning program membership.
     global_contributors: crate::global_contributors::GlobalContributorIndex,
+    /// Published program file orders, which order declarations merged
+    /// across files; each is valid only for the workspace state it was
+    /// built from.
+    program_orders: crate::program_order::ProgramOrderIndex,
     /// The live workspace's content-transition history, through which
     /// every stored version owns its canonical's freshness evidence.
     /// Installed by the host for each workspace it serves; `None` leaves
@@ -1060,6 +1064,7 @@ impl FileArtifactStore {
             schema_version,
             augmentation_index: DashMap::new(),
             global_contributors: crate::global_contributors::GlobalContributorIndex::new(),
+            program_orders: crate::program_order::ProgramOrderIndex::default(),
             freshness_readers: parking_lot::RwLock::new(None),
             #[cfg(test)]
             freshness_install_hook: parking_lot::Mutex::new(None),
@@ -2492,6 +2497,11 @@ impl FileArtifactStore {
         &self.global_contributors
     }
 
+    /// Published program file orders.
+    pub(crate) fn program_order_index(&self) -> &crate::program_order::ProgramOrderIndex {
+        &self.program_orders
+    }
+
     /// Strict lookup by full content-addressed key.
     #[must_use]
     pub fn get_artifacts(&self, key: &FileArtifactKey) -> Option<Arc<FileArtifacts>> {
@@ -3697,7 +3707,8 @@ pub(crate) fn fact_key_kind_tag_for(key: &fact_registry::FactKey) -> verter_audi
         // unreachable arm flags a producer error if we ever do.
         FactKey::ResolvedImportClause { .. }
         | FactKey::ResolvedReexportBinding { .. }
-        | FactKey::ModuleAugmentationIndexShape { .. } => FactKeyKindTag::SyntacticExportSet,
+        | FactKey::ModuleAugmentationIndexShape { .. }
+        | FactKey::ProgramFileOrder { .. } => FactKeyKindTag::SyntacticExportSet,
     }
 }
 
