@@ -65,13 +65,25 @@ pub enum FactResult<T> {
     },
 }
 
-/// The status of a [`FactResult`], without its value.
+/// The bounded interpretation established by a projection producer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FactInterpretation {
+    /// Proven presence only; omissions prove neither absence nor values.
+    PresenceOnly,
+    /// Completed structural lowering retains gaps at their own positions.
+    Positional,
+    /// The producer established the checker's explicit recovery.
+    CheckerRecovery,
+}
+
+/// The status of a [`FactResult`], without its value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FactStatus {
     /// The exact demanded fact.
+    #[default]
     Complete,
     /// A bounded approximation, and why.
-    Approximate(NonEmptyReasons),
+    Approximate(NonEmptyReasons, Option<FactInterpretation>),
     /// No representation, and why.
     Unavailable(NonEmptyReasons),
 }
@@ -97,7 +109,7 @@ impl<T> FactResult<T> {
     pub fn status(&self) -> FactStatus {
         match self {
             Self::Complete(_) => FactStatus::Complete,
-            Self::Approximate { causes, .. } => FactStatus::Approximate(*causes),
+            Self::Approximate { causes, .. } => FactStatus::Approximate(*causes, None),
             Self::Unavailable { causes } => FactStatus::Unavailable(*causes),
         }
     }
@@ -243,7 +255,7 @@ pub fn root_narrowing_fact(domain: &FactStatus, required: &[FactStatus]) -> Fact
     }
     let mut inputs = PartialReasonSet::empty();
     for status in std::iter::once(domain).chain(required) {
-        if let FactStatus::Approximate(causes) | FactStatus::Unavailable(causes) = status {
+        if let FactStatus::Approximate(causes, _) | FactStatus::Unavailable(causes) = status {
             inputs = inputs.union(causes.get());
         }
     }
@@ -251,6 +263,81 @@ pub fn root_narrowing_fact(domain: &FactStatus, required: &[FactStatus]) -> Fact
 }
 
 impl FactStatus {
+    /// Strict dependent composition of two adopted facts.
+    pub fn join(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Complete, right) => right,
+            (left, Self::Complete) => left,
+            (Self::Approximate(left, left_kind), Self::Approximate(right, right_kind)) => {
+                Self::Approximate(
+                    left.union(right),
+                    if left_kind == right_kind {
+                        left_kind
+                    } else {
+                        None
+                    },
+                )
+            }
+            (Self::Unavailable(left), Self::Unavailable(right))
+            | (Self::Unavailable(left), Self::Approximate(right, _))
+            | (Self::Approximate(left, _), Self::Unavailable(right)) => {
+                Self::Unavailable(left.union(right))
+            }
+        }
+    }
+    /// State that no representation is available. Empty observations name
+    /// the unclassified propagation fault rather than a complete answer.
+    pub fn unavailable(reasons: PartialReasonSet) -> Self {
+        Self::Unavailable(
+            NonEmptyReasons::new(reasons)
+                .unwrap_or_else(|| NonEmptyReasons::of(super::PartialReason::Propagated)),
+        )
+    }
+
+    /// State a producer-established usable approximation.
+    pub fn approximate(reasons: PartialReasonSet) -> Self {
+        Self::Approximate(
+            NonEmptyReasons::new(reasons)
+                .unwrap_or_else(|| NonEmptyReasons::of(super::PartialReason::Propagated)),
+            None,
+        )
+    }
+
+    /// Read the producer's interpretation without choosing a new one.
+    pub const fn interpretation(self) -> Option<FactInterpretation> {
+        match self {
+            Self::Approximate(_, interpretation) => interpretation,
+            Self::Complete | Self::Unavailable(_) => None,
+        }
+    }
+
+    pub(crate) fn with_interpretation(self, interpretation: Option<FactInterpretation>) -> Self {
+        match self {
+            Self::Approximate(causes, _) => Self::Approximate(causes, interpretation),
+            other => other,
+        }
+    }
+    /// Preserve an adopted fact's availability while joining a limitation.
+    /// A producer must establish usability before calling this on a value.
+    pub(crate) fn limited_by(self, more: NonEmptyReasons) -> Self {
+        match self {
+            Self::Complete => Self::Approximate(more, None),
+            Self::Approximate(own, interpretation) => {
+                Self::Approximate(own.union(more), interpretation)
+            }
+            Self::Unavailable(own) => Self::Unavailable(own.union(more)),
+        }
+    }
+
+    /// Attach this adopted disposition to its payload. Unavailable never
+    /// extracts a payload, even if a caller supplied one.
+    pub fn with_value<T>(self, value: T) -> FactResult<T> {
+        match self {
+            Self::Complete => FactResult::Complete(value),
+            Self::Approximate(causes, _) => FactResult::Approximate { value, causes },
+            Self::Unavailable(causes) => FactResult::Unavailable { causes },
+        }
+    }
     /// Whether the fact is exact.
     #[must_use]
     pub const fn is_complete(self) -> bool {
@@ -262,7 +349,7 @@ impl FactStatus {
     pub fn completeness(self) -> ResultCompleteness {
         match self {
             Self::Complete => ResultCompleteness::Complete,
-            Self::Approximate(causes) | Self::Unavailable(causes) => {
+            Self::Approximate(causes, _) | Self::Unavailable(causes) => {
                 ResultCompleteness::Partial(causes.get())
             }
         }
@@ -287,7 +374,7 @@ pub fn summarize<'a>(statuses: impl IntoIterator<Item = &'a FactStatus>) -> Resu
     let mut reasons = PartialReasonSet::empty();
     let mut partial = false;
     for status in statuses {
-        if let FactStatus::Approximate(causes) | FactStatus::Unavailable(causes) = status {
+        if let FactStatus::Approximate(causes, _) | FactStatus::Unavailable(causes) = status {
             partial = true;
             reasons = reasons.union(causes.get());
         }

@@ -577,10 +577,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             base,
             context: self.apparent_type_context_scoped(canonical.as_ref(), demand_scope),
         };
-        match self.execute_type_node(key) {
+        self.probe_optional(|| match self.execute_type_node(key) {
             QueryResult::Value(SemanticQueryOutput { value, .. }) => Some(value),
             QueryResult::Recursive(_) | QueryResult::Error(_) => None,
-        }
+        })
     }
 
     /// Production constructor for the env-bearing [`ApparentTypeContext`]:

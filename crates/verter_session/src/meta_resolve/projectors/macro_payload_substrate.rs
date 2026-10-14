@@ -384,7 +384,7 @@ pub(crate) fn resolve_payload_surface_with_scope(
             // A branch is OPEN when its read is partial or its terminal stays
             // a construction program (the walker's typed open evidence): its
             // positive members are presence-only, never a closed domain.
-            let open = branch_read.result_is_partial;
+            let open = branch_read.result_is_partial();
             match branch_read.value {
                 QueryResult::Value(id) => {
                     let open = open

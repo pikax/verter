@@ -336,6 +336,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     ) -> DriveEnd
     where
         'b: 'a,
+        'd: 'a,
+        'd: 'r,
     {
         let mut delivered: Option<RegionDelivery> = None;
         loop {
@@ -408,6 +410,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             contextual,
             outer_env: _,
         } = demand;
+        self.constructive_signatures.remove(&function);
         let function = &function;
         let context = &context;
         let extended_captures: &[SkeletonBindingId] = &extended_captures;
@@ -551,6 +554,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         });
         let capture_context = context;
         let mut evaluator = Box::new(FlowEvaluator {
+            independent_members: None,
+            independent_returns: None,
+            constructive_values: rustc_hash::FxHashMap::default(),
+            constructive_signatures: rustc_hash::FxHashMap::default(),
             dispatch: self.dispatch,
             call_receivers: rustc_hash::FxHashMap::default(),
             call_arguments: Arc::clone(&owned.content.call_arguments),
@@ -687,6 +694,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             type_param_decls,
             contextual,
         } = finish;
+        let function = nested_evaluator.bindings.function().clone();
+        let constructive_signature;
         let signature = {
             let graph = self.dispatch.graph();
             let can_fall_through = owned.content.can_fall_through;
@@ -698,6 +707,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             let nested_observations;
             let nested_yield_contributions;
             let nested_inferred_predicate;
+            let mut constructive_return = None;
+            let mut independently_typed_return = false;
             let (contributors, nested_body_falls_through) = {
                 let (outcome, nested_body_falls_through) = outcome;
                 nested_evaluator.promote_pending_statement_gap();
@@ -715,6 +726,33 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     nested_evaluator.executed_walk.aborted = true;
                 }
                 nested_holds = nested_evaluator.holds.clone();
+                let source_return = match owned.content.body.statements.as_ref() {
+                    [verter_session_query::flow::slice::SliceStatement::Return {
+                        argument: Some(argument),
+                        ..
+                    }] => Some(argument),
+                    _ => None,
+                };
+                let source_complete = outcome.as_ref().is_ok_and(|values| values.len() == 1)
+                    && !nested_body_falls_through
+                    && nested_holds.is_empty()
+                    && !nested_evaluator.executed_walk.aborted
+                    && !nested_evaluator.executed_walk.local_aborted
+                    && !crate::request_context::current_cold_compute_completeness().is_partial()
+                    && crate::request_context::current_execution_abort().is_none()
+                    && source_return.is_some();
+                let independent_return = outcome
+                    .as_ref()
+                    .ok()
+                    .filter(|values| values.len() == 1)
+                    .and_then(|values| {
+                        nested_evaluator
+                            .constructive_values
+                            .get(&values[0].node)
+                            .cloned()
+                            .map(|proof| (values[0].node, proof))
+                    })
+                    .filter(|_| source_complete);
                 let finished = nested_evaluator
                 .products
                 .finish(nested_evaluator.plan.as_deref())
@@ -780,13 +818,23 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         ))
                     }
                 });
+                let finished_ok = finished.is_ok();
                 if let Err(failure) = finished {
                     if matches!(failure, FlowProductFailure::BudgetExceeded(_)) {
                         self.products.execution.borrow_mut().failure = Some(failure);
+                        nested_evaluator.executed_walk.aborted = true;
                     }
                     nested_evaluator.record_degradation(
                         crate::semantic_query::FlowReturnDegradation::UnresolvedValue,
                     );
+                }
+                if finished_ok && !nested_evaluator.executed_walk.aborted {
+                    independently_typed_return = source_complete
+                        && source_return.is_some_and(super::independent_return_expression);
+                    if let Some((node, proof)) = independent_return {
+                        constructive_return = Some(node);
+                        self.constructive_values.insert(node, proof);
+                    }
                 }
                 nested_degradation = nested_evaluator.degradation;
                 nested_observations = nested_evaluator.observations;
@@ -895,6 +943,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 }
                 _ => return_type,
             };
+            constructive_signature = signature_params.is_empty()
+                && type_param_decls.is_empty()
+                && predicate.is_none()
+                && nested_degradation.is_none()
+                && skeleton.kind == verter_session_query::flow::skeleton::FunctionBodyKind::Plain
+                && (constructive_return == Some(return_type) || independently_typed_return);
             graph.intern_node(SemanticNodeData::Signature {
                 kind: crate::semantic_query::SignatureKind::Call,
                 params: Arc::from(signature_params.into_boxed_slice()),
@@ -914,7 +968,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             })
         };
         drop(nested_evaluator);
-        self.nested_function_postlude(circular, declared_return_none, signature)
+        let value = self.nested_function_postlude(circular, declared_return_none, signature);
+        if constructive_signature && value == signature {
+            self.constructive_signatures.insert(function, signature);
+        }
+        value
     }
 
     /// A nested function's signature, once evaluated: its frame leaves the

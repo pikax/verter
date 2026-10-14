@@ -54,8 +54,15 @@ impl SemanticQueryValue {
             Self::OverloadSet(signatures) => {
                 for signature in signatures.iter() {
                     visit(signature.node);
-                    match signature.return_carrier {
-                        SignatureReturnCarrier::Declared(node) => visit(node),
+                    match &signature.return_carrier {
+                        SignatureReturnCarrier::Declared(node) => visit(*node),
+                        SignatureReturnCarrier::DeferredFlow(source)
+                        | SignatureReturnCarrier::EvaluatedFlow(source) => {
+                            for (_, image) in source.bindings() {
+                                visit(*image);
+                            }
+                            source.receiver().into_iter().for_each(&mut visit);
+                        }
                         SignatureReturnCarrier::Function(_) => {}
                     }
                 }

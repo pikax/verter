@@ -133,7 +133,7 @@ fn the_summary_is_complete_only_when_every_published_fact_is() {
     assert_eq!(
         summarize(&[
             FactStatus::Complete,
-            FactStatus::Approximate(budget()),
+            FactStatus::Approximate(budget(), None),
             FactStatus::Unavailable(missing()),
         ]),
         ResultCompleteness::Partial(budget().union(missing()).get())
@@ -147,6 +147,6 @@ fn only_a_complete_result_yields_an_exact_value() {
     assert_eq!(FactResult::<i32>::unavailable(budget()).into_exact(), None);
     assert_eq!(
         FactResult::approximate(1, budget()).status(),
-        FactStatus::Approximate(budget())
+        FactStatus::Approximate(budget(), None)
     );
 }

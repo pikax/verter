@@ -669,6 +669,14 @@ pub(crate) fn resolve_macro_payload(
                         ),
                 });
                 emit_dispatch_dep_signature_facts(dispatch,  &probe_read.dep_signature);
+                if !probe_read.walker_diagnostics.is_empty() {
+                    diag_sink.push(shallow_diagnostics_to_macro_expansion(
+                        &probe_read.walker_diagnostics,
+                        macro_index,
+                        expansion_kind.clone(),
+                        probe_read.cache_suppress,
+                    ));
+                }
                 match probe_read.value {
                     QueryResult::Value(id) => id,
                     QueryResult::Recursive(id) => id,
@@ -700,6 +708,14 @@ pub(crate) fn resolve_macro_payload(
                                 },
                             ));
                             emit_dispatch_dep_signature_facts(dispatch, &read.dep_signature);
+                            if !read.walker_diagnostics.is_empty() {
+                                diag_sink.push(shallow_diagnostics_to_macro_expansion(
+                                    &read.walker_diagnostics,
+                                    macro_index,
+                                    expansion_kind.clone(),
+                                    read.cache_suppress,
+                                ));
+                            }
                             match read.value {
                                 QueryResult::Value(anchor) => {
                                     match verter_type_engine::project_semantic_dispatch::node_data_for(

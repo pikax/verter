@@ -833,57 +833,58 @@ pub(crate) fn surface_member_to_expanded_field(
             // survives to the published surface"); a reduce that kept a
             // symbolic / package-backed / carrier-stop shape keeps the
             // authored source unchanged.
-            None => match published_member_source_upgrade_for_node(
-                dispatch,
-                materialized.node_id(),
-                shallow_source.is_none(),
-            )
-            .or(authored_source)
-            {
-                Some(source) => verter_type_expr::facts::SourcePosition::Present(source),
-                // No authored position, no use-site slot, no upgrade on the
-                // published node: the STRUCTURAL member-source projection. A
-                // member value with a valid structural replay address (an
-                // imported function / inline object / rich tuple / array /
-                // composite / instantiation) publishes its faithful shallow
-                // carrier — the closed/ref upgrade on the admitted node, or
-                // the projected MEMBER-PATH replay route off the macro's
-                // stamped type-argument base (the consumer re-resolves it on
-                // demand through the one shared dispatch; nothing flattens
-                // eagerly). ONLY a genuine miss stays the typed
-                // source-construction FAILURE: an operationally partial
-                // materialization (a torn read is never a replay-address
-                // proof), an unknown-materializing resolver failure carrier,
-                // or a structural value with no stamped base to replay off.
-                // A stable unresolved reference/import is itself a faithful
-                // Complete carrier. There
-                // is no proven-open producer position on this arm: every
-                // member enumerated from a type-based macro surface carries a
-                // REQUIRED value-type position (runtime/unannotated positions
-                // are separately typed `Absent` at their producers). Emit
-                // PAYLOAD sources never land here — the normalized
-                // `ResolvedEmitOccurrence.payload_source` rows (closed tuple /
-                // member-path / callable-params replay) own them.
-                None => match value_position {
-                    MemberValuePosition::ShallowMember => {
-                        // Source construction is anchored in the admitted
-                        // member's original carrier node, not the reduced
-                        // result node. A terminal reduction may legitimately
-                        // stop on an `Opaque(RecursiveRef)` or projection miss
-                        // while the authored member path remains a faithful,
-                        // replayable address. Partiality is retained on the
-                        // materialized outcome and still refuses cache
-                        // admission; it does not erase the best safe carrier.
-                        let structural = structural_member_value_source(
+            None => {
+                match published_member_source_upgrade_for_node(
+                    dispatch,
+                    materialized.node_id(),
+                    shallow_source.is_none(),
+                )
+                .or(authored_source)
+                {
+                    Some(source) => verter_type_expr::facts::SourcePosition::Present(source),
+                    // No authored position, no use-site slot, no upgrade on the
+                    // published node: the STRUCTURAL member-source projection. A
+                    // member value with a valid structural replay address (an
+                    // imported function / inline object / rich tuple / array /
+                    // composite / instantiation) publishes its faithful shallow
+                    // carrier — the closed/ref upgrade on the admitted node, or
+                    // the projected MEMBER-PATH replay route off the macro's
+                    // stamped type-argument base (the consumer re-resolves it on
+                    // demand through the one shared dispatch; nothing flattens
+                    // eagerly). ONLY a genuine miss stays the typed
+                    // source-construction FAILURE: an operationally partial
+                    // materialization (a torn read is never a replay-address
+                    // proof), an unknown-materializing resolver failure carrier,
+                    // or a structural value with no stamped base to replay off.
+                    // A stable unresolved reference/import is itself a faithful
+                    // Complete carrier. There
+                    // is no proven-open producer position on this arm: every
+                    // member enumerated from a type-based macro surface carries a
+                    // REQUIRED value-type position (runtime/unannotated positions
+                    // are separately typed `Absent` at their producers). Emit
+                    // PAYLOAD sources never land here — the normalized
+                    // `ResolvedEmitOccurrence.payload_source` rows (closed tuple /
+                    // member-path / callable-params replay) own them.
+                    None => match value_position {
+                        MemberValuePosition::ShallowMember => {
+                            // Source construction is anchored in the admitted
+                            // member's original carrier node, not the reduced
+                            // result node. A terminal reduction may legitimately
+                            // stop on an `Opaque(RecursiveRef)` or projection miss
+                            // while the authored member path remains a faithful,
+                            // replayable address. Partiality is retained on the
+                            // materialized outcome and still refuses cache
+                            // admission; it does not erase the best safe carrier.
+                            let structural = structural_member_value_source(
                             dispatch,
                             member.value,
                             &member
                                 .key
                                 .cloned_known()
                                 .expect("publication authority admits only known string keys"),
-                            type_arg_base,
+                            type_arg_base.map(|base| verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(base.clone())).as_ref(),
                         );
-                        match structural {
+                            match structural {
                             Some(source) => {
                                 verter_type_expr::facts::SourcePosition::Present(source)
                             }
@@ -891,9 +892,10 @@ pub(crate) fn surface_member_to_expanded_field(
                                 verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredMemberValue,
                             ),
                         }
-                    }
-                },
-            },
+                        }
+                    },
+                }
+            }
         }
     };
     // Provenance downgrade through transparent carriers: a member reached
@@ -1293,6 +1295,7 @@ fn materialize_output_source(
                             // deref).
                             QueryErrorDisposition::ControlCarrier
                             | QueryErrorDisposition::UnsupportedSurface
+                            | QueryErrorDisposition::UnsupportedPosition
                             | QueryErrorDisposition::Partial
                             | QueryErrorDisposition::Failure => {
                                 crate::meta_resolve::ComponentMetaOutputFailure::UnknownMaterializingSourceInterior {

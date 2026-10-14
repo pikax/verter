@@ -338,11 +338,16 @@ companion blocks once for syntax reuse only. Typed prop bindings are registered
 from the runtime DTO; runtime-form object/array bindings remain parser-owned
 syntax facts.
 
-A target that encounters a typed macro without its required bundle, with a
-degraded entry, or with a projection for the wrong macro role fails closed at
+A target that encounters a typed macro without its required bundle or with a
+projection for the wrong macro role fails closed at
 the authored macro/type anchor using `XMissingMacroSemanticBundle` or
-`XUnavailableMacroSemanticResult`. Before runtime codegen, the compiler
-structurally validates the whole bundle: syntax/effective macro identities,
+`XUnavailableMacroSemanticResult`. Runtime codegen also refuses a degraded
+root entry. IDE checking validates the entry identity but preserves the authored
+macro/type splice when the name domain is unavailable: only a Complete DTO
+registers prop bindings, and unavailable names use the existing instance
+fallback. It never synthesizes names from type syntax or converts an unavailable
+domain to an exact empty one. Invalid macro outcomes still produce their typed
+diagnostic on both targets. Before runtime codegen, the compiler structurally validates the whole bundle: syntax/effective macro identities,
 roles, `withDefaults` association, public names, authored-member ordinals, and
 synthesized model-row anchors must all match parser-owned syntax. Any invalid
 row suppresses the entire runtime bundle; a `Complete` row with a degraded

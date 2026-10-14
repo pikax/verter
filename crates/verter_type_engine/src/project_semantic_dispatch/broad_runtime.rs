@@ -7,10 +7,10 @@ use super::ProjectSemanticDispatch;
 use crate::intrinsic_registry::RuntimeNominal;
 use crate::locator_identity::{BroadRuntimeSubjectLocator, BroadRuntimeSubjectRoute};
 use crate::semantic_query::{
-    BroadRuntimeClassification, BroadRuntimeKind, CacheRead, DepSignature, LiteralValue,
-    PartialReasonSet, PrimitiveKind, ProjectionMode, ProjectionReductionContext, QueryError,
-    QueryResult, SemanticNodeData, SemanticNodeId, SemanticQueryKey, SemanticQueryValue,
-    SurfaceProvenanceContext,
+    BroadRuntimeClassification, BroadRuntimeKind, CacheRead, DepSignature, FactStatus,
+    LiteralValue, PartialReasonSet, PrimitiveKind, ProjectionMode, ProjectionReductionContext,
+    QueryError, QueryResult, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
+    SemanticQueryValue, SurfaceProvenanceContext,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -24,82 +24,7 @@ struct RehydratedRuntimeSubject {
     dep_signature: DepSignature,
     observed_self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
     cache_suppress: bool,
-    result_is_partial: bool,
-    /// The classes behind [`Self::result_is_partial`]. The boolean alone
-    /// cannot distinguish a partial that leaves the resolved SHAPE intact
-    /// from one that does not, and that distinction is what decides
-    /// whether the addressed MEMBER can be projected at all.
-    partial_reasons: PartialReasonSet,
-}
-
-/// What an observed partial says about the subject the classifier is about
-/// to read — the split the raw `result_is_partial` boolean cannot express.
-///
-/// A flow-return degradation is a statement about a VALUE inside a surface
-/// whose structure the substrate did produce. Every other class
-/// (a budget, a cancellation, a torn view, a recursion, a missing node) is
-/// a statement about the demand itself, and leaves nothing trustworthy.
-///
-/// Both fields stay independent of `result_is_partial`, which remains
-/// `true` for every one of these: a degraded result is still `ReturnOnly`
-/// and never warms.
-#[derive(Clone, Copy)]
-struct ObservedRuntimePartial {
-    /// Whether the resolved node is the structure the demand asked for, so
-    /// the addressed member can be selected out of it. True for both
-    /// flow-return classes: the UNINFERRED class carries the typed marker
-    /// at the one position it could not type and leaves every sibling
-    /// exact, and the UNVERIFIED class has a COMPLETE member set by
-    /// definition.
-    shape_is_trustworthy: bool,
-    /// Whether a member's own node may be classified into runtime
-    /// constructors. False as soon as a class says a member's TYPE may be
-    /// silently WRONG — `FLOW_RETURN_UNVERIFIED` is exactly that claim,
-    /// and it is a property of the FRAME (seeded from the lowered slice's
-    /// effect list before any member evaluates), so it disqualifies every
-    /// member rather than a nameable one.
-    ///
-    /// The UNINFERRED class does NOT disqualify: its untyped position
-    /// carries the typed marker, so the member holding it classifies
-    /// itself as unknown while its exact siblings classify exactly.
-    member_types_are_trustworthy: bool,
-}
-
-impl ObservedRuntimePartial {
-    const COMPLETE: Self = Self {
-        shape_is_trustworthy: true,
-        member_types_are_trustworthy: true,
-    };
-
-    /// The NOTHING-SURVIVES verdict — a partial about the demand itself.
-    const OPAQUE: Self = Self {
-        shape_is_trustworthy: false,
-        member_types_are_trustworthy: false,
-    };
-
-    fn observe(result_is_partial: bool, reasons: PartialReasonSet) -> Self {
-        if !result_is_partial {
-            return Self::COMPLETE;
-        }
-        // A partial that named NO class is not a licence: "empty" is
-        // vacuously a subset of every set, so reading it structurally would
-        // make an unclassified partial the most trustworthy value here
-        // instead of the least. Callers reach this through
-        // `CacheRead::partial_reason_classes`, which substitutes the
-        // `PROPAGATED` bridge, so the arm should be unreachable — which is
-        // exactly why it must fail closed rather than fail open.
-        if reasons.is_empty() {
-            return Self::OPAQUE;
-        }
-        Self {
-            shape_is_trustworthy: reasons
-                .without(PartialReasonSet::FLOW_RETURN_DEGRADED)
-                .is_empty(),
-            member_types_are_trustworthy: reasons
-                .without(PartialReasonSet::FLOW_RETURN_UNINFERRED)
-                .is_empty(),
-        }
-    }
+    fact_status: FactStatus,
 }
 
 impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
@@ -110,11 +35,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let rehydrated = self.rehydrate_broad_runtime_subject(locator);
         let mut output = self.classify_broad_runtime_node_return_only_if(
             rehydrated.node,
-            rehydrated.result_is_partial,
-            ObservedRuntimePartial::observe(
-                rehydrated.result_is_partial,
-                rehydrated.partial_reasons,
-            ),
+            rehydrated.fact_status,
             rehydrated.cache_suppress,
         );
         output.dep_signature = rehydrated.dep_signature;
@@ -141,11 +62,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         }
         let output = self.classify_broad_runtime_node_return_only_if(
             subject,
-            initial_trip.is_some(),
-            ObservedRuntimePartial::observe(
-                initial_trip.is_some(),
-                initial_trip.unwrap_or(PartialReasonSet::empty()),
-            ),
+            initial_trip.map_or(FactStatus::Complete, FactStatus::unavailable),
             true,
         );
         let observed = frame.finish();
@@ -155,17 +72,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
 
     /// Classify `subject` into broad runtime kinds.
     ///
-    /// `initial_partial` is the RESULT-level signal — it decides warm
-    /// admission and never anything else. `observed` is the CLASSIFICATION
-    /// -level signal: a partial whose classes leave a member's own node
-    /// readable still classifies that node, so an exact sibling of an
-    /// unmodelled position keeps its real constructor instead of collapsing
-    /// with it.
+    /// Classification consumes only an exact subject fact. A selected member
+    /// can supply that fact independently of its incomplete whole payload.
     fn classify_broad_runtime_node_return_only_if(
         &self,
         subject: SemanticNodeId,
-        initial_partial: bool,
-        observed: ObservedRuntimePartial,
+        subject_status: FactStatus,
         force_return_only: bool,
     ) -> QueryBuildOutput<SemanticQueryValue> {
         let mut work = vec![RuntimeWork {
@@ -175,8 +87,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let mut visited = FxHashSet::default();
         let mut observed_nodes = Vec::new();
         let mut kinds = Vec::new();
-        let mut result_is_partial = initial_partial;
-        let mut undecidable = !observed.member_types_are_trustworthy;
+        let mut result_is_partial = !subject_status.is_complete();
+        let mut undecidable = !subject_status.is_complete();
         let transit =
             ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate);
 
@@ -271,7 +183,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 SemanticNodeData::Array { .. } | SemanticNodeData::Tuple { .. } => {
                     kinds.push(BroadRuntimeKind::Array)
                 }
-                SemanticNodeData::Signature { .. } => kinds.push(BroadRuntimeKind::Function),
+                SemanticNodeData::Signature { .. } | SemanticNodeData::DeferredCallable(_) => {
+                    kinds.push(BroadRuntimeKind::Function)
+                }
                 SemanticNodeData::Object(surface) => {
                     // Callability is a signature-discovery answer, never the
                     // surface's own lists: a surface merged for presentation
@@ -413,9 +327,6 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 | SemanticNodeData::Infer { .. }
                 | SemanticNodeData::InferRef { .. }
                 | SemanticNodeData::RawFallback { .. }
-                // The sealed callable carrier is an intra-transaction call
-                // callee and never reaches a runtime classification.
-                | SemanticNodeData::DeferredCallable(_)
                 | SemanticNodeData::SyntheticBinding { .. } => push_unknown(&mut kinds),
                 SemanticNodeData::Opaque(error) => {
                     if let Some(reasons) = runtime_query_error_partial_reason(error) {
@@ -446,12 +357,17 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 .map(|frame| frame.partial_reasons)
                 .unwrap_or_default();
             BroadRuntimeClassification::unavailable(
-                crate::semantic_query::surface_resolution::NonEmptyReasons::new(reasons)
-                    .unwrap_or_else(|| {
-                        crate::semantic_query::surface_resolution::NonEmptyReasons::of(
-                            crate::semantic_query::PartialReason::SemanticQueryFault,
-                        )
-                    }),
+                crate::semantic_query::surface_resolution::NonEmptyReasons::new(
+                    subject_status.completeness().reasons(),
+                )
+                .or_else(|| {
+                    crate::semantic_query::surface_resolution::NonEmptyReasons::new(reasons)
+                })
+                .unwrap_or_else(|| {
+                    crate::semantic_query::surface_resolution::NonEmptyReasons::of(
+                        crate::semantic_query::PartialReason::SemanticQueryFault,
+                    )
+                }),
             )
         } else {
             BroadRuntimeClassification::new(kinds)
@@ -487,8 +403,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 dep_signature: Arc::from(dep_facts.into_boxed_slice()),
                 observed_self_roots: Vec::new(),
                 cache_suppress: true,
-                result_is_partial: true,
-                partial_reasons: PartialReasonSet::SEMANTIC_QUERY_FAULT,
+                fact_status: FactStatus::unavailable(PartialReasonSet::SEMANTIC_QUERY_FAULT),
             };
         };
         let indexed = serve.indexed;
@@ -502,8 +417,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 dep_signature: Arc::from(dep_facts.into_boxed_slice()),
                 observed_self_roots: vec![owner_root],
                 cache_suppress: true,
-                result_is_partial: true,
-                partial_reasons: PartialReasonSet::SEMANTIC_QUERY_FAULT,
+                fact_status: FactStatus::unavailable(PartialReasonSet::SEMANTIC_QUERY_FAULT),
             };
         };
         let Some(macro_kind) = indexed
@@ -518,8 +432,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 dep_signature: Arc::from(dep_facts.into_boxed_slice()),
                 observed_self_roots: vec![owner_root],
                 cache_suppress: true,
-                result_is_partial: true,
-                partial_reasons: PartialReasonSet::SEMANTIC_QUERY_FAULT,
+                fact_status: FactStatus::unavailable(PartialReasonSet::SEMANTIC_QUERY_FAULT),
             };
         };
         let Some(product) = self.macro_type_arg_hot_ref(canonical, macro_index) else {
@@ -529,51 +442,43 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 dep_signature: Arc::from(dep_facts.into_boxed_slice()),
                 observed_self_roots: vec![owner_root],
                 cache_suppress: true,
-                result_is_partial: true,
-                partial_reasons: PartialReasonSet::SEMANTIC_QUERY_FAULT,
+                fact_status: FactStatus::unavailable(PartialReasonSet::SEMANTIC_QUERY_FAULT),
             };
         };
 
-        let payload_read = self.execute_read(SemanticQueryKey::ResolveMacroPayload {
-            owner: owner.clone(),
-            macro_index,
-            macro_kind,
-            type_args: Arc::from([product.hot.node()]),
-            context: self.macro_payload_context_for(canonical, ProjectionMode::Navigate),
+        let payload_observation = self.observe_read(|| {
+            self.execute_read(SemanticQueryKey::ResolveMacroPayload {
+                owner: owner.clone(),
+                macro_index,
+                macro_kind,
+                type_args: Arc::from([product.hot.node()]),
+                context: self.macro_payload_context_for(canonical, ProjectionMode::Navigate),
+            })
         });
-        crate::fact_signature_helpers::merge_dep_signature_into_local_fence(
-            &mut dep_facts,
-            &payload_read.dep_signature,
-        );
-        let mut cache_suppress = payload_read.cache_suppress;
-        let mut result_is_partial = payload_read.result_is_partial;
-        let mut partial_reasons = payload_read.partial_reason_classes();
-        let mut node = match payload_read.value {
-            QueryResult::Value(node) => node,
+        let payload_read = payload_observation.value();
+        let payload_complete = payload_read.fact_status.is_complete();
+        let mut independent_value = false;
+        let mut cache_suppress = false;
+        let mut fact_status = payload_read.fact_status;
+        let mut node = match &payload_read.value {
+            QueryResult::Value(node) => *node,
             QueryResult::Recursive(node) => {
-                self.fold_local_partial_completeness(PartialReasonSet::SAME_PATH_RECURSION);
-                result_is_partial = true;
-                partial_reasons = partial_reasons.union(PartialReasonSet::SAME_PATH_RECURSION);
-                node
+                fact_status = fact_status.join(FactStatus::unavailable(
+                    PartialReasonSet::SAME_PATH_RECURSION,
+                ));
+                *node
             }
             QueryResult::Error(error) => {
-                let reasons = runtime_query_error_partial_reason(&error)
+                let reasons = runtime_query_error_partial_reason(error)
                     .unwrap_or(PartialReasonSet::SEMANTIC_QUERY_FAULT);
-                self.fold_local_partial_completeness(reasons);
-                result_is_partial = true;
-                partial_reasons = partial_reasons.union(reasons);
-                self.opaque(error)
+                fact_status = fact_status.join(FactStatus::unavailable(reasons));
+                self.opaque(error.clone())
             }
         };
 
-        // The MEMBER projection is gated on the SHAPE, not on the partial
-        // boolean. A flow-return degradation is a statement about a value
-        // INSIDE a surface the substrate did produce, so the addressed
-        // member is still selectable out of it; bailing here instead
-        // handed the whole payload object to the classifier, which then
-        // answered `Unknown` for EVERY member of a component one of whose
-        // members happened to be unmodelled.
-        if ObservedRuntimePartial::observe(result_is_partial, partial_reasons).shape_is_trustworthy
+        // Demand the original source independently. An incomplete whole
+        // payload cannot certify member values, and its causes cannot prevent
+        // an independently Complete member fact from being adopted.
         {
             if let BroadRuntimeSubjectRoute::Member(name) = locator.route() {
                 let provenance = match macro_kind {
@@ -583,99 +488,119 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     }
                     _ => SurfaceProvenanceContext::Structural,
                 };
-                // Reuse the exact root-surface demand already issued by the
-                // TypeInfo producer. `Shallow` materializes that filtered
-                // Object; it does not navigate a non-empty path to its value.
-                // Select the addressed member from the immutable surface only
-                // after the warm/cold read has established its facts.
-                let member_read = self.execute_read(SemanticQueryKey::ProjectPath {
-                    base: node,
-                    path: Arc::from([]),
-                    context: ProjectionReductionContext::vue_runtime_object_surface(
-                        ProjectionMode::Shallow,
-                        provenance,
-                    ),
+                // Demand this member through the shared path producer. Its
+                // independent flow-member proof can establish an exact value
+                // beside a sibling gap; selecting from a presence-only root
+                // surface cannot establish that value's classification.
+                // An exact whole surface already supplies exact member values,
+                // including their authored union order. A partial surface does
+                // not: discard that probe and demand the selected member.
+                let probe = self.observe_read(|| {
+                    self.execute_read(SemanticQueryKey::ProjectPath {
+                        base: node,
+                        path: Arc::from([]),
+                        context: ProjectionReductionContext::vue_runtime_object_surface(
+                            ProjectionMode::Shallow,
+                            provenance,
+                        ),
+                    })
                 });
-                crate::fact_signature_helpers::merge_dep_signature_into_local_fence(
-                    &mut dep_facts,
-                    &member_read.dep_signature,
-                );
-                cache_suppress |= member_read.cache_suppress;
-                result_is_partial |= member_read.result_is_partial;
-                partial_reasons = partial_reasons.union(member_read.partial_reason_classes());
-                node = match member_read.value {
-                    QueryResult::Value(node) => node,
-                    QueryResult::Recursive(node) => {
-                        self.fold_local_partial_completeness(PartialReasonSet::SAME_PATH_RECURSION);
-                        result_is_partial = true;
-                        partial_reasons =
-                            partial_reasons.union(PartialReasonSet::SAME_PATH_RECURSION);
-                        node
-                    }
-                    QueryResult::Error(error) => {
-                        let reasons = runtime_query_error_partial_reason(&error)
-                            .unwrap_or(PartialReasonSet::SEMANTIC_QUERY_FAULT);
-                        self.fold_local_partial_completeness(reasons);
-                        result_is_partial = true;
-                        partial_reasons = partial_reasons.union(reasons);
-                        self.opaque(error)
-                    }
-                };
-                if ObservedRuntimePartial::observe(result_is_partial, partial_reasons)
-                    .shape_is_trustworthy
-                {
-                    match self.graph().node_data(node) {
-                        None => {
-                            self.fold_local_partial_completeness(
-                                PartialReasonSet::MISSING_SEMANTIC_NODE_DATA,
-                            );
-                            result_is_partial = true;
-                            partial_reasons =
-                                partial_reasons.union(PartialReasonSet::MISSING_SEMANTIC_NODE_DATA);
-                            node = self.opaque(QueryError::Miss);
+                let selected = if payload_complete && probe.value().fact_status.is_complete() {
+                    match probe.value().value {
+                        QueryResult::Value(surface) => {
+                            self.graph()
+                                .node_data(surface)
+                                .and_then(|data| match data.as_ref() {
+                                    SemanticNodeData::Object(view) => view
+                                        .positive_members()
+                                        .iter()
+                                        .find(|member| {
+                                            member.key.as_known().is_some_and(|key| {
+                                                key.as_string() == Some(name.as_ref())
+                                            })
+                                        })
+                                        .map(|member| member.value),
+                                    _ => None,
+                                })
                         }
-                        Some(data) => match data.as_ref() {
-                            SemanticNodeData::Object(surface) => {
-                                // The member was ADMITTED under its
-                                // published name, and a numeric literal key
-                                // publishes under its canonical ECMAScript
-                                // string spelling — so the selection reads
-                                // the coercing known-key projection (JS
-                                // property identity: `"1"` and `1` are the
-                                // same property), never the non-coercing
-                                // string-key one, which misses exactly the
-                                // members the boundary just named.
-                                let key =
-                                    crate::semantic_query::PropertyKey::identifier(name.as_ref());
-                                match surface.project_known_key(&key) {
-                                    crate::semantic_query::SurfaceKeyProjection::Exact(member) => {
-                                        node = member.value;
-                                    }
-                                    crate::semantic_query::SurfaceKeyProjection::AbsentProven => {
-                                        self.fold_local_partial_completeness(
-                                            PartialReasonSet::SEMANTIC_QUERY_FAULT,
-                                        );
-                                        result_is_partial = true;
-                                        partial_reasons = partial_reasons
-                                            .union(PartialReasonSet::SEMANTIC_QUERY_FAULT);
-                                        node =
-                                            self.opaque(QueryError::UnrepresentableSurfaceMember);
-                                    }
-                                }
-                            }
-                            _ => {
-                                self.fold_local_partial_completeness(
-                                    PartialReasonSet::SEMANTIC_QUERY_FAULT,
-                                );
-                                result_is_partial = true;
-                                partial_reasons =
-                                    partial_reasons.union(PartialReasonSet::SEMANTIC_QUERY_FAULT);
-                                node = self.opaque(QueryError::UnrepresentableSurface);
-                            }
-                        },
+                        _ => None,
                     }
+                } else {
+                    None
+                };
+                if let Some(selected) = selected {
+                    if let Ok(read) = probe.adopt(self) {
+                        crate::fact_signature_helpers::merge_dep_signature_into_local_fence(
+                            &mut dep_facts,
+                            &read.dep_signature,
+                        );
+                        cache_suppress |= read.cache_suppress;
+                        fact_status = FactStatus::Complete;
+                        node = selected;
+                    }
+                } else {
+                    let _ = probe.discard();
+                    let member_read = self.execute_read(SemanticQueryKey::ProjectPath {
+                        base: product.hot.node(),
+                        path: Arc::from([crate::semantic_query::PathSegment::Member(
+                            crate::semantic_query::PropertyKey::identifier(name.as_ref()),
+                        )]),
+                        context: ProjectionReductionContext::vue_runtime_object_surface(
+                            ProjectionMode::Navigate,
+                            provenance,
+                        ),
+                    });
+                    crate::fact_signature_helpers::merge_dep_signature_into_local_fence(
+                        &mut dep_facts,
+                        &member_read.dep_signature,
+                    );
+                    cache_suppress |= member_read.cache_suppress;
+                    if member_read.fact_status.is_complete() {
+                        independent_value = true;
+                        fact_status = FactStatus::Complete;
+                    } else {
+                        fact_status = fact_status.join(member_read.fact_status);
+                    }
+                    node = match member_read.value {
+                        QueryResult::Value(node) => node,
+                        QueryResult::Recursive(node) => {
+                            self.fold_local_partial_completeness(
+                                PartialReasonSet::SAME_PATH_RECURSION,
+                            );
+                            fact_status = fact_status.join(FactStatus::unavailable(
+                                PartialReasonSet::SAME_PATH_RECURSION,
+                            ));
+                            node
+                        }
+                        QueryResult::Error(error) => {
+                            let reasons = runtime_query_error_partial_reason(&error)
+                                .unwrap_or(PartialReasonSet::SEMANTIC_QUERY_FAULT);
+                            self.fold_local_partial_completeness(reasons);
+                            fact_status = fact_status.join(FactStatus::unavailable(reasons));
+                            self.opaque(error)
+                        }
+                    };
                 }
             }
+        }
+
+        // The original payload's observations are declined only when the
+        // original source independently certified the selected member value.
+        // Execution aborts propagate through either disposition.
+        let payload_validity = if independent_value {
+            payload_observation.discard()
+        } else {
+            crate::fact_signature_helpers::merge_dep_signature_into_local_fence(
+                &mut dep_facts,
+                &payload_read.dep_signature,
+            );
+            cache_suppress |= payload_read.cache_suppress;
+            payload_observation.adopt(self)
+        };
+        if let Err(abort) = payload_validity {
+            node = self.opaque(QueryError::ExecutionAborted(abort));
+            fact_status = FactStatus::unavailable(abort.reason_class());
+            cache_suppress = true;
         }
 
         let mut observed_self_roots = vec![owner_root];
@@ -689,8 +614,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             dep_signature: Arc::from(dep_facts.into_boxed_slice()),
             observed_self_roots,
             cache_suppress,
-            result_is_partial,
-            partial_reasons,
+            fact_status,
         }
     }
 
@@ -725,7 +649,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         work: &mut Vec<RuntimeWork>,
         kinds: &mut Vec<BroadRuntimeKind>,
     ) -> bool {
-        let result_is_partial = read.result_is_partial;
+        let result_is_partial = read.result_is_partial();
         if result_is_partial {
             match &read.value {
                 QueryResult::Recursive(_) => {
@@ -854,78 +778,18 @@ mod tests {
         );
     }
 
-    /// The flow substrate's positional marker carries the flow substrate's
-    /// OWN class, so observing it as a NODE and observing it through the
-    /// flow result are the same observation.
-    ///
-    /// Reading it as the generic `SEMANTIC_QUERY_FAULT` makes the second
-    /// observation un-contain the first: a consumer that contains
-    /// `FLOW_RETURN_UNINFERRED` sees an uncontained class arrive from the
-    /// very node the contained class produced, and the surface it was
-    /// about to publish per-member is deleted instead. It also flips
-    /// `ObservedRuntimePartial::shape_is_trustworthy` to `false`, which
-    /// short-circuits the member projection this file exists to perform.
-    ///
-    /// The mapping is asserted directly HERE, and exercised through the
-    /// production classification path by
-    /// `broad_runtime_tests::the_positional_marker_classifies_with_the_
-    /// flow_class_through_the_classifier`. It is not asserted at a
-    /// SURFACE-level fixture because none can see the class:
-    /// `runtime_props_derive_each_member_from_that_members_own_evidence`
-    /// does drive a marker node into the `Opaque` arm of
-    /// `classify_runtime_kinds`, but both spellings stop that walk
-    /// identically (`undecidable`) and the folded class does not escape it
-    /// to the macro-codegen completeness the publish/refuse decision
-    /// reads.
-    ///
-    /// The `QueryResult::Error` route into this function
-    /// (`rehydrate_broad_runtime_subject`, `push_runtime_query_read`) is
-    /// live but cannot carry this variant today: the marker exists only as
-    /// a NODE (`unmodeled_position_marker` interns
-    /// `SemanticNodeData::Opaque`), and no producer returns
-    /// `QueryResult::Error(QueryError::UnmodeledPosition)`. The arm covers
-    /// it so that a future producer inherits the right class rather than
-    /// the wildcard's.
+    /// Diagnostic causes preserve the producer's positional class. These
+    /// classes explain refusal; the adopted fact alone authorizes a runtime
+    /// classification or independent member value.
     #[test]
     fn the_positional_marker_carries_the_flow_class_not_the_generic_query_fault() {
         assert_eq!(
             runtime_query_error_partial_reason(&QueryError::UnmodeledPosition),
             Some(PartialReasonSet::FLOW_RETURN_UNINFERRED),
         );
-        assert!(
-            ObservedRuntimePartial::observe(true, PartialReasonSet::FLOW_RETURN_UNINFERRED)
-                .shape_is_trustworthy,
-            "the addressed member is still selectable out of a surface whose one \
-             unmodelled position says so"
-        );
-        // CONTROL — a genuine query fault says nothing survived, and must
-        // still short-circuit both the member projection and the
-        // classification.
         assert_eq!(
             runtime_query_error_partial_reason(&QueryError::UnrepresentableSurface),
             Some(PartialReasonSet::SEMANTIC_QUERY_FAULT),
         );
-        let faulted = ObservedRuntimePartial::observe(true, PartialReasonSet::SEMANTIC_QUERY_FAULT);
-        assert!(!faulted.shape_is_trustworthy);
-        assert!(!faulted.member_types_are_trustworthy);
-        // CONTROL — the frame-wide class keeps the SHAPE but not the
-        // member types.
-        let unverified =
-            ObservedRuntimePartial::observe(true, PartialReasonSet::FLOW_RETURN_UNVERIFIED);
-        assert!(unverified.shape_is_trustworthy);
-        assert!(!unverified.member_types_are_trustworthy);
-        // CONTROL — an UNNAMED partial fails CLOSED. The empty set is
-        // vacuously a subset of every class, so a structural read alone
-        // would make the least-informative partial the most trusted one.
-        let unnamed = ObservedRuntimePartial::observe(true, PartialReasonSet::empty());
-        assert!(!unnamed.shape_is_trustworthy);
-        assert!(!unnamed.member_types_are_trustworthy);
-        // CONTROL — a MIXED observation is governed by its worst class.
-        let mixed = ObservedRuntimePartial::observe(
-            true,
-            PartialReasonSet::FLOW_RETURN_UNINFERRED.union(PartialReasonSet::BUDGET_EXCEEDED),
-        );
-        assert!(!mixed.shape_is_trustworthy);
-        assert!(!mixed.member_types_are_trustworthy);
     }
 }
