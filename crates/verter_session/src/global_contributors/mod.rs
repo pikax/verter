@@ -24,6 +24,7 @@ use dashmap::DashMap;
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_session_query::analysis::types::Hash16;
 use verter_session_query::facts::SymbolSpace;
+use verter_session_query::inputs::program_order::ProgramFileOrder;
 use verter_type_expr::TopLevelOwnerId;
 
 use crate::file_artifact_store::{
@@ -101,6 +102,9 @@ struct ProjectViewKey {
     overlay: Option<Hash16>,
     project: Option<verter_session_query::resolution::ProjectId>,
     membership_generation: Option<u64>,
+    /// Order and imported-membership fingerprint; absent when neither
+    /// relative precedence nor imported reachability affects the view.
+    program_order: Option<Hash16>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -110,7 +114,13 @@ struct CollectionViewKey {
     selection: FileScopeContribution,
     augmenters: Hash16,
     contributors: Hash16,
-    membership_generation: Option<u64>,
+    /// Fingerprint of the program order the view is sorted by; `None`
+    /// when its candidates span fewer than two program files.
+    program_order: Option<Hash16>,
+}
+
+fn program_rank(order: Option<&ProgramFileOrder>, canonical: &str) -> u32 {
+    order.map_or(u32::MAX, |order| order.rank(canonical))
 }
 
 type CollectionViews =
@@ -218,9 +228,12 @@ impl GlobalContributorPopulation {
         )
     }
 
-    /// A program's global contributor view, shared for this population and
-    /// immutable membership revision. Ownership changes require a new key;
-    /// the unfiltered fingerprint remains the population observation rail.
+    /// A program's global contributor view in declaration precedence order,
+    /// shared for this population, immutable membership revision and
+    /// program order. Ownership changes require a new key; the unfiltered
+    /// fingerprint remains the population observation rail. The program
+    /// order/membership dependency is read on every lookup, including cached
+    /// project views, and returned for the reader to observe.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn lookup_in_project(
         &self,
@@ -230,18 +243,8 @@ impl GlobalContributorPopulation {
         project: Option<verter_session_query::resolution::ProjectId>,
         membership_generation: Option<u64>,
         belongs: impl Fn(&ContributorEntry) -> bool,
-        rank: impl Fn(&str) -> u32,
-    ) -> SymbolContributors {
-        let key = ProjectViewKey {
-            name: Arc::from(name),
-            space,
-            overlay,
-            project,
-            membership_generation,
-        };
-        if let Some(view) = self.project_views.get(&key) {
-            return view.clone();
-        }
+        order: impl FnOnce(&[ContributorEntry]) -> Option<Arc<ProgramFileOrder>>,
+    ) -> (SymbolContributors, Option<Arc<ProgramFileOrder>>) {
         let contributors = self.lookup_in_space(
             &AugmentationTargetKind::GlobalAugmentation,
             name,
@@ -250,9 +253,22 @@ impl GlobalContributorPopulation {
             space,
         );
         if contributors.entries.is_empty() {
-            return contributors;
+            return (contributors, None);
         }
-        self.project_views
+        let order = order(&contributors.entries);
+        let key = ProjectViewKey {
+            name: Arc::from(name),
+            space,
+            overlay,
+            project,
+            membership_generation,
+            program_order: order.as_ref().map(|order| order.fingerprint()),
+        };
+        if let Some(view) = self.project_views.get(&key) {
+            return (view.clone(), order);
+        }
+        let view = self
+            .project_views
             .entry(key)
             .or_insert_with(|| {
                 let mut entries: Vec<_> = contributors
@@ -261,8 +277,9 @@ impl GlobalContributorPopulation {
                     .filter(|entry| belongs(entry))
                     .cloned()
                     .collect();
-                let ordering_work =
-                    stable_rank_order(&mut entries, |entry| rank(&entry.artifact_key.canonical));
+                let ordering_work = stable_rank_order(&mut entries, |entry| {
+                    program_rank(order.as_deref(), &entry.artifact_key.canonical)
+                });
                 #[cfg(any(test, feature = "semantic-observe"))]
                 self.ordering_work
                     .fetch_add(ordering_work, Ordering::Relaxed);
@@ -276,14 +293,16 @@ impl GlobalContributorPopulation {
                     fingerprint: contributors.fingerprint,
                 }
             })
-            .clone()
+            .clone();
+        (view, order)
     }
 
     /// Materialize declaration precedence once for this contributor/index and
-    /// membership revision. Each declaring base borrows the same slot order.
-    /// `selection` names the file-scope declarations ordered beside the
-    /// augmenters.
-    #[allow(clippy::too_many_arguments)]
+    /// program order. Each declaring base borrows the same slot order. The
+    /// order is read through `order`, given every candidate file — `None`
+    /// when they need none — and returned for the reader to observe. A
+    /// library the program does not load contributes nothing. `selection`
+    /// names the file-scope declarations ordered beside the augmenters.
     pub(crate) fn augmentation_order(
         &self,
         key: &crate::file_artifact_store::AugmentationTargetKey,
@@ -291,25 +310,40 @@ impl GlobalContributorPopulation {
         name: &str,
         contributors: &SymbolContributors,
         selection: FileScopeContribution,
-        membership_generation: Option<u64>,
-        rank: impl Fn(&str) -> u32,
-    ) -> Arc<[verter_session_query::inputs::contributors::AugmentationCandidate]> {
+        order: impl FnOnce(&mut dyn Iterator<Item = &str>) -> Option<Arc<ProgramFileOrder>>,
+    ) -> (
+        Arc<[verter_session_query::inputs::contributors::AugmentationCandidate]>,
+        Option<Arc<ProgramFileOrder>>,
+    ) {
         use verter_session_query::inputs::contributors::AugmentationCandidate;
+        if augmenters.entries.is_empty() && contributors.entries.is_empty() {
+            return (Arc::from([]), None);
+        }
+        let order = order(
+            &mut augmenters
+                .entries
+                .iter()
+                .map(|entry| entry.canonical().as_ref())
+                .chain(
+                    contributors
+                        .entries
+                        .iter()
+                        .map(|entry| entry.artifact_key.canonical.as_ref()),
+                ),
+        );
+        let rank = |canonical: &str| program_rank(order.as_deref(), canonical);
         let view_key = CollectionViewKey {
             target: key.clone(),
             name: Arc::from(name),
             selection,
             augmenters: augmenters.fingerprint,
             contributors: contributors.fingerprint,
-            membership_generation,
+            program_order: order.as_ref().map(|order| order.fingerprint()),
         };
         if let Some(view) = self.collection_views.get(&view_key) {
-            return Arc::clone(&view);
+            return (Arc::clone(&view), order);
         }
-        if augmenters.entries.is_empty() && contributors.entries.is_empty() {
-            return Arc::from([]);
-        }
-        Arc::clone(
+        let view = Arc::clone(
             self.collection_views
                 .entry(view_key)
                 .or_insert_with(|| {
@@ -339,6 +373,12 @@ impl GlobalContributorPopulation {
                         .entries
                         .iter()
                         .enumerate()
+                        .filter(|(_, entry)| {
+                            !entry.is_automatic_lib
+                                || order.as_ref().is_none_or(|order| {
+                                    order.loads_library(&entry.artifact_key.canonical)
+                                })
+                        })
                         .filter(|(_, entry)| match selection {
                             FileScopeContribution::TypeBody => {
                                 entry.origin == ContributorOrigin::FileScopeInterface
@@ -391,7 +431,8 @@ impl GlobalContributorPopulation {
                         .collect()
                 })
                 .value(),
-        )
+        );
+        (view, order)
     }
 
     fn lookup_spaces(
@@ -495,9 +536,10 @@ impl GlobalContributorPopulation {
     }
 }
 
-/// Stable byte radix ordering of configured ranks. The input's canonical/hash
-/// tie order survives; rank lookup and four fixed passes take linear work even
-/// when the configured file sequence is an arbitrary permutation.
+/// Stable byte radix ordering of program-order ranks. The input's
+/// canonical/hash tie order survives; rank lookup and four fixed passes take
+/// linear work even when the program's file order is an arbitrary
+/// permutation.
 fn stable_rank_order<T: Clone>(entries: &mut [T], rank: impl Fn(&T) -> u32) -> u64 {
     let mut positions: Vec<_> = entries
         .iter()

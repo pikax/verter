@@ -1113,6 +1113,8 @@ impl VerterHost {
             .map(|commit| (commit.canonical_id, commit.parsed_edges))
             .collect::<Vec<_>>();
         self.ws().record_parsed_edges_many(&records);
+        self.ingest_injected_ambient_roots(None);
+        self.ingest_changed_program_files(records.into_iter().map(|(canonical, _)| canonical));
     }
 
     fn notify_upsert_many(&self, records: &[(String, Arc<str>)]) {

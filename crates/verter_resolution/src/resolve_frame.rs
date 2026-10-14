@@ -20,6 +20,7 @@ use verter_session_query::resolution::{
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ResolveFrameOperation {
     Request,
+    ProjectImport,
     Project,
 }
 
@@ -290,6 +291,33 @@ impl<'a> ResolveFrame<'a> {
         Self {
             projects,
             operation: ResolveFrameOperation::Request,
+            geometry,
+            memo: ResolutionStringMemo::default(),
+            active_basis: Cell::new(None),
+        }
+    }
+
+    pub(crate) fn for_project_import(
+        projects: &'a [IdeProjectConfig],
+        owner: &ProjectOwnership,
+        request: &ResolveRequest,
+    ) -> Self {
+        let owner_index = project_for_ownership(projects, owner)
+            .and_then(|project| project_index(projects, project));
+        let geometry = build_source_geometry(
+            projects,
+            owner_index,
+            &request.importer_id,
+            &request.specifier,
+            ResolutionContext {
+                phase: request.phase,
+                kind: request.kind,
+            },
+            false,
+        );
+        Self {
+            projects,
+            operation: ResolveFrameOperation::ProjectImport,
             geometry,
             memo: ResolutionStringMemo::default(),
             active_basis: Cell::new(None),

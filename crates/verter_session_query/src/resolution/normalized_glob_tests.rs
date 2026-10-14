@@ -206,3 +206,64 @@ fn compiled_glob_from_normalized_glob() {
     let compiled: CompiledGlob = NormalizedGlob::new("d:/project/**/*").into();
     assert!(compiled.matches(&CanonicalPath::new("d:/project/src/foo.ts")));
 }
+
+// ── TypeScript include wildcard semantics ──
+
+#[test]
+fn typescript_include_wildcards_skip_package_and_dot_folders() {
+    let include = |raw: &str| CompiledGlob::new(NormalizedGlob::new(raw)).as_typescript_include();
+    let cases: &[(&str, &str, bool)] = &[
+        ("/p/**/*.ts", "/p/src/a.ts", true),
+        ("/p/**/*.ts", "/p/node_modules/pkg/index.d.ts", false),
+        ("/p/**/*.ts", "/p/src/bower_components/x.ts", false),
+        ("/p/*/*.ts", "/p/jspm_packages/x.ts", false),
+        ("/p/**/*.ts", "/p/.git/hooks/x.ts", false),
+        ("/p/**/*.ts", "/p/src/.hidden.ts", false),
+        // Spelled literally, the folder is matched.
+        (
+            "/p/node_modules/pkg/*.ts",
+            "/p/node_modules/pkg/index.d.ts",
+            true,
+        ),
+        (
+            "/p/node_modules/**/*.ts",
+            "/p/node_modules/a/node_modules/b/x.ts",
+            false,
+        ),
+        ("/p/.storybook/*.ts", "/p/.storybook/main.ts", true),
+        ("/p/**/.*/*.ts", "/p/src/.config/x.ts", true),
+        // The rooted literal prefix may carry dot components.
+        ("/tmp/.tmp1/p/**/*.ts", "/tmp/.tmp1/p/src/a.ts", true),
+    ];
+    for (pattern, path, expected) in cases {
+        let path = CanonicalPath::new(path);
+        assert_eq!(
+            include(pattern).matches(&path),
+            *expected,
+            "include {pattern} vs {}",
+            path.as_str()
+        );
+    }
+    // A glob that is not an authored include keeps plain glob semantics.
+    let plain = CompiledGlob::new(NormalizedGlob::new("/p/**/*.ts"));
+    assert!(plain.matches(&CanonicalPath::new("/p/node_modules/pkg/index.d.ts")));
+    assert!(plain.matches(&CanonicalPath::new("/p/.git/x.ts")));
+}
+
+#[test]
+fn typescript_include_prunes_only_folders_its_wildcards_cannot_reach() {
+    let include = |raw: &str| CompiledGlob::new(NormalizedGlob::new(raw)).as_typescript_include();
+    let below = |glob: &CompiledGlob, dir: &str| glob.may_match_below(&CanonicalPath::new(dir));
+    let all = include("/tmp/.tmp1/p/**/*.ts");
+    assert!(below(&all, "/tmp/.tmp1/p"));
+    assert!(below(&all, "/tmp/.tmp1/p/src"));
+    assert!(!below(&all, "/tmp/.tmp1/p/node_modules"));
+    assert!(!below(&all, "/tmp/.tmp1/p/src/.git"));
+    assert!(below(
+        &include("/p/node_modules/pkg/*.ts"),
+        "/p/node_modules"
+    ));
+    assert!(below(&include("/p/**/.*/*.ts"), "/p/src/.config"));
+    let plain = CompiledGlob::new(NormalizedGlob::new("/p/**/*.ts"));
+    assert!(below(&plain, "/p/node_modules"));
+}

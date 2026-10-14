@@ -41,6 +41,29 @@ try {
 }
 ```
 
+### Project configuration
+
+A session opened with `tsconfig` is a configured TypeScript project: the
+native workspace loader reads the tsconfig itself (its `extends` chain,
+compiler options including `paths`/`baseUrl`, and its `files` / `include` /
+`exclude` membership, enumerating `include` matches from disk). The
+membership is the program's root files in their authored order, which
+decides the order of declarations merged across files (global interfaces and
+namespaces, `declare global`, module augmentations); files those roots import
+or reference join the program just ahead of the root that pulls them in. The
+tsconfig's `paths` also govern imported and referenced dependencies outside
+`files` / `include`. An unreachable component outside that closure still
+publishes, but resolves only relative and package imports. The pooled engine
+identity fingerprints the tsconfig and its `extends` chain, including package
+configuration resolution. JSONC comments, URLs, alias globs and trailing commas
+are supported. Changes to root order or inherited configuration select a fresh
+engine for both project sessions and compat checkers.
+
+A session opened with an inline `config` object has no tsconfig file and is
+an unconfigured project: it applies the object's `paths`/`baseUrl` to every
+file under `root` (match-all), and its `include` only filters discovery.
+Use a tsconfig file when the program's file order matters.
+
 ### Root exports
 
 - `openComponentMetaSession(config)`

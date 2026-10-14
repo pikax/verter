@@ -2886,7 +2886,24 @@ new_fingerprint: [number, number, number, number, number, number, number, number
 /**
  * Number of augmenters in the post-install set.
  */
-augmenter_count: number, } } | { "FileArtifactCache": {
+augmenter_count: number, } } | { "ProgramFileOrder": {
+/**
+ * The program's project config path.
+ */
+program: string,
+/**
+ * Fingerprint of the previously published order, `None` on the
+ * program's first publication.
+ */
+prev_fingerprint: [number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number] | null,
+/**
+ * Fingerprint of the published order.
+ */
+new_fingerprint: [number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number],
+/**
+ * Number of files the program lists.
+ */
+file_count: number, } } | { "FileArtifactCache": {
 /**
  * Canonical id whose entry was admitted or evicted.
  */

@@ -44,11 +44,12 @@ import {
 import {
   createMetaRuntime,
   getMetaRuntime,
-  stableSelectiveConfigHash,
+  inlineConfigHash,
+  hashTsconfigConfig,
   resolvePath as runtimeResolvePath,
   normalizePath as runtimeNormalizePath,
-  parseTsconfig,
   extractPathAliases,
+  tsconfigProjectConfig,
 } from "../runtime/index.js";
 import type {
   BootstrapFn,
@@ -185,6 +186,8 @@ export interface CheckerWorkspace {
     projects: Array<{
       root: string;
       workspaceRoot: string;
+      /** A tsconfig the native loader reads compiler options and membership from. */
+      tsconfigPath?: string;
       compilerOptions?: {
         baseUrl?: string;
         paths?: Array<{ pattern: string; targets: string[] }>;
@@ -2325,15 +2328,12 @@ export async function createChecker(
   const normalizedAbsPath = runtimeResolvePath(tsconfigPath);
   const projectRoot = dirname(normalizedAbsPath);
   const workspace = createWorkspace(projectRoot);
-  const parsed = await parseTsconfig(normalizedAbsPath, workspace);
   const input: EngineKeyInput = {
     backend: "napi",
     root: runtimeNormalizePath(projectRoot),
     configKind: "tsconfig",
     tsconfigPath: runtimeNormalizePath(normalizedAbsPath),
-    configHash: stableSelectiveConfigHash(
-      parsed?.config ?? { tsconfigPath: runtimeNormalizePath(normalizedAbsPath) },
-    ),
+    configHash: hashTsconfigConfig(normalizedAbsPath),
     nativeFlags: {
       analysisLevel: "full",
       auditEnabled: options?.logging?.audit ?? false,
@@ -2357,10 +2357,10 @@ export async function createChecker(
       hostConfig,
       workspace,
     );
-    if (parsed) {
-      const aliases = extractPathAliases(parsed.config, runtimeNormalizePath(projectRoot));
-      workspace.configureProjects([aliases]);
-    }
+    // The native loader reads the tsconfig itself: compiler options and the
+    // `files` / `include` / `exclude` membership that orders the program's
+    // files.
+    workspace.configureProjects([tsconfigProjectConfig(normalizedAbsPath, projectRoot)]);
     return { nativeProject, baseFileIds: [] };
   };
   const engine = await runtime.getOrCreateEngine(input, bootstrap);
@@ -2422,7 +2422,7 @@ export async function createCheckerByJson(
     backend: "napi",
     root: runtimeNormalizePath(absRoot),
     configKind: "inline",
-    configHash: stableSelectiveConfigHash(config),
+    configHash: inlineConfigHash(config),
     nativeFlags: {
       analysisLevel: "full",
       auditEnabled: options?.logging?.audit ?? false,

@@ -619,6 +619,29 @@ impl crate::traits::WorkspaceRead for MemoryWorkspace {
             .resolve_import_for_project_outcome(self, owner, specifier, ctx)
     }
 
+    fn resolve_import_from_project_outcome(
+        &self,
+        owner: &verter_session_query::resolution::ProjectOwnership,
+        overlay: Option<&crate::resolution_currency::ResolutionOverlaySnapshot>,
+        importer_id: &str,
+        specifier: &str,
+        ctx: verter_session_query::resolution::ResolutionContext,
+    ) -> crate::resolution_currency::ResolutionOutcome {
+        let mut ledger =
+            crate::resolver::InputResolutionLedger::new(self.engine.input_resolution_budgets);
+        self.engine
+            .resolve_import_outcome_for_published_in_operation(
+                self,
+                crate::resolution_currency::ResolutionEvidenceSource::ReaderAuthoritative,
+                importer_id,
+                specifier,
+                ctx,
+                crate::engine::ResolutionOperation::unpinned(&mut ledger, &|| true)
+                    .over(overlay)
+                    .in_project(Some(owner)),
+            )
+    }
+
     fn is_workspace_owned(&self, canonical_id: &str) -> bool {
         let resolved = self.realpath(canonical_id);
         let target = resolved.as_deref().unwrap_or(canonical_id);

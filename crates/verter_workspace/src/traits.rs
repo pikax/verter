@@ -425,6 +425,28 @@ pub trait WorkspaceRead: Send + Sync {
         )
     }
 
+    /// Resolve an imported program member in the program's configured
+    /// context, preserving its source directory and any session overlay.
+    /// Adapters without this capability refuse persistent publication.
+    fn resolve_import_from_project_outcome(
+        &self,
+        _owner: &ProjectOwnership,
+        overlay: Option<&crate::resolution_currency::ResolutionOverlaySnapshot>,
+        importer_id: &str,
+        specifier: &str,
+        ctx: ResolutionContext,
+    ) -> crate::resolution_currency::ResolutionOutcome {
+        let outcome = match overlay {
+            Some(overlay) => {
+                self.resolve_import_outcome_with_overlay(overlay, importer_id, specifier, ctx)
+            }
+            None => self.resolve_import_outcome(importer_id, specifier, ctx),
+        };
+        crate::resolution_currency::ResolutionOutcome::adapter_return_only(
+            outcome.into_transient_result(),
+        )
+    }
+
     /// Whether `canonical_id` is a workspace-owned source file.
     ///
     /// Routes through the resolver's existing ownership classification:

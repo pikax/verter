@@ -47,7 +47,7 @@ impl VerterHost {
             return Vec::new();
         };
         let snapshot = &root.snapshot;
-        let Some(project_id) = snapshot.owners_for_file(canonical).first().copied() else {
+        let Some(project_id) = self.resolve_project_for_canonical(canonical) else {
             return Vec::new();
         };
         match snapshot

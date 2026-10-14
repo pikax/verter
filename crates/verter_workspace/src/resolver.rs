@@ -1378,7 +1378,21 @@ pub(crate) fn resolve_tracked(
     ledger: &mut InputResolutionLedger,
     request: &ResolveRequest,
 ) -> Result<Option<ResolveResult>, Box<AttemptFailure>> {
-    let frame = resolver.resolve_frame(request);
+    resolve_tracked_in_project(resolver, _capability, reader, ledger, request, None)
+}
+
+pub(crate) fn resolve_tracked_in_project(
+    resolver: &ModuleResolverCore,
+    _capability: &crate::engine::TrackedResolutionCapability,
+    reader: &crate::resolution_currency::TransactionReader<'_>,
+    ledger: &mut InputResolutionLedger,
+    request: &ResolveRequest,
+    project: Option<&verter_session_query::resolution::ProjectOwnership>,
+) -> Result<Option<ResolveResult>, Box<AttemptFailure>> {
+    let frame = match project {
+        Some(owner) => resolver.resolve_from_project_frame(owner, request),
+        None => resolver.resolve_frame(request),
+    };
     let result = drive_attempt(
         reader,
         ledger,
