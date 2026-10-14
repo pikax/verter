@@ -14212,15 +14212,35 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         Ok(reads)
     }
 
-    /// One selected-value demand retains its exact completion and availability.
-    /// The evaluator owns instantiation and conditional continuations; callers
-    /// never restart an incomplete value through a shell evaluation.
+    /// A selected member retains exact completion and availability through
+    /// helper instantiation, without forcing the instantiated object's members.
     pub(super) fn materialize_selected_key_mapped_value_outcome(
         &self,
         mapper: &crate::semantic_query::MapperKey,
         key_arg: SemanticNodeId,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> super::evaluate::EvaluateDeferredOutcome {
+        let substituted = self.substitute_selected_mapped_value(mapper, key_arg, context);
+        self.evaluate_mapped_member_value_outcome(substituted, context)
+    }
+
+    /// An index batch consumes the value composition, including helper bodies.
+    pub(super) fn materialize_mapped_index_value_outcome(
+        &self,
+        mapper: &crate::semantic_query::MapperKey,
+        key_arg: SemanticNodeId,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> super::evaluate::EvaluateDeferredOutcome {
+        let substituted = self.substitute_selected_mapped_value(mapper, key_arg, context);
+        self.evaluate_mapped_index_value_outcome(substituted, context)
+    }
+
+    fn substitute_selected_mapped_value(
+        &self,
+        mapper: &crate::semantic_query::MapperKey,
+        key_arg: SemanticNodeId,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> SemanticNodeId {
         self.graph().record_mapped_per_k_materialization();
         // Instrumentation — selected-key variant.
         if let Some(ctx) = crate::request_context::current_request_context() {
@@ -14234,9 +14254,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 },
             );
         }
-        let substituted =
-            self.substitute_semantic_type_param(mapper.value_expr, mapper.parameter_node, key_arg);
-        self.evaluate_selected_value_outcome(substituted, context)
+        self.substitute_semantic_type_param(mapper.value_expr, mapper.parameter_node, key_arg)
     }
 
     /// A binder-independent selected value uses the same typed evaluator,
@@ -14246,7 +14264,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         mapper: &crate::semantic_query::MapperKey,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> SemanticNodeId {
-        self.evaluate_selected_value_outcome(mapper.value_expr, context)
+        self.evaluate_mapped_member_value_outcome(mapper.value_expr, context)
             .into_active_query_build_node(self)
     }
 
@@ -14447,7 +14465,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> (SemanticNodeId, crate::semantic_query::PartialReasonSet) {
         let output = self
-            .evaluate_selected_value_outcome(mapper.value_expr, context)
+            .evaluate_mapped_member_value_outcome(mapper.value_expr, context)
             .into_query_build_output(self);
         let reasons = output.completeness.reasons();
         let node = match output.result {

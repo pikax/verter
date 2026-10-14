@@ -2861,7 +2861,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     );
                 }
             }
-            let value = self.dispatch.materialize_selected_key_mapped_value_outcome(
+            let value = self.dispatch.materialize_mapped_index_value_outcome(
                 &selected_mapper,
                 argument,
                 // Selected values use the same publication context as
