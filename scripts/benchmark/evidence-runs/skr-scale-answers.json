@@ -1,0 +1,89 @@
+{
+  "name": "skr-scale-answers",
+  "description": "Recursive conditionals over an as-const route tree of 300 parents, a repeated infer over a 1,000-member union and 1,000 distinct alias inferences; cold Verter time and peak memory beside whole-program TypeScript wall time.",
+  "tier": "standard",
+  "scenarios": [
+    "route-tree-names-100",
+    "route-tree-names-300",
+    "route-tree-paths-100",
+    "route-tree-paths-300",
+    "infer-pattern-repeat-100",
+    "infer-pattern-repeat-1000",
+    "reference-infer-aliases-100",
+    "reference-infer-aliases-1000"
+  ],
+  "settings": ["strict"],
+  "arms": ["verter", "tsc-cli"],
+  "modes": ["cold"],
+  "threads": ["default"],
+  "noise": [
+    "docs/contributing/semantic-benchmark.md#verdicts",
+    "docs/contributing/semantic-benchmark.md#schedule"
+  ],
+  "requiredCells": [
+    {
+      "scenario": "route-tree-names-300",
+      "setting": "strict",
+      "arm": "verter",
+      "mode": "cold",
+      "threads": "default",
+      "metrics": ["coldMs", "peakBytes"]
+    },
+    {
+      "scenario": "route-tree-names-300",
+      "setting": "strict",
+      "arm": "tsc-cli",
+      "mode": "cold",
+      "threads": "default",
+      "metrics": ["wallMs"]
+    },
+    {
+      "scenario": "route-tree-paths-300",
+      "setting": "strict",
+      "arm": "verter",
+      "mode": "cold",
+      "threads": "default",
+      "metrics": ["coldMs", "peakBytes"]
+    },
+    {
+      "scenario": "route-tree-paths-300",
+      "setting": "strict",
+      "arm": "tsc-cli",
+      "mode": "cold",
+      "threads": "default",
+      "metrics": ["wallMs"]
+    },
+    {
+      "scenario": "infer-pattern-repeat-1000",
+      "setting": "strict",
+      "arm": "verter",
+      "mode": "cold",
+      "threads": "default",
+      "metrics": ["coldMs", "peakBytes"]
+    },
+    {
+      "scenario": "infer-pattern-repeat-1000",
+      "setting": "strict",
+      "arm": "tsc-cli",
+      "mode": "cold",
+      "threads": "default",
+      "metrics": ["wallMs"]
+    },
+    {
+      "scenario": "reference-infer-aliases-1000",
+      "setting": "strict",
+      "arm": "verter",
+      "mode": "cold",
+      "threads": "default",
+      "metrics": ["coldMs", "peakBytes"]
+    },
+    {
+      "scenario": "reference-infer-aliases-1000",
+      "setting": "strict",
+      "arm": "tsc-cli",
+      "mode": "cold",
+      "threads": "default",
+      "metrics": ["wallMs"]
+    }
+  ]
+}

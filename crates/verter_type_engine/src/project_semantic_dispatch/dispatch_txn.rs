@@ -2273,6 +2273,44 @@ impl RelationDomainRuntime {
             .binary_search_by_key(&id, |session| session.id)
             .ok()
     }
+
+    /// The first stack position a session must hold to be visible: the
+    /// newest binding-disabled barrier, or the bottom of the stack.
+    fn visible_floor(&self) -> usize {
+        self.binding_disabled_session_barriers
+            .last()
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// The stack positions of the visible collecting sessions, innermost
+    /// first.
+    fn visible_collecting_positions(&self) -> impl Iterator<Item = usize> + '_ {
+        let floor = self.visible_floor();
+        self.collecting_ids
+            .iter()
+            .rev()
+            .filter_map(|&id| self.session_position(id))
+            .take_while(move |&position| position >= floor)
+            .filter(|&position| self.sessions[position].state == InferenceSessionState::Collecting)
+    }
+
+    /// Drop the finished sessions from the top of the collecting ids. A
+    /// session never returns to collecting once it leaves it; one absent
+    /// from the stack (a contextual collector suspended while its candidate
+    /// relates) is kept, so it is searched again once it returns.
+    fn prune_finished_collecting(&mut self) {
+        while let Some(&id) = self.collecting_ids.last() {
+            match self.session_position(id) {
+                Some(position)
+                    if self.sessions[position].state != InferenceSessionState::Collecting =>
+                {
+                    self.collecting_ids.pop();
+                }
+                _ => break,
+            }
+        }
+    }
 }
 
 /// The relation domain runtime: inference sessions, relation provisional
@@ -2309,6 +2347,13 @@ pub struct RelationDomainRuntime {
     /// newest length watermark are inactive; a genuinely nested call may push
     /// a fresh session above it and infer normally.
     binding_disabled_session_barriers: Vec<usize>,
+    /// The ids of the sessions that may still be collecting, in id order:
+    /// every session opened, less the finished ones found on top. Finished
+    /// sessions stay on [`Self::sessions`] for the rest of the transaction,
+    /// so finding the innermost collecting session by scanning that stack
+    /// costs every session the transaction ever opened; this keeps the
+    /// search to the open ones.
+    collecting_ids: Vec<SessionId>,
     /// Literal interpretation for the current call argument relation. Empty
     /// outside call-owned collection, so ordinary relation inference is
     /// unchanged.
@@ -2667,54 +2712,29 @@ impl CheckerDispatchTransaction {
                 .is_none_or(|last| last.id < id),
             "sessions are appended in id order"
         );
+        self.relation.prune_finished_collecting();
         self.relation.sessions.push(session);
+        self.relation.collecting_ids.push(id);
         id
     }
 
     /// The active (innermost `Collecting`) session, if any.
     pub(crate) fn active_session_mut(&mut self) -> Option<&mut InferenceSession> {
-        let start = self
-            .relation
-            .binding_disabled_session_barriers
-            .last()
-            .copied()
-            .unwrap_or(0);
-        self.relation
-            .sessions
-            .get_mut(start..)?
-            .iter_mut()
-            .rev()
-            .find(|s| s.state == InferenceSessionState::Collecting)
+        self.relation.prune_finished_collecting();
+        let position = self.relation.visible_collecting_positions().next()?;
+        self.relation.sessions.get_mut(position)
     }
 
     pub(crate) fn active_session(&self) -> Option<&InferenceSession> {
-        let start = self
-            .relation
-            .binding_disabled_session_barriers
-            .last()
-            .copied()
-            .unwrap_or(0);
-        self.relation
-            .sessions
-            .get(start..)?
-            .iter()
-            .rev()
-            .find(|s| s.state == InferenceSessionState::Collecting)
+        let position = self.relation.visible_collecting_positions().next()?;
+        self.relation.sessions.get(position)
     }
 
     /// Whether a collecting session visible here infers `param_node`.
     pub(crate) fn collecting_session_infers(&self, param_node: SemanticNodeId) -> bool {
-        let start = self
-            .relation
-            .binding_disabled_session_barriers
-            .last()
-            .copied()
-            .unwrap_or(0);
-        self.relation.sessions.get(start..).is_some_and(|sessions| {
-            sessions.iter().any(|session| {
-                session.state == InferenceSessionState::Collecting && session.infers(param_node)
-            })
-        })
+        self.relation
+            .visible_collecting_positions()
+            .any(|position| self.relation.sessions[position].infers(param_node))
     }
 
     pub(crate) fn begin_binding_disabled(&mut self) {

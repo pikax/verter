@@ -1133,6 +1133,32 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 if !any_changed {
                     return (node, false);
                 }
+                // Substitution is a template CONSTRUCTION site, as it is for
+                // a union: the checker instantiates a template literal type
+                // through `getTemplateLiteralType`, which folds literal holes
+                // into its text, so a template whose every hole is now a
+                // literal is that string (`${P}${S}` with `P := "/a/"` and
+                // `S := "x"` is `"/a/x"`). The template authority builds it.
+                let all_literal = new_expressions.iter().all(|expression| {
+                    matches!(
+                        self.graph().node_data(*expression).as_deref(),
+                        Some(SemanticNodeData::Literal(_))
+                    )
+                });
+                if all_literal {
+                    let read = self.execute_read(
+                        crate::semantic_query::SemanticQueryKey::TemplateLiteralReduce {
+                            pattern: Arc::clone(quasis),
+                            args: Arc::from(new_expressions.as_slice()),
+                            context: self.template_literal_reduce_context(),
+                        },
+                    );
+                    if let (crate::semantic_query::QueryResult::Value(built), false) =
+                        (&read.value, read.result_is_partial())
+                    {
+                        return (*built, true);
+                    }
+                }
                 (
                     self.graph().intern_preserving_scope(
                         node,
@@ -1325,8 +1351,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 } else {
                     next_pending = next_pending.append_both(parameter_node, arg);
                     // A distributive conditional's check IS this parameter:
-                    // its branches see each member it distributes over.
-                    if *distributive && *check == parameter_node {
+                    // its branches see each member it distributes over. An
+                    // `infer` binder's check is a reference carrying its
+                    // binder identity, never the declaration node itself.
+                    let check_is_parameter = *check == parameter_node
+                        || parameter_infer_binder.as_ref().is_some_and(|binder| {
+                            matches!(
+                                self.graph().node_data(*check).as_deref(),
+                                Some(
+                                    SemanticNodeData::Infer { binder: written, .. }
+                                        | SemanticNodeData::InferRef { binder: written, .. }
+                                ) if written == binder
+                            )
+                        });
+                    if *distributive && check_is_parameter {
                         next_pending = next_pending.distributing(parameter_node);
                     }
                 }

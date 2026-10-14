@@ -29,12 +29,20 @@ manifests under `scripts/benchmark/evidence-run-fixtures/` (`pnpm test:scripts`)
 owner: the change that needs the run adds its manifest and no other change
 edits it. Shipped: `skr-perf0-structural`, `skr-mapped-indexb`, `switch-discriminated`,
 `skr-callback-cost` (10, 100 and 500 contravariant callbacks; cold Verter time
-and peak memory beside whole-program TypeScript wall time).
+and peak memory beside whole-program TypeScript wall time), `skr-scale-answers`.
 
 `skr-mapped-indexb` demands conditional mapped values through the entire source
 key domain at 1,000, 3,000 and 10,000 keys. The recorded TypeScript 7.0.2 answer
 is `"b" | "n" | "s"`. Its strict, cold Verter cells require `firstTypeMs` and
 `peakBytes`; the fleet measures those cells on the benchmark worker.
+
+`skr-scale-answers` demands the recursive `Names` and `Paths` conditionals over
+an `as const` route tree of 100 and 300 parents (five children each), a repeated
+`infer` pattern over a 100- and a 1,000-member union, and an inference through
+100 and 1,000 distinct aliases of one generic. TypeScript 7.0.2 answers every
+one with the full literal union and no diagnostic. Its required cells are the
+largest sizes: cold Verter `coldMs` and `peakBytes` beside whole-program
+`tsc-cli` `wallMs`; the middle sizes run beside them for comparison.
 
 | Field                             | Meaning                                                                                                                                                        |
 | --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
