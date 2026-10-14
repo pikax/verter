@@ -198,12 +198,13 @@ impl SnapshotShard {
             Ok(parsed) => (Some(std::rc::Rc::new(parsed)), None),
             Err(refused) => (None, refused),
         };
-        // Charged from SOURCE bytes rather than by walking the arena:
-        // the lease path is hot, and an arena walk per acquisition would
-        // cost more than the accounting is worth. See
-        // `PARSE_SNAPSHOT_BYTES_PER_SOURCE_BYTE` for the factor.
+        // Charged once per snapshot from the arena the parse retains (its
+        // chunk list is a handful of chunks long); a fatal parse retains no
+        // arena.
         let pin = account.pin(
-            source.len() * verter_session_query::retention::PARSE_SNAPSHOT_BYTES_PER_SOURCE_BYTE,
+            parsed
+                .as_deref()
+                .map_or(0, |parsed| parsed.arena_capacity()),
         );
         self.entries.insert(
             key.clone(),

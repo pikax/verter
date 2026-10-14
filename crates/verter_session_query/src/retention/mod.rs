@@ -309,13 +309,6 @@ impl_inline_footprint!((), u8, u16, u32, u64, usize);
 /// accounted as free.
 pub const ENTRY_OVERHEAD_BYTES: usize = 128;
 
-/// Multiplier turning source bytes into the resident size of the OXC
-/// parse arena retained for them. Arena residency tracks source size
-/// closely and superlinearly-ish in practice; a fixed conservative
-/// factor keeps pin accounting cheap (no arena walk on the hot lease
-/// path) while staying on the safe side of the real figure.
-pub const PARSE_SNAPSHOT_BYTES_PER_SOURCE_BYTE: usize = 12;
-
 // ──────────────────────────────────────────────────────────────────────
 // The account
 // ──────────────────────────────────────────────────────────────────────
