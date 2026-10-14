@@ -32,7 +32,6 @@ use verter_session_query::source::indexed_call::IndexedFlowCallExpression;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, OnceLock};
 
-use dashmap::DashMap;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use verter_parser::utils::oxc::script::raw_surface::{
@@ -463,10 +462,12 @@ pub struct DeclBodyMemo {
     /// header-membership view) the graph-free route producer classifies
     /// against — installed with the shallow lens at state construction.
     route_lens: OnceLock<Arc<RouteLens>>,
-    type_entries: DashMap<DeclBindingKey, TypeCell>,
-    value_entries: DashMap<DeclBindingKey, ValueCell>,
-    aug_type_entries: DashMap<(AugmentationScopeKind, DeclBindingKey), TypeCell>,
-    aug_value_entries: DashMap<(AugmentationScopeKind, DeclBindingKey), ValueCell>,
+    type_entries: crate::per_file_map::PerFileMap<DeclBindingKey, TypeCell>,
+    value_entries: crate::per_file_map::PerFileMap<DeclBindingKey, ValueCell>,
+    aug_type_entries:
+        crate::per_file_map::PerFileMap<(AugmentationScopeKind, DeclBindingKey), TypeCell>,
+    aug_value_entries:
+        crate::per_file_map::PerFileMap<(AugmentationScopeKind, DeclBindingKey), ValueCell>,
     whole_env: OnceLock<Arc<EvalEnv>>,
     /// The per-file function program index — a DEMAND product: exact
     /// function identities + body locators, binding/reference inventory,
@@ -475,7 +476,8 @@ pub struct DeclBodyMemo {
     /// Arena-free, no lowered types; built once through the retained
     /// snapshot on first Flow demand.
     function_index: Arc<FunctionIndexDemand>,
-    raw_surfaces: DashMap<(DeclarationPath, SymbolSpace), Arc<Vec<RawSourceSurface>>>,
+    raw_surfaces:
+        crate::per_file_map::PerFileMap<(DeclarationPath, SymbolSpace), Arc<Vec<RawSourceSurface>>>,
     /// Transient body parts a batched demand ([`prime_type_bodies`]) kept
     /// from the lowering that registered their facts, waiting for the body
     /// read that follows it. A read takes its entry; the batch's

@@ -54,7 +54,10 @@ enum RequiredImportClosure {
 pub struct ShallowFileState {
     inputs: ShallowInputAssembly,
     decl_bodies: Arc<verter_semantic_source::decl_body_memo::DeclBodyMemo>,
-    type_deps_cache: dashmap::DashMap<DeclBindingKey, Option<Arc<ClassifiedTypeDeps>>>,
+    type_deps_cache: verter_semantic_source::per_file_map::PerFileMap<
+        DeclBindingKey,
+        Option<Arc<ClassifiedTypeDeps>>,
+    >,
     synthesised_value_bodies: FxHashMap<DeclBindingKey, Arc<LoweredValueDecl>>,
     route_surface_hash: RouteSurfaceHashMemo,
     syntactic_route_interface_hash: RouteSurfaceHashMemo,

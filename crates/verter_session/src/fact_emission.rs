@@ -37,7 +37,6 @@
 
 use std::sync::Arc;
 
-use dashmap::DashMap;
 use rustc_hash::FxHashMap;
 use verter_session_query::analysis::types::hash_16;
 use verter_session_query::analysis::types::Hash16;
@@ -403,7 +402,7 @@ pub(crate) struct LazyBodyFactSource {
     /// — their facts compute from the eager `LoweredValueDecl`, never
     /// the lazy memo.
     synthesised_value_bodies: FxHashMap<verter_type_expr::DeclBindingKey, Arc<LoweredValueDecl>>,
-    computed: Arc<DashMap<FactKey, Fact>>,
+    computed: Arc<verter_semantic_source::per_file_map::PerFileMap<FactKey, Fact>>,
 }
 
 impl LazyBodyFactSource {
