@@ -487,9 +487,11 @@ fn library_inference() {
             diagnostics: [&[], &[], &[], &[]],
             baseline: [
                 Class::WrongClean,
+                // The unfixed Awaited relation is carried as an explicit
+                // proof refusal rather than silently claiming completeness.
+                Class::Gap,
                 Class::WrongClean,
-                Class::WrongClean,
-                Class::WrongClean,
+                Class::Gap,
             ],
         },
     ];

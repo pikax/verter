@@ -76,7 +76,8 @@ impl SemanticGraphStore {
     /// whose value carries a declaration identity, etc.).
     #[must_use = "the returned SemanticNodeId is the only way to reach the interned node"]
     pub fn intern_node(&self, data: SemanticNodeData) -> SemanticNodeId {
-        self.arena.push(data)
+        self.arena
+            .push(crate::semantic_query::DeferredCallable::seal_signature_header(data))
     }
 
     /// Intern `data` and record `scope` in the origin sidecar. Dispatch
@@ -90,7 +91,10 @@ impl SemanticGraphStore {
         data: SemanticNodeData,
         scope: NodeScopeId,
     ) -> SemanticNodeId {
-        self.arena.push_with_scope(data, scope)
+        self.arena.push_with_scope(
+            crate::semantic_query::DeferredCallable::seal_signature_header(data),
+            scope,
+        )
     }
 
     /// Intern a rebuilt shell `data` while preserving the scope of
@@ -131,7 +135,10 @@ impl SemanticGraphStore {
             .intern_preserving_scope_calls
             .fetch_add(1, Ordering::Relaxed);
         let scope = self.node_scope(origin).unwrap_or(NodeScopeId::Global);
-        self.arena.push_with_scope(data, scope)
+        self.arena.push_with_scope(
+            crate::semantic_query::DeferredCallable::seal_signature_header(data),
+            scope,
+        )
     }
 
     /// Test/diagnostic — read the cumulative count of

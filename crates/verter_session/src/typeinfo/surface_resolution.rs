@@ -75,7 +75,7 @@ pub(crate) fn metadata_guarantee(
     use verter_type_engine::semantic_query::{FactStatus, PartialReason};
     let (kind, reasons) = match status {
         FactStatus::Complete => (1, None),
-        FactStatus::Approximate(causes) => (2, Some(causes)),
+        FactStatus::Approximate(causes, _) => (2, Some(causes)),
         FactStatus::Unavailable(causes) => (3, Some(causes)),
     };
     let causes = reasons

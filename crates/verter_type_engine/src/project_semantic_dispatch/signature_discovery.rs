@@ -672,11 +672,10 @@ impl<'w, 'a, 'd, C: crate::resolver_core::ResolverCapabilities> Walk<'w, 'a, 'd,
                     parts.kind,
                     Arc::clone(parts.params),
                     Arc::clone(parts.type_parameters),
-                    Some(parts.occurrence.clone()),
+                    parts.occurrence.cloned(),
                     parts.return_carrier.clone(),
-                    None,
-                    // A body-derived return carries no authored predicate.
-                    None,
+                    parts.signature_span,
+                    parts.predicate,
                 )
             }
             _ => return Ok(None),
@@ -768,14 +767,14 @@ impl<'w, 'a, 'd, C: crate::resolver_core::ResolverCapabilities> Walk<'w, 'a, 'd,
                 default: decl.default,
             })
             .collect();
-        let result = match &carrier {
-            crate::semantic_query::SignatureReturnCarrier::Declared(return_type) => {
+        let result = match carrier.result_source() {
+            crate::semantic_query::SignatureResultSource::Declared(return_type) => {
                 ResultInput::Declared {
                     return_type: *return_type,
                     predicate_or_assertion: predicate,
                 }
             }
-            crate::semantic_query::SignatureReturnCarrier::Function(source) => ResultInput::Body {
+            crate::semantic_query::SignatureResultSource::Function(source) => ResultInput::Body {
                 locator: hash_u64(source),
             },
         };
@@ -800,6 +799,8 @@ impl<'w, 'a, 'd, C: crate::resolver_core::ResolverCapabilities> Walk<'w, 'a, 'd,
                 && matches!(
                     carrier,
                     crate::semantic_query::SignatureReturnCarrier::Function(_)
+                        | crate::semantic_query::SignatureReturnCarrier::DeferredFlow(_)
+                        | crate::semantic_query::SignatureReturnCarrier::EvaluatedFlow(_)
                 )
         }) && params.iter().all(|p| {
             matches!(
@@ -1175,19 +1176,19 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             let graph = self.graph();
             let data = graph.node_data(node);
             match data.as_deref() {
-                Some(SemanticNodeData::Signature {
-                    return_carrier:
-                        crate::semantic_query::SignatureReturnCarrier::Function(
-                            verter_type_expr::facts::FunctionReturnSource::Flow(identity),
-                        ),
-                    ..
-                }) => identity.clone(),
+                Some(SemanticNodeData::Signature { return_carrier, .. }) => return_carrier
+                    .flow_identity()
+                    .cloned()
+                    .ok_or(DiscoveryError::Incomplete(
+                        IncompleteReason::UnresolvedObligation,
+                    ))?,
                 Some(SemanticNodeData::DeferredCallable(callable)) => {
                     match callable
                         .parts(&ResolveOverloadSetConsumer::witness())
                         .return_carrier
+                        .result_source()
                     {
-                        crate::semantic_query::SignatureReturnCarrier::Function(
+                        crate::semantic_query::SignatureResultSource::Function(
                             verter_type_expr::facts::FunctionReturnSource::Flow(identity),
                         ) => identity.clone(),
                         _ => {
@@ -1240,7 +1241,22 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         &self,
         key: crate::semantic_query::FlowReturnKey,
     ) -> Result<crate::semantic_query::FlowReturnResult, DiscoveryError> {
-        match self.execute_flow_return(key) {
+        let read = self.observe_flow_return_value(key.clone());
+        let independent = match read.value() {
+            crate::semantic_query::FlowReturnStep::Complete(result)
+                if result.independent_member(&key).is_some() =>
+            {
+                Some(result.clone())
+            }
+            _ => None,
+        };
+        let step = if let Some(result) = independent {
+            read.adopt_independent_member(self, &key)
+                .map(|_| crate::semantic_query::FlowReturnStep::Complete(result))
+        } else {
+            read.adopt(self)
+        };
+        match step.unwrap_or_else(crate::semantic_query::FlowReturnStep::Aborted) {
             crate::semantic_query::FlowReturnStep::Complete(result) => Ok(result),
             crate::semantic_query::FlowReturnStep::NoValue(
                 crate::semantic_query::FlowReturnFailure::Budget(_),
@@ -1510,6 +1526,13 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             kind,
             context: SemanticContextId::production(),
         });
+        if !read.fact_status.is_complete() {
+            return Err(if self.connected_demand_tripped() {
+                IncompleteReason::Budget
+            } else {
+                IncompleteReason::UnsettledInput
+            });
+        }
         match read.value {
             QueryResult::Value(SemanticQueryValue::SignatureSet(value)) => Ok(value),
             _ => Err(if self.connected_demand_tripped() {
@@ -2450,7 +2473,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     .and_then(|record| record.return_type)
                     .and_then(|token| store.type_token_node(token).ok());
                 let roots = self.observed_self_roots_from_nodes(return_node);
-                super::walk::QueryBuildOutput::from((
+                let mut output = super::walk::QueryBuildOutput::from((
                     QueryResult::Value(SemanticQueryValue::SignatureResult(
                         crate::signature_kernel::SignatureResultValue {
                             result: value,
@@ -2459,7 +2482,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     )),
                     fence,
                 ))
-                .with_observed_self_roots(roots)
+                .with_observed_self_roots(roots);
+                if key.projection == ResultDemand::Return {
+                    // A ready recipe visited every demanded return constituent;
+                    // body constituents carry their independently evaluated
+                    // return, including their anchored unresolved positions.
+                    output = output.with_positional_guarantee();
+                }
+                output
             }
             QueryOutcome::Incomplete(reason) => incomplete_output(fence, reason, QueryError::Miss),
         }

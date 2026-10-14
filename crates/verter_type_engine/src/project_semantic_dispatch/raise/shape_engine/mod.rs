@@ -809,6 +809,14 @@ pub trait RaisedShapeAlgebra {
     ) -> Self::Out;
 
     // -- Function + ConstructorType --
+    /// Source-presence inspection can retain an owned body return source.
+    /// Ordinary materialization and value-domain facts still fold its value.
+    fn owned_function_return(
+        &mut self,
+        _carrier: &crate::semantic_query::SignatureReturnCarrier,
+    ) -> Option<Self::Out> {
+        None
+    }
     fn build_function(&mut self, function: FoldedFunction<Self::Out>) -> Self::Fn;
     fn function_to_out(&mut self, function: Self::Fn) -> Self::Out;
     fn constructor_to_out(&mut self, function: Self::Fn) -> Self::Out;
@@ -906,7 +914,7 @@ pub(in crate::project_semantic_dispatch) fn project_node_facts<
     dispatch: &ProjectSemanticDispatch<'_, C>,
     node: SemanticNodeId,
 ) -> Option<RaisedNodeShapeFacts> {
-    let mut alg = RaisedFactsAlg;
+    let mut alg = RaisedFactsAlg::default();
     let mut active = FxHashSet::default();
     let facts = fold_node(&mut alg, dispatch, node, &mut active)?.facts;
     Some(RaisedNodeShapeFacts { node, facts })
@@ -1132,6 +1140,21 @@ pub(in crate::project_semantic_dispatch) fn project_node_contains_semantic_miss<
     node: SemanticNodeId,
 ) -> Option<bool> {
     project_node_facts(dispatch, node).map(|facts| !facts.materialized())
+}
+
+/// Whether a required source slot is missing. A body-owned return source is
+/// present even while its value awaits a return demand; other slots still fold.
+pub(in crate::project_semantic_dispatch) fn project_source_contains_semantic_miss<
+    C: crate::resolver_core::ResolverCapabilities,
+>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
+    node: SemanticNodeId,
+) -> Option<bool> {
+    let mut alg = RaisedFactsAlg {
+        source_presence: true,
+    };
+    let mut active = FxHashSet::default();
+    fold_node(&mut alg, dispatch, node, &mut active).map(|out| !out.facts.materialized)
 }
 
 /// Combined facts + node-vs-`TypeExpr` equality of `node` in ONE fold: returns

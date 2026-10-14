@@ -424,7 +424,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // total `closed()` witness would claim completeness the read does
         // not have (open-spread evidence, budget, cycles). Callers degrade
         // on `None` instead of consuming a completeness-claiming Object.
-        if terminal_read.result_is_partial {
+        if terminal_read.result_is_partial() {
             return None;
         }
         let terminal = match terminal_read.value {

@@ -106,6 +106,7 @@ impl SourceRaiseOutcome {
             }
             QueryErrorDisposition::ControlCarrier
             | QueryErrorDisposition::UnsupportedSurface
+            | QueryErrorDisposition::UnsupportedPosition
             | QueryErrorDisposition::Partial
             | QueryErrorDisposition::Failure => Self::Failed(err),
         }
@@ -287,7 +288,7 @@ impl SourceRaiseContext<'_> {
         let Some(hot) = hot else {
             return;
         };
-        if super::raise::node_contains_semantic_miss_with_dispatch(dispatch, hot.node())
+        if super::raise::shape_engine::project_source_contains_semantic_miss(dispatch, hot.node())
             == Some(true)
         {
             sink.record_unknown_materializing();

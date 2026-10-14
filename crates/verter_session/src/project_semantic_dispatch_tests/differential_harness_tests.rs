@@ -1,8 +1,9 @@
 //! The differential lane the `differential_*` tests compare against the
 //! checker: one host carrying the four `strictNullChecks` × `noImplicitAny`
 //! projects, a probe module upserted verbatim into each, and every row read
-//! back through the public audited flow-return boundary, reduced to the
-//! altitude the checker prints and spelled as the checker prints it.
+//! back through the public audited flow-return boundary for diagnostics and
+//! the producer's selected return-value fact, reduced and spelled as the
+//! checker prints it. Runtime capture completion remains a separate fact.
 //!
 //! A row is either a TYPE probe — answered as the return of a generated
 //! function whose body returns a local declared as the probe — or a
@@ -333,10 +334,11 @@ impl<'a> Matrix<'a> {
                 let read = dispatch.execute_read(
                     verter_type_engine::semantic_query::SemanticQueryKey::FlowReturn(Box::new(key)),
                 );
-                if read.result_is_partial {
+                if read.result_is_partial() {
                     unproven.push(format!(
                         "`{function}` [{}]: its proof does not close ({:?})",
-                        setting.label, read.partial_reasons
+                        setting.label,
+                        read.partial_reasons()
                     ));
                 }
             }
@@ -374,9 +376,9 @@ impl<'a> Matrix<'a> {
             verter_type_engine::semantic_query::SemanticQueryKey::FlowReturn(Box::new(key)),
         );
         assert!(
-            !result.result_is_partial,
+            !result.result_is_partial(),
             "{function}: {:?}",
-            result.partial_reasons
+            result.partial_reasons()
         );
         (
             dispatch.graph().stats_snapshot().relation_check_count - before,
@@ -757,9 +759,21 @@ fn observe(host: &VerterHost, canonical: &str, symbol: &str, scoped: bool) -> (O
     let _demand_scope = scoped.then(|| {
         super::LexicalDemandScopeGuard::push(&dispatch.lexical_demand_scope, Arc::from(canonical))
     });
+    let value_fact =
+        match dispatch.execute_flow_return_value_fact(dispatch.flow_return_key_for(&identity)) {
+            Ok(fact) => fact,
+            Err(abort) => return (Observed::NoValue(format!("{abort:?}")), diagnostics),
+        };
+    let value = match &value_fact {
+        verter_type_engine::semantic_query::FactResult::Complete(value)
+        | verter_type_engine::semantic_query::FactResult::Approximate { value, .. } => *value,
+        verter_type_engine::semantic_query::FactResult::Unavailable { .. } => {
+            return (Observed::Partial, diagnostics);
+        }
+    };
     let Some(node) = dispatch
         .normalize_node_keeping_declaration_refs_for_tests(
-            result.return_type(),
+            value,
             ProjectionReductionContext::published(ProjectionMode::Expanded),
         )
         .into_complete_node()
@@ -768,7 +782,8 @@ fn observe(host: &VerterHost, canonical: &str, symbol: &str, scoped: bool) -> (O
     };
     let text = print(&dispatch, node, 0);
     let observed = match result.degradation() {
-        None => Observed::Clean(text),
+        None if value_fact.status().is_complete() => Observed::Clean(text),
+        None => Observed::Degraded(text, format!("{:?}", value_fact.status())),
         Some(degradation) => Observed::Degraded(text, format!("{degradation:?}")),
     };
     (observed, diagnostics)

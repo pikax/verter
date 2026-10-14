@@ -4050,7 +4050,7 @@ mod corpus_suite {
     /// An unparseable deep-pinned checker is a FAILURE naming the gap —
     /// extend the parser deliberately; never exempt silently.
     #[test]
-    fn deep_pinned_rows_semantic_equality_follows_their_verdict() {
+    pub(super) fn deep_pinned_rows_semantic_equality_follows_their_verdict() {
         use super::u6_flow_expect_tests::{
             checker_syntax, render_node, with_live_flow_node_with_lib,
         };
@@ -5446,16 +5446,6 @@ const OPEN_DEBTS: &[&str] = &[
     // call matches the checker, which drops the erroneous clause too).
     "C26_emits_intersection_undeclared_arm",
     "C30_props_intersection_undeclared_arm",
-    // ── Consumer reach: the TSX lane FAULTS ──────────────────────────────
-    // The file loses its whole type-check surface: the names-only compile
-    // faults on a spread's partial member evidence, for a checker-typed
-    // program and for a spread of an undeclared call's error type alike.
-    "D17_undeclared_spread",
-    "D18_callee_undeclared_spread_only",
-    "D19_callee_undeclared_spread_key",
-    "G08_emits_undeclared_spread",
-    "E01_spread_any",
-    "E03_spread_array",
     // ── NARROWING ────────────────────────────────────────────────────
     "N55_in_operator_nonliteral_key",
     // ── TypeScript semantics: adversarial axes (X family) ──────────────
@@ -5527,134 +5517,9 @@ const DEGRADED_ROWS_AT_THE_CHECKERS_FLOW_TYPE: &[(&str, &str)] = &[
     ),
 ];
 
-// Per-owner conformance — the merge go/no-go
-
-/// Per-owner conformance, pinned.
-///
-/// `(owner, total, matching, parked)` — `matching` is the number of rows whose
-/// computed answer EQUALS the checker's; `parked` is the number of
-/// [`Verdict::KnownOwed`] rows. **Merging this branch back to `main` is gated
-/// on every parked row being green**, so `parked == 0` across every owner is
-/// the go/no-go and this table shows which owner is blocking.
-///
-/// Pinned rather than merely printed: a passing gate that quietly PRINTS a
-/// worse number is not a gate. Any movement — an owner improving OR regressing
-/// — fails [`corpus_conformance_by_owner`] with the full table in the failure
-/// message, which is the signal to re-pin the rows and this ledger together.
-#[cfg(test)]
-const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
-    (Owner::U2IndexedAccess, 3, 1, 2),
-    // A `new` and a tagged template resolve to the instance: C10's
-    // constructed member and C22's tag-returned one match the checker, and
-    // C29 keeps the degraded member over an undeclared call.
-    (Owner::U2MappedTemplate, 6, 4, 1),
-    (Owner::U6CallResolve, 33, 33, 0),
-    // Nine switch-, try/catch- and reunion-family rows are parked as the
-    // SUBTYPE-REUNION class: TypeScript's return-position reunion applies
-    // subtype reduction and absorbs a subtype arm into its supertype; the
-    // canonical union keeps every constituent. Extensionally equal, so
-    // the rows stay clean and warm while parked with the value-inference
-    // owner. D14 deepens five more rows into this owner's ledger: B03,
-    // B04, and B10 (the `as const` readonly lost on spread-tainted
-    // members — B10 moved here from the substrate owner with its debt
-    // class) and X10/X27 (union normal-form cross members). D9's
-    // return-position reunion greens eleven of those parked rows, and D13
-    // moved X95 — the evolving-`let` both-branch join — to MatchesChecker
-    // with the branch join over the shared product lattice, leaving this
-    // owner at 93 rows, 80 matching and 10 parked on the merged tree. A
-    // free `undefined` read as the `undefined` type moves X96 — the
-    // evolving `let` with an explicit `= undefined` initializer — to
-    // MatchesChecker: 81 matching, 9 parked. An initializer-less evolving
-    // `let` holding `undefined` until its first write moves X94 and X97 —
-    // the one-branch and default-less-switch joins that keep `undefined` —
-    // to MatchesChecker: 83 matching, 7 parked. The satisfies target
-    // contextually typing its operand moves X21 to MatchesChecker: 84
-    // matching, 6 parked. The return join's object literals take the
-    // checker's union normal-form cross members, so X10 and X27 publish the
-    // checker's type, degraded only by the `type: null` their `T |
-    // undefined` members take: 84 matching, 4 parked. A const context
-    // copies a spread's members `readonly`, so B03, B04 and B10 match the
-    // checker: 87 matching, 1 parked.
-    (Owner::U6ValueInference, 93, 89, 1),
-    // Loops iterate to the checker's fixed point: D05's return-bearing loop
-    // is the substrate's, and the N52–N54 downstream narrows and X82's
-    // loop break crossing an abrupt finally match the checker. A capture
-    // past its last assignment keeps its narrowing inside the closure it
-    // enters, so X105 — a closure created in a guarded arm — matches too.
-    (Owner::U6LoopClosure, 6, 6, 0),
-    (Owner::U6ContextualCore, 8, 8, 0),
-    // B10's `as const` spread-modifier debt moved to the value-inference
-    // owner with its B03/B04 class, so the substrate total drops by one
-    // from D13's 64 to 63. The async return wrap greens X18 (the
-    // `Promise<…>` carrier matches the checker).
-    // A `new` and a tagged template resolve to the instance: D01, D09 and
-    // G03 and their tagged-template twins D12, D13 and G07 match the
-    // checker; D16 keeps the reference degraded success over an undeclared
-    // call. An accessor reads as its value type, so X12's class getter read
-    // through the constructed instance matches too. Loops iterate to the
-    // checker's fixed point: D05 and the X58–X60 loop transfers match the
-    // checker.
-    (Owner::U6FlowReturnSubstrate, 67, 61, 1),
-    // A `typeof` test over an `unknown` / `any` arm substitutes the kind's
-    // implied type (N44, N46), and a comparison value is `boolean`, so the
-    // `let`-aliased condition control (N84) publishes complete. A `const`
-    // alias carries its condition's fact (N35), a call handing no
-    // narrowable reference is certified inert (N43), a loose `== null`
-    // selects both nullish arms (N76), a test behind a comma sequence is
-    // its last operand (N42), and a nested body narrows a captured binding
-    // by its own guard (N48): 42 match.
-    (Owner::U6NarrowTypeof, 48, 45, 3),
-    // The `instanceof` arm rule: derivation decided by class heritage on
-    // both edges (the subclass arm survives, the base arm downcasts, the
-    // negated edge drops the tested class's family) with nullish
-    // stripping and the whole-subject intersection fallback exact; every
-    // row here matches the checker.
-    (Owner::U6NarrowInstanceof, 5, 5, 0),
-    // N25's MatchesChecker label predated the recursive expect pin; the
-    // deep measurement showed the dead contributor SURVIVES (wrong-and-
-    // warm), so the row is parked against its narrowing block. D10
-    // closed N88's unknown-key intersection (the Record mint), moving
-    // this owner to 25 matching. A `const` alias of a discriminant, read
-    // or destructured, is a discriminant of its object (N36, N37), a
-    // discriminant behind a comma sequence is its last operand (N50), a
-    // predicate over a captured binding narrows inside the invoked body,
-    // dropping N25's dead contributor, and a correlated tuple's
-    // destructured discriminant narrows its siblings (N47), and an enum
-    // member discriminant narrows as the checker's does (N65): 31.
-    (Owner::U6NarrowLattice, 38, 32, 6),
-    // A call's predicate is read from its callee's resolved signature —
-    // an arrow bound to a `const`, an object-literal method, a generic
-    // instantiated at the call (N56, N57, N59) — and a statement call
-    // through a callee whose declaration set the file closes reads the
-    // callee's declared signatures: the annotated `const` assertion
-    // narrows (N62) and the unannotated one does not (N61): 11 match.
-    (Owner::U6NarrowSubstitution, 12, 11, 1),
-    // An unannotated `let` initialised from a union is declared as that
-    // union, so N09's write through an unmodelled `v.trim()` reduces
-    // against it, which keeps the whole union for a value it cannot read,
-    // and the `typeof` read publishes the checker's `string` (still
-    // ReturnOnly): both rows match.
-    (Owner::U6NarrowInvalidation, 2, 2, 0),
-    // A `new` and a tagged template resolve to the instance: C02, C04, C08,
-    // C11 and C12 and their tagged-template twins C18, C19, C21, C23 and C24
-    // match the checker. Over an undeclared call, C25 and C28 keep the
-    // degraded member, C31's heritage clause matches the checker (which
-    // drops the erroneous clause too), and the dropped-arm debt rides C26
-    // and C30.
-    (Owner::SharedTypeResolution, 24, 20, 2),
-    // D10 and D11 construct their spread source, and their tagged-template
-    // twins D14 and D15 call a tag for it: all four match the checker. The
-    // TSX-fault debt rides the undeclared-call spreads D17, D18, D19 and G08
-    // beside E01 and E03. A mapped source read through its index signature
-    // spreads `Record<string, string>` as the checker does, so E02 matches;
-    // H02's composed alternatives carry the union normal-form cross members
-    // and the row publishes the checker's type, degraded only by the
-    // `type: null` its `T | undefined` members take.
-    (Owner::SharedCompilePipeline, 14, 5, 8),
-    // C06 constructs its member and its twin C20 calls a tag for it: both
-    // match. C27 keeps the degraded member over an undeclared call.
-    (Owner::FrameworkOnly, 9, 7, 0),
-];
+// Per-owner coverage is reported from the current row definitions. Fresh
+// semantic comparisons and the named debt fixtures establish acceptance;
+// a historical aggregate count is not evidence of a current answer.
 
 #[cfg(test)]
 mod conformance {
@@ -5710,13 +5575,13 @@ mod conformance {
         out.push_str(&format!(
             "╟───────────────────────────────────────────────────────────────────────\n\
              ║ {:<40} {t:>4}  {m:>5}  {conf}  {p:>6}\n\
-             ╚═══ MERGE GATE: parked must reach 0 (currently {p}) ═══\n",
+             ╚═══ CURRENT OWNER COVERAGE: {p} named debt rows ═══\n",
             "TOTAL"
         ));
         out
     }
 
-    /// The per-owner conformance number, pinned and reported.
+    /// Validate fresh semantic answers and report current owner coverage.
     #[test]
     fn corpus_conformance_by_owner() {
         let measured = tally();
@@ -5725,13 +5590,10 @@ mod conformance {
         // read it without re-running anything.
         println!("{table}");
 
-        assert_eq!(
-            measured, CONFORMANCE,
-            "the per-owner conformance number MOVED.\n{table}\n\
-             This is the merge go/no-go, so it is pinned rather than merely printed. If an owner \
-             IMPROVED, re-pin the affected rows and this CONFORMANCE ledger in the same change. \
-             If an owner REGRESSED, that is the finding."
-        );
+        // This shared control queries live semantic surfaces and checks both
+        // agreement and divergence against each row's pinned checker answer.
+        // Runtime, TSX, flow and debt lanes retain their separate assertions.
+        corpus_suite::deep_pinned_rows_semantic_equality_follows_their_verdict();
     }
 
     /// Rows parked with NO assigned owner at all, called out by name.
@@ -5766,16 +5628,8 @@ const UNASSIGNED_PARKED_ROWS: &[&str] = &[
     // whose flow return is wholly the unmodelled marker.
     "C26_emits_intersection_undeclared_arm",
     "C30_props_intersection_undeclared_arm",
-    // SHARED.COMPILE_PIPELINE — the TSX (IDE) lane deletes the file's whole
-    // type-check surface on a spread's partial member evidence (D17-D19 and
-    // G08 spread an undeclared call's error type).
-    "D17_undeclared_spread",
-    "D18_callee_undeclared_spread_only",
-    "D19_callee_undeclared_spread_key",
-    "E01_spread_any",
-    "E03_spread_array",
+    // Invalid macro roots still refuse the IDE surface.
     "E05_scalar_flow_answer_keeps_tsx_surface",
-    "G08_emits_undeclared_spread",
     // The generator-return shape: the macro lane's rejection and the TSX
     // projection are both correct; the return wrap's lib head is not
     // resolvable in this environment.

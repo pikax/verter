@@ -478,10 +478,26 @@ struct SvelteSurfaceSeal;
 /// supertrait seal is private to the trait module).
 pub(in crate::typeinfo::framework_surface) struct SvelteResolvedSurface {
     surface: VueMacroSurface,
+    member_source_base: Option<verter_type_expr::locators::AuthoredBodyLocator>,
     _seal: SvelteSurfaceSeal,
 }
 
 impl SvelteResolvedSurface {
+    fn with_member_source_base(
+        mut self,
+        base: verter_type_expr::locators::AuthoredBodyLocator,
+    ) -> Self {
+        self.member_source_base = Some(base);
+        self
+    }
+
+    /// The captured source body belonging to this resolved surface.
+    pub(in crate::typeinfo::framework_surface) fn member_source_base(
+        &self,
+    ) -> Option<&verter_type_expr::locators::AuthoredBodyLocator> {
+        self.member_source_base.as_ref()
+    }
+
     /// The resolution-derived carrier the shared normalizers read, by borrow.
     /// Exposed to the trait module
     /// [`crate::typeinfo::framework_surface::resolved_surface_access`] while the
@@ -523,6 +539,7 @@ fn macro_surface_shell(
             unresolved_surface_arms: Vec::new(),
         },
         _seal: SvelteSurfaceSeal,
+        member_source_base: None,
     }
 }
 
@@ -679,7 +696,8 @@ fn resolve_runes_props(
                 let fields = props_from_typeinfo_surface(
                     ctx,
                     dispatch,
-                    &macro_surface_shell(surface, AnalyzedMacroKind::DefineProps, owner),
+                    &macro_surface_shell(surface, AnalyzedMacroKind::DefineProps, owner)
+                        .with_member_source_base(props_type.locator.clone()),
                 );
                 let fields = fields
                     .into_iter()
@@ -702,38 +720,14 @@ fn resolve_runes_props(
                 let fields = props_from_typeinfo_surface(
                     ctx,
                     dispatch,
-                    &macro_surface_shell(surface, AnalyzedMacroKind::DefineProps, owner),
+                    &macro_surface_shell(surface, AnalyzedMacroKind::DefineProps, owner)
+                        .with_member_source_base(props_type.locator.clone()),
                 );
                 (fields, prop_origins)
             }
             None => (Vec::new(), Vec::new()),
         }
     };
-    for row in &mut fields {
-        if matches!(
-            row.authority.outcome(),
-            verter_type_expr::ResolvedTypeOutcome::Failed { .. }
-        ) {
-            let source = verter_type_expr::facts::SourcePosition::Present(
-                verter_type_expr::facts::SemanticTypeSource::Projected(
-                    verter_type_expr::facts::ProjectedTypeFact::MemberPath {
-                        base: props_type.locator.clone(),
-                        path: Arc::from([verter_type_expr::facts::FactPropertyKey::from(
-                            row.analysis.name.clone(),
-                        )]),
-                    },
-                ),
-            );
-            let member_type = row.member_type.clone();
-            *row =
-                crate::typeinfo::framework_surface::results::ResolvedPropField::from_source_position(
-                    row.analysis.clone(),
-                    source,
-                    row.callable_role.clone(),
-                );
-            row.member_type = member_type;
-        }
-    }
     // Apply runtime DEFAULTS DIRECTLY (the Svelte path does NOT use Vue's
     // analyzer default-merge path): a prop with a captured default is OPTIONAL
     // on the surface (`required = !is_optional` downstream), and the default
@@ -945,12 +939,14 @@ fn resolve_bindable(
             adopt_surface(navigate_param_to_object_surface(
                 ctx, dispatch, owner, props_type,
             ))
+            .map(|surface| (surface, props_type.locator.clone()))
         })
-        .map(|surface| {
+        .map(|(surface, base)| {
             props_from_typeinfo_surface(
                 ctx,
                 dispatch,
-                &macro_surface_shell(surface, AnalyzedMacroKind::DefineProps, owner),
+                &macro_surface_shell(surface, AnalyzedMacroKind::DefineProps, owner)
+                    .with_member_source_base(base),
             )
         })
         .unwrap_or_default();

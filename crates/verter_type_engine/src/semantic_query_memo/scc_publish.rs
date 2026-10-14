@@ -493,7 +493,7 @@ impl SemanticGraphStore {
                 state.self_root_canonicals = Arc::clone(self_root_canonicals);
                 state.walker_diagnostics = Some(Arc::from([]));
                 state.cache_suppress = false;
-                state.result_is_partial = false;
+                state.fact_status = crate::semantic_query::FactStatus::Complete;
             }
             flight.notify_and_retire(self);
         }

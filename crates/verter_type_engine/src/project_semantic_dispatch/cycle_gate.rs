@@ -133,8 +133,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             dep_signature: read.dep_signature,
             walker_diagnostics: read.walker_diagnostics,
             cache_suppress: read.cache_suppress || is_fallback || defensive,
-            result_is_partial: read.result_is_partial || defensive,
-            partial_reasons,
+            fact_status: if defensive {
+                crate::semantic_query::FactStatus::unavailable(partial_reasons)
+            } else {
+                read.fact_status
+            },
             receipt: read.receipt,
         }
     }
@@ -299,7 +302,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 &mut dep_facts,
                 &read.dep_signature,
             );
-            if read.result_is_partial {
+            if read.result_is_partial() {
                 record_reason(
                     &mut reasons,
                     MaterializationCycleGateFallbackReason::NestedIncompleteObservation,

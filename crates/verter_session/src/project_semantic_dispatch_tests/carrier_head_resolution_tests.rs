@@ -1809,7 +1809,7 @@ defineProps<Copy<ImportedProps>>()
             ),
         ));
         assert!(
-            !read.result_is_partial,
+            !read.result_is_partial(),
             "exact mapped body must be complete"
         );
         assert!(!read.cache_suppress, "exact mapped body must be reusable");
@@ -1839,7 +1839,7 @@ defineProps<Copy<ImportedProps>>()
                 ProjectionMode::Navigate,
             ),
         });
-        assert!(!navigate_read.result_is_partial);
+        assert!(!navigate_read.result_is_partial());
         assert!(!navigate_read.cache_suppress);
         let navigate_node = match navigate_read.value {
             QueryResult::Value(node) => node,
@@ -1867,7 +1867,7 @@ defineProps<Copy<ImportedProps>>()
             type_args: Arc::from(vec![product.hot.node()].into_boxed_slice()),
             context: dispatch.macro_payload_context_for(canonical, ProjectionMode::Navigate),
         });
-        assert!(!payload_read.result_is_partial);
+        assert!(!payload_read.result_is_partial());
         assert!(!payload_read.cache_suppress);
         let payload = match payload_read.value {
             QueryResult::Value(node) => node,
@@ -1878,7 +1878,7 @@ defineProps<Copy<ImportedProps>>()
             path: Arc::from([]),
             context: runtime_context,
         });
-        assert!(!payload_surface_read.result_is_partial);
+        assert!(!payload_surface_read.result_is_partial());
         assert!(!payload_surface_read.cache_suppress);
         let payload_surface = match payload_surface_read.value {
             QueryResult::Value(node) => node,
@@ -1945,7 +1945,7 @@ defineProps<{ setupOnly: string }>()
         context,
     });
     assert!(
-        !parent_read.result_is_partial && !parent_read.cache_suppress,
+        !parent_read.result_is_partial() && !parent_read.cache_suppress,
         "the validated Instance-to-Module lexical parent remains a complete fallback"
     );
     let parent_surface = match parent_read.value {
@@ -1971,7 +1971,7 @@ defineProps<{ setupOnly: string }>()
     });
 
     assert!(
-        read.result_is_partial,
+        read.result_is_partial(),
         "an unresolved exact head is partial"
     );
     assert!(

@@ -550,6 +550,26 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         members
             .into_iter()
             .filter_map(|(name, root)| {
+                // The retained lexical inventory proves a type-only export
+                // has no value. Do not dispatch a failed value probe for it.
+                if self
+                    .ctx
+                    .shallow_file_state(root.scope.canonical_id.as_ref())
+                    .is_some_and(|state| {
+                        state
+                            .visible_local_type_owner(root.scope.owner, root.name.as_ref())
+                            .is_some()
+                            && state
+                                .visible_value_binding(root.scope.owner, root.name.as_ref())
+                                .is_none()
+                            && !state.headers.namespace_blocks.iter().any(|block| {
+                                block.owner == root.scope.owner
+                                    && block.qualified_name == root.name.as_ref()
+                            })
+                    })
+                {
+                    return None;
+                }
                 let node = match self.execute_read(self.typeof_key_for(root, context)).value {
                     QueryResult::Value(node) => node,
                     _ => return None,

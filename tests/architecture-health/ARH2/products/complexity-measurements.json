@@ -33,7 +33,10 @@
         "cargo nextest run -p verter_type_engine semantic_query_memo::tests::substrate",
         "cargo nextest run -p verter_session semantic_query_memo_tests::tests",
         "cargo nextest run -p verter_type_engine stable_key_tests",
-        "cargo nextest run -p verter_session flow_slice_content_tests"
+        "cargo nextest run -p verter_session flow_slice_content_tests",
+        "cargo nextest run -p verter_session budget_recovery_root_reprojection_remains_approximate_and_unretained",
+        "cargo nextest run -p verter_session carrier_normalization_preserves_recovery_interpretation_when_forwarded",
+        "cargo nextest run -p verter_session merged_global_instantiation_preserves_approximation_from_every_declaration"
       ],
       "measures": "whether the characterized boundaries still behave as pinned (pass/fail per lane); this list is exactly the characterization product's pinned commands, joined by the verifier in both directions",
       "separates": "behavior only: a lane's outcome is never reported as a timing, a size or a cost, and a failing lane cannot be exchanged for a cheaper one"
@@ -72,7 +75,10 @@
         "cargo nextest run -p verter_type_engine semantic_query_memo::tests::substrate",
         "cargo nextest run -p verter_session semantic_query_memo_tests::tests",
         "cargo nextest run -p verter_type_engine stable_key_tests",
-        "cargo nextest run -p verter_session flow_slice_content_tests"
+        "cargo nextest run -p verter_session flow_slice_content_tests",
+        "cargo nextest run -p verter_session budget_recovery_root_reprojection_remains_approximate_and_unretained",
+        "cargo nextest run -p verter_session carrier_normalization_preserves_recovery_interpretation_when_forwarded",
+        "cargo nextest run -p verter_session merged_global_instantiation_preserves_approximation_from_every_declaration"
       ],
       "measures": "per-lane runtime cost of the pinned characterization nextest lanes (the same commands as production-behavior; this dimension accounts wall/RSS, never pass/fail)",
       "separates": "test cost is never reported as application latency or build time: the pinned behavior lanes may be run cheaply for pass/fail while their cost is accounted only here"

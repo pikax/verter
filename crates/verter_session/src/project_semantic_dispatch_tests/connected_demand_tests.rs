@@ -95,3 +95,75 @@ fn each_connected_demand_starts_from_zero_bytes() {
         .reserve_bytes(100)
         .expect("the next demand has its whole allowance");
 }
+
+#[test]
+fn stopped_demands_never_offer_unevaluated_subjects_as_positional_values() {
+    use std::sync::Arc;
+    use verter_type_engine::semantic_query::{
+        FactStatus, IndexKey, PrimitiveKind, ProjectionMode, ProjectionReductionContext,
+        QueryResult, SemanticNodeData, SemanticQueryKey,
+    };
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let number = dispatch
+        .graph()
+        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let string = dispatch
+        .graph()
+        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let object = super::tests::simple_object(dispatch.graph(), &[("x", number)]);
+    let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
+    let keys = [
+        SemanticQueryKey::ProjectPath {
+            base: object,
+            path: Arc::from([]),
+            context,
+        },
+        SemanticQueryKey::KeyOf {
+            base: object,
+            context,
+        },
+        SemanticQueryKey::IndexedAccess {
+            base: object,
+            index: IndexKey::String(Arc::from("x")),
+            mode: ProjectionMode::Navigate,
+        },
+        SemanticQueryKey::ReduceUnion {
+            members: Arc::from([number, string]),
+            nullability: verter_session_query::flow::policy::NullabilityPolicy::Strict,
+        },
+        SemanticQueryKey::Conditional {
+            check: number,
+            extends: number,
+            true_branch: string,
+            false_branch: number,
+            distributive: false,
+            pending: None,
+        },
+    ];
+    dispatch.connected_demand().set_byte_limit_for_tests(0);
+    {
+        let (_demand, _) = dispatch.enter_connected_demand(false);
+        assert!(dispatch.connected_demand().reserve_bytes(1).is_err());
+        for key in keys.iter().cloned() {
+            let read = dispatch.execute_read(key);
+            assert!(
+                matches!(read.fact_status, FactStatus::Unavailable(_)),
+                "stopped work establishes no positional guarantee: {read:?}"
+            );
+            assert!(!matches!(read.value, QueryResult::Value(_)));
+        }
+    }
+    dispatch
+        .connected_demand()
+        .set_byte_limit_for_tests(usize::MAX);
+    for key in keys {
+        let read = dispatch.execute_read(key);
+        assert_eq!(
+            read.fact_status,
+            FactStatus::Complete,
+            "the unaffected control completes: {read:?}"
+        );
+        assert!(matches!(read.value, QueryResult::Value(_)));
+    }
+}

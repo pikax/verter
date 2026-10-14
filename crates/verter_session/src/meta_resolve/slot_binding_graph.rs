@@ -661,7 +661,7 @@ pub(crate) fn resolve_slot_bindings_graph_native(
         // A2 signal split: the component-meta warm gate keys on the
         // PARTIAL signal, not on inner-memo non-cacheability. A benign
         // non-cacheable nested read must NOT suppress a complete result.
-        if macro_payload_read.result_is_partial {
+        if macro_payload_read.result_is_partial() {
             ledger.suppress_partial_read(
                 dispatch.host_attachment().surface_claims(),
                 macro_payload_read.partial_reason_classes(),
@@ -848,7 +848,7 @@ pub(crate) fn compute_bindings_via_graph(
         ));
     }
     // A2 signal split: key the warm gate on the PARTIAL signal only.
-    if slot_surface_read.result_is_partial {
+    if slot_surface_read.result_is_partial() {
         ledger.suppress_partial_read(
             dispatch.host_attachment().surface_claims(),
             slot_surface_read.partial_reason_classes(),
@@ -1046,7 +1046,7 @@ pub(crate) fn compute_bindings_via_graph(
             ));
         }
         // A2 signal split: key the warm gate on the PARTIAL signal only.
-        if param_surface_read.result_is_partial {
+        if param_surface_read.result_is_partial() {
             ledger.suppress_partial_read(
                 dispatch.host_attachment().surface_claims(),
                 param_surface_read.partial_reason_classes(),
@@ -1145,7 +1145,7 @@ pub(crate) fn compute_bindings_via_graph(
                         &value_read,
                     );
                     emit_slot_binding_graph_dispatch_facts(dispatch, &value_read.dep_signature);
-                    if value_read.result_is_partial {
+                    if value_read.result_is_partial() {
                         ledger.suppress_partial_read(
                             dispatch.host_attachment().surface_claims(),
                             value_read.partial_reason_classes(),

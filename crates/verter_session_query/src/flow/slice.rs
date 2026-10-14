@@ -2166,6 +2166,9 @@ pub enum SliceEffectCallee {
 /// instance, under the class's own identity.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SliceClass {
+    /// The exact local declaration read that owns this constructor source.
+    /// Class expressions carry no declaration-binding evidence.
+    pub declaration: Option<crate::function_program::FlowBindingIdentity>,
     /// The class expression's start offset in the defining file — what
     /// identifies the class among every class expression of that file.
     pub offset: u32,

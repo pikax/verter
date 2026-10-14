@@ -3254,6 +3254,7 @@ fn prefix_backfill_loop_skips_all_backfills_when_winner_aborted_mid_loop() {
                     walker_diagnostics: Vec::new(),
                     cache_suppress: false,
                     completeness: verter_type_engine::semantic_query::ResultCompleteness::Complete,
+                    approximation: None,
                     taint: verter_type_engine::semantic_query::ResultTaint::Clean,
                     observed_self_roots: Vec::new(),
                     graph_carrier: None,
@@ -4174,9 +4175,13 @@ fn semantic_graph_stats_cold_aborts_swept_increments_when_forced() {
     );
 
     assert!(
-        matches!(result.value, QueryResult::Value(_)),
-        "cold winner still returns its computed result — the sweep only \
-         blocks the warm publish",
+        matches!(
+            result.value,
+            QueryResult::Error(QueryError::ExecutionAborted(
+                verter_type_engine::semantic_query::ExecutionAbort::Superseded
+            ))
+        ),
+        "an invalidated cold flight carries no candidate value",
     );
     assert_eq!(
         call_count, 1,
@@ -4293,7 +4298,12 @@ fn cold_abort_trigger_is_scoped_to_its_store_not_process_global() {
             (QueryResult::Value(id), empty_signature())
         },
     );
-    assert!(matches!(a_result.value, QueryResult::Value(_)));
+    assert!(matches!(
+        a_result.value,
+        QueryResult::Error(QueryError::ExecutionAborted(
+            verter_type_engine::semantic_query::ExecutionAbort::Superseded
+        ))
+    ));
     assert_eq!(
         store_a.memo_entry_count(),
         0,
@@ -4669,6 +4679,7 @@ fn prefix_backfill_carries_traced_facts() {
             walker_diagnostics: Vec::new(),
             cache_suppress: false,
             completeness: verter_type_engine::semantic_query::ResultCompleteness::Complete,
+            approximation: None,
             taint: verter_type_engine::semantic_query::ResultTaint::Clean,
             observed_self_roots: Vec::new(),
             graph_carrier: Some(Box::new(parent_carrier.clone())),
@@ -4766,7 +4777,12 @@ fn cold_abort_sweep_global_counter_increments_without_request_context() {
             (QueryResult::Value(id), empty_signature())
         },
     );
-    assert!(matches!(result.value, QueryResult::Value(_)));
+    assert!(matches!(
+        result.value,
+        QueryResult::Error(QueryError::ExecutionAborted(
+            verter_type_engine::semantic_query::ExecutionAbort::Superseded
+        ))
+    ));
 
     let snap = store.stats_snapshot();
     assert_eq!(
@@ -4820,7 +4836,12 @@ fn cold_abort_sweep_attributes_to_per_request_context() {
             (QueryResult::Value(id), empty_signature())
         },
     );
-    assert!(matches!(result.value, QueryResult::Value(_)));
+    assert!(matches!(
+        result.value,
+        QueryResult::Error(QueryError::ExecutionAborted(
+            verter_type_engine::semantic_query::ExecutionAbort::Superseded
+        ))
+    ));
 
     let snap = store.stats_snapshot();
     assert_eq!(
@@ -5001,6 +5022,7 @@ fn joiner_outer_tracer_contains_winner_carrier_fact() {
                     walker_diagnostics: Vec::new(),
                     cache_suppress: false,
                     completeness: verter_type_engine::semantic_query::ResultCompleteness::Complete,
+                    approximation: None,
                     taint: verter_type_engine::semantic_query::ResultTaint::Clean,
                     observed_self_roots: Vec::new(),
                     graph_carrier: Some(Box::new(carrier)),
@@ -5216,6 +5238,7 @@ fn joiner_of_cache_suppress_winner_inherits_carrier_and_suppression() {
                     // inner-memo non-cacheability is `cache_suppress` only;
                     // `result_is_partial` stays false.
                     completeness: verter_type_engine::semantic_query::ResultCompleteness::Complete,
+                    approximation: None,
                     taint: verter_type_engine::semantic_query::ResultTaint::Clean,
                     observed_self_roots: Vec::new(),
                     graph_carrier: Some(Box::new(carrier)),
@@ -5466,6 +5489,7 @@ fn cross_view_joiner_forks_when_winner_carrier_fails_follower_validation() {
                     walker_diagnostics: Vec::new(),
                     cache_suppress: false,
                     completeness: verter_type_engine::semantic_query::ResultCompleteness::Complete,
+                    approximation: None,
                     taint: verter_type_engine::semantic_query::ResultTaint::Clean,
                     observed_self_roots: Vec::new(),
                     graph_carrier: Some(Box::new(carrier)),
@@ -5681,6 +5705,7 @@ fn same_view_joiner_still_coalesces_onto_winner() {
                     walker_diagnostics: Vec::new(),
                     cache_suppress: false,
                     completeness: verter_type_engine::semantic_query::ResultCompleteness::Complete,
+                    approximation: None,
                     taint: verter_type_engine::semantic_query::ResultTaint::Clean,
                     observed_self_roots: Vec::new(),
                     graph_carrier: Some(Box::new(carrier)),
@@ -5878,6 +5903,7 @@ fn cross_view_joiner_of_suppressed_overflow_winner_forks() {
                     walker_diagnostics: Vec::new(),
                     cache_suppress: true,
                     completeness: verter_type_engine::semantic_query::ResultCompleteness::Complete,
+                    approximation: None,
                     taint: verter_type_engine::semantic_query::ResultTaint::Clean,
                     observed_self_roots: Vec::new(),
                     graph_carrier: None,
@@ -6156,6 +6182,7 @@ fn cross_view_joiner_of_suppressed_unrootable_winner_forks() {
                     walker_diagnostics: Vec::new(),
                     cache_suppress: true,
                     completeness: verter_type_engine::semantic_query::ResultCompleteness::Complete,
+                    approximation: None,
                     taint: verter_type_engine::semantic_query::ResultTaint::Clean,
                     observed_self_roots: Vec::new(),
                     graph_carrier: Some(Box::new(carrier)),
@@ -6448,6 +6475,7 @@ fn cross_view_joiner_of_nonsuppressed_miss_winner_without_self_root_forks() {
                     walker_diagnostics: Vec::new(),
                     cache_suppress: false,
                     completeness: verter_type_engine::semantic_query::ResultCompleteness::Complete,
+                    approximation: None,
                     taint: verter_type_engine::semantic_query::ResultTaint::Clean,
                     observed_self_roots: Vec::new(),
                     graph_carrier: Some(Box::new(carrier)),
@@ -6539,10 +6567,11 @@ fn cross_view_joiner_of_nonsuppressed_miss_winner_without_self_root_forks() {
         winner_read.value,
     );
     assert!(
-        !winner_read.cache_suppress,
-        "fixture invariant: the winner must NOT be `cache_suppress` — \
-         this test discriminates a NON-suppressed no-self-root winner \
-         from the fix-8 `cache_suppress`-gated fork.",
+        matches!(
+            winner_read.fact_status,
+            verter_type_engine::semantic_query::FactStatus::Unavailable(_)
+        ),
+        "an unresolved declaration supplies no usable value",
     );
 
     let snap = store.stats_snapshot();
@@ -6841,11 +6870,14 @@ fn partial_value_leaves_no_memo_entry_and_fresh_request_cold_rebuilds() {
     );
     assert!(first_ran, "first request must cold-build");
     assert!(
-        matches!(first.value, QueryResult::Value(_)),
-        "the partial value still flows back to the caller"
+        matches!(
+            first.value,
+            QueryResult::Error(QueryError::IncompleteSemanticOperand { .. })
+        ),
+        "an unfinished value without a producer guarantee is withheld"
     );
     assert!(
-        first.result_is_partial,
+        first.result_is_partial(),
         "the CacheRead carries result_is_partial=true back to the caller"
     );
     assert_eq!(
@@ -7010,7 +7042,7 @@ fn memo_admission_or_gate_refuses_benign_cache_suppress() {
         "the complete value still flows back to the caller"
     );
     assert!(
-        !first.result_is_partial,
+        !first.result_is_partial(),
         "a benign non-cacheable result is NOT partial — component-meta may still warm"
     );
     assert_eq!(

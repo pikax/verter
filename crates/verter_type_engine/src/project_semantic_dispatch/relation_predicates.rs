@@ -31,6 +31,7 @@ pub fn is_deferred(data: &SemanticNodeData) -> bool {
     matches!(
         data,
         SemanticNodeData::KeyOf { .. }
+            | SemanticNodeData::DeferredCallable(_)
             | SemanticNodeData::IndexedAccess { .. }
             | SemanticNodeData::Mapped { .. }
             | SemanticNodeData::Conditional { .. }
