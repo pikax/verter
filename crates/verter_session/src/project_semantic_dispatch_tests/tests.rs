@@ -14611,6 +14611,28 @@ fn raw_relate_rejects_forged_inference_context_when_target_has_no_pattern() {
         "a raw relation key must reject a supplied inference fingerprint when \
          the target admits no inference session"
     );
+    // The rejection supplies no relation, so its read must report the same
+    // Unavailable fact the fact API adopts, not a Complete status.
+    let read = dispatch.execute_read(forged.to_query_key());
+    assert!(matches!(read.value, QueryResult::Error(QueryError::Miss)));
+    assert!(
+        matches!(
+            read.fact_status,
+            verter_type_engine::semantic_query::FactStatus::Unavailable(_)
+        ),
+        "a rejected raw relation read must report Unavailable, got {:?}",
+        read.fact_status
+    );
+    assert!(read.result_is_partial());
+    assert!(!read.partial_reason_classes().is_empty());
+    let fact = dispatch
+        .execute_fact(forged.to_query_key())
+        .expect("a rejected raw relation is not an execution abort");
+    assert_eq!(
+        read.fact_status,
+        fact.status(),
+        "the raw read and the fact API must carry one adopted disposition"
+    );
     assert!(
         matches!(
             dispatch.execute_relate_pair_as_result_for_tests(string, string),
