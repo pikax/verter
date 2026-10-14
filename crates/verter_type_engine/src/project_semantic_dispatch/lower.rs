@@ -1177,7 +1177,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     crate::project_semantic_dispatch::carrier::CarrierResolutionPlan::Ready(
                         value,
                     ) => {
-                        return LowerStep::Value(value);
+                        return LowerStep::Value(value.node);
                     }
                     crate::project_semantic_dispatch::carrier::CarrierResolutionPlan::NeedsArgs(
                         continuation,

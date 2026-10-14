@@ -11621,40 +11621,45 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // A completed member path has addressed every demanded position.
         // It can preserve a usable child's positional value without claiming
         // that an incomplete enclosing domain proves absence or exactness.
-        // A stopped walk or an opaque terminal has no such interpretation.
-        let approximation = if path.is_empty()
-            && context.mode == ProjectionMode::Shallow
-            && matches!(
-                self.graph().node_data(result).as_deref(),
-                Some(
-                    SemanticNodeData::Object(_)
-                        | SemanticNodeData::ObjectSpreadProgram(_)
-                        | SemanticNodeData::Union(_)
-                        | SemanticNodeData::Intersection(_)
+        // A stopped walk has no such interpretation. An opaque terminal can
+        // forward only the explicit guarantee of its adopted child producer.
+        let approximation =
+            if let Some(interpretation) = walker.completed_child_interpretation(result) {
+                Some(interpretation)
+            } else if path.is_empty()
+                && context.mode == ProjectionMode::Shallow
+                && matches!(
+                    self.graph().node_data(result).as_deref(),
+                    Some(
+                        SemanticNodeData::Object(_)
+                            | SemanticNodeData::ObjectSpreadProgram(_)
+                            | SemanticNodeData::Union(_)
+                            | SemanticNodeData::Intersection(_)
+                    )
                 )
-            ) {
-            // Shallow synthesis emits positive member evidence. It never
-            // establishes absent members or exact member values from a subset.
-            Some(super::projection_fact::ProjectionInterpretation::PresenceOnly)
-        } else if path.is_empty()
-            && matches!(
-                self.graph().node_data(result).as_deref(),
-                Some(
-                    SemanticNodeData::Conditional { .. }
-                        | SemanticNodeData::Mapped { .. }
-                        | SemanticNodeData::KeyOf { .. }
-                        | SemanticNodeData::IndexedAccess { .. }
-                        | SemanticNodeData::InstantiationRef { .. }
-                        | SemanticNodeData::TemplateLiteral { .. }
+            {
+                // Shallow synthesis emits positive member evidence. It never
+                // establishes absent members or exact member values from a subset.
+                Some(super::projection_fact::ProjectionInterpretation::PresenceOnly)
+            } else if path.is_empty()
+                && matches!(
+                    self.graph().node_data(result).as_deref(),
+                    Some(
+                        SemanticNodeData::Conditional { .. }
+                            | SemanticNodeData::Mapped { .. }
+                            | SemanticNodeData::KeyOf { .. }
+                            | SemanticNodeData::IndexedAccess { .. }
+                            | SemanticNodeData::InstantiationRef { .. }
+                            | SemanticNodeData::TemplateLiteral { .. }
+                    )
                 )
-            )
-        {
-            // The whole demand retained this expression and all its operands
-            // as a suspended source at exactly the addressed position.
-            Some(super::projection_fact::ProjectionInterpretation::Positional)
-        } else {
-            None
-        };
+            {
+                // The whole demand retained this expression and all its operands
+                // as a suspended source at exactly the addressed position.
+                Some(super::projection_fact::ProjectionInterpretation::Positional)
+            } else {
+                None
+            };
         drop(walker);
         // Supplement §5.D.0 r17 — surface a budget-exceeded
         // sentinel as `QueryResult::Recursive` so §5.D.4

@@ -450,6 +450,7 @@ impl<'s> Lowerer<'s> {
             (None, None) => Arc::from(ANONYMOUS_CLASS),
         };
         SliceExpr::Class(Arc::new(SliceClass {
+            declaration: None,
             offset: class.span.start,
             name,
             outer_clauses: self.class_outer_clauses(),

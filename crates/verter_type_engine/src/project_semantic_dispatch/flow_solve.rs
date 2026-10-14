@@ -1338,13 +1338,10 @@ pub fn build_flow_demand_plan_from_execution(
                 }
             }
             F::Capture => {
-                // A class DECLARATION anchors on the declared binding
-                // identity. Its capture SET is beyond this skeleton's
-                // authority (no index record serves a class member), so the
-                // subject installs as the family's accepted typed gap —
-                // never an omission. A function declaration's captures ride
-                // every site that reads it, as that site's own closure
-                // below.
+                // A class DECLARATION anchors on its exact binding identity.
+                // Its finite constructor type does not enumerate its runtime
+                // capture set. Keep that independent obligation as a typed gap.
+                // Value-source certificates never discharge full capture proof.
                 for node in &selected {
                     let FlowNodeKind::Binding(binding) = graph.node_kind(*node) else { continue };
                     if !matches!(bundle.skeleton().binding(binding).kind, SkeletonBindingKind::Class) { continue; }

@@ -489,7 +489,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     Arc::clone(&path),
                     context,
                 )) {
-                    QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
+                    QueryResult::Value(SemanticQueryOutput { value, provenance }) => {
+                        (value, provenance.fact_status)
+                    }
                     _ if !path.is_empty() => {
                         let joined: Arc<str> =
                             Arc::from(format!("{}.{}", value_root.name, path[0]));
@@ -503,7 +505,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             rest,
                             context,
                         )) {
-                            QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
+                            QueryResult::Value(SemanticQueryOutput { value, provenance }) => {
+                                (value, provenance.fact_status)
+                            }
                             _ => {
                                 return ReferenceProjectionPlan::Ready(
                                     self.opaque(QueryError::Miss),
@@ -516,10 +520,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     }
                 };
                 if type_args.is_empty() {
-                    ReferenceProjectionPlan::Ready(result)
+                    ReferenceProjectionPlan::Ready(result.0)
                 } else {
                     ReferenceProjectionPlan::NeedsArgs {
-                        continuation: CarrierArgsContinuation::ApplyTypeof { base: result },
+                        continuation: CarrierArgsContinuation::ApplyTypeof {
+                            base: result.0,
+                            source_status: result.1,
+                        },
                         args: type_args,
                         argument_context: context,
                     }

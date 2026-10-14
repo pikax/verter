@@ -769,8 +769,13 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         {
             // The plan supplies the finite authored positions. Reaching this
             // constructor means each was evaluated and actually composed.
-            self.constructive_values
-                .insert(result, super::ConstructiveValue::Class { instance });
+            self.constructive_values.insert(
+                result,
+                super::ConstructiveValue::Class {
+                    instance,
+                    declaration: class.declaration.clone(),
+                },
+            );
         }
         Positional::Value(result)
     }

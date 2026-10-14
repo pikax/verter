@@ -568,8 +568,28 @@ pub(super) struct WorkspaceEdit {
 /// build folds every nested read's `result_is_partial` / `cache_suppress`
 /// into before its memo-admission decision. See
 /// [`ProjectSemanticDispatch::build_local_taint`].
+#[derive(Debug, Clone, Copy, Default)]
+enum AdoptedTerminal {
+    #[default]
+    None,
+    Positional(SemanticNodeId),
+    Unsupported,
+}
+
+impl AdoptedTerminal {
+    fn join(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::None, value) | (value, Self::None) => value,
+            (Self::Positional(left), Self::Positional(right)) if left == right => self,
+            _ => Self::Unsupported,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct BuildLocalTaint {
+    /// An adopted child guarantee tied to its actual returned type position.
+    adopted_terminal: AdoptedTerminal,
     /// OR of every nested read's `result_is_partial` observed while this
     /// frame was the top of the build-local stack. A genuine partial.
     pub result_is_partial: bool,
@@ -1600,10 +1620,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// root deposited under a nested observation still reaches the
     /// enclosing build's memo entry.
     pub(super) fn fold_observed_frame_into_top(&self, observed: &BuildLocalTaint) {
-        self.fold_into_top_build_local_taint_with(
+        self.fold_into_top_build_local_taint_position(
             observed.result_is_partial,
             observed.cache_suppress,
             observed.partial_reasons,
+            if observed.result_is_partial
+                && matches!(observed.adopted_terminal, AdoptedTerminal::None)
+            {
+                AdoptedTerminal::Unsupported
+            } else {
+                observed.adopted_terminal
+            },
         );
         self.deposit_operation_refusals(&observed.operation_refusals);
         if observed.observed_self_roots.is_empty() {
@@ -1648,10 +1675,26 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         cache_suppress: bool,
         reasons: crate::semantic_query::PartialReasonSet,
     ) {
+        self.fold_into_top_build_local_taint_position(
+            result_is_partial,
+            cache_suppress,
+            reasons,
+            AdoptedTerminal::Unsupported,
+        );
+    }
+
+    fn fold_into_top_build_local_taint_position(
+        &self,
+        result_is_partial: bool,
+        cache_suppress: bool,
+        reasons: crate::semantic_query::PartialReasonSet,
+        position: AdoptedTerminal,
+    ) {
         if let Some(top) = self.build_local_taint.borrow_mut().last_mut() {
             top.result_is_partial |= result_is_partial;
             top.cache_suppress |= cache_suppress;
             if result_is_partial {
+                top.adopted_terminal = top.adopted_terminal.join(position);
                 top.partial_reasons = top.partial_reasons.union(if reasons.is_empty() {
                     crate::semantic_query::PartialReasonSet::PROPAGATED
                 } else {
@@ -1697,6 +1740,27 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             crate::request_context::mark_request_result_partial_from_read_with(reasons);
         }
         self.fold_into_top_build_local_taint_with(result_is_partial, cache_suppress, reasons);
+    }
+
+    fn fold_cache_read_fact(&self, read: &CacheRead<QueryResult<SemanticQueryValue>>) {
+        let partial = read.result_is_partial();
+        let reasons = read.partial_reason_classes();
+        if partial {
+            crate::request_context::mark_request_result_partial_from_read_with(reasons);
+        }
+        let position = match (&read.value, read.fact_status.interpretation()) {
+            (
+                QueryResult::Value(SemanticQueryValue::TypeNode(node)),
+                Some(projection_fact::ProjectionInterpretation::Positional),
+            ) => AdoptedTerminal::Positional(*node),
+            _ => AdoptedTerminal::Unsupported,
+        };
+        self.fold_into_top_build_local_taint_position(
+            partial,
+            read.cache_suppress,
+            reasons,
+            position,
+        );
     }
 
     /// Bump the per-request type-resolution audit counters (hop / mode /
@@ -2921,12 +2985,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         {
             return (key, CarrierNormalizationPrelude::none());
         }
-        let ((normalized, partial_reasons), finalise) =
+        let ((normalized, partial_reasons, normalized_source), finalise) =
             crate::fact_signature_helpers::install_fact_tracer(
                 &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(self.ctx),
                 || {
-                    let normalized = self.normalize_carrier_subject_key(key);
-                    let partial_reasons = self.carrier_normalization_partial_reasons(&normalized);
+                    let (normalized, normalized_source) =
+                        self.normalize_carrier_subject_key_with_fact(key);
+                    let mut partial_reasons =
+                        self.carrier_normalization_partial_reasons(&normalized);
+                    if let Some(source) = normalized_source {
+                        partial_reasons =
+                            partial_reasons.union(source.status.completeness().reasons());
+                    }
                     // The wrapper read is scoped to the demand's project here,
                     // so its lookup's facts root the admitted entry too: a
                     // member path through an apparent wrapper, or a
@@ -2949,7 +3019,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             verter_session_query::facts::reuse::NonCacheableReadReason::FencedServe,
                         );
                     }
-                    (normalized, partial_reasons)
+                    (normalized, partial_reasons, normalized_source)
                 },
             );
         let prelude = match finalise {
@@ -2962,6 +3032,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     // admission of any enclosing entry that rode this rewrite.
                     cache_suppress: false,
                     partial_reasons,
+                    normalized_source,
                 }
             }
             verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(
@@ -2970,6 +3041,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 facts: Some(facts),
                 cache_suppress: true,
                 partial_reasons,
+                normalized_source,
             },
             // The subject rewrite observed a moved domain, so the value has
             // no coherent evaluated basis, independently of admission.
@@ -2981,6 +3053,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     facts: None,
                     cache_suppress: true,
                     partial_reasons,
+                    normalized_source,
                 }
             }
         };
@@ -3117,6 +3190,37 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         crate::project_semantic_dispatch::walk::QueryBuildOutput<SemanticQueryValue>,
         Option<CompletedSelfRoots>,
     ) {
+        // A declaration/locator wrapper may return an adopted child unchanged.
+        // Only that actual terminal and a locally complete output retain its
+        // interpretation; another partial dependency blocks this transfer.
+        if !output.result_is_partial() && build_local.operation_refusals.is_empty() {
+            if let (
+                AdoptedTerminal::Positional(child),
+                QueryResult::Value(SemanticQueryValue::TypeNode(node)),
+            ) = (build_local.adopted_terminal, &output.result)
+            {
+                if child == *node {
+                    output.approximation =
+                        Some(projection_fact::ProjectionInterpretation::Positional);
+                    output.add_partial_reasons(build_local.partial_reasons);
+                }
+            }
+        }
+        // The rewrite owns this guarantee only while its actual value survives
+        // a locally complete build. A derived member or stopped walk must prove
+        // its own interpretation instead of inheriting the subject's one.
+        if !output.result_is_partial() && !build_local.result_is_partial {
+            if let (Some(source), QueryResult::Value(SemanticQueryValue::TypeNode(node))) =
+                (carrier_prelude.normalized_source, &output.result)
+            {
+                if source.node == *node {
+                    if let Some(interpretation) = source.status.interpretation() {
+                        output.approximation = Some(interpretation);
+                        output.add_partial_reasons(source.status.completeness().reasons());
+                    }
+                }
+            }
+        }
         if let QueryResult::Value(SemanticQueryValue::TypeNode(node)) = &output.result {
             if matches!(
                 self.graph().node_data(*node).as_deref(),
@@ -3320,6 +3424,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // idempotent.)
         if carrier_prelude.cache_suppress() {
             cache_read.cache_suppress = true;
+        }
+        if let Some(source) = carrier_prelude.normalized_source {
+            let retained_source = matches!(
+                &cache_read.value,
+                QueryResult::Value(SemanticQueryValue::TypeNode(node)) if *node == source.node
+            );
+            // A warm exact carrier may be the same value, but it still adopts
+            // this read's producer fact. Other projections need their own proof.
+            if retained_source
+                || matches!(
+                    source.status,
+                    crate::semantic_query::FactStatus::Unavailable(_)
+                )
+            {
+                cache_read.fact_status = cache_read.fact_status.join(source.status);
+            }
         }
         if carrier_prelude.is_partial() {
             cache_read.cache_suppress = true;
@@ -3599,6 +3719,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if publication.is_none() && operand_evidence.is_none() && self.drives_on_the_runtime(&key) {
             return self.drive_query(key);
         }
+        self.execute_cold_query_owned(key, publication, operand_evidence)
+    }
+
+    // Keep cold-only construction state off the stack while the continuation
+    // runtime drives a query. All entry scopes above still cover its delivery.
+    #[inline(never)]
+    fn execute_cold_query_owned(
+        &self,
+        key: SemanticQueryKey,
+        publication: Option<&mut Option<crate::semantic_query_memo::PublishedMemoCandidate>>,
+        operand_evidence: Option<
+            &mut Option<crate::semantic_query::operand::SemanticOperandEvidence>,
+        >,
+    ) -> CacheRead<QueryResult<SemanticQueryValue>> {
         // Install or join the connected state before carrier normalisation,
         // whose resolver can itself dispatch. Query-depth/work charging waits
         // until the canonical memo identity is known so an exact same-path key
@@ -4095,11 +4229,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             let _ = self.execute_via_cold_build_helper(nested);
                         });
                     }
-                    raw_build()
+                    // The producer owns this envelope on the heap while the
+                    // tracer passes it through its generic scope frames.
+                    Box::new(raw_build())
                 });
             let build_local = taint_guard.finish();
             let (output, rooted) = self.close_cold_build(
-                output,
+                *output,
                 build_local,
                 finalise,
                 &carrier_prelude_for_build,
@@ -4223,11 +4359,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if let (Some(identity), Some(carrier)) = (isolated_root, refusal_carrier) {
             self.seal_root_refusal(identity, &cache_read, carrier);
         }
-        self.fold_cache_read_rails(
-            cache_read.result_is_partial(),
-            cache_read.cache_suppress,
-            cache_read.partial_reason_classes(),
-        );
+        self.fold_cache_read_fact(&cache_read);
         self.deposit_operation_refusals(cache_read.walker_diagnostics.iter());
         tracing::debug!(
             target: "verter::dispatch::execute_via_helper",
@@ -4338,6 +4470,7 @@ pub struct CarrierNormalizationPrelude {
     facts: Option<Arc<[verter_session_query::facts::fact_cache::FactVersionRef]>>,
     cache_suppress: bool,
     partial_reasons: crate::semantic_query::PartialReasonSet,
+    normalized_source: Option<carrier::CarrierResolution>,
 }
 
 impl CarrierNormalizationPrelude {
@@ -4347,6 +4480,7 @@ impl CarrierNormalizationPrelude {
             facts: None,
             cache_suppress: false,
             partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
+            normalized_source: None,
         }
     }
 

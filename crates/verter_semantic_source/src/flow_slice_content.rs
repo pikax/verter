@@ -14218,6 +14218,7 @@ impl<'a> Lowerer<'a> {
         else {
             return None;
         };
+        let declaration = self.bindings.identity(*local).cloned()?;
         let fact = self.frame_gate.skeleton().binding(*local);
         if fact.kind != SkeletonBindingKind::Class {
             return None;
@@ -14232,7 +14233,10 @@ impl<'a> Lowerer<'a> {
             return None;
         }
         self.lowering_local_classes.push(class.span.start);
-        let value = self.lower_class_expression(class, Some(name));
+        let mut value = self.lower_class_expression(class, Some(name));
+        if let SliceExpr::Class(source) = &mut value {
+            Arc::make_mut(source).declaration = Some(declaration);
+        }
         self.lowering_local_classes.pop();
         Some(value)
     }

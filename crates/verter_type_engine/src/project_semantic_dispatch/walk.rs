@@ -1160,6 +1160,12 @@ pub(crate) struct PathWalker<'a, 'b, C: crate::resolver_core::ResolverCapabiliti
     /// class is not laundered into the anonymous bridge on its way out of
     /// the walk. One field is the authority for both facts.
     pub(super) completeness: crate::semantic_query::ResultCompleteness,
+    /// The value returned by an adopted child with a positional producer
+    /// guarantee. Only returning this same terminal can forward that guarantee.
+    positional_child_terminal: Option<SemanticNodeId>,
+    /// Every incomplete dependency must supply its own positional guarantee.
+    /// Local stops and unavailable reads invalidate terminal forwarding.
+    positional_children_supported: bool,
     /// `true` when any nested contribution during this walk was an open /
     /// multi-alternative construction program (or a failed program
     /// projection) — see [`ShallowDiagnostic::OpenSpreadProgram`]. The
@@ -1510,6 +1516,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
     /// Mark the walk partial and union `reasons` into its classes (an
     /// empty set is a genuine unclassified partial).
     fn mark_partial_with(&mut self, reasons: crate::semantic_query::PartialReasonSet) {
+        self.positional_children_supported = false;
         self.completeness = self
             .completeness
             .merge(crate::semantic_query::ResultCompleteness::Partial(reasons));
@@ -1608,6 +1615,8 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             walker_diagnostics: Vec::new(),
             cache_suppress: false,
             completeness: crate::semantic_query::ResultCompleteness::Complete,
+            positional_child_terminal: None,
+            positional_children_supported: true,
             open_spread_partial: false,
             surface_failure: None,
             original_path_non_empty: false,
@@ -2475,9 +2484,60 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
     ) -> QueryResult<SemanticNodeId> {
         let read = self.dispatch.execute_read(key);
         if read.result_is_partial() {
-            self.mark_partial_with(read.partial_reason_classes());
+            match (&read.value, read.fact_status.interpretation()) {
+                (
+                    QueryResult::Value(node),
+                    Some(super::projection_fact::ProjectionInterpretation::Positional),
+                ) => {
+                    self.completeness = self.completeness.merge(
+                        crate::semantic_query::ResultCompleteness::Partial(
+                            read.partial_reason_classes(),
+                        ),
+                    );
+                    self.positional_child_terminal = Some(*node);
+                }
+                _ => self.mark_partial_with(read.partial_reason_classes()),
+            }
+        }
+        if matches!(
+            read.fact_status,
+            crate::semantic_query::FactStatus::Unavailable(_)
+        ) {
+            self.positional_children_supported = false;
         }
         read.value
+    }
+
+    fn resolve_carrier_subject(
+        &mut self,
+        node: SemanticNodeId,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> SemanticNodeId {
+        let resolved = self.dispatch.resolve_carrier_subject_fact(node, context);
+        if !resolved.status.is_complete() {
+            if resolved.status.interpretation()
+                == Some(super::projection_fact::ProjectionInterpretation::Positional)
+            {
+                self.completeness = self.completeness.merge(resolved.status.completeness());
+                self.positional_child_terminal = Some(resolved.node);
+            } else {
+                self.mark_partial_with(resolved.status.completeness().reasons());
+            }
+        }
+        resolved.node
+    }
+
+    /// Forward an adopted child's guarantee only when the completed walk
+    /// returns that child's actual value and adopted no unsupported partial.
+    pub(super) fn completed_child_interpretation(
+        &self,
+        terminal: SemanticNodeId,
+    ) -> Option<super::projection_fact::ProjectionInterpretation> {
+        (self.positional_children_supported
+            && self.positional_child_terminal == Some(terminal)
+            && self.surface_failure.is_none()
+            && !self.open_spread_partial)
+            .then_some(super::projection_fact::ProjectionInterpretation::Positional)
     }
 
     /// Classify a pending path segment as a numeric tuple/array demand:
@@ -5214,7 +5274,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 // fallback below.
                 SemanticNodeData::BareRef(_) | SemanticNodeData::ImportType(_) => {
                     drop(data);
-                    let resolved = self.dispatch.resolve_carrier_subject_node(
+                    let resolved = self.resolve_carrier_subject(
                         current,
                         self.context_from_template(
                             crate::semantic_query::ProjectionReductionContext::published(
@@ -5478,7 +5538,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             // rule, mirroring the `DeclRef` arm's Error fallback above.
             SemanticNodeData::BareRef(_) | SemanticNodeData::ImportType(_) => {
                 drop(data);
-                let resolved = self.dispatch.resolve_carrier_subject_node(
+                let resolved = self.resolve_carrier_subject(
                     node,
                     self.context_from_template(
                         crate::semantic_query::ProjectionReductionContext::published(self.mode()),
@@ -5491,11 +5551,12 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 // opaque (a genuine `Miss`, a recursive back-edge, …) keeps
                 // the shallow carrier per the shallow-by-default rule.
                 if resolved == node
-                    || matches!(
-                        self.graph().node_data(resolved).as_deref(),
-                        Some(SemanticNodeData::Opaque(err))
-                            if !matches!(err, QueryError::DeclPlaceholder { .. })
-                    )
+                    || (self.completed_child_interpretation(resolved).is_none()
+                        && matches!(
+                            self.graph().node_data(resolved).as_deref(),
+                            Some(SemanticNodeData::Opaque(err))
+                                if !matches!(err, QueryError::DeclPlaceholder { .. })
+                        ))
                 {
                     node
                 } else {
@@ -5531,7 +5592,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             Some(SemanticNodeData::BareRef(_) | SemanticNodeData::ImportType(_)) => {}
             _ => return node,
         }
-        let resolved = self.dispatch.resolve_carrier_subject_node(
+        let resolved = self.resolve_carrier_subject(
             node,
             self.context_from_template(
                 crate::semantic_query::ProjectionReductionContext::published(
@@ -5685,7 +5746,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 self.present_terminal_surface_carriers(value, visited, depth + 1)
             }
             MemberShape::Unresolved => {
-                let resolved = self.dispatch.resolve_carrier_subject_node(
+                let resolved = self.resolve_carrier_subject(
                     value,
                     self.context_from_template(
                         crate::semantic_query::ProjectionReductionContext::published(
@@ -7848,7 +7909,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         crate::semantic_query::NodeScopeId::Global => None,
                     })
                 });
-                let resolved = self.dispatch.resolve_carrier_subject_node(
+                let resolved = self.resolve_carrier_subject(
                     cur,
                     self.context_from_template(
                         crate::semantic_query::ProjectionReductionContext::published(self.mode()),

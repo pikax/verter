@@ -1,5 +1,5 @@
-//! The projection fact mapping: presence-only projections keep a usable
-//! subset, value projections do not, and aborts publish nothing.
+//! Projection facts preserve producer-certified presence subsets and
+//! positional gaps; uncertified values and aborts publish nothing.
 
 use super::projection_fact;
 use crate::semantic_query::{
@@ -102,12 +102,20 @@ fn positional_guarantees_keep_a_value_with_the_same_causes_as_an_unavailable_one
 }
 
 #[test]
-fn typed_root_failures_cannot_be_certified_by_a_positional_forwarder() {
+fn a_presence_subset_cannot_certify_absence_or_an_unsupported_root() {
     let graph = crate::semantic_query_memo::SemanticGraphStore::new();
     let (_, _, key) = keys();
-    for error in [
-        crate::semantic_query::QueryError::Miss,
-        crate::semantic_query::QueryError::UnmodeledPosition,
+    for (error, observed, guarantee) in [
+        (
+            crate::semantic_query::QueryError::Miss,
+            partial(),
+            super::ProjectionInterpretation::PresenceOnly,
+        ),
+        (
+            crate::semantic_query::QueryError::UnmodeledPosition,
+            ResultCompleteness::Complete,
+            super::ProjectionInterpretation::Positional,
+        ),
     ] {
         let node = graph.intern_node(crate::semantic_query::SemanticNodeData::Opaque(error));
         let (result, status) = super::adopt_projection_result(
@@ -116,13 +124,92 @@ fn typed_root_failures_cannot_be_certified_by_a_positional_forwarder() {
             crate::semantic_query::QueryResult::Value(
                 crate::semantic_query::SemanticQueryValue::TypeNode(node),
             ),
-            ResultCompleteness::Complete,
-            Some(super::ProjectionInterpretation::Positional),
+            observed,
+            Some(guarantee),
         );
         assert!(matches!(status, FactStatus::Unavailable(_)));
         assert!(matches!(
             result,
             crate::semantic_query::QueryResult::Error(_)
         ));
+    }
+}
+
+#[test]
+fn a_complete_negative_carrier_stays_exact_but_an_incomplete_lookup_has_no_value() {
+    use crate::semantic_query::{QueryError, QueryResult, SemanticQueryValue};
+    let graph = SemanticGraphStore::new();
+    let (_, _, key) = keys();
+    let node = graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss));
+    let value = || QueryResult::Value(SemanticQueryValue::TypeNode(node));
+    let (result, status) =
+        super::adopt_projection_result(&graph, &key, value(), ResultCompleteness::Complete, None);
+    assert_eq!(status, FactStatus::Complete);
+    assert!(matches!(result, QueryResult::Value(SemanticQueryValue::TypeNode(id)) if id == node));
+
+    for guarantee in [None, Some(super::ProjectionInterpretation::PresenceOnly)] {
+        let (result, status) =
+            super::adopt_projection_result(&graph, &key, value(), partial(), guarantee);
+        assert!(matches!(status, FactStatus::Unavailable(_)));
+        assert!(matches!(
+            result,
+            QueryResult::Error(QueryError::IncompleteSemanticOperand { .. })
+        ));
+    }
+
+    // A completed positional value retains a gap, never a negative proof.
+    let (result, status) = super::adopt_projection_result(
+        &graph,
+        &key,
+        value(),
+        partial(),
+        Some(super::ProjectionInterpretation::Positional),
+    );
+    assert!(matches!(
+        status,
+        FactStatus::Approximate(_, Some(super::ProjectionInterpretation::Positional))
+    ));
+    assert!(matches!(result, QueryResult::Value(_)));
+    for guarantee in [None, Some(super::ProjectionInterpretation::Positional)] {
+        let (result, status) = super::adopt_projection_result(
+            &graph,
+            &key,
+            QueryResult::Error(QueryError::Miss),
+            partial(),
+            guarantee,
+        );
+        assert!(matches!(status, FactStatus::Unavailable(_)));
+        assert!(matches!(result, QueryResult::Error(_)));
+    }
+}
+
+#[test]
+fn an_unsupported_position_requires_a_completed_positional_structure() {
+    use crate::semantic_query::{QueryError, QueryResult, SemanticQueryValue};
+    let graph = SemanticGraphStore::new();
+    let (_, _, key) = keys();
+    let node = graph.intern_node(SemanticNodeData::Opaque(QueryError::UnmodeledPosition));
+    for guarantee in [
+        None,
+        Some(super::ProjectionInterpretation::PresenceOnly),
+        Some(super::ProjectionInterpretation::Positional),
+    ] {
+        let (result, status) = super::adopt_projection_result(
+            &graph,
+            &key,
+            QueryResult::Value(SemanticQueryValue::TypeNode(node)),
+            partial(),
+            guarantee,
+        );
+        if guarantee == Some(super::ProjectionInterpretation::Positional) {
+            assert!(matches!(
+                status,
+                FactStatus::Approximate(_, Some(super::ProjectionInterpretation::Positional))
+            ));
+            assert!(matches!(result, QueryResult::Value(_)));
+        } else {
+            assert!(matches!(status, FactStatus::Unavailable(_)));
+            assert!(matches!(result, QueryResult::Error(_)));
+        }
     }
 }

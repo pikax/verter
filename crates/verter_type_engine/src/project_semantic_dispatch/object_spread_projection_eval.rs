@@ -783,10 +783,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         crate::semantic_query::ProjectionReductionContext::structural_transit();
                     let (resolved, _, _) =
                         self.resolve_carrier_subject_node_capturing_suppress(current, transit);
-                    if resolved == current {
+                    if resolved.node == current
+                        || matches!(
+                            resolved.status,
+                            crate::semantic_query::FactStatus::Unavailable(_)
+                        )
+                    {
                         return current;
                     }
-                    current = resolved;
+                    current = resolved.node;
                 }
                 _ => return current,
             }

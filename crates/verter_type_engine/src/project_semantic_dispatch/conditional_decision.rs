@@ -648,7 +648,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// recovery is usable here only when all other positions are exact;
     /// an arbitrary partial value supplies no comparison evidence.
     fn conditional_tuple_operand(&self, node: SemanticNodeId) -> Option<(SemanticNodeId, bool)> {
-        self.probe_optional(|| self.probe_conditional_tuple_operand(node))
+        let probe = self.observe_read(|| self.probe_conditional_tuple_operand(node));
+        if matches!(probe.value(), Some((_, true))) {
+            probe.adopt(self).ok().flatten()
+        } else {
+            // Without recovery the normalized positions are unused: the
+            // relation consumes the original tuple and its symbolic references.
+            probe.discard().ok().flatten()
+        }
     }
 
     fn probe_conditional_tuple_operand(
