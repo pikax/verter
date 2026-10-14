@@ -82,6 +82,30 @@ const fn match_options() -> glob::MatchOptions {
     }
 }
 
+/// [`match_options`] for a tsconfig `include` entry: a wildcard does not
+/// match a leading `.` (TypeScript's `[^./]` component start).
+const fn typescript_include_match_options() -> glob::MatchOptions {
+    glob::MatchOptions {
+        require_literal_leading_dot: true,
+        ..match_options()
+    }
+}
+
+/// The package folders TypeScript's include wildcards never descend into
+/// (`implicitExcludePathRegexPattern`).
+const IMPLICIT_EXCLUDED_FOLDERS: [&str; 3] = ["node_modules", "bower_components", "jspm_packages"];
+
+/// Whether every implicitly excluded folder component of `path` is spelled
+/// literally by `pattern`: a pattern component that names the folder is the
+/// only one that matches it, so `path` may carry no more of each such
+/// component than `pattern` spells.
+fn admits_implicitly_excluded_folders(pattern: &str, path: &str) -> bool {
+    IMPLICIT_EXCLUDED_FOLDERS.iter().all(|folder| {
+        let count = |text: &str| text.split('/').filter(|part| part == folder).count();
+        count(path) <= count(pattern)
+    })
+}
+
 /// A [`NormalizedGlob`] with its [`glob::Pattern`] compiled once up front.
 ///
 /// [`NormalizedGlob::matches`] compiles the pattern on every call, which
@@ -108,6 +132,10 @@ pub struct CompiledGlob {
     /// files each entry matches together, in entry order, so the program's
     /// root order needs the authored entry, not the expanded position.
     include_entry: u32,
+    /// Whether this glob is an authored tsconfig `include` entry, matched
+    /// with TypeScript's include wildcard semantics (see
+    /// [`CompiledGlob::as_typescript_include`]).
+    typescript_include: bool,
 }
 
 impl CompiledGlob {
@@ -118,6 +146,7 @@ impl CompiledGlob {
             raw,
             pattern,
             include_entry: 0,
+            typescript_include: false,
         }
     }
 
@@ -126,6 +155,42 @@ impl CompiledGlob {
     pub fn in_include_entry(mut self, entry: u32) -> Self {
         self.include_entry = entry;
         self
+    }
+
+    /// Match this glob as a tsconfig `include` entry, as TypeScript's
+    /// wildcard matcher does (`getSubPatternFromSpec`): a wildcard (`*`,
+    /// `?`, `**`) never matches a path component that starts with `.`, and
+    /// never matches a `node_modules`, `bower_components` or `jspm_packages`
+    /// component — whatever `exclude` says. Such a component matches only
+    /// when the pattern spells it literally.
+    #[must_use]
+    pub fn as_typescript_include(mut self) -> Self {
+        self.typescript_include = true;
+        self
+    }
+
+    /// Whether a file below directory `dir` could match this glob — false
+    /// only when `dir` ends in a component an include wildcard cannot match
+    /// (see [`Self::as_typescript_include`]) and the pattern does not spell
+    /// it. A directory walk prunes such a subtree.
+    pub fn may_match_below(&self, dir: &CanonicalPath) -> bool {
+        if !self.typescript_include {
+            return true;
+        }
+        let Some(last) = dir.as_str().trim_end_matches('/').rsplit('/').next() else {
+            return true;
+        };
+        let mut components = self.raw.as_str().split('/');
+        if IMPLICIT_EXCLUDED_FOLDERS.contains(&last) {
+            return components.any(|component| component == last);
+        }
+        if last.starts_with('.') {
+            return components.any(|component| {
+                component == last
+                    || (component.starts_with('.') && component.contains(['*', '?', '[']))
+            });
+        }
+        true
     }
 
     /// The authored `include` entry this glob expands.
@@ -145,12 +210,18 @@ impl CompiledGlob {
 
     /// Test whether a canonical path matches, using the precompiled pattern.
     ///
-    /// Same semantics as [`NormalizedGlob::matches`]: identical
-    /// [`glob::MatchOptions`], invalid pattern → `false`.
+    /// Same semantics as [`NormalizedGlob::matches`] (identical
+    /// [`glob::MatchOptions`], invalid pattern → `false`), narrowed by the
+    /// include wildcard rules for a [`Self::as_typescript_include`] glob.
     pub fn matches(&self, path: &CanonicalPath) -> bool {
-        self.pattern
-            .as_ref()
-            .is_some_and(|pat| pat.matches_with(path.as_str(), match_options()))
+        let Some(pattern) = self.pattern.as_ref() else {
+            return false;
+        };
+        if !self.typescript_include {
+            return pattern.matches_with(path.as_str(), match_options());
+        }
+        pattern.matches_with(path.as_str(), typescript_include_match_options())
+            && admits_implicitly_excluded_folders(self.raw.as_str(), path.as_str())
     }
 }
 

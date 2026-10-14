@@ -20,7 +20,10 @@ project carrying a `tsconfigPath` through the shared workspace loader
 workspace: compiler options (`extends`, `paths`, `baseUrl`, `noLib`, `lib`,
 strictness) and the exact `files` / `include` / `exclude` membership, its
 `include` matches materialized by walking the project root (a lazy workspace
-has read none of them yet), whose `program_root_files` order is the program
+has read none of them yet; as in TypeScript, an include wildcard never matches
+a dot-prefixed name or a `node_modules` / `bower_components` /
+`jspm_packages` folder the entry does not spell, whatever `exclude` says, and
+the walk never descends into one), whose `program_root_files` order is the program
 file order that orders merged declarations. These are entry roots: their
 transitive import/reference closure retains the program's compiler options
 and aliases even when `files`/`include` omit those dependencies. An unreachable

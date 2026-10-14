@@ -434,11 +434,20 @@ fn materialize_from_spec(
     // Walk the project root and check each file against include - exclude
     if !spec.include.is_empty() {
         if let Some(ws) = ws {
-            // Use exclude patterns to skip entire directories during walk.
-            // This avoids descending into node_modules/, dist/, etc.
+            // Skip entire directories during the walk: those an exclude glob
+            // covers (dist/, …) and those no include glob can reach — the
+            // package and dot-prefixed folders TypeScript's include wildcards
+            // never descend into, whatever `exclude` says.
             let exclude_globs = &spec.exclude;
             let filter_dir = |dir: &str| {
                 let dir_cp = CanonicalPath::new(dir);
+                if !spec
+                    .include
+                    .iter()
+                    .any(|glob| glob.may_match_below(&dir_cp))
+                {
+                    return false;
+                }
                 // If any exclude glob matches this directory (as a prefix),
                 // prune the entire subtree. We check by appending a dummy
                 // file name to see if the directory itself is excluded.
