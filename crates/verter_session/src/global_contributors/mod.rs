@@ -13,7 +13,8 @@
 //! that symbol's contributor fingerprint, including a proved-empty set.
 use verter_session_query::inputs::contributors::{
     classify_shallow_module_kind, fingerprint_of, is_automatic_lib_canonical,
-    AugmentationCandidate, ContributorEntry, ContributorOrigin, FileModuleKind, SymbolContributors,
+    AugmentationCandidate, ContributorEntry, ContributorOrigin, FileModuleKind,
+    FileScopeContribution, SymbolContributors,
 };
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -106,6 +107,7 @@ struct ProjectViewKey {
 struct CollectionViewKey {
     target: crate::file_artifact_store::AugmentationTargetKey,
     name: Arc<str>,
+    selection: FileScopeContribution,
     augmenters: Hash16,
     contributors: Hash16,
     membership_generation: Option<u64>,
@@ -279,12 +281,16 @@ impl GlobalContributorPopulation {
 
     /// Materialize declaration precedence once for this contributor/index and
     /// membership revision. Each declaring base borrows the same slot order.
+    /// `selection` names the file-scope declarations ordered beside the
+    /// augmenters.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn augmentation_order(
         &self,
         key: &crate::file_artifact_store::AugmentationTargetKey,
         augmenters: &verter_session_query::resolution::AugmenterSet,
         name: &str,
         contributors: &SymbolContributors,
+        selection: FileScopeContribution,
         membership_generation: Option<u64>,
         rank: impl Fn(&str) -> u32,
     ) -> Arc<[verter_session_query::inputs::contributors::AugmentationCandidate]> {
@@ -292,6 +298,7 @@ impl GlobalContributorPopulation {
         let view_key = CollectionViewKey {
             target: key.clone(),
             name: Arc::from(name),
+            selection,
             augmenters: augmenters.fingerprint,
             contributors: contributors.fingerprint,
             membership_generation,
@@ -332,13 +339,18 @@ impl GlobalContributorPopulation {
                         .entries
                         .iter()
                         .enumerate()
-                        .filter(|(_, entry)| {
-                            entry.origin == ContributorOrigin::FileScopeInterface
-                                || (entry.origin == ContributorOrigin::FileScopeNamespace
-                                    && !interface_declarers.contains(&(
-                                        entry.artifact_key.canonical.as_ref(),
-                                        entry.symbol.as_ref(),
-                                    )))
+                        .filter(|(_, entry)| match selection {
+                            FileScopeContribution::TypeBody => {
+                                entry.origin == ContributorOrigin::FileScopeInterface
+                                    || (entry.origin == ContributorOrigin::FileScopeNamespace
+                                        && !interface_declarers.contains(&(
+                                            entry.artifact_key.canonical.as_ref(),
+                                            entry.symbol.as_ref(),
+                                        )))
+                            }
+                            FileScopeContribution::EnumBlock => {
+                                entry.origin == ContributorOrigin::FileScopeValue
+                            }
                         })
                         .map(|(i, entry)| {
                             (

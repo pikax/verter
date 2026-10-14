@@ -146,7 +146,13 @@ pub(super) fn index_augmentation_block(
                         index_augmentation_class_value(cls, ctx, index, scope);
                     }
                     Declaration::TSEnumDeclaration(enum_decl) => {
-                        index_augmentation_enum(enum_decl, ctx, index, scope);
+                        index_augmentation_enum(
+                            enum_decl,
+                            enum_decl.id.name.as_str(),
+                            ctx,
+                            index,
+                            scope,
+                        );
                     }
                     Declaration::TSNamespaceDeclaration(module) => {
                         index_augmentation_module_declaration(module, ctx, index, scope, None);
@@ -174,7 +180,7 @@ pub(super) fn index_augmentation_block(
                 index_augmentation_class_value(cls, ctx, index, scope);
             }
             Statement::TSEnumDeclaration(enum_decl) => {
-                index_augmentation_enum(enum_decl, ctx, index, scope);
+                index_augmentation_enum(enum_decl, enum_decl.id.name.as_str(), ctx, index, scope);
             }
             // A namespace nested inside an ambient augmentation block
             // (`declare global { namespace JSX { ... } }`) registers its inner
@@ -350,6 +356,10 @@ fn index_namespaced_statement_into_augmentation(
                 .or_default();
             index_function_in(func, ctx, scoped, Some(namespace));
         }
+        Statement::TSEnumDeclaration(enum_decl) if implicit_export => {
+            let name = format!("{namespace}.{}", enum_decl.id.name);
+            index_augmentation_enum(enum_decl, &name, ctx, index, scope);
+        }
         _ => {}
     }
 }
@@ -398,54 +408,43 @@ fn index_namespaced_declaration_into_augmentation(
                 .or_default();
             index_function_in(func, ctx, scoped, Some(namespace));
         }
+        Declaration::TSEnumDeclaration(enum_decl) => {
+            let name = format!("{namespace}.{}", enum_decl.id.name);
+            index_augmentation_enum(enum_decl, &name, ctx, index, scope);
+        }
         _ => {}
     }
 }
 
-/// A `declare global` enum is a block of the global enum, both a type and a
-/// value of the block's scope (mirrors `index_enum`'s dual-space headers and
-/// `collect_augmentation_block`'s enum arm). Its member names stay off the
-/// file's `enum_headers` table, which inventories the file's own enums.
+/// An enum an ambient block declares (`name` qualified by the namespaces
+/// of the block it is nested in) is a block of the enum of that name the
+/// block's scope augments: its member names and positions, and its type and
+/// value headers, index into the scope's tables as `index_enum` indexes a
+/// file's own enum, never into the file's. The block is ambient.
 fn index_augmentation_enum(
     enum_decl: &TSEnumDeclaration<'_>,
+    name: &str,
     ctx: HeaderStatementContext<'_>,
     index: &mut DeclHeaderIndex,
     scope: &AugmentationScopeKind,
 ) {
-    if *scope != AugmentationScopeKind::Global {
-        return;
-    }
-    let name = enum_decl.id.name.as_str();
-    let span = verter_span::Span::new(enum_decl.span.start, enum_decl.span.end);
-    let name_span = verter_span::Span::new(enum_decl.id.span.start, enum_decl.id.span.end);
-    upsert_type_header(
-        index
-            .augmentation_type_headers
-            .entry(scope.clone())
-            .or_default(),
+    let DeclHeaderIndex {
+        augmentation_enum_headers,
+        augmentation_type_headers,
+        augmentation_value_headers,
+        ..
+    } = index;
+    super::index_enum_into(
+        enum_decl,
         name,
-        TypeDeclKind::Alias,
-        span,
-        name_span,
-        Vec::new(),
-        MemberHeaderList::new(),
-        &[],
         ctx,
+        true,
+        super::EnumHeaderTables {
+            enums: augmentation_enum_headers.entry(scope.clone()).or_default(),
+            types: augmentation_type_headers.entry(scope.clone()).or_default(),
+            values: augmentation_value_headers.entry(scope.clone()).or_default(),
+        },
     );
-    let entry = index
-        .augmentation_value_headers
-        .entry(scope.clone())
-        .or_default()
-        .entry(ctx.key(name))
-        .or_insert_with(|| ValueDeclHeader {
-            kind: ValueDeclKind::Enum,
-            span,
-            name_span,
-            object_member_headers: MemberHeaderList::new(),
-            contributors: Vec::new(),
-        });
-    entry.kind = ValueDeclKind::Enum;
-    push_contributor(&mut entry.contributors, ctx, span, name_span);
 }
 
 /// An ambient-augmentation class contributes its value side and the
