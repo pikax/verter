@@ -1047,8 +1047,9 @@ impl PreparedValueDeclCache {
     }
 
     /// Prepare an augmentation-scoped VALUE contribution: its function
-    /// signatures, in the file's value-space name environment (the same
-    /// per-owner base every value declaration of the file shares).
+    /// signatures and an enum block's members, in the file's value-space
+    /// name environment (the same per-owner base every value declaration of
+    /// the file shares).
     fn prepare_augmentation_value_decl_outcome_in(
         &self,
         scope: &verter_session_query::declarations::AugmentationScopeKind,
@@ -1091,6 +1092,7 @@ impl PreparedValueDeclCache {
         );
         prepared.type_annotation = lowered.type_annotation.clone();
         prepared.signatures = lowered.signatures.clone();
+        prepared.enum_members = lowered.enum_members.clone();
         prepared.name_resolution = name_resolution;
         let hash_u64 =
             u64::from_le_bytes(self.state.whole_hash[..8].try_into().unwrap_or_default());
@@ -1287,8 +1289,9 @@ impl PreparedDeclBundle {
             .prepare_augmentation_type_decl_outcome_in(scope, owner, symbol_name)
     }
 
-    /// Prepare the function declarations one augmentation block contributes
-    /// to a value, against the same pinned state and value-space name
+    /// Prepare the function declarations or the enum block one augmentation
+    /// block contributes to a value, against the same pinned state and
+    /// value-space name
     /// environment as this bundle's own value declarations.
     pub(crate) fn prepare_augmentation_value_decl_outcome_in(
         &self,

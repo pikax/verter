@@ -2668,24 +2668,27 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         }
     }
 
+    /// A mapped member read at one key under the mapping's optionality
+    /// modifier. `source_optional` reads the source member's authored
+    /// optionality at that key (`None` when no single member answers); a
+    /// batch answers it from one index over the source surface.
     fn mapped_index_read(
         &self,
         mapper: &crate::semantic_query::MapperKey,
         value: SemanticNodeId,
         source: SemanticNodeId,
-        key: SemanticNodeId,
+        source_optional: impl Fn() -> Option<bool>,
     ) -> SemanticNodeId {
         let (value, optional) = match mapper.optionality {
             crate::semantic_query::OptionalityMod::Add => (value, true),
-            crate::semantic_query::OptionalityMod::Keep => (
-                value,
-                self.dispatch
-                    .mapped_source_member(source, key)
-                    .is_some_and(|member| member.optional),
-            ),
+            crate::semantic_query::OptionalityMod::Keep => (value, source_optional() == Some(true)),
             crate::semantic_query::OptionalityMod::Remove => (
-                self.dispatch
-                    .mapped_member_optionality(mapper, value, source, key),
+                self.dispatch.mapped_member_optionality_with(
+                    mapper,
+                    value,
+                    source,
+                    source_optional,
+                ),
                 false,
             ),
         };
@@ -2751,6 +2754,16 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             .graph()
             .node_scope(object)
             .and_then(|scope| scope.canonical_file());
+        // Every key reads the source's authored modifier; one index over the
+        // source surface keeps the whole batch linear in its key count.
+        let source_data = (mapper.optionality != crate::semantic_query::OptionalityMod::Add)
+            .then(|| self.dispatch.mapped_source_object(source))
+            .flatten()
+            .and_then(|object| self.graph().node_data(object));
+        let source_index = match source_data.as_deref() {
+            Some(SemanticNodeData::Object(surface)) => Some(surface.key_index()),
+            _ => None,
+        };
         let mut values = Vec::with_capacity(keys.len());
         for key in keys {
             if let Err(reasons) = self.dispatch.charge_connected_work() {
@@ -2759,6 +2772,11 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             }
             let IndexKey::String(name) = key else {
                 unreachable!("finite string keys checked above")
+            };
+            let property = PropertyKey::String(Arc::clone(name));
+            let source_optional = || match source_index.as_ref()?.project_known_key(&property) {
+                crate::semantic_query::SurfaceKeyProjection::Exact(member) => Some(member.optional),
+                crate::semantic_query::SurfaceKeyProjection::AbsentProven => None,
             };
             let argument = self.graph().intern_node(SemanticNodeData::Literal(
                 crate::semantic_query::LiteralValue::String(name.to_string()),
@@ -2775,7 +2793,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         crate::semantic_query::ProjectionReductionContext::published(self.mode()),
                     ),
                 );
-            let value = self.mapped_index_read(mapper, value, source, argument);
+            let value = self.mapped_index_read(mapper, value, source, source_optional);
             self.graph().record_origin_edge(
                 value,
                 OriginEdgeKind::ProjectIndex,
@@ -4559,7 +4577,11 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                                     ),
                                 )
                             };
-                        let value = self.mapped_index_read(mapper, value, *source, key_arg);
+                        let value = self.mapped_index_read(mapper, value, *source, || {
+                            self.dispatch
+                                .mapped_source_member(*source, key_arg)
+                                .map(|member| member.optional)
+                        });
                         // Emit the per-key edge mirroring
                         // `build_mapped_type`'s ProjectMember edge so
                         // downstream origin-graph consumers see the

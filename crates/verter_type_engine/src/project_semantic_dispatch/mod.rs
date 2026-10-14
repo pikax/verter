@@ -3702,13 +3702,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if let SemanticQueryKey::Relate { .. } = &key {
             let relate = crate::semantic_query::RelateMemoKey::from_query_key(&key);
             if !self.relation_raw_key_has_exact_inference_context(&relate) {
+                // The rejection supplies no relation: report the same
+                // Unavailable fact `CacheRead::into_fact` adopts for it.
+                let error = QueryError::Miss;
+                let fact_status = crate::semantic_query::FactStatus::Unavailable(
+                    crate::semantic_query::surface_resolution::NonEmptyReasons::from_query_error(
+                        &error,
+                    ),
+                );
                 return CacheRead {
                     lease: Default::default(),
-                    value: QueryResult::Error(QueryError::Miss),
+                    value: QueryResult::Error(error),
                     dep_signature: empty_signature(),
                     walker_diagnostics: Arc::from([]),
                     cache_suppress: true,
-                    fact_status: crate::semantic_query::FactStatus::Complete,
+                    fact_status,
                     receipt: crate::semantic_query::ReadReceipt::Unpriced,
                 };
             }

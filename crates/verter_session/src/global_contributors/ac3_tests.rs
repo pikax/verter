@@ -833,6 +833,7 @@ fn every_base_borrows_one_augmentation_collection_order() {
                 &augmenters,
                 "Shared",
                 &contributors,
+                verter_session_query::inputs::contributors::FileScopeContribution::TypeBody,
                 Some(generation),
                 |canonical| {
                     ranks.set(ranks.get() + 1);

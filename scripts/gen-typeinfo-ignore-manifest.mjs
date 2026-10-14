@@ -2879,14 +2879,7 @@ const LIFTED_ROW_OVERRIDES = new Map([
     {
       mech: "MappedTemplateRemap",
       proof: "ProofRequirement::Ts7Oracle(OracleId::MappedTemplate)",
-      semantic_queries: [
-        "ResolveDecl",
-        "Instantiate",
-        "KeyOf",
-        "MappedType",
-        "ProjectPath",
-        "LowerLocator",
-      ],
+      semantic_queries: ["ResolveDecl", "Instantiate", "KeyOf", "MappedType", "LowerLocator"],
       consumed_mechanisms: ["QueryValueDomainFoundation", "IndexedAccessUnionDistribution"],
       unblocker:
         "lifted by U2.MAPPED_TEMPLATE: `AllRequired<{ a?: string; b?: number }>` " +
@@ -2926,14 +2919,7 @@ const LIFTED_ROW_OVERRIDES = new Map([
     {
       mech: "MappedTemplateRemap",
       proof: "ProofRequirement::Ts7Oracle(OracleId::UtilityComposition)",
-      semantic_queries: [
-        "ResolveDecl",
-        "Instantiate",
-        "KeyOf",
-        "MappedType",
-        "ProjectPath",
-        "LowerLocator",
-      ],
+      semantic_queries: ["ResolveDecl", "Instantiate", "KeyOf", "MappedType", "LowerLocator"],
       consumed_mechanisms: ["QueryValueDomainFoundation", "IndexedAccessUnionDistribution"],
       unblocker:
         "lifted by U2.MAPPED_TEMPLATE: `Required<T>` is the library mapped " +
@@ -2947,14 +2933,7 @@ const LIFTED_ROW_OVERRIDES = new Map([
     {
       mech: "MappedTemplateRemap",
       proof: "ProofRequirement::Ts7Oracle(OracleId::UtilityComposition)",
-      semantic_queries: [
-        "ResolveDecl",
-        "Instantiate",
-        "KeyOf",
-        "MappedType",
-        "ProjectPath",
-        "LowerLocator",
-      ],
+      semantic_queries: ["ResolveDecl", "Instantiate", "KeyOf", "MappedType", "LowerLocator"],
       consumed_mechanisms: ["QueryValueDomainFoundation", "IndexedAccessUnionDistribution"],
       unblocker:
         "lifted by U2.MAPPED_TEMPLATE: `Readonly<Required<T>>` composes two " +
@@ -3654,12 +3633,21 @@ const RUNNING_UNRATIFIED_UNBLOCKERS = new Map([
       "are owned by U6.CALL_RESOLVE, which ratifies the lift",
   ]),
   ...[
-    ["call_resolution.rs", "call_resolution_abstract_constructor_instance_type_projects_class_shape"],
+    [
+      "call_resolution.rs",
+      "call_resolution_abstract_constructor_instance_type_projects_class_shape",
+    ],
     ["call_resolution.rs", "call_resolution_class_this_member_call_returns_declared_return"],
     ["call_resolution.rs", "call_resolution_contextual_callback_return_picks_first_overload"],
     ["class_features.rs", "class_features_dog_sound_return_type_is_literal_woof"],
-    ["class_features.rs", "class_features_generic_subclass_substitutes_type_parameter_on_inherited_field"],
-    ["class_features.rs", "class_features_generic_subclass_with_own_type_param_substitutes_through_base"],
+    [
+      "class_features.rs",
+      "class_features_generic_subclass_substitutes_type_parameter_on_inherited_field",
+    ],
+    [
+      "class_features.rs",
+      "class_features_generic_subclass_with_own_type_param_substitutes_through_base",
+    ],
     ["conditional_infer.rs", "conditional_infer_tuple_pattern_resolves_each_slot"],
     ["contextual_typing.rs", "contextual_typing_ct03_object_literal_assignment_from_typed_target"],
     ["contextual_typing.rs", "contextual_typing_ct04_object_literal_in_function_call"],
@@ -3669,12 +3657,21 @@ const RUNNING_UNRATIFIED_UNBLOCKERS = new Map([
     ["contextual_typing.rs", "contextual_typing_ct11_as_const_readonly_modifier"],
     ["contextual_typing.rs", "contextual_typing_ct13_object_literal_as_cast_narrows_shape"],
     ["contextual_typing.rs", "contextual_typing_ct14_satisfies_widens_to_target"],
-    ["contextual_typing.rs", "contextual_typing_ct15_contextual_type_via_type_parameter_constraint"],
+    [
+      "contextual_typing.rs",
+      "contextual_typing_ct15_contextual_type_via_type_parameter_constraint",
+    ],
     ["cross_file.rs", "cross_file_label_parameter_resolves_local_item"],
     ["cross_file.rs", "cross_file_projected_extra_resolves_number_terminal"],
     ["cross_file.rs", "cross_file_projected_item_resolves_local_extension"],
-    ["demand_boundary.rs", "demand_boundary_projection_into_selected_alias_loads_needed_but_not_unused"],
-    ["demand_boundary.rs", "demand_boundary_terminal_projection_resolves_value_without_unused_branch"],
+    [
+      "demand_boundary.rs",
+      "demand_boundary_projection_into_selected_alias_loads_needed_but_not_unused",
+    ],
+    [
+      "demand_boundary.rs",
+      "demand_boundary_terminal_projection_resolves_value_without_unused_branch",
+    ],
     ["enums.rs", "enum_const_enum_member_resolves_to_inlined_string_literal"],
     ["enums.rs", "enum_discriminant_extract_projects_matching_arm_payload"],
     ["enums.rs", "enum_keyof_typeof_numeric_yields_member_name_union"],
@@ -3684,11 +3681,23 @@ const RUNNING_UNRATIFIED_UNBLOCKERS = new Map([
     ["enums.rs", "enum_template_literal_over_string_enum_produces_value_union"],
     ["flow_invalidations.rs", "flow_invalidations_fi01_reassignment_invalidates_string_narrowing"],
     ["flow_invalidations.rs", "flow_invalidations_fi02_narrowing_preserved_across_opaque_call"],
-    ["flow_invalidations.rs", "flow_invalidations_fi03_closure_capture_preserves_narrowing_at_return"],
-    ["flow_invalidations.rs", "flow_invalidations_fi04_destructured_discriminant_preserves_correlation"],
-    ["flow_invalidations.rs", "flow_invalidations_fi05_destructured_discriminant_loses_on_reassignment"],
+    [
+      "flow_invalidations.rs",
+      "flow_invalidations_fi03_closure_capture_preserves_narrowing_at_return",
+    ],
+    [
+      "flow_invalidations.rs",
+      "flow_invalidations_fi04_destructured_discriminant_preserves_correlation",
+    ],
+    [
+      "flow_invalidations.rs",
+      "flow_invalidations_fi05_destructured_discriminant_loses_on_reassignment",
+    ],
     ["flow_invalidations.rs", "flow_invalidations_fi07_finally_without_return_preserves_try_catch"],
-    ["flow_invalidations.rs", "flow_invalidations_fi09_exhaustive_never_tail_does_not_widen_return"],
+    [
+      "flow_invalidations.rs",
+      "flow_invalidations_fi09_exhaustive_never_tail_does_not_widen_return",
+    ],
     ["flow_return_catalog.rs", "flow_return_ho09_keeps_unknown_declared_callback_result_opaque"],
     ["flow_return_catalog.rs", "flow_return_xf02_expands_imported_value_function_return"],
     ["flow_return_catalog.rs", "flow_return_xf04_expands_barrel_imported_value_function_return"],
@@ -3716,18 +3725,33 @@ const RUNNING_UNRATIFIED_UNBLOCKERS = new Map([
     ["mode_boundary_invariants.rs", "mode_boundary_shallow_does_not_expand_member_bodies"],
     ["modern_ts_features.rs", "await_using_simulated_return_type_resolves_to_primitive"],
     ["modern_ts_features.rs", "import_attribute_simulated_resolves_imported_json_shape"],
-    ["modern_ts_features.rs", "variance_annotation_in_substitution_through_consumer_consume_parameters"],
+    [
+      "modern_ts_features.rs",
+      "variance_annotation_in_substitution_through_consumer_consume_parameters",
+    ],
     ["module_features.rs", "module_features_cjs_export_equals_resolves_to_carrier"],
-    ["module_features.rs", "module_features_namespace_interface_merge_namespace_value_resolves_to_literal"],
+    [
+      "module_features.rs",
+      "module_features_namespace_interface_merge_namespace_value_resolves_to_literal",
+    ],
     ["module_features.rs", "module_features_typeof_import_named_shape_resolves_to_interface"],
     ["narrow_discriminated_union.rs", "narrow_discriminated_union_du01_if_equality_discriminant"],
     ["narrow_discriminated_union.rs", "narrow_discriminated_union_du02_switch_discriminant"],
     ["narrow_discriminated_union.rs", "narrow_discriminated_union_du03_switch_default_never"],
     ["narrow_discriminated_union.rs", "narrow_discriminated_union_du04_negated_discriminant"],
-    ["narrow_discriminated_union.rs", "narrow_discriminated_union_du05_multi_property_discriminant"],
+    [
+      "narrow_discriminated_union.rs",
+      "narrow_discriminated_union_du05_multi_property_discriminant",
+    ],
     ["narrow_discriminated_union.rs", "narrow_discriminated_union_du06_nested_discriminant"],
-    ["narrow_discriminated_union.rs", "narrow_discriminated_union_du07_number_literal_discriminant"],
-    ["narrow_discriminated_union.rs", "narrow_discriminated_union_du08_boolean_literal_discriminant"],
+    [
+      "narrow_discriminated_union.rs",
+      "narrow_discriminated_union_du07_number_literal_discriminant",
+    ],
+    [
+      "narrow_discriminated_union.rs",
+      "narrow_discriminated_union_du08_boolean_literal_discriminant",
+    ],
     ["narrow_discriminated_union.rs", "narrow_discriminated_union_du09_destructure_correlation"],
     ["narrow_discriminated_union.rs", "narrow_discriminated_union_du10_in_guard_plus_discriminant"],
     ["narrow_discriminated_union.rs", "narrow_discriminated_union_du11_switch_per_arm_join"],
@@ -3813,7 +3837,10 @@ const RUNNING_UNRATIFIED_UNBLOCKERS = new Map([
     ["substitution_types.rs", "substitution_types_sb10_x_is_t_predicate_on_generic"],
     ["substitution_types.rs", "substitution_types_sb14_default_type_arg_ignored_by_return_type"],
     ["template_literal_inference.rs", "template_literal_strip_on_prefix_uncapitalises_remainder"],
-    ["template_literal_inference.rs", "template_literal_strip_returns_input_unchanged_when_prefix_missing"],
+    [
+      "template_literal_inference.rs",
+      "template_literal_strip_returns_input_unchanged_when_prefix_missing",
+    ],
     ["tuple_labels.rs", "tuple_labels_number_index_projects_all_elements_union"],
     ["tuple_labels.rs", "tuple_labels_numeric_position_access_drops_label"],
     ["tuple_labels.rs", "tuple_labels_numeric_position_access_on_optional_slot_carries_undefined"],
@@ -3824,7 +3851,10 @@ const RUNNING_UNRATIFIED_UNBLOCKERS = new Map([
     ["typescript_rules.rs", "typescript_rules_template_intrinsic_evaluates_union"],
     ["typescript_rules.rs", "typescript_rules_typeof_const_preserves_readonly_literals"],
     ["union_key_access.rs", "union_key_access_two_key_union_projects_member_type_union"],
-    ["utility_composition.rs", "utility_composition_resolves_required_pick_over_nested_nonnullable_payload"],
+    [
+      "utility_composition.rs",
+      "utility_composition_resolves_required_pick_over_nested_nonnullable_payload",
+    ],
     ["utility_edge.rs", "utility_edge_omit_all_keys_yields_empty_object"],
     ["utility_edge.rs", "utility_edge_pick_all_keys_yields_input_shape"],
     ["utility_edge.rs", "utility_edge_pick_never_yields_empty_object"],
@@ -3836,13 +3866,19 @@ const RUNNING_UNRATIFIED_UNBLOCKERS = new Map([
     ["utility_top_bottom.rs", "utility_top_bottom_utb22_non_nullable_never_is_never"],
     ["utility_top_bottom.rs", "utility_top_bottom_utb23_non_nullable_null_undefined_is_never"],
     ["utility_top_bottom.rs", "utility_top_bottom_utb25_exclude_any_against_string_is_any"],
-    ["value_inference.rs", "value_inference_computed_callback_object_value_resolves_from_callback_body"],
+    [
+      "value_inference.rs",
+      "value_inference_computed_callback_object_value_resolves_from_callback_body",
+    ],
     ["value_inference.rs", "value_inference_flow_variables_narrow_return_value_by_branch"],
     ["variadic_tuples.rs", "variadic_tuple_head_of_sample_resolves_to_first_literal"],
     ["variadic_tuples.rs", "variadic_tuple_init_of_sample_resolves_to_prefix_tuple"],
     ["variadic_tuples.rs", "variadic_tuple_last_of_sample_resolves_to_terminal_literal"],
     ["variadic_tuples.rs", "variadic_tuple_tail_of_sample_resolves_to_remaining_tuple"],
-    ["variadic_tuples.rs", "variadic_tuple_variadic_function_with_explicit_type_args_concatenates_tuples"],
+    [
+      "variadic_tuples.rs",
+      "variadic_tuple_variadic_function_with_explicit_type_args_concatenates_tuples",
+    ],
   ].map(([f, fn]) => [
     tkey(f, fn),
     "runs always in the default suite (its `#[ignore]` was removed when the " +

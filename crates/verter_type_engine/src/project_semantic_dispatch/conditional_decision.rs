@@ -427,6 +427,15 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         ),
                     )
                     .into_complete_active_query_build_node(self)
+                    // An access the evaluation could not read (an open
+                    // generic's element, an absent key) keeps the authored,
+                    // deferred access rather than relating a miss sentinel.
+                    .filter(|node| {
+                        !matches!(
+                            self.graph().node_data(*node).as_deref(),
+                            Some(SemanticNodeData::Opaque(_))
+                        )
+                    })
                     .unwrap_or(check);
                 self.canonical_argument_carrier(evaluated)
             } else {

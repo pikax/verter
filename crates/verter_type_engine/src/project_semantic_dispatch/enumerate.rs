@@ -655,9 +655,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         ) {
             return None;
         }
-        // Equal closed template patterns admit the entire index without
-        // enumerating their infinite literal domain. Open interpolants retain
-        // the deferred access, just like any other unbound generic domain.
+        // A closed template pattern equal to, or assignable to, a closed
+        // pattern constraint admits the entire index without enumerating its
+        // infinite literal domain (`a${number}` below `a${string}`). Open
+        // interpolants retain the deferred access, just like any other
+        // unbound generic domain.
         let pattern_index = if matches!(
             self.graph().node_data(node).as_deref(),
             Some(
@@ -699,7 +701,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 &mut budget,
             ) == super::canonical_algebra::StructuralIdentity::Equal;
             self.deposit_canonical_evidence(evidence);
-            if equal {
+            if equal
+                || self.template_pattern_accepts(pattern_index, pattern_constraint) == Some(true)
+            {
                 return Some(pattern_index);
             }
         }

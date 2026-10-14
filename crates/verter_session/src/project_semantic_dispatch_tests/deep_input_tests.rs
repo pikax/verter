@@ -1188,40 +1188,39 @@ fn mapped_types(depth: usize) -> String {
     format!("type D = {};\n", wrap(depth, "{ [K in \"a\"]: ", " }"))
 }
 
-/// The key-domain read reports a typed work-budget refusal. Derive its
-/// allowance from fresh requests: skipping unrequested mapped values can
-/// change the amount of work without changing this refusal contract.
+/// The connected work reading `keyof D` over a mapped-type nest charges: it
+/// reads only the nest's key domain, never an unrequested mapped value, so
+/// the charge does not grow with the nest's depth.
+const MAPPED_KEY_DOMAIN_WORK: usize = 16;
+
+/// Reading `keyof D` over a mapped-type nest answers under
+/// [`MAPPED_KEY_DOMAIN_WORK`] at a quarter of [`BUDGET_DEPTH`] as at the
+/// full depth, and one unit less returns the budget's typed failure, the
+/// plan budget at its production default — read on [`MAPPED_STACK`], as
+/// reading `keyof D` over the nest needs.
 #[test]
 fn mapped_types_nested_past_the_work_budget_return() {
     in_a_fresh_process(test_path!(), || {
-        let source = format!(
-            "{}export function pf() {{ const p: keyof D = null as any; return p; }}\n",
-            mapped_types(BUDGET_DEPTH)
-        );
-        let outcome_at = |work| {
-            let source = source.clone();
-            on_a_stack(MAPPED_STACK, move || {
-                let _work = super::connected_demand::WorkBudgetForTests::install(work);
-                audited_return_on(&footprint_host(), &source).0
-            })
-        };
-        let mut refused = 1;
-        assert_eq!(outcome_at(refused), WORK_BUDGET_EXCEEDED);
-        let mut allowance = 2;
-        loop {
-            assert!(
-                allowance <= WORK_BUDGET,
-                "the request completes under the available work allowance"
+        for depth in [BUDGET_DEPTH / 4, BUDGET_DEPTH] {
+            let source = format!(
+                "{}export function pf() {{ const p: keyof D = null as any; return p; }}\n",
+                mapped_types(depth)
             );
-            let outcome = outcome_at(allowance);
-            if outcome == Ok(None) {
-                break;
-            }
-            assert_eq!(outcome, WORK_BUDGET_EXCEEDED);
-            refused = allowance;
-            allowance *= 2;
+            let answered = {
+                let source = source.clone();
+                on_a_stack(MAPPED_STACK, move || {
+                    let _work = super::connected_demand::WorkBudgetForTests::install(
+                        MAPPED_KEY_DOMAIN_WORK,
+                    );
+                    audited_return_on(&footprint_host(), &source).0
+                })
+            };
+            assert_eq!(
+                answered, RETURNS_ITS_VALUE,
+                "a {depth}-level nest answers within the key domain's work"
+            );
+            assert_returns_past_a_work_budget(source, MAPPED_KEY_DOMAIN_WORK - 1, MAPPED_STACK);
         }
-        assert_returns_past_a_work_budget(source, refused, MAPPED_STACK);
     });
 }
 

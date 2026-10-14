@@ -476,10 +476,11 @@ impl FactReadSet {
     /// observations.
     #[inline]
     pub fn observe(&mut self, fact: FactVersionRef) {
-        if self.recently_observed(&fact) {
-            return;
+        let (seen, comparisons) = self.recently_observed(&fact);
+        record_signature_work(comparisons);
+        if !seen {
+            self.observations.push(fact);
         }
-        self.observations.push(fact);
     }
 
     /// Bulk-record a previously finalised signature.
@@ -492,23 +493,26 @@ impl FactReadSet {
     #[inline]
     pub fn observe_borrowed_signature(&mut self, sig: &[FactVersionRef]) {
         self.observations.reserve(sig.len());
+        let mut compared = 0;
         for fact in sig {
-            if !self.recently_observed(fact) {
+            let (seen, comparisons) = self.recently_observed(fact);
+            compared += comparisons;
+            if !seen {
                 self.observations.push(fact.clone());
             }
         }
+        record_signature_work(compared);
     }
 
+    /// Whether `fact` is among the last [`INLINE_CAPACITY`] observations,
+    /// with the number of comparisons that decided it.
     #[inline]
-    fn recently_observed(&self, fact: &FactVersionRef) -> bool {
-        self.observations
-            .iter()
-            .rev()
-            .take(INLINE_CAPACITY)
-            .any(|observed| {
-                record_signature_work(1);
-                observed == fact
-            })
+    fn recently_observed(&self, fact: &FactVersionRef) -> (bool, usize) {
+        let window = &self.observations[self.observations.len().saturating_sub(INLINE_CAPACITY)..];
+        match window.iter().rposition(|observed| observed == fact) {
+            Some(position) => (true, window.len() - position),
+            None => (false, window.len()),
+        }
     }
 
     /// Absorb an ALREADY-CANONICAL signature — the output of a previous

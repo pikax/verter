@@ -113,6 +113,94 @@ fn mapped_index_equal_template_pattern_binds_the_value() {
 }
 
 #[test]
+fn mapped_index_assignable_template_pattern_binds_the_value() {
+    let host = make_host_with_footprint();
+    upsert_ts(&host, "/indices.ts", "export type Numbered = `a${number}`; export type Constant = { [K in `a${string}`]: 1 }[`a${number}`]; export type Identity = { [K in `a${string}`]: K }[`a${number}`]; export type Open<T extends string> = { [K in `a${string}`]: 1 }[`a${T}`];");
+    let free = Arc::new(TypeExpr::TypeParameter(verter_type_expr::TypeParam {
+        name: "Free".into(),
+        constraint: None,
+        default: None,
+        is_const: false,
+    }));
+    for _ in 0..2 {
+        assert_eq!(
+            mapped_index_wire_answer(&host, "Constant", &[]),
+            TypeExpr::Literal(verter_type_expr::LiteralValue::Number(1.0))
+        );
+        assert_eq!(
+            mapped_index_wire_answer(&host, "Identity", &[]),
+            mapped_index_wire_answer(&host, "Numbered", &[])
+        );
+        let open = mapped_index_wire_answer(&host, "Open", &[Arc::clone(&free)]);
+        assert!(
+            matches!(open, TypeExpr::IndexedAccess { .. }),
+            "an open interpolant must keep the deferred access: {open:?}"
+        );
+    }
+}
+
+/// `1 | undefined`, in either union order.
+fn assert_one_or_undefined(answer: &TypeExpr, label: &str) {
+    let TypeExpr::Union(arms) = answer else {
+        panic!("{label}: an optional source member must read `1 | undefined`, got {answer:?}");
+    };
+    assert_eq!(arms.len(), 2, "{label}: {answer:?}");
+    assert!(
+        arms.contains(&TypeExpr::Literal(verter_type_expr::LiteralValue::Number(
+            1.0
+        ))) && arms.contains(&TypeExpr::Primitive(PrimitiveName::Undefined)),
+        "{label}: {answer:?}"
+    );
+}
+
+#[test]
+fn mapped_index_unique_symbol_key_keeps_source_optionality() {
+    let host = make_host_with_footprint();
+    upsert_ts(&host, "/indices.ts", "declare const tag: unique symbol; interface Optional { [tag]?: 1 } interface Required { [tag]: 1 } export type OptionalSymbol = { [K in keyof Optional]: 1 }[keyof Optional]; export type RequiredSymbol = { [K in keyof Required]: 1 }[keyof Required];");
+    for _ in 0..2 {
+        assert_one_or_undefined(
+            &mapped_index_wire_answer(&host, "OptionalSymbol", &[]),
+            "OptionalSymbol",
+        );
+        assert_eq!(
+            mapped_index_wire_answer(&host, "RequiredSymbol", &[]),
+            TypeExpr::Literal(verter_type_expr::LiteralValue::Number(1.0))
+        );
+    }
+}
+
+#[test]
+fn mapped_index_optional_source_modifiers_read_in_linear_work() {
+    let mut scans = Vec::new();
+    for count in [32usize, 64, 128] {
+        let host = make_host_with_footprint();
+        let members = (0..count)
+            .map(|i| format!("k{i}?: {i};"))
+            .collect::<String>();
+        upsert_ts(
+            &host,
+            "/indices.ts",
+            &format!(
+                "interface S {{ {members} }} export type Probe = {{ [K in keyof S]: 1 }}[keyof S];"
+            ),
+        );
+        let before = verter_type_engine::semantic_query::key_scan_comparisons_for_tests();
+        let answer = mapped_index_wire_answer(&host, "Probe", &[]);
+        scans.push(verter_type_engine::semantic_query::key_scan_comparisons_for_tests() - before);
+        assert_one_or_undefined(&answer, &format!("{count} optional keys"));
+    }
+    // Reading every key's source modifier scans the source surface once:
+    // doubling the key count at most doubles the comparisons (a per-key
+    // scan quadruples them).
+    for pair in scans.windows(2) {
+        assert!(
+            pair[1] <= 2 * pair[0] + 8,
+            "source modifier reads must stay linear in the key count: {scans:?}"
+        );
+    }
+}
+
+#[test]
 fn mapped_index_empty_filtered_domains_are_never() {
     let host = make_host_with_footprint();
     upsert_ts(&host, "/indices.ts", "interface Numeric { 0: 1 } interface Empty {} export type NumericOnly = { [K in keyof Numeric & string]: Numeric[K] }[keyof Numeric & string]; export type NoKeys = { [K in keyof Empty & string]: Empty[K] }[keyof Empty & string]; export type Disjoint = { [K in string & number]: K }[string & number]; export type FilteredHop = { [K in keyof Numeric & string]: { value: 1 } }[keyof Numeric & string]['value']; export type NeverHop = { [K in never]: { value: 1 } }[never]['value'];");
@@ -226,9 +314,8 @@ fn generic_mapped_index_keeps_the_access_and_alias_arguments() {
 
 #[test]
 fn recursive_mapped_index_publishes_dotted_paths_across_modules() {
-    // Two entities per module cover cyclic imports and recursive path depth
-    // without repeating identical path shapes hundreds of times. Explicit
-    // full-size recipes reuse this generator and every path-union assertion.
+    // Two entities per module cover cyclic imports and recursive path depth.
+    // Explicit full-size recipes reuse the generator and every union assertion.
     let layouts: &[(usize, usize)] = match std::env::var("VERTER_RECURSIVE_MAPPED_INDEX_LAYOUT")
         .as_deref()
     {
@@ -239,116 +326,274 @@ fn recursive_mapped_index_publishes_dotted_paths_across_modules() {
         other => panic!("expected recursive mapped-index layout 20x3, 100x5 or 300x5: {other:?}"),
     };
     for &(count, groups) in layouts {
-        let started = std::time::Instant::now();
-        let mut files = vec![(
-            "/paths/utils.ts".to_string(),
-            "export interface Meta<T> { tag: T; created: number }\n\
-             export type Paths<T, D extends unknown[] = []> = D['length'] extends 3 ? never\n\
-             : T extends object ? { [K in keyof T & string]: K | `${K}.${Paths<T[K], [...D, 0]>}` }[keyof T & string] : never;".to_string(),
-        )];
-        for group in 0..groups {
-            let mut source = "import type { Meta } from './utils';\n".to_string();
-            for other in 0..groups {
-                if other != group {
-                    let imports = (other..count)
-                        .step_by(groups)
-                        .map(|i| format!("E{i}"))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    source.push_str(&format!(
-                        "import type {{ {imports} }} from './entities-{other}';\n"
-                    ));
-                }
-            }
-            for i in (group..count).step_by(groups) {
-                source.push_str(&format!("export interface E{i} {{ id: {i}; name: string; next: E{}; owner: E{}; meta: Meta<{i}> }}\n", (i + 1) % count, (i * 7 + 3) % count));
-            }
-            files.push((format!("/paths/entities-{group}.ts"), source));
-        }
-        let mut api = String::new();
-        for group in 0..groups {
-            let imports = (group..count)
-                .step_by(groups)
-                .map(|i| format!("E{i}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            api.push_str(&format!(
-                "import type {{ {imports} }} from './entities-{group}';\n"
-            ));
-        }
-        api.push_str("export interface Api {\n");
-        for i in 0..count {
-            api.push_str(&format!("e{i}: E{i};\n"));
-        }
-        api.push_str("}\n");
-        files.push(("/paths/api.ts".to_string(), api));
-        files.push(("/paths/scenario.ts".to_string(), "import type { Api } from './api'; import type { Paths } from './utils'; export type Probe = Paths<Api>;".to_string()));
-        let borrowed = files
-            .iter()
-            .map(|(path, source)| (path.as_str(), source.as_str()))
-            .collect::<Vec<_>>();
-        // Complete enumeration of the larger closures needs an explicit
-        // request allowance; small layouts exercise the default fuse.
-        let host = make_host_with_workspace_files_config(
-            &borrowed,
-            crate::HostConfig {
-                audit_enabled: true,
-                projection_op_budget: if count <= 20 { 0 } else { 50_000 },
-                ..crate::HostConfig::default()
-            },
-        );
-        for (path, source) in &borrowed {
-            upsert_ts(&host, path, source);
-        }
-        let (answer, record) = resolve_expr(
-            &host,
-            "/paths/scenario.ts",
-            "Probe",
-            &[],
-            ProjectionMode::Expanded,
-        );
-        let stats = host.project_type_store().semantic_graph().stats_snapshot();
-        assert!(
-            stats.instantiate_count <= u64::try_from(count * 15 + 20).unwrap(),
-            "recursive applications must share already demanded property types: {count} entities used {} instantiations",
-            stats.instantiate_count,
-        );
-        eprintln!(
-            "layout={count}/{groups} elapsed={:?} instantiates={} evaluations={}",
-            started.elapsed(),
-            stats.instantiate_count,
-            stats.evaluate_deferred_memo_misses
-        );
-        let mut expected = BTreeSet::new();
-        for i in 0..count {
-            expected.insert(format!("e{i}"));
-            for field in ["id", "name", "next", "owner", "meta"] {
-                expected.insert(format!("e{i}.{field}"));
-            }
-            for field in ["next", "owner"] {
-                for child in ["id", "name", "next", "owner", "meta"] {
-                    expected.insert(format!("e{i}.{field}.{child}"));
-                }
-            }
-            for child in ["tag", "created"] {
-                expected.insert(format!("e{i}.meta.{child}"));
-            }
-        }
-        let TypeExpr::Union(arms) = &answer else {
-            panic!("{count} entities/{groups} modules must publish a path union, got {answer:?}; audit: {:?}", record.kind_payload)
-        };
-        let actual = arms
-            .iter()
-            .map(|arm| {
-                let TypeExpr::Literal(verter_type_expr::LiteralValue::String(path)) = arm else {
-                    panic!("path must be a string literal, got {arm:?}")
-                };
-                path.clone()
-            })
-            .collect::<BTreeSet<_>>();
-        assert_eq!(actual, expected, "{count} entities/{groups} modules");
-        println!("{count} entities/{groups} modules: {} paths", actual.len());
+        assert_recursive_paths_layout(count, groups);
     }
+}
+
+/// Exhaustion withholds the selected value, while its authored mapped access
+/// remains intact. The stopped demand is not an evaluated partial value.
+#[test]
+fn recursive_mapped_index_budget_refusal_does_not_warm() {
+    use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+    use verter_type_engine::semantic_query::{
+        FactStatus, InstantiateKey, PathSegment, ProjectionReductionContext, QueryError,
+        QueryResult, SemanticNodeData, SemanticQueryKey,
+    };
+
+    let host = recursive_paths_host(3, 3, 100);
+    let view = crate::typeinfo::current_store_view_for_query(&host).unwrap();
+    let host_context = crate::resolver_core::HostResolverContext::from_current(
+        &host,
+        &view,
+        Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
+    );
+    let dispatch =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host_context);
+    let graph = host.project_type_store().semantic_graph();
+    // Like the public named-symbol entry, first obtain the declaration shell;
+    // the selected index demand below owns reduction of its recursive value.
+    let shell = dispatch.execute_read(SemanticQueryKey::Instantiate(InstantiateKey::new(
+        dispatch.type_slot_for(
+            Arc::from("/paths/scenario.ts"),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            Arc::from("Probe"),
+        ),
+        Arc::from([]),
+        dispatch.instantiate_context_for(
+            "/paths/scenario.ts",
+            ProjectionReductionContext::published(ProjectionMode::Expanded),
+        ),
+    )));
+    let QueryResult::Value(node) = shell.value else {
+        panic!("the authored access must resolve: {:?}", shell.value);
+    };
+    let data = graph.node_data(node).unwrap();
+    let SemanticNodeData::IndexedAccess { object, index } = data.as_ref() else {
+        panic!("the mapped index must remain: {data:?}");
+    };
+    let key = SemanticQueryKey::IndexedAccess {
+        base: *object,
+        index: index.clone(),
+        mode: ProjectionMode::Expanded,
+    };
+    // IndexedAccess is admitted under this canonical ProjectPath identity.
+    let memo_key = SemanticQueryKey::ProjectPath {
+        base: *object,
+        path: Arc::from([PathSegment::Index(index.clone())]),
+        context: ProjectionReductionContext::published(ProjectionMode::Expanded),
+    };
+    for request in 1..=2 {
+        let context = RequestContext::with_kind_timing_and_projection_budget(
+            request,
+            Arc::from("/paths/scenario.ts"),
+            verter_audit::RequestKind::TypeResolution,
+            false,
+            false,
+            None,
+            100,
+        );
+        let _guard = RequestContextGuard::install(Arc::clone(&context));
+        let read = dispatch.execute_read(key.clone());
+        assert!(context.projection_budget.is_exhausted());
+        assert!(read.result_is_partial());
+        assert!(read.cache_suppress);
+        assert!(matches!(read.fact_status, FactStatus::Unavailable(_)));
+        assert!(
+            matches!(
+                read.value,
+                QueryResult::Error(QueryError::IncompleteSemanticOperand { .. })
+            ),
+            "a stopped walk cannot publish an evaluated value: {:?}",
+            read.value
+        );
+        assert!(graph.get_unvalidated(&memo_key).is_none());
+    }
+    let bytes = host.project_node_to_type_expr_json_bytes(node).unwrap();
+    let answer: TypeExpr = serde_json::from_slice(&bytes).unwrap();
+    let TypeExpr::IndexedAccess { object, index } = &answer else {
+        panic!("the authored index must survive refusal: {answer:?}");
+    };
+    let TypeExpr::Mapped { source, value, .. } = object.as_ref() else {
+        panic!("the authored mapping must survive refusal: {object:?}");
+    };
+    assert_eq!(index, source, "the mapped key domain must remain indexed");
+    let TypeExpr::Union(arms) = value.as_ref() else {
+        panic!("the mapped value must retain its recursive branch: {value:?}");
+    };
+    let expressions = arms
+        .iter()
+        .find_map(|arm| match arm {
+            TypeExpr::TemplateLiteral { expressions, .. } => Some(expressions),
+            _ => None,
+        })
+        .expect("the dotted-path template must remain");
+    let TypeExpr::Ref {
+        name,
+        type_arguments,
+    } = &expressions[1]
+    else {
+        panic!("the recursive alias must remain: {expressions:?}");
+    };
+    assert_eq!(name.as_ref(), "Paths");
+    assert_eq!(type_arguments.len(), 2);
+    assert!(matches!(&type_arguments[0], TypeExpr::IndexedAccess { .. }));
+    assert!(matches!(&type_arguments[1], TypeExpr::Tuple { .. }));
+    // The public boundary must retain the typed refusal on a repeat request.
+    for _ in 0..2 {
+        let (outcome, _) = host
+            .resolve_named_symbol_wire_with_audit(
+                "/paths/scenario.ts",
+                "Probe",
+                &[],
+                Some(ProjectionMode::Expanded),
+            )
+            .into_parts();
+        assert!(
+            matches!(
+                outcome,
+                Err(crate::host_resolve_type_audit::TypeResolutionRequestError::Other(_))
+            ),
+            "the refused Paths<Api> cannot become a published answer: {outcome:?}"
+        );
+    }
+    // The same demand with enough allowance must recompute and admit its
+    // complete result. This also proves the non-admission probe's identity.
+    let context = RequestContext::with_kind_timing_and_projection_budget(
+        3,
+        Arc::from("/paths/scenario.ts"),
+        verter_audit::RequestKind::TypeResolution,
+        false,
+        false,
+        None,
+        50_000,
+    );
+    let _guard = RequestContextGuard::install(context);
+    let read = dispatch.execute_read(key);
+    assert!(!read.result_is_partial() && !read.cache_suppress);
+    let QueryResult::Value(value) = read.value else {
+        panic!("the roomy request must complete: {:?}", read.value);
+    };
+    let answer = host.project_node_to_type_expr_for_test(value).unwrap();
+    let TypeExpr::Union(paths) = &answer else {
+        panic!("the roomy request must publish paths: {answer:?}");
+    };
+    assert_eq!(paths.len(), 3 * 18);
+    assert!(graph.get_unvalidated(&memo_key).is_some());
+}
+
+/// A host holding `Paths<Api>` over `count` entities spread across `groups`
+/// mutually importing modules, under the request allowance `budget`
+/// (`0` keeps the shipped default fuse).
+fn recursive_paths_host(count: usize, groups: usize, budget: usize) -> Arc<crate::VerterHost> {
+    let mut files = vec![(
+        "/paths/utils.ts".to_string(),
+        "export interface Meta<T> { tag: T; created: number }\n\
+         export type Paths<T, D extends unknown[] = []> = D['length'] extends 3 ? never\n\
+         : T extends object ? { [K in keyof T & string]: K | `${K}.${Paths<T[K], [...D, 0]>}` }[keyof T & string] : never;".to_string(),
+    )];
+    for group in 0..groups {
+        let mut source = "import type { Meta } from './utils';\n".to_string();
+        for other in 0..groups {
+            if other != group {
+                let imports = (other..count)
+                    .step_by(groups)
+                    .map(|i| format!("E{i}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                source.push_str(&format!(
+                    "import type {{ {imports} }} from './entities-{other}';\n"
+                ));
+            }
+        }
+        for i in (group..count).step_by(groups) {
+            source.push_str(&format!("export interface E{i} {{ id: {i}; name: string; next: E{}; owner: E{}; meta: Meta<{i}> }}\n", (i + 1) % count, (i * 7 + 3) % count));
+        }
+        files.push((format!("/paths/entities-{group}.ts"), source));
+    }
+    let mut api = String::new();
+    for group in 0..groups {
+        let imports = (group..count)
+            .step_by(groups)
+            .map(|i| format!("E{i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        api.push_str(&format!(
+            "import type {{ {imports} }} from './entities-{group}';\n"
+        ));
+    }
+    api.push_str("export interface Api {\n");
+    for i in 0..count {
+        api.push_str(&format!("e{i}: E{i};\n"));
+    }
+    api.push_str("}\n");
+    files.push(("/paths/api.ts".to_string(), api));
+    files.push(("/paths/scenario.ts".to_string(), "import type { Api } from './api'; import type { Paths } from './utils'; export type Probe = Paths<Api>;".to_string()));
+    let borrowed = files
+        .iter()
+        .map(|(path, source)| (path.as_str(), source.as_str()))
+        .collect::<Vec<_>>();
+    let host = make_host_with_workspace_files_config(
+        &borrowed,
+        crate::HostConfig {
+            audit_enabled: true,
+            projection_op_budget: budget,
+            ..crate::HostConfig::default()
+        },
+    );
+    for (path, source) in &borrowed {
+        upsert_ts(&host, path, source);
+    }
+    host
+}
+
+/// `Paths<Api>` over `count` entities spread across `groups` mutually
+/// importing modules publishes every dotted path to depth 3, as tsc does,
+/// with instantiations linear in the entity count.
+fn assert_recursive_paths_layout(count: usize, groups: usize) {
+    // Complete enumeration of the larger closures needs an explicit
+    // request allowance; the smallest layout exercises the default fuse.
+    let host = recursive_paths_host(count, groups, if count <= 20 { 0 } else { 50_000 });
+    let (answer, record) = resolve_expr(
+        &host,
+        "/paths/scenario.ts",
+        "Probe",
+        &[],
+        ProjectionMode::Expanded,
+    );
+    let stats = host.project_type_store().semantic_graph().stats_snapshot();
+    assert!(
+        stats.instantiate_count <= u64::try_from(count * 15 + 20).unwrap(),
+        "recursive applications must share already demanded property types: {count} entities used {} instantiations",
+        stats.instantiate_count,
+    );
+    let mut expected = BTreeSet::new();
+    for i in 0..count {
+        expected.insert(format!("e{i}"));
+        for field in ["id", "name", "next", "owner", "meta"] {
+            expected.insert(format!("e{i}.{field}"));
+        }
+        for field in ["next", "owner"] {
+            for child in ["id", "name", "next", "owner", "meta"] {
+                expected.insert(format!("e{i}.{field}.{child}"));
+            }
+        }
+        for child in ["tag", "created"] {
+            expected.insert(format!("e{i}.meta.{child}"));
+        }
+    }
+    let TypeExpr::Union(arms) = &answer else {
+        panic!("{count} entities/{groups} modules must publish a path union, got {answer:?}; audit: {:?}", record.kind_payload)
+    };
+    let actual = arms
+        .iter()
+        .map(|arm| {
+            let TypeExpr::Literal(verter_type_expr::LiteralValue::String(path)) = arm else {
+                panic!("path must be a string literal, got {arm:?}")
+            };
+            path.clone()
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(actual, expected, "{count} entities/{groups} modules");
 }
 
 #[test]
