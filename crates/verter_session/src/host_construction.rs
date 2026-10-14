@@ -57,10 +57,11 @@ pub(crate) fn next_host_instance_id() -> u64 {
     NEXT_HOST_INSTANCE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Unit-test standalone hosts model an explicitly configured in-memory
-/// project. Production standalone hosts remain unconfigured until their
-/// caller supplies project authority; tests that exercise the no-project
-/// state construct a host with an explicit workspace instead.
+/// Unit-test hosts without project authority receive a tsconfig-less
+/// in-memory context for default environment and ownership identity. A
+/// missing, fabricated tsconfig must not turn that context into a configured
+/// program whose roots are eagerly discovered. Tests with authored roots or
+/// compiler options configure their real tsconfig through the shared loader.
 #[cfg(test)]
 pub(crate) fn configure_workspace_test_projects(workspace: &dyn verter_workspace::WorkspaceAccess) {
     if workspace.resource_snapshot().published_project_count != 0 {
@@ -92,13 +93,7 @@ pub(crate) fn configure_workspace_test_projects(workspace: &dyn verter_workspace
                         )
                     })
                     .collect();
-            let tsconfig_path = if root == "/" {
-                "/__verter_test__/tsconfig.json".to_string()
-            } else {
-                format!("{root}__verter_test__/tsconfig.json")
-            };
-            let mut project =
-                verter_workspace::ide_project_config(root.clone(), root, Some(tsconfig_path));
+            let mut project = verter_workspace::ide_project_config(root.clone(), root, None);
             project.membership = membership;
             project
         })

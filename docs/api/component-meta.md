@@ -51,11 +51,13 @@ membership is the program's root files in their authored order, which
 decides the order of declarations merged across files (global interfaces and
 namespaces, `declare global`, module augmentations); files those roots import
 or reference join the program just ahead of the root that pulls them in. The
-tsconfig's `paths` govern the files its membership owns: a component outside
-`files` / `include` still publishes, but resolves only relative and package
-imports. The pooled engine identity hashes the tsconfig file's whole
-contents, membership included, so two configurations whose roots differ
-never share an engine.
+tsconfig's `paths` also govern imported and referenced dependencies outside
+`files` / `include`. An unreachable component outside that closure still
+publishes, but resolves only relative and package imports. The pooled engine
+identity fingerprints the tsconfig and its `extends` chain, including package
+configuration resolution. JSONC comments, URLs, alias globs and trailing commas
+are supported. Changes to root order or inherited configuration select a fresh
+engine for both project sessions and compat checkers.
 
 A session opened with an inline `config` object has no tsconfig file and is
 an unconfigured project: it applies the object's `paths`/`baseUrl` to every

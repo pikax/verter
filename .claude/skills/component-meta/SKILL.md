@@ -20,7 +20,10 @@ project carrying a `tsconfigPath` through the shared workspace loader
 workspace: compiler options (`extends`, `paths`, `baseUrl`, `noLib`, `lib`,
 strictness) and the exact `files` / `include` / `exclude` membership, its
 `include` matches materialized by walking the project root (a lazy workspace
-has read none of them yet), whose `program_root_files` order is the program
+has read none of them yet; as in TypeScript, an include wildcard never matches
+a dot-prefixed name or a `node_modules` / `bower_components` /
+`jspm_packages` folder the entry does not spell, whatever `exclude` says, and
+the walk never descends into one), whose `program_root_files` order is the program
 file order that orders merged declarations. These are entry roots: their
 transitive import/reference closure retains the program's compiler options
 and aliases even when `files`/`include` omit those dependencies. An unreachable
@@ -32,7 +35,13 @@ project contexts. Explicit `providerRoot` / `workspaceAliases` /
 does not clear the tsconfig's). A project with no `tsconfigPath` — the inline
 `config` session — keeps the match-all membership: match-all is only for
 tsconfig-less projects. The pooled engine identity follows the same split:
-`tsconfigConfigHash` hashes the whole tsconfig (membership included);
+`runtime/tsconfig.ts::hashTsconfigConfig` fingerprints the tsconfig bytes and
+its ordered `extends` graph (string, array and package specifiers), including
+missing resolution probes and package manifests. Inheritance traversal uses
+the native loader's depth-eight bound; the native loader remains the sole
+options/membership merge authority. A shared JSONC parser preserves URLs,
+alias globs and trailing commas. Both session and compat entrypoints use this
+identity; synchronous eviction computes the same key.
 `inlineConfigHash` strips `include`, which is only a discovery filter for a
 match-all project. Guards: `crates/verter_napi/src/project_config_tests.rs`,
 `packages/component-meta/src/project.program-order.spec.ts`.

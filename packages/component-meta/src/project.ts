@@ -13,7 +13,6 @@
  * ```
  */
 
-import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { resolve } from "node:path";
 import { mapComponentMeta } from "./compat/checker.js";
@@ -34,8 +33,7 @@ import {
   normalizePath,
   resolvePath,
   shutdownMetaRuntime as _shutdownMetaRuntime,
-  stableHash,
-  tsconfigConfigHash,
+  hashTsconfigConfig,
   tsconfigProjectConfig,
 } from "./runtime/index.js";
 import type {
@@ -323,16 +321,6 @@ export class ComponentMetaSession {
 function loadNative(): any {
   const _require = typeof require === "function" ? require : createRequire(import.meta.url);
   return _require("@verter/native");
-}
-
-function hashTsconfigConfig(tsconfigPath: string): string {
-  try {
-    const raw = readFileSync(tsconfigPath, "utf8");
-    const stripped = raw.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
-    return tsconfigConfigHash(JSON.parse(stripped));
-  } catch {
-    return stableHash({ tsconfigPath: resolvePath(tsconfigPath) });
-  }
 }
 
 function buildEngineKeyInput(

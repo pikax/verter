@@ -11,21 +11,25 @@
  *
  * Requires @verter/native to be built.
  */
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { openComponentMetaSession, shutdownMetaRuntime } from "./project.js";
 import type { ComponentMetaSession } from "./project.js";
 import { getMetaRuntime } from "./runtime/index.js";
+import { createChecker, type ComponentMetaChecker } from "./compat/checker.js";
 
 const COUNT = 10;
-const sessions = new Set<ComponentMetaSession>();
+const sessions = new Set<ComponentMetaSession | ComponentMetaChecker>();
+const roots = new Set<string>();
 
 afterEach(() => {
   for (const session of sessions) session.close();
   sessions.clear();
   shutdownMetaRuntime();
+  for (const root of roots) rmSync(root, { recursive: true, force: true });
+  roots.clear();
 });
 
 function busFile(i: number): string {
@@ -54,6 +58,7 @@ function writeProgram(
   through: "files" | "include" = "files",
 ): string {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "verter-program-order-")));
+  roots.add(root);
   writeFileSync(join(root, "tsconfig.json"), tsconfig(listed, through));
   writeFileSync(join(root, "lib.bench.d.ts"), "interface Object { toString(): string; }\n");
   for (let i = 0; i < COUNT; i++) {
@@ -133,13 +138,57 @@ describe("tsconfig program file order", () => {
     expect(await answer(session)).toEqual(editedCold);
   });
 
-  it("gives a tsconfig whose include order changed its own engine", async () => {
-    const root = writeProgram(reverse, answers, "include");
-    expect(await answer(await openLoaded(root))).toEqual(literal(9));
-    writeFileSync(join(root, "tsconfig.json"), tsconfig(forward, "include"));
-    expect(await answer(await openLoaded(root))).toEqual(literal(0));
-    expect(getMetaRuntime().diagnostics.enginesCreated).toBe(2);
-  });
+  it.each(["json", "jsonc", "schema-and-aliases", "extends", "array-extends", "package-extends"])(
+    "gives a %s tsconfig whose include order changed its own engine",
+    async (format) => {
+      const root = writeProgram(reverse, answers, "include");
+      const writeConfig = (listed: number[]) => {
+        const config: {
+          $schema?: string;
+          compilerOptions: Record<string, unknown>;
+          files: string[];
+          include: string[];
+        } = {
+          compilerOptions: { strict: true, noLib: true, noEmit: true },
+          files: ["lib.bench.d.ts"],
+          include: [...listed.map(busFile), "scenario.ts", "Probe.vue"],
+        };
+        let path = join(root, "tsconfig.json");
+        if (format === "schema-and-aliases") {
+          config.$schema = "https://json.schemastore.org/tsconfig";
+          config.compilerOptions.baseUrl = ".";
+          config.compilerOptions.paths = { "@/*": ["src/*"] };
+          config.include.push("src/**/*.vue");
+        } else if (format.endsWith("extends")) {
+          if (format === "package-extends") {
+            const packageDir = join(root, "node_modules", "config-package");
+            mkdirSync(packageDir, { recursive: true });
+            writeFileSync(join(packageDir, "package.json"), '{ "tsconfig": "../../base.json" }');
+            writeFileSync(path, '{ "extends": "config-package" }');
+          } else {
+            writeFileSync(
+              path,
+              JSON.stringify({
+                extends: format === "array-extends" ? ["./base.json"] : "./base.json",
+              }),
+            );
+          }
+          path = join(root, "base.json");
+        }
+        const raw = JSON.stringify(config, null, 2);
+        writeFileSync(path, format === "jsonc" ? `// roots\n${raw.slice(0, -1)},\n}` : raw);
+      };
+      writeConfig(reverse);
+      expect(await answer(await openLoaded(root))).toEqual(literal(9));
+      const checker = await createChecker(join(root, "tsconfig.json"));
+      sessions.add(checker);
+      expect(getMetaRuntime().diagnostics.enginesCreated).toBe(1);
+      checker.close();
+      writeConfig(forward);
+      expect(await answer(await openLoaded(root))).toEqual(literal(0));
+      expect(getMetaRuntime().diagnostics.enginesCreated).toBe(2);
+    },
+  );
 });
 
 describe("tsconfig ownership and path aliases", () => {
@@ -147,6 +196,7 @@ describe("tsconfig ownership and path aliases", () => {
     "keeps aliases through unlisted imports with %s roots",
     async (membership) => {
       const root = realpathSync(mkdtempSync(join(tmpdir(), "verter-imported-alias-")));
+      roots.add(root);
       mkdirSync(join(root, "src"));
       writeFileSync(
         join(root, "tsconfig.json"),
@@ -184,6 +234,7 @@ export interface P extends Item {}`,
 
   function writeAliasProject(): string {
     const root = realpathSync(mkdtempSync(join(tmpdir(), "verter-program-alias-")));
+    roots.add(root);
     mkdirSync(join(root, "src"), { recursive: true });
     mkdirSync(join(root, "outside"), { recursive: true });
     writeFileSync(

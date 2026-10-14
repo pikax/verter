@@ -471,7 +471,11 @@ fn project_global_reads_retain_unowned_dependencies_and_exclude_other_projects()
         root.snapshot.owners_for_file("/app/global.ts"),
         root.snapshot.owners_for_file("/other/global.ts")
     );
-    upsert_ts(&host, "/app/read.ts", "type Probe = Shared['dependency'];");
+    upsert_ts(
+        &host,
+        "/app/read.ts",
+        "import 'pkg';\ntype Probe = Shared['dependency'];",
+    );
     use verter_type_engine::resolver_core::request_ports::OwnedLowering;
     let contributors = host
         .global_contributor_answer(

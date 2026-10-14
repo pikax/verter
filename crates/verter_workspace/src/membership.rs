@@ -250,7 +250,11 @@ pub fn static_membership_from_includes(
                 supported,
             )
             .into_iter()
-            .map(move |glob| CompiledGlob::new(glob).in_include_entry(entry))
+            .map(move |glob| {
+                CompiledGlob::new(glob)
+                    .in_include_entry(entry)
+                    .as_typescript_include()
+            })
         })
         .collect();
     let exclude = exclude

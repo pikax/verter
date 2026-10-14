@@ -15,6 +15,7 @@ export {
   tsconfigConfigHash,
 } from "./engine-key.js";
 export type { EngineKeyInput } from "./engine-key.js";
+export { hashTsconfigConfig } from "./tsconfig.js";
 
 export { ProjectEngine, generateLeaseId } from "./project-engine.js";
 export type {
