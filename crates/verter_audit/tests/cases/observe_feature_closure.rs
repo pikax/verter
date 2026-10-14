@@ -89,16 +89,30 @@ impl Dependency {
     }
 }
 
+fn repository_root() -> &'static Path {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("repository root above the crate manifest")
+}
+
 fn cargo(root: &Path, args: &[&str]) -> String {
     // Keep toolchain discovery in the repository even for fixture manifests.
     // A fresh runner need not have a rustup default outside the pinned tree.
-    let output = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+    let mut command = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
+    command
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .args(args)
         .arg("--manifest-path")
-        .arg(root.join("Cargo.toml"))
-        .output()
-        .expect("launch Cargo feature resolver");
+        .arg(root.join("Cargo.toml"));
+    // A fixture resolves only path members and its in-fixture directory
+    // registry, so it gets a private Cargo home. Cargo's package-cache lock is
+    // per home, and the shared one is held by any concurrent Cargo process
+    // resolving the real workspace, for the whole download on a cold registry.
+    if root != repository_root() {
+        command.env("CARGO_HOME", root.join("cargo-home"));
+    }
+    let output = command.output().expect("launch Cargo feature resolver");
     assert!(
         output.status.success(),
         "cargo {args:?} failed: {}",
@@ -567,11 +581,7 @@ fn read_host_target(root: &Path) -> String {
 
 #[test]
 fn observe_feature_closure_is_off_for_production_and_its_dev_unification() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap();
+    let root = repository_root();
     let host = host_target(root);
     let metadata = metadata(root, &[]);
     for target in [host.as_str(), "wasm32-unknown-unknown"] {
