@@ -225,19 +225,17 @@ impl VerterHost {
         parent_canonical_id: &str,
         import_source: &str,
     ) -> Option<String> {
-        let outcome = self.ws().resolve_import_outcome(
+        self.resolve_import_outcome_in(
+            None,
             parent_canonical_id,
             import_source,
             verter_session_query::resolution::ResolutionContext {
                 phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
                 kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
             },
-        );
-        #[cfg(test)]
-        self.observe_owner_edge_outcome(parent_canonical_id, import_source, &outcome);
-        outcome
-            .into_transient_result()
-            .map(|result| result.source_id)
+        )
+        .into_transient_result()
+        .map(|result| result.source_id)
     }
 
     /// Record one owner-edge resolution's semantic trace onto the host's
@@ -322,6 +320,20 @@ impl VerterHost {
         import_source: &str,
         ctx: verter_session_query::resolution::ResolutionContext,
     ) -> verter_workspace::ResolutionPublication {
+        let publication = self
+            .resolve_import_outcome_in(overlay, parent_canonical_id, import_source, ctx)
+            .into_publication();
+        crate::host_manage::import_route_witness::record_resolution_witness(&publication);
+        publication
+    }
+
+    fn resolve_import_outcome_in(
+        &self,
+        overlay: Option<&verter_workspace::ResolutionOverlaySnapshot>,
+        parent_canonical_id: &str,
+        import_source: &str,
+        ctx: verter_session_query::resolution::ResolutionContext,
+    ) -> verter_workspace::ResolutionOutcome {
         // Typeinfo scratch files inline the active request scope and therefore
         // resolve their synthetic imports in that real scope's project
         // context. The request context supplies the actual published-project
@@ -335,11 +347,45 @@ impl VerterHost {
             } else {
                 Arc::from(parent_canonical_id)
             };
-        let outcome = match overlay {
-            None => self
+        let workspace = self.workspace();
+        let root = workspace.published_root();
+        if root.as_ref().is_some_and(|root| {
+            !root.snapshot.owners_for_file(&importer).iter().any(|id| {
+                matches!(
+                    root.snapshot.project(*id).payload,
+                    verter_workspace::ProjectPayload::Configured { .. }
+                )
+            })
+        }) {
+            self.ingest_configured_programs();
+        }
+        let root = workspace.published_root();
+        let reachable_owner = root.as_ref().and_then(|root| {
+            let project = root
+                .snapshot
+                .project(self.project_for_canonical_in_snapshot(&importer, &root.snapshot)?);
+            match &project.payload {
+                verter_workspace::ProjectPayload::Configured { tsconfig_path, .. } => {
+                    Some(verter_session_query::resolution::ProjectOwnership {
+                        project_root: project.root.as_str().to_owned(),
+                        tsconfig_path: Some(tsconfig_path.as_str().to_owned()),
+                    })
+                }
+                _ => None,
+            }
+        });
+        let outcome = match (reachable_owner, overlay) {
+            (Some(owner), overlay) => workspace.resolve_import_from_project_outcome(
+                &owner,
+                overlay,
+                importer.as_ref(),
+                import_source,
+                ctx,
+            ),
+            (None, None) => self
                 .ws()
                 .resolve_import_outcome(importer.as_ref(), import_source, ctx),
-            Some(overlay) => self.ws().resolve_import_outcome_with_overlay(
+            (None, Some(overlay)) => self.ws().resolve_import_outcome_with_overlay(
                 overlay,
                 importer.as_ref(),
                 import_source,
@@ -348,9 +394,7 @@ impl VerterHost {
         };
         #[cfg(test)]
         self.observe_owner_edge_outcome(importer.as_ref(), import_source, &outcome);
-        let publication = outcome.into_publication();
-        crate::host_manage::import_route_witness::record_resolution_witness(&publication);
-        publication
+        outcome
     }
 
     /// The session view's resolution-visible overlay: its upserted
@@ -676,6 +720,7 @@ impl VerterHost {
         // above so its per-file maps release now rather than lingering
         // until the next store-view request.
         self.store_view_manager().clear();
+        self.ingest_configured_programs();
         self.bump_store_view_epoch();
     }
 

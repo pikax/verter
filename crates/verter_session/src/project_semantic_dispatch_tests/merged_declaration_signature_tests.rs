@@ -327,10 +327,14 @@ fn probe(host: &crate::VerterHost) -> f64 {
 
 /// The number literal the type `name` in `scenario.ts` settles on.
 fn literal_number(host: &crate::VerterHost, name: &str) -> f64 {
-    use verter_type_engine::semantic_query::{LiteralValue, ProjectionMode, SemanticNodeData};
     let scenario = format!("{PROGRAM_ROOT}/scenario.ts");
+    literal_number_at(host, &scenario, name)
+}
+
+fn literal_number_at(host: &crate::VerterHost, scenario: &str, name: &str) -> f64 {
+    use verter_type_engine::semantic_query::{LiteralValue, ProjectionMode, SemanticNodeData};
     let mut node = host
-        .resolve_named_symbol(&scenario, name, Some(ProjectionMode::Expanded))
+        .resolve_named_symbol(scenario, name, Some(ProjectionMode::Expanded))
         .expect("the probe answers");
     let graph = host.project_type_store().semantic_graph();
     loop {
@@ -864,4 +868,163 @@ fn a_referenced_library_loads_the_libraries_it_references() {
         assert_eq!(probe(&host), 3.0);
         assert_eq!(probe(&host), 3.0, "warm");
     }
+}
+
+/// A program's requesting file and every contributor can be reachable but
+/// absent from its configured roots. The first semantic read must use the
+/// completed population and its visit order, independently of prior reads.
+#[test]
+fn disk_reachable_globals_and_unlisted_requesters_share_program_order() {
+    use std::sync::Arc;
+    use verter_workspace::WorkspaceAccess;
+    for edges in [
+        "import './z'; import './a'; import './scenario'; export {};",
+        "/// <reference path=\"./z.ts\" />\n/// <reference path=\"./a.ts\" />\n/// <reference path=\"./scenario.ts\" />\nexport {};",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let directory = dir.path().canonicalize().unwrap();
+        let root = directory.to_str().unwrap();
+        let config = directory.join("tsconfig.json");
+        std::fs::write(&config, r#"{"compilerOptions":{"strict":true,"noLib":true},"files":["lib.bench.d.ts","entry.ts"]}"#).unwrap();
+        for (name, source) in [
+            bench_lib(),
+            ("entry.ts".into(), edges.into()),
+            ("z.ts".into(), Contributor::GlobalInterface.source(0, 1)),
+            ("a.ts".into(), Contributor::GlobalInterface.source(1, 2)),
+            ("scenario.ts".into(), bus_scenario(&[0, 1])),
+        ] {
+            std::fs::write(directory.join(name), source).unwrap();
+        }
+        let make = || {
+            let workspace = Arc::new(verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default()));
+            let project = verter_workspace::configured_ide_project(workspace.as_ref(), root.into(), root.into(), config.to_str().unwrap());
+            workspace.configure_resolver(vec![project]);
+            crate::VerterHost::new(crate::HostConfig::default(), workspace)
+        };
+        let scenario = format!("{root}/scenario.ts");
+        let read = |host: &crate::VerterHost| literal_number_at(host, &scenario, "__Probe");
+        let host = make();
+        assert_eq!(read(&host), 2.0, "first read: {edges}");
+        assert_eq!(read(&host), 2.0, "warm");
+        assert_eq!(read(&make()), 2.0, "independently cold");
+        let source = Contributor::GlobalInterface.source(1, 3);
+        let edited = directory.join("a.ts");
+        std::fs::write(&edited, &source).unwrap();
+        crate::u6_flow_shape_corpus_tests::upsert(&host, edited.to_str().unwrap(), &source, crate::FileLanguage::script_ts());
+        assert_eq!(read(&host), 3.0, "incremental");
+        assert_eq!(read(&make()), 3.0, "cold after edit");
+    }
+}
+
+/// Reachability of a sole contributor is a dependency even when no merge
+/// needs ordering. A non-contributor edit can retract it without changing
+/// the indexed declaration or the requesting source.
+#[test]
+fn a_single_imported_global_retires_when_its_incoming_edge_is_removed() {
+    use verter_type_engine::semantic_query::{LiteralValue, ProjectionMode, SemanticNodeData};
+    let config = serde_json::json!({ "compilerOptions": { "noLib": true }, "files": ["scenario.ts", "bridge.ts"] });
+    let files = |bridge: &str| {
+        vec![
+            (
+                "scenario.ts".into(),
+                "type __Probe = X['value']; type __Other = X['value']; export {};".into(),
+            ),
+            ("bridge.ts".into(), bridge.into()),
+            ("globals.d.ts".into(), "interface X { value: 7 }".into()),
+        ]
+    };
+    let host = program_host(&config, &files("import './globals'; export {};"));
+    let read = |host: &crate::VerterHost, name: &str| {
+        let mut node = host.resolve_named_symbol(
+            &format!("{PROGRAM_ROOT}/scenario.ts"),
+            name,
+            Some(ProjectionMode::Expanded),
+        )?;
+        let graph = host.project_type_store().semantic_graph();
+        loop {
+            match graph.node_data(node)?.as_ref() {
+                SemanticNodeData::Alias(inner) => node = *inner,
+                SemanticNodeData::Literal(LiteralValue::Number(value)) => return Some(*value),
+                _ => return None,
+            }
+        }
+    };
+    assert_eq!(read(&host, "__Probe"), Some(7.0));
+    assert_eq!(read(&host, "__Probe"), Some(7.0));
+    assert_eq!(
+        read(&host, "__Other"),
+        Some(7.0),
+        "a distinct demand reuses the population view"
+    );
+    program_upsert(&host, "bridge.ts", "export {};");
+    let cold = read(&program_host(&config, &files("export {};")), "__Probe");
+    assert_eq!(
+        cold, None,
+        "a fresh program excludes the detached declaration"
+    );
+    assert_eq!(
+        read(&host, "__Probe"),
+        cold,
+        "the warm singleton must retire"
+    );
+    assert_eq!(
+        read(&host, "__Other"),
+        cold,
+        "the reused population view carries membership facts"
+    );
+}
+
+#[test]
+fn two_programs_can_share_an_imported_global_contributor() {
+    let config = r#"{"compilerOptions":{"noLib":true},"files":["main.ts"]}"#;
+    let host = crate::VerterHost::new_standalone_with_tsconfig_projects(
+        crate::HostConfig::default(),
+        &[("/one", config), ("/two", config)],
+    );
+    for (file, source) in [
+        ("/shared/globals.d.ts", "interface Shared { value: 7 }"),
+        (
+            "/one/main.ts",
+            "import '../shared/globals'; type __Probe = Shared['value']; export {};",
+        ),
+        (
+            "/two/main.ts",
+            "import '../shared/globals'; type __Probe = Shared['value']; export {};",
+        ),
+    ] {
+        crate::u6_flow_shape_corpus_tests::upsert(
+            &host,
+            file,
+            source,
+            crate::FileLanguage::script_ts(),
+        );
+    }
+    for main in ["/two/main.ts", "/one/main.ts", "/two/main.ts"] {
+        assert_eq!(literal_number_at(&host, main, "__Probe"), 7.0, "{main}");
+    }
+}
+
+#[test]
+fn an_unconfigured_project_retains_imported_globals_outside_its_root() {
+    let host = crate::VerterHost::new_standalone(crate::HostConfig::default());
+    host.configure_projects(vec![verter_workspace::ide_project_config(
+        "/one".into(),
+        "/one".into(),
+        None,
+    )]);
+    for (file, source) in [
+        ("/shared/globals.d.ts", "interface Shared { value: 7 }"),
+        (
+            "/one/main.ts",
+            "import '../shared/globals'; type __Probe = Shared['value']; export {};",
+        ),
+    ] {
+        crate::u6_flow_shape_corpus_tests::upsert(
+            &host,
+            file,
+            source,
+            crate::FileLanguage::script_ts(),
+        );
+    }
+    assert_eq!(literal_number_at(&host, "/one/main.ts", "__Probe"), 7.0);
 }

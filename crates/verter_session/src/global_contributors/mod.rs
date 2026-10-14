@@ -102,8 +102,8 @@ struct ProjectViewKey {
     overlay: Option<Hash16>,
     project: Option<verter_session_query::resolution::ProjectId>,
     membership_generation: Option<u64>,
-    /// Fingerprint of the program order the view is sorted by; `None`
-    /// when its contributors span fewer than two program files.
+    /// Order and imported-membership fingerprint; absent when neither
+    /// relative precedence nor imported reachability affects the view.
     program_order: Option<Hash16>,
 }
 
@@ -117,16 +117,6 @@ struct CollectionViewKey {
     /// Fingerprint of the program order the view is sorted by; `None`
     /// when its candidates span fewer than two program files.
     program_order: Option<Hash16>,
-}
-
-/// The program order a view sorts by, read through `order` — given the
-/// view's candidate files — only when they span two or more program files.
-fn view_program_order<'c>(
-    mut canonicals: impl Iterator<Item = &'c str> + Clone,
-    order: impl FnOnce(&mut dyn Iterator<Item = &str>) -> Arc<ProgramFileOrder>,
-) -> Option<Arc<ProgramFileOrder>> {
-    verter_session_query::inputs::program_order::orders_across_files(canonicals.clone())
-        .then(|| order(&mut canonicals))
 }
 
 fn program_rank(order: Option<&ProgramFileOrder>, canonical: &str) -> u32 {
@@ -242,8 +232,8 @@ impl GlobalContributorPopulation {
     /// shared for this population, immutable membership revision and
     /// program order. Ownership changes require a new key; the unfiltered
     /// fingerprint remains the population observation rail. The program
-    /// order is read through `order` — and returned, for the reader to
-    /// observe — only when the contributors span two or more program files.
+    /// order/membership dependency is read on every lookup, including cached
+    /// project views, and returned for the reader to observe.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn lookup_in_project(
         &self,
@@ -253,7 +243,7 @@ impl GlobalContributorPopulation {
         project: Option<verter_session_query::resolution::ProjectId>,
         membership_generation: Option<u64>,
         belongs: impl Fn(&ContributorEntry) -> bool,
-        order: impl FnOnce(&mut dyn Iterator<Item = &str>) -> Arc<ProgramFileOrder>,
+        order: impl FnOnce(&[ContributorEntry]) -> Option<Arc<ProgramFileOrder>>,
     ) -> (SymbolContributors, Option<Arc<ProgramFileOrder>>) {
         let contributors = self.lookup_in_space(
             &AugmentationTargetKind::GlobalAugmentation,
@@ -265,13 +255,7 @@ impl GlobalContributorPopulation {
         if contributors.entries.is_empty() {
             return (contributors, None);
         }
-        let order = view_program_order(
-            contributors
-                .entries
-                .iter()
-                .map(|entry| entry.artifact_key.canonical.as_ref()),
-            order,
-        );
+        let order = order(&contributors.entries);
         let key = ProjectViewKey {
             name: Arc::from(name),
             space,

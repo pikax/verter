@@ -139,8 +139,13 @@ fn program_order_is_reused_while_the_workspace_lists_the_same_program() {
         ],
     );
     let anchor = format!("{ROOT}/main.ts");
+    let ingested_reads = reads(&host);
     let first = host.program_file_order(&anchor, &mut std::iter::empty());
-    assert_eq!(reads(&host), 2, "a cold walk reads each program file once");
+    assert_eq!(
+        reads(&host),
+        ingested_reads,
+        "lookup reuses ingestion's program order"
+    );
     assert!(Arc::ptr_eq(
         &first,
         &host.program_file_order(&anchor, &mut std::iter::empty())
@@ -156,16 +161,24 @@ fn program_order_is_reused_while_the_workspace_lists_the_same_program() {
         &first,
         &host.program_file_order(&anchor, &mut std::iter::empty())
     ));
-    assert_eq!(reads(&host), 2, "no file is re-read");
+    assert_eq!(reads(&host), ingested_reads, "no file is re-read");
 
     upsert(&host, "b.ts", "export const b = 1;\n");
-    assert_eq!(validated(&host), None, "a program file changed");
+    assert_eq!(
+        validated(&host),
+        Some(first.fingerprint()),
+        "unchanged references keep the order valid"
+    );
     let rebuilt = host.program_file_order(&anchor, &mut std::iter::empty());
     assert!(
         Arc::ptr_eq(&first, &rebuilt),
         "the same sequence keeps the order"
     );
-    assert_eq!(reads(&host), 3, "only the edited file is re-read");
+    assert_eq!(
+        reads(&host),
+        ingested_reads + 1,
+        "only the edited file is re-read"
+    );
     assert_eq!(validated(&host), Some(first.fingerprint()));
 
     upsert(&host, "b.ts", "import './main';\nexport {};\n");
@@ -177,4 +190,194 @@ fn program_order_is_reused_while_the_workspace_lists_the_same_program() {
             .fingerprint(),
         first.fingerprint()
     );
+}
+
+/// Root membership alone cannot prove even an empty global population:
+/// imports and references can reach declarations that the directory walk
+/// excludes. Discovery must settle before the first population snapshot.
+#[test]
+fn disk_program_discovers_transitive_contributors_before_the_first_read() {
+    use verter_workspace::WorkspaceAccess;
+    for edge in [
+        "import './bridge';",
+        "/// <reference path=\"./bridge.ts\" />",
+    ] {
+        for initial in [
+            "export {};",
+            "export {}; declare global { interface Discovered { root: 1 } }",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let directory = dir.path().canonicalize().unwrap();
+            let root = directory.to_str().unwrap();
+            let config = directory.join("tsconfig.json");
+            std::fs::write(
+                &config,
+                r#"{"compilerOptions":{"noLib":true},"files":["main.ts"]}"#,
+            )
+            .unwrap();
+            std::fs::write(directory.join("main.ts"), format!("{edge}\n{initial}")).unwrap();
+            std::fs::write(
+                directory.join("bridge.ts"),
+                "/// <reference path=\"./leaf.d.ts\" />\nexport {};",
+            )
+            .unwrap();
+            std::fs::write(
+                directory.join("leaf.d.ts"),
+                "interface Discovered { leaf: 2 }",
+            )
+            .unwrap();
+            let make = || {
+                let workspace = Arc::new(verter_workspace::FilesystemWorkspace::new(
+                    verter_workspace::FilesystemOptions::default(),
+                ));
+                let project = verter_workspace::configured_ide_project(
+                    workspace.as_ref(),
+                    root.into(),
+                    root.into(),
+                    config.to_str().unwrap(),
+                );
+                workspace.configure_resolver(vec![project]);
+                VerterHost::new(HostConfig::default(), workspace)
+            };
+            let count = |host: &VerterHost| {
+                host.ingest_program_ambient_roots();
+                host.project_type_store()
+                    .indexed()
+                    .global_contributor_index()
+                    .snapshot()
+                    .lookup(
+                        &crate::file_artifact_store::AugmentationTargetKind::GlobalAugmentation,
+                        "Discovered",
+                        None,
+                        true,
+                    )
+                    .entries
+                    .len()
+            };
+            let host = make();
+            // An import makes main.ts a module; a path reference does not.
+            let roots = usize::from(initial.contains("root: 1"));
+            assert_eq!(count(&host), roots + 1, "first read: {edge}, {initial}");
+            assert_eq!(count(&host), roots + 1, "repeated read");
+            assert_eq!(count(&make()), roots + 1, "independently cold host");
+            let leaf = directory.join("leaf.d.ts");
+            crate::u6_flow_shape_corpus_tests::upsert(
+                &host,
+                leaf.to_str().unwrap(),
+                "interface Replaced { leaf: 3 }",
+                verter_language::FileLanguage::script_ts(),
+            );
+            std::fs::write(&leaf, "interface Replaced { leaf: 3 }").unwrap();
+            assert_eq!(count(&host), roots, "contributor edit");
+            assert_eq!(count(&make()), roots, "cold after edit");
+        }
+    }
+}
+
+#[test]
+fn imported_unlisted_files_keep_the_programs_aliases_and_options() {
+    use verter_workspace::WorkspaceAccess;
+    let dir = tempfile::tempdir().unwrap();
+    let directory = dir.path().canonicalize().unwrap();
+    let root = directory.to_str().unwrap();
+    std::fs::create_dir_all(directory.join("src")).unwrap();
+    let config = directory.join("tsconfig.json");
+    std::fs::write(&config, r#"{"compilerOptions":{"strict":true,"baseUrl":".","paths":{"@/*":["src/*"]}},"files":["src/main.ts"]}"#).unwrap();
+    for (name, source) in [
+        ("main.ts", "import './props'; export {};"),
+        (
+            "props.ts",
+            "import type { Item } from '@/types'; export type P = Item;",
+        ),
+        ("types.ts", "export interface Item { label: 'item' }"),
+        ("outside.ts", "export {};"),
+    ] {
+        std::fs::write(directory.join("src").join(name), source).unwrap();
+    }
+    let workspace = Arc::new(verter_workspace::FilesystemWorkspace::new(
+        verter_workspace::FilesystemOptions::default(),
+    ));
+    let project = verter_workspace::configured_ide_project(
+        workspace.as_ref(),
+        root.into(),
+        root.into(),
+        config.to_str().unwrap(),
+    );
+    workspace.configure_resolver(vec![project]);
+    let host = VerterHost::new(HostConfig::default(), workspace);
+    let path = |name: &str| format!("{root}/src/{name}");
+    assert_eq!(
+        host.resolve_type_dependency_canonical(&path("props.ts"), "@/types")
+            .as_deref(),
+        Some(path("types.ts").as_str())
+    );
+    assert_eq!(
+        host.resolve_import_transient(&path("props.ts"), "@/types"),
+        Some(path("types.ts"))
+    );
+    assert_eq!(
+        host.host_view_env_hashes_for(&path("props.ts")),
+        host.host_view_env_hashes_for(&path("main.ts"))
+    );
+    assert_eq!(
+        host.resolve_project_for_canonical(&path("props.ts")),
+        host.resolve_project_for_canonical(&path("main.ts"))
+    );
+    assert_eq!(
+        host.resolve_project_for_canonical(&path("outside.ts")),
+        None
+    );
+    assert!(host
+        .resolve_type_dependency_canonical(&path("outside.ts"), "@/types")
+        .as_deref()
+        .is_none());
+}
+
+/// An edge can keep its target while acquiring a different negative probe.
+/// Creating that nearer candidate later must retire the restamped order.
+#[test]
+fn equal_edges_refresh_reference_probe_dependencies() {
+    let host = host(
+        serde_json::json!({ "compilerOptions": { "noLib": true }, "files": ["main.ts"] }),
+        &[
+            ("main.ts", "/// <reference path=\"./a.tsx\" />"),
+            ("a.tsx", "export {};"),
+        ],
+    );
+    let anchor = format!("{ROOT}/main.ts");
+    let first = host.program_file_order(&anchor, &mut std::iter::empty());
+    upsert(&host, "main.ts", "/// <reference path=\"./a\" />");
+    assert_eq!(validated(&host), Some(first.fingerprint()));
+    upsert(&host, "a.ts", "export {};");
+    let changed = host.program_file_order(&anchor, &mut std::iter::empty());
+    assert_ne!(first.fingerprint(), changed.fingerprint());
+    assert!(changed.lists(&format!("{ROOT}/a.ts")));
+    assert!(!changed.lists(&format!("{ROOT}/a.tsx")));
+}
+
+/// A captured configuration cannot publish its roots under a newer
+/// configuration's stamp, even if the positional project ID is unchanged.
+#[test]
+fn a_superseded_snapshot_cannot_publish_program_membership() {
+    let host = host(
+        serde_json::json!({ "compilerOptions": { "noLib": true }, "files": ["main.ts", "a.ts"] }),
+        &[
+            ("main.ts", "export {};"),
+            ("a.ts", "export {};"),
+            ("b.ts", "export {};"),
+        ],
+    );
+    let workspace = host.workspace();
+    let old = workspace.published_root().unwrap();
+    let project = old.snapshot.owners_for_file(&format!("{ROOT}/main.ts"))[0];
+    let mut configs = old.snapshot.resolver.configs().to_vec();
+    configs[0].membership.materialized_files.clear();
+    configs[0].membership.spec.files = ["main.ts", "b.ts"]
+        .map(|name| verter_workspace::CanonicalPath::new(&format!("{ROOT}/{name}")))
+        .to_vec();
+    workspace.configure_resolver(configs);
+    let _ = host.project_program_order(&old.snapshot, project);
+    let current = host.program_file_order(&format!("{ROOT}/main.ts"), &mut std::iter::empty());
+    assert!(current.lists(&format!("{ROOT}/b.ts")));
+    assert!(!current.lists(&format!("{ROOT}/a.ts")));
 }

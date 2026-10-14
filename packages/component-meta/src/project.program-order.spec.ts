@@ -11,7 +11,7 @@
  *
  * Requires @verter/native to be built.
  */
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -53,7 +53,7 @@ function writeProgram(
   answers: number[],
   through: "files" | "include" = "files",
 ): string {
-  const root = mkdtempSync(join(tmpdir(), "verter-program-order-"));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "verter-program-order-")));
   writeFileSync(join(root, "tsconfig.json"), tsconfig(listed, through));
   writeFileSync(join(root, "lib.bench.d.ts"), "interface Object { toString(): string; }\n");
   for (let i = 0; i < COUNT; i++) {
@@ -83,8 +83,8 @@ async function open(root: string): Promise<ComponentMetaSession> {
 }
 
 /**
- * Opens `root` and hands the session every program file, in path order: a
- * global script nothing imports reaches the host only when it is loaded.
+ * Opens `root` and overlays every program file in path order, independently
+ * of the configured root sequence used for declaration precedence.
  */
 async function openLoaded(root: string): Promise<ComponentMetaSession> {
   const session = await open(root);
@@ -143,8 +143,47 @@ describe("tsconfig program file order", () => {
 });
 
 describe("tsconfig ownership and path aliases", () => {
+  it.each(["files", "include"])(
+    "keeps aliases through unlisted imports with %s roots",
+    async (membership) => {
+      const root = realpathSync(mkdtempSync(join(tmpdir(), "verter-imported-alias-")));
+      mkdirSync(join(root, "src"));
+      writeFileSync(
+        join(root, "tsconfig.json"),
+        JSON.stringify({
+          compilerOptions: { strict: true, baseUrl: ".", paths: { "@/*": ["src/*"] } },
+          ...(membership === "files"
+            ? { files: ["src/Member.vue"] }
+            : { include: ["src/**/*.vue"] }),
+        }),
+      );
+      writeFileSync(
+        join(root, "src/Member.vue"),
+        `<script setup lang="ts">
+import type { P } from "./props";
+defineProps<P>();
+</script><template><div /></template>`,
+      );
+      writeFileSync(
+        join(root, "src/props.ts"),
+        `import type { Item } from "@/types";
+export interface P extends Item {}`,
+      );
+      writeFileSync(join(root, "src/types.ts"), `export interface Item { label: "item" }`);
+      const session = await open(root);
+      const read = async () =>
+        (await session.getComponentMeta("src/Member.vue"))._verter?.props.find(
+          (prop) => prop.name === "label",
+        )?.type;
+      expect(await read()).toEqual({ kind: "literal", value: "item" });
+      expect(await read()).toEqual({ kind: "literal", value: "item" });
+      session.updateFile("src/types.ts", `export interface Item { label: "edited" }`);
+      expect(await read()).toEqual({ kind: "literal", value: "edited" });
+    },
+  );
+
   function writeAliasProject(): string {
-    const root = mkdtempSync(join(tmpdir(), "verter-program-alias-"));
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "verter-program-alias-")));
     mkdirSync(join(root, "src"), { recursive: true });
     mkdirSync(join(root, "outside"), { recursive: true });
     writeFileSync(

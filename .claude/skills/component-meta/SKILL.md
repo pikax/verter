@@ -21,8 +21,13 @@ workspace: compiler options (`extends`, `paths`, `baseUrl`, `noLib`, `lib`,
 strictness) and the exact `files` / `include` / `exclude` membership, its
 `include` matches materialized by walking the project root (a lazy workspace
 has read none of them yet), whose `program_root_files` order is the program
-file order that orders merged declarations. Ownership follows the membership:
-a file outside it is not governed by the tsconfig's `paths`. Explicit `providerRoot` / `workspaceAliases` /
+file order that orders merged declarations. These are entry roots: their
+transitive import/reference closure retains the program's compiler options
+and aliases even when `files`/`include` omit those dependencies. An unreachable
+file outside that closure is not governed by the tsconfig's `paths`.
+`openComponentMetaSession` configures through `MetaProject.configureProjects`,
+so host discovery and invalidation run before the first request freezes its
+project contexts. Explicit `providerRoot` / `workspaceAliases` /
 `compilerOptions` / `references` fields layer on top (an absent `baseUrl`
 does not clear the tsconfig's). A project with no `tsconfigPath` — the inline
 `config` session — keeps the match-all membership: match-all is only for

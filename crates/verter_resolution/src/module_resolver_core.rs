@@ -121,6 +121,16 @@ impl ModuleResolverCore {
         crate::resolve_frame::ResolveFrame::for_request(&self.configs, request)
     }
 
+    /// Resolve a reachable program member using the program's options and
+    /// the member's actual source directory.
+    pub fn resolve_from_project_frame(
+        &self,
+        owner: &verter_session_query::resolution::ProjectOwnership,
+        request: &verter_session_query::resolution::ResolveRequest,
+    ) -> crate::ResolveFrame<'_> {
+        crate::resolve_frame::ResolveFrame::for_project_import(&self.configs, owner, request)
+    }
+
     /// Runs one kernel attempt against the project identified by `owner`.
     pub fn resolve_for_project_attempt(
         &self,

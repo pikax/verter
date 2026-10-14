@@ -381,10 +381,10 @@ async function openComponentMetaSessionInternal(
       // The native loader reads the tsconfig itself: compiler options and
       // the `files` / `include` / `exclude` membership that orders the
       // program's files.
-      workspace.configureProjects([tsconfigProjectConfig(resolvePath(options.tsconfig), root)]);
+      nativeProject.configureProjects([tsconfigProjectConfig(resolvePath(options.tsconfig), root)]);
     } else if (options.config) {
       const aliases = extractPathAliases(options.config, normalizePath(root));
-      workspace.configureProjects([aliases]);
+      nativeProject.configureProjects([aliases]);
     }
 
     // Selective loading: no eager preload. Files are loaded on-demand

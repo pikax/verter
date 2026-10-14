@@ -1081,7 +1081,8 @@ impl VerterHost {
     /// Per-canonical env-hash bundle.
     ///
     /// Maps `canonical` to its owning project via the published
-    /// snapshot's `owners_for_file().first()`, then looks up the
+    /// snapshot's configured roots, then discovered program membership (and
+    /// finally fallback ownership), then looks up the
     /// project's env-hash array on `PublishedRoot::env_hashes_by_project`.
     /// Falls back to the workspace-default env-hash array when the
     /// canonical has no owning project (e.g. ambient libs, scratch
@@ -1147,7 +1148,8 @@ impl VerterHost {
     /// Per-canonical project identity.
     ///
     /// Maps `canonical` to its owning project via the published
-    /// snapshot's `owners_for_file().first()`, then looks up the
+    /// snapshot's configured roots, then discovered program membership (and
+    /// finally fallback ownership), then looks up the
     /// project's identity hash on
     /// `PublishedRoot::project_identity_hashes`. Falls back to the
     /// workspace-default project identity when the canonical has no
@@ -1180,7 +1182,7 @@ impl VerterHost {
         canonical: &str,
     ) -> Option<verter_session_query::resolution::ProjectId> {
         let root = self.workspace().published_root()?;
-        root.snapshot.owners_for_file(canonical).first().copied()
+        self.project_for_canonical_in_snapshot(canonical, &root.snapshot)
     }
 
     /// IndexedReady for a declaration file whose source is a global/ambient
@@ -1209,6 +1211,7 @@ impl VerterHost {
     /// without consuming cold flights at upsert.
     pub(crate) fn ingest_program_ambient_roots(&self) {
         self.ingest_injected_ambient_roots(None);
+        self.ingest_configured_programs();
         let pending = self
             .project_type_store()
             .indexed()

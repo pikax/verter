@@ -742,24 +742,26 @@ fn project_filtered_population_is_shared_and_tracks_membership_revision() {
     }
     let snapshot = store.global_contributor_index().snapshot();
     let visits = Cell::new(0);
-    let lookup =
-        |project, generation, prefix: &str| {
-            snapshot.lookup_in_project(
-            "Shared",
-            SymbolSpace::Type,
-            None,
-            Some(ProjectId(project)),
-            Some(generation),
-            |entry| {
-                visits.set(visits.get() + 1);
-                entry.artifact_key.canonical.starts_with(prefix)
-            },
-            |_| {
-                Arc::new(verter_session_query::inputs::program_order::ProgramFileOrder::unordered())
-            },
-        )
-        .0
-        };
+    let lookup = |project, generation, prefix: &str| {
+        snapshot
+            .lookup_in_project(
+                "Shared",
+                SymbolSpace::Type,
+                None,
+                Some(ProjectId(project)),
+                Some(generation),
+                |entry| {
+                    visits.set(visits.get() + 1);
+                    entry.artifact_key.canonical.starts_with(prefix)
+                },
+                |_| {
+                    Some(Arc::new(
+                        verter_session_query::inputs::program_order::ProgramFileOrder::unordered(),
+                    ))
+                },
+            )
+            .0
+    };
     let first = lookup(0, 1, "/p0/");
     assert_eq!(first.entries.len(), 64);
     let visits_after_first = visits.get();
