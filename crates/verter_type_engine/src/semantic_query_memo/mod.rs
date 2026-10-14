@@ -1093,6 +1093,24 @@ impl SemanticGraphStore {
         self.memo_budget.tracked_len()
     }
 
+    /// Test-only — the family memo's retention bound: the number of
+    /// families it retains before FIFO eviction.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn memo_family_cap_for_test(&self) -> usize {
+        self.memo_budget.cap()
+    }
+
+    /// Test-only — re-bound the family memo of a store that has admitted
+    /// no family yet, so a host built through the production constructors
+    /// evicts after `cap` families instead of the production
+    /// [`crate::bounded_query_retention::DEFAULT_BUDGET_CAP`]. Panics once
+    /// a family has been admitted.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_memo_family_cap_before_admission_for_test(&self, cap: usize) {
+        self.memo_budget.set_cap_before_admission_for_test(cap);
+    }
+
     /// Audit-only dump of the warm memo entries, keyed by the
     /// debug-formatted [`FamilyKey`]. Returns one row per populated slot
     /// (a single family with N slot variants populated yields N rows).
