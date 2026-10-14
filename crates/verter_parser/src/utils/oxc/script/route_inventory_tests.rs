@@ -396,8 +396,9 @@ fn program_references_of(
 
 /// A file pulls its program files in TypeScript's visiting order: leading
 /// triple-slash references by kind, then import specifiers in statement
-/// order, then dynamic imports and import types in source order, then
-/// augmented module names. A directive after the first token is no
+/// order, then dynamic imports and import types in source order. An
+/// augmented module name pulls nothing in: TypeScript adds only imported
+/// files to the program. A directive after the first token is no
 /// directive.
 #[test]
 fn program_references_follow_typescript_collection_order() {
@@ -423,20 +424,14 @@ export { b } from './b';
     assert_eq!(references.libs, ["es2015"]);
     assert_eq!(
         references.module_names,
-        [
-            "./a",
-            "./star",
-            "./b",
-            "./dynamic",
-            "./typed",
-            "./augmented"
-        ]
+        ["./a", "./star", "./b", "./dynamic", "./typed"]
     );
 }
 
 /// In a script, a `declare module "m"` declares an ambient module rather
 /// than augmenting one: its body's non-relative imports are the file's,
-/// and an ambient module nested in it augments its name.
+/// and an ambient module nested in it augments its name, which pulls
+/// nothing in.
 #[test]
 fn script_ambient_module_bodies_contribute_their_bare_imports() {
     let source = r#"
@@ -448,7 +443,7 @@ declare module 'host' {
 declare module './not-ambient-in-a-script';
 "#;
     let references = program_references_of(source, SourceType::ts());
-    assert_eq!(references.module_names, ["dep", "nested"]);
+    assert_eq!(references.module_names, ["dep"]);
 }
 
 /// `require("m")` pulls `m` in only from a JavaScript file.

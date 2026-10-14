@@ -1608,6 +1608,22 @@ so:
 - editing an unrelated file (not in the augmenter set) leaves the signature
   valid → consumer warm-hits (R14 / R28 narrow scope).
 
+**Program order fact.** Declarations of one symbol merged across files — and
+which loaded library declares a global — follow the program's order
+(`verter_session::program_order`; see `/type-resolution` →
+`references/global-names.md`). A result whose answer depended on it observes
+`RouteSurface(ProgramFileOrder { program })`, the fingerprint of the whole
+sequence (libraries by priority, then program files). The per-file
+`DeclContributionOrder` / `AugmentationContributionOrder` facts cannot carry
+it: an import or `/// <reference lib>` edit in a file that contributes
+nothing reorders the program. The published order records every input it read
+(each visited file with the files it pulls in, every probed path, the
+candidate file set, the registry, the configuration and resolution
+generations); the validator re-stamps it while none moved, so an edit
+elsewhere keeps warm results, and a rebuild re-reads only the changed files.
+An order a refused resolution or an unpublished serve produced is never
+published.
+
 A typed `ModuleAugmentationStitched` audit event records each cold-path compute.
 Both audit-event variants live on `verter_audit::StructuredAuditEvent`; the
 `Custom` escape hatch is forbidden on the augmentation stitching surface (R23

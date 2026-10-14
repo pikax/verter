@@ -1,36 +1,54 @@
-//! The program file order authority: the order a configured program lists
-//! its source files in, which orders the declarations of a symbol merged
-//! across files (global interfaces and namespaces, `declare global`, module
-//! augmentations).
+//! The program file order authority: the order a program lists its library
+//! and source files in, which decides which library declares a global and
+//! orders the declarations of a symbol merged across files (global
+//! interfaces and namespaces, `declare global`, module augmentations).
 //!
 //! The order is TypeScript's: the `files` roots as listed, then the
 //! `include` matches (by authored entry, in directory-walk order), each root
 //! preceded by the files it pulls in — `/// <reference path>` and
 //! `/// <reference types>` targets, then its imports — first visit wins.
-//! `/// <reference lib>` targets are library files, listed before every
-//! program file; they take no place here.
+//! A module augmentation's name pulls nothing in. The libraries the program
+//! loads — its `lib` selection (or its target's default library), every
+//! `/// <reference lib>` a program file carries and everything those
+//! libraries reference — are listed before every program file, by
+//! TypeScript's library priority. A registered ambient library only makes
+//! a library's bytes available; whether and where the program loads it is
+//! decided here. A host that registers none of the libraries its
+//! configuration names supplies its own library environment: every library
+//! it registers is a root.
 //!
-//! A program's order is built on demand, only for a read that orders
-//! contributors from two or more files, and kept on the
+//! The libraries alone ([`VerterHost::library_order`]) are decided by the
+//! configuration and the libraries' own references, so a read that needs
+//! nothing else takes no walk of the program's files. The whole order is
+//! built on demand — for a read that orders contributors from two or more
+//! program files, or that meets a library only a program file's
+//! `/// <reference lib>` can load — and kept on the
 //! [`FileArtifactStore`](crate::file_artifact_store::FileArtifactStore)
 //! until the workspace moves. A result ordered by it observes
 //! [`FactKey::ProgramFileOrder`](verter_session_query::facts::FactKey::ProgramFileOrder);
 //! the validator accepts that fact only while the published order is the
 //! current workspace's and still has the observed fingerprint, so an edit
-//! that reorders the program — an import added to a file that contributes
-//! nothing — misses every warm result ordered by it.
+//! that reorders the program — an import or a library reference added to a
+//! file that contributes nothing — misses every warm result ordered by it.
 
 use std::sync::Arc;
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use verter_session_query::analysis::types::Hash16;
-use verter_session_query::inputs::program_order::ProgramFileOrder;
+use verter_session_query::inputs::program_order::{
+    library_file_name, needs_program_walk, orders_across_files, ProgramFileOrder,
+};
 use verter_session_query::resolution::path_utils::{join_paths, parent_dir};
-use verter_workspace::{CanonicalPath, ProjectPayload, WorkspaceAccess};
+use verter_session_query::resolution::{
+    AmbientSymbolHit, ProjectId, ProjectStableKey, SemanticCompilerOptions,
+};
+use verter_workspace::{
+    AmbientLibsByProject, CanonicalPath, ProjectPayload, WorkspaceAccess, WorkspaceSnapshot,
+};
 
-/// The workspace state a published order was built from. Any change —
-/// project configuration, file content (an import edit), the resolution
-/// world — retires the order.
+/// The workspace state a published order was built from. A state with
+/// another stamp may still describe the same program: see
+/// [`OrderInputs::unchanged`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ProgramOrderStamp {
     snapshot_generation: u64,
@@ -50,54 +68,384 @@ impl ProgramOrderStamp {
     }
 }
 
-/// One program's published order and the workspace state it describes.
-type PublishedOrder = (ProgramOrderStamp, Arc<ProgramFileOrder>);
+/// The set of files a program's `include` roots are matched against —
+/// every snapshot member and open document — as an order-independent sum
+/// of their hashes and their count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CandidateSet {
+    sum: u64,
+    count: usize,
+}
 
-/// Published program orders, one per program, each valid for one
-/// [`ProgramOrderStamp`].
-#[derive(Debug, Default)]
+impl CandidateSet {
+    fn of(canonicals: impl IntoIterator<Item = impl AsRef<str>>) -> Self {
+        use std::hash::{BuildHasher, BuildHasherDefault};
+        let hasher = BuildHasherDefault::<rustc_hash::FxHasher>::default();
+        let mut set = Self { sum: 0, count: 0 };
+        for canonical in canonicals {
+            set.sum = set.sum.wrapping_add(hasher.hash_one(canonical.as_ref()));
+            set.count += 1;
+        }
+        set
+    }
+
+    fn live(workspace: &dyn WorkspaceAccess) -> Self {
+        Self::of(
+            workspace
+                .snapshot_canonicals()
+                .into_iter()
+                .chain(workspace.overlay_canonicals()),
+        )
+    }
+}
+
+/// Everything a published order was read from: the workspace state, the
+/// registered libraries, the files `include` matched against, the roots,
+/// and each file the walk read with the files it pulls in.
+struct OrderInputs {
+    stamp: ProgramOrderStamp,
+    registry: Arc<AmbientLibsByProject>,
+    candidates: CandidateSet,
+    roots: Vec<Arc<str>>,
+    /// Each file the walk read, with the files it pulls in (`None`: the
+    /// program cannot load it).
+    pulled: FxHashMap<Arc<str>, Option<Vec<Arc<str>>>>,
+    /// Paths a `/// <reference path>` looked for, found or not.
+    probes: Vec<Arc<str>>,
+}
+
+impl OrderInputs {
+    /// Whether the program these inputs describe has the same roots in the
+    /// live workspace: the configuration, the resolution world, the
+    /// registered libraries and the candidate files are the same ones.
+    fn same_roots(&self, workspace: &dyn WorkspaceAccess, live: ProgramOrderStamp) -> bool {
+        self.stamp.snapshot_generation == live.snapshot_generation
+            && self.stamp.resolution_generation == live.resolution_generation
+            && Arc::ptr_eq(&self.registry, &workspace.ambient_libs_view())
+            && self.candidates == CandidateSet::live(workspace)
+            && !self.probes.iter().any(|probe| self.moved(workspace, probe))
+    }
+
+    /// Whether `file`'s content changed after these inputs were read.
+    fn moved(&self, workspace: &dyn WorkspaceAccess, file: &str) -> bool {
+        workspace.last_content_transition_generation(file) > self.stamp.content_generation
+    }
+
+    /// Whether the live workspace lists exactly this program: its roots
+    /// are the same and no file the walk read changed since.
+    fn unchanged(&self, workspace: &dyn WorkspaceAccess, live: ProgramOrderStamp) -> bool {
+        self.same_roots(workspace, live)
+            && !self.pulled.keys().any(|file| self.moved(workspace, file))
+    }
+}
+
+/// One program's published order and what it was read from.
+struct PublishedOrder {
+    order: Arc<ProgramFileOrder>,
+    inputs: Arc<OrderInputs>,
+}
+
+/// The state a project's library order was built from: its configuration
+/// and the registered libraries (a registration replaces the registry).
+#[derive(Clone)]
+struct LibraryStamp {
+    snapshot_generation: u64,
+    registry: Arc<AmbientLibsByProject>,
+}
+
+impl LibraryStamp {
+    fn matches(&self, other: &Self) -> bool {
+        self.snapshot_generation == other.snapshot_generation
+            && Arc::ptr_eq(&self.registry, &other.registry)
+    }
+}
+
+/// Published program orders, one per program, each with the inputs it was
+/// read from, and each project's library order.
+#[derive(Default)]
 pub(crate) struct ProgramOrderIndex {
     published: parking_lot::RwLock<FxHashMap<Arc<str>, PublishedOrder>>,
+    libraries:
+        parking_lot::RwLock<FxHashMap<ProjectStableKey, (LibraryStamp, Arc<ProgramFileOrder>)>>,
+    /// Files whose references a walk read afresh rather than reused.
+    #[cfg(test)]
+    reference_reads: std::sync::atomic::AtomicU64,
+}
+
+impl std::fmt::Debug for ProgramOrderIndex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProgramOrderIndex")
+            .field("published", &self.published.read().len())
+            .field("libraries", &self.libraries.read().len())
+            .finish()
+    }
 }
 
 impl ProgramOrderIndex {
-    fn current(&self, program: &str, stamp: ProgramOrderStamp) -> Option<Arc<ProgramFileOrder>> {
-        let published = self.published.read();
-        let (at, order) = published.get(program)?;
-        (*at == stamp).then(|| Arc::clone(order))
+    /// `program`'s published order, while the live workspace still lists
+    /// exactly it: published for `live`, or for an earlier state none of
+    /// whose inputs moved since — then restamped for `live`, so the check
+    /// runs once per workspace state.
+    fn current(
+        &self,
+        program: &str,
+        live: ProgramOrderStamp,
+        workspace: &dyn WorkspaceAccess,
+    ) -> Option<Arc<ProgramFileOrder>> {
+        let inputs = {
+            let published = self.published.read();
+            let entry = published.get(program)?;
+            if entry.inputs.stamp == live {
+                return Some(Arc::clone(&entry.order));
+            }
+            Arc::clone(&entry.inputs)
+        };
+        if !inputs.unchanged(workspace, live) {
+            return None;
+        }
+        let mut published = self.published.write();
+        let entry = published.get_mut(program)?;
+        if !Arc::ptr_eq(&entry.inputs, &inputs) {
+            return (entry.inputs.stamp == live).then(|| Arc::clone(&entry.order));
+        }
+        entry.inputs = Arc::new(OrderInputs {
+            stamp: live,
+            registry: Arc::clone(&inputs.registry),
+            candidates: inputs.candidates,
+            roots: inputs.roots.clone(),
+            pulled: inputs.pulled.clone(),
+            probes: inputs.probes.clone(),
+        });
+        Some(Arc::clone(&entry.order))
     }
 
-    /// Publish `order` for `stamp`; the previously published fingerprint.
-    fn publish(&self, stamp: ProgramOrderStamp, order: &Arc<ProgramFileOrder>) -> Option<Hash16> {
-        let program = Arc::clone(order.program()?);
+    /// The inputs `program`'s published order was read from.
+    fn inputs(&self, program: &str) -> Option<Arc<OrderInputs>> {
         self.published
-            .write()
-            .insert(program, (stamp, Arc::clone(order)))
-            .map(|(_, previous)| previous.fingerprint())
+            .read()
+            .get(program)
+            .map(|entry| Arc::clone(&entry.inputs))
     }
 
-    /// The fingerprint of `program`'s order if it is published for
-    /// `stamp`. `None` once the workspace has moved: the order may differ,
-    /// and the next read that needs it rebuilds and republishes it.
+    /// Publish `order`, read from `inputs`. An order with the published
+    /// fingerprint keeps the published instance. Returns the order to
+    /// serve and the previously published fingerprint.
+    fn publish(
+        &self,
+        order: Arc<ProgramFileOrder>,
+        inputs: OrderInputs,
+    ) -> (Arc<ProgramFileOrder>, Option<Hash16>) {
+        let Some(program) = order.program().cloned() else {
+            return (order, None);
+        };
+        let mut published = self.published.write();
+        let previous = published
+            .get(&program)
+            .map(|entry| Arc::clone(&entry.order));
+        let order = match &previous {
+            Some(previous) if previous.fingerprint() == order.fingerprint() => Arc::clone(previous),
+            _ => order,
+        };
+        published.insert(
+            program,
+            PublishedOrder {
+                order: Arc::clone(&order),
+                inputs: Arc::new(inputs),
+            },
+        );
+        (order, previous.map(|previous| previous.fingerprint()))
+    }
+
+    /// The fingerprint of `program`'s order while the live workspace still
+    /// lists exactly it (see [`Self::current`]). `None` once a file it read,
+    /// its configuration, its candidate files or the resolution world
+    /// moved: the order may differ, and the next read that needs it
+    /// rebuilds and republishes it, re-reading only the files that changed.
     pub(crate) fn published_fingerprint(
         &self,
         program: &str,
-        stamp: ProgramOrderStamp,
+        live: ProgramOrderStamp,
+        workspace: &dyn WorkspaceAccess,
     ) -> Option<Hash16> {
-        self.current(program, stamp)
+        self.current(program, live, workspace)
             .map(|order| order.fingerprint())
+    }
+
+    fn library_order(
+        &self,
+        project: ProjectStableKey,
+        stamp: &LibraryStamp,
+    ) -> Option<Arc<ProgramFileOrder>> {
+        let libraries = self.libraries.read();
+        let (at, order) = libraries.get(&project)?;
+        at.matches(stamp).then(|| Arc::clone(order))
+    }
+
+    fn publish_library_order(
+        &self,
+        project: ProjectStableKey,
+        stamp: LibraryStamp,
+        order: &Arc<ProgramFileOrder>,
+    ) {
+        self.libraries
+            .write()
+            .insert(project, (stamp, Arc::clone(order)));
+    }
+
+    /// Files whose references a walk read afresh.
+    #[cfg(test)]
+    pub(crate) fn reference_reads(&self) -> u64 {
+        self.reference_reads
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    fn note_reference_read(&self) {
+        self.reference_reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[cfg(not(test))]
+    fn note_reference_read(&self) {}
+}
+
+/// The libraries a project can load: the registered ones a user file does
+/// not shadow, and the roots its configuration names.
+struct ProjectLibraries {
+    key: ProjectStableKey,
+    /// Registered library file names a user file does not shadow.
+    available: FxHashSet<Arc<str>>,
+    /// The program's library roots, as ambient virtual ids.
+    roots: Vec<Arc<str>>,
+    /// `noLib`: the program loads no library, and a
+    /// `/// <reference lib>` none.
+    no_lib: bool,
+}
+
+impl ProjectLibraries {
+    fn of(
+        workspace: &dyn WorkspaceAccess,
+        registry: &AmbientLibsByProject,
+        project: ProjectId,
+        options: &SemanticCompilerOptions,
+    ) -> Option<Self> {
+        let key = workspace.project_stable_key(project)?;
+        let mut available: FxHashSet<Arc<str>> = FxHashSet::default();
+        if let Some(registered) = registry.by_project.get(&key) {
+            for name in registered.libs.keys() {
+                if workspace.read_ambient_lib(key, name).is_some() {
+                    available.insert(Arc::clone(name));
+                }
+            }
+        }
+        let mut libraries = Self {
+            key,
+            available,
+            roots: Vec::new(),
+            no_lib: options.no_lib,
+        };
+        if libraries.no_lib {
+            return Some(libraries);
+        }
+        let configured: Vec<Arc<str>> = options
+            .effective_lib_file_names()
+            .into_iter()
+            .filter_map(|name| libraries.target(workspace, name))
+            .collect();
+        libraries.roots = if configured.is_empty() {
+            let mut registered: Vec<&Arc<str>> = libraries.available.iter().collect();
+            registered.sort();
+            registered
+                .into_iter()
+                .map(|name| workspace.ambient_virtual_canonical_id(key, name))
+                .collect()
+        } else {
+            configured
+        };
+        Some(libraries)
+    }
+
+    /// The ambient virtual id of the library file `name`, when the project
+    /// can load it.
+    fn target(&self, workspace: &dyn WorkspaceAccess, name: &str) -> Option<Arc<str>> {
+        self.available
+            .contains(name)
+            .then(|| workspace.ambient_virtual_canonical_id(self.key, name))
+    }
+
+    /// The library files `/// <reference lib>` names in `names` load.
+    fn referenced(&self, workspace: &dyn WorkspaceAccess, names: &[String]) -> Vec<Arc<str>> {
+        if self.no_lib {
+            return Vec::new();
+        }
+        names
+            .iter()
+            .filter_map(|name| library_file_name(name))
+            .filter_map(|file| self.target(workspace, file))
+            .collect()
     }
 }
 
 impl crate::VerterHost {
-    /// The file order of the program `anchor` — the requesting file —
-    /// belongs to: its most specific configured project. When no configured
-    /// project owns `anchor`, the program of the canonically first of
-    /// `ordered` (the files being ordered) one owns: a declaration file a
-    /// program only imports (listed in no `files` / `include`) still orders
-    /// within the program of a file that is listed. When none has a
-    /// configured owner there is no program, and contributors have no
-    /// defined order.
+    /// The project whose program orders `anchor` — the requesting file —
+    /// and `ordered` (the files being ordered): `anchor`'s most specific
+    /// configured project; when none owns it, the configured project of the
+    /// canonically first of `ordered` one owns (a declaration file a
+    /// program only imports, listed in no `files` / `include`, still orders
+    /// within the program of a file that is listed); else the project that
+    /// owns `anchor`. A library belongs to the project it is registered
+    /// for.
+    fn ordering_project(
+        workspace: &dyn WorkspaceAccess,
+        snapshot: &WorkspaceSnapshot,
+        anchor: &str,
+        ordered: &mut dyn Iterator<Item = &str>,
+    ) -> Option<ProjectId> {
+        let configured = |project: &ProjectId| {
+            matches!(
+                snapshot.project(*project).payload,
+                ProjectPayload::Configured { .. }
+            )
+        };
+        let configured_owner = |file: &str| match registered_project(workspace, snapshot, file) {
+            Some(project) => Some(project).filter(configured),
+            None => snapshot.owners_for_file(file).into_iter().find(configured),
+        };
+        configured_owner(anchor)
+            .or_else(|| {
+                ordered
+                    .filter_map(|file| Some((file, configured_owner(file)?)))
+                    .min_by(|(left, _), (right, _)| left.cmp(right))
+                    .map(|(_, project)| project)
+            })
+            .or_else(|| {
+                registered_project(workspace, snapshot, anchor)
+                    .or_else(|| snapshot.owners_for_file(anchor).first().copied())
+            })
+    }
+
+    /// Index the libraries `anchor`'s program loads by its configuration
+    /// and the libraries' own references, so a population read after this
+    /// holds them.
+    pub(crate) fn settle_program_libraries(&self, anchor: &str) {
+        let workspace = self.workspace();
+        let Some(root) = workspace.published_root() else {
+            return;
+        };
+        if let Some(project) = Self::ordering_project(
+            workspace.as_ref(),
+            &root.snapshot,
+            anchor,
+            &mut std::iter::empty(),
+        ) {
+            let _ = self.library_order(&root.snapshot, project);
+        }
+    }
+
+    /// The file order of the program [`Self::ordering_project`] picks for
+    /// `anchor` and `ordered`: a configured project's whole program; a
+    /// project without configuration its libraries alone; no project, no
+    /// order.
     pub(crate) fn program_file_order(
         &self,
         anchor: &str,
@@ -107,103 +455,348 @@ impl crate::VerterHost {
         let Some(root) = workspace.published_root() else {
             return Arc::new(ProgramFileOrder::unordered());
         };
+        match Self::ordering_project(workspace.as_ref(), &root.snapshot, anchor, ordered) {
+            Some(project) => self.project_program_order(&root.snapshot, project),
+            None => Arc::new(ProgramFileOrder::unordered()),
+        }
+    }
+
+    /// The order that ranks `candidates` (the files declaring one symbol)
+    /// for a read from `anchor`, or `None` when they need none: no library
+    /// and fewer than two program files. Libraries alone are ranked by the
+    /// project's [`Self::library_order`]; the whole program's order is built
+    /// only when two program files meet, or a library only a program
+    /// file's `/// <reference lib>` can load.
+    pub(crate) fn declaration_order<'c>(
+        &self,
+        anchor: &str,
+        candidates: impl Iterator<Item = &'c str> + Clone,
+    ) -> Option<Arc<ProgramFileOrder>> {
+        let has_library = candidates
+            .clone()
+            .any(verter_session_query::inputs::contributors::is_automatic_lib_canonical);
+        if !has_library {
+            return orders_across_files(candidates.clone())
+                .then(|| self.program_file_order(anchor, &mut candidates.clone()));
+        }
+        let workspace = self.workspace();
+        let Some(root) = workspace.published_root() else {
+            return Some(Arc::new(ProgramFileOrder::unordered()));
+        };
+        let Some(project) = Self::ordering_project(
+            workspace.as_ref(),
+            &root.snapshot,
+            anchor,
+            &mut candidates.clone(),
+        ) else {
+            return Some(Arc::new(ProgramFileOrder::unordered()));
+        };
+        let libraries = self.library_order(&root.snapshot, project);
+        Some(if needs_program_walk(candidates, &libraries) {
+            self.project_program_order(&root.snapshot, project)
+        } else {
+            libraries
+        })
+    }
+
+    /// The registered library that declares the global `symbol` for
+    /// `consumer_project`: of the libraries declaring it, the first the
+    /// project's program loads, in program order. The project's libraries
+    /// alone decide it when every declaring library is one of them;
+    /// otherwise the whole program's order does, and the read observes it.
+    pub(crate) fn program_ambient_symbol(
+        &self,
+        consumer_project: ProjectStableKey,
+        symbol: &str,
+    ) -> Option<AmbientSymbolHit> {
+        let workspace = self.workspace();
+        let registry = workspace.ambient_libs_view();
+        let declaring = registry
+            .by_project
+            .get(&consumer_project)?
+            .symbol_index
+            .get(symbol)?;
+        let root = workspace.published_root()?;
         let snapshot = &root.snapshot;
-        if !snapshot
+        let project = snapshot
             .projects
             .iter()
-            .any(|project| matches!(project.payload, ProjectPayload::Configured { .. }))
-        {
-            return Arc::new(ProgramFileOrder::unordered());
-        }
-        let configured_owner = |file: &str| {
-            snapshot.owners_for_file(file).into_iter().find(|&project| {
-                matches!(
-                    snapshot.project(project).payload,
-                    ProjectPayload::Configured { .. }
+            .map(|project| project.id)
+            .find(|&id| workspace.project_stable_key(id) == Some(consumer_project))?;
+        let candidates: Vec<(Arc<str>, Arc<str>, u32)> = declaring
+            .iter()
+            .map(|(name, lib_order)| {
+                (
+                    workspace.ambient_virtual_canonical_id(consumer_project, name),
+                    Arc::clone(name),
+                    *lib_order,
                 )
             })
+            .collect();
+        let libraries = self.library_order(snapshot, project);
+        let order = if candidates
+            .iter()
+            .all(|(virtual_id, _, _)| libraries.lists(virtual_id))
+        {
+            libraries
+        } else {
+            let order = self.project_program_order(snapshot, project);
+            verter_type_engine::resolver_core::resolver_context::observe_program_file_order(&order);
+            order
         };
-        let owner = configured_owner(anchor).or_else(|| {
-            ordered
-                .filter_map(|file| Some((file, configured_owner(file)?)))
-                .min_by(|(left, _), (right, _)| left.cmp(right))
-                .map(|(_, project)| project)
-        });
-        let Some(ProjectPayload::Configured {
+        candidates
+            .into_iter()
+            .filter(|(virtual_id, _, _)| order.loads_library(virtual_id))
+            .min_by(|(left, _, _), (right, _, _)| {
+                order
+                    .rank(left)
+                    .cmp(&order.rank(right))
+                    .then_with(|| left.cmp(right))
+            })
+            .map(|(virtual_id, canonical_id, lib_order)| AmbientSymbolHit {
+                project: consumer_project,
+                canonical_id,
+                virtual_id,
+                lib_order,
+            })
+    }
+
+    /// `project`'s order: a configured project's whole program, built on
+    /// demand and published while the workspace lists exactly it; any
+    /// other project's libraries alone. A rebuild after an edit re-reads
+    /// only the files that changed: every other file pulls in what it did.
+    fn project_program_order(
+        &self,
+        snapshot: &WorkspaceSnapshot,
+        project: ProjectId,
+    ) -> Arc<ProgramFileOrder> {
+        let ProjectPayload::Configured {
             tsconfig_path,
             membership,
             compiler_options,
             ..
-        }) = owner.map(|project| &snapshot.project(project).payload)
+        } = &snapshot.project(project).payload
         else {
-            return Arc::new(ProgramFileOrder::unordered());
+            return self.library_order(snapshot, project);
         };
+        let workspace = self.workspace();
         let index = self.project_type_store().indexed().program_order_index();
         let stamp = ProgramOrderStamp::live(workspace.as_ref());
-        if let Some(order) = stamp.and_then(|stamp| index.current(tsconfig_path.as_str(), stamp)) {
+        if let Some(order) =
+            stamp.and_then(|stamp| index.current(tsconfig_path.as_str(), stamp, workspace.as_ref()))
+        {
             return order;
         }
 
-        let mut candidates: Vec<CanonicalPath> =
-            membership.materialized_files.iter().cloned().collect();
-        candidates.extend(
-            workspace
-                .snapshot_canonicals()
-                .into_iter()
-                .chain(workspace.overlay_canonicals())
-                .map(|canonical| CanonicalPath::new(&canonical)),
-        );
-        let roots = membership.spec.program_root_files(&candidates);
+        // What the published order read that the live workspace still
+        // holds: its roots while they are the same ones, and every file
+        // that did not change since.
+        let previous = stamp.and_then(|stamp| {
+            index
+                .inputs(tsconfig_path.as_str())
+                .filter(|inputs| inputs.same_roots(workspace.as_ref(), stamp))
+        });
+        let registry = workspace.ambient_libs_view();
+        let options = workspace
+            .semantic_compiler_options_for_project(project)
+            .unwrap_or_else(|| compiler_options.semantic.clone());
+        let libraries = ProjectLibraries::of(workspace.as_ref(), &registry, project, &options);
+        let candidates = CandidateSet::live(workspace.as_ref());
+        let roots: Vec<Arc<str>> = match &previous {
+            Some(previous) => previous.roots.clone(),
+            None => {
+                let mut files: Vec<CanonicalPath> =
+                    membership.materialized_files.iter().cloned().collect();
+                files.extend(
+                    workspace
+                        .snapshot_canonicals()
+                        .into_iter()
+                        .chain(workspace.overlay_canonicals())
+                        .map(|canonical| CanonicalPath::new(&canonical)),
+                );
+                membership
+                    .spec
+                    .program_root_files(&files)
+                    .iter()
+                    .map(|root| Arc::from(root.as_str()))
+                    .chain(
+                        libraries
+                            .iter()
+                            .flat_map(|libraries| libraries.roots.iter().cloned()),
+                    )
+                    .collect()
+            }
+        };
         let javascript = compiler_options.js_is_member();
         // A file served from outside the store, or a module name the
         // resolver refused, makes this order this request's alone.
         let mut provisional = false;
+        let mut pulled: FxHashMap<Arc<str>, Option<Vec<Arc<str>>>> = FxHashMap::default();
+        let mut probes: Vec<Arc<str>> = Vec::new();
         let order = Arc::new(ProgramFileOrder::sequence(
             Arc::from(tsconfig_path.as_str()),
-            roots.iter().map(|root| Arc::from(root.as_str())),
+            roots.iter().cloned(),
+            |file| {
+                let reused = previous.as_ref().and_then(|previous| {
+                    let (file, files) = previous.pulled.get_key_value(file)?;
+                    (!previous.moved(workspace.as_ref(), file))
+                        .then(|| (Arc::clone(file), files.clone()))
+                });
+                let (file, files) = match reused {
+                    Some(reused) => reused,
+                    None => {
+                        index.note_reference_read();
+                        let files = self.pulled_files(
+                            workspace.as_ref(),
+                            libraries.as_ref(),
+                            javascript,
+                            file,
+                            &mut provisional,
+                            &mut probes,
+                        );
+                        (Arc::from(file), files)
+                    }
+                };
+                pulled.insert(file, files.clone());
+                files
+            },
+        ));
+        if let Some(previous) = &previous {
+            // A reused file's path references were probed by the walk that
+            // first read it.
+            probes.extend(
+                previous
+                    .probes
+                    .iter()
+                    .filter(|probe| !probes.contains(probe))
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            );
+        }
+        let Some(stamp) = stamp else {
+            return order;
+        };
+        if provisional || ProgramOrderStamp::live(workspace.as_ref()) != Some(stamp) {
+            return order;
+        }
+        let (order, previous_fingerprint) = index.publish(
+            order,
+            OrderInputs {
+                stamp,
+                registry,
+                candidates,
+                roots,
+                pulled,
+                probes,
+            },
+        );
+        if previous_fingerprint != Some(order.fingerprint()) {
+            verter_type_engine::request_observers::push_structured_event(
+                crate::component_meta_audit::StructuredAuditEvent::ProgramFileOrder {
+                    program: Arc::from(tsconfig_path.as_str()),
+                    prev_fingerprint: previous_fingerprint,
+                    new_fingerprint: order.fingerprint(),
+                    file_count: u32::try_from(order.len()).unwrap_or(u32::MAX),
+                },
+            );
+        }
+        order
+    }
+
+    /// The files `file` pulls into its program, in the order the program
+    /// visits them: its `/// <reference path>` targets, `/// <reference
+    /// types>` packages, `/// <reference lib>` libraries, then its module
+    /// names' files. A library pulls in only the libraries it references.
+    /// `None` when the program cannot load `file`.
+    fn pulled_files(
+        &self,
+        workspace: &dyn WorkspaceAccess,
+        libraries: Option<&ProjectLibraries>,
+        javascript: bool,
+        file: &str,
+        provisional: &mut bool,
+        probes: &mut Vec<Arc<str>>,
+    ) -> Option<Vec<Arc<str>>> {
+        let serve = self.ensure_indexed_ready_serve_unobserved(file)?;
+        *provisional |= !serve.store_published;
+        let references = &serve.indexed.route_inventory.program_references;
+        if verter_session_query::inputs::contributors::is_automatic_lib_canonical(file) {
+            return Some(libraries.map_or_else(Vec::new, |libraries| {
+                libraries.referenced(workspace, &references.libs)
+            }));
+        }
+        let mut pulled: Vec<Arc<str>> = Vec::new();
+        for path in &references.paths {
+            if let Some(target) = self.triple_slash_path_target(workspace, file, path, probes) {
+                pulled.push(target);
+            }
+        }
+        for package in &references.types {
+            let types_package = match package.strip_prefix('@') {
+                Some(scoped) => format!("@types/{}", scoped.replacen('/', "__", 1)),
+                None => format!("@types/{package}"),
+            };
+            let target = self
+                .program_module_target(file, &types_package, provisional)
+                .or_else(|| self.program_module_target(file, package, provisional));
+            pulled.extend(target);
+        }
+        pulled.retain(|target| is_program_source(target, javascript));
+        if let Some(libraries) = libraries {
+            pulled.extend(libraries.referenced(workspace, &references.libs));
+        }
+        for name in &references.module_names {
+            pulled.extend(
+                self.program_module_target(file, name, provisional)
+                    .filter(|target| is_program_source(target, javascript)),
+            );
+        }
+        Some(pulled)
+    }
+
+    /// The libraries `project` loads by its configuration and the
+    /// libraries' own `/// <reference lib>` directives, in program order —
+    /// the libraries of its program before any program file adds one.
+    /// Kept until the configuration or the registered libraries change.
+    pub(crate) fn library_order(
+        &self,
+        snapshot: &WorkspaceSnapshot,
+        project: ProjectId,
+    ) -> Arc<ProgramFileOrder> {
+        let workspace = self.workspace();
+        let Some(key) = workspace.project_stable_key(project) else {
+            return Arc::new(ProgramFileOrder::unordered());
+        };
+        let stamp = LibraryStamp {
+            snapshot_generation: snapshot.generation.0,
+            registry: workspace.ambient_libs_view(),
+        };
+        let index = self.project_type_store().indexed().program_order_index();
+        if let Some(order) = index.library_order(key, &stamp) {
+            return order;
+        }
+        let options = workspace
+            .semantic_compiler_options_for_project(project)
+            .unwrap_or_default();
+        let Some(libraries) =
+            ProjectLibraries::of(workspace.as_ref(), &stamp.registry, project, &options)
+        else {
+            return Arc::new(ProgramFileOrder::unordered());
+        };
+        let mut provisional = false;
+        let order = Arc::new(ProgramFileOrder::libraries(
+            libraries.roots.iter().cloned(),
             |file| {
                 let serve = self.ensure_indexed_ready_serve_unobserved(file)?;
                 provisional |= !serve.store_published;
-                let references = &serve.indexed.route_inventory.program_references;
-                let mut pulled: Vec<Arc<str>> = Vec::new();
-                for path in &references.paths {
-                    if let Some(target) =
-                        self.triple_slash_path_target(workspace.as_ref(), file, path)
-                    {
-                        pulled.push(target);
-                    }
-                }
-                for package in &references.types {
-                    let types_package = match package.strip_prefix('@') {
-                        Some(scoped) => format!("@types/{}", scoped.replacen('/', "__", 1)),
-                        None => format!("@types/{package}"),
-                    };
-                    let target = self
-                        .program_module_target(file, &types_package, &mut provisional)
-                        .or_else(|| self.program_module_target(file, package, &mut provisional));
-                    pulled.extend(target);
-                }
-                for name in &references.module_names {
-                    pulled.extend(self.program_module_target(file, name, &mut provisional));
-                }
-                pulled.retain(|target| is_program_source(target, javascript));
-                Some(pulled)
+                Some(libraries.referenced(
+                    workspace.as_ref(),
+                    &serve.indexed.route_inventory.program_references.libs,
+                ))
             },
         ));
-        if let Some(stamp) = stamp {
-            if !provisional && ProgramOrderStamp::live(workspace.as_ref()) == Some(stamp) {
-                let previous = index.publish(stamp, &order);
-                if previous != Some(order.fingerprint()) {
-                    verter_type_engine::request_observers::push_structured_event(
-                        crate::component_meta_audit::StructuredAuditEvent::ProgramFileOrder {
-                            program: Arc::from(tsconfig_path.as_str()),
-                            prev_fingerprint: previous,
-                            new_fingerprint: order.fingerprint(),
-                            file_count: u32::try_from(order.len()).unwrap_or(u32::MAX),
-                        },
-                    );
-                }
-            }
+        if !provisional {
+            index.publish_library_order(key, stamp, &order);
         }
         order
     }
@@ -212,27 +805,36 @@ impl crate::VerterHost {
     /// (`resolveTripleslashReference` + `getSourceFileFromReferenceWorker`):
     /// the path relative to `file`'s directory, as written when it carries
     /// an extension, else the first of `.ts`, `.tsx`, `.d.ts` that exists.
+    /// Every path it looks for joins `probes`: one that appears or goes
+    /// away later changes the answer.
     fn triple_slash_path_target(
         &self,
         workspace: &dyn WorkspaceAccess,
         file: &str,
         reference: &str,
+        probes: &mut Vec<Arc<str>>,
     ) -> Option<Arc<str>> {
         let target = join_paths(&parent_dir(file), reference);
         let has_extension = target
             .rsplit('/')
             .next()
             .is_some_and(|name| name.contains('.'));
-        if has_extension {
-            return workspace
-                .file_exists(&target)
-                .then(|| Arc::from(target.as_str()));
+        let candidates: Vec<String> = if has_extension {
+            vec![target]
+        } else {
+            [".ts", ".tsx", ".d.ts"]
+                .into_iter()
+                .map(|extension| format!("{target}{extension}"))
+                .collect()
+        };
+        for candidate in candidates {
+            let candidate: Arc<str> = Arc::from(candidate.as_str());
+            probes.push(Arc::clone(&candidate));
+            if workspace.file_exists(&candidate) {
+                return Some(candidate);
+            }
         }
-        [".ts", ".tsx", ".d.ts"]
-            .into_iter()
-            .map(|extension| format!("{target}{extension}"))
-            .find(|candidate| workspace.file_exists(candidate))
-            .map(|candidate| Arc::from(candidate.as_str()))
+        None
     }
 
     /// The program file module name `name` resolves to from `file`, through
@@ -255,9 +857,24 @@ impl crate::VerterHost {
     }
 }
 
-/// Whether a resolved `target` is a source file of the program: library
-/// files are listed apart, JSON and (without `allowJs`) JavaScript are not
-/// program sources.
+/// The project the library `canonical` (an ambient virtual id) is
+/// registered for; `None` for any other file.
+fn registered_project(
+    workspace: &dyn WorkspaceAccess,
+    snapshot: &WorkspaceSnapshot,
+    canonical: &str,
+) -> Option<ProjectId> {
+    let (key, _) = verter_workspace::parse_ambient_virtual_canonical_id(canonical)?;
+    snapshot
+        .projects
+        .iter()
+        .map(|project| project.id)
+        .find(|&id| workspace.project_stable_key(id) == Some(key))
+}
+
+/// Whether a resolved module `target` is a source file of the program:
+/// library files are loaded only by library references, JSON and (without
+/// `allowJs`) JavaScript are not program sources.
 fn is_program_source(target: &str, javascript: bool) -> bool {
     if verter_session_query::inputs::contributors::is_automatic_lib_canonical(target)
         || target.ends_with(".json")

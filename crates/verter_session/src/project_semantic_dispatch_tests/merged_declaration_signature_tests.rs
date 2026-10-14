@@ -322,17 +322,22 @@ fn program_upsert(host: &crate::VerterHost, name: &str, source: &str) {
 
 /// The literal `__Probe` in `scenario.ts` settles on.
 fn probe(host: &crate::VerterHost) -> f64 {
+    literal_number(host, "__Probe")
+}
+
+/// The number literal the type `name` in `scenario.ts` settles on.
+fn literal_number(host: &crate::VerterHost, name: &str) -> f64 {
     use verter_type_engine::semantic_query::{LiteralValue, ProjectionMode, SemanticNodeData};
     let scenario = format!("{PROGRAM_ROOT}/scenario.ts");
     let mut node = host
-        .resolve_named_symbol(&scenario, "__Probe", Some(ProjectionMode::Expanded))
+        .resolve_named_symbol(&scenario, name, Some(ProjectionMode::Expanded))
         .expect("the probe answers");
     let graph = host.project_type_store().semantic_graph();
     loop {
         match graph.node_data(node).as_deref().expect("a live answer") {
             SemanticNodeData::Alias(inner) => node = *inner,
             SemanticNodeData::Literal(LiteralValue::Number(value)) => return *value,
-            other => panic!("`__Probe` is no number literal: {other:?}"),
+            other => panic!("`{name}` is no number literal: {other:?}"),
         }
     }
 }
@@ -670,4 +675,193 @@ fn a_non_contributor_import_edit_reorders_the_merge() {
     assert_eq!(probe(&host), cold_importing, "warm after adding the import");
     program_upsert(&host, "a.ts", &detached);
     assert_eq!(probe(&host), cold_detached, "after removing the import");
+}
+
+/// A module augmentation names the module it merges into without pulling
+/// that module into the program; only an import does.
+///
+/// Measured on TypeScript 7.0.2, listing `aug.ts`, `b.ts`, `core.ts`,
+/// `c.ts`, with `core.ts` importing `./c`: when `aug.ts` only augments
+/// `./core` the program is `aug, b, c, core` and the answer is `3`; when
+/// `aug.ts` also imports `./core` it is `c, core, aug, b` and the answer
+/// is `2`. Either way the augmentation still merges into `core.ts`.
+///
+/// Mutation: visiting an augmentation's target as an import answers `2`
+/// for the augmentation alone.
+#[test]
+fn a_module_augmentation_does_not_pull_its_target_in() {
+    let augmenting = "export {};
+declare module './core' { interface Core { extra: 1 } }
+";
+    let importing = "import './core';
+declare module './core' { interface Core { extra: 1 } }
+";
+    let project = |aug_source: &str| {
+        bus_project(
+            &bus_tsconfig(&["aug.ts", "b.ts", "core.ts", "c.ts"], None),
+            &[
+                ("aug.ts", aug_source.to_owned()),
+                ("b.ts", bus_script("", 2)),
+                (
+                    "core.ts",
+                    "import './c';
+export interface Core {}
+"
+                    .to_owned(),
+                ),
+                ("c.ts", bus_script("", 3)),
+            ],
+            &[2, 3],
+        )
+    };
+    for (case, source, answer) in [
+        ("augmenting", augmenting, 3.0),
+        ("importing", importing, 2.0),
+    ] {
+        let host = project(source);
+        assert_eq!(probe(&host), answer, "{case}: cold");
+        assert_eq!(probe(&host), answer, "{case}: warm");
+        program_upsert(
+            &host,
+            "scenario.ts",
+            "import type { Core } from './core';
+type __Extra = Core['extra'];
+export {};
+",
+        );
+        assert_eq!(
+            literal_number(&host, "__Extra"),
+            1.0,
+            "{case}: the augmentation merges into core.ts"
+        );
+    }
+    let host = project(augmenting);
+    assert_eq!(probe(&host), 3.0, "before the edit");
+    program_upsert(&host, "aug.ts", importing);
+    assert_eq!(probe(&host), 2.0, "after adding the import");
+    program_upsert(&host, "aug.ts", augmenting);
+    assert_eq!(probe(&host), 3.0, "after removing the import");
+}
+
+/// The core of a library: the globals every program needs.
+const LIBRARY_CORE: &str = "interface Array<T> { length: number; [n: number]: T; }\n\
+interface Boolean {}\ninterface Function {}\ninterface IArguments {}\n\
+interface Number {}\ninterface Object {}\ninterface RegExp {}\ninterface String {}\n";
+
+/// A library declaring the global `Bus` with one `emit` overload answering
+/// `answer`, after `head` (its own references).
+fn bus_library(head: &str, answer: usize) -> String {
+    format!("{head}interface Bus {{ emit(e: {{ k{answer}: 1 }}): {answer}; }}\n")
+}
+
+/// The libraries the library-order fixtures register: `lib.es5.d.ts`
+/// (answering `1`, with the core globals), `lib.es2015.core.d.ts` (`2`),
+/// `lib.es2015.collection.d.ts` (`3`), and `lib.es2015.d.ts`, which
+/// declares nothing and references the other three as TypeScript's does.
+fn bus_libraries() -> Vec<(&'static str, String)> {
+    vec![
+        (
+            "lib.es5.d.ts",
+            format!("{LIBRARY_CORE}{}", bus_library("", 1)),
+        ),
+        ("lib.es2015.core.d.ts", bus_library("", 2)),
+        ("lib.es2015.collection.d.ts", bus_library("", 3)),
+        (
+            "lib.es2015.d.ts",
+            "/// <reference lib=\"es5\" />\n/// <reference lib=\"es2015.core\" />\n\
+             /// <reference lib=\"es2015.collection\" />\n"
+                .to_owned(),
+        ),
+    ]
+}
+
+/// A `lib: ["es5"]` project listing `ref.ts` then `scenario.ts`, with
+/// `libraries` registered in the order given.
+fn library_project(ref_source: &str, libraries: &[(&str, String)]) -> crate::VerterHost {
+    let tsconfig = serde_json::json!({
+        "compilerOptions": { "strict": true, "lib": ["es5"], "noEmit": true },
+        "files": ["ref.ts", "scenario.ts"],
+    });
+    let host = program_host(&tsconfig, &[]);
+    for (name, source) in libraries {
+        host.workspace()
+            .register_ambient_lib(verter_workspace::AmbientLibSpec {
+                project_id: None,
+                canonical_id: std::sync::Arc::from(*name),
+                source: std::sync::Arc::from(source.as_str()),
+            })
+            .expect("the library registers against the project");
+    }
+    program_upsert(&host, "ref.ts", ref_source);
+    program_upsert(
+        &host,
+        "scenario.ts",
+        "declare const bus: Bus;\ndeclare const ev: { k1: 1; k2: 1; k3: 1 };\n\
+         const r = bus.emit(ev);\ntype __Probe = typeof r;\nexport {};\n",
+    );
+    host
+}
+
+/// A file's `/// <reference lib>` loads that library into the program; the
+/// program lists its libraries before its own files, by TypeScript's
+/// library priority, so a later library's declaration of a global is tried
+/// first. A library the program does not load contributes nothing, however
+/// it was registered; editing the reference in a file that declares
+/// nothing moves the answer, and every state answers what a cold host of
+/// it does.
+///
+/// Measured on TypeScript 7.0.2 with `lib: ["es5"]` and the merged `Bus`
+/// declared by `lib.es5.d.ts` (`1`), `lib.es2015.core.d.ts` (`2`) and
+/// `lib.es2015.collection.d.ts` (`3`): `ref.ts` referencing no library
+/// answers `1`, `es2015.core` `2`, `es2015.collection` `3`.
+///
+/// Mutation: merging every registered library answers `3` with no
+/// reference; ordering libraries by registration answers the first
+/// registered.
+#[test]
+fn a_library_reference_loads_and_orders_its_library() {
+    let states = [
+        ("export {};\n", 1.0),
+        ("/// <reference lib=\"es2015.core\" />\nexport {};\n", 2.0),
+        (
+            "/// <reference lib=\"es2015.collection\" />\nexport {};\n",
+            3.0,
+        ),
+        ("export {};\n", 1.0),
+    ];
+    let libraries = bus_libraries();
+    let mut reversed = libraries.clone();
+    reversed.reverse();
+    for (source, answer) in states {
+        for registered in [&libraries, &reversed] {
+            let host = library_project(source, registered);
+            assert_eq!(probe(&host), answer, "cold: {source:?}");
+            assert_eq!(probe(&host), answer, "warm: {source:?}");
+        }
+    }
+    let host = library_project(states[0].0, &libraries);
+    for (source, answer) in states {
+        program_upsert(&host, "ref.ts", source);
+        assert_eq!(probe(&host), answer, "incremental: {source:?}");
+        assert_eq!(probe(&host), answer, "warm incremental: {source:?}");
+    }
+}
+
+/// A library's own references load the libraries it names, placed by
+/// priority whatever order the walk reaches them in.
+///
+/// Measured on TypeScript 7.0.2 with `lib: ["es5"]` and `ref.ts`
+/// referencing `es2015`: the program lists `lib.es5.d.ts`,
+/// `lib.es2015.d.ts`, `lib.es2015.core.d.ts`, `lib.es2015.collection.d.ts`
+/// and answers `3`.
+#[test]
+fn a_referenced_library_loads_the_libraries_it_references() {
+    let libraries = bus_libraries();
+    let mut reversed = libraries.clone();
+    reversed.reverse();
+    for registered in [&libraries, &reversed] {
+        let host = library_project("/// <reference lib=\"es2015\" />\nexport {};\n", registered);
+        assert_eq!(probe(&host), 3.0);
+        assert_eq!(probe(&host), 3.0, "warm");
+    }
 }

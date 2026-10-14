@@ -91,9 +91,11 @@ pub struct ScriptRouteCounts {
 /// `types` references, then `lib` references, then module names — import
 /// and re-export specifiers in statement order (including the bare
 /// specifiers an ambient `declare module "m" { … }` body imports), then
-/// dynamic `import("m")` calls and `import("m")` types in source order,
-/// then the names of `declare module "m"` augmentations. Authored text
-/// only: resolving a name is the program-order authority's job.
+/// dynamic `import("m")` calls and `import("m")` types in source order.
+/// A `declare module "m"` augmentation's name is not among them: it is
+/// resolved to the module it merges into, never added to the program.
+/// Authored text only: resolving a name is the program-order authority's
+/// job.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ProgramReferences {
     /// `/// <reference path="…" />`, as written.

@@ -956,6 +956,27 @@ impl StoreViewRoots {
             .map(|set| set.fingerprint)
     }
 
+    /// The published file-order fingerprint of `program`, while the live
+    /// workspace still lists exactly that program: no file the order read,
+    /// no path it probed, its configuration, its candidate files, its
+    /// registered libraries and the resolution world moved since it was
+    /// built. An edit elsewhere keeps it. `None` otherwise: the order may
+    /// differ, so no published fingerprint vouches for it. That refuses
+    /// the warm entry; the recompute that follows rebuilds the order —
+    /// re-reading only the files that changed — and observes its
+    /// fingerprint, and every other warm entry ordered by the same,
+    /// unchanged sequence validates again.
+    pub(crate) fn program_file_order_fingerprint(&self, program: &str) -> Option<Hash16> {
+        note_owner_visit();
+        let reader = self.artifact_reader.as_ref()?;
+        let workspace = self.workspace.as_deref()?;
+        let stamp = crate::program_order::ProgramOrderStamp::live(workspace)?;
+        reader
+            .indexed()
+            .program_order_index()
+            .published_fingerprint(program, stamp, workspace)
+    }
+
     /// Per-symbol global-contributor fingerprint, including a proved-empty
     /// set. Read from the live published snapshot: a membership edit that
     /// does not rebuild this view fails closed against a moved fingerprint.
@@ -968,23 +989,6 @@ impl StoreViewRoots {
     /// contributor first and then observes the fingerprint of the complete
     /// population. The cost is one recompute for each warm read made while
     /// a contributor waits.
-    /// The published file-order fingerprint of `program`, while it still
-    /// describes the live workspace. `None` once the workspace has moved
-    /// (any project, content or resolution change): the order may differ,
-    /// so no published fingerprint vouches for it. That refuses the warm
-    /// entry; the recompute that follows rebuilds and republishes the
-    /// order and observes its fingerprint, and every other warm entry
-    /// ordered by the same, unchanged sequence validates again.
-    pub(crate) fn program_file_order_fingerprint(&self, program: &str) -> Option<Hash16> {
-        note_owner_visit();
-        let reader = self.artifact_reader.as_ref()?;
-        let stamp = crate::program_order::ProgramOrderStamp::live(self.workspace.as_deref()?)?;
-        reader
-            .indexed()
-            .program_order_index()
-            .published_fingerprint(program, stamp)
-    }
-
     pub(crate) fn global_contributor_fingerprint(
         &self,
         target: crate::file_artifact_store::AugmentationTargetKind,

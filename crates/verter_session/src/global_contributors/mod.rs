@@ -313,15 +313,16 @@ impl GlobalContributorPopulation {
 
     /// Materialize declaration precedence once for this contributor/index and
     /// program order. Each declaring base borrows the same slot order. The
-    /// program order is read through `order` — and returned, for the reader
-    /// to observe — only when the candidates span two or more program files.
+    /// order is read through `order`, given every candidate file — `None`
+    /// when they need none — and returned for the reader to observe. A
+    /// library the program does not load contributes nothing.
     pub(crate) fn augmentation_order(
         &self,
         key: &crate::file_artifact_store::AugmentationTargetKey,
         augmenters: &verter_session_query::resolution::AugmenterSet,
         name: &str,
         contributors: &SymbolContributors,
-        order: impl FnOnce(&mut dyn Iterator<Item = &str>) -> Arc<ProgramFileOrder>,
+        order: impl FnOnce(&mut dyn Iterator<Item = &str>) -> Option<Arc<ProgramFileOrder>>,
     ) -> (
         Arc<[verter_session_query::inputs::contributors::AugmentationCandidate]>,
         Option<Arc<ProgramFileOrder>>,
@@ -330,8 +331,8 @@ impl GlobalContributorPopulation {
         if augmenters.entries.is_empty() && contributors.entries.is_empty() {
             return (Arc::from([]), None);
         }
-        let order = view_program_order(
-            augmenters
+        let order = order(
+            &mut augmenters
                 .entries
                 .iter()
                 .map(|entry| entry.canonical().as_ref())
@@ -341,7 +342,6 @@ impl GlobalContributorPopulation {
                         .iter()
                         .map(|entry| entry.artifact_key.canonical.as_ref()),
                 ),
-            order,
         );
         let rank = |canonical: &str| program_rank(order.as_deref(), canonical);
         let view_key = CollectionViewKey {
@@ -384,6 +384,12 @@ impl GlobalContributorPopulation {
                         .entries
                         .iter()
                         .enumerate()
+                        .filter(|(_, entry)| {
+                            !entry.is_automatic_lib
+                                || order.as_ref().is_none_or(|order| {
+                                    order.loads_library(&entry.artifact_key.canonical)
+                                })
+                        })
                         .filter(|(_, entry)| {
                             entry.origin == ContributorOrigin::FileScopeInterface
                                 || (entry.origin == ContributorOrigin::FileScopeNamespace

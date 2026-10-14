@@ -80,7 +80,9 @@ impl StaticMembershipSpec {
     /// authored `include` entry each matches and, within one entry, in
     /// directory-walk order ([`directory_walk_order`]). A wildcard match
     /// yields to a same-named file with a higher-priority extension
-    /// (`a.ts` over `a.d.ts` over `a.js`).
+    /// (`a.ts` over `a.d.ts`, `a.ts` over `a.js`) — except that a
+    /// `.d.ts` never shadows a `.js` / `.jsx` file, which stays a root
+    /// beside it (`hasFileWithHigherPriorityExtension`).
     ///
     /// `candidates` is every file the workspace knows; their order is
     /// irrelevant.
@@ -117,7 +119,11 @@ impl StaticMembershipSpec {
                 continue;
             };
             let sibling = |extension: &str| format!("{stem}{extension}");
+            let javascript = path.as_str().ends_with(".js") || path.as_str().ends_with(".jsx");
             let outranked = group[..priority].iter().any(|extension| {
+                if javascript && *extension == ".d.ts" {
+                    return false;
+                }
                 let name = sibling(extension);
                 literal.contains(name.as_str()) || wildcard_slots.contains_key(name.as_str())
             });

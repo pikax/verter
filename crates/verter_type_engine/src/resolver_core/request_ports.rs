@@ -630,16 +630,22 @@ pub trait OwnedLowering {
         name: &str,
         space: verter_session_query::facts::SymbolSpace,
     ) -> ContributorAnswer;
+    /// The contributors of `name` to `target`, read for `anchor`, the
+    /// requesting file: every library among them, for
+    /// [`Self::augmentation_contributor_order`] to keep the ones `anchor`'s
+    /// program loads. The population read already holds every file the
+    /// program's library and file order reached.
     fn contributor_answer(
         &self,
+        anchor: &str,
         target: &verter_session_query::resolution::AugmentationTargetKind,
         name: &str,
-        allow_automatic_libs: bool,
         space: Option<verter_session_query::facts::SymbolSpace>,
     ) -> ContributorAnswer;
     /// The augmenters and file-scope contributors of `name` in declaration
-    /// precedence order — by the file order of `anchor`'s program when they
-    /// span two or more program files, which the read then observes.
+    /// precedence order — by the order of `anchor`'s program when they
+    /// include a library or span two or more program files, which the read
+    /// then observes — without the libraries that program does not load.
     fn augmentation_contributor_order(
         &self,
         anchor: &str,

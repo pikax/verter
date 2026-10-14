@@ -5801,16 +5801,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             ),
         );
 
-        let options = self.ctx.semantic_compiler_options_for(request_canonical);
-        let allow_automatic_libs = !options.no_lib;
-        let selected_libs: rustc_hash::FxHashSet<String> = options
-            .effective_lib_file_names()
-            .into_iter()
-            .map(str::to_owned)
-            .collect();
         let population_answer =
             self.ctx
-                .contributor_answer(&target, decl_name, allow_automatic_libs, None);
+                .contributor_answer(request_canonical, &target, decl_name, None);
         let population_hit = population_answer.contributors;
         crate::resolver_core::resolver_context::observe_fan_out(
             verter_session_query::facts::fact_cache::FactVersionRef::RouteSurface(
@@ -6183,17 +6176,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
                 OrderedOrigin::FileScope(file_scope_idx) => {
                     let entry = &population_hit.entries[file_scope_idx];
-                    if entry.is_automatic_lib {
-                        let name = entry
-                            .artifact_key
-                            .canonical
-                            .rsplit(['/', '\\'])
-                            .next()
-                            .unwrap_or("");
-                        if !selected_libs.contains(name) {
-                            continue;
-                        }
-                    }
                     let canonical = entry.artifact_key.canonical.as_ref();
                     let Some(indexed) = self
                         .ctx

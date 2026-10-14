@@ -324,7 +324,14 @@ where
 /// statement order (an ambient `declare module "m" { … }` body contributes
 /// its non-relative specifiers), dynamic `import("m")` calls and
 /// `import("m")` types in source order (plus `require("m")` in a JavaScript
-/// file), and finally the names of `declare module "m"` augmentations.
+/// file).
+///
+/// The names of `declare module "m"` augmentations are not among them:
+/// TypeScript resolves an augmentation's name to find the module it merges
+/// into, but adds only imported files to the program
+/// (`processImportedModules` adds a resolution only below
+/// `file.imports.length`), so an augmentation alone never places its
+/// target.
 ///
 /// `is_external_module` is whether the file has top-level module syntax: a
 /// `declare module "m"` in a module augments `m`, in a script it declares
@@ -336,14 +343,12 @@ pub fn build_program_references(
 ) -> ProgramReferences {
     let mut references = ProgramReferences::default();
     collect_triple_slash_references(program, &mut references);
-    let mut augmentations = Vec::new();
     collect_module_references(
         &program.body,
         false,
         is_external_module,
         program.source_type.is_typescript_definition(),
         &mut references.module_names,
-        &mut augmentations,
     );
     let mut dynamic = DynamicModuleNames {
         javascript: program.source_type.is_javascript(),
@@ -356,7 +361,6 @@ pub fn build_program_references(
     references
         .module_names
         .extend(dynamic.names.into_iter().map(|(_, name)| name));
-    references.module_names.extend(augmentations);
     references
 }
 
@@ -460,7 +464,6 @@ fn collect_module_references(
     is_external_module: bool,
     is_declaration_file: bool,
     imports: &mut Vec<String>,
-    augmentations: &mut Vec<String>,
 ) {
     let push_import = |imports: &mut Vec<String>, name: &str| {
         if !name.is_empty() && (!in_ambient_module || !is_relative_module_name(name)) {
@@ -499,10 +502,10 @@ fn collect_module_references(
         if !(in_ambient_module || module.declare || is_declaration_file) {
             continue;
         }
-        let name = module.id.value.as_str();
-        if is_external_module || (in_ambient_module && !is_relative_module_name(name)) {
-            augmentations.push(name.to_owned());
-        } else if !in_ambient_module {
+        // A module augmentation (`declare module "m"` in a module, or a
+        // non-relative one nested in an ambient module) imports nothing; an
+        // ambient module a script declares may.
+        if !is_external_module && !in_ambient_module {
             if let Some(body) = &module.body {
                 collect_module_references(
                     &body.body,
@@ -510,7 +513,6 @@ fn collect_module_references(
                     is_external_module,
                     is_declaration_file,
                     imports,
-                    augmentations,
                 );
             }
         }

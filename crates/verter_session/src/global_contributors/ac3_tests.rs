@@ -839,7 +839,7 @@ fn every_base_borrows_one_augmentation_collection_order() {
         let lookup = |order: &Arc<ProgramFileOrder>| {
             let (view, observed) =
                 snapshot.augmentation_order(&key, &augmenters, "Shared", &contributors, |_| {
-                    Arc::clone(order)
+                    Some(Arc::clone(order))
                 });
             assert!(observed.is_some_and(|observed| Arc::ptr_eq(&observed, order)));
             view
