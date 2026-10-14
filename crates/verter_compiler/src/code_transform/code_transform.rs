@@ -11,6 +11,7 @@ use oxc_allocator::Allocator;
 thread_local! {
     static CODE_TRANSFORM_CONSTRUCTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static CODE_TRANSFORM_BUILD_STRING_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static CODE_TRANSFORM_CHUNK_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -31,6 +32,19 @@ pub(crate) fn code_transform_build_string_call_count() -> usize {
 #[cfg(test)]
 pub(crate) fn reset_code_transform_build_string_call_count() {
     CODE_TRANSFORM_BUILD_STRING_CALLS.with(|count| count.set(0));
+}
+
+/// Chunks inspected by position searches and move scans on this thread: the
+/// work an edit costs beyond its own output.
+#[cfg(test)]
+pub(crate) fn take_code_transform_chunk_visits() -> usize {
+    CODE_TRANSFORM_CHUNK_VISITS.with(|count| count.replace(0))
+}
+
+#[inline]
+fn count_chunk_visit() {
+    #[cfg(test)]
+    CODE_TRANSFORM_CHUNK_VISITS.with(|count| count.set(count.get() + 1));
 }
 
 /// Result of scanning chunks for a target position.
@@ -564,7 +578,15 @@ impl<'a> CodeTransform<'a> {
     /// Shared by both prepend and append position-finding.
     #[inline]
     fn split_and_find(&mut self, index: u32, search_start: usize) -> SplitResult {
+        // Every positioned chunk spans a non-empty source range, so none starts
+        // at or past the end of the source: a position there is always past
+        // every chunk. Output anchored at the end of the source is the dominant
+        // append pattern and must not rescan the chunk list.
+        if index as usize >= self.original.len() {
+            return SplitResult::End;
+        }
         for i in search_start..self.chunks.len() {
+            count_chunk_visit();
             match self.chunks[i] {
                 Chunk::Original { start: cs, end: ce } => {
                     if cs < index && index < ce {
@@ -1228,17 +1250,21 @@ impl<'a> CodeTransform<'a> {
 
         // Single-pass: split at boundaries + collect indices in one forward scan
         // (replaces ensure_split_at(start) + ensure_split_at(end) + identification loop)
-        self.cursor_hint = 0;
         let mut indices_to_move: SmallVec<[usize; 8]> = SmallVec::new();
         // Position watermark: tracks the end of the last positioned chunk we've
         // seen. Used to decide whether unpositioned chunks (Inserted/Moved) fall
         // within the [start, end) move range — they belong to the range if the
         // watermark has entered it.
         let mut current_pos = 0u32;
-        let mut i = 0;
+        // Every chunk before a positioned chunk that starts strictly before
+        // `start` keeps the watermark below `start` (positions are monotonic
+        // and ranges disjoint), so none of them is in the range: the scan may
+        // resume from such a chunk instead of the beginning.
+        let mut i = self.move_search_start(start);
         let mut past_start = false;
 
         while i < self.chunks.len() {
+            count_chunk_visit();
             match self.chunks[i] {
                 Chunk::Original { start: cs, end: ce } => {
                     if ce <= start {
@@ -1393,18 +1419,28 @@ impl<'a> CodeTransform<'a> {
             chunks_to_move.push(Chunk::inserted(suffix));
         }
 
-        // Remove moved chunks in a single O(n) pass instead of O(n*k) reverse removal
-        let mut write = 0usize;
-        let mut remove_idx = 0usize;
-        for read in 0..self.chunks.len() {
-            if remove_idx < indices_to_move.len() && indices_to_move[remove_idx] == read {
-                remove_idx += 1;
-            } else {
-                self.chunks[write] = self.chunks[read];
-                write += 1;
+        // Remove the moved chunks. Chunks before the first one stay in place,
+        // and a contiguous run (the common case) is removed in one shift.
+        let first = indices_to_move[0];
+        let last = indices_to_move[indices_to_move.len() - 1];
+        if last - first + 1 == indices_to_move.len() {
+            self.chunks.drain(first..=last);
+        } else {
+            let mut write = first;
+            let mut remove_idx = 0usize;
+            for read in first..self.chunks.len() {
+                if remove_idx < indices_to_move.len() && indices_to_move[remove_idx] == read {
+                    remove_idx += 1;
+                } else {
+                    self.chunks[write] = self.chunks[read];
+                    write += 1;
+                }
             }
+            self.chunks.truncate(write);
         }
-        self.chunks.truncate(write);
+        // The chunks around the removed range are where a forward-progressing
+        // sequence of moves resumes.
+        self.cursor_hint = first;
 
         // Insert moved chunks at target position
         let insert_idx = self.find_insert_position_for_append(target_index, false);
@@ -1412,6 +1448,22 @@ impl<'a> CodeTransform<'a> {
         self.chunks.splice(insert_pos..insert_pos, chunks_to_move);
 
         self
+    }
+
+    /// Where a move of a range starting at `start` may begin its scan: the
+    /// cursor hint, or the chunk before it, when that chunk is positioned
+    /// strictly before `start`; otherwise the beginning.
+    fn move_search_start(&self, start: u32) -> usize {
+        let hint = self.cursor_hint.min(self.chunks.len().saturating_sub(1));
+        if self.chunks.is_empty() {
+            return 0;
+        }
+        for candidate in [hint, hint.saturating_sub(1)] {
+            if Self::chunk_position(&self.chunks[candidate]).is_some_and(|pos| pos < start) {
+                return candidate;
+            }
+        }
+        0
     }
 
     /// Get a slice of the original source

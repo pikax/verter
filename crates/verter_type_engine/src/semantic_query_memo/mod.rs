@@ -710,6 +710,21 @@ pub struct SemanticGraphStore {
         parking_lot::Mutex<Option<(SemanticQueryKey, test_support::ExhaustedJoinAbortForTests)>>,
 }
 
+/// The family memo's retention bound, chosen when a store is constructed
+/// ([`SemanticGraphStore::with_memo_family_bound`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MemoFamilyBound {
+    /// The production bound,
+    /// [`crate::bounded_query_retention::DEFAULT_BUDGET_CAP`] families.
+    #[default]
+    Production,
+    /// Test support: retain at most this many families, through the same
+    /// FIFO eviction as the production bound, so a test overruns the memo
+    /// without first admitting the production bound's worth of families.
+    #[cfg(any(test, feature = "test-support"))]
+    ForTest(usize),
+}
+
 impl Default for SemanticGraphStore {
     fn default() -> Self {
         Self::with_arena(Default::default())
@@ -987,11 +1002,21 @@ impl SemanticGraphStore {
     #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn new_with_memo_budget_for_test(memo_budget_cap: usize) -> Self {
-        Self {
-            memo_budget: crate::bounded_query_retention::GlobalRetentionBudget::new(
-                memo_budget_cap,
-            ),
-            ..Self::default()
+        Self::default().with_memo_family_bound(MemoFamilyBound::ForTest(memo_budget_cap))
+    }
+
+    /// Bound this store's family memo at construction. Consumes the
+    /// store before any caller can share it, so the bound is fixed before
+    /// the first admission and never changes afterwards.
+    #[must_use]
+    pub fn with_memo_family_bound(self, bound: MemoFamilyBound) -> Self {
+        match bound {
+            MemoFamilyBound::Production => self,
+            #[cfg(any(test, feature = "test-support"))]
+            MemoFamilyBound::ForTest(cap) => Self {
+                memo_budget: crate::bounded_query_retention::GlobalRetentionBudget::new(cap),
+                ..self
+            },
         }
     }
 
@@ -1107,6 +1132,14 @@ impl SemanticGraphStore {
     #[must_use]
     pub fn memo_budget_tracked_len_for_test(&self) -> usize {
         self.memo_budget.tracked_len()
+    }
+
+    /// Test-only — the family memo's retention bound: the number of
+    /// families it retains before FIFO eviction.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn memo_family_cap_for_test(&self) -> usize {
+        self.memo_budget.cap()
     }
 
     /// Audit-only dump of the warm memo entries, keyed by the

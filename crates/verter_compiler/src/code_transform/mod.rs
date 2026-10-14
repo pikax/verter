@@ -49,6 +49,7 @@ pub use code_transform::GeneratedSourceRange;
 pub(crate) use code_transform::{
     code_transform_build_string_call_count, code_transform_construction_count,
     reset_code_transform_build_string_call_count, reset_code_transform_construction_count,
+    take_code_transform_chunk_visits,
 };
 // The typed refusal surface of the checked (`try_*`) operations, re-exported
 // alongside `CodeTransform` as this module's public error type (the inner

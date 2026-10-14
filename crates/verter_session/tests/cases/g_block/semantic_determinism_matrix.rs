@@ -1039,10 +1039,14 @@ fn det_05_persisted_axis_is_dormant_while_no_semantic_cache_serializes() {
     }
 }
 
-/// More distinct answered questions than the family memo retains: the
-/// memo's retention bound is 4096 families, admitted in order and evicted
-/// oldest first.
-const FAMILY_EVICTION_FLOOD: usize = 4200;
+/// The family memo's retention bound on DET-05's partial-cache host. The
+/// memo admits families in order and evicts the oldest past its bound; the
+/// production bound is one setting of that same FIFO eviction, and a small
+/// one keeps the flood of cold questions that overruns it cheap.
+const PARTIAL_CACHE_FAMILY_CAP: usize = 64;
+
+/// More distinct answered questions than the family memo retains.
+const FAMILY_EVICTION_FLOOD: usize = PARTIAL_CACHE_FAMILY_CAP + PARTIAL_CACHE_FAMILY_CAP / 2;
 
 /// DET-05's partial-cache axis in the product's own terms. The family memo
 /// is bounded, so a host that has answered more distinct questions than the
@@ -1063,7 +1067,22 @@ fn drive_det_05_partial_resident_cache() {
         .from_cache
     };
 
-    let host = build_host(&[(canonical, EDIT_ORIGINAL_TS)]);
+    let host = Arc::new(VerterHost::new_standalone_with_memo_family_cap_for_test(
+        HostConfig {
+            audit_enabled: true,
+            ..HostConfig::default()
+        },
+        PARTIAL_CACHE_FAMILY_CAP,
+    ));
+    assert!(
+        FAMILY_EVICTION_FLOOD
+            > host
+                .project_type_store()
+                .semantic_graph()
+                .memo_family_cap_for_test(),
+        "DET-05: precondition — the flood outnumbers the families the memo retains"
+    );
+    upsert(&host, canonical, EDIT_ORIGINAL_TS);
     assert_eq!(observe(&host, canonical, "witness"), cold);
     assert!(
         ask(&host, canonical, "witness"),
