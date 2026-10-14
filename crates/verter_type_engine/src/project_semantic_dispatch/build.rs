@@ -108,6 +108,21 @@ pub(super) enum AugmentationContribution {
     /// The call signatures its function declarations add to an exported
     /// function VALUE — one overload group per augmenting block.
     FunctionSignatures,
+    /// The block of an enum it declares — and, for a global enum, every
+    /// script's block — with its members.
+    EnumBlocks,
+}
+
+/// One block of an enum an augmentation collection gathered
+/// ([`AugmentationContribution::EnumBlocks`]): the file and declaration
+/// scope declaring it, and its members in declaration order.
+pub(super) struct EnumContribution {
+    pub(super) canonical: Arc<str>,
+    pub(super) owner: verter_type_expr::TopLevelOwnerId,
+    /// The ambient block scope declaring it; `None` for the file's own
+    /// declaration.
+    pub(super) scope: Option<verter_session_query::declarations::AugmentationScopeKind>,
+    pub(super) members: Arc<[verter_type_expr::facts::EnumMemberEntry]>,
 }
 
 /// Shared return shape of the augmenter-fold path
@@ -128,6 +143,10 @@ pub(crate) struct AugmentationContributions {
     /// block in declaration order, when the collected contribution is
     /// [`AugmentationContribution::FunctionSignatures`]; empty otherwise.
     pub(super) signature_groups: Vec<Vec<SemanticNodeId>>,
+    /// The enum blocks gathered, in declaration precedence order, when the
+    /// collected contribution is [`AugmentationContribution::EnumBlocks`];
+    /// empty otherwise.
+    pub(super) enum_blocks: Vec<EnumContribution>,
 }
 
 /// Record a completed semantic augmentation stitch using the public typed
@@ -5130,6 +5149,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             generic,
             suspend,
             complete_structure: false,
+            enum_body: false,
             body: BodyLowering::Ready(base),
         });
         // Propagate the full `ProjectionReductionContext` through body
@@ -5313,6 +5333,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             prepared.root_identity.owner,
             prepared.root_identity.symbol_name.as_ref(),
         ) {
+            build.enum_body = true;
             return BodyLowering::Ready(self.enum_type(&enumeration));
         }
         // The declaration's OWN decl-body locator (whole body).
@@ -5408,7 +5429,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // terminates at the recursive-ref back-edge instead of recursing.
         let mut augmenter_contributor_roots: Vec<AugmentationContributorRoot> = Vec::new();
         let mut augmentation_source_env_unobservable = false;
-        if !is_non_file_base {
+        // An enum's member union already holds every block's members, an
+        // augmenting block's included: it is no type body to merge.
+        if !is_non_file_base && !build.enum_body {
             if let Some(stitch) =
                 self.stitch_module_augmentations(decl_canonical, decl_name, result, scope, context)
             {
@@ -5707,6 +5730,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             source_env_unobservable,
             base_position,
             signature_groups: _,
+            enum_blocks: _,
         } = contributions;
         // Tainted-EMPTY collection: augmenters targeted this decl but every
         // contribution was unobservable. Keep the base body UNCHANGED (no false
@@ -5871,9 +5895,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .into_iter()
             .map(str::to_owned)
             .collect();
+        // The file-scope declarations collected beside the augmenters: a
+        // type body's interfaces and namespaces, an enum's script blocks.
+        let (selection, space) = match contribution {
+            AugmentationContribution::EnumBlocks => (
+                verter_session_query::inputs::contributors::FileScopeContribution::EnumBlock,
+                Some(verter_session_query::facts::SymbolSpace::Value),
+            ),
+            AugmentationContribution::TypeBody | AugmentationContribution::FunctionSignatures => (
+                verter_session_query::inputs::contributors::FileScopeContribution::TypeBody,
+                None,
+            ),
+        };
         let population_answer =
             self.ctx
-                .contributor_answer(&target, decl_name, allow_automatic_libs, None);
+                .contributor_answer(&target, decl_name, allow_automatic_libs, space);
         let population_hit = population_answer.contributors;
         crate::resolver_core::resolver_context::observe_fan_out(
             verter_session_query::facts::fact_cache::FactVersionRef::RouteSurface(
@@ -5889,11 +5925,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             ),
         );
         let has_file_scope = population_hit.entries.iter().any(|entry| {
-            matches!(
-                entry.origin,
-                verter_session_query::inputs::contributors::ContributorOrigin::FileScopeInterface
-                    | verter_session_query::inputs::contributors::ContributorOrigin::FileScopeNamespace
-            )
+            use verter_session_query::inputs::contributors::ContributorOrigin;
+            match selection {
+                verter_session_query::inputs::contributors::FileScopeContribution::TypeBody => {
+                    matches!(
+                        entry.origin,
+                        ContributorOrigin::FileScopeInterface
+                            | ContributorOrigin::FileScopeNamespace
+                    )
+                }
+                verter_session_query::inputs::contributors::FileScopeContribution::EnumBlock => {
+                    entry.origin == ContributorOrigin::FileScopeValue
+                }
+            }
         });
         if augmenter_set.entries.is_empty() && !has_file_scope {
             return None;
@@ -5901,6 +5945,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 
         let mut contributor_nodes: Vec<SemanticNodeId> = Vec::new();
         let mut signature_groups: Vec<Vec<SemanticNodeId>> = Vec::new();
+        let mut enum_blocks: Vec<EnumContribution> = Vec::new();
         // One root per contributing augmenter: the version self-root AND the
         // EXACT artifact key the contributor `LowerLocator` served from,
         // inseparable in one carrier — recorded below as paired
@@ -5922,7 +5967,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             &augmenter_set,
             decl_name,
             &population_hit,
+            selection,
         );
+        // An enum's blocks are its program's: a file another project owns
+        // declares another project's enum of the name.
+        let request_project = (contribution == AugmentationContribution::EnumBlocks)
+            .then(|| self.ctx.project_stable_key_for_canonical(request_canonical));
         for candidate in ordered.iter().copied() {
             let canonical = match candidate {
                 OrderedOrigin::Augmenter(i) => augmenter_set.entries[i].canonical().as_ref(),
@@ -5933,6 +5983,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             if excluded_contributor == Some(canonical) {
                 base_position.get_or_insert(contributor_nodes.len());
                 continue;
+            }
+            if let Some(project) = &request_project {
+                let owner = self.ctx.project_stable_key_for_canonical(canonical);
+                if owner.is_some() && owner != *project {
+                    continue;
+                }
             }
             match candidate {
                 OrderedOrigin::Augmenter(augmenter_idx) => {
@@ -6002,7 +6058,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         if fact.augmented_name.as_ref() != decl_name {
                             continue;
                         }
-                        if contribution == AugmentationContribution::FunctionSignatures
+                        if contribution != AugmentationContribution::TypeBody
                             && fact.space
                                 != verter_session_query::facts::registry::SymbolSpace::Value
                         {
@@ -6063,6 +6119,43 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         } else {
                             AugmentationScopeKind::Module(spec.clone())
                         };
+                        if contribution == AugmentationContribution::EnumBlocks {
+                            // The block's members, read in the block's own
+                            // scope: a same-named declaration of the file
+                            // itself is another declaration.
+                            let prepared = match self.ctx.prepare_augmentation_value(
+                                &bundle,
+                                &scope_kind,
+                                *contributor_owner,
+                                decl_name,
+                            ) {
+                                verter_session_query::inputs::prepared::PreparedDeclOutcome::Ready(
+                                    Some(prepared),
+                                ) => prepared,
+                                verter_session_query::inputs::prepared::PreparedDeclOutcome::Ready(
+                                    None,
+                                ) => continue,
+                                verter_session_query::inputs::prepared::PreparedDeclOutcome::LeaseMiss
+                                | verter_session_query::inputs::prepared::PreparedDeclOutcome::Failed(_) => {
+                                    source_env_unobservable = true;
+                                    continue;
+                                }
+                            };
+                            let Some(members) = prepared.enum_members.as_ref().filter(|_| {
+                                prepared.kind
+                                    == verter_session_query::declarations::ValueDeclKind::Enum
+                            }) else {
+                                continue;
+                            };
+                            enum_blocks.push(EnumContribution {
+                                canonical: Arc::clone(augmenter_canonical),
+                                owner: *contributor_owner,
+                                scope: Some(scope_kind),
+                                members: Arc::clone(&members.members),
+                            });
+                            any_contribution = true;
+                            continue;
+                        }
                         if contribution == AugmentationContribution::FunctionSignatures {
                             let prepared = match self.ctx.prepare_augmentation_value(&bundle,
                                 &scope_kind,
@@ -6243,6 +6336,60 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 {
                     continue;
                 }
+                // A script's block of the global enum: its own declaration
+                // of the name.
+                OrderedOrigin::FileScope(file_scope_idx)
+                    if contribution == AugmentationContribution::EnumBlocks =>
+                {
+                    let entry = &population_hit.entries[file_scope_idx];
+                    let canonical = entry.artifact_key.canonical.as_ref();
+                    let Some(indexed) = self
+                        .ctx
+                        .ensure_indexed_ready_serve(canonical)
+                        .map(|serve| serve.indexed)
+                    else {
+                        source_env_unobservable = true;
+                        continue;
+                    };
+                    let Some(art) = self
+                        .ctx
+                        .augmenter_artifact_answer(&entry.artifact_key, indexed.whole_hash)
+                    else {
+                        source_env_unobservable = true;
+                        continue;
+                    };
+                    let prepared =
+                        match self
+                            .ctx
+                            .prepared_value_decl(canonical, entry.owner, decl_name)
+                        {
+                            Ok(Some(prepared)) => prepared,
+                            Ok(None) => continue,
+                            Err(_) => {
+                                source_env_unobservable = true;
+                                continue;
+                            }
+                        };
+                    let Some(members) = prepared.enum_members.as_ref().filter(|_| {
+                        prepared.kind == verter_session_query::declarations::ValueDeclKind::Enum
+                    }) else {
+                        continue;
+                    };
+                    enum_blocks.push(EnumContribution {
+                        canonical: Arc::clone(&entry.artifact_key.canonical),
+                        owner: entry.owner,
+                        scope: None,
+                        members: Arc::clone(&members.members),
+                    });
+                    contributor_roots.push(AugmentationContributorRoot {
+                        canonical: Arc::clone(&entry.artifact_key.canonical),
+                        whole_hash: indexed.whole_hash,
+                        artifact_key: art
+                            .refreshed_key
+                            .clone()
+                            .unwrap_or_else(|| entry.artifact_key.clone()),
+                    });
+                }
                 OrderedOrigin::FileScope(file_scope_idx) => {
                     let entry = &population_hit.entries[file_scope_idx];
                     if entry.is_automatic_lib {
@@ -6392,7 +6539,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         self.ctx
             .refresh_augmentation_keys(&key, &augmenter_set, refreshed_keys);
 
-        if contributor_nodes.is_empty() {
+        if contributor_nodes.is_empty() && enum_blocks.is_empty() {
             // DISTINGUISH the two empty outcomes (they are NOT the same):
             //   - `source_env_unobservable == true`: augmenters targeted this
             //     decl but EVERY contribution was unobservable (torn / unhealable
@@ -6414,6 +6561,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     source_env_unobservable: true,
                     base_position: None,
                     signature_groups: Vec::new(),
+                    enum_blocks: Vec::new(),
                 });
             }
             return None;
@@ -6469,6 +6617,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             source_env_unobservable,
             base_position,
             signature_groups,
+            enum_blocks,
         })
     }
 
@@ -6754,6 +6903,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             source_env_unobservable,
             base_position: _,
             signature_groups: _,
+            enum_blocks: _,
         } = self.collect_augmentation_contributions(
             AugmentationContribution::TypeBody,
             target,
@@ -7017,15 +7167,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// files is ONE variable whose type is its first declaration's (the
     /// checker requires every later declaration to repeat it, TS2403), so
     /// only that one is listed; a function declared in several files is
-    /// one function whose overloads are every file's, so all are. `None`
+    /// one function whose overloads are every file's, so all are; an enum
+    /// declared in several files is one enum, listed by its first
+    /// declaration, which carries every file's members. `None`
     /// when neither declares such a global value, or when this lane cannot
     /// address it:
     ///
     /// - declarations of other kinds, or of mixed kinds, span more than
     ///   one file: a block-scoped global declared twice is the checker's
     ///   TS2451;
-    /// - a declaring module also declares a module-scope value of the same
-    ///   name, which the identity `(module, name)` addresses instead.
+    /// - a declaration listed is a module's `declare global` one while the
+    ///   module also declares a module-scope value of the same name, which
+    ///   the identity `(module, name)` addresses instead. (An enum or a
+    ///   `var` listed by an earlier declaration still reads it: an enum's
+    ///   blocks are assembled in their own declaration scopes.)
     ///
     /// A `declare global` block in a SCRIPT binds nothing.
     pub(super) fn global_value_declarations(
@@ -7059,9 +7214,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             name,
             verter_session_query::facts::SymbolSpace::Value,
         );
+        // Each declaration with its kind, and whether its identity would
+        // address the declaring module's own value of the name instead.
         let mut declarations: Vec<(
             &verter_session_query::inputs::contributors::ContributorEntry,
             ValueDeclKind,
+            bool,
         )> = Vec::new();
         for entry in population.entries.iter() {
             let declares = !entry.is_automatic_lib
@@ -7081,23 +7239,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .ensure_indexed_ready_serve(&entry.artifact_key.canonical)?
                 .indexed;
             let headers = &indexed.shallow_state.headers;
-            let kind = if entry.origin == ContributorOrigin::FileScopeValue {
-                headers.value_header_in(entry.owner, name)?.kind
+            let (kind, shadowed) = if entry.origin == ContributorOrigin::FileScopeValue {
+                (headers.value_header_in(entry.owner, name)?.kind, false)
             } else {
-                if indexed.shallow_state.has_value_symbol_in(entry.owner, name) {
-                    return None;
-                }
-                headers
-                    .augmentation_value_header_in(
-                        &verter_session_query::declarations::AugmentationScopeKind::Global,
-                        entry.owner,
-                        name,
-                    )?
-                    .kind
+                (
+                    headers
+                        .augmentation_value_header_in(
+                            &verter_session_query::declarations::AugmentationScopeKind::Global,
+                            entry.owner,
+                            name,
+                        )?
+                        .kind,
+                    indexed.shallow_state.has_value_symbol_in(entry.owner, name),
+                )
             };
-            declarations.push((entry, kind));
+            declarations.push((entry, kind, shadowed));
         }
-        declarations.sort_by(|(left, _), (right, _)| {
+        declarations.sort_by(|(left, _, _), (right, _, _)| {
             self.ctx
                 .declaration_sequence_rank(left.artifact_key.canonical.as_ref())
                 .cmp(
@@ -7113,9 +7271,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 })
                 .then_with(|| left.parse_stable_hash.cmp(&right.parse_stable_hash))
         });
-        let mut declarations: Vec<(ResolvedRootIdentity, ValueDeclKind)> = lib
+        let mut declarations: Vec<(ResolvedRootIdentity, ValueDeclKind, bool)> = lib
+            .map(|(identity, kind)| (identity, kind, false))
             .into_iter()
-            .chain(declarations.into_iter().map(|(entry, kind)| {
+            .chain(declarations.into_iter().map(|(entry, kind, shadowed)| {
                 (
                     ResolvedRootIdentity::new_in_owner(
                         Arc::clone(&entry.artifact_key.canonical),
@@ -7123,27 +7282,42 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         name,
                     ),
                     kind,
+                    shadowed,
                 )
             }))
             .collect();
         let first = declarations.first()?.0.canonical_id.clone();
         let spans_files = declarations
             .iter()
-            .any(|(identity, _)| identity.canonical_id != first);
+            .any(|(identity, _, _)| identity.canonical_id != first);
         if spans_files {
             let is_function = |kind: &ValueDeclKind| {
                 matches!(kind, ValueDeclKind::Function | ValueDeclKind::AsyncFunction)
             };
+            // An enum declared in several files is ONE enum too, whose
+            // first declaration carries every file's members
+            // (`enum_blocks`).
             if declarations
                 .iter()
-                .all(|(_, kind)| *kind == ValueDeclKind::Var)
+                .all(|(_, kind, _)| *kind == ValueDeclKind::Var)
+                || declarations
+                    .iter()
+                    .all(|(_, kind, _)| *kind == ValueDeclKind::Enum)
             {
                 declarations.truncate(1);
-            } else if !declarations.iter().all(|(_, kind)| is_function(kind)) {
+            } else if !declarations.iter().all(|(_, kind, _)| is_function(kind)) {
                 return None;
             }
         }
-        Some(declarations)
+        if declarations.iter().any(|(_, _, shadowed)| *shadowed) {
+            return None;
+        }
+        Some(
+            declarations
+                .into_iter()
+                .map(|(identity, kind, _)| (identity, kind))
+                .collect(),
+        )
     }
 
     /// The global `TemplateStringsArray` type — a tagged template's first
@@ -18109,6 +18283,9 @@ pub(super) struct InstantiateBuild {
     conditional_body: Option<Option<bool>>,
     generic: bool,
     suspend: bool,
+    /// Whether the body is an enum's member union: every block of the enum,
+    /// augmenting ones included, already contributed its members.
+    enum_body: bool,
     body: BodyLowering,
     complete_structure: bool,
 }
