@@ -371,8 +371,14 @@ type FactVersionLedger = imbl::GenericHashMap<
 >;
 
 /// One derived node's edge set, or one dependency's dependent set.
+///
+/// The graph's persistent containers hold each key behind an `Arc`, as the
+/// version ledger does. A HAMT node reserves its full slot width inline, so
+/// an inline key multiplies its own size by that width in every node; behind
+/// an `Arc` a slot costs a pointer, and the forward and reverse sets of one
+/// publication share a single allocation of each key.
 type ResolutionEdgeSet = imbl::GenericHashSet<
-    ResolutionFactKey,
+    Arc<ResolutionFactKey>,
     rustc_hash::FxBuildHasher,
     imbl::shared_ptr::DefaultSharedPtr,
 >;
@@ -382,7 +388,7 @@ type ResolutionEdgeSet = imbl::GenericHashSet<
 /// `O(changed keys × log n)` — the bound the decision DAG is sized
 /// against.
 type ResolutionEdgeMap = imbl::GenericHashMap<
-    ResolutionFactKey,
+    Arc<ResolutionFactKey>,
     ResolutionEdgeSet,
     rustc_hash::FxBuildHasher,
     imbl::shared_ptr::DefaultSharedPtr,
@@ -439,7 +445,7 @@ pub(crate) struct ResolutionFactRoot {
     /// as long as it holds the node, so a snapshot that outlives the
     /// node's retirement keeps its bytes charged until the snapshot drops.
     decision_charges: imbl::GenericHashMap<
-        ResolutionFactKey,
+        Arc<ResolutionFactKey>,
         Arc<verter_session_query::retention::resolution_charge::ResolutionRetentionCharge>,
         rustc_hash::FxBuildHasher,
         imbl::shared_ptr::DefaultSharedPtr,
@@ -530,33 +536,48 @@ impl ResolutionFactRoot {
         node: ResolutionFactKey,
         dependencies: impl IntoIterator<Item = ResolutionFactKey>,
     ) -> bool {
+        self.publish_shared_derived(Arc::new(node), dependencies)
+    }
+
+    /// [`Self::publish_derived`] over a node key already behind its shared
+    /// allocation.
+    fn publish_shared_derived(
+        &mut self,
+        node: Arc<ResolutionFactKey>,
+        dependencies: impl IntoIterator<Item = ResolutionFactKey>,
+    ) -> bool {
         verter_debug_assert!(
             node.is_derived_node(),
             "only a derived DAG node carries direct edges"
         );
-        let replaced = self.forward.contains_key(&node);
+        let replaced = self.forward.contains_key(node.as_ref());
         self.detach_edges(&node);
-        self.retired_nodes.remove(&node);
+        self.retired_nodes.remove(node.as_ref());
         let mut direct = ResolutionEdgeSet::default();
         for dependency in dependencies {
             // A node is never its own dependency: a recompute of Q that
             // reuses Q's own prior answer is the SAME decision, not a
             // child of itself, and a self-edge would make propagation
             // advance the node that seeded it.
-            if dependency == node {
+            if dependency == *node {
                 continue;
             }
+            // A dependency already indexed keeps its one allocation.
+            let dependency = match self.reverse.get_key_value(&dependency) {
+                Some((shared, _)) => Arc::clone(shared),
+                None => Arc::new(dependency),
+            };
             self.reverse
-                .entry(dependency.clone())
+                .entry(Arc::clone(&dependency))
                 .or_default()
-                .insert(node.clone());
+                .insert(Arc::clone(&node));
             direct.insert(dependency);
         }
         if let Some(owner) = node.owner_canonical() {
             self.owner_decisions
                 .entry((owner.to_owned(), node.population()))
                 .or_default()
-                .insert(node.clone());
+                .insert(Arc::clone(&node));
         }
         self.edge_count += direct.len();
         self.forward.insert(node, direct);
@@ -572,8 +593,9 @@ impl ResolutionFactRoot {
         dependencies: impl IntoIterator<Item = ResolutionFactKey>,
         charge: Arc<verter_session_query::retention::resolution_charge::ResolutionRetentionCharge>,
     ) -> bool {
-        self.decision_charges.insert(node.clone(), charge);
-        self.publish_derived(node, dependencies)
+        let node = Arc::new(node);
+        self.decision_charges.insert(Arc::clone(&node), charge);
+        self.publish_shared_derived(node, dependencies)
     }
 
     /// Drop a derived node: ADVANCE its version, then drop its complete
@@ -627,7 +649,7 @@ impl ResolutionFactRoot {
             }
         }
         self.advance(node.clone(), version);
-        self.retired_nodes.insert(node.clone());
+        self.retired_nodes.insert(Arc::new(node.clone()));
         if let Some(owner_set) = orphaned_owner_set {
             self.remove_derived(&owner_set, version);
         }
@@ -659,7 +681,7 @@ impl ResolutionFactRoot {
         let floor = self.derived_floor;
         for node in self.forward.keys() {
             if !self.versions.contains_key(node) {
-                self.versions.insert(Arc::new(node.clone()), floor);
+                self.versions.insert(Arc::clone(node), floor);
             }
         }
         for node in std::mem::take(&mut self.retired_nodes) {
@@ -709,7 +731,7 @@ impl ResolutionFactRoot {
                 verter_session_query::resolution::normalize_canonical_id(owner),
                 population,
             ))
-            .map(|decisions| decisions.iter().cloned().collect())
+            .map(|decisions| decisions.iter().map(|node| (**node).clone()).collect())
             .unwrap_or_default()
     }
 
@@ -720,7 +742,7 @@ impl ResolutionFactRoot {
     ) -> Option<Vec<ResolutionFactKey>> {
         self.forward
             .get(node)
-            .map(|deps| deps.iter().cloned().collect())
+            .map(|deps| deps.iter().map(|dep| (**dep).clone()).collect())
     }
 
     /// Every `ContextSelection` key some derived node depends on.
@@ -731,8 +753,8 @@ impl ResolutionFactRoot {
     pub(crate) fn registered_context_selection_keys(&self) -> Vec<ResolutionFactKey> {
         self.reverse
             .keys()
-            .filter(|key| matches!(key, ResolutionFactKey::ContextSelection { .. }))
-            .cloned()
+            .filter(|key| matches!(key.as_ref(), ResolutionFactKey::ContextSelection { .. }))
+            .map(|key| (**key).clone())
             .collect()
     }
 
@@ -751,7 +773,7 @@ impl ResolutionFactRoot {
     pub(crate) fn direct_dependents(&self, key: &ResolutionFactKey) -> Vec<ResolutionFactKey> {
         self.reverse
             .get(key)
-            .map(|dependents| dependents.iter().cloned().collect())
+            .map(|dependents| dependents.iter().map(|node| (**node).clone()).collect())
             .unwrap_or_default()
     }
 
@@ -786,13 +808,13 @@ impl ResolutionFactRoot {
                 continue;
             };
             for dependent in dependents {
-                if !visited.insert(dependent.clone()) {
+                if !visited.insert((*dependent).clone()) {
                     continue;
                 }
                 self.versions
-                    .insert(Arc::new(dependent.clone()), fresh_version());
-                advanced.push(dependent.clone());
-                queue.push_back(dependent);
+                    .insert(Arc::clone(&dependent), fresh_version());
+                advanced.push((*dependent).clone());
+                queue.push_back((*dependent).clone());
             }
         }
         advanced
@@ -1079,11 +1101,11 @@ impl RequestOverlayRoot {
                     continue;
                 };
                 for dependent in dependents {
-                    if derived.contains_key(dependent) {
+                    if derived.contains_key(dependent.as_ref()) {
                         continue;
                     }
-                    derived.insert(dependent.clone(), mint_overlay_version());
-                    queue.push_back(dependent.clone());
+                    derived.insert((**dependent).clone(), mint_overlay_version());
+                    queue.push_back((**dependent).clone());
                 }
             }
         }

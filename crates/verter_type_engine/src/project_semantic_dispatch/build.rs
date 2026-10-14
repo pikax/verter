@@ -80,6 +80,7 @@ pub(super) type EffectivePreparedValueDecl = (
 /// version-root fields and the `artifact_key` are inseparable, and the fact
 /// emission records the contributor's `FileWholeHash` observation AND its
 /// `FileSourceEnv` observation from the SAME element in one step.
+#[derive(Clone)]
 struct AugmentationContributorRoot {
     canonical: Arc<str>,
     whole_hash: crate::semantic_query::HashValue,
@@ -123,6 +124,82 @@ pub(super) struct EnumContribution {
     /// declaration.
     pub(super) scope: Option<verter_session_query::declarations::AugmentationScopeKind>,
     pub(super) members: Arc<[verter_type_expr::facts::EnumMemberEntry]>,
+}
+
+/// One contributor of an augmentation fold, read before the fold so its
+/// type bodies can be lowered as one batch: its served source, and for an
+/// augmenter its artifact answer and the blocks that contribute to the
+/// folded declaration (raw specifier, owner, retained scope).
+struct ContributorPrefetch {
+    indexed: Arc<verter_session_query::inputs::indexed::IndexedInputRecord>,
+    art: Option<crate::resolver_core::request_ports::AugmenterArtifactAnswer>,
+    matched: Vec<(
+        String,
+        verter_type_expr::TopLevelOwnerId,
+        verter_session_query::declarations::AugmentationScopeKind,
+    )>,
+}
+
+/// One contributing type body of an augmentation fold, fetched but not
+/// yet projected: its role-free authored shape and everything projecting
+/// it reads. Nothing here depends on the demanding projection context, so
+/// a fold serves every context its declaration is instantiated under.
+pub(crate) struct PlannedContributorBody {
+    /// The `LowerLocator` shape; `None` when the locator missed (the
+    /// projection is then the shared miss sentinel).
+    shape: Option<SemanticNodeId>,
+    owner_symbol: Arc<str>,
+    kind: verter_session_query::declarations::TypeDeclKind,
+    type_parameters: Arc<[verter_type_expr::facts::NarrowTypeParam]>,
+    name_resolution: Arc<FxHashMap<Arc<str>, ResolvedRootIdentity>>,
+    binding: PlannedBinding,
+    scope: NodeScopeId,
+    scope_payload: Option<crate::resolver_core::bare_name_resolve::DeclarationScopePayload>,
+    shadowing: crate::resolver_core::scope_shadowing::ScopeShadowing,
+}
+
+/// How a planned body's type parameters bind to the augmented
+/// declaration's arguments.
+enum PlannedBinding {
+    /// An augmenting block's parameters, bound positionally when planned.
+    Bound(FxHashMap<String, SemanticNodeId>),
+    /// A script declaration's: its arguments bind through its declared
+    /// defaults under the projecting context.
+    Declared(Arc<PreparedTypeDecl>),
+}
+
+/// A type-body augmentation fold before projection: the ordered planned
+/// bodies and the fold's rails. Shared by every projection context of one
+/// dispatch transaction (see [`ProjectSemanticDispatch::collect_augmentation_contributions`]).
+pub(crate) struct AugmentationPlan {
+    bodies: Vec<PlannedContributorBody>,
+    contributor_roots: Vec<AugmentationContributorRoot>,
+    source_env_unobservable: bool,
+    base_position: Option<usize>,
+    /// The target and augmenter-set fingerprint of the stitched event a
+    /// projection reports; `None` for a tainted-empty fold.
+    stitched: Option<(
+        verter_session_query::resolution::AugmentationTargetKind,
+        crate::semantic_query::HashValue,
+    )>,
+    /// Whether every shape fetch answered a value: a recursive or failed
+    /// fetch depends on the demand stack that met it, so its plan serves
+    /// only the context that built it.
+    context_free: bool,
+}
+
+/// A fold as the transaction holds it: lowered contributions, or a shared
+/// type-body plan.
+enum TransactionFold {
+    Contributions(AugmentationContributions),
+    Plan(Arc<AugmentationPlan>),
+}
+
+/// What an augmentation fold produced: lowered contributions, or the
+/// unprojected plan of a type-body fold.
+enum FoldedAugmentation {
+    Contributions(AugmentationContributions),
+    Plan(AugmentationPlan),
 }
 
 /// Shared return shape of the augmenter-fold path
@@ -5632,15 +5709,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // sibling augmenter pulled in via a side-effect `import "./base"` is
         // discovered rather than silently dropped. Loads are idempotent /
         // content-hash cached; the augmentation index is then built once.
-        for rdep in self
-            .ctx
-            .reverse_dependency_canonicals(decl_canonical.as_ref())
-        {
-            let _ = self.ctx.ensure_indexed_ready_serve(&rdep);
-        }
+        let index_candidates = || {
+            for rdep in self
+                .ctx
+                .reverse_dependency_canonicals(decl_canonical.as_ref())
+            {
+                let _ = self.ctx.ensure_indexed_ready_serve(&rdep);
+            }
+        };
 
         let target = AugmentationTargetKind::ResolvedRelativeCanonical(Arc::clone(decl_canonical));
-        let contributions = self.collect_augmentation_contributions(
+        let contributions = self.collect_augmentation_contributions_after(
             AugmentationContribution::TypeBody,
             target,
             decl_name.as_ref(),
@@ -5648,6 +5727,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             context,
             decl_canonical.as_ref(),
             None,
+            index_candidates,
         )?;
         Some(self.merge_into_base(base_result, base_scope, contributions))
     }
@@ -5780,6 +5860,279 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
+    /// The contributions every augmenter and every other declaration of
+    /// `decl_name` adds to the declaration `target` names, projected under
+    /// `context` (see [`Self::fold_augmentation_contributions`]).
+    ///
+    /// A type-body fold is context-free up to its projection: which files
+    /// contribute, their prepared declarations, scopes and authored shapes
+    /// do not depend on the demanding context. A declaration instantiated
+    /// under several contexts in one dispatch transaction — `keyof M` reads
+    /// `M` published, `M[K]` reads it in structural transit — therefore
+    /// folds once; every later context replays the fold's reads into the
+    /// scopes live now and projects the planned bodies. The plan lives
+    /// exactly as long as the transaction and is kept only when complete.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn collect_augmentation_contributions(
+        &self,
+        contribution: AugmentationContribution,
+        target: verter_session_query::resolution::AugmentationTargetKind,
+        decl_name: &str,
+        type_arguments: &[SemanticNodeId],
+        context: crate::semantic_query::ProjectionReductionContext,
+        request_canonical: &str,
+        excluded_contributor: Option<&str>,
+    ) -> Option<AugmentationContributions> {
+        self.collect_augmentation_contributions_after(
+            contribution,
+            target,
+            decl_name,
+            type_arguments,
+            context,
+            request_canonical,
+            excluded_contributor,
+            || {},
+        )
+    }
+
+    /// [`Self::collect_augmentation_contributions`], running `prepare` first
+    /// whenever the fold runs — inside the fold's recorded reads, so a
+    /// reused fold replays what `prepare` read and skips its work.
+    #[allow(clippy::too_many_arguments)]
+    fn collect_augmentation_contributions_after(
+        &self,
+        contribution: AugmentationContribution,
+        target: verter_session_query::resolution::AugmentationTargetKind,
+        decl_name: &str,
+        type_arguments: &[SemanticNodeId],
+        context: crate::semantic_query::ProjectionReductionContext,
+        request_canonical: &str,
+        excluded_contributor: Option<&str>,
+        prepare: impl FnOnce(),
+    ) -> Option<AugmentationContributions> {
+        let key = (contribution == AugmentationContribution::TypeBody).then(|| {
+            super::dispatch_txn::AugmentationPlanKey {
+                target: target.clone(),
+                decl_name: Arc::from(decl_name),
+                type_arguments: Arc::from(type_arguments),
+                request_canonical: Arc::from(request_canonical),
+                excluded_contributor: excluded_contributor.map(Arc::from),
+            }
+        });
+        if let Some(plan) = key
+            .as_ref()
+            .and_then(|key| self.reusable_augmentation_plan(key))
+        {
+            return Some(self.project_augmentation_plan(&plan, type_arguments, context));
+        }
+        let fold = || {
+            self.fold_augmentation_contributions(
+                contribution,
+                target,
+                decl_name,
+                type_arguments,
+                context,
+                request_canonical,
+                excluded_contributor,
+                prepare,
+            )
+        };
+        let folded = match key {
+            Some(key) => self.record_augmentation_plan(key, fold),
+            None => fold().map(|folded| match folded {
+                FoldedAugmentation::Contributions(contributions) => {
+                    TransactionFold::Contributions(contributions)
+                }
+                FoldedAugmentation::Plan(plan) => TransactionFold::Plan(Arc::new(plan)),
+            }),
+        }?;
+        Some(match folded {
+            TransactionFold::Contributions(contributions) => contributions,
+            TransactionFold::Plan(plan) => {
+                self.project_augmentation_plan(&plan, type_arguments, context)
+            }
+        })
+    }
+
+    /// A type-body fold this transaction completed for `key`, after
+    /// replaying what folding it read — its facts, refusal, file self-roots
+    /// and canonical evidence — into the scopes live now, exactly as
+    /// folding it again would.
+    fn reusable_augmentation_plan(
+        &self,
+        key: &super::dispatch_txn::AugmentationPlanKey,
+    ) -> Option<Arc<AugmentationPlan>> {
+        let txn = self.dispatch_txn.borrow();
+        let completed = txn.augmentation.get(key)?;
+        let replay = &completed.replay;
+        crate::resolver_core::resolver_context::observe_fan_out_borrowed(&replay.reads.facts);
+        crate::fact_tracing::replay_reuse_refusal(&completed.reuse);
+        self.deposit_operand_self_roots(&replay.observed_self_roots);
+        if replay.canonical_evidence_deposited {
+            self.canonical_evidence_epoch
+                .set(self.canonical_evidence_epoch.get().wrapping_add(1));
+        }
+        Some(Arc::clone(&completed.plan))
+    }
+
+    /// Fold a type body, keeping a complete plan for the rest of the
+    /// transaction with what reusing it replays. A fold is recorded only
+    /// when every channel an enclosing build observes is observable here
+    /// (the rule the flow-result table applies); anything else folds
+    /// exactly as before and is never reused.
+    fn record_augmentation_plan(
+        &self,
+        key: super::dispatch_txn::AugmentationPlanKey,
+        fold: impl FnOnce() -> Option<FoldedAugmentation>,
+    ) -> Option<TransactionFold> {
+        let into_transaction_fold = |folded: FoldedAugmentation| match folded {
+            FoldedAugmentation::Contributions(contributions) => {
+                TransactionFold::Contributions(contributions)
+            }
+            FoldedAugmentation::Plan(plan) => TransactionFold::Plan(Arc::new(plan)),
+        };
+        let completeness_scope_active =
+            crate::request_context::cold_compute_completeness_scope_active();
+        let recordable = crate::resolver_core::resolver_context::fact_tracer_installed()
+            && !self.build_local_taint.borrow().is_empty()
+            && !(completeness_scope_active
+                && crate::request_context::current_cold_compute_completeness().is_partial());
+        if !recordable {
+            return fold().map(into_transaction_fold);
+        }
+        let private_completeness = (!completeness_scope_active)
+            .then(crate::request_context::ColdComputeCompletenessScope::enter);
+        let evidence_epoch = self.canonical_evidence_epoch.get();
+        let frame = super::BuildLocalTaintGuard::push(&self.build_local_taint);
+        let refusals = crate::fact_tracing::RefusalObservationScope::enter();
+        let (folded, reads) = crate::resolver_core::resolver_context::record_fact_reads(fold);
+        let refused = refusals.observed();
+        drop(refusals);
+        let observed = frame.finish();
+        let folded_partial =
+            crate::request_context::current_cold_compute_completeness().is_partial();
+        if let Some(scope) = private_completeness {
+            scope.discard();
+        }
+        // The frame's rails reach the enclosing build exactly as if they had
+        // folded there directly.
+        self.fold_observed_frame_into_top(&observed);
+        let folded = folded.map(into_transaction_fold)?;
+        let TransactionFold::Plan(plan) = &folded else {
+            return Some(folded);
+        };
+        let complete = plan.context_free && !observed.result_is_partial && !folded_partial;
+        let refusal = match refused {
+            Some(reason) => verter_session_query::facts::reuse::ObservedRefusal::Typed(reason),
+            None if reads.non_cacheable || observed.cache_suppress => {
+                verter_session_query::facts::reuse::ObservedRefusal::Unattributed
+            }
+            None => verter_session_query::facts::reuse::ObservedRefusal::None,
+        };
+        let reuse = verter_session_query::facts::reuse::classify_reuse(refusal, complete);
+        if reuse.is_request_reusable() {
+            self.dispatch_txn.borrow_mut().augmentation.complete(
+                key,
+                super::dispatch_txn::TransactionAugmentationPlan {
+                    plan: Arc::clone(plan),
+                    reuse,
+                    replay: super::dispatch_txn::FlowMemberReuse {
+                        reads,
+                        observed_self_roots: observed.observed_self_roots,
+                        canonical_evidence_deposited: self.canonical_evidence_epoch.get()
+                            != evidence_epoch,
+                    },
+                },
+            );
+        }
+        Some(folded)
+    }
+
+    /// Project a planned type-body fold under `context`: each planned body
+    /// bound to the augmented declaration's arguments and projected exactly
+    /// as [`Self::lower_located_body_with_provenance`] projects a located
+    /// body, in fold order.
+    fn project_augmentation_plan(
+        &self,
+        plan: &AugmentationPlan,
+        type_arguments: &[SemanticNodeId],
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> AugmentationContributions {
+        let mut contributor_nodes = Vec::with_capacity(plan.bodies.len());
+        for body in &plan.bodies {
+            let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
+            let declared_env;
+            let env = match &body.binding {
+                PlannedBinding::Bound(env) => env,
+                PlannedBinding::Declared(prepared) => {
+                    declared_env = self
+                        .bind_declared_type_arguments(
+                            prepared,
+                            type_arguments,
+                            &DeclarationBindingScope {
+                                scope: &body.scope,
+                                scope_payload: body.scope_payload.as_ref(),
+                                shadowing: &body.shadowing,
+                                authored_resolution_debt: None,
+                            },
+                            &mut substitutions,
+                            context,
+                            |_, _| None,
+                        )
+                        .0;
+                    &declared_env
+                }
+            };
+            let mut lowering = match body.shape {
+                Some(shape) => self.begin_shape_lowering(
+                    shape,
+                    &body.owner_symbol,
+                    body.kind,
+                    &body.type_parameters,
+                    env,
+                    &body.scope,
+                    &mut substitutions,
+                    context.into_structural_provenance(),
+                    &[],
+                    crate::project_semantic_dispatch::locator_view_worklist::ProjectionSeam::inline(
+                    ),
+                ),
+                None => BodyLowering::Ready(self.opaque(QueryError::Miss)),
+            };
+            let inputs = crate::project_semantic_dispatch::locator_view::LocatorViewInputs {
+                env,
+                scope: &body.scope,
+                name_resolution: &body.name_resolution,
+                scope_payload: body.scope_payload.as_ref(),
+                shadowing: &body.shadowing,
+                authored_resolution_debt: None,
+                self_value: None,
+            };
+            match self.drain_located_body_lowering(&mut lowering, &inputs, &mut substitutions, None)
+            {
+                BodyPoll::Done(node, _) => contributor_nodes.push(node),
+                BodyPoll::Need(_) => {
+                    unreachable!("an inline body lowering evaluates the instantiations it reaches")
+                }
+            }
+        }
+        if let Some((target, fingerprint)) = &plan.stitched {
+            emit_module_augmentation_stitched_event(
+                target,
+                plan.contributor_roots.len() as u32,
+                *fingerprint,
+            );
+        }
+        AugmentationContributions {
+            contributor_nodes,
+            contributor_roots: plan.contributor_roots.clone(),
+            source_env_unobservable: plan.source_env_unobservable,
+            base_position: plan.base_position,
+            signature_groups: Vec::new(),
+            enum_blocks: Vec::new(),
+        }
+    }
+
     /// Shared augmenter-contribution folder — the ONE cross-file
     /// declaration-merge augmenter path, used by BOTH the relative-canonical
     /// stitch ([`Self::stitch_module_augmentations`]) and the external
@@ -5820,7 +6173,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// to an exported function value (file-scope global declarations never
     /// contribute those).
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn collect_augmentation_contributions(
+    fn fold_augmentation_contributions(
         &self,
         contribution: AugmentationContribution,
         target: verter_session_query::resolution::AugmentationTargetKind,
@@ -5829,14 +6182,26 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         context: crate::semantic_query::ProjectionReductionContext,
         request_canonical: &str,
         excluded_contributor: Option<&str>,
-    ) -> Option<AugmentationContributions> {
+        prepare: impl FnOnce(),
+    ) -> Option<FoldedAugmentation> {
         use verter_session_query::declarations::AugmentationScopeKind;
         use verter_session_query::resolution::AugmentationTargetKind;
 
+        prepare();
         // The source boundary captures the same session population and host
         // environment, ingests program roots, and returns an owned index read.
-        let (key, augmenter_set) = self.ctx.augmentation_index(target.clone());
+        let (key, augmenter_set, index_resolutions) =
+            self.ctx.augmentation_index_with_resolutions(target.clone());
+        // A specifier the index population resolved in this read is not
+        // resolved again: the answer is the one the same fold just read.
         let resolve_rel = |augmenter: &str, spec: &str| -> Option<Arc<str>> {
+            if let Some(resolved) = index_resolutions.get(augmenter).and_then(|specs| {
+                specs
+                    .iter()
+                    .find(|(resolved_spec, _)| resolved_spec.as_ref() == spec)
+            }) {
+                return resolved.1.clone();
+            }
             self.ctx
                 .resolve_type_dependency_canonical(augmenter, spec)
                 .map(Arc::from)
@@ -5937,6 +6302,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
 
         let mut contributor_nodes: Vec<SemanticNodeId> = Vec::new();
+        // A type body's contributions are planned here and projected under
+        // each demanding context by the caller.
+        let mut planned_bodies: Vec<PlannedContributorBody> = Vec::new();
+        let mut context_free = true;
         let mut signature_groups: Vec<Vec<SemanticNodeId>> = Vec::new();
         let mut enum_blocks: Vec<EnumContribution> = Vec::new();
         // One root per contributing augmenter: the version self-root AND the
@@ -5967,15 +6336,146 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // declares another project's enum of the name.
         let request_project = (contribution == AugmentationContribution::EnumBlocks)
             .then(|| self.ctx.project_stable_key_for_canonical(request_canonical));
-        for candidate in ordered.iter().copied() {
-            let canonical = match candidate {
+        let candidate_canonical = |candidate: OrderedOrigin| -> &str {
+            match candidate {
                 OrderedOrigin::Augmenter(i) => augmenter_set.entries[i].canonical().as_ref(),
                 OrderedOrigin::FileScope(i) => {
                     population_hit.entries[i].artifact_key.canonical.as_ref()
                 }
+            }
+        };
+        // Which declaration blocks of an augmenter contribute to
+        // `decl_name`: each `ModuleAugmentationFact` of the block that
+        // targets this declaration, as its raw specifier (the key its typed
+        // inner body is retained under) and its owner.
+        let matched_augmentations =
+            |augmenter_canonical: &str,
+             art: &crate::resolver_core::request_ports::AugmenterArtifactAnswer|
+             -> Vec<(
+                String,
+                verter_type_expr::TopLevelOwnerId,
+                AugmentationScopeKind,
+            )> {
+                let mut matched_specs: Vec<(
+                    String,
+                    verter_type_expr::TopLevelOwnerId,
+                    AugmentationScopeKind,
+                )> = Vec::new();
+                for fact in art.augmentations.iter() {
+                    if fact.augmented_name.as_ref() != decl_name {
+                        continue;
+                    }
+                    if contribution != AugmentationContribution::TypeBody
+                        && fact.space != verter_session_query::facts::registry::SymbolSpace::Value
+                    {
+                        continue;
+                    }
+                    let relative = if matches!(key.target, verter_session_query::resolution::AugmentationTargetKind::ResolvedRelativeCanonical(_))
+                    && verter_session_query::resolution::is_relative_specifier(fact.specifier.as_ref()) {
+                    resolve_rel(augmenter_canonical, fact.specifier.as_ref())
+                } else { None };
+                    if !verter_session_query::source::augmentation::augmenter_matches_target(
+                        fact,
+                        &key,
+                        relative.as_deref(),
+                    ) {
+                        continue;
+                    }
+                    let spec = fact.specifier.as_ref();
+                    if matched_specs
+                        .iter()
+                        .any(|(matched, owner, _)| matched == spec && *owner == fact.owner)
+                    {
+                        continue;
+                    }
+                    // A `declare global` augmenter is indexed under the global
+                    // tag; its retained body lives in the GLOBAL augmentation
+                    // scope, not in a module scope named after the tag.
+                    let scope = if spec
+                        == verter_session_query::source::augmentation::GLOBAL_AUGMENTATION_TAG
+                    {
+                        AugmentationScopeKind::Global
+                    } else {
+                        AugmentationScopeKind::Module(spec.to_string())
+                    };
+                    matched_specs.push((spec.to_string(), fact.owner, scope));
+                }
+                matched_specs
             };
+        // Every contributor's source, artifact answer and contributing
+        // blocks, read once up front so the type bodies the fold lowers can
+        // be lowered as ONE batch — one lowering-service rendezvous per
+        // worker shard — before the fold reads them one by one.
+        let mut prefetched: Vec<Option<ContributorPrefetch>> = Vec::with_capacity(ordered.len());
+        for candidate in ordered.iter().copied() {
+            let canonical = candidate_canonical(candidate);
+            if excluded_contributor == Some(canonical) || request_project.is_some() {
+                prefetched.push(None);
+                continue;
+            }
+            let Some(indexed) = self
+                .ctx
+                .ensure_indexed_ready_serve(canonical)
+                .map(|serve| serve.indexed)
+            else {
+                prefetched.push(None);
+                continue;
+            };
+            let mut prefetch = ContributorPrefetch {
+                indexed,
+                art: None,
+                matched: Vec::new(),
+            };
+            if let OrderedOrigin::Augmenter(augmenter_idx) = candidate {
+                let declares_from_script =
+                    matches!(target, AugmentationTargetKind::GlobalAugmentation)
+                        && verter_session_query::inputs::contributors::classify_shallow_module_kind(
+                            &prefetch.indexed.shallow_state,
+                        ) == verter_session_query::inputs::contributors::FileModuleKind::Script;
+                if !declares_from_script {
+                    let augmenter = &augmenter_set.entries[augmenter_idx];
+                    if let Some(art) = self.ctx.augmenter_artifact_answer(
+                        &augmenter.artifact_key,
+                        prefetch.indexed.whole_hash,
+                    ) {
+                        prefetch.matched = matched_augmentations(canonical, &art);
+                        prefetch.art = Some(art);
+                    }
+                }
+            }
+            prefetched.push(Some(prefetch));
+        }
+        let _batched_bodies = (contribution == AugmentationContribution::TypeBody).then(|| {
+            let mut demands: Vec<verter_session_query::source::demand::TypeBodyBatchDemand<'_>> =
+                Vec::new();
+            for (candidate, prefetch) in ordered.iter().zip(&prefetched) {
+                let Some(prefetch) = prefetch else {
+                    continue;
+                };
+                let source = &*prefetch.indexed.shallow_state;
+                if let OrderedOrigin::FileScope(i) = *candidate {
+                    demands.push(verter_session_query::source::demand::TypeBodyBatchDemand {
+                        source,
+                        owner: population_hit.entries[i].owner,
+                        name: decl_name,
+                        scope: None,
+                    });
+                }
+                for (_, owner, scope) in &prefetch.matched {
+                    demands.push(verter_session_query::source::demand::TypeBodyBatchDemand {
+                        source,
+                        owner: *owner,
+                        name: decl_name,
+                        scope: Some(scope),
+                    });
+                }
+            }
+            self.ctx.batch_type_bodies(&demands)
+        });
+        for (position, candidate) in ordered.iter().copied().enumerate() {
+            let canonical = candidate_canonical(candidate);
             if excluded_contributor == Some(canonical) {
-                base_position.get_or_insert(contributor_nodes.len());
+                base_position.get_or_insert(contributor_nodes.len() + planned_bodies.len());
                 continue;
             }
             if let Some(project) = &request_project {
@@ -5984,15 +6484,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     continue;
                 }
             }
+            let prefetch = prefetched[position].take();
             match candidate {
                 OrderedOrigin::Augmenter(augmenter_idx) => {
                     let augmenter = &augmenter_set.entries[augmenter_idx];
                     let augmenter_canonical = augmenter.canonical();
-                    let Some(indexed) = self
-                        .ctx
-                        .ensure_indexed_ready_serve(augmenter_canonical.as_ref())
-                        .map(|serve| serve.indexed)
-                    else {
+                    let (prefetched_art, prefetched_matched, prefetched_indexed) = match prefetch {
+                        Some(prefetch) => {
+                            (prefetch.art, Some(prefetch.matched), Some(prefetch.indexed))
+                        }
+                        None => (None, None, None),
+                    };
+                    let Some(indexed) = prefetched_indexed.or_else(|| {
+                        self.ctx
+                            .ensure_indexed_ready_serve(augmenter_canonical.as_ref())
+                            .map(|serve| serve.indexed)
+                    }) else {
                         // A set member the live view cannot serve is a torn state:
                         // its contribution (and source-env identity) cannot be
                         // observed coherently — the parent result must not warm. The
@@ -6026,16 +6533,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     // augmentation. `ensure_indexed_ready_serve` above already materialised
                     // the augmenter's CURRENT version, so `indexed.whole_hash` is the
                     // scheduler-authoritative current content hash.
-                    let Some(art) = self
-                        .ctx
-                        .augmenter_artifact_answer(&augmenter.artifact_key, indexed.whole_hash)
-                    else {
-                        // Unhealable captured key: the augmenter's exact artifact
-                        // identity is unobservable — refuse warm admission. The
-                        // generalized non-cacheability rail is fanned ONCE at the
-                        // consumer (see the unservable arm above).
-                        source_env_unobservable = true;
-                        continue;
+                    let (art, matched_specs) = match prefetched_art {
+                        Some(art) => (art, prefetched_matched.unwrap_or_default()),
+                        None => {
+                            let Some(art) = self.ctx.augmenter_artifact_answer(
+                                &augmenter.artifact_key,
+                                indexed.whole_hash,
+                            ) else {
+                                // Unhealable captured key: the augmenter's exact artifact
+                                // identity is unobservable — refuse warm admission. The
+                                // generalized non-cacheability rail is fanned ONCE at the
+                                // consumer (see the unservable arm above).
+                                source_env_unobservable = true;
+                                continue;
+                            };
+                            let matched = matched_augmentations(augmenter_canonical.as_ref(), &art);
+                            (art, matched)
+                        }
                     };
                     // The EXACT key the contributor read serves from (the healed
                     // current key when the captured one was stale).
@@ -6045,35 +6559,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         .unwrap_or_else(|| augmenter.artifact_key.clone());
                     if let Some(refreshed_key) = refreshed_key {
                         refreshed_keys.push((augmenter_idx, refreshed_key));
-                    }
-                    let mut matched_specs: Vec<(String, verter_type_expr::TopLevelOwnerId)> =
-                        Vec::new();
-                    for fact in art.augmentations.iter() {
-                        if fact.augmented_name.as_ref() != decl_name {
-                            continue;
-                        }
-                        if contribution != AugmentationContribution::TypeBody
-                            && fact.space
-                                != verter_session_query::facts::registry::SymbolSpace::Value
-                        {
-                            continue;
-                        }
-                        let relative = if matches!(key.target, verter_session_query::resolution::AugmentationTargetKind::ResolvedRelativeCanonical(_))
-                            && verter_session_query::resolution::is_relative_specifier(fact.specifier.as_ref()) {
-                            resolve_rel(augmenter_canonical.as_ref(), fact.specifier.as_ref())
-                        } else { None };
-                        if !verter_session_query::source::augmentation::augmenter_matches_target(
-                            fact,
-                            &key,
-                            relative.as_deref(),
-                        ) {
-                            continue;
-                        }
-                        let spec = fact.specifier.as_ref().to_string();
-                        let matched = (spec, fact.owner);
-                        if !matched_specs.contains(&matched) {
-                            matched_specs.push(matched);
-                        }
                     }
                     if matched_specs.is_empty() {
                         continue;
@@ -6086,7 +6571,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     };
 
                     let mut any_contribution = false;
-                    for (spec, contributor_owner) in &matched_specs {
+                    for (spec, contributor_owner, _) in &matched_specs {
                         let aug_scope = NodeScopeId::File {
                             canonical_id: Arc::clone(augmenter_canonical),
                             owner: *contributor_owner,
@@ -6261,13 +6746,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             .zip(type_arguments.iter())
                             .map(|(param, argument)| (param.name.clone(), *argument))
                             .collect();
-                        let mut aug_subs: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
                         // Demand the augmenter's RETAINED contribution body through
                         // the augmenter's OWN `LowerLocator` (the augmentation-scoped
                         // locator leaf) — never an inline lowering of another file's
                         // prepared body. An augmenter contribution is never the
-                        // macro-T own body — downgrade provenance to structural
-                        // (same rule the builtin / heritage paths apply).
+                        // macro-T own body — the projection downgrades provenance to
+                        // structural (same rule the builtin / heritage paths apply).
                         let locator =
                             verter_type_expr::locators::AuthoredBodyLocator::AugmentationBody(
                                 verter_type_expr::locators::AugmentationBodyLocator {
@@ -6291,19 +6775,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                     ),
                                 },
                             );
-                        let node = self.lower_located_body_with_provenance(
-                            locator,
-                            aug_prepared.kind,
-                            &aug_prepared.type_parameters,
-                            &aug_prepared.name_resolution,
-                            &aug_env,
-                            &aug_scope,
-                            aug_scope_payload.as_ref(),
-                            &aug_shadowing,
-                            &mut aug_subs,
-                            context.into_structural_provenance(),
-                        );
-                        contributor_nodes.push(node);
+                        let shape = self.fetch_located_shape(locator);
+                        context_free &= shape.is_some();
+                        planned_bodies.push(PlannedContributorBody {
+                            shape,
+                            owner_symbol: Arc::from(decl_name),
+                            kind: aug_prepared.kind,
+                            type_parameters: Arc::from(aug_prepared.type_parameters),
+                            name_resolution: aug_prepared.name_resolution,
+                            binding: PlannedBinding::Bound(aug_env),
+                            scope: aug_scope,
+                            scope_payload: aug_scope_payload,
+                            shadowing: aug_shadowing,
+                        });
                         any_contribution = true;
                     }
                     if any_contribution {
@@ -6337,11 +6821,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 {
                     let entry = &population_hit.entries[file_scope_idx];
                     let canonical = entry.artifact_key.canonical.as_ref();
-                    let Some(indexed) = self
-                        .ctx
-                        .ensure_indexed_ready_serve(canonical)
-                        .map(|serve| serve.indexed)
-                    else {
+                    let Some(indexed) = prefetch.map(|prefetch| prefetch.indexed).or_else(|| {
+                        self.ctx
+                            .ensure_indexed_ready_serve(canonical)
+                            .map(|serve| serve.indexed)
+                    }) else {
                         source_env_unobservable = true;
                         continue;
                     };
@@ -6387,11 +6871,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 OrderedOrigin::FileScope(file_scope_idx) => {
                     let entry = &population_hit.entries[file_scope_idx];
                     let canonical = entry.artifact_key.canonical.as_ref();
-                    let Some(indexed) = self
-                        .ctx
-                        .ensure_indexed_ready_serve(canonical)
-                        .map(|serve| serve.indexed)
-                    else {
+                    let Some(indexed) = prefetch.map(|prefetch| prefetch.indexed).or_else(|| {
+                        self.ctx
+                            .ensure_indexed_ready_serve(canonical)
+                            .map(|serve| serve.indexed)
+                    }) else {
                         source_env_unobservable = true;
                         continue;
                     };
@@ -6439,20 +6923,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(
                             aug_scope_payload.as_ref(),
                         );
-                    let mut aug_subs: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
-                    let (aug_env, _) = self.bind_declared_type_arguments(
-                        &prepared,
-                        type_arguments,
-                        &DeclarationBindingScope {
-                            scope: &aug_scope,
-                            scope_payload: aug_scope_payload.as_ref(),
-                            shadowing: &aug_shadowing,
-                            authored_resolution_debt: None,
-                        },
-                        &mut aug_subs,
-                        context,
-                        |_, _| None,
-                    );
                     let locator = verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
                 verter_type_expr::locators::TypeBodySlot {
                     anchor: verter_type_expr::locators::AuthoredAnchor {
@@ -6473,19 +6943,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     ),
                 },
             );
-                    let node = self.lower_located_body_with_provenance(
-                        locator,
-                        prepared.kind,
-                        &prepared.type_parameters,
-                        &prepared.name_resolution,
-                        &aug_env,
-                        &aug_scope,
-                        aug_scope_payload.as_ref(),
-                        &aug_shadowing,
-                        &mut aug_subs,
-                        context.into_structural_provenance(),
-                    );
-                    contributor_nodes.push(node);
+                    let shape = self.fetch_located_shape(locator);
+                    context_free &= shape.is_some();
+                    planned_bodies.push(PlannedContributorBody {
+                        shape,
+                        owner_symbol: Arc::from(decl_name),
+                        kind: prepared.kind,
+                        type_parameters: Arc::from(prepared.type_parameters.as_slice()),
+                        name_resolution: Arc::clone(&prepared.name_resolution),
+                        binding: PlannedBinding::Declared(prepared),
+                        scope: aug_scope,
+                        scope_payload: aug_scope_payload,
+                        shadowing: aug_shadowing,
+                    });
                     contributor_roots.push(AugmentationContributorRoot {
                         canonical: Arc::clone(&entry.artifact_key.canonical),
                         whole_hash: indexed.whole_hash,
@@ -6522,7 +6992,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         self.ctx
             .refresh_augmentation_keys(&key, &augmenter_set, refreshed_keys);
 
-        if contributor_nodes.is_empty() && enum_blocks.is_empty() {
+        if contributor_nodes.is_empty() && planned_bodies.is_empty() && enum_blocks.is_empty() {
             // DISTINGUISH the two empty outcomes (they are NOT the same):
             //   - `source_env_unobservable == true`: augmenters targeted this
             //     decl but EVERY contribution was unobservable (torn / unhealable
@@ -6538,14 +7008,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             //     result. Return `None`; the caller keeps the base body unchanged
             //     and warms normally.
             if source_env_unobservable {
-                return Some(AugmentationContributions {
-                    contributor_nodes: Vec::new(),
-                    contributor_roots: Vec::new(),
-                    source_env_unobservable: true,
-                    base_position: None,
-                    signature_groups: Vec::new(),
-                    enum_blocks: Vec::new(),
-                });
+                return Some(FoldedAugmentation::Contributions(
+                    AugmentationContributions {
+                        contributor_nodes: Vec::new(),
+                        contributor_roots: Vec::new(),
+                        source_env_unobservable: true,
+                        base_position: None,
+                        signature_groups: Vec::new(),
+                        enum_blocks: Vec::new(),
+                    },
+                ));
             }
             return None;
         }
@@ -6588,20 +7060,32 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
         }
 
+        if contribution == AugmentationContribution::TypeBody {
+            return Some(FoldedAugmentation::Plan(AugmentationPlan {
+                bodies: planned_bodies,
+                contributor_roots,
+                source_env_unobservable,
+                base_position,
+                stitched: Some((target, augmenter_set.fingerprint)),
+                context_free,
+            }));
+        }
         emit_module_augmentation_stitched_event(
             &target,
             contributor_roots.len() as u32,
             augmenter_set.fingerprint,
         );
 
-        Some(AugmentationContributions {
-            contributor_nodes,
-            contributor_roots,
-            source_env_unobservable,
-            base_position,
-            signature_groups,
-            enum_blocks,
-        })
+        Some(FoldedAugmentation::Contributions(
+            AugmentationContributions {
+                contributor_nodes,
+                contributor_roots,
+                source_env_unobservable,
+                base_position,
+                signature_groups,
+                enum_blocks,
+            },
+        ))
     }
 
     /// Resolve a named ambient value export through the import value owner.
@@ -7861,12 +8345,51 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 
         // 1. Fetch the fixed authored shape (one reusable body-shape family
         //    per locator/source-env).
-        let shape = match self.lower_locator(locator) {
-            QueryResult::Value(node) => node,
-            QueryResult::Recursive(_) | QueryResult::Error(_) => {
-                return BodyLowering::Ready(self.opaque(QueryError::Miss))
-            }
+        let Some(shape) = self.fetch_located_shape(locator) else {
+            return BodyLowering::Ready(self.opaque(QueryError::Miss));
         };
+        self.begin_shape_lowering(
+            shape,
+            &owner_symbol,
+            decl_kind,
+            type_parameters,
+            env,
+            scope,
+            substitutions,
+            context,
+            vue_ignored_heritage,
+            seam,
+        )
+    }
+
+    /// The fixed authored shape `locator` names, or `None` when its
+    /// `LowerLocator` query answers no value.
+    fn fetch_located_shape(
+        &self,
+        locator: verter_type_expr::locators::AuthoredBodyLocator,
+    ) -> Option<SemanticNodeId> {
+        match self.lower_locator(locator) {
+            QueryResult::Value(node) => Some(node),
+            QueryResult::Recursive(_) | QueryResult::Error(_) => None,
+        }
+    }
+
+    /// Begin lowering an already fetched authored `shape`: apply the
+    /// caller's bindings and plan the projection of the demanded view.
+    #[allow(clippy::too_many_arguments)]
+    fn begin_shape_lowering(
+        &self,
+        shape: SemanticNodeId,
+        owner_symbol: &Arc<str>,
+        decl_kind: verter_session_query::declarations::TypeDeclKind,
+        type_parameters: &[verter_type_expr::facts::NarrowTypeParam],
+        env: &FxHashMap<String, SemanticNodeId>,
+        scope: &NodeScopeId,
+        substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
+        context: crate::semantic_query::ProjectionReductionContext,
+        vue_ignored_heritage: &[verter_type_expr::facts::VueIgnoredHeritageFact],
+        seam: crate::project_semantic_dispatch::locator_view_worklist::ProjectionSeam,
+    ) -> BodyLowering {
         let shape = if context.suppresses_vue_ignored_heritage() && !vue_ignored_heritage.is_empty()
         {
             self.filter_vue_ignored_heritage(shape, vue_ignored_heritage)
@@ -7882,7 +8405,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         //    "unbound param propagates a miss through the body" rule.
         let substituted = self.bind_located_shape_parameters(
             shape,
-            &owner_symbol,
+            owner_symbol,
             type_parameters,
             env,
             scope,
@@ -15021,14 +15544,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // duplicates, whose file edits must miss the warm read even though
         // the duplicate no longer appears in the result.
         let mut observed_self_roots = self.observed_self_roots_from_nodes(members.iter().copied());
-        for root in composite.evidence.inspected_file_roots {
-            if !observed_self_roots
-                .iter()
-                .any(|(c, h)| *c == root.0 && *h == root.1)
-            {
-                observed_self_roots.push(root);
-            }
-        }
+        super::extend_unique_self_roots(
+            &mut observed_self_roots,
+            composite.evidence.inspected_file_roots,
+        );
         let mut output = crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
             QueryResult::Value(node),
             fence,
