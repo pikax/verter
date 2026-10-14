@@ -2297,11 +2297,13 @@ pub fn prime_type_bodies(demands: &[TypeBodyDemand<'_>]) -> PrimedTypeBodies {
     let mut kept = Vec::new();
     // Group by service so each batch goes to the workers that retain its
     // snapshots (one service per host in production).
-    let mut groups: Vec<(
-        Arc<DeclLoweringService>,
-        Vec<Pending<'_>>,
-        Vec<crate::decl_lowering::LeasedJob<DemandJobOutput>>,
-    )> = Vec::new();
+    /// The demands one lowering service answers, beside their jobs.
+    struct ServiceBatch<'a> {
+        service: Arc<DeclLoweringService>,
+        pendings: Vec<Pending<'a>>,
+        jobs: Vec<crate::decl_lowering::LeasedJob<DemandJobOutput>>,
+    }
+    let mut groups: Vec<ServiceBatch<'_>> = Vec::new();
     for demand in demands {
         let Some(service) = demand.memo.service.as_ref() else {
             continue;
@@ -2330,16 +2332,25 @@ pub fn prime_type_bodies(demands: &[TypeBodyDemand<'_>]) -> PrimedTypeBodies {
         };
         match groups
             .iter_mut()
-            .find(|(candidate, _, _)| Arc::ptr_eq(candidate, service))
+            .find(|batch| Arc::ptr_eq(&batch.service, service))
         {
-            Some((_, pendings, jobs)) => {
-                pendings.push(pending);
-                jobs.push(job);
+            Some(batch) => {
+                batch.pendings.push(pending);
+                batch.jobs.push(job);
             }
-            None => groups.push((Arc::clone(service), vec![pending], vec![job])),
+            None => groups.push(ServiceBatch {
+                service: Arc::clone(service),
+                pendings: vec![pending],
+                jobs: vec![job],
+            }),
         }
     }
-    for (service, pendings, jobs) in groups {
+    for ServiceBatch {
+        service,
+        pendings,
+        jobs,
+    } in groups
+    {
         let outcomes = service.run_leased_batch(jobs);
         for (pending, outcome) in pendings.into_iter().zip(outcomes) {
             let (lowered, transient) = pending.memo.finish_demanded(outcome);

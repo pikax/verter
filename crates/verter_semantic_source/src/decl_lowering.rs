@@ -1297,11 +1297,16 @@ impl DeclLoweringService {
     }
 }
 
+/// A pure lowering closure over a retained eval program (`None` for a fatal
+/// parse).
+pub type LeasedRun<R> =
+    Box<dyn FnOnce(Option<&crate::parsed_eval_program::ParsedEvalProgram>) -> R + Send>;
+
 /// One job of a [`DeclLoweringService::run_leased_batch`]: a pure lowering
 /// closure over the retained eval program of `key`.
 pub struct LeasedJob<R> {
     pub key: SnapshotKey,
-    pub run: Box<dyn FnOnce(Option<&crate::parsed_eval_program::ParsedEvalProgram>) -> R + Send>,
+    pub run: LeasedRun<R>,
 }
 
 #[cfg(test)]
