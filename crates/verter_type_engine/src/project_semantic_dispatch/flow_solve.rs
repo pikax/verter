@@ -1159,6 +1159,8 @@ pub fn build_flow_demand_plan_from_execution(
                 observed: u32::try_from(next).unwrap_or(u32::MAX),
             });
         }
+        // Ids are dense spec positions: the runtime finds an obligation's
+        // record by its id as an index (`flow_obligation_state::record_of`).
         let id = FlowObligationId(u32::try_from(specs.len()).unwrap_or(u32::MAX));
         specs.push(FlowObligationSpec::new(id, requirement, origin, basis, expected_dependencies, expected_suboperations));
         Ok(id)
