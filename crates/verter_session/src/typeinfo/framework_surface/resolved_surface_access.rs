@@ -54,6 +54,12 @@ pub(crate) trait ResolvedSurfaceAccess: Sealed {
     /// The resolution-derived Vue macro surface the normalizers read (members,
     /// signatures, macro kind, per-member scope helpers), by borrow.
     fn macro_surface(&self) -> &VueMacroSurface;
+
+    /// The producer-owned body from which member value paths can be replayed.
+    /// Vue uses its indexed macro argument; Svelte supplies its captured props body.
+    fn member_source_base(&self) -> Option<&verter_type_expr::locators::AuthoredBodyLocator> {
+        None
+    }
 }
 
 // ── The ONLY `impl Sealed` / `impl ResolvedSurfaceAccess` in the crate ──────
@@ -77,5 +83,9 @@ impl Sealed for SvelteResolvedSurface {}
 impl ResolvedSurfaceAccess for SvelteResolvedSurface {
     fn macro_surface(&self) -> &VueMacroSurface {
         self.surface_carrier()
+    }
+
+    fn member_source_base(&self) -> Option<&verter_type_expr::locators::AuthoredBodyLocator> {
+        self.member_source_base()
     }
 }

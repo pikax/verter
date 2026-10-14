@@ -361,6 +361,7 @@ pub fn fold_node<A: RaisedShapeAlgebra, C: crate::resolver_core::ResolverCapabil
             return_type_span,
             predicate,
             is_abstract,
+            return_carrier,
             ..
         } => {
             let mut folded = fold_function(
@@ -368,6 +369,7 @@ pub fn fold_node<A: RaisedShapeAlgebra, C: crate::resolver_core::ResolverCapabil
                 dispatch,
                 params,
                 *return_type,
+                return_carrier,
                 type_parameters,
                 *signature_span,
                 *return_type_span,
@@ -481,6 +483,7 @@ fn fold_function<A: RaisedShapeAlgebra, C: crate::resolver_core::ResolverCapabil
     dispatch: &ProjectSemanticDispatch<'_, C>,
     params: &[crate::semantic_query::FunctionParam],
     return_type: SemanticNodeId,
+    return_carrier: &crate::semantic_query::SignatureReturnCarrier,
     type_parameters: &[crate::semantic_query::TypeParamDecl],
     signature_span: Option<Span>,
     return_type_span: Option<Span>,
@@ -501,7 +504,10 @@ fn fold_function<A: RaisedShapeAlgebra, C: crate::resolver_core::ResolverCapabil
             })
         })
         .collect::<Option<_>>()?;
-    let return_out = fold_node(alg, dispatch, return_type, active)?;
+    let return_out = match alg.owned_function_return(return_carrier) {
+        Some(source) => source,
+        None => fold_node(alg, dispatch, return_type, active)?,
+    };
     let mut type_params: Vec<FoldedTypeParam<A::Out>> = Vec::new();
     for tp in type_parameters {
         type_params.push(FoldedTypeParam {

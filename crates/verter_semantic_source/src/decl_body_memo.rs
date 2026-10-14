@@ -3457,7 +3457,7 @@ impl IndexedExpressionDemand {
         };
         self.snapshot.ensure_lease();
         let mut refusal = None;
-        let _index = self.function_program_index().absorb_into(&mut refusal);
+        let index = self.function_program_index().absorb_into(&mut refusal);
         let Some(node) = service.run_leased(&self.snapshot.key, move |program| {
             program.map(|parsed| {
                 let source = parsed.source_str();
@@ -3502,7 +3502,35 @@ impl IndexedExpressionDemand {
         };
         WalkedRead::from_program_walk(node)
             .with_prior_refusal(refusal)
-            .map(|node| node.map(Arc::new))
+            .map(|node| node.map(|mut node| {
+                for argument in Arc::make_mut(&mut node.call.args) {
+                    let verter_type_expr::IndexedValueExpression::Value(TypeExpr::Function(function)) =
+                        &argument.expression
+                    else {
+                        continue;
+                    };
+                    let point = verter_type_expr::facts::ProgramExpressionIdentity {
+                        canonical_id: Arc::clone(&self.snapshot.key.canonical),
+                        offset: argument.point,
+                    };
+                    let Some(record) = index.expression(&point) else {
+                        continue;
+                    };
+                    // The actual transient signature and the served source
+                    // must name the same authored callback, not just a nearby point.
+                    if function.spans.signature != Some(record.span) {
+                        continue;
+                    }
+                    if let verter_session_query::function_program::ProgramExpressionSource::FunctionReturn(source) =
+                        &record.source
+                    {
+                        verter_semantic::analysis::function_program::attach_indexed_callback_return_source(
+                            argument, source,
+                        );
+                    }
+                }
+                Arc::new(node)
+            }))
     }
 
     pub fn function_type_param_clause(

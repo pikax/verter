@@ -560,16 +560,16 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                             }
                             let (resolved, observed, completeness) =
                                 self.resolve_carrier_subject_node_capturing_suppress(node, context);
-                            if observed.result_is_partial {
+                            if observed.result_is_partial || !resolved.status.is_complete() {
                                 let reason = partial_reason(completeness.reasons());
                                 return self.partial_symbol_identity(reason);
                             }
-                            if resolved == node {
+                            if resolved.node == node {
                                 return self.partial_symbol_identity(
                                     PropCallableRoleUnresolvedReason::MissingDependency,
                                 );
                             }
-                            subject = IdentitySubject::Node(resolved);
+                            subject = IdentitySubject::Node(resolved.node);
                         }
                         SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
                             canonical_id,
@@ -640,7 +640,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         match read.value {
             QueryResult::Recursive(_) => Err(PropCallableRoleUnresolvedReason::Cycle),
             QueryResult::Error(error) => Err(query_error_reason(&error)),
-            QueryResult::Value(_) if read.result_is_partial => {
+            QueryResult::Value(_) if read.result_is_partial() => {
                 Err(PropCallableRoleUnresolvedReason::Fault)
             }
             QueryResult::Value(node) => Ok(node),

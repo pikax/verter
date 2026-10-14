@@ -90,7 +90,8 @@ pub mod fact_result;
 #[cfg(test)]
 mod fact_result_tests;
 pub use fact_result::{
-    root_narrowing_fact, summarize, ExecutionAbort, FactResult, FactStatus, MemberDomain,
+    root_narrowing_fact, summarize, ExecutionAbort, FactInterpretation, FactResult, FactStatus,
+    MemberDomain,
 };
 pub mod outcome;
 pub mod stable_key;
@@ -2223,6 +2224,9 @@ pub struct SignatureNodeOccurrence {
     pub signature_ordinal: u32,
 }
 
+/// An owned flow source whose return value has not been adopted.
+pub use crate::project_semantic_dispatch::flow_return_fact::DeferredFlowReturnSource;
+
 /// Where a signature's return type comes from.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SignatureReturnCarrier {
@@ -2230,6 +2234,57 @@ pub enum SignatureReturnCarrier {
     Declared(SemanticNodeId),
     /// A body-derived return, served by the `FlowReturn` producer.
     Function(verter_type_expr::facts::FunctionReturnSource),
+    /// An owned body source whose return value has not been demanded.
+    DeferredFlow(DeferredFlowReturnSource),
+    /// An evaluated return slot whose owned source still supplies later body recipes.
+    EvaluatedFlow(DeferredFlowReturnSource),
+}
+
+/// The existing return authority, borrowed for a value demand or body recipe.
+pub(crate) enum SignatureResultSource<'a> {
+    Declared(&'a SemanticNodeId),
+    Function(&'a verter_type_expr::facts::FunctionReturnSource),
+}
+
+impl SignatureReturnCarrier {
+    pub(crate) fn result_source(&self) -> SignatureResultSource<'_> {
+        match self {
+            Self::Declared(node) => SignatureResultSource::Declared(node),
+            Self::Function(source) => SignatureResultSource::Function(source),
+            Self::DeferredFlow(source) | Self::EvaluatedFlow(source) => {
+                SignatureResultSource::Function(source.source())
+            }
+        }
+    }
+
+    pub(crate) fn owned_flow_source(&self) -> Option<&DeferredFlowReturnSource> {
+        match self {
+            Self::DeferredFlow(source) | Self::EvaluatedFlow(source) => Some(source),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn map_source_images(
+        &self,
+        map: impl FnMut(SemanticNodeId) -> SemanticNodeId,
+    ) -> Option<Self> {
+        match self {
+            Self::DeferredFlow(source) => Some(Self::DeferredFlow(source.map_images(map))),
+            Self::EvaluatedFlow(source) => Some(Self::EvaluatedFlow(source.map_images(map))),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn flow_identity(
+        &self,
+    ) -> Option<&verter_type_expr::facts::FlowFunctionReturnIdentity> {
+        match self.result_source() {
+            SignatureResultSource::Function(
+                verter_type_expr::facts::FunctionReturnSource::Flow(identity),
+            ) => Some(identity),
+            _ => None,
+        }
+    }
 }
 
 /// The admitted value of a `ResolveCall` query. Only a COMPLETE evaluation
@@ -4418,8 +4473,12 @@ pub(crate) struct KnownKeyAccessor<'a> {
 impl KnownKeyAccessor<'_> {
     /// The accessor as the one PROPERTY every reader sees: its read value
     /// ([`Self::read_value`]), `readonly` when there is no setter.
-    pub(crate) fn property_member(&self, graph: &impl NodeRead) -> Option<SurfaceMember> {
-        let value = self.read_value(graph)?;
+    pub(crate) fn property_member(
+        &self,
+        graph: &impl NodeRead,
+        materialize: impl FnOnce(SemanticNodeId) -> SemanticNodeId,
+    ) -> Option<SurfaceMember> {
+        let value = self.read_value(graph, materialize)?;
         let declared = self.getter.or(self.setter)?;
         Some(SurfaceMember {
             value,
@@ -4434,20 +4493,24 @@ impl KnownKeyAccessor<'_> {
     /// The accessor's VALUE type as a read sees it: the getter's return,
     /// else the setter's parameter. `None` when the accessor's signature
     /// carries neither.
-    pub(crate) fn read_value(&self, graph: &impl NodeRead) -> Option<SemanticNodeId> {
+    pub(crate) fn read_value(
+        &self,
+        graph: &impl NodeRead,
+        materialize: impl FnOnce(SemanticNodeId) -> SemanticNodeId,
+    ) -> Option<SemanticNodeId> {
         if let Some(getter) = self.getter {
-            return match graph.node_data(getter.value).as_deref() {
+            return match graph.node_data(materialize(getter.value)).as_deref() {
                 Some(SemanticNodeData::Signature { return_type, .. }) => Some(*return_type),
                 _ => None,
             };
         }
         let setter = self.setter?;
-        match graph.node_data(setter.value).as_deref() {
-            Some(SemanticNodeData::Signature { params, .. }) => {
-                split_this_receiver(params).1.first().map(|param| param.ty)
-            }
-            _ => None,
-        }
+        let data = graph.node_data(setter.value)?;
+        let header = data.callable_header(&ResolveOverloadSetConsumer::witness())?;
+        split_this_receiver(header.params)
+            .1
+            .first()
+            .map(|param| param.ty)
     }
 }
 
@@ -5303,47 +5366,9 @@ pub struct CacheRead<T> {
     /// still flows back to the caller. This is NOT the partial-result
     /// signal — see [`Self::result_is_partial`].
     pub cache_suppress: bool,
-    /// **Partial-result signal.** `true` when this query's value is
-    /// itself a PARTIAL — a budget exhaustion (`BudgetExceeded`),
-    /// cancellation / unstable state, same-path recursion, or a walker
-    /// pathological/fatal diagnostic produced a structurally-incomplete
-    /// result. Aggregates via OR through nested queries. Distinct from
-    /// [`Self::cache_suppress`]: a benign non-cacheable result (ReturnOnly
-    /// / overflow / unrootable self-root) sets `cache_suppress` but NOT
-    /// this. The component-meta final-result warm gate and the
-    /// shape/materialization result caches key ONLY on this flag — a
-    /// complete-but-non-cacheable result MUST still be allowed to warm the
-    /// component-meta result, while a partial MUST be refused.
-    ///
-    /// This boolean is the per-read projection of
-    /// [`ResultCompleteness`]: `false` ⇒ `Complete`, `true` ⇒ `Partial`.
-    /// The typed [`ResultCompleteness`] carrier (with the reason set) is
-    /// used at the RESULT / scope / admission level — where the
-    /// completeness drives a decision — via the per-cold-compute
-    /// completeness scope and the request-result completeness accumulator
-    /// (see [`crate::request_context`] and
-    /// [`crate::cache_runtime::refuse_result_cache_admission_if_partial`]).
-    pub result_is_partial: bool,
-    /// **The classes behind [`Self::result_is_partial`]**, carried ACROSS
-    /// the query/build boundary.
-    ///
-    /// The boolean alone forces every consumer to re-lift a partial child
-    /// under the unclassified bridge
-    /// [`PartialReasonSet::PROPAGATED`]. That is not merely lossy: a
-    /// consumer that treats ONE class as CONTAINED (the Vue macro
-    /// projection and
-    /// [`PartialReasonSet::FLOW_RETURN_UNINFERRED`]) sees the bridge bit
-    /// arrive ALONGSIDE the named class the producer already recorded, so
-    /// the containment subtracts the name and the anonymous duplicate of
-    /// the SAME cause still faults it. Carrying the classes here removes
-    /// the duplicate at its source.
-    ///
-    /// Invariant: empty whenever `result_is_partial` is `false`. When
-    /// `result_is_partial` is `true` this is the union of the classes the
-    /// producing build observed; read it through
-    /// [`Self::partial_reason_classes`], which substitutes the bridge for
-    /// a producer that genuinely could not name one.
-    pub partial_reasons: PartialReasonSet,
+    /// The adopted producer fact. Compatibility summaries are projections of
+    /// this disposition; an unavailable read cannot offer its candidate value.
+    pub fact_status: FactStatus,
     /// **The value's cost receipt.** A stored, joined or freshly built
     /// result is [`ReadReceipt::Priced`] with what computing it cost: the
     /// consumer replays it into its connected demand before using the
@@ -5367,8 +5392,7 @@ impl<T> CacheRead<T> {
             dep_signature,
             walker_diagnostics: Arc::from([]),
             cache_suppress: false,
-            result_is_partial: false,
-            partial_reasons: PartialReasonSet::empty(),
+            fact_status: FactStatus::Complete,
             receipt: ReadReceipt::Unpriced,
         }
     }
@@ -5384,28 +5408,24 @@ impl<T> CacheRead<T> {
             dep_signature: self.dep_signature,
             walker_diagnostics: self.walker_diagnostics,
             cache_suppress: self.cache_suppress,
-            result_is_partial: self.result_is_partial,
-            partial_reasons: self.partial_reasons,
+            fact_status: self.fact_status,
             receipt: self.receipt,
         }
     }
 
-    /// The partial classes this read carries — the ONE read accessor.
-    ///
-    /// Empty for a complete read. For a partial read it is the producer's
-    /// own classes, or [`PartialReasonSet::PROPAGATED`] when the producer
-    /// set the boolean without naming one (the residual bridge, which no
-    /// longer duplicates a class the producer DID name).
-    #[inline]
-    #[must_use]
+    /// Whether this adopted fact is unfinished.
+    pub fn result_is_partial(&self) -> bool {
+        !self.fact_status.is_complete()
+    }
+
+    /// The compatibility causes, derived from the adopted fact.
+    pub fn partial_reasons(&self) -> PartialReasonSet {
+        self.fact_status.completeness().reasons()
+    }
+
+    /// The named causes of this read's fact.
     pub fn partial_reason_classes(&self) -> PartialReasonSet {
-        if !self.result_is_partial {
-            PartialReasonSet::empty()
-        } else if self.partial_reasons.is_empty() {
-            PartialReasonSet::PROPAGATED
-        } else {
-            self.partial_reasons
-        }
+        self.partial_reasons()
     }
 }
 
@@ -6313,7 +6333,7 @@ impl BroadRuntimeClassification {
     pub fn into_fact(self) -> FactResult<Self> {
         match self.status {
             FactStatus::Complete => FactResult::complete(self),
-            FactStatus::Approximate(causes) => FactResult::approximate(self, causes),
+            FactStatus::Approximate(causes, _) => FactResult::approximate(self, causes),
             FactStatus::Unavailable(causes) => FactResult::unavailable(causes),
         }
     }
@@ -6861,6 +6881,7 @@ pub struct SemanticQueryOutput<T> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResultProvenance {
     pub taint: ResultTaint,
+    pub fact_status: FactStatus,
 }
 
 impl ResultProvenance {
@@ -6869,6 +6890,7 @@ impl ResultProvenance {
     pub fn clean() -> Self {
         Self {
             taint: ResultTaint::Clean,
+            fact_status: FactStatus::Complete,
         }
     }
 }

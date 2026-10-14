@@ -35,6 +35,29 @@ function h<T>(x: T) { const y: { [K in keyof T]: T[K] } = null!; return y; }
 export function callH() { return h('s' as string); }
 ";
 
+#[test]
+fn removing_object_optionality_preserves_authored_undefined_in_exact_mode() {
+    let exact = ProbeProject {
+        compiler_options: Some(r#"{ "strict": true, "exactOptionalPropertyTypes": true }"#),
+        ..ProbeProject::default()
+    };
+    const SOURCE: &str = "type Req<T> = { [K in keyof T]-?: T[K] };";
+    for (project, optional_value) in [(ProbeProject::default(), "1"), (exact, "1 | undefined")] {
+        let failures = mismatches_in(
+            project,
+            SOURCE,
+            &[
+                ("Required<{ a?: 1 | undefined }>['a']", optional_value),
+                ("Req<{ a?: 1 | undefined }>['a']", optional_value),
+                ("Required<{ a: 1 | undefined }>['a']", "1 | undefined"),
+                ("Req<{ a: 1 | undefined }>['a']", "1 | undefined"),
+                ("Required<{ a?: 1 }>['a']", "1"),
+            ],
+        );
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+}
+
 /// A primitive passes through, with or without an `as` clause, and `never`
 /// is `never`.
 ///

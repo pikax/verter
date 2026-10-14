@@ -4966,9 +4966,9 @@ fn fenced_serve_surface_member_shape_is_not_admitted() {
         DeclIdentity, ScopeId, SemanticNodeData, ValueRootKey,
     };
 
-    // Drive the REAL surface-member seam for a `typeof <missing>` member value
+    // Drive the REAL surface-member seam for a `typeof seamValue` member value
     // interned in `scope`'s graph: its reduce drives an `ensure_indexed_ready_serve`
-    // (so the fence has a serve to catch) and settles a deferred carrier that IS
+    // (so the fence has a serve to catch) and settles a concrete shape that IS
     // admitted warm (so the control is a genuine admission). Returns the post-drive
     // ShapeCacheDb `live_count`.
     fn drive_surface_member_seam(host: &VerterHost, scope: &str) -> usize {
@@ -4979,21 +4979,21 @@ fn fenced_serve_surface_member_shape_is_not_admitted() {
                     ValueRootKey {
                         scope: ScopeId {
                             canonical_id: Arc::from(scope),
-                            owner: verter_type_expr::TopLevelOwnerId::instance(0),
+                            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                             local_scope: None,
                             binder_scope_id:
                                 verter_type_engine::semantic_query::BinderScopeId::file_scope(
-                                    verter_type_expr::TopLevelOwnerId::instance(0),
+                                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
                                 ),
                         },
-                        name: Arc::from("definitelyMissingSeamValue"),
+                        name: Arc::from("seamValue"),
                     },
                     Arc::from(Vec::new().into_boxed_slice()),
                     Arc::from(Vec::new().into_boxed_slice()),
                 ));
         let owner = DeclIdentity {
             canonical_id: Arc::from(scope),
-            owner: verter_type_expr::TopLevelOwnerId::instance(0),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: Default::default(),
             decl_name: Arc::from("<sfc-script-setup>"),
         };
@@ -5029,7 +5029,11 @@ fn fenced_serve_surface_member_shape_is_not_admitted() {
         ..HostConfig::default()
     });
     let control_scope = "/fenced_surface/control.ts";
-    upsert(&control, control_scope, "export type Probe = number;\n");
+    upsert(
+        &control,
+        control_scope,
+        "export const seamValue = { label: \"x\" };\n",
+    );
     control
         .ensure_indexed_ready(control_scope)
         .expect("control scope IndexedReady materialises");
@@ -5049,7 +5053,11 @@ fn fenced_serve_surface_member_shape_is_not_admitted() {
         ..HostConfig::default()
     });
     let fenced_scope = "/fenced_surface/fenced.ts";
-    upsert(&fenced, fenced_scope, "export type Probe = number;\n");
+    upsert(
+        &fenced,
+        fenced_scope,
+        "export const seamValue = { label: \"x\" };\n",
+    );
     fenced
         .ensure_indexed_ready(fenced_scope)
         .expect("fenced scope IndexedReady materialises");

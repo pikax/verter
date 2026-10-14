@@ -105,6 +105,11 @@ pub(crate) fn props_from_typeinfo_surface<C: crate::session_attachment::SessionC
         .map(|mac| mac.prop_fields.as_slice())
         .unwrap_or(&[]);
     let type_arg_base = analyzed_macro.and_then(|mac| mac.parsed_type_argument.as_ref());
+    let member_source_base = resolved.member_source_base().cloned().or_else(|| {
+        type_arg_base
+            .cloned()
+            .map(verter_type_expr::locators::AuthoredBodyLocator::MacroPayload)
+    });
 
     macro_surface
         .surface
@@ -223,11 +228,9 @@ pub(crate) fn props_from_typeinfo_surface<C: crate::session_attachment::SessionC
                         )
                     })
                 })
-                .or_else(|| member_value_source(dispatch, member, type_arg_base))
+                .or_else(|| member_value_source(dispatch, member, member_source_base.as_ref()))
                 .map(verter_type_expr::facts::SourcePosition::Present)
-                .unwrap_or(verter_type_expr::facts::SourcePosition::Failed(
-                    verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredMemberValue,
-                ));
+                .unwrap_or_else(unavailable_required_member_source);
             let (description, tags) = member_jsdoc_from_spans(ctx, member);
             // `declared_in_macro_type_arg`: a member belongs to the macro-T own
             // body iff it is NOT heritage-reached. The terminal
@@ -269,6 +272,20 @@ pub(crate) fn props_from_typeinfo_surface<C: crate::session_attachment::SessionC
         .collect()
 }
 
+/// Full metadata requires a usable source for each demanded value position.
+/// Preserve the named row, but do not publish or retain the enclosing DTO as
+/// complete when that required source could not be constructed.
+fn unavailable_required_member_source() -> verter_type_expr::facts::SourcePosition {
+    verter_type_engine::request_context::fold_result_completeness(
+        verter_type_engine::semantic_query::ResultCompleteness::partial(
+            verter_type_engine::semantic_query::PartialReasonSet::MISSING_DEPENDENCY,
+        ),
+    );
+    verter_type_expr::facts::SourcePosition::Failed(
+        verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredMemberValue,
+    )
+}
+
 /// The graph-native member-value SOURCE for a props / expose / options
 /// surface member with no PROVEN single-contributor authored position:
 ///
@@ -290,7 +307,7 @@ pub(crate) fn props_from_typeinfo_surface<C: crate::session_attachment::SessionC
 fn member_value_source<C: verter_type_engine::resolver_core::ResolverCapabilities>(
     dispatch: &ProjectSemanticDispatch<'_, C>,
     member: &TypeInfoSurfaceMember,
-    type_arg_base: Option<&verter_type_expr::locators::MacroPayloadLocator>,
+    member_source_base: Option<&verter_type_expr::locators::AuthoredBodyLocator>,
 ) -> Option<verter_type_expr::facts::SemanticTypeSource> {
     use verter_type_expr::facts::{ClosedTypeFact, SemanticTypeSource};
     if let Some(leaf) = dispatch.node_leaf_fact(member.value) {
@@ -324,7 +341,7 @@ fn member_value_source<C: verter_type_engine::resolver_core::ResolverCapabilitie
         dispatch,
         member.value,
         &member_key,
-        type_arg_base,
+        member_source_base,
     )
 }
 
@@ -416,7 +433,8 @@ pub(crate) fn exposed_from_typeinfo_surface<
         .map(|serve| serve.indexed)
         .as_ref()
         .and_then(|indexed| indexed.snapshot.macros.get(macro_surface.macro_index))
-        .and_then(|mac| mac.parsed_type_argument.clone());
+        .and_then(|mac| mac.parsed_type_argument.clone())
+        .map(verter_type_expr::locators::AuthoredBodyLocator::MacroPayload);
     macro_surface
         .surface
         .members
@@ -433,21 +451,21 @@ pub(crate) fn exposed_from_typeinfo_surface<
             // success.
             let type_source = member_value_source(dispatch, member, type_arg_base.as_ref())
                 .map(verter_type_expr::facts::SourcePosition::Present)
-                .unwrap_or(verter_type_expr::facts::SourcePosition::Failed(
-                    verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredMemberValue,
-                ));
-            Some(crate::typeinfo::framework_surface::results::ResolvedExposeField {
-                analysis: verter_session_query::analysis::types::AnalyzedExposeField {
-                    name: member_name,
-                    span: None,
-                    payload: None,
-                    type_expr_scope: None,
-                    referenced_binding: None,
-                    description,
-                    tags,
+                .unwrap_or_else(unavailable_required_member_source);
+            Some(
+                crate::typeinfo::framework_surface::results::ResolvedExposeField {
+                    analysis: verter_session_query::analysis::types::AnalyzedExposeField {
+                        name: member_name,
+                        span: None,
+                        payload: None,
+                        type_expr_scope: None,
+                        referenced_binding: None,
+                        description,
+                        tags,
+                    },
+                    type_source,
                 },
-                type_source,
-            })
+            )
         })
         .collect()
 }
