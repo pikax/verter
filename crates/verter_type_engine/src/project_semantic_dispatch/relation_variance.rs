@@ -850,7 +850,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let mut current = node;
         let mut visited = rustc_hash::FxHashSet::default();
         while visited.insert(current) {
-            if let Some(SemanticNodeData::Alias(inner)) = self.graph().node_data(current).as_deref() {
+            if let Some(SemanticNodeData::Alias(inner)) = self.graph().node_data(current).as_deref()
+            {
                 current = *inner;
                 continue;
             }
