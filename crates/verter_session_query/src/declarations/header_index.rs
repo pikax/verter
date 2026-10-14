@@ -351,6 +351,10 @@ pub struct DeclHeaderIndex {
     pub enum_headers: DeclMap<EnumDeclHeader>,
     pub augmentation_type_headers: FxHashMap<AugmentationScopeKind, DeclMap<TypeDeclHeader>>,
     pub augmentation_value_headers: FxHashMap<AugmentationScopeKind, DeclMap<ValueDeclHeader>>,
+    /// The enums of each `declare module "X" { … }` / `declare global { …
+    /// }` block scope, as [`Self::enum_headers`] holds the file's own:
+    /// each enum's member names and where they are declared, in order.
+    pub augmentation_enum_headers: FxHashMap<AugmentationScopeKind, DeclMap<EnumDeclHeader>>,
     /// Every `namespace N { … }` block in source order, EMPTY blocks
     /// included (recorded at block entry, before any member registers).
     /// Empty in the `from_eval_env` mirror (that env-seeded construction
@@ -432,6 +436,22 @@ impl DeclHeaderIndex {
 
     pub fn value_header_in(&self, owner: TopLevelOwnerId, name: &str) -> Option<&ValueDeclHeader> {
         self.value_headers.get(&DeclBindingKey::new(owner, name))
+    }
+
+    /// The enum `(owner, name)` the file's own declarations (`scope`
+    /// `None`) or one ambient block scope's declare.
+    #[must_use]
+    pub fn enum_header_in(
+        &self,
+        scope: Option<&AugmentationScopeKind>,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> Option<&EnumDeclHeader> {
+        let key = DeclBindingKey::new(owner, name);
+        match scope {
+            None => self.enum_headers.get(&key),
+            Some(scope) => self.augmentation_enum_headers.get(scope)?.get(&key),
+        }
     }
 
     /// Look up an augmentation-scoped type header (borrowed-key two-level
@@ -749,6 +769,22 @@ impl DeclHeaderIndex {
                 .entry(scope.clone())
                 .or_default()
                 .insert(name.clone(), value_header_from_group(group));
+            if let Some(names_fact) = group.merged_enum_member_names_fact() {
+                index
+                    .augmentation_enum_headers
+                    .entry(scope.clone())
+                    .or_default()
+                    .insert(
+                        name.clone(),
+                        EnumDeclHeader {
+                            span: Span::default(),
+                            name_span: Span::default(),
+                            member_names: names_fact.names.iter().cloned().collect(),
+                            member_positions: Vec::new(),
+                            contributors: Vec::new(),
+                        },
+                    );
+            }
         }
         index
     }

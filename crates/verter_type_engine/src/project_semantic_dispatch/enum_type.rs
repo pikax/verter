@@ -8,7 +8,11 @@
 //! member — so `E.A | E.B` over a two-member `E` IS `E`.
 //!
 //! One inventory feeds every surface: the prepared value declaration's
-//! member facts, merged across every declaration of a merged enum. The
+//! member facts, merged across every declaration of a merged enum — the
+//! blocks of one file, every block of a global enum in program order, and
+//! a module enum's `declare module` blocks after its own, each block read
+//! in its own declaration scope ([`ProjectSemanticDispatch::enum_blocks`]).
+//! The
 //! type-position `E` and `E.A`, the enum object `typeof E` and the widening
 //! of a fresh `E.A` all read it through [`EnumDeclaration`], so the members
 //! a type names and the members the object carries are the same nodes.
@@ -31,10 +35,37 @@ use crate::semantic_query::{
 /// declaration order across every declaration of a merged enum.
 pub(super) struct EnumDeclaration {
     /// The enum's type declaration — the identity every member literal
-    /// carries and a reference to the enum resolves to.
+    /// carries and a reference to the enum resolves to. For an enum merged
+    /// across files, its first file's declaration, whichever file the
+    /// reference reached.
     pub(super) decl: DeclIdentity,
     /// The members, in declaration order.
     pub(super) members: Arc<[EnumMemberEntry]>,
+    /// The files declaring the members, in the members' order: each file's
+    /// members are the next `len` entries of [`Self::members`].
+    blocks: Arc<[EnumBlock]>,
+    /// The values a namespace merged with the enum exports, each named by
+    /// its property and rooted at its declaration: properties of the enum
+    /// object beside its members, in the order their namespaces declare
+    /// them.
+    namespace_members: Arc<[(Arc<str>, ValueRootKey)]>,
+}
+
+/// The members one declaration scope of a file declares of an enum: an
+/// initializer written in them reads names in that file's scope.
+#[derive(Clone)]
+struct EnumBlock {
+    canonical: Arc<str>,
+    owner: verter_type_expr::TopLevelOwnerId,
+    /// The ambient block scope declaring the members (`declare global`,
+    /// `declare module "…"`); `None` for the file's own declarations.
+    scope: Option<verter_session_query::declarations::AugmentationScopeKind>,
+    /// Whether the identity `(canonical, owner, name)` names this block's
+    /// declaration: the file's own, or an ambient block's where the file
+    /// declares no value of the name itself.
+    addressed: bool,
+    /// How many of the enum's members, in order, the block declares.
+    len: usize,
 }
 
 impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
@@ -87,25 +118,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         declaring_symbol: Arc<str>,
         prepared: &verter_session_query::type_solver::PreparedValueDecl,
     ) -> Option<EnumDeclaration> {
-        if prepared.kind != verter_session_query::declarations::ValueDeclKind::Enum {
-            return None;
-        }
-        let members = Arc::clone(&prepared.enum_members.as_ref()?.members);
-        let whole_hash = self
-            .ctx
-            .shallow_file_state(declaring_canonical.as_ref())
-            .map_or(crate::semantic_query::HashValue::default(), |state| {
-                state.whole_hash
-            });
-        let enumeration = EnumDeclaration {
-            decl: DeclIdentity {
-                canonical_id: declaring_canonical,
-                owner: declaring_owner,
-                whole_hash,
-                decl_name: declaring_symbol,
-            },
-            members,
-        };
+        let enumeration = self.enum_blocks(
+            declaring_canonical,
+            declaring_owner,
+            declaring_symbol,
+            prepared,
+        )?;
         if enumeration
             .members
             .iter()
@@ -116,7 +134,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         // A member whose value depends on another declaration is evaluated
         // now that the declaration can be read.
         let mut evaluation = EnumEvaluation::default();
-        evaluation.read_enum(&enumeration.decl, &enumeration.members);
+        evaluation.read_enum(&enumeration);
         let members: Vec<EnumMemberEntry> = enumeration
             .members
             .iter()
@@ -276,6 +294,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 return self.member_target(evaluation, user, key);
             }
         }
+        // The file whose block declares the member: its scope is the one
+        // the initializer is written in.
+        let Some(block) = evaluation.block(user).cloned() else {
+            return ReferenceTarget::Nothing;
+        };
         let namespaces: Vec<&str> = enumeration
             .decl_name
             .rsplit_once('.')
@@ -292,12 +315,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             };
             let value_root = ValueRootKey {
                 scope: crate::semantic_query::ScopeId {
-                    canonical_id: Arc::clone(&enumeration.canonical_id),
-                    owner: enumeration.owner,
+                    canonical_id: Arc::clone(&block.canonical),
+                    owner: block.owner,
                     local_scope: None,
-                    binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
-                        enumeration.owner,
-                    ),
+                    binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(block.owner),
                 },
                 name: Arc::clone(root),
             };
@@ -320,7 +341,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 [] => {
                     if let Some(global) = global_number_spelling(path) {
                         let is_global = self
-                            .global_value_declarations(&enumeration.canonical_id, &path[0])
+                            .global_value_declarations(&block.canonical, &path[0])
                             .is_some_and(|declarations| {
                                 declarations
                                     .iter()
@@ -345,8 +366,17 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         .map_or(ReferenceTarget::Nothing, ReferenceTarget::Constant);
                 }
                 [member] => {
+                    // An enum this evaluation already read — another block
+                    // of a merged enum — is not assembled again.
+                    if let Some(decl) = evaluation.read_enum_declared_at(&identity) {
+                        let key = (decl, Arc::<str>::from(member.as_ref()));
+                        if evaluation.member(&key).is_none() {
+                            return ReferenceTarget::Nothing;
+                        }
+                        return self.member_target(evaluation, user, key);
+                    }
                     if let Some(other) = self.enum_declaration_raw(&identity) {
-                        evaluation.read_enum(&other.decl, &other.members);
+                        evaluation.read_enum(&other);
                         let key = (other.decl, Arc::<str>::from(member.as_ref()));
                         if evaluation.member(&key).is_none() {
                             return ReferenceTarget::Nothing;
@@ -372,7 +402,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let declared = self
             .enum_member_position(evaluation, &key)
             .map(|position| position.start);
-        if self.declared_after_use(evaluation, user, &key.0.canonical_id, key.0.owner, declared) {
+        let Some(block) = evaluation.block(&key).cloned() else {
+            return ReferenceTarget::Member(key);
+        };
+        if self.declared_after_use(evaluation, user, &block.canonical, block.owner, declared) {
             ReferenceTarget::Constant(EnumConstant::Number(0.0))
         } else {
             ReferenceTarget::Member(key)
@@ -392,23 +425,28 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         qualified: &[Arc<str>],
     ) -> Option<ResolvedRootIdentity> {
         let used = self.enum_member_position(evaluation, user)?;
+        let file = evaluation.block(user)?.clone();
+        // An ambient block's namespace exports every member.
+        if file.scope.is_some() {
+            return None;
+        }
         let name = qualified.join(".");
         let indexed = self
             .ctx
-            .ensure_indexed_ready_serve(user.0.canonical_id.as_ref())?
+            .ensure_indexed_ready_serve(file.canonical.as_ref())?
             .indexed;
         let block = *indexed
             .shallow_state
             .headers
             .namespace_private_value_blocks
             .get(&verter_type_expr::facts::DeclBindingKey::new(
-                user.0.owner,
+                file.owner,
                 name.as_str(),
             ))?;
         (block.start <= used.start && used.start < block.end).then(|| {
             ResolvedRootIdentity::new_in_owner(
-                Arc::clone(&user.0.canonical_id),
-                user.0.owner,
+                Arc::clone(&file.canonical),
+                file.owner,
                 name.as_str(),
             )
         })
@@ -417,9 +455,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// Whether a declaration of `canonical`'s `owner` starting at
     /// `declared` is written after the member `user` reads it — the
     /// checker's `isBlockScopedNameDeclaredBeforeUse` for an enum member
-    /// initializer. Only a declaration of the user's own file has an order
-    /// (another file's never follows it), and a use in an ambient context
-    /// reads every declaration as declared before it.
+    /// initializer. Only a declaration of the file declaring the user has
+    /// an order (another file's never follows it), and a use in an ambient
+    /// context reads every declaration as declared before it.
     fn declared_after_use(
         &self,
         evaluation: &mut EnumEvaluation,
@@ -428,7 +466,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         owner: verter_type_expr::TopLevelOwnerId,
         declared: Option<u32>,
     ) -> bool {
-        if user.0.canonical_id.as_ref() != canonical || user.0.owner != owner {
+        if !evaluation
+            .block(user)
+            .is_some_and(|block| block.canonical.as_ref() == canonical && block.owner == owner)
+        {
             return false;
         }
         let Some(declared) = declared else {
@@ -449,7 +490,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     ) -> Option<verter_session_query::declarations::headers::EnumMemberPosition> {
         let slot = *evaluation.enums.get(&key.0)?.positions.get(&key.1)?;
         if !evaluation.header_positions.contains_key(&key.0) {
-            let positions = self.enum_header_positions(&key.0, &evaluation.enums[&key.0].members);
+            let read = &evaluation.enums[&key.0];
+            let positions = self.enum_header_positions(&key.0, &read.members, &read.blocks);
             evaluation.header_positions.insert(key.0.clone(), positions);
         }
         evaluation
@@ -461,31 +503,42 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     }
 
     /// The declared positions of `decl`'s members, in the order of
-    /// `members` — `None` when its file's enum header does not list exactly
-    /// those members.
+    /// `members`, each read off the enum header of the declaration scope
+    /// whose block declares it — `None` when a block's enum header does not
+    /// list exactly its block's members.
     fn enum_header_positions(
         &self,
         decl: &DeclIdentity,
         members: &[EnumMemberEntry],
+        blocks: &[EnumBlock],
     ) -> Option<Arc<[verter_session_query::declarations::headers::EnumMemberPosition]>> {
-        let indexed = self
-            .ctx
-            .ensure_indexed_ready_serve(decl.canonical_id.as_ref())?
-            .indexed;
-        let headers = &indexed.shallow_state.headers;
-        let header = headers
-            .enum_headers
-            .get(&verter_type_expr::facts::DeclBindingKey::new(
-                decl.owner,
+        let mut positions = Vec::with_capacity(members.len());
+        let mut rest = members;
+        for block in blocks {
+            let (block_members, after) = rest.split_at_checked(block.len)?;
+            rest = after;
+            let indexed = self
+                .ctx
+                .ensure_indexed_ready_serve(block.canonical.as_ref())?
+                .indexed;
+            let header = indexed.shallow_state.headers.enum_header_in(
+                block.scope.as_ref(),
+                block.owner,
                 decl.decl_name.as_ref(),
-            ))?;
-        (header.member_positions.len() == members.len()
-            && header
-                .member_names
-                .iter()
-                .zip(members)
-                .all(|(name, entry)| *name == entry.name))
-        .then(|| Arc::from(header.member_positions.as_slice()))
+            )?;
+            if header.member_positions.len() != block_members.len()
+                || !header
+                    .member_names
+                    .iter()
+                    .zip(block_members)
+                    .all(|(name, entry)| *name == entry.name)
+            {
+                return None;
+            }
+            positions.extend_from_slice(&header.member_positions);
+        }
+        rest.is_empty()
+            .then(|| Arc::from(positions.into_boxed_slice()))
     }
 
     /// Where the value declaration `identity` names starts in its file,
@@ -510,24 +563,284 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             identity.owner,
             &identity.symbol_name,
         )?;
-        if prepared.kind != verter_session_query::declarations::ValueDeclKind::Enum {
+        self.enum_blocks(canonical, owner, symbol, &prepared)
+    }
+
+    /// The enum the value declaration `prepared` (`symbol` in
+    /// `canonical`'s `owner` scope) declares, its pending members left
+    /// unevaluated; `None` when it is not an enum.
+    ///
+    /// Its blocks are gathered by the shared augmentation collector
+    /// ([`AugmentationContribution::EnumBlocks`]), each read in the
+    /// declaration scope that declares it:
+    ///
+    /// - a GLOBAL enum — a script's top-level enum or one its namespaces
+    ///   export (`N.E`), or a module's `declare global` one, nested in a
+    ///   namespace or not — is every such declaration of its qualified name,
+    ///   in declaration precedence order, whichever of them `prepared` is;
+    /// - a module's enum is its own declaration followed by every `declare
+    ///   module` block of the module that declares it, in order;
+    /// - any other enum (a namespace's private one, one an ambient module
+    ///   declares) is its own declaration's blocks.
+    ///
+    /// The collector observes the contributor population, the augmentation
+    /// index and every contributing file's content, the negative reads
+    /// included, so a block added, removed, edited or entering the enum
+    /// (a namespace starting to export it) misses the warm read; a block it
+    /// cannot serve leaves the read uncacheable. Its identity is the first
+    /// block whose `(canonical, owner, name)` names it, so every reference
+    /// reaching any block names the one enum.
+    ///
+    /// A namespace of the enum's name merged with it adds no member, but its
+    /// exported values are properties of the enum object
+    /// ([`EnumDeclaration::namespace_members`]): the namespace blocks of the
+    /// enum's own file, and for a global enum every script's.
+    fn enum_blocks(
+        &self,
+        canonical: Arc<str>,
+        owner: verter_type_expr::TopLevelOwnerId,
+        symbol: Arc<str>,
+        prepared: &verter_session_query::type_solver::PreparedValueDecl,
+    ) -> Option<EnumDeclaration> {
+        use super::build::AugmentationContribution;
+        use verter_session_query::declarations::{AugmentationScopeKind, ValueDeclKind};
+        use verter_session_query::inputs::contributors::{
+            classify_shallow_module_kind, FileModuleKind,
+        };
+        use verter_session_query::resolution::AugmentationTargetKind;
+        if prepared.kind != ValueDeclKind::Enum {
             return None;
         }
-        let whole_hash = self
+        let own_members = Arc::clone(&prepared.enum_members.as_ref()?.members);
+        let indexed = self
             .ctx
-            .shallow_file_state(canonical.as_ref())
+            .ensure_indexed_ready_serve(canonical.as_ref())?
+            .indexed;
+        let state = &indexed.shallow_state;
+        // The declaration scope `prepared` was read from: the file's own,
+        // else the ambient block its identity falls back to.
+        let own_scope = if state.headers.value_header_in(owner, &symbol).is_some() {
+            None
+        } else {
+            Some(state.value_fallback_augmentation_scope(owner, &symbol)?)
+        };
+        let module_kind = classify_shallow_module_kind(state);
+        let target = match &own_scope {
+            None if module_kind == FileModuleKind::Script
+                && state.headers.namespace_member_is_exported(owner, &symbol) =>
+            {
+                Some(AugmentationTargetKind::GlobalAugmentation)
+            }
+            None if module_kind == FileModuleKind::Module => {
+                // A `declare module "./x"` block lives in a file depending on
+                // the module: index each before the augmentation index is read.
+                for rdep in self.ctx.reverse_dependency_canonicals(canonical.as_ref()) {
+                    let _ = self.ctx.ensure_indexed_ready_serve(&rdep);
+                }
+                Some(AugmentationTargetKind::ResolvedRelativeCanonical(
+                    Arc::clone(&canonical),
+                ))
+            }
+            Some(AugmentationScopeKind::Global) => Some(AugmentationTargetKind::GlobalAugmentation),
+            None | Some(AugmentationScopeKind::Module(_)) => None,
+        };
+        let is_global = matches!(target, Some(AugmentationTargetKind::GlobalAugmentation));
+        let own_block = super::build::EnumContribution {
+            canonical: Arc::clone(&canonical),
+            owner,
+            scope: own_scope.clone(),
+            members: own_members,
+        };
+        let contributions = target.and_then(|target| {
+            self.collect_augmentation_contributions(
+                AugmentationContribution::EnumBlocks,
+                target,
+                symbol.as_ref(),
+                &[],
+                crate::semantic_query::ProjectionReductionContext::structural_transit(),
+                canonical.as_ref(),
+                None,
+            )
+        });
+        let mut gathered = match contributions {
+            Some(contributions) => {
+                if contributions.source_env_unobservable {
+                    crate::fact_tracing::note_non_cacheable_read_fan_out(
+                        verter_session_query::facts::reuse::NonCacheableReadReason::UnobservableSource,
+                    );
+                }
+                contributions.enum_blocks
+            }
+            None => Vec::new(),
+        };
+        if is_global {
+            // A global enum's blocks are the collected ones, `prepared`'s
+            // among them; one the collection cannot place is its own.
+            let placed = gathered.iter().any(|block| {
+                block.canonical == canonical && block.owner == owner && block.scope == own_scope
+            });
+            if !placed {
+                gathered = vec![own_block];
+            }
+        } else {
+            gathered.insert(0, own_block);
+        }
+        let mut members: Vec<EnumMemberEntry> = Vec::new();
+        let mut blocks: Vec<EnumBlock> = Vec::with_capacity(gathered.len());
+        for block in gathered {
+            #[cfg(any(test, feature = "test-support"))]
+            ENUM_ASSEMBLY_WORK.with(|count| count.set(count.get() + 1));
+            let addressed = match &block.scope {
+                None => true,
+                Some(scope) => self
+                    .ctx
+                    .ensure_indexed_ready_serve(&block.canonical)
+                    .is_some_and(|serve| {
+                        serve
+                            .indexed
+                            .shallow_state
+                            .headers
+                            .value_header_in(block.owner, &symbol)
+                            .is_none()
+                            && serve
+                                .indexed
+                                .shallow_state
+                                .value_fallback_augmentation_scope(block.owner, &symbol)
+                                .as_ref()
+                                == Some(scope)
+                    }),
+            };
+            members.extend(block.members.iter().cloned());
+            blocks.push(EnumBlock {
+                len: block.members.len(),
+                canonical: block.canonical,
+                owner: block.owner,
+                scope: block.scope,
+                addressed,
+            });
+        }
+        let first = blocks.iter().find(|block| block.addressed)?;
+        let decl = DeclIdentity {
+            whole_hash: self.decl_whole_hash(&first.canonical),
+            canonical_id: Arc::clone(&first.canonical),
+            owner: first.owner,
+            decl_name: Arc::clone(&symbol),
+        };
+        let namespace_members =
+            self.enum_namespace_members(&canonical, owner, &symbol, is_global, &members);
+        Some(EnumDeclaration {
+            decl,
+            members: Arc::from(members.into_boxed_slice()),
+            blocks: Arc::from(blocks.into_boxed_slice()),
+            namespace_members: Arc::from(namespace_members.into_boxed_slice()),
+        })
+    }
+
+    /// The values a namespace merged with the enum `symbol` exports, each
+    /// named by its property and rooted at its declaration, after the
+    /// enum's `members` (a name a member holds is the member's): the
+    /// namespace blocks of `canonical`'s `owner` scope, or for a `global`
+    /// enum, whichever block the read reached, every script's namespace of
+    /// its name (of its head's for `N.E`). Every file read is observed, an
+    /// empty namespace's included, so a value it starts to export misses the
+    /// warm read.
+    fn enum_namespace_members(
+        &self,
+        canonical: &Arc<str>,
+        owner: verter_type_expr::TopLevelOwnerId,
+        symbol: &Arc<str>,
+        global: bool,
+        members: &[EnumMemberEntry],
+    ) -> Vec<(Arc<str>, ValueRootKey)> {
+        use verter_session_query::facts::SymbolSpace;
+        use verter_session_query::inputs::contributors::{ContributorOrigin, FileModuleKind};
+        let mut files: Vec<(Arc<str>, verter_type_expr::TopLevelOwnerId)> =
+            vec![(Arc::clone(canonical), owner)];
+        if global {
+            let head = symbol.split('.').next().unwrap_or(symbol);
+            let mut entries: Vec<_> = self
+                .global_contributors_in(canonical, head, SymbolSpace::Namespace)
+                .entries
+                .iter()
+                .filter(|entry| {
+                    !entry.is_automatic_lib
+                        && entry.module_kind == FileModuleKind::Script
+                        && entry.origin == ContributorOrigin::FileScopeNamespace
+                })
+                .map(|entry| {
+                    (
+                        self.ctx
+                            .declaration_sequence_rank(entry.artifact_key.canonical.as_ref()),
+                        Arc::clone(&entry.artifact_key.canonical),
+                        entry.owner,
+                    )
+                })
+                .collect();
+            entries.sort_by(|left, right| (left.0, &left.1).cmp(&(right.0, &right.1)));
+            files = entries
+                .into_iter()
+                .map(|(_, file, file_owner)| (file, file_owner))
+                .collect();
+            files.dedup();
+        }
+        let mut seen: rustc_hash::FxHashSet<&str> =
+            members.iter().map(|entry| entry.name.as_str()).collect();
+        let mut namespace_members: Vec<(Arc<str>, ValueRootKey)> = Vec::new();
+        let mut names: Vec<(Arc<str>, verter_type_expr::TopLevelOwnerId, String)> = Vec::new();
+        for (file, file_owner) in files {
+            let Some(indexed) = self
+                .ctx
+                .ensure_indexed_ready_serve(file.as_ref())
+                .map(|serve| serve.indexed)
+            else {
+                crate::fact_tracing::note_non_cacheable_read_fan_out(
+                    verter_session_query::facts::reuse::NonCacheableReadReason::UnobservableSource,
+                );
+                continue;
+            };
+            crate::resolver_core::resolver_context::observe_fan_out(
+                verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+                    canonical_id: file.to_string(),
+                    hash: indexed.whole_hash,
+                },
+            );
+            for member in indexed.shallow_state.headers.namespace_value_members(
+                None,
+                file_owner,
+                Some(symbol.as_ref()),
+            ) {
+                names.push((Arc::clone(&file), file_owner, member));
+            }
+        }
+        for (file, file_owner, member) in &names {
+            if !seen.insert(member.as_str()) {
+                continue;
+            }
+            namespace_members.push((
+                Arc::from(member.as_str()),
+                ValueRootKey {
+                    scope: crate::semantic_query::ScopeId {
+                        canonical_id: Arc::clone(file),
+                        owner: *file_owner,
+                        local_scope: None,
+                        binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                            *file_owner,
+                        ),
+                    },
+                    name: Arc::from(format!("{symbol}.{member}")),
+                },
+            ));
+        }
+        namespace_members
+    }
+
+    /// The whole-file hash a declaration identity in `canonical` carries.
+    fn decl_whole_hash(&self, canonical: &str) -> crate::semantic_query::HashValue {
+        self.ctx
+            .shallow_file_state(canonical)
             .map_or(crate::semantic_query::HashValue::default(), |state| {
                 state.whole_hash
-            });
-        Some(EnumDeclaration {
-            decl: DeclIdentity {
-                canonical_id: canonical,
-                owner,
-                whole_hash,
-                decl_name: symbol,
-            },
-            members: Arc::clone(&prepared.enum_members.as_ref()?.members),
-        })
+            })
     }
 
     /// The constant value of a `const` variable an enum initializer names:
@@ -630,7 +943,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// typed by the member's literal type, and — when a member's value is
     /// numeric or computed — the reverse mapping `readonly [x: number]:
     /// string` the checker gives it (`resolveAnonymousTypeMembers`'s
-    /// `enumNumberIndexInfo`), so `E[0]` reads a member's name.
+    /// `enumNumberIndexInfo`), so `E[0]` reads a member's name. A namespace
+    /// merged with the enum adds each value it exports as a property of
+    /// that value's type, after the members.
     pub(super) fn enum_object(&self, enumeration: &EnumDeclaration) -> SemanticNodeId {
         let reverse_mapping = enumeration.members.iter().any(|entry| {
             matches!(
@@ -674,6 +989,16 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
                 merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
             })
+            .chain(
+                self.typeof_members(
+                    enumeration.namespace_members.to_vec(),
+                    crate::semantic_query::ProjectionReductionContext::structural_transit(),
+                )
+                .into_iter()
+                .map(|(name, value)| {
+                    Self::module_member(name, value, enumeration.decl.canonical_id.as_ref())
+                }),
+            )
             .map(crate::semantic_query::SurfaceEntry::Member)
             .chain(index_signature)
             .collect();
@@ -722,16 +1047,18 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// out of `keyof` (`keyof typeof E` is its member names).
     pub(super) fn is_enum_object(&self, node: SemanticNodeId) -> bool {
         let literal = match self.graph().node_data(node).as_deref() {
+            // A merged namespace's properties are no member literal: the
+            // first member literal names the enum.
             Some(SemanticNodeData::Object(surface)) => {
                 match surface
                     .positive_members()
-                    .first()
+                    .iter()
                     .map(|member| member.value)
-                {
-                    Some(value) => match self.graph().node_data(value).as_deref() {
-                        Some(SemanticNodeData::EnumLiteral(literal)) => literal.clone(),
-                        _ => return false,
-                    },
+                    .find_map(|value| match self.graph().node_data(value).as_deref() {
+                        Some(SemanticNodeData::EnumLiteral(literal)) => Some(literal.clone()),
+                        _ => None,
+                    }) {
+                    Some(literal) => literal,
                     None => return false,
                 }
             }
@@ -868,6 +1195,12 @@ enum MemberState {
 #[derive(Default)]
 struct EnumEvaluation {
     enums: rustc_hash::FxHashMap<DeclIdentity, ReadEnum>,
+    /// The read enum each addressed block's `(canonical, owner, name)`
+    /// declares.
+    declared_at: rustc_hash::FxHashMap<
+        (Arc<str>, verter_type_expr::TopLevelOwnerId, Arc<str>),
+        DeclIdentity,
+    >,
     states: rustc_hash::FxHashMap<EnumMemberKey, MemberState>,
     /// The declared positions of a read enum's members, read off its
     /// file's header when a reference first needs one.
@@ -881,23 +1214,74 @@ struct EnumEvaluation {
 /// the position of each member name (its first declaration).
 struct ReadEnum {
     members: Arc<[EnumMemberEntry]>,
+    blocks: Arc<[EnumBlock]>,
+    /// The block declaring each member, by the member's position.
+    block_of: Vec<usize>,
     positions: rustc_hash::FxHashMap<Arc<str>, usize>,
 }
 
 impl EnumEvaluation {
-    /// Read `members` as the members of the enum `decl` (once per enum).
-    fn read_enum(&mut self, decl: &DeclIdentity, members: &Arc<[EnumMemberEntry]>) {
-        self.enums.entry(decl.clone()).or_insert_with(|| ReadEnum {
-            // Collected last to first, so a repeated name keeps its first
-            // position.
-            positions: members
-                .iter()
-                .enumerate()
-                .rev()
-                .map(|(position, entry)| (Arc::from(entry.name.as_str()), position))
-                .collect(),
-            members: Arc::clone(members),
-        });
+    /// Read the members of `enumeration` (once per enum).
+    fn read_enum(&mut self, enumeration: &EnumDeclaration) {
+        if self.enums.contains_key(&enumeration.decl) {
+            return;
+        }
+        for block in enumeration.blocks.iter().filter(|block| block.addressed) {
+            self.declared_at
+                .entry((
+                    Arc::clone(&block.canonical),
+                    block.owner,
+                    Arc::clone(&enumeration.decl.decl_name),
+                ))
+                .or_insert_with(|| enumeration.decl.clone());
+        }
+        let block_of = enumeration
+            .blocks
+            .iter()
+            .enumerate()
+            .flat_map(|(index, block)| std::iter::repeat_n(index, block.len))
+            .collect();
+        self.enums.insert(
+            enumeration.decl.clone(),
+            ReadEnum {
+                // Collected last to first, so a repeated name keeps its
+                // first position.
+                positions: enumeration
+                    .members
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .map(|(position, entry)| (Arc::from(entry.name.as_str()), position))
+                    .collect(),
+                members: Arc::clone(&enumeration.members),
+                blocks: Arc::clone(&enumeration.blocks),
+                block_of,
+            },
+        );
+    }
+
+    /// The block declaring the member `key` names, when its enum has been
+    /// read and declares it.
+    fn block(&self, key: &EnumMemberKey) -> Option<&EnumBlock> {
+        #[cfg(any(test, feature = "test-support"))]
+        ENUM_ASSEMBLY_WORK.with(|count| count.set(count.get() + 1));
+        let read = self.enums.get(&key.0)?;
+        let slot = *read.positions.get(&key.1)?;
+        read.blocks.get(*read.block_of.get(slot)?)
+    }
+
+    /// The read enum one of whose blocks the value declaration `identity`
+    /// names.
+    fn read_enum_declared_at(&self, identity: &ResolvedRootIdentity) -> Option<DeclIdentity> {
+        #[cfg(any(test, feature = "test-support"))]
+        ENUM_ASSEMBLY_WORK.with(|count| count.set(count.get() + 1));
+        self.declared_at
+            .get(&(
+                Arc::clone(&identity.canonical_id),
+                identity.owner,
+                Arc::clone(&identity.symbol_name),
+            ))
+            .cloned()
     }
 
     /// The member `key` names, when its enum has been read and declares it.
@@ -922,4 +1306,19 @@ thread_local! {
 #[cfg(any(test, feature = "test-support"))]
 pub fn enum_initializer_work_for_tests() -> usize {
     ENUM_INITIALIZER_EVALUATIONS.with(std::cell::Cell::get)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    /// How many enum blocks this thread assembled and member provenance
+    /// lookups it made; test-only.
+    static ENUM_ASSEMBLY_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many enum blocks this thread assembled, and member provenance
+/// lookups (which block declares a member, which enum a declaration's
+/// block belongs to) it made, so far (test-only).
+#[cfg(any(test, feature = "test-support"))]
+pub fn enum_assembly_work_for_tests() -> usize {
+    ENUM_ASSEMBLY_WORK.with(std::cell::Cell::get)
 }

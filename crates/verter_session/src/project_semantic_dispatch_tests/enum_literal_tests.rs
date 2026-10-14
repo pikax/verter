@@ -704,3 +704,593 @@ fn a_namespaces_non_exported_member_is_not_read_from_outside() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// `blocks` script files each declaring one block of the global enum
+/// `BenchFlag`: `F0 = 1`, then `F<i> = BenchFlag.F<i-1> * 2 + i % 3`, with
+/// the values TypeScript 7.0.2 gives those members.
+fn bench_flag_blocks(blocks: usize) -> (Vec<(String, String)>, Vec<f64>) {
+    let mut files = Vec::with_capacity(blocks);
+    let mut values = Vec::with_capacity(blocks);
+    for index in 0..blocks {
+        let (initializer, value) = if index == 0 {
+            ("1".to_owned(), 1.0)
+        } else {
+            let carry = index % 3;
+            (
+                format!("BenchFlag.F{} * 2 + {carry}", index - 1),
+                values[index - 1] * 2.0 + carry as f64,
+            )
+        };
+        files.push((
+            format!("enum-{index}.ts"),
+            format!("enum BenchFlag {{ F{index} = {initializer} }}\n"),
+        ));
+        values.push(value);
+    }
+    (files, values)
+}
+
+/// The template-literal print of a union of number values: `"1" | "3"`.
+fn template_print(values: &[f64]) -> String {
+    values
+        .iter()
+        .map(|value| format!("\"{value}\""))
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
+/// A global enum declared in one block per script file is ONE enum whose
+/// members are every block's, each block's member computed from the
+/// previous block's: `` `${BenchFlag}` `` is the template of every member
+/// value, and `BenchFlag.F<i>` each member's own value.
+///
+/// Measured on TypeScript 7.0.2 (`tsc --ignoreConfig --strict` over the
+/// block files in name order, reading `` `${BenchFlag}` `` and
+/// `BenchFlag.F<last>` off a TS2322 against `never`): at 10 blocks `"1" |
+/// "1096" | "136" | "16" | "273" | "3" | "33" | "548" | "68" | "8"`; at 25
+/// blocks the 25 values up to `"35951176"`; at 50 blocks the 50 values up
+/// to `"1206321328759953"`, which a double holds exactly; the last member
+/// prints as itself.
+///
+/// Mutation: reading the enum's first block alone answers `"1"`.
+#[test]
+fn a_global_enum_merged_across_files_carries_every_members_value() {
+    for blocks in [10, 25, 50] {
+        let (files, values) = bench_flag_blocks(blocks);
+        let tsc_last = match blocks {
+            10 => 1096.0,
+            25 => 35_951_176.0,
+            _ => 1_206_321_328_759_953.0,
+        };
+        assert_eq!(values[blocks - 1], tsc_last, "the recurrence tsc measured");
+        let files: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(name, source)| (name.as_str(), source.as_str()))
+            .collect();
+        let expected = template_print(&values);
+        let last = format!("BenchFlag.F{}", blocks - 1);
+        let extends_value = format!("{last} extends {} ? \"y\" : \"n\"", values[blocks - 1]);
+        let rows = [
+            ("`${BenchFlag}`", expected.as_str()),
+            (last.as_str(), last.as_str()),
+            (extends_value.as_str(), "\"y\""),
+        ];
+        let project = ProbeProject {
+            files: &files,
+            compiler_options: None,
+            ambient_lib: None,
+        };
+        let failures = mismatches_in(project, "export {};\n", &rows);
+        assert!(
+            failures.is_empty(),
+            "{blocks} blocks:\n{}",
+            failures.join("\n")
+        );
+    }
+}
+
+/// Assembling a global enum merged across files, and looking up which
+/// block declares each member an initializer reads, grows with the number
+/// of blocks: going from 20 to 40 blocks adds twice the work going from
+/// 10 to 20 adds.
+///
+/// Mutation: finding a member's block by walking, and counting, the blocks
+/// before it makes the work added from 20 to 40 blocks about four times
+/// that added from 10 to 20.
+#[test]
+fn assembling_a_merged_enum_grows_linearly_with_its_blocks() {
+    let work = |blocks: usize| {
+        let (files, values) = bench_flag_blocks(blocks);
+        let files: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(name, source)| (name.as_str(), source.as_str()))
+            .collect();
+        let expected = template_print(&values);
+        let before = super::enum_type::enum_assembly_work_for_tests();
+        let project = ProbeProject {
+            files: &files,
+            compiler_options: None,
+            ambient_lib: None,
+        };
+        let failures = mismatches_in(
+            project,
+            "export {};\n",
+            &[("`${BenchFlag}`", expected.as_str())],
+        );
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+        super::enum_type::enum_assembly_work_for_tests() - before
+    };
+    let (quarter, half, full) = (work(10), work(20), work(40));
+    assert!(quarter > 0, "the enum is assembled");
+    assert_eq!(
+        full - half,
+        2 * (half - quarter),
+        "assembly work over 10, 20 and 40 blocks: {quarter}, {half}, {full}"
+    );
+}
+
+/// Global enums merged across script files: auto-increment after a
+/// constant member computed from another file's block, string members
+/// concatenating another block's, a `const enum`, an enum merged with a
+/// namespace, a non-constant member, two blocks omitting their first
+/// initializer, and auto-increment after a non-constant member.
+const MERGED_A: &str = "\
+enum AutoInc { A = 3 }
+enum Str { A = \"a\" }
+const enum CE { A = 1 }
+enum NE { A = 1 }
+enum Rand { A = 1 }
+enum Two { A }
+enum Bad { A = 1 }
+";
+const MERGED_B: &str = "\
+enum AutoInc { B = AutoInc.A * 2, C }
+enum Str { B = Str.A + \"b\", C = `${B}c` }
+const enum CE { B = CE.A + 1, C }
+namespace NE { export const x = 2; }
+enum Rand { F = Math.random() }
+enum Two { B, C }
+enum Bad { R = Math.random(), S }
+";
+const MERGED_C: &str = "enum NE { B = NE.A + 1 }\n";
+
+/// Every block of a global enum merged across files evaluates as the
+/// checker evaluates it: auto-increment continues after a constant member
+/// computed from another block (`C` is 7), a string member concatenates
+/// another block's, a `const enum` merges like any other, a namespace
+/// merged with the enum adds no member but its exported value is a property
+/// of the enum object, and a member initialized with `Math.random()` is
+/// computed — its template is `string`.
+///
+/// Measured on TypeScript 7.0.2 (`tsc --ignoreConfig --strict` over
+/// `a.ts b.ts c.ts`, each read off a TS2322 against `never`):
+/// `` `${AutoInc}` `` is `"3" | "6" | "7"`, `` `${Str}` `` `"a" | "ab" |
+/// "abc"`, `` `${CE}` `` `"1" | "2" | "3"`, `` `${NE}` `` `"1" | "2"`,
+/// `` `${Rand}` `` `string`, `AutoInc.C` `AutoInc.C`, `Rand` `Rand`,
+/// `Rand.F` `Rand.F`, `1 extends Rand.F`, `AutoInc.C extends 7` and
+/// `CE.C extends 3` `"y"`, `keyof typeof NE` `"A" | "B" | "x"`, `typeof
+/// NE.x` `2`. These
+/// declarations raise no diagnostic. Two blocks omitting their first
+/// initializer raise TS2432 and still number from `0` (`` `${Two}` `` is
+/// `"0" | "1"`); a bare member after `Math.random()` raises TS1061 and is
+/// computed (`1 extends Bad.S` is `"y"`, `` `${Bad}` `` `string`).
+///
+/// Mutation: reading each enum's first block alone answers `` `${AutoInc}`
+/// `` `"3"` and `AutoInc.C` an unresolved member; an enum object of its
+/// members alone answers `keyof typeof NE` `"A" | "B"`.
+#[test]
+fn global_enum_blocks_evaluate_as_the_checker_evaluates_them() {
+    let yes = |probe: &'static str| (probe, "\"y\"");
+    let files = [("a.ts", MERGED_A), ("b.ts", MERGED_B), ("c.ts", MERGED_C)];
+    assert_rows(
+        &files,
+        "export {};\n",
+        &[
+            ("`${AutoInc}`", "\"3\" | \"6\" | \"7\""),
+            ("`${Str}`", "\"a\" | \"ab\" | \"abc\""),
+            ("`${CE}`", "\"1\" | \"2\" | \"3\""),
+            ("`${NE}`", "\"1\" | \"2\""),
+            ("keyof typeof NE", "\"A\" | \"B\" | \"x\""),
+            ("typeof NE.x", "2"),
+            ("`${Rand}`", "string"),
+            ("AutoInc.C", "AutoInc.C"),
+            ("Rand", "Rand"),
+            ("Rand.F", "Rand.F"),
+            yes("1 extends Rand.F ? \"y\" : \"n\""),
+            yes("AutoInc.C extends 7 ? \"y\" : \"n\""),
+            yes("CE.C extends 3 ? \"y\" : \"n\""),
+            ("`${Two}`", "\"0\" | \"1\""),
+            yes("1 extends Bad.S ? \"y\" : \"n\""),
+            ("`${Bad}`", "string"),
+        ],
+    );
+}
+
+/// Editing one block of a global enum merged across files changes the
+/// enum exactly as a cold build of the edited program answers it.
+///
+/// Measured on TypeScript 7.0.2: rewriting `enum-3.ts` of the 10-block
+/// program to `F3 = BenchFlag.F2 * 3` makes `F3` `24` and every later
+/// member follow it — `` `${BenchFlag}` `` is `"1" | "3" | "8" | "24" |
+/// "49" | "100" | "200" | "401" | "804" | "1608"`.
+///
+/// Mutation: a warm read keeping the enum's pre-edit members answers the
+/// unedited union.
+#[test]
+fn editing_one_block_of_a_merged_enum_matches_a_cold_build() {
+    use super::checker_probe_lane_tests::{probe_host, with_probe_on_host};
+    use crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::{checker_syntax, render_node};
+    let (files, before) = bench_flag_blocks(10);
+    let edited_source = "enum BenchFlag { F3 = BenchFlag.F2 * 3 }\n";
+    let mut after = before.clone();
+    after[3] = after[2] * 3.0;
+    for index in 4..after.len() {
+        after[index] = after[index - 1] * 2.0 + (index % 3) as f64;
+    }
+    assert_eq!(after[9], 1608.0, "the edited recurrence tsc measured");
+    let borrowed: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(name, source)| (name.as_str(), source.as_str()))
+        .collect();
+    let edited: Vec<(&str, &str)> = borrowed
+        .iter()
+        .map(|&(name, source)| {
+            (
+                name,
+                if name == "enum-3.ts" {
+                    edited_source
+                } else {
+                    source
+                },
+            )
+        })
+        .collect();
+    let project = ProbeProject {
+        files: &borrowed,
+        compiler_options: None,
+        ambient_lib: None,
+    };
+    let edited_project = ProbeProject {
+        files: &edited,
+        ..project
+    };
+    // The template's print, and whether it is the checker's `expected`.
+    let read =
+        |host: &std::sync::Arc<crate::VerterHost>, project: ProbeProject<'_>, expected: &[f64]| {
+            let expected = checker_syntax::parse(&template_print(expected))
+                .expect("a union of string literals parses");
+            with_probe_on_host(
+                host,
+                project,
+                "export {};\n",
+                "`${BenchFlag}`",
+                |dispatch, node| {
+                    (
+                        render_node(dispatch, node, 0),
+                        checker_syntax::matches_node(dispatch, node, &expected, 0),
+                    )
+                },
+            )
+        };
+    let warm = probe_host(project);
+    let (unedited, matched) = read(&warm, project, &before);
+    assert!(matched, "before the edit: {unedited}");
+    crate::u6_flow_shape_corpus_tests::upsert(
+        &warm,
+        "/wb/enum-3.ts",
+        edited_source,
+        crate::FileLanguage::script_ts(),
+    );
+    let (cold, matched) = read(&probe_host(edited_project), edited_project, &after);
+    assert!(matched, "a cold build of the edited program: {cold}");
+    let (warm_after, _) = read(&warm, edited_project, &after);
+    assert_eq!(
+        warm_after, cold,
+        "the edited warm host answers as a cold build"
+    );
+    assert_ne!(warm_after, unedited, "the edit changes the answer");
+}
+
+/// A global enum is merged wherever its blocks are declared: the enum a
+/// script's namespace exports (`namespace N { export enum E {} }` in two
+/// scripts is one `N.E`), a module's `declare global` block of a script's
+/// enum, and a module's `declare global { namespace N { enum E {} } }`
+/// block of a script's `N.E`, whichever file declares first; a module's
+/// `declare module "./a"` block merges into `./a`'s enum; a module's own
+/// enum and its `declare global` block of the same name stay two enums; an
+/// enum declared with a namespace in one file carries the namespace's
+/// exported values.
+///
+/// Measured on TypeScript 7.0.2 (`tsc --ignoreConfig --strict` over the
+/// fixture files, each read off a TS2322 against `never`; the fixtures
+/// raise no other diagnostic): over the two namespace blocks
+/// `` `${N.E}` `` is `"1" | "2" | "3"`, `keyof typeof N.E` `"A" | "B" |
+/// "C"` and `N.E.C extends 3` `"y"`; over the script block and the
+/// `declare global` block, in either file order, `` `${E}` `` is `"1" |
+/// "2" | "6"`, `keyof typeof E` `"A" | "B" | "C"`, `E.B` `E.B` and `E.C
+/// extends 6` `"y"`; over the script namespace and the `declare global`
+/// namespace, in either file order, `` `${N.E}` `` is `"1" | "2"`, `keyof
+/// typeof N.E` `"A" | "B"` and `N.E.B extends 2` `"y"`; over `./a`'s enum
+/// and its `declare module` block, `` `${E}` `` is `"1" | "2"`, `keyof
+/// typeof E` `"A" | "B"` and `E.B extends 2` `"y"`; over a script's `E`
+/// and a module declaring its own `E { X = 9 }` beside a `declare global`
+/// block, the global `` `${E}` `` is `"1" | "2"` and `keyof typeof E`
+/// `"A" | "B"` while the module's
+/// `` `${ME}` `` is `"9"` and `keyof typeof ME` `"X"`; over one file
+/// declaring `NE` and its namespace, `keyof typeof NE` is `"A" | "f" |
+/// "x"` and `typeof NE.x` `2`.
+///
+/// Mutation: merging only a script's top-level enum answers `` `${N.E}`
+/// `` `"1"` and `` `${E}` `` `"1"`; leaving a `declare global` enum
+/// unindexed leaves the module-first `E` unresolved; dropping a block
+/// nested in a `declare global` namespace or a `declare module` block
+/// answers `"1"`; reading the global block as the module's own `E`
+/// answers `` `${ME}` `` `"2" | "9"`; an enum object of its members alone
+/// answers `keyof typeof NE` `"A"`.
+#[test]
+fn a_global_enum_merges_every_block_and_its_namespace() {
+    let mut failures = Vec::new();
+    let namespace_blocks = [
+        ("a.ts", "namespace N { export enum E { A = 1 } }\n"),
+        (
+            "b.ts",
+            "namespace N { export enum E { B = N.E.A + 1, C } }\n",
+        ),
+    ];
+    failures.extend(mismatches_in(
+        enum_project(&namespace_blocks),
+        "export {};\n",
+        &[
+            ("`${N.E}`", "\"1\" | \"2\" | \"3\""),
+            ("keyof typeof N.E", "\"A\" | \"B\" | \"C\""),
+            ("N.E.C extends 3 ? \"y\" : \"n\"", "\"y\""),
+        ],
+    ));
+    let script = "enum E { A = 1 }\n";
+    let augmentation = "export {};\ndeclare global { enum E { B = 2, C = E.A + 5 } }\n";
+    for files in [
+        [("a.ts", script), ("m.ts", augmentation)],
+        [("g.ts", augmentation), ("z.ts", script)],
+    ] {
+        failures.extend(mismatches_in(
+            enum_project(&files),
+            "export {};\n",
+            &[
+                ("`${E}`", "\"1\" | \"2\" | \"6\""),
+                ("keyof typeof E", "\"A\" | \"B\" | \"C\""),
+                ("E.B", "E.B"),
+                ("E.C extends 6 ? \"y\" : \"n\"", "\"y\""),
+            ],
+        ));
+    }
+    let namespace_script = "namespace N { export enum E { A = 1 } }\n";
+    let namespace_augmentation =
+        "export {};\ndeclare global { namespace N { enum E { B = 2 } } }\n";
+    for files in [
+        [("a.ts", namespace_script), ("m.ts", namespace_augmentation)],
+        [("g.ts", namespace_augmentation), ("z.ts", namespace_script)],
+    ] {
+        failures.extend(mismatches_in(
+            enum_project(&files),
+            "export {};\n",
+            &[
+                ("`${N.E}`", "\"1\" | \"2\""),
+                ("keyof typeof N.E", "\"A\" | \"B\""),
+                ("N.E.B extends 2 ? \"y\" : \"n\"", "\"y\""),
+            ],
+        ));
+    }
+    let module_augmentation = [
+        ("a.ts", "export enum E { A = 1 }\n"),
+        (
+            "m.ts",
+            "import \"./a\";\ndeclare module \"./a\" { enum E { B = 2 } }\n",
+        ),
+    ];
+    failures.extend(mismatches_in(
+        enum_project(&module_augmentation),
+        "import { E } from './a';\n",
+        &[
+            ("`${E}`", "\"1\" | \"2\""),
+            ("keyof typeof E", "\"A\" | \"B\""),
+            ("E.B extends 2 ? \"y\" : \"n\"", "\"y\""),
+        ],
+    ));
+    let shadowing = [
+        ("a.ts", "enum E { A = 1 }\n"),
+        (
+            "m.ts",
+            "export enum E { X = 9 }\ndeclare global { enum E { B = 2 } }\n",
+        ),
+    ];
+    failures.extend(mismatches_in(
+        enum_project(&shadowing),
+        "import { E as ME } from './m';\n",
+        &[
+            ("`${E}`", "\"1\" | \"2\""),
+            ("keyof typeof E", "\"A\" | \"B\""),
+            ("`${ME}`", "\"9\""),
+            ("keyof typeof ME", "\"X\""),
+        ],
+    ));
+    let with_namespace = "enum NE { A = 1 }\n\
+        namespace NE { export const x = 2; export function f() { return 1 as const } }\n";
+    failures.extend(mismatches_in(
+        enum_project(&[("a.ts", with_namespace)]),
+        "export {};\n",
+        &[
+            ("keyof typeof NE", "\"A\" | \"f\" | \"x\""),
+            ("typeof NE.x", "2"),
+        ],
+    ));
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A block entering or leaving a merged enum changes the enum on a warm
+/// host exactly as a cold build of the edited program answers it: a
+/// script's namespace starting, then stopping, to export its `E`, and a
+/// module's `declare module "./a"` block of `./a`'s enum appearing, having
+/// its member's value edited and disappearing. An edit to a file declaring
+/// no block of the enum keeps the warm answer, re-evaluating no
+/// initializer.
+///
+/// Measured on TypeScript 7.0.2 (`tsc --ignoreConfig --strict`, read off a
+/// TS2322 against `never`; no other diagnostic): `` `${N.E}` `` is `"1"`
+/// while `b.ts`'s `namespace N { enum E { B = N.E.A + 1 } }` keeps its
+/// enum private and `"1" | "2"` once it exports it; `./a`'s `` `${E}` `` is
+/// `"1"` without the augmentation, `"1" | "2"` with `declare module "./a" {
+/// enum E { B = 2 } }` and `"1" | "3"` once `B = 3`.
+///
+/// Mutation: discovering a dotted enum's blocks without observing the
+/// exported membership of `N.E` leaves the warm `` `${N.E}` `` at `"1"`
+/// after `b.ts` exports its enum; observing the augmentation index only
+/// when a block contributes leaves the warm `` `${E}` `` at `"1"` after
+/// the augmentation appears.
+#[test]
+fn an_enum_block_entering_or_leaving_its_enum_matches_a_cold_build() {
+    use super::checker_probe_lane_tests::{probe_host, with_probe_on_host};
+    use crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::{checker_syntax, render_node};
+    // The probe's print, and whether it is the checker's `checker`.
+    let read = |host: &std::sync::Arc<crate::VerterHost>,
+                project: ProbeProject<'_>,
+                source: &str,
+                probe: &str,
+                checker: &str| {
+        let expected = checker_syntax::parse(checker).expect("a union of string literals parses");
+        with_probe_on_host(host, project, source, probe, |dispatch, node| {
+            (
+                render_node(dispatch, node, 0),
+                checker_syntax::matches_node(dispatch, node, &expected, 0),
+            )
+        })
+    };
+    let mut failures = Vec::new();
+    // Each edit of `path` to `edited`, in turn, on one warm host, against a
+    // cold build of the edited program and the checker's answer.
+    let mut walk = |files: &[(&'static str, &'static str)],
+                    source: &str,
+                    probe: &str,
+                    path: &'static str,
+                    edits: &[(&'static str, &'static str)],
+                    initial: &str| {
+        let warm = probe_host(enum_project(files));
+        let mut program: Vec<(&str, &str)> = files.to_vec();
+        let (first, matched) = read(&warm, enum_project(&program), source, probe, initial);
+        if !matched {
+            failures.push(format!("`{probe}` before any edit: {first}"));
+        }
+        for (edited, checker) in edits {
+            for entry in program.iter_mut().filter(|(name, _)| *name == path) {
+                entry.1 = edited;
+            }
+            crate::u6_flow_shape_corpus_tests::upsert(
+                &warm,
+                &format!("/wb/{path}"),
+                edited,
+                crate::FileLanguage::script_ts(),
+            );
+            let (cold, matched) = read(
+                &probe_host(enum_project(&program)),
+                enum_project(&program),
+                source,
+                probe,
+                checker,
+            );
+            let (warm_after, _) = read(&warm, enum_project(&program), source, probe, checker);
+            if !matched {
+                failures.push(format!(
+                    "`{probe}` cold after `{edited}`: the checker answers `{checker}`, \
+                     the lane measured `{cold}`"
+                ));
+            }
+            if warm_after != cold {
+                failures.push(format!(
+                    "`{probe}` warm after `{edited}`: `{warm_after}`, a cold build `{cold}`"
+                ));
+            }
+        }
+    };
+    walk(
+        &[
+            ("a.ts", "namespace N { export enum E { A = 1 } }\n"),
+            ("b.ts", "namespace N { enum E { B = N.E.A + 1 } }\n"),
+        ],
+        "export {};\n",
+        "`${N.E}`",
+        "b.ts",
+        &[
+            (
+                "namespace N { export enum E { B = N.E.A + 1 } }\n",
+                "\"1\" | \"2\"",
+            ),
+            ("namespace N { enum E { B = N.E.A + 1 } }\n", "\"1\""),
+        ],
+        "\"1\"",
+    );
+    walk(
+        &[
+            ("a.ts", "export enum E { A = 1 }\n"),
+            ("m.ts", "import \"./a\";\nexport {};\n"),
+        ],
+        "import { E } from './a';\n",
+        "`${E}`",
+        "m.ts",
+        &[
+            (
+                "import \"./a\";\ndeclare module \"./a\" { enum E { B = 2 } }\n",
+                "\"1\" | \"2\"",
+            ),
+            (
+                "import \"./a\";\ndeclare module \"./a\" { enum E { B = 3 } }\n",
+                "\"1\" | \"3\"",
+            ),
+            ("import \"./a\";\nexport {};\n", "\"1\""),
+        ],
+        "\"1\"",
+    );
+    // An edit to a file declaring no block of the enum keeps the warm
+    // answer without evaluating an initializer again.
+    let files = [
+        ("a.ts", "namespace N { export enum E { A = 1 } }\n"),
+        ("b.ts", "namespace N { export enum E { B = N.E.A + 1 } }\n"),
+        ("u.ts", "const unrelated = 1;\n"),
+    ];
+    let warm = probe_host(enum_project(&files));
+    let both = "\"1\" | \"2\"";
+    let (before, matched) = read(
+        &warm,
+        enum_project(&files),
+        "export {};\n",
+        "`${N.E}`",
+        both,
+    );
+    if !matched {
+        failures.push(format!("`${{N.E}}` over two exported blocks: {before}"));
+    }
+    crate::u6_flow_shape_corpus_tests::upsert(
+        &warm,
+        "/wb/u.ts",
+        "const unrelated = 2;\n",
+        crate::FileLanguage::script_ts(),
+    );
+    let work = super::enum_type::enum_initializer_work_for_tests();
+    let (after, _) = read(
+        &warm,
+        enum_project(&files),
+        "export {};\n",
+        "`${N.E}`",
+        both,
+    );
+    let reread_work = super::enum_type::enum_initializer_work_for_tests() - work;
+    if after != before {
+        failures.push(format!(
+            "an unrelated edit moved `${{N.E}}`: {before} -> {after}"
+        ));
+    }
+    if reread_work != 0 {
+        failures.push(format!(
+            "an unrelated edit re-evaluated {reread_work} initializer steps"
+        ));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

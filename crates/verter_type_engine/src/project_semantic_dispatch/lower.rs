@@ -663,8 +663,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// declaration (so a non-enum `Ns.Member` reference is never
     /// mis-projected) or an unknown member name. A one-segment prefix
     /// resolves through the prepared decl's pre-resolved map first, then
-    /// the shared bare-name resolver, so a locally-declared OR an imported
-    /// enum binding both resolve; a qualified prefix (`Ns.Enum.Member`)
+    /// the shared bare-name resolver, then the global value declarations,
+    /// so a locally-declared, an imported OR a global enum binding
+    /// resolves; a qualified prefix (`Ns.Enum.Member`)
     /// resolves as a value path does, so a namespace's enum resolves in the
     /// namespace's own file.
     pub(super) fn resolve_enum_member_type(
@@ -679,6 +680,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let identity = match prefix.split_once('.') {
             None => match name_resolution.get(prefix) {
                 Some(direct) => direct.clone(),
+                // A name the scope does not bind is the GLOBAL enum of
+                // that name, a script's.
                 None => resolve_bare_name_in_scope(
                     self.ctx,
                     self,
@@ -686,7 +689,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     scope_owner,
                     scope_payload,
                     prefix,
-                )?,
+                )
+                .or_else(|| {
+                    self.global_value_declaration(scope_canonical, prefix)
+                        .map(|(identity, _)| identity)
+                })?,
             },
             Some((root, rest)) => {
                 let value_root = crate::semantic_query::ValueRootKey {
