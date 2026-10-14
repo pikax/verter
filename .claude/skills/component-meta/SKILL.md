@@ -8,6 +8,30 @@ description: "Component metadata: native vs compat boundary, fallthrough/root in
 For the native fact transport, schema compatibility, localized validation and
 public guarantees, see [native-facts.md](references/native-facts.md).
 
+## Project configuration ingress
+
+A tsconfig-backed session (`openComponentMetaSession({ tsconfig })`,
+`createChecker(tsconfigPath)`) configures its workspace with
+`{ root: <tsconfig dir>, workspaceRoot, tsconfigPath }`
+(`runtime/discovery.ts::tsconfigProjectConfig`). The NAPI ingress
+(`crates/verter_napi/src/lib.rs::napi_project_config_to_ide`) builds any
+project carrying a `tsconfigPath` through the shared workspace loader
+`verter_workspace::configured_ide_project`, read through the host's own
+workspace: compiler options (`extends`, `paths`, `baseUrl`, `noLib`, `lib`,
+strictness) and the exact `files` / `include` / `exclude` membership, its
+`include` matches materialized by walking the project root (a lazy workspace
+has read none of them yet), whose `program_root_files` order is the program
+file order that orders merged declarations. Ownership follows the membership:
+a file outside it is not governed by the tsconfig's `paths`. Explicit `providerRoot` / `workspaceAliases` /
+`compilerOptions` / `references` fields layer on top (an absent `baseUrl`
+does not clear the tsconfig's). A project with no `tsconfigPath` — the inline
+`config` session — keeps the match-all membership: match-all is only for
+tsconfig-less projects. The pooled engine identity follows the same split:
+`tsconfigConfigHash` hashes the whole tsconfig (membership included);
+`inlineConfigHash` strips `include`, which is only a discovery filter for a
+match-all project. Guards: `crates/verter_napi/src/project_config_tests.rs`,
+`packages/component-meta/src/project.program-order.spec.ts`.
+
 ## Audit & footprint
 
 Per-request semantic footprint observability splits across two crates:

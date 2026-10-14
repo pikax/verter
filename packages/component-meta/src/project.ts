@@ -30,12 +30,13 @@ import {
   computeEngineKey,
   extractPathAliases,
   getMetaRuntime,
+  inlineConfigHash,
   normalizePath,
-  parseTsconfig,
   resolvePath,
   shutdownMetaRuntime as _shutdownMetaRuntime,
   stableHash,
-  stableSelectiveConfigHash,
+  tsconfigConfigHash,
+  tsconfigProjectConfig,
 } from "./runtime/index.js";
 import type {
   BootstrapFn,
@@ -328,7 +329,7 @@ function hashTsconfigConfig(tsconfigPath: string): string {
   try {
     const raw = readFileSync(tsconfigPath, "utf8");
     const stripped = raw.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
-    return stableSelectiveConfigHash(JSON.parse(stripped));
+    return tsconfigConfigHash(JSON.parse(stripped));
   } catch {
     return stableHash({ tsconfigPath: resolvePath(tsconfigPath) });
   }
@@ -347,7 +348,7 @@ function buildEngineKeyInput(
     configKind: options.tsconfig ? "tsconfig" : "inline",
     tsconfigPath,
     configHash: options.config
-      ? stableSelectiveConfigHash(options.config)
+      ? inlineConfigHash(options.config)
       : hashTsconfigConfig(resolvePath(options.tsconfig)),
     nativeFlags: {
       analysisLevel: "full",
@@ -366,9 +367,6 @@ async function openComponentMetaSessionInternal(
   const root = resolvePath(options.root);
   const native = loadNative();
   const workspace: CheckerWorkspace = new native.Workspace([root]);
-  const parsedConfig = options.tsconfig
-    ? await parseTsconfig(resolvePath(options.tsconfig), workspace)
-    : null;
   const input = buildEngineKeyInput(options, checkerOptions);
 
   const bootstrap: BootstrapFn = async () => {
@@ -380,10 +378,10 @@ async function openComponentMetaSessionInternal(
     const nativeProject: NativeMetaProject = native.MetaProject.withWorkspace(config, workspace);
 
     if (options.tsconfig) {
-      if (parsedConfig) {
-        const aliases = extractPathAliases(parsedConfig.config, normalizePath(root));
-        workspace.configureProjects([aliases]);
-      }
+      // The native loader reads the tsconfig itself: compiler options and
+      // the `files` / `include` / `exclude` membership that orders the
+      // program's files.
+      workspace.configureProjects([tsconfigProjectConfig(resolvePath(options.tsconfig), root)]);
     } else if (options.config) {
       const aliases = extractPathAliases(options.config, normalizePath(root));
       workspace.configureProjects([aliases]);
