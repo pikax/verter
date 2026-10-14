@@ -327,6 +327,157 @@ fn recursive_mapped_index_publishes_dotted_paths_for_three_hundred_entities() {
     assert_recursive_paths_layout(300, 5);
 }
 
+/// Exhaustion withholds the selected value, while its authored mapped access
+/// remains intact. The stopped demand is not an evaluated partial value.
+#[test]
+fn recursive_mapped_index_budget_refusal_does_not_warm() {
+    use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+    use verter_type_engine::semantic_query::{
+        FactStatus, InstantiateKey, PathSegment, ProjectionReductionContext, QueryError,
+        QueryResult, SemanticNodeData, SemanticQueryKey,
+    };
+
+    let host = recursive_paths_host(3, 3, 100);
+    let view = crate::typeinfo::current_store_view_for_query(&host).unwrap();
+    let host_context = crate::resolver_core::HostResolverContext::from_current(
+        &host,
+        &view,
+        Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
+    );
+    let dispatch =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host_context);
+    let graph = host.project_type_store().semantic_graph();
+    // Like the public named-symbol entry, first obtain the declaration shell;
+    // the selected index demand below owns reduction of its recursive value.
+    let shell = dispatch.execute_read(SemanticQueryKey::Instantiate(InstantiateKey::new(
+        dispatch.type_slot_for(
+            Arc::from("/paths/scenario.ts"),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            Arc::from("Probe"),
+        ),
+        Arc::from([]),
+        dispatch.instantiate_context_for(
+            "/paths/scenario.ts",
+            ProjectionReductionContext::published(ProjectionMode::Expanded),
+        ),
+    )));
+    let QueryResult::Value(node) = shell.value else {
+        panic!("the authored access must resolve: {:?}", shell.value);
+    };
+    let data = graph.node_data(node).unwrap();
+    let SemanticNodeData::IndexedAccess { object, index } = data.as_ref() else {
+        panic!("the mapped index must remain: {data:?}");
+    };
+    let key = SemanticQueryKey::IndexedAccess {
+        base: *object,
+        index: index.clone(),
+        mode: ProjectionMode::Expanded,
+    };
+    // IndexedAccess is admitted under this canonical ProjectPath identity.
+    let memo_key = SemanticQueryKey::ProjectPath {
+        base: *object,
+        path: Arc::from([PathSegment::Index(index.clone())]),
+        context: ProjectionReductionContext::published(ProjectionMode::Expanded),
+    };
+    for request in 1..=2 {
+        let context = RequestContext::with_kind_timing_and_projection_budget(
+            request,
+            Arc::from("/paths/scenario.ts"),
+            verter_audit::RequestKind::TypeResolution,
+            false,
+            false,
+            None,
+            100,
+        );
+        let _guard = RequestContextGuard::install(Arc::clone(&context));
+        let read = dispatch.execute_read(key.clone());
+        assert!(context.projection_budget.is_exhausted());
+        assert!(read.result_is_partial());
+        assert!(read.cache_suppress);
+        assert!(matches!(read.fact_status, FactStatus::Unavailable(_)));
+        assert!(
+            matches!(
+                read.value,
+                QueryResult::Error(QueryError::IncompleteSemanticOperand { .. })
+            ),
+            "a stopped walk cannot publish an evaluated value: {:?}",
+            read.value
+        );
+        assert!(graph.get_unvalidated(&memo_key).is_none());
+    }
+    let bytes = host.project_node_to_type_expr_json_bytes(node).unwrap();
+    let answer: TypeExpr = serde_json::from_slice(&bytes).unwrap();
+    let TypeExpr::IndexedAccess { object, index } = &answer else {
+        panic!("the authored index must survive refusal: {answer:?}");
+    };
+    let TypeExpr::Mapped { source, value, .. } = object.as_ref() else {
+        panic!("the authored mapping must survive refusal: {object:?}");
+    };
+    assert_eq!(index, source, "the mapped key domain must remain indexed");
+    let TypeExpr::Union(arms) = value.as_ref() else {
+        panic!("the mapped value must retain its recursive branch: {value:?}");
+    };
+    let expressions = arms
+        .iter()
+        .find_map(|arm| match arm {
+            TypeExpr::TemplateLiteral { expressions, .. } => Some(expressions),
+            _ => None,
+        })
+        .expect("the dotted-path template must remain");
+    let TypeExpr::Ref {
+        name,
+        type_arguments,
+    } = &expressions[1]
+    else {
+        panic!("the recursive alias must remain: {expressions:?}");
+    };
+    assert_eq!(name.as_ref(), "Paths");
+    assert_eq!(type_arguments.len(), 2);
+    assert!(matches!(&type_arguments[0], TypeExpr::IndexedAccess { .. }));
+    assert!(matches!(&type_arguments[1], TypeExpr::Tuple { .. }));
+    // The public boundary must retain the typed refusal on a repeat request.
+    for _ in 0..2 {
+        let (outcome, _) = host
+            .resolve_named_symbol_wire_with_audit(
+                "/paths/scenario.ts",
+                "Probe",
+                &[],
+                Some(ProjectionMode::Expanded),
+            )
+            .into_parts();
+        assert!(
+            matches!(
+                outcome,
+                Err(crate::host_resolve_type_audit::TypeResolutionRequestError::Other(_))
+            ),
+            "the refused Paths<Api> cannot become a published answer: {outcome:?}"
+        );
+    }
+    // The same demand with enough allowance must recompute and admit its
+    // complete result. This also proves the non-admission probe's identity.
+    let context = RequestContext::with_kind_timing_and_projection_budget(
+        3,
+        Arc::from("/paths/scenario.ts"),
+        verter_audit::RequestKind::TypeResolution,
+        false,
+        false,
+        None,
+        50_000,
+    );
+    let _guard = RequestContextGuard::install(context);
+    let read = dispatch.execute_read(key);
+    assert!(!read.result_is_partial() && !read.cache_suppress);
+    let QueryResult::Value(value) = read.value else {
+        panic!("the roomy request must complete: {:?}", read.value);
+    };
+    let answer = host.project_node_to_type_expr_for_test(value).unwrap();
+    let TypeExpr::Union(paths) = &answer else {
+        panic!("the roomy request must publish paths: {answer:?}");
+    };
+    assert_eq!(paths.len(), 3 * 18);
+    assert!(graph.get_unvalidated(&memo_key).is_some());
+}
+
 /// A host holding `Paths<Api>` over `count` entities spread across `groups`
 /// mutually importing modules, under the request allowance `budget`
 /// (`0` keeps the shipped default fuse).
