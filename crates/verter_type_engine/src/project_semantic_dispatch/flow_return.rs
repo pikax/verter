@@ -4402,8 +4402,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         witness: &FlowExecutionWitness<'_>,
     ) -> super::dispatch_txn::flow_obligation_state::FlowDischargeReport {
         use super::dispatch_txn::flow_obligation_state::{
-            FlowDischargeEntry, FlowDischargeReport, FlowObligationBasis, FlowSuboperationEvidence,
-            ObligationState,
+            record_of, FlowDischargeEntry, FlowDischargeReport, FlowObligationBasis,
+            FlowSuboperationEvidence, ObligationState,
         };
         let txn = self.dispatch_txn.borrow();
         let Some(records) = txn.obligations.flow_obligations(carrier.handle) else {
@@ -4462,10 +4462,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .obligation_specs()
             .iter()
             .filter(|spec| {
-                records.iter().any(|record| {
-                    record.spec.id() == spec.id()
-                        && matches!(record.state, ObligationState::Pending)
-                })
+                record_of(records, spec.id())
+                    .is_some_and(|record| matches!(record.state, ObligationState::Pending))
             })
             .filter(|spec| match spec.basis() {
                 FlowObligationBasis::FamilyCoverage { .. }
