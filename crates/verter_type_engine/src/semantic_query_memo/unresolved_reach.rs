@@ -212,7 +212,11 @@ impl SemanticGraphStore {
             SemanticNodeData::Mapped { source, mapper } => {
                 children.push(*source);
                 children.push(mapper.key_space);
-                children.push(mapper.value_expr);
+                // Identity mappings read the source member itself. Their
+                // dormant template slot is not an adopted value dependency.
+                if mapper.kind != crate::semantic_query::MapperKind::Identity {
+                    children.push(mapper.value_expr);
+                }
                 children.extend(mapper.name_remap);
                 // A wildcard-free match covers VARIANTS, not struct FIELDS:
                 // the mapper's own parameter node is a descent too.
@@ -239,10 +243,17 @@ impl SemanticGraphStore {
                 return_type,
                 type_parameters,
                 predicate,
+                return_carrier,
                 ..
             } => {
                 children.extend(params.iter().map(|param| param.ty));
-                children.push(*return_type);
+                // A dormant owned source is not an evaluated missing value.
+                // Once its return is actually demanded, the rebuilt slot
+                // carries the value or its typed gap and participates here.
+                if !(matches!(return_carrier, crate::semantic_query::SignatureReturnCarrier::DeferredFlow(_))
+                    && matches!(self.node_data(*return_type).as_deref(), Some(SemanticNodeData::Opaque(QueryError::Miss)))) {
+                    children.push(*return_type);
+                }
                 for parameter in type_parameters.iter() {
                     children.extend(parameter.constraint);
                     children.extend(parameter.default);

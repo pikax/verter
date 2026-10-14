@@ -1208,7 +1208,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // demand populates ONE family slot instead of two.
                 let context = self.reference_argument_context(
                     &continuation,
-                    reduction_context.into_structural_transit_with_mode(
+                    reduction_context.into_structural_provenance().with_mode(
                         match reduction_context.mode {
                             ProjectionMode::Expanded | ProjectionMode::Identity => {
                                 ProjectionMode::Navigate
@@ -1324,7 +1324,29 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // Keep mapped values and declaration interiors deferred until
                 // the index selects them; the terminal retains the caller's
                 // context in finish_indexed_access_lowering.
-                let object_context = super::raise::indexed_access_object_context(reduction_context);
+                let mut object_head = object.as_ref();
+                while let TypeExpr::Parenthesized(inner) = object_head {
+                    object_head = inner;
+                }
+                let object_context = if matches!(object_head, TypeExpr::Mapped { .. }) {
+                    // The selected index, rather than object navigation,
+                    // owns substitution and evaluation of mapped values.
+                    reduction_context.into_structural_transit_with_mode(ProjectionMode::Navigate)
+                } else if matches!(
+                    object_head,
+                    TypeExpr::Ref { .. } | TypeExpr::IndexedAccess { .. }
+                ) {
+                    // Lowering still needs the generic carrier's navigation
+                    // context. The raise reducer's default transit/Shallow
+                    // operand context would hide callable argument bindings.
+                    reduction_context.with_mode(ProjectionMode::Navigate)
+                } else if matches!(object_head, TypeExpr::TypeOf { .. }) {
+                    // A value-root lookup owns its module export domain,
+                    // including stable absence; it is not a type-argument hop.
+                    reduction_context
+                } else {
+                    super::raise::indexed_access_object_context(reduction_context)
+                };
                 frames.push(LowerFrame::IndexedObject {
                     index,
                     context: reduction_context,
@@ -2704,41 +2726,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     } => (Arc::clone(canonical_id), *owner),
                     NodeScopeId::Global => return self.opaque(QueryError::Miss),
                 };
-                // `typeof X.Y` semantic discrimination.
-                //
-                // The branch unconditionally joined the first
-                // two path segments into `"X.Y"` whenever the path had
-                // length > 1, turning EVERY dotted typeof into a
-                // namespace-member lookup. That worked for
-                // `import * as Ns from './m'; typeof Ns.Foo` (the
-                // namespace-member case `build_typeof`'s
-                // `has_namespace_prefix` branch handles via
-                // `resolve_namespace_member_from_facts`) but broke
-                // ordinary value-member projection like
-                // `const sample: { id: string } = ...; typeof sample.id`,
-                // because no value binding named `"sample.id"` exists.
-                // The downstream Miss propagated up through `Instantiate`,
-                // leaving the type argument as a free `T` placeholder when
-                // the surface body referenced it through substitution
-                // (`Instantiate { TypeOf { ... } }` chained substitution
-                // gap — `-tier1-mismatches.md` row 4).
-                //
-                // The fix: attempt single-segment root resolution first
-                // (the value-member projection case) and fall back to the
-                // joined-2-segment lookup only when the single-segment
-                // root misses AND a longer path exists. The fallback
-                // preserves the namespace-member semantics for
-                // `Ns.Foo[.Bar...]` shapes; the primary path closes the
-                // value-member gap. Both branches reuse the same
-                // `ProjectPath { mode: Navigate }` projection for the
-                // tail segments — terminal-mode-only expansion is the
-                // outer caller's responsibility (per CLAUDE.md "type
-                // navigation must stay narrower than expansion").
-                // The ambient lowering demand rides the `TypeOf` key: a
-                // Skeleton / Navigate / Shallow body lowering crossing a
-                // `typeof`-typed value lowers the value's declaration
-                // graph carrier-preserving instead of detonating an
-                // Expanded materialisation at build time.
+                // One root-and-path demand owns namespace and value-member
+                // resolution. A failed member lookup cannot be retried under
+                // a joined name that bypasses the module's export domain.
                 let single_root: Arc<str> = Arc::from(value_ref.path[0].as_str());
                 let remaining: Arc<[Arc<str>]> = Arc::from(
                     value_ref.path[1..]
@@ -2764,38 +2754,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     reduction_context,
                 )) {
                     QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
-                    _ if value_ref.path.len() > 1 => {
-                        let joined: Arc<str> = Arc::<str>::from(format!(
-                            "{}.{}",
-                            value_ref.path[0], value_ref.path[1]
-                        ));
-                        let rest: Arc<[Arc<str>]> = Arc::from(
-                            value_ref.path[2..]
-                                .iter()
-                                .map(|segment| Arc::<str>::from(segment.as_str()))
-                                .collect::<Vec<_>>()
-                                .into_boxed_slice(),
-                        );
-                        match self.execute_type_node(self.typeof_key_with_path(
-                            ValueRootKey {
-                                scope: ScopeId {
-                                    canonical_id: Arc::clone(&scope_canonical_id),
-                                    owner: scope_owner,
-                                    local_scope: None,
-                                    binder_scope_id:
-                                        crate::semantic_query::BinderScopeId::file_scope(
-                                            scope_owner,
-                                        ),
-                                },
-                                name: joined,
-                            },
-                            rest,
-                            reduction_context,
-                        )) {
-                            QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
-                            _ => return self.opaque(QueryError::Miss),
-                        }
-                    }
                     _ => return self.opaque(QueryError::Miss),
                 };
                 // Instantiation expression: `typeof C.make<string>` applies
@@ -2968,21 +2926,32 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         };
                         match scope_canonical {
                             Some(scope_canonical) => {
-                                let carrier =
+                                let mut carrier =
                                     crate::semantic_query::SignatureReturnCarrier::Function(
                                         verter_type_expr::facts::FunctionReturnSource::Flow(
                                             identity.clone(),
                                         ),
                                     );
-                                let return_type = match self.execute_function_return_source(
-                                    &verter_type_expr::facts::FunctionReturnSource::Flow(identity),
+                                let return_type = match self.probe_signature_flow_return(
+                                    &identity,
                                     scope_canonical.as_ref(),
                                 ) {
-                                    super::flow_return::FunctionReturnNode::Flow(result) => {
+                                    super::flow_return_fact::SignatureReturnProbe::Evaluated(
+                                        result,
+                                    ) => {
                                         inferred_predicate = result.inferred_predicate();
                                         result.return_type()
                                     }
-                                    _ => self.opaque(QueryError::Miss),
+                                    super::flow_return_fact::SignatureReturnProbe::Deferred(
+                                        source,
+                                    ) => {
+                                        carrier = crate::semantic_query::SignatureReturnCarrier::DeferredFlow(source.with_bindings(
+                                            env.iter()
+                                                .filter(|(name, _)| !func.type_parameters.iter().any(|tp| tp.name == name.as_str()))
+                                                .map(|(name, node)| (Arc::from(name.as_str()), *node)),
+                                        ));
+                                        self.opaque(QueryError::Miss)
+                                    }
                                 };
                                 (return_type, carrier)
                             }
@@ -3091,24 +3060,26 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     _ => crate::semantic_query::SignatureKind::Call,
                 };
                 graph.intern_node_with_scope(
-                    SemanticNodeData::Signature {
-                        kind,
-                        params: Arc::from(params.into_boxed_slice()),
-                        return_type,
-                        type_parameters: Arc::from(type_parameters.into_boxed_slice()),
-                        // The generic type-expression lowering carries no
-                        // declaration occurrence: occurrence-aware provenance
-                        // arrives through the locator-driven rails (the
-                        // `LowerLocator` producer patches the ROOT signature).
-                        occurrence: None,
-                        return_carrier,
-                        // Stamp the whole-signature + return spans from the IR
-                        // FunctionExpr (NOT recovered from child node ids).
-                        signature_span: func.spans.signature,
-                        return_type_span: func.spans.return_type,
-                        predicate,
-                        is_abstract: func.is_abstract,
-                    },
+                    crate::semantic_query::DeferredCallable::seal_signature_header(
+                        SemanticNodeData::Signature {
+                            kind,
+                            params: Arc::from(params.into_boxed_slice()),
+                            return_type,
+                            type_parameters: Arc::from(type_parameters.into_boxed_slice()),
+                            // The generic type-expression lowering carries no
+                            // declaration occurrence: occurrence-aware provenance
+                            // arrives through the locator-driven rails (the
+                            // `LowerLocator` producer patches the ROOT signature).
+                            occurrence: None,
+                            return_carrier,
+                            // Stamp the whole-signature + return spans from the IR
+                            // FunctionExpr (NOT recovered from child node ids).
+                            signature_span: func.spans.signature,
+                            return_type_span: func.spans.return_type,
+                            predicate,
+                            is_abstract: func.is_abstract,
+                        },
+                    ),
                     scope.clone(),
                 )
             }

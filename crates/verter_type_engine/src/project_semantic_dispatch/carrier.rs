@@ -1775,6 +1775,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return PartialReasonSet::SEMANTIC_QUERY_FAULT;
         }
         match data.as_ref() {
+            // A found declaration is an exact expandable source. The path
+            // walker owns its instantiation; this prelude has not failed.
+            SemanticNodeData::Opaque(QueryError::DeclPlaceholder { .. }) => {
+                PartialReasonSet::empty()
+            }
             SemanticNodeData::Opaque(QueryError::BudgetExceeded(_)) => {
                 PartialReasonSet::BUDGET_EXCEEDED
             }

@@ -67,3 +67,16 @@ fn a_call_on_an_instantiated_receiver_returns_its_type_arguments() {
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+#[test]
+fn a_deferred_member_return_applies_lexical_images_once() {
+    let failures = mismatches(
+        "export class C<A, B> { get(value: A) { return value; } }\n\
+         export function outer<B>(value: B) { const c = null as unknown as C<B, number>; return c.get(value); }",
+        &[
+            ("ReturnType<typeof outer>", "unknown"),
+            ("ReturnType<typeof outer<string>>", "string"),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

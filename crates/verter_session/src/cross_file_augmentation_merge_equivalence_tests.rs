@@ -1102,10 +1102,10 @@ fn external_module_augmentation_discharges_exact_unresolved_owner_debt() {
         "a non-file ambient import must begin as exact typed unresolved-owner debt"
     );
     assert!(
-        !ambient_read.result_is_partial && !ambient_read.cache_suppress,
+        !ambient_read.result_is_partial() && !ambient_read.cache_suppress,
         "the exact Cfg debt must discharge when the normal resolver reaches the live ambient \
          augmentation; got partial={}, suppress={}",
-        ambient_read.result_is_partial,
+        ambient_read.result_is_partial(),
         ambient_read.cache_suppress,
     );
     let ambient_node = match ambient_read.value {
@@ -1140,10 +1140,10 @@ fn external_module_augmentation_discharges_exact_unresolved_owner_debt() {
         "the absent import must retain exact typed unresolved-owner debt"
     );
     assert!(
-        missing_read.result_is_partial && missing_read.cache_suppress,
+        missing_read.result_is_partial() && missing_read.cache_suppress,
         "an undischargeable owner debt must remain Partial(MissingDependency) and ReturnOnly; \
          got partial={}, suppress={}",
-        missing_read.result_is_partial,
+        missing_read.result_is_partial(),
         missing_read.cache_suppress,
     );
 }
@@ -1444,7 +1444,7 @@ fn relative_augmentation_torn_stitch_fans_non_cacheability_to_outer_tracer() {
     use verter_type_engine::semantic_query::{ProjectionReductionContext, SemanticQueryKey};
 
     // Drive the `/types.ts::Foo` Instantiate under an OUTER fact tracer, returning
-    // (build.cache_suppress, build.result_is_partial, outer_tracer.non_cacheable).
+    // (build.cache_suppress, build.result_is_partial(), outer_tracer.non_cacheable).
     // `/types.ts::Foo` is a file-based interface (`!is_non_file_base`) with a REAL
     // sibling RELATIVE `declare module './types'` augmenter (`/aug.ts`) in the
     // fixture, so the relative stitch DISCOVERS the augmenter and the consumer at
@@ -1490,7 +1490,7 @@ fn relative_augmentation_torn_stitch_fans_non_cacheability_to_outer_tracer() {
         );
         (
             read.cache_suppress,
-            read.result_is_partial,
+            read.result_is_partial(),
             outer_non_cacheable,
         )
     }

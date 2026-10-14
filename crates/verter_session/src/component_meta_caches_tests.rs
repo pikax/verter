@@ -957,7 +957,7 @@ defineProps<{ x: Lib }>()
 // ─────────────────────────────────────────────────────────────────
 // ShapeCacheDb central partial-admission gate.
 // `ShapeCacheDb::get_or_compute` / `admit_computed` refuse to admit a
-// GENUINE partial (value.result_is_partial OR the request partial
+// GENUINE partial (value.result_is_partial() OR the request partial
 // sticky), so a partial member shape never warm-replays as a complete
 // shape. A benign-COMPLETE shape MUST still admit (the gate keys on
 // partiality, not bare non-cacheability).

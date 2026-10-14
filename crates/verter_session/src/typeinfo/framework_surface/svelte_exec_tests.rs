@@ -2419,12 +2419,12 @@ fn snippet_unresolved_params_carrier_drops_the_slot_at_the_dto_surface() {
         },
     );
     assert!(
-        !read.result_is_partial && !read.cache_suppress,
+        !read.result_is_partial() && !read.cache_suppress,
         "the carrier-bearing surface is COMPLETE and cacheable — its read-set \
          carries the owner's ImportRoute recovery fact, so the appearance of \
          the missing dependency invalidates the warm entry instead of a \
          permanent partial (got partial={}, suppress={})",
-        read.result_is_partial,
+        read.result_is_partial(),
         read.cache_suppress,
     );
 
@@ -2621,7 +2621,7 @@ fn snippet_resolved_params_preparation_stays_complete_and_cacheable() {
         },
     );
     assert!(
-        !read.result_is_partial && !read.cache_suppress,
+        !read.result_is_partial() && !read.cache_suppress,
         "the fully resolved path remains Complete and cacheable"
     );
 }

@@ -267,7 +267,7 @@ impl<'p, 'a, C: crate::resolver_core::ResolverCapabilities> Program for QueryPro
         // Exactly what the memo would serve warm: a complete, cacheable
         // result. A partial or non-cacheable one is evaluated again, as a
         // synchronous re-entry would evaluate it.
-        !delivery.read.cache_suppress && !delivery.read.result_is_partial
+        !delivery.read.cache_suppress && !delivery.read.result_is_partial()
     }
 
     fn wait(&mut self, pending: PendingClaim<'p>) -> External<Self> {
@@ -415,7 +415,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             self.seal_root_refusal(identity, &read, traced);
         }
         self.fold_cache_read_rails(
-            read.result_is_partial,
+            read.result_is_partial(),
             read.cache_suppress,
             read.partial_reason_classes(),
         );
@@ -565,7 +565,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .record_prerequisite(receipt, Nesting::Frame { depth });
         }
         self.fold_cache_read_rails(
-            read.result_is_partial,
+            read.result_is_partial(),
             read.cache_suppress,
             read.partial_reason_classes(),
         );
@@ -694,7 +694,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             std::mem::take(&mut frame.taint),
             finalise,
             &CarrierNormalizationPrelude::none(),
-            &frame.key,
         );
         let lease = frame
             .lease

@@ -345,6 +345,86 @@ fn projection_inputs<'a>(
 }
 
 #[test]
+fn missing_projection_nodes_remain_unavailable_on_repeated_visits() {
+    use verter_type_engine::semantic_query::{SemanticNodeId, SurfaceMember, SurfaceView};
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let missing = SemanticNodeId(u64::MAX);
+    assert!(dispatch.graph().node_data(missing).is_none());
+    let number = dispatch
+        .graph()
+        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let uniform = dispatch.graph().intern_node(SemanticNodeData::Union(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from([
+            number, missing,
+        ])),
+    ));
+    let member = dispatch
+        .graph()
+        .intern_node(SemanticNodeData::Object(SurfaceView::from_members(
+            vec![SurfaceMember {
+                key: verter_type_engine::semantic_query::AuthoredPropertyKey::string("missing"),
+                value: missing,
+                optional: false,
+                readonly: false,
+                method_kind: None,
+                has_implementation_body: false,
+                visibility: verter_type_expr::MemberVisibility::Public,
+                spans: Default::default(),
+                declaration_origin: None,
+                declared_in_macro_type_arg:
+                    verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
+                excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+            }],
+            None,
+        )));
+    let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
+    let env = rustc_hash::FxHashMap::default();
+    let names = rustc_hash::FxHashMap::default();
+    let scope = NodeScopeId::Global;
+    let shadowing = ScopeShadowing::empty();
+    let inputs = projection_inputs(&env, &scope, &names, &shadowing);
+    for root in [missing, uniform, member] {
+        let mut memo = ViewMemo::default();
+        for _ in 0..2 {
+            let outcome = dispatch.project_view_node_worklist(
+                root,
+                context,
+                &inputs,
+                &mut Vec::new(),
+                &mut memo,
+            );
+            assert!(
+                !outcome.has_positional_representation_for_tests(),
+                "a missing graph node has no usable source"
+            );
+            assert!(outcome
+                .completeness
+                .reasons()
+                .contains(PartialReasonSet::SEMANTIC_QUERY_FAULT));
+            assert!(
+                !memo.contains_key(&(missing, context)),
+                "missing nodes must not enter the exact memo"
+            );
+            assert!(
+                !memo.contains_key(&(root, context)),
+                "a missing child cannot certify its parent"
+            );
+        }
+    }
+    let exact = dispatch.project_view_node_worklist(
+        number,
+        context,
+        &inputs,
+        &mut Vec::new(),
+        &mut ViewMemo::default(),
+    );
+    assert_eq!(exact.completeness, ResultCompleteness::Complete);
+    assert_eq!(exact.node, number);
+}
+
+#[test]
 fn expanded_locator_projection_does_not_request_hidden_spread_writes() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -665,7 +745,7 @@ fn runaway_generic_returns_work_partial_one_root_diagnostic_and_seals_its_refusa
         !first_reasons.contains(PartialReasonSet::CONNECTED_QUERY_DEPTH_LIMIT),
         "fresh-identity growth must stop on the work rail, not query depth"
     );
-    assert!(first.result_is_partial);
+    assert!(first.result_is_partial());
     assert!(first.cache_suppress);
     let QueryResult::Value(_carrier) = first.value else {
         panic!("a work trip must preserve a safe typed carrier");

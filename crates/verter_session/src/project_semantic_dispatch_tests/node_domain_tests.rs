@@ -260,7 +260,7 @@ fn root_only_projection_root_kind_matches_full_fold() {
     for (label, node) in cases {
         let full = {
             let mut alg =
-                verter_type_engine::project_semantic_dispatch::raise::shape_engine::node_domain::RaisedFactsAlg;
+                verter_type_engine::project_semantic_dispatch::raise::shape_engine::node_domain::RaisedFactsAlg::default();
             let mut active = FxHashSet::default();
             verter_type_engine::project_semantic_dispatch::raise::shape_engine::fold_node(
                 &mut alg,
@@ -514,7 +514,7 @@ fn root_only_projection_matches_full_fold_across_all_arms() {
     let assert_parity = |label: &str, node| {
         let full = {
             let mut alg =
-                verter_type_engine::project_semantic_dispatch::raise::shape_engine::node_domain::RaisedFactsAlg;
+                verter_type_engine::project_semantic_dispatch::raise::shape_engine::node_domain::RaisedFactsAlg::default();
             let mut active = FxHashSet::default();
             verter_type_engine::project_semantic_dispatch::raise::shape_engine::fold_node(
                 &mut alg,
@@ -779,7 +779,7 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
     for (label, node) in malformed {
         let full = {
             let mut alg =
-                verter_type_engine::project_semantic_dispatch::raise::shape_engine::node_domain::RaisedFactsAlg;
+                verter_type_engine::project_semantic_dispatch::raise::shape_engine::node_domain::RaisedFactsAlg::default();
             let mut active = FxHashSet::default();
             verter_type_engine::project_semantic_dispatch::raise::shape_engine::fold_node(
                 &mut alg,
@@ -924,7 +924,7 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
     for (label, node) in asymmetric {
         let full = {
             let mut alg =
-                verter_type_engine::project_semantic_dispatch::raise::shape_engine::node_domain::RaisedFactsAlg;
+                verter_type_engine::project_semantic_dispatch::raise::shape_engine::node_domain::RaisedFactsAlg::default();
             let mut active = FxHashSet::default();
             verter_type_engine::project_semantic_dispatch::raise::shape_engine::fold_node(
                 &mut alg,
@@ -984,7 +984,7 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
     ));
     let full_obj = {
         let mut alg =
-            verter_type_engine::project_semantic_dispatch::raise::shape_engine::node_domain::RaisedFactsAlg;
+            verter_type_engine::project_semantic_dispatch::raise::shape_engine::node_domain::RaisedFactsAlg::default();
         let mut active = FxHashSet::default();
         verter_type_engine::project_semantic_dispatch::raise::shape_engine::fold_node(
             &mut alg,

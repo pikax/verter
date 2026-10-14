@@ -286,7 +286,7 @@ fn barrel_chain_proofs_and_folding_grow_with_the_answer() {
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
             "__Probe",
         )));
-        assert!(!result.result_is_partial, "complete authored chain probe");
+        assert!(!result.result_is_partial(), "complete authored chain probe");
         let QueryResult::Value(alias) = result.value else {
             panic!("chain probe: {:?}", result.value);
         };
@@ -455,7 +455,7 @@ fn export_tables_and_namespace_evaluation_have_linear_work() {
         let (_guard, _) = dispatch.enter_connected_demand(false);
         let read = |key| {
             let result = dispatch.execute_read(key);
-            assert!(!result.result_is_partial, "complete namespace demand");
+            assert!(!result.result_is_partial(), "complete namespace demand");
             match result.value {
                 QueryResult::Value(node) => node,
                 other => panic!("namespace demand: {other:?}"),

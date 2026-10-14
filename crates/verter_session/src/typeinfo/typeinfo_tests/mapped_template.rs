@@ -662,7 +662,7 @@ pub(crate) fn keyspace_budget_exceeded_admits_nothing() {
         "a refused template product must be cache-suppressed (never warm-admitted)"
     );
     assert!(
-        read.result_is_partial,
+        read.result_is_partial(),
         "a refused template product must be flagged a budget-tainted partial"
     );
 
@@ -685,7 +685,7 @@ pub(crate) fn keyspace_budget_exceeded_admits_nothing() {
         "the enumerated product is a complete result and must not be suppressed"
     );
     assert!(
-        !small_read.result_is_partial,
+        !small_read.result_is_partial(),
         "the enumerated product is complete, not a partial"
     );
 }

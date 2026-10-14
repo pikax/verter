@@ -599,7 +599,10 @@ impl RaisedShapeAlgebra for RaisedShapeAlg<'_> {
 // ===========================================================================
 
 /// Stateless facts-only algebra — no interner.
-pub struct RaisedFactsAlg;
+#[derive(Default)]
+pub struct RaisedFactsAlg {
+    pub(super) source_presence: bool,
+}
 
 /// The facts-only function representation: only the folded `materialized` fact
 /// (the facts-only path never needs the `RaisedFunction` structure).
@@ -634,6 +637,24 @@ impl RaisedShapeAlgebra for RaisedFactsAlg {
     type Out = RaisedShapeSummary;
     type Fn = FactsFunction;
     type Member = FactsMember;
+
+    fn owned_function_return(
+        &mut self,
+        carrier: &crate::semantic_query::SignatureReturnCarrier,
+    ) -> Option<RaisedShapeSummary> {
+        (self.source_presence
+            && (matches!(
+                carrier,
+                crate::semantic_query::SignatureReturnCarrier::DeferredFlow(_)
+                    | crate::semantic_query::SignatureReturnCarrier::EvaluatedFlow(_)
+            ) || matches!(
+                carrier,
+                crate::semantic_query::SignatureReturnCarrier::Function(
+                    verter_type_expr::facts::FunctionReturnSource::Flow(_)
+                )
+            )))
+        .then(summary::materialized_expanded_leaf)
+    }
 
     fn primitive(&mut self, _kind: PrimitiveName) -> RaisedShapeSummary {
         summary::materialized_expanded_leaf()
@@ -770,8 +791,24 @@ impl RaisedShapeAlgebra for RaisedFactsAlg {
     }
 
     fn build_function(&mut self, function: FoldedFunction<RaisedShapeSummary>) -> FactsFunction {
+        let source_slots = !self.source_presence
+            || (function.type_parameters.iter().all(|parameter| {
+                parameter
+                    .constraint
+                    .as_ref()
+                    .is_none_or(|out| out.facts.materialized)
+                    && parameter
+                        .default
+                        .as_ref()
+                        .is_none_or(|out| out.facts.materialized)
+            }) && function.predicate.as_ref().is_none_or(|predicate| {
+                predicate
+                    .ty
+                    .as_ref()
+                    .is_none_or(|out| out.facts.materialized)
+            }));
         FactsFunction {
-            materialized: Self::function_materialized(&function),
+            materialized: Self::function_materialized(&function) && source_slots,
         }
     }
     fn function_to_out(&mut self, function: FactsFunction) -> RaisedShapeSummary {

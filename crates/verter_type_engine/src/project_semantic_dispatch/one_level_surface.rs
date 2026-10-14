@@ -446,9 +446,9 @@ pub fn project_one_level_surface<C: crate::resolver_core::ResolverCapabilities>(
             // producer captured no specific class is a downstream
             // PROPAGATED partial — stated here, at the one conversion
             // site, never normalized inside the claim type.
-            let read_partiality = if surface_read.result_is_partial {
+            let read_partiality = if surface_read.result_is_partial() {
                 Some(
-                    NonEmptyReasons::new(surface_read.partial_reasons).unwrap_or_else(|| {
+                    NonEmptyReasons::new(surface_read.partial_reasons()).unwrap_or_else(|| {
                         NonEmptyReasons::of(crate::semantic_query::PartialReason::Propagated)
                     }),
                 )

@@ -271,7 +271,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 SemanticNodeData::Array { .. } | SemanticNodeData::Tuple { .. } => {
                     kinds.push(BroadRuntimeKind::Array)
                 }
-                SemanticNodeData::Signature { .. } => kinds.push(BroadRuntimeKind::Function),
+                SemanticNodeData::Signature { .. } | SemanticNodeData::DeferredCallable(_) => {
+                    kinds.push(BroadRuntimeKind::Function)
+                }
                 SemanticNodeData::Object(surface) => {
                     // Callability is a signature-discovery answer, never the
                     // surface's own lists: a surface merged for presentation
@@ -413,9 +415,6 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 | SemanticNodeData::Infer { .. }
                 | SemanticNodeData::InferRef { .. }
                 | SemanticNodeData::RawFallback { .. }
-                // The sealed callable carrier is an intra-transaction call
-                // callee and never reaches a runtime classification.
-                | SemanticNodeData::DeferredCallable(_)
                 | SemanticNodeData::SyntheticBinding { .. } => push_unknown(&mut kinds),
                 SemanticNodeData::Opaque(error) => {
                     if let Some(reasons) = runtime_query_error_partial_reason(error) {
@@ -546,7 +545,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             &payload_read.dep_signature,
         );
         let mut cache_suppress = payload_read.cache_suppress;
-        let mut result_is_partial = payload_read.result_is_partial;
+        let mut result_is_partial = payload_read.result_is_partial();
         let mut partial_reasons = payload_read.partial_reason_classes();
         let mut node = match payload_read.value {
             QueryResult::Value(node) => node,
@@ -583,97 +582,96 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     }
                     _ => SurfaceProvenanceContext::Structural,
                 };
-                // Reuse the exact root-surface demand already issued by the
-                // TypeInfo producer. `Shallow` materializes that filtered
-                // Object; it does not navigate a non-empty path to its value.
-                // Select the addressed member from the immutable surface only
-                // after the warm/cold read has established its facts.
-                let member_read = self.execute_read(SemanticQueryKey::ProjectPath {
-                    base: node,
-                    path: Arc::from([]),
-                    context: ProjectionReductionContext::vue_runtime_object_surface(
-                        ProjectionMode::Shallow,
-                        provenance,
-                    ),
+                // Demand this member through the shared path producer. Its
+                // independent flow-member proof can establish an exact value
+                // beside a sibling gap; selecting from a presence-only root
+                // surface cannot establish that value's classification.
+                // An exact whole surface already supplies exact member values,
+                // including their authored union order. A partial surface does
+                // not: discard that probe and demand the selected member.
+                let probe = self.observe_read(|| {
+                    self.execute_read(SemanticQueryKey::ProjectPath {
+                        base: node,
+                        path: Arc::from([]),
+                        context: ProjectionReductionContext::vue_runtime_object_surface(
+                            ProjectionMode::Shallow,
+                            provenance,
+                        ),
+                    })
                 });
-                crate::fact_signature_helpers::merge_dep_signature_into_local_fence(
-                    &mut dep_facts,
-                    &member_read.dep_signature,
-                );
-                cache_suppress |= member_read.cache_suppress;
-                result_is_partial |= member_read.result_is_partial;
-                partial_reasons = partial_reasons.union(member_read.partial_reason_classes());
-                node = match member_read.value {
-                    QueryResult::Value(node) => node,
-                    QueryResult::Recursive(node) => {
-                        self.fold_local_partial_completeness(PartialReasonSet::SAME_PATH_RECURSION);
-                        result_is_partial = true;
-                        partial_reasons =
-                            partial_reasons.union(PartialReasonSet::SAME_PATH_RECURSION);
-                        node
+                let selected = if probe.value().fact_status.is_complete() {
+                    match probe.value().value {
+                        QueryResult::Value(surface) => {
+                            self.graph()
+                                .node_data(surface)
+                                .and_then(|data| match data.as_ref() {
+                                    SemanticNodeData::Object(view) => view
+                                        .positive_members()
+                                        .iter()
+                                        .find(|member| {
+                                            member.key.as_known().is_some_and(|key| {
+                                                key.as_string() == Some(name.as_ref())
+                                            })
+                                        })
+                                        .map(|member| member.value),
+                                    _ => None,
+                                })
+                        }
+                        _ => None,
                     }
-                    QueryResult::Error(error) => {
-                        let reasons = runtime_query_error_partial_reason(&error)
-                            .unwrap_or(PartialReasonSet::SEMANTIC_QUERY_FAULT);
-                        self.fold_local_partial_completeness(reasons);
-                        result_is_partial = true;
-                        partial_reasons = partial_reasons.union(reasons);
-                        self.opaque(error)
-                    }
+                } else {
+                    None
                 };
-                if ObservedRuntimePartial::observe(result_is_partial, partial_reasons)
-                    .shape_is_trustworthy
-                {
-                    match self.graph().node_data(node) {
-                        None => {
+                if let Some(selected) = selected {
+                    if let Ok(read) = probe.adopt(self) {
+                        crate::fact_signature_helpers::merge_dep_signature_into_local_fence(
+                            &mut dep_facts,
+                            &read.dep_signature,
+                        );
+                        cache_suppress |= read.cache_suppress;
+                        result_is_partial = false;
+                        partial_reasons = PartialReasonSet::empty();
+                        node = selected;
+                    }
+                } else {
+                    let _ = probe.discard();
+                    let member_read = self.execute_read(SemanticQueryKey::ProjectPath {
+                        base: node,
+                        path: Arc::from([crate::semantic_query::PathSegment::Member(
+                            crate::semantic_query::PropertyKey::identifier(name.as_ref()),
+                        )]),
+                        context: ProjectionReductionContext::vue_runtime_object_surface(
+                            ProjectionMode::Navigate,
+                            provenance,
+                        ),
+                    });
+                    crate::fact_signature_helpers::merge_dep_signature_into_local_fence(
+                        &mut dep_facts,
+                        &member_read.dep_signature,
+                    );
+                    cache_suppress |= member_read.cache_suppress;
+                    result_is_partial |= member_read.result_is_partial();
+                    partial_reasons = partial_reasons.union(member_read.partial_reason_classes());
+                    node = match member_read.value {
+                        QueryResult::Value(node) => node,
+                        QueryResult::Recursive(node) => {
                             self.fold_local_partial_completeness(
-                                PartialReasonSet::MISSING_SEMANTIC_NODE_DATA,
+                                PartialReasonSet::SAME_PATH_RECURSION,
                             );
                             result_is_partial = true;
                             partial_reasons =
-                                partial_reasons.union(PartialReasonSet::MISSING_SEMANTIC_NODE_DATA);
-                            node = self.opaque(QueryError::Miss);
+                                partial_reasons.union(PartialReasonSet::SAME_PATH_RECURSION);
+                            node
                         }
-                        Some(data) => match data.as_ref() {
-                            SemanticNodeData::Object(surface) => {
-                                // The member was ADMITTED under its
-                                // published name, and a numeric literal key
-                                // publishes under its canonical ECMAScript
-                                // string spelling — so the selection reads
-                                // the coercing known-key projection (JS
-                                // property identity: `"1"` and `1` are the
-                                // same property), never the non-coercing
-                                // string-key one, which misses exactly the
-                                // members the boundary just named.
-                                let key =
-                                    crate::semantic_query::PropertyKey::identifier(name.as_ref());
-                                match surface.project_known_key(&key) {
-                                    crate::semantic_query::SurfaceKeyProjection::Exact(member) => {
-                                        node = member.value;
-                                    }
-                                    crate::semantic_query::SurfaceKeyProjection::AbsentProven => {
-                                        self.fold_local_partial_completeness(
-                                            PartialReasonSet::SEMANTIC_QUERY_FAULT,
-                                        );
-                                        result_is_partial = true;
-                                        partial_reasons = partial_reasons
-                                            .union(PartialReasonSet::SEMANTIC_QUERY_FAULT);
-                                        node =
-                                            self.opaque(QueryError::UnrepresentableSurfaceMember);
-                                    }
-                                }
-                            }
-                            _ => {
-                                self.fold_local_partial_completeness(
-                                    PartialReasonSet::SEMANTIC_QUERY_FAULT,
-                                );
-                                result_is_partial = true;
-                                partial_reasons =
-                                    partial_reasons.union(PartialReasonSet::SEMANTIC_QUERY_FAULT);
-                                node = self.opaque(QueryError::UnrepresentableSurface);
-                            }
-                        },
-                    }
+                        QueryResult::Error(error) => {
+                            let reasons = runtime_query_error_partial_reason(&error)
+                                .unwrap_or(PartialReasonSet::SEMANTIC_QUERY_FAULT);
+                            self.fold_local_partial_completeness(reasons);
+                            result_is_partial = true;
+                            partial_reasons = partial_reasons.union(reasons);
+                            self.opaque(error)
+                        }
+                    };
                 }
             }
         }
@@ -725,7 +723,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         work: &mut Vec<RuntimeWork>,
         kinds: &mut Vec<BroadRuntimeKind>,
     ) -> bool {
-        let result_is_partial = read.result_is_partial;
+        let result_is_partial = read.result_is_partial();
         if result_is_partial {
             match &read.value {
                 QueryResult::Recursive(_) => {

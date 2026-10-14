@@ -538,7 +538,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// them.
     fn evaluate_scheduled_callee(&self, key: &FlowReturnKey, probe: bool) -> ScheduledEvaluation {
         let (step, recorded) = self
-            .observe_flow_read(|| {
+            .observe_read(|| {
                 self.dispatch_txn
                     .borrow_mut()
                     .flow
@@ -1275,15 +1275,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let SemanticNodeData::Signature {
             params,
             type_parameters,
-            return_carrier:
-                crate::semantic_query::SignatureReturnCarrier::Function(
-                    verter_type_expr::facts::FunctionReturnSource::Flow(identity),
-                ),
+            return_carrier,
             ..
         } = data.as_ref()
         else {
             return None;
         };
+        let identity = return_carrier.flow_identity()?;
         (self.flow_return_key_for(identity) == *expected).then(|| CallableSignature {
             params: Arc::clone(params),
             type_parameters: Arc::clone(type_parameters),

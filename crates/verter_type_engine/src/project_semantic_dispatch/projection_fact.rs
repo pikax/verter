@@ -1,144 +1,212 @@
-//! The fact a projection build establishes for its consumer.
+//! Adoption of a projection producer's fact at the memo settlement boundary.
 //!
-//! A projection build's value and the completeness its read observed are
-//! read together as ONE [`FactResult`] ([`QueryBuildOutput::projection_fact`]).
-//! The arm decides; the causes explain.
+//! A complete outcome is exact, including empty/open domains and deferred
+//! conditionals. An unfinished value needs an explicit producer guarantee:
+//! presence subsets enumerate proven members/keys without proving absence;
+//! positional lowering completes the authored structure and anchors every
+//! unresolved position without weakening independently evaluated siblings;
+//! checker recovery carries the pinned checker's diagnostic and recovery.
+//! A traversal stopped before completing that structure has no guarantee.
+//! Proof consumers (conditional decisions and classifications) require exact
+//! facts even when a value consumer can use a positional approximation.
 //!
-//! # Per-projection interpretation
-//!
-//! Whether a partial projection is usable depends on what the projection
-//! answers, not on the partial flag:
-//!
-//! | Projection | Partial read with a value |
-//! | --- | --- |
-//! | `ProjectPath` ending in `Shallow` (a one-level member surface) | **Approximate**: a presence-only member subset. Every member the build produced was proven under the projection's own rules; an omission proves nothing. |
-//! | `KeyOf` (a key set) | **Approximate**: a presence-only key subset, same contract. |
-//! | `ProjectPath` in any other terminal mode, `IndexedAccess`, `ProjectMember`, `MappedType`, `Instantiate`, `TypeOf`, every other key | **Unavailable**: the value is one type, and an unfinished one has no documented usable interpretation. |
-//!
-//! A complete read is **Complete**, including an exact empty or open domain
-//! and a deferred carrier. A build with no value (an error or an in-flight
-//! recursive hold) is **Unavailable**. A read that observed cancellation or
-//! a superseded/torn view is no fact at all ([`ExecutionAbort`]).
-//!
-//! Membership does not establish member values or modifiers: those are
-//! separate facts and carry their own guarantees.
+//! Execution validity comes from the prerequisite's typed disposition and
+//! ExecutionValidityScope, never from a compatibility reason classification.
 
 use super::walk::QueryBuildOutput;
 use crate::semantic_query::surface_resolution::NonEmptyReasons;
 use crate::semantic_query::{
-    ExecutionAbort, FactResult, PartialReason, ProjectionMode, QueryResult, ResultCompleteness,
-    SemanticQueryKey,
+    ExecutionAbort, FactResult, FactStatus, PartialReason, QueryError, QueryResult,
+    ResultCompleteness, SemanticQueryKey, SemanticQueryValue,
 };
 
-/// What an unfinished projection of a given key can still honestly offer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ProjectionInterpretation {
-    /// A lower-bound enumeration: every produced member or key is real.
-    PresenceOnly,
-    /// One type: unfinished means no usable representation.
-    ValueRequired,
-}
+pub use crate::semantic_query::FactInterpretation as ProjectionInterpretation;
 
-/// The documented interpretation of an unfinished projection of `key`.
-pub(crate) fn interpretation_of(key: &SemanticQueryKey) -> ProjectionInterpretation {
-    match key {
-        SemanticQueryKey::ProjectPath { context, .. }
-            if context.mode == ProjectionMode::Shallow =>
-        {
-            ProjectionInterpretation::PresenceOnly
-        }
-        SemanticQueryKey::KeyOf { .. } => ProjectionInterpretation::PresenceOnly,
-        _ => ProjectionInterpretation::ValueRequired,
-    }
-}
-
-/// The fact `value` establishes under the completeness its read observed.
-/// `value` is `None` when the build produced none.
 pub(crate) fn projection_fact<T>(
-    key: &SemanticQueryKey,
     value: Option<T>,
     observed: ResultCompleteness,
-) -> Result<FactResult<T>, ExecutionAbort> {
-    if let Some(abort) = ExecutionAbort::observed_in(observed) {
-        return Err(abort);
+    guarantee: Option<ProjectionInterpretation>,
+) -> FactResult<T> {
+    let causes = NonEmptyReasons::new(observed.reasons())
+        .unwrap_or_else(|| NonEmptyReasons::of(PartialReason::Propagated));
+    match (value, observed.is_partial()) {
+        (Some(value), false) => FactResult::complete(value),
+        (Some(value), true) if guarantee.is_some() => FactResult::approximate(value, causes),
+        _ => FactResult::unavailable(causes),
     }
-    let fault = || NonEmptyReasons::of(PartialReason::SemanticQueryFault);
-    let causes = match observed {
-        ResultCompleteness::Complete => None,
-        ResultCompleteness::Partial(reasons) => {
-            Some(NonEmptyReasons::new(reasons).unwrap_or_else(fault))
+}
+
+/// Adopt once, before either the owner or a follower receives the result.
+/// The compatibility summary is derived from this disposition by the read.
+pub(crate) fn adopt_projection_result(
+    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    key: &SemanticQueryKey,
+    result: QueryResult<SemanticQueryValue>,
+    observed: ResultCompleteness,
+    guarantee: Option<ProjectionInterpretation>,
+) -> (QueryResult<SemanticQueryValue>, FactStatus) {
+    match result {
+        QueryResult::Value(value) => {
+            let mut interpretation = guarantee;
+            if let SemanticQueryValue::TypeNode(node) = &value {
+                if let Some(crate::semantic_query::SemanticNodeData::Opaque(error)) =
+                    graph.node_data(*node).as_deref()
+                {
+                    if let Some(abort) = ExecutionAbort::from_query_error(error) {
+                        crate::request_context::observe_execution_abort(abort);
+                        return (
+                            QueryResult::Error(error.clone()),
+                            FactStatus::Unavailable(
+                                NonEmptyReasons::from_query_error(error).with(observed.reasons()),
+                            ),
+                        );
+                    }
+                }
+            }
+            let fact = match value {
+                SemanticQueryValue::FlowReturn(value) => {
+                    let status = value.fact().status();
+                    let status = if observed.is_partial() {
+                        status.limited_by(
+                            NonEmptyReasons::new(observed.reasons())
+                                .unwrap_or_else(|| NonEmptyReasons::of(PartialReason::Propagated)),
+                        )
+                    } else {
+                        status
+                    };
+                    status.with_value(SemanticQueryValue::FlowReturn(value))
+                }
+                SemanticQueryValue::BroadRuntime(value) if !observed.is_partial() => {
+                    value.into_fact().map(SemanticQueryValue::BroadRuntime)
+                }
+                SemanticQueryValue::TypeNode(node) => match graph.node_data(node).as_deref() {
+                    Some(crate::semantic_query::SemanticNodeData::Opaque(error))
+                        if super::query_error_disposition::classify_query_error(error).disposition
+                            == super::query_error_disposition::QueryErrorDisposition::BudgetRecovery =>
+                    {
+                        // The root itself witnesses the checker's recovery after
+                        // an exhausted allowance. A fresh projection cannot make
+                        // that resource-limited answer exact or reusable.
+                        interpretation = Some(ProjectionInterpretation::CheckerRecovery);
+                        FactResult::approximate(
+                            SemanticQueryValue::TypeNode(node),
+                            NonEmptyReasons::of(PartialReason::OperationBudget)
+                                .with(observed.reasons()),
+                        )
+                    }
+                    Some(crate::semantic_query::SemanticNodeData::Opaque(error))
+                        if matches!(
+                            super::query_error_disposition::classify_query_error(error).disposition,
+                            super::query_error_disposition::QueryErrorDisposition::OptionalAbsence
+                                | super::query_error_disposition::QueryErrorDisposition::Partial
+                                | super::query_error_disposition::QueryErrorDisposition::Failure
+                        ) =>
+                    {
+                        FactResult::unavailable(
+                            NonEmptyReasons::from_query_error(error).with(observed.reasons()),
+                        )
+                    }
+                    _ => projection_fact(
+                        Some(SemanticQueryValue::TypeNode(node)),
+                        observed,
+                        guarantee,
+                    ),
+                },
+                value => projection_fact(Some(value), observed, guarantee),
+            };
+            let status = fact.status().with_interpretation(interpretation);
+            let result = match fact {
+                FactResult::Complete(value) | FactResult::Approximate { value, .. } => {
+                    QueryResult::Value(value)
+                }
+                FactResult::Unavailable { causes } => {
+                    QueryResult::Error(QueryError::IncompleteSemanticOperand {
+                        reasons: causes.get(),
+                    })
+                }
+            };
+            (result, status)
         }
-    };
-    Ok(match (value, causes) {
-        (Some(value), None) => FactResult::complete(value),
-        (Some(value), Some(causes)) => match interpretation_of(key) {
-            ProjectionInterpretation::PresenceOnly => FactResult::approximate(value, causes),
-            ProjectionInterpretation::ValueRequired => FactResult::unavailable(causes),
-        },
-        (None, causes) => FactResult::unavailable(causes.unwrap_or_else(fault)),
-    })
+        QueryResult::Error(error) => {
+            let causes = NonEmptyReasons::from_query_error(&error);
+            let causes =
+                NonEmptyReasons::new(observed.reasons()).map_or(causes, |more| causes.union(more));
+            // A miss after incomplete work is not a stable negative lookup.
+            // Consumers may retain their authored carrier after a genuine
+            // miss, but cannot discard an unfinished producer's observations.
+            let error = if observed.is_partial()
+                && matches!(error, QueryError::Miss | QueryError::RaiseMiss)
+                && matches!(
+                    key,
+                    SemanticQueryKey::ResolveDecl(_) | SemanticQueryKey::Instantiate(_)
+                ) {
+                QueryError::IncompleteSemanticOperand {
+                    reasons: causes.get(),
+                }
+            } else {
+                error
+            };
+            (QueryResult::Error(error), FactStatus::Unavailable(causes))
+        }
+        QueryResult::Recursive(node) => {
+            let causes = NonEmptyReasons::of(PartialReason::SamePathRecursion);
+            let causes =
+                NonEmptyReasons::new(observed.reasons()).map_or(causes, |more| causes.union(more));
+            (
+                QueryResult::Recursive(node),
+                FactStatus::Unavailable(causes),
+            )
+        }
+    }
 }
 
 impl<T> QueryBuildOutput<T> {
-    /// The fact this build established for `key`. See the module
-    /// documentation for each projection's interpretation.
-    pub(crate) fn projection_fact(
-        &self,
-        key: &SemanticQueryKey,
-    ) -> Result<FactResult<&T>, ExecutionAbort> {
-        let value = match &self.result {
-            QueryResult::Value(value) => Some(value),
-            QueryResult::Recursive(_) | QueryResult::Error(_) => None,
-        };
-        projection_fact(key, value, self.completeness())
+    /// Construct a completed positional source in controlled producer fixtures.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn with_positional_guarantee_for_tests(self) -> Self {
+        self.with_positional_guarantee()
+    }
+
+    pub(crate) fn with_positional_guarantee(mut self) -> Self {
+        self.approximation = Some(ProjectionInterpretation::Positional);
+        self
+    }
+}
+
+impl<T> crate::semantic_query::CacheRead<QueryResult<T>> {
+    /// The adopted fact, without reinterpreting compatibility summaries.
+    pub fn into_fact(self) -> Result<FactResult<T>, ExecutionAbort> {
+        let status = self.fact_status;
+        let reasons = self.partial_reason_classes();
+        match self.value {
+            QueryResult::Value(value) => Ok(status.with_value(value)),
+            QueryResult::Error(error) => {
+                if let Some(abort) = ExecutionAbort::from_query_error(&error) {
+                    Err(abort)
+                } else {
+                    Ok(FactResult::unavailable(
+                        NonEmptyReasons::from_query_error(&error).union(
+                            NonEmptyReasons::new(reasons)
+                                .unwrap_or_else(|| NonEmptyReasons::from_query_error(&error)),
+                        ),
+                    ))
+                }
+            }
+            QueryResult::Recursive(_) => Ok(FactResult::unavailable(
+                NonEmptyReasons::of(PartialReason::SamePathRecursion).with(reasons),
+            )),
+        }
     }
 }
 
 impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispatch<'_, C> {
-    /// Read the fact demanded by `key`, including its own availability.
-    ///
-    /// The read's status travels with its value on cold, warm and joined
-    /// paths. An unrelated enclosing observation cannot change this fact.
-    /// Dependency evidence still follows the shared read boundary.
     pub fn execute_fact(
         &self,
         key: SemanticQueryKey,
-    ) -> Result<FactResult<crate::semantic_query::SemanticQueryValue>, ExecutionAbort> {
+    ) -> Result<FactResult<SemanticQueryValue>, ExecutionAbort> {
         self.record_dispatch_intent_counters(&key);
-        let read = self.execute_via_cold_build_helper(key.clone());
-        let observed = if read.result_is_partial {
-            ResultCompleteness::partial(read.partial_reason_classes())
-        } else {
-            ResultCompleteness::Complete
-        };
-        if let Some(abort) = ExecutionAbort::observed_in(observed) {
-            return Err(abort);
-        }
-        match read.value {
-            QueryResult::Value(crate::semantic_query::SemanticQueryValue::BroadRuntime(value)) => {
-                Ok(value
-                    .into_fact()
-                    .map(crate::semantic_query::SemanticQueryValue::BroadRuntime))
-            }
-            QueryResult::Value(value) => projection_fact(&key, Some(value), observed),
-            QueryResult::Recursive(_) => {
-                let own = NonEmptyReasons::of(PartialReason::SamePathRecursion);
-                let causes = NonEmptyReasons::new(observed.reasons())
-                    .map_or(own, |observed| own.union(observed));
-                Ok(FactResult::unavailable(causes))
-            }
-            QueryResult::Error(error) => {
-                let own = NonEmptyReasons::from_query_error(&error);
-                let causes = NonEmptyReasons::new(observed.reasons())
-                    .map_or(own, |observed| own.union(observed));
-                if let Some(abort) =
-                    ExecutionAbort::observed_in(ResultCompleteness::partial(causes.get()))
-                {
-                    return Err(abort);
-                }
-                Ok(FactResult::unavailable(causes))
-            }
-        }
+        self.execute_via_cold_build_helper(key).into_fact()
     }
 }
 

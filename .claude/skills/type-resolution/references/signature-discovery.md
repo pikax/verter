@@ -1,5 +1,13 @@
 ## Signature discovery (`SignaturesOfType` / `ReadSignatureResult`)
 
+Signature return slots distinguish retained evaluated values (`Function(Flow)`) from owned, undemanded sources (`DeferredFlow`). A declined eager probe can construct only the latter. Source discovery reads the same function identity without interpreting its provisional slot as an evaluated gap; value consumers force that source through the shared result reader. Substitution preserves the source state and applies declaration inference before enclosing and call result substitution. See [typed degradation](typed-degradation.md) for the observation and availability contract.
+
+Deferred sources capture only enclosing lexical binders. A signature's own clause
+remains owned by body inference and call instantiation, even when it shadows an
+enclosing name. Call settlement applies the selected deferred source's binder
+and receiver images once after the shared return equation, for both concrete
+seeds and held returns. A concrete seed does not apply those images early.
+
 One discovery authority enumerates call and construct signature candidates. `ResolveOverloadSet` (and through it `ResolveCall`), the six signature utilities, and the flow rail's callee reads consume it; the callable classifiers (`apparent_type.rs::callable_anchor`, `walk.rs::value_may_contribute_call_signatures`, the `broad_runtime.rs` object check) still read the graph directly.
 
 - **Modules.** `signature_kernel/positional.rs` is the ONE positional model (declared vs effective minimum, void-sensitive and untyped-JS arity, receiver exclusion, array/generic rest with required tails, tuple projection, names never in type equality). `signature_kernel/discovery.rs` is the record-level authority (publish candidates, `compareSignaturesIdentical` under a positional binder correspondence, union common-match then restricted synthesis, intersection dedup and mixin constructor composition) and reaches the type graph only through `DiscoveryTypes`. `project_semantic_dispatch/signature_discovery.rs` is the graph-facing subject walk and the result reader.

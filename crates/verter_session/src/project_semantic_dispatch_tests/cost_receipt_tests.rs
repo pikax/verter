@@ -216,6 +216,17 @@ fn a_paid_receipt_still_answers_to_the_depth_rail() {
         .connected_demand()
         .replay_admit(&receipts[10], None, Nesting::Entered)
         .expect("depth 10 fits");
+    {
+        let (_nested, trip) = dispatch.enter_connected_demand(true);
+        assert!(trip.is_none(), "the nested consumer itself fits");
+        assert_eq!(
+            dispatch
+                .connected_demand()
+                .replay_admit(&receipts[10], None, Nesting::Entered),
+            Err(ReplayRefusal::Depth),
+            "a fully paid root still needs its footprint at the new entry depth"
+        );
+    }
     assert_eq!(
         dispatch
             .connected_demand()
@@ -775,6 +786,25 @@ fn cold_query_entries_fit_within_the_checker_relation_envelope() {
     use verter_type_engine::semantic_query::PartialReasonSet;
     let host = bench_host(1_000_000, &reversed_unions(200));
     let (key, [source, target]) = reversed_conditional_key(&host, 200);
+    let branch_proofs = || {
+        host.project_type_store()
+            .semantic_graph()
+            .export_all_origin_edges()
+            .iter()
+            .filter(|(_, kind, edge)| {
+                *kind == verter_type_engine::semantic_query::OriginEdgeKind::ConditionalSelect
+                    && edge.sources.as_ref() == [source, target]
+                    && matches!(
+                        edge.meta,
+                        verter_type_engine::semantic_query::OriginMeta::Branch(
+                            verter_type_engine::semantic_query::BranchSelection::True
+                                | verter_type_engine::semantic_query::BranchSelection::False
+                        )
+                    )
+            })
+            .count()
+    };
+    let before_recovery = branch_proofs();
     let comparisons = 20_000;
     let reducer_only =
         comparisons as usize * super::connected_demand::RELATION_UNITS_PER_COMPARISON;
@@ -804,6 +834,11 @@ fn cold_query_entries_fit_within_the_checker_relation_envelope() {
     assert_eq!(
         recovered.refusals,
         vec![super::walk::ShallowDiagnostic::RelationTooComplex { source, target }]
+    );
+    assert_eq!(
+        branch_proofs(),
+        before_recovery,
+        "a checker recovery must not publish a branch-selection proof"
     );
     let before_repeat = semantic_misses(&host);
     let before_reductions = ProjectSemanticDispatch::<crate::resolver_core::HostCapabilities>::relation_reductions_for_tests();
@@ -1174,7 +1209,7 @@ fn root_read_with_context(
     };
     RootAnswer {
         answer,
-        partial: read.result_is_partial,
+        partial: read.result_is_partial(),
         reasons: read.partial_reason_classes(),
         work: dispatch.connected_demand().work_used_for_tests(),
         bytes: dispatch.connected_demand().bytes_used_for_tests(),
@@ -2112,8 +2147,9 @@ fn the_refusal_table_keeps_the_newest_and_refuses_torn_evaluations() {
         dep_signature: verter_type_engine::semantic_query_memo::empty_signature(),
         walker_diagnostics: Arc::from([]),
         cache_suppress: true,
-        result_is_partial: true,
-        partial_reasons: PartialReasonSet::PROJECTION_WORK_LIMIT,
+        fact_status: verter_type_engine::semantic_query::FactStatus::unavailable(
+            PartialReasonSet::PROJECTION_WORK_LIMIT,
+        ),
         receipt: verter_type_engine::semantic_query::ReadReceipt::Unpriced,
     };
     let carrier =

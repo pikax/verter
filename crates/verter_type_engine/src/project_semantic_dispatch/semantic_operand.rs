@@ -1251,7 +1251,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         );
         let (read, evidence) = self.execute_read_with_operand_evidence(key);
         crate::meta_resolve::emit_dispatch_dep_signature_facts(self, &read.dep_signature);
-        if read.result_is_partial {
+        if read.result_is_partial() {
             return match read.value {
                 QueryResult::Error(error) => QueryResult::Error(error),
                 QueryResult::Recursive(node) => QueryResult::Recursive(node),

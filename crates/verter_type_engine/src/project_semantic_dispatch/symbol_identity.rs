@@ -640,7 +640,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         match read.value {
             QueryResult::Recursive(_) => Err(PropCallableRoleUnresolvedReason::Cycle),
             QueryResult::Error(error) => Err(query_error_reason(&error)),
-            QueryResult::Value(_) if read.result_is_partial => {
+            QueryResult::Value(_) if read.result_is_partial() => {
                 Err(PropCallableRoleUnresolvedReason::Fault)
             }
             QueryResult::Value(node) => Ok(node),

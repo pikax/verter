@@ -185,8 +185,7 @@ fn narrow_cache_read(
         dep_signature: read.dep_signature,
         walker_diagnostics: read.walker_diagnostics,
         cache_suppress: read.cache_suppress,
-        result_is_partial: read.result_is_partial,
-        partial_reasons: read.partial_reasons,
+        fact_status: read.fact_status,
         receipt: read.receipt,
     }
 }
@@ -199,8 +198,9 @@ pub(crate) fn cancelled_cache_read() -> CacheRead<QueryResult<SemanticQueryValue
         dep_signature: empty_signature(),
         walker_diagnostics: Arc::from([]),
         cache_suppress: true,
-        result_is_partial: true,
-        partial_reasons: crate::semantic_query::PartialReasonSet::CANCELLED,
+        fact_status: crate::semantic_query::FactStatus::unavailable(
+            crate::semantic_query::PartialReasonSet::CANCELLED,
+        ),
         receipt: crate::semantic_query::ReadReceipt::Unpriced,
     }
 }
@@ -1880,8 +1880,7 @@ impl SemanticGraphStore {
                     dep_signature,
                     walker_diagnostics: entry.walker_diagnostics,
                     cache_suppress: false,
-                    result_is_partial: false,
-                    partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
+                    fact_status: crate::semantic_query::FactStatus::Complete,
                     receipt: crate::semantic_query::ReadReceipt::Priced(entry.cost_receipt),
                 }
             })
@@ -2039,8 +2038,7 @@ impl SemanticGraphStore {
                 dep_signature,
                 walker_diagnostics: entry.walker_diagnostics,
                 cache_suppress: false,
-                result_is_partial: false,
-                partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
+                fact_status: crate::semantic_query::FactStatus::Complete,
                 receipt: crate::semantic_query::ReadReceipt::Priced(entry.cost_receipt),
             }
         });
@@ -2189,8 +2187,7 @@ impl SemanticGraphStore {
             dep_signature: Arc::clone(&entry.dispatch_dep_signature),
             walker_diagnostics: entry.walker_diagnostics,
             cache_suppress: false,
-            result_is_partial: false,
-            partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
+            fact_status: crate::semantic_query::FactStatus::Complete,
             receipt: crate::semantic_query::ReadReceipt::Priced(entry.cost_receipt),
         };
 
@@ -2263,9 +2260,10 @@ impl SemanticGraphStore {
             state.cost_receipt = None;
             state.walker_diagnostics = None;
             state.cache_suppress = true;
-            state.result_is_partial = true;
+            state.fact_status = crate::semantic_query::FactStatus::unavailable(
+                crate::semantic_query::PartialReasonSet::CANCELLED,
+            );
             // A cancellation abort is a partial with its own precise class.
-            state.partial_reasons = crate::semantic_query::PartialReasonSet::CANCELLED;
         }
         inflight.ready.notify_all();
         #[cfg(any(test, feature = "test-support"))]

@@ -27,8 +27,8 @@ use rustc_hash::FxHashSet;
 use verter_session_query::type_solver::arena::PrimitiveKind;
 
 use crate::semantic_query::{
-    ProjectionReductionContext, QueryResult, SemanticContextId, SemanticNodeData, SemanticNodeId,
-    SemanticQueryKey, SemanticQueryValue, SignatureKind,
+    ProjectionReductionContext, QueryError, QueryResult, SemanticContextId, SemanticNodeData,
+    SemanticNodeId, SemanticQueryKey, SemanticQueryValue, SignatureKind,
 };
 
 use super::ProjectSemanticDispatch;
@@ -131,6 +131,12 @@ pub(crate) enum AuthoredSignatures {
     Undecided,
 }
 
+enum UtilityInference {
+    Signature(SemanticNodeId),
+    Absent,
+    Incomplete,
+}
+
 impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
     /// The subject's candidates of `kind`, read from `SignaturesOfType`,
     /// each as the authored signature node this subject carries it at — a
@@ -201,18 +207,38 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         subject: SemanticNodeId,
         kind: SignatureKind,
     ) -> Option<SemanticNodeId> {
+        match self.utility_inference(subject, kind) {
+            UtilityInference::Signature(node) => Some(node),
+            UtilityInference::Absent | UtilityInference::Incomplete => None,
+        }
+    }
+
+    fn utility_inference(&self, subject: SemanticNodeId, kind: SignatureKind) -> UtilityInference {
         if !self.subject_infers_a_signature(subject) {
-            return None;
+            return UtilityInference::Incomplete;
         }
         let signature = match self.shared_signature_nodes(subject, kind) {
-            super::signature_discovery::SharedSignatureNodes::Nodes(nodes) => *nodes.last()?,
-            super::signature_discovery::SharedSignatureNodes::Incomplete(_) => return None,
+            super::signature_discovery::SharedSignatureNodes::Nodes(nodes) => match nodes.last() {
+                Some(node) => *node,
+                None => return UtilityInference::Absent,
+            },
+            super::signature_discovery::SharedSignatureNodes::Incomplete(_) => {
+                return UtilityInference::Incomplete
+            }
         };
         match self.graph().node_data(signature).as_deref() {
             Some(SemanticNodeData::Signature {
                 kind: node_kind, ..
-            }) if *node_kind == kind => Some(signature),
-            _ => None,
+            }) if *node_kind == kind => UtilityInference::Signature(signature),
+            Some(SemanticNodeData::DeferredCallable(callable))
+                if callable
+                    .parts(&crate::semantic_query::ResolveOverloadSetConsumer::witness())
+                    .kind
+                    == kind =>
+            {
+                UtilityInference::Signature(signature)
+            }
+            _ => UtilityInference::Incomplete,
         }
     }
 
@@ -245,7 +271,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         context: ProjectionReductionContext,
     ) -> Option<SemanticNodeId> {
         let Some(arms) = self.settled_union_arms(subject) else {
-            return self.resolve_signature_utility_on_arm(utility, subject);
+            return self.resolve_signature_utility_on_arm(utility, subject, context);
         };
         let mut settled_arms = Vec::with_capacity(arms.len());
         for &arm in arms.iter() {
@@ -294,30 +320,67 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         &self,
         utility: SignatureUtility,
         subject: SemanticNodeId,
+        context: ProjectionReductionContext,
     ) -> Option<SemanticNodeId> {
-        let inferred = self.utility_inference_signature(subject, utility.signature_kind());
+        let inferred = match self.utility_inference(subject, utility.signature_kind()) {
+            UtilityInference::Signature(node) => Some(node),
+            UtilityInference::Absent => None,
+            UtilityInference::Incomplete => return None,
+        };
         let unknown = || {
             self.graph()
                 .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown))
         };
         match utility.projection() {
             SignatureUtilityProjection::Result => {
-                let signature = inferred?;
-                let return_type = match self.graph().node_data(signature).as_deref() {
-                    Some(SemanticNodeData::Signature { return_type, .. }) => *return_type,
+                let inferred = inferred?;
+                if context.mode == crate::semantic_query::ProjectionMode::Shallow
+                    && crate::semantic_query::may_reduce_operator(context)
+                {
+                    if let Some(surface) =
+                        self.signature_return_key_surface(utility, subject, inferred)
+                    {
+                        return Some(surface);
+                    }
+                }
+                let signature = self.materialize_returned_callable(inferred);
+                let (return_type, carrier) = match self.graph().node_data(signature).as_deref() {
+                    Some(SemanticNodeData::Signature {
+                        return_type,
+                        return_carrier,
+                        ..
+                    }) => (*return_type, return_carrier.clone()),
                     _ => return None,
                 };
-                // A body-derived return whose evaluation closed degraded
-                // stays a usable value, and the read that composed its
-                // answer from it is counted on this request, so the
-                // published answer (`ReturnType<typeof C.m>`) degrades
-                // rather than reading clean. Only this member's return
-                // decides it; the other members of the type that holds it
-                // read as they are.
-                if self.body_derived_return_degraded(signature) {
-                    self.degraded_member_reads
-                        .set(self.degraded_member_reads.get().saturating_add(1));
-                }
+                // The signature's structural lowering may have declined an
+                // eager body probe. Demand the authoritative return source
+                // here, rather than reading its provisional placeholder.
+                let demand_source = matches!(
+                    carrier,
+                    crate::semantic_query::SignatureReturnCarrier::DeferredFlow(_)
+                ) || matches!(
+                    self.graph().node_data(return_type).as_deref(),
+                    Some(SemanticNodeData::Opaque(QueryError::Miss))
+                );
+                let return_type = match carrier.result_source() {
+                    crate::semantic_query::SignatureResultSource::Function(
+                        verter_type_expr::facts::FunctionReturnSource::Flow(identity),
+                    ) if demand_source => {
+                        let canonical = Arc::clone(&identity.anchor.canonical_id);
+                        match self.execute_function_return_source(
+                            &verter_type_expr::facts::FunctionReturnSource::Flow(identity.clone()),
+                            canonical.as_ref(),
+                        ) {
+                            super::flow_return::FunctionReturnNode::Flow(result) => {
+                                // The source consumer has already adopted either the whole
+                                // fact or its independently certified selected value.
+                                self.apply_signature_return_source(&carrier, result.return_type())
+                            }
+                            _ => return None,
+                        }
+                    }
+                    _ => return_type,
+                };
                 // Free signature generics instantiate at their base
                 // constraints: `ReturnType<typeof id>` over `id<T>(x: T): T`
                 // is `unknown`, over `id<T extends string>(x: T): T` it is
@@ -358,48 +421,78 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         }
     }
 
+    /// A shallow result demand can use independently certified keys while
+    /// each value remains its own deferred member demand. Key evidence cannot
+    /// promote the stored values of an unfinished whole return.
+    fn signature_return_key_surface(
+        &self,
+        utility: SignatureUtility,
+        subject: SemanticNodeId,
+        signature: SemanticNodeId,
+    ) -> Option<SemanticNodeId> {
+        let data = self.graph().node_data(signature)?;
+        let header =
+            data.callable_header(&crate::semantic_query::ResolveOverloadSetConsumer::witness())?;
+        let identity = header.return_carrier.flow_identity()?;
+        let key = self.flow_return_key_for(identity);
+        let read = self.observe_flow_return_key_domain(key);
+        let usable = read.observations_are_complete()
+            && matches!(read.value(), crate::semantic_query::FlowReturnStep::Complete(result) if result.exact_return_keys().is_some());
+        if !usable {
+            let _ = read.discard();
+            return None;
+        }
+        let crate::semantic_query::FlowReturnStep::Complete(result) = read.adopt(self).ok()? else {
+            return None;
+        };
+        let data = self.graph().node_data(result.return_type())?;
+        let SemanticNodeData::Object(view) = data.as_ref() else {
+            return None;
+        };
+        let source = self
+            .graph()
+            .intern_node(SemanticNodeData::InstantiationRef {
+                base: crate::semantic_query::DeclIdentity {
+                    canonical_id: Arc::from("__builtin__"),
+                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    whole_hash: Default::default(),
+                    decl_name: Arc::from(utility.builtin_name()),
+                },
+                args: Arc::from([subject]),
+            });
+        let entries = view
+            .entries
+            .iter()
+            .map(|entry| match entry {
+                crate::semantic_query::SurfaceEntry::Member(member) => {
+                    let mut member = member.clone();
+                    let key = member.key.cloned_known()?;
+                    member.value = self.graph().intern_node(SemanticNodeData::IndexedAccess {
+                        object: source,
+                        index: crate::semantic_query::IndexKey::String(Arc::from(key.as_string()?)),
+                    });
+                    Some(crate::semantic_query::SurfaceEntry::Member(member))
+                }
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(self.graph().intern_node(SemanticNodeData::Object(
+            crate::semantic_query::SurfaceView::from_entries(entries, None, false),
+        )))
+    }
+
     fn signature_params(
         &self,
         signature: SemanticNodeId,
     ) -> Option<Arc<[crate::semantic_query::FunctionParam]>> {
         match self.graph().node_data(signature).as_deref() {
             Some(SemanticNodeData::Signature { params, .. }) => Some(Arc::clone(params)),
+            Some(SemanticNodeData::DeferredCallable(callable)) => Some(Arc::clone(
+                callable
+                    .parts(&crate::semantic_query::ResolveOverloadSetConsumer::witness())
+                    .params,
+            )),
             _ => None,
         }
-    }
-}
-
-impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
-    /// Whether `signature`'s return is body-derived and its evaluation
-    /// closed with a typed degradation. A return still in flight or with no
-    /// value answers `false`: its own read already carries that.
-    ///
-    /// The re-read asks for the VERDICT only: the signature's lowering read
-    /// the value and folded its rails, so this read's own observations (a
-    /// nested cold compute's limits) are scoped and dropped here.
-    pub(super) fn body_derived_return_degraded(&self, signature: SemanticNodeId) -> bool {
-        let identity = match self.graph().node_data(signature).as_deref() {
-            Some(SemanticNodeData::Signature {
-                return_carrier:
-                    crate::semantic_query::SignatureReturnCarrier::Function(
-                        verter_type_expr::facts::FunctionReturnSource::Flow(identity),
-                    ),
-                ..
-            }) => identity.clone(),
-            _ => return false,
-        };
-        let canonical = Arc::clone(&identity.anchor.canonical_id);
-        let node = self
-            .observe_flow_read(|| {
-                self.execute_function_return_source(
-                    &verter_type_expr::facts::FunctionReturnSource::Flow(identity),
-                    &canonical,
-                )
-            })
-            .discard();
-        matches!(
-            node,
-            Ok(super::flow_return::FunctionReturnNode::Flow(result)) if result.degradation().is_some()
-        )
     }
 }
