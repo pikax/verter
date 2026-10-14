@@ -553,6 +553,7 @@ fn assert_recursive_paths_layout(count: usize, groups: usize) {
     // Complete enumeration of the larger closures needs an explicit
     // request allowance; the smallest layout exercises the default fuse.
     let host = recursive_paths_host(count, groups, if count <= 20 { 0 } else { 50_000 });
+    let proof_before = verter_session_query::facts::fact_read_set::signature_work_for_tests();
     let (answer, record) = resolve_expr(
         &host,
         "/paths/scenario.ts",
@@ -561,6 +562,15 @@ fn assert_recursive_paths_layout(count: usize, groups: usize) {
         ProjectionMode::Expanded,
     );
     let stats = host.project_type_store().semantic_graph().stats_snapshot();
+    let proof_work =
+        verter_session_query::facts::fact_read_set::signature_work_for_tests() - proof_before;
+    let verter_audit::RequestKindPayload::TypeResolution(payload) = &record.kind_payload else {
+        panic!("recursive paths must retain their resolution audit");
+    };
+    println!(
+        "entities={count} instantiate_count={} projection_ops={} paths_proof_work={proof_work}",
+        stats.instantiate_count, payload.projection_ops_executed,
+    );
     assert!(
         stats.instantiate_count <= u64::try_from(count * 15 + 20).unwrap(),
         "recursive applications must share already demanded property types: {count} entities used {} instantiations",

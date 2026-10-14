@@ -51,6 +51,17 @@ reducer's transit default is Shallow; using it here would defer callable argumen
 binding and change a generic function's returned class.
 A mapped object operand keeps transit Navigate until its index selects K;
 graph projection and deferred evaluation share that operand-context policy.
+`typeof` indexed operands use the same transit Navigate source context as
+`keyof`. An authored `T[keyof T]` reads its source surface once before the
+selected-value demand, including when the surface is a module namespace.
+Completed deferred-evaluation frames and retained memo witnesses fan their
+canonical fact witnesses into every active tracer as verified sorted runs,
+preserving recorder attribution and refusal propagation without sorting the
+same child evidence again.
+The read-set owner merges batches in balanced rounds so growing prefixes are
+not recopied for every following witness. Observation marks cover both local
+facts and retained canonical runs, so consuming a completed result replaces
+its witness with the receipt without retaining duplicate child evidence.
 A named declaration accompanied by null or undefined retains its name.
 
 **Key-domain reuse.** One typed key-domain result supplies enumeration,
