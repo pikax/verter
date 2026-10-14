@@ -58,10 +58,11 @@ pub(crate) fn next_host_instance_id() -> u64 {
     NEXT_HOST_INSTANCE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Unit-test standalone hosts model an explicitly configured in-memory
-/// project. Production standalone hosts remain unconfigured until their
-/// caller supplies project authority; tests that exercise the no-project
-/// state construct a host with an explicit workspace instead.
+/// Unit-test hosts without project authority receive a tsconfig-less
+/// in-memory context for default environment and ownership identity. A
+/// missing, fabricated tsconfig must not turn that context into a configured
+/// program whose roots are eagerly discovered. Tests with authored roots or
+/// compiler options configure their real tsconfig through the shared loader.
 #[cfg(test)]
 pub(crate) fn configure_workspace_test_projects(workspace: &dyn verter_workspace::WorkspaceAccess) {
     if workspace.resource_snapshot().published_project_count != 0 {
@@ -93,13 +94,7 @@ pub(crate) fn configure_workspace_test_projects(workspace: &dyn verter_workspace
                         )
                     })
                     .collect();
-            let tsconfig_path = if root == "/" {
-                "/__verter_test__/tsconfig.json".to_string()
-            } else {
-                format!("{root}__verter_test__/tsconfig.json")
-            };
-            let mut project =
-                verter_workspace::ide_project_config(root.clone(), root, Some(tsconfig_path));
+            let mut project = verter_workspace::ide_project_config(root.clone(), root, None);
             project.membership = membership;
             project
         })
@@ -814,14 +809,12 @@ impl VerterHost {
                 let root = root.trim_end_matches('/').to_string();
                 let tsconfig_path = format!("{root}/tsconfig.json");
                 workspace.inject_file(tsconfig_path.clone(), Arc::from(*tsconfig_json));
-                let mut project = verter_workspace::ide_project_config(
+                verter_workspace::configured_ide_project(
+                    &*workspace,
                     root.clone(),
                     root,
-                    Some(tsconfig_path.clone()),
-                );
-                project.compiler_options =
-                    verter_workspace::load_compiler_options(&*workspace, &tsconfig_path);
-                project
+                    &tsconfig_path,
+                )
             })
             .collect();
         let host = Self::new(config, workspace);
@@ -1110,7 +1103,8 @@ impl VerterHost {
     /// Per-canonical env-hash bundle.
     ///
     /// Maps `canonical` to its owning project via the published
-    /// snapshot's `owners_for_file().first()`, then looks up the
+    /// snapshot's configured roots, then discovered program membership (and
+    /// finally fallback ownership), then looks up the
     /// project's env-hash array on `PublishedRoot::env_hashes_by_project`.
     /// Falls back to the workspace-default env-hash array when the
     /// canonical has no owning project (e.g. ambient libs, scratch
@@ -1176,7 +1170,8 @@ impl VerterHost {
     /// Per-canonical project identity.
     ///
     /// Maps `canonical` to its owning project via the published
-    /// snapshot's `owners_for_file().first()`, then looks up the
+    /// snapshot's configured roots, then discovered program membership (and
+    /// finally fallback ownership), then looks up the
     /// project's identity hash on
     /// `PublishedRoot::project_identity_hashes`. Falls back to the
     /// workspace-default project identity when the canonical has no
@@ -1209,17 +1204,7 @@ impl VerterHost {
         canonical: &str,
     ) -> Option<verter_session_query::resolution::ProjectId> {
         let root = self.workspace().published_root()?;
-        root.snapshot.owners_for_file(canonical).first().copied()
-    }
-
-    /// Configured `files` index for `canonical`, or `u32::MAX` when the
-    /// path was discovered by include/globs (unordered inputs are then
-    /// normalized by canonical spelling).
-    pub(crate) fn declaration_sequence_rank(&self, canonical: &str) -> u32 {
-        let Some(root) = self.workspace().published_root() else {
-            return u32::MAX;
-        };
-        root.snapshot.declaration_sequence_rank(canonical)
+        self.project_for_canonical_in_snapshot(canonical, &root.snapshot)
     }
 
     /// IndexedReady for a declaration file whose source is a global/ambient
@@ -1248,6 +1233,7 @@ impl VerterHost {
     /// without consuming cold flights at upsert.
     pub(crate) fn ingest_program_ambient_roots(&self) {
         self.ingest_injected_ambient_roots(None);
+        self.ingest_configured_programs();
         let pending = self
             .project_type_store()
             .indexed()

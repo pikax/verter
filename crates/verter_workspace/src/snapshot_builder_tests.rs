@@ -794,6 +794,48 @@ fn materialize_files_entries_always_included_regardless_of_excludes() {
     );
 }
 
+/// A declared `exclude` replaces TypeScript's default excludes, but the walk
+/// still never takes package or dot-prefixed folders into the include set.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn materialize_with_declared_exclude_skips_package_and_dot_folders() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let project = tmp.path().join("project");
+    for dir in ["src", "dist", "node_modules/pkg", ".git/hooks"] {
+        std::fs::create_dir_all(project.join(dir)).unwrap();
+    }
+    for file in [
+        "src/main.ts",
+        "dist/out.ts",
+        "node_modules/pkg/index.d.ts",
+        ".git/hooks/x.ts",
+    ] {
+        std::fs::write(project.join(file), "").unwrap();
+    }
+
+    let project_str = project.to_string_lossy().replace('\\', "/");
+    let root = CanonicalPath::new(&project_str);
+    let spec = crate::membership::static_membership_from_includes(
+        &root,
+        &[],
+        &["**/*"],
+        &["dist"],
+        &crate::membership::SupportedExtensions::new(false, &[]),
+    );
+    let ws = crate::filesystem::FilesystemWorkspace::new(
+        crate::filesystem::FilesystemOptions::default(),
+    );
+
+    let materialized = materialize_from_spec(&spec, &root, Some(&ws));
+
+    let expected = CanonicalPath::new(&format!("{project_str}/src/main.ts"));
+    assert_eq!(
+        materialized,
+        FxHashSet::from_iter([expected]),
+        "only src/main.ts is a member: dist is excluded, node_modules and .git are never included"
+    );
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn materialize_empty_include_produces_files_only() {

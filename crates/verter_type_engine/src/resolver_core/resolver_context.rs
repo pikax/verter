@@ -335,6 +335,18 @@ pub fn observe_fan_out(fact: verter_session_query::facts::fact_cache::FactVersio
     tracer_stack::observe_fan_out(fact);
 }
 
+/// Record that the active computation ordered declarations by `order`, so
+/// its result misses once the program lists its files differently. No-op
+/// for a file no program owns.
+#[inline]
+pub fn observe_program_file_order(
+    order: &verter_session_query::inputs::program_order::ProgramFileOrder,
+) {
+    if let Some(fact) = order.fact() {
+        tracer_stack::observe_fan_out(fact);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Request-bound lifecycle adapters — the ONE shared `ResolverContext`
 // implementation behind `HostResolverContext` and `SessionResolverContext`.

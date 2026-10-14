@@ -26,6 +26,7 @@ pub(crate) fn resolve_frame_with_reader(
     if matches!(
         frame.operation,
         crate::resolve_frame::ResolveFrameOperation::Project
+            | crate::resolve_frame::ResolveFrameOperation::ProjectImport
     ) && frame.geometry.owner_index.is_none()
     {
         return hit(None, AttemptOutput::new());
@@ -38,7 +39,8 @@ pub(crate) fn resolve_frame_with_reader(
                 return hit(None, output);
             };
             let result = match &frame.operation {
-                crate::resolve_frame::ResolveFrameOperation::Request => {
+                crate::resolve_frame::ResolveFrameOperation::Request
+                | crate::resolve_frame::ResolveFrameOperation::ProjectImport => {
                     crate::provider_projection_resolution::build_resolve_result_with_memo(
                         frame.projects,
                         &frame.geometry.start,

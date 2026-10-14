@@ -8,6 +8,44 @@ description: "Component metadata: native vs compat boundary, fallthrough/root in
 For the native fact transport, schema compatibility, localized validation and
 public guarantees, see [native-facts.md](references/native-facts.md).
 
+## Project configuration ingress
+
+A tsconfig-backed session (`openComponentMetaSession({ tsconfig })`,
+`createChecker(tsconfigPath)`) configures its workspace with
+`{ root: <tsconfig dir>, workspaceRoot, tsconfigPath }`
+(`runtime/discovery.ts::tsconfigProjectConfig`). The NAPI ingress
+(`crates/verter_napi/src/lib.rs::napi_project_config_to_ide`) builds any
+project carrying a `tsconfigPath` through the shared workspace loader
+`verter_workspace::configured_ide_project`, read through the host's own
+workspace: compiler options (`extends`, `paths`, `baseUrl`, `noLib`, `lib`,
+strictness) and the exact `files` / `include` / `exclude` membership, its
+`include` matches materialized by walking the project root (a lazy workspace
+has read none of them yet; as in TypeScript, an include wildcard never matches
+a dot-prefixed name or a `node_modules` / `bower_components` /
+`jspm_packages` folder the entry does not spell, whatever `exclude` says, and
+the walk never descends into one), whose `program_root_files` order is the program
+file order that orders merged declarations. These are entry roots: their
+transitive import/reference closure retains the program's compiler options
+and aliases even when `files`/`include` omit those dependencies. An unreachable
+file outside that closure is not governed by the tsconfig's `paths`.
+`openComponentMetaSession` configures through `MetaProject.configureProjects`,
+so host discovery and invalidation run before the first request freezes its
+project contexts. Explicit `providerRoot` / `workspaceAliases` /
+`compilerOptions` / `references` fields layer on top (an absent `baseUrl`
+does not clear the tsconfig's). A project with no `tsconfigPath` — the inline
+`config` session — keeps the match-all membership: match-all is only for
+tsconfig-less projects. The pooled engine identity follows the same split:
+`runtime/tsconfig.ts::hashTsconfigConfig` fingerprints the tsconfig bytes and
+its ordered `extends` graph (string, array and package specifiers), including
+missing resolution probes and package manifests. Inheritance traversal uses
+the native loader's depth-eight bound; the native loader remains the sole
+options/membership merge authority. A shared JSONC parser preserves URLs,
+alias globs and trailing commas. Both session and compat entrypoints use this
+identity; synchronous eviction computes the same key.
+`inlineConfigHash` strips `include`, which is only a discovery filter for a
+match-all project. Guards: `crates/verter_napi/src/project_config_tests.rs`,
+`packages/component-meta/src/project.program-order.spec.ts`.
+
 ## Audit & footprint
 
 Per-request semantic footprint observability splits across two crates:

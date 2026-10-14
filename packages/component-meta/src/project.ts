@@ -13,7 +13,6 @@
  * ```
  */
 
-import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { resolve } from "node:path";
 import { mapComponentMeta } from "./compat/checker.js";
@@ -30,12 +29,12 @@ import {
   computeEngineKey,
   extractPathAliases,
   getMetaRuntime,
+  inlineConfigHash,
   normalizePath,
-  parseTsconfig,
   resolvePath,
   shutdownMetaRuntime as _shutdownMetaRuntime,
-  stableHash,
-  stableSelectiveConfigHash,
+  hashTsconfigConfig,
+  tsconfigProjectConfig,
 } from "./runtime/index.js";
 import type {
   BootstrapFn,
@@ -324,16 +323,6 @@ function loadNative(): any {
   return _require("@verter/native");
 }
 
-function hashTsconfigConfig(tsconfigPath: string): string {
-  try {
-    const raw = readFileSync(tsconfigPath, "utf8");
-    const stripped = raw.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
-    return stableSelectiveConfigHash(JSON.parse(stripped));
-  } catch {
-    return stableHash({ tsconfigPath: resolvePath(tsconfigPath) });
-  }
-}
-
 function buildEngineKeyInput(
   options: ComponentMetaSessionConfig,
   checkerOptions?: MetaCheckerOptions,
@@ -347,7 +336,7 @@ function buildEngineKeyInput(
     configKind: options.tsconfig ? "tsconfig" : "inline",
     tsconfigPath,
     configHash: options.config
-      ? stableSelectiveConfigHash(options.config)
+      ? inlineConfigHash(options.config)
       : hashTsconfigConfig(resolvePath(options.tsconfig)),
     nativeFlags: {
       analysisLevel: "full",
@@ -366,9 +355,6 @@ async function openComponentMetaSessionInternal(
   const root = resolvePath(options.root);
   const native = loadNative();
   const workspace: CheckerWorkspace = new native.Workspace([root]);
-  const parsedConfig = options.tsconfig
-    ? await parseTsconfig(resolvePath(options.tsconfig), workspace)
-    : null;
   const input = buildEngineKeyInput(options, checkerOptions);
 
   const bootstrap: BootstrapFn = async () => {
@@ -380,13 +366,13 @@ async function openComponentMetaSessionInternal(
     const nativeProject: NativeMetaProject = native.MetaProject.withWorkspace(config, workspace);
 
     if (options.tsconfig) {
-      if (parsedConfig) {
-        const aliases = extractPathAliases(parsedConfig.config, normalizePath(root));
-        workspace.configureProjects([aliases]);
-      }
+      // The native loader reads the tsconfig itself: compiler options and
+      // the `files` / `include` / `exclude` membership that orders the
+      // program's files.
+      nativeProject.configureProjects([tsconfigProjectConfig(resolvePath(options.tsconfig), root)]);
     } else if (options.config) {
       const aliases = extractPathAliases(options.config, normalizePath(root));
-      workspace.configureProjects([aliases]);
+      nativeProject.configureProjects([aliases]);
     }
 
     // Selective loading: no eager preload. Files are loaded on-demand

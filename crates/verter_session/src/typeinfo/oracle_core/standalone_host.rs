@@ -6,8 +6,8 @@
 //! would let the generator preflight a DIFFERENT program than the row's test
 //! resolves, and a snapshot minted that way would pin the wrong answer.
 //!
-//! The host carries one configured project over the fixture root plus the
-//! callable ambient corpus registered against it. The configured project is
+//! The host carries one tsconfig-less project over the fixture root plus the
+//! callable ambient corpus registered against it. The project context is
 //! what gives the ambient registry a stable key to attach to, and it is what
 //! a callable's apparent-type lookup resolves the fixture canonicals to.
 //! Its root is the fixture directory, so workspace fixtures rooted elsewhere
@@ -33,12 +33,12 @@ pub(crate) const AMBIENT_CALLABLE_LIB_ID: &str = "lib.callable.d.ts";
 pub(crate) const AMBIENT_CALLABLE_LIB: &str =
     include_str!("../typeinfo_tests/fixtures/ambient_callable_lib.d.ts");
 
-/// The project root every standalone typeinfo host is configured at — the
+/// The project root every standalone typeinfo host is scoped to — the
 /// directory the fixture canonicals live in.
 pub(crate) const FIXTURE_PROJECT_ROOT: &str = "/fixtures";
 
 /// Build the standalone typeinfo host: audit + footprint capture on, one
-/// configured project over [`FIXTURE_PROJECT_ROOT`], and the callable ambient
+/// tsconfig-less project over [`FIXTURE_PROJECT_ROOT`], and the callable ambient
 /// corpus registered against that project.
 pub(crate) fn standalone_footprint_host() -> Arc<VerterHost> {
     let workspace = Arc::new(MemoryWorkspace::new(MemoryOptions::default()));
@@ -55,7 +55,7 @@ pub(crate) fn standalone_footprint_host() -> Arc<VerterHost> {
     workspace.set_project_graph(ProjectGraph::from_configs(vec![VfsProjectConfig {
         root: FIXTURE_PROJECT_ROOT.to_string(),
         rank: ProjectRank::Explicit,
-        tsconfig_path: Some(format!("{FIXTURE_PROJECT_ROOT}/tsconfig.json")),
+        tsconfig_path: None,
         root_files: vec![],
         extensions,
         workspace_root: FIXTURE_PROJECT_ROOT.to_string(),

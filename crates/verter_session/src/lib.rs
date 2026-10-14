@@ -197,6 +197,7 @@ pub(crate) mod host_source_demand;
 mod materialized_structure_equivalence_tests;
 #[cfg(test)]
 mod mutation_stability_tests;
+mod program_order;
 #[cfg(test)]
 mod value_symbol_depth_equivalence_tests;
 // `fact_signature_helpers` is `pub(crate)`: the module's internals are

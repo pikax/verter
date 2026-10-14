@@ -144,6 +144,12 @@ export interface HostConfig {
 export interface HostIdeProjectConfig {
   root: string;
   workspaceRoot: string;
+  /**
+   * The tsconfig configuring this project. The native loader reads its
+   * compiler options and its `files` / `include` / `exclude` membership — the
+   * program's root files, in authored order. Without it the project owns
+   * every file under `root` (match-all). The fields below layer on top.
+   */
   tsconfigPath?: string;
   providerRoot?: string;
   workspaceAliases?: { find: string; replacement: string }[];

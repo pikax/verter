@@ -35,6 +35,7 @@
 //! - [`StructuredAuditEvent::FactSignatureAdmissionRefused`]
 //! - [`StructuredAuditEvent::ModuleAugmentationStitched`]
 //! - [`StructuredAuditEvent::ModuleAugmentationIndexShape`]
+//! - [`StructuredAuditEvent::ProgramFileOrder`]
 //! - [`StructuredAuditEvent::FileArtifactCache`]
 //! - [`StructuredAuditEvent::FactRegistryWrite`]
 //! - [`StructuredAuditEvent::FactValidationSummary`]
@@ -487,6 +488,24 @@ pub enum StructuredAuditEvent {
         /// Number of augmenters in the post-install set.
         augmenter_count: u32,
     },
+    /// A program's file order was published (first build, or a rebuild
+    /// after a workspace change).
+    ///
+    /// Cold-path only. Results that ordered declarations merged across
+    /// files observed the program's `ProgramFileOrder` fact with the
+    /// previous fingerprint; when `new_fingerprint` differs they fail
+    /// validation on their next read and recompute.
+    ProgramFileOrder {
+        /// The program's project config path.
+        program: Arc<str>,
+        /// Fingerprint of the previously published order, `None` on the
+        /// program's first publication.
+        prev_fingerprint: Option<Hash16>,
+        /// Fingerprint of the published order.
+        new_fingerprint: Hash16,
+        /// Number of files the program lists.
+        file_count: u32,
+    },
     /// `FileArtifactStore` admitted or evicted an artifact entry
     /// (R5). Cold-path / mutation-path only — warm reads (`get`,
     /// `get_any`) never emit this event.
@@ -870,6 +889,24 @@ impl std::fmt::Display for StructuredAuditEvent {
                     ),
                 }
             }
+            Self::ProgramFileOrder {
+                program,
+                prev_fingerprint,
+                new_fingerprint,
+                file_count,
+            } => match prev_fingerprint {
+                Some(prev) => write!(
+                    f,
+                    "ProgramFileOrder({program}, prev={}, new={}, n={file_count})",
+                    short_hash(prev),
+                    short_hash(new_fingerprint),
+                ),
+                None => write!(
+                    f,
+                    "ProgramFileOrder({program}, install={}, n={file_count})",
+                    short_hash(new_fingerprint),
+                ),
+            },
             Self::FileArtifactCache {
                 canonical_id,
                 action,

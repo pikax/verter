@@ -2152,6 +2152,17 @@ impl VerterHost {
         serve
     }
 
+    /// [`Self::ensure_indexed_ready_serve`] without its demand-time route
+    /// observation: for a reader that consumes no route surface (the
+    /// program order walk reads only the parse's program references), so
+    /// visiting a file records no dependency on it.
+    pub(crate) fn ensure_indexed_ready_serve_unobserved(
+        &self,
+        canonical_id: &str,
+    ) -> Option<IndexedReadyServe> {
+        self.ensure_indexed_ready_serve_uninstrumented(canonical_id, None)
+    }
+
     fn ensure_indexed_ready_serve_uninstrumented(
         &self,
         canonical_id: &str,

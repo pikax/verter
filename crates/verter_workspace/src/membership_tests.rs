@@ -731,3 +731,42 @@ fn default_excludes_stay_correct_across_memo_overflow() {
         "post-overflow set must still match node_modules under the root"
     );
 }
+
+/// A tsconfig that declares its own `exclude` still keeps TypeScript's
+/// implicit include exclusions: wildcards never reach package folders or
+/// dot-prefixed names, so neither becomes a member or a program root.
+#[test]
+fn declared_exclude_keeps_implicit_include_exclusions() {
+    let root = CanonicalPath::new("/p");
+    let supported = SupportedExtensions::new(false, &[]);
+    let spec = static_membership_from_includes(&root, &[], &["**/*"], &["dist"], &supported);
+    let candidates: Vec<CanonicalPath> = [
+        "/p/src/env.d.ts",
+        "/p/node_modules/pkg/index.d.ts",
+        "/p/plugins/b.ts",
+        "/p/.git/hooks/x.ts",
+        "/p/src/.hidden.ts",
+        "/p/dist/out.ts",
+        "/p/a.ts",
+    ]
+    .into_iter()
+    .map(CanonicalPath::new)
+    .collect();
+    let roots: Vec<String> = spec
+        .program_root_files(&candidates)
+        .into_iter()
+        .map(|path| path.as_str().to_owned())
+        .collect();
+    assert_eq!(roots, ["/p/a.ts", "/p/plugins/b.ts", "/p/src/env.d.ts"]);
+    assert!(!spec.matches(&CanonicalPath::new("/p/node_modules/pkg/index.d.ts")));
+
+    let spelled = static_membership_from_includes(
+        &root,
+        &[],
+        &["node_modules/pkg/*.d.ts", ".storybook/*.ts"],
+        &["dist"],
+        &supported,
+    );
+    assert!(spelled.matches(&CanonicalPath::new("/p/node_modules/pkg/index.d.ts")));
+    assert!(spelled.matches(&CanonicalPath::new("/p/.storybook/main.ts")));
+}
