@@ -8,7 +8,7 @@
 import { resolve, dirname } from "node:path";
 import { CLIENT_CARRIER_EXTENSIONS } from "@verter/language-shared";
 import type { CheckerWorkspace } from "../compat/checker.js";
-import { normalizePath } from "./engine-key.js";
+import { dirnamePath, normalizePath, resolvePath } from "./engine-key.js";
 
 /**
  * Whether a file name is a framework-carrier component file — ends in ANY
@@ -42,7 +42,11 @@ export async function parseTsconfig(
 }
 
 /**
- * Extract path alias configuration from tsconfig JSON.
+ * The project configuration of an INLINE (tsconfig-less) config object: its
+ * path aliases over a match-all project rooted at `projectRoot`. With no
+ * tsconfig file there is no configured program, so `files` / `include` /
+ * `exclude` do not define the project's roots. A config read from a tsconfig
+ * file goes through {@link tsconfigProjectConfig} instead.
  */
 export function extractPathAliases(
   config: Record<string, unknown>,
@@ -69,6 +73,26 @@ export function extractPathAliases(
       baseUrl: (compilerOptions.baseUrl as string) ?? undefined,
       paths: paths.length > 0 ? paths : undefined,
     },
+  };
+}
+
+/**
+ * The project configuration of a tsconfig file. The native workspace loader
+ * reads everything else from the file itself — its `extends` chain,
+ * compiler options (`paths` and `baseUrl` included), and its `files` /
+ * `include` / `exclude` membership, which is the program's root files in
+ * their authored order. The project is rooted at the tsconfig's directory;
+ * `workspaceRoot` bounds package resolution.
+ */
+export function tsconfigProjectConfig(
+  tsconfigPath: string,
+  workspaceRoot: string,
+): { root: string; workspaceRoot: string; tsconfigPath: string } {
+  const absPath = resolvePath(tsconfigPath);
+  return {
+    root: dirnamePath(absPath),
+    workspaceRoot: normalizePath(workspaceRoot),
+    tsconfigPath: absPath,
   };
 }
 

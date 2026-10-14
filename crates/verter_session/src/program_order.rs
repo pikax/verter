@@ -17,19 +17,14 @@
 //! configuration names supplies its own library environment: every library
 //! it registers is a root.
 //!
-//! The libraries alone ([`VerterHost::library_order`]) are decided by the
-//! configuration and the libraries' own references, so a read that needs
-//! nothing else takes no walk of the program's files. The whole order is
-//! built on demand — for a read that orders contributors from two or more
-//! program files, or that meets a library only a program file's
-//! `/// <reference lib>` can load — and kept on the
-//! [`FileArtifactStore`](crate::file_artifact_store::FileArtifactStore)
-//! until the workspace moves. A result ordered by it observes
-//! [`FactKey::ProgramFileOrder`](verter_session_query::facts::FactKey::ProgramFileOrder);
-//! the validator accepts that fact only while the published order is the
-//! current workspace's and still has the observed fingerprint, so an edit
-//! that reorders the program — an import or a library reference added to a
-//! file that contributes nothing — misses every warm result ordered by it.
+//! Configured program discovery settles before population lookup, including
+//! empty and singleton populations, and after batched workspace publication.
+//! It reads shallow reference/contribution inventories and lowers no bodies.
+//! The same immutable composition supplies imported members' project context,
+//! captured with source/project roots, and declaration ranks. Unchanged file
+//! edges are reused when roots grow. Results that depend on ordering observe
+//! [`FactKey::ProgramFileOrder`](verter_session_query::facts::FactKey::ProgramFileOrder),
+//! so a reference edit in a non-contributor can invalidate a changed winner.
 
 use std::sync::Arc;
 
@@ -51,6 +46,7 @@ use verter_workspace::{
 /// [`OrderInputs::unchanged`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ProgramOrderStamp {
+    authority: verter_workspace::published_state::WorkspaceAuthority,
     snapshot_generation: u64,
     content_generation: u64,
     resolution_generation: u64,
@@ -60,11 +56,19 @@ impl ProgramOrderStamp {
     /// The live workspace's stamp, `None` before a snapshot is published.
     pub(crate) fn live(workspace: &dyn WorkspaceAccess) -> Option<Self> {
         let root = workspace.published_root()?;
-        Some(Self {
+        Some(Self::from_root(workspace, &root))
+    }
+
+    fn from_root(
+        workspace: &dyn WorkspaceAccess,
+        root: &verter_workspace::published_state::PublishedRoot,
+    ) -> Self {
+        Self {
+            authority: root.authority(),
             snapshot_generation: root.snapshot.generation.0,
             content_generation: workspace.content_generation(),
             resolution_generation: workspace.resolution_fact_generation(),
-        })
+        }
     }
 }
 
@@ -119,10 +123,14 @@ impl OrderInputs {
     /// live workspace: the configuration, the resolution world, the
     /// registered libraries and the candidate files are the same ones.
     fn same_roots(&self, workspace: &dyn WorkspaceAccess, live: ProgramOrderStamp) -> bool {
-        self.stamp.snapshot_generation == live.snapshot_generation
+        self.same_resolution(workspace, live) && self.candidates == CandidateSet::live(workspace)
+    }
+
+    fn same_resolution(&self, workspace: &dyn WorkspaceAccess, live: ProgramOrderStamp) -> bool {
+        self.stamp.authority == live.authority
+            && self.stamp.snapshot_generation == live.snapshot_generation
             && self.stamp.resolution_generation == live.resolution_generation
             && Arc::ptr_eq(&self.registry, &workspace.ambient_libs_view())
-            && self.candidates == CandidateSet::live(workspace)
             && !self.probes.iter().any(|probe| self.moved(workspace, probe))
     }
 
@@ -139,7 +147,37 @@ impl OrderInputs {
     }
 }
 
+/// A shallow inclusion edge set ingested once per source version. Files
+/// without references are independent of the resolution/library world.
+#[derive(Clone)]
+struct DiscoveredFile {
+    transition: u64,
+    observed_content: u64,
+    published: Arc<verter_workspace::published_state::PublishedRoot>,
+    resolution: u64,
+    registry: Arc<AmbientLibsByProject>,
+    reference_free: bool,
+    files: Option<Vec<Arc<str>>>,
+    probes: Vec<Arc<str>>,
+}
+
+impl DiscoveredFile {
+    fn current(&self, workspace: &dyn WorkspaceAccess, file: &str) -> bool {
+        self.transition == workspace.last_content_transition_generation(file)
+            && workspace
+                .published_root()
+                .is_some_and(|root| Arc::ptr_eq(&root, &self.published))
+            && (self.reference_free
+                || (self.resolution == workspace.resolution_fact_generation()
+                    && Arc::ptr_eq(&self.registry, &workspace.ambient_libs_view())
+                    && self.probes.iter().all(|probe| {
+                        workspace.last_content_transition_generation(probe) <= self.observed_content
+                    })))
+    }
+}
+
 /// One program's published order and what it was read from.
+#[derive(Clone)]
 struct PublishedOrder {
     order: Arc<ProgramFileOrder>,
     inputs: Arc<OrderInputs>,
@@ -149,22 +187,27 @@ struct PublishedOrder {
 /// and the registered libraries (a registration replaces the registry).
 #[derive(Clone)]
 struct LibraryStamp {
+    authority: verter_workspace::published_state::WorkspaceAuthority,
     snapshot_generation: u64,
     registry: Arc<AmbientLibsByProject>,
 }
 
 impl LibraryStamp {
     fn matches(&self, other: &Self) -> bool {
-        self.snapshot_generation == other.snapshot_generation
+        self.authority == other.authority
+            && self.snapshot_generation == other.snapshot_generation
             && Arc::ptr_eq(&self.registry, &other.registry)
     }
 }
+
+type DiscoveredFiles = FxHashMap<(Arc<str>, Arc<str>), DiscoveredFile>;
 
 /// Published program orders, one per program, each with the inputs it was
 /// read from, and each project's library order.
 #[derive(Default)]
 pub(crate) struct ProgramOrderIndex {
-    published: parking_lot::RwLock<FxHashMap<Arc<str>, PublishedOrder>>,
+    published: parking_lot::RwLock<Arc<FxHashMap<Arc<str>, PublishedOrder>>>,
+    discovered: parking_lot::RwLock<DiscoveredFiles>,
     libraries:
         parking_lot::RwLock<FxHashMap<ProjectStableKey, (LibraryStamp, Arc<ProgramFileOrder>)>>,
     /// Files whose references a walk read afresh rather than reused.
@@ -200,11 +243,24 @@ impl ProgramOrderIndex {
             }
             Arc::clone(&entry.inputs)
         };
+        let mut refreshed_probes = inputs.probes.clone();
         if !inputs.unchanged(workspace, live) {
-            return None;
+            if !inputs.same_roots(workspace, live) {
+                return None;
+            }
+            let discovered = self.discovered.read();
+            for (file, previous) in &inputs.pulled {
+                if inputs.moved(workspace, file) {
+                    let entry = discovered.get(&(Arc::from(program), Arc::clone(file)))?;
+                    if !entry.current(workspace, file) || &entry.files != previous {
+                        return None;
+                    }
+                    refreshed_probes.extend(entry.probes.iter().cloned());
+                }
+            }
         }
         let mut published = self.published.write();
-        let entry = published.get_mut(program)?;
+        let entry = Arc::make_mut(&mut published).get_mut(program)?;
         if !Arc::ptr_eq(&entry.inputs, &inputs) {
             return (entry.inputs.stamp == live).then(|| Arc::clone(&entry.order));
         }
@@ -214,9 +270,23 @@ impl ProgramOrderIndex {
             candidates: inputs.candidates,
             roots: inputs.roots.clone(),
             pulled: inputs.pulled.clone(),
-            probes: inputs.probes.clone(),
+            probes: refreshed_probes,
         });
         Some(Arc::clone(&entry.order))
+    }
+
+    pub(crate) fn capture_membership(
+        &self,
+        workspace: &dyn WorkspaceAccess,
+    ) -> ProgramMembershipRoot {
+        let root = workspace.published_root();
+        ProgramMembershipRoot {
+            programs: Arc::clone(&self.published.read()),
+            stamp: root
+                .as_ref()
+                .map(|root| ProgramOrderStamp::from_root(workspace, root)),
+            snapshot: root.map(|root| Arc::clone(&root.snapshot)),
+        }
     }
 
     /// The inputs `program`'s published order was read from.
@@ -246,7 +316,7 @@ impl ProgramOrderIndex {
             Some(previous) if previous.fingerprint() == order.fingerprint() => Arc::clone(previous),
             _ => order,
         };
-        published.insert(
+        Arc::make_mut(&mut published).insert(
             program,
             PublishedOrder {
                 order: Arc::clone(&order),
@@ -309,9 +379,46 @@ impl ProgramOrderIndex {
     fn note_reference_read(&self) {}
 }
 
+/// Immutable program membership captured beside the source/project roots.
+/// It shares the same compositions used for contributor ordering, and costs
+/// a fixed number of Arc clones to capture, independent of the program's size.
+#[derive(Clone, Default)]
+pub(crate) struct ProgramMembershipRoot {
+    programs: Arc<FxHashMap<Arc<str>, PublishedOrder>>,
+    stamp: Option<ProgramOrderStamp>,
+    snapshot: Option<Arc<WorkspaceSnapshot>>,
+}
+
+impl ProgramMembershipRoot {
+    pub(crate) fn project_for_member(
+        &self,
+        canonical: &str,
+        snapshot: &WorkspaceSnapshot,
+    ) -> Option<ProjectId> {
+        if !self
+            .snapshot
+            .as_ref()
+            .is_some_and(|captured| std::ptr::eq(captured.as_ref(), snapshot))
+        {
+            return None;
+        }
+        snapshot.projects.iter().find_map(|project| {
+            let ProjectPayload::Configured { tsconfig_path, .. } = &project.payload else {
+                return None;
+            };
+            let entry = self.programs.get(tsconfig_path.as_str())?;
+            (self.stamp == Some(entry.inputs.stamp)
+                && entry.inputs.stamp.snapshot_generation == snapshot.generation.0
+                && entry.order.lists(canonical))
+            .then_some(project.id)
+        })
+    }
+}
+
 /// The libraries a project can load: the registered ones a user file does
 /// not shadow, and the roots its configuration names.
 struct ProjectLibraries {
+    registry: Arc<AmbientLibsByProject>,
     key: ProjectStableKey,
     /// Registered library file names a user file does not shadow.
     available: FxHashSet<Arc<str>>,
@@ -325,7 +432,7 @@ struct ProjectLibraries {
 impl ProjectLibraries {
     fn of(
         workspace: &dyn WorkspaceAccess,
-        registry: &AmbientLibsByProject,
+        registry: &Arc<AmbientLibsByProject>,
         project: ProjectId,
         options: &SemanticCompilerOptions,
     ) -> Option<Self> {
@@ -339,6 +446,7 @@ impl ProjectLibraries {
             }
         }
         let mut libraries = Self {
+            registry: Arc::clone(registry),
             key,
             available,
             roots: Vec::new(),
@@ -387,6 +495,159 @@ impl ProjectLibraries {
 }
 
 impl crate::VerterHost {
+    /// Settle configured program discovery before reading any symbol's
+    /// population, including symbols with no known contributors. Only
+    /// shallow reference/contribution inventories enter the artifact store.
+    pub(crate) fn ingest_configured_programs(&self) {
+        let workspace = self.workspace();
+        let mut incomplete = Vec::new();
+        for _ in 0..3 {
+            let Some(root) = workspace.published_root() else {
+                return;
+            };
+            incomplete.clear();
+            for project in &root.snapshot.projects {
+                if !matches!(project.payload, ProjectPayload::Configured { .. }) {
+                    continue;
+                }
+                let order = self.project_program_order(&root.snapshot, project.id);
+                let current = ProgramOrderStamp::live(workspace.as_ref()).and_then(|stamp| {
+                    self.project_type_store()
+                        .indexed()
+                        .program_order_index()
+                        .current(order.program()?.as_ref(), stamp, workspace.as_ref())
+                });
+                if current.is_none() && !order.is_empty() {
+                    incomplete.push(order);
+                }
+            }
+            if workspace
+                .published_root()
+                .is_some_and(|live| Arc::ptr_eq(&live.snapshot, &root.snapshot))
+                && incomplete.is_empty()
+            {
+                return;
+            }
+        }
+        for order in incomplete {
+            verter_type_engine::resolver_core::resolver_context::observe_program_file_order(&order);
+        }
+    }
+
+    /// Extend contributor discovery from changed roots/members at ingestion.
+    /// A previously settled file's closure is not revisited. Ordering is built
+    /// only when consumed, from these same cached shallow edge sets.
+    pub(crate) fn ingest_changed_program_files(&self, files: impl IntoIterator<Item = String>) {
+        let workspace = self.workspace();
+        let Some(root) = workspace.published_root() else {
+            return;
+        };
+        let index = self.project_type_store().indexed().program_order_index();
+        let files: Vec<_> = files.into_iter().collect();
+        for project in &root.snapshot.projects {
+            let ProjectPayload::Configured {
+                tsconfig_path,
+                membership,
+                compiler_options,
+                ..
+            } = &project.payload
+            else {
+                continue;
+            };
+            let owner = verter_session_query::resolution::ProjectOwnership {
+                project_root: project.root.as_str().to_owned(),
+                tsconfig_path: Some(tsconfig_path.as_str().to_owned()),
+            };
+            let registry = workspace.ambient_libs_view();
+            let options = workspace
+                .semantic_compiler_options_for_project(project.id)
+                .unwrap_or_else(|| compiler_options.semantic.clone());
+            let libraries =
+                ProjectLibraries::of(workspace.as_ref(), &registry, project.id, &options);
+            let mut pending: Vec<String> = files
+                .iter()
+                .filter(|file| {
+                    membership.contains(&CanonicalPath::new(file))
+                        || index.discovered.read().contains_key(&(
+                            Arc::from(tsconfig_path.as_str()),
+                            Arc::from(file.as_str()),
+                        ))
+                })
+                .cloned()
+                .collect();
+            let mut visited = FxHashSet::default();
+            while let Some(file) = pending.pop() {
+                if !visited.insert(file.clone()) {
+                    continue;
+                }
+                let mut provisional = false;
+                let mut probes = Vec::new();
+                let (children, fresh) = self.discovered_files(
+                    workspace.as_ref(),
+                    &root.snapshot,
+                    libraries.as_ref(),
+                    &owner,
+                    compiler_options.js_is_member(),
+                    &file,
+                    &mut provisional,
+                    &mut probes,
+                );
+                if fresh {
+                    pending.extend(children.into_iter().flatten().map(|file| file.to_string()));
+                }
+            }
+        }
+    }
+
+    pub(crate) fn program_lists(
+        &self,
+        snapshot: &WorkspaceSnapshot,
+        project: ProjectId,
+        canonical: &str,
+    ) -> Option<bool> {
+        let workspace = self.workspace();
+        let root = workspace.published_root()?;
+        if !std::ptr::eq(root.snapshot.as_ref(), snapshot) {
+            return None;
+        }
+        let ProjectPayload::Configured { tsconfig_path, .. } = &snapshot.project(project).payload
+        else {
+            return None;
+        };
+        let stamp = ProgramOrderStamp::live(workspace.as_ref())?;
+        let order = self
+            .project_type_store()
+            .indexed()
+            .program_order_index()
+            .current(tsconfig_path.as_str(), stamp, workspace.as_ref())?;
+        Some(order.lists(canonical))
+    }
+
+    pub(crate) fn project_for_canonical_in_snapshot(
+        &self,
+        canonical: &str,
+        snapshot: &WorkspaceSnapshot,
+    ) -> Option<ProjectId> {
+        let owners = snapshot.owners_for_file(canonical);
+        owners
+            .iter()
+            .copied()
+            .find(|project| {
+                matches!(
+                    snapshot.project(*project).payload,
+                    ProjectPayload::Configured { .. }
+                )
+            })
+            .or_else(|| {
+                self.project_type_store()
+                    .indexed()
+                    .program_order_index()
+                    .capture_membership(self.workspace().as_ref())
+                    .project_for_member(canonical, snapshot)
+            })
+            .or_else(|| owners.first().copied())
+    }
+
     /// The project whose program orders `anchor` — the requesting file —
     /// and `ordered` (the files being ordered): `anchor`'s most specific
     /// configured project; when none owns it, the configured project of the
@@ -396,6 +657,7 @@ impl crate::VerterHost {
     /// owns `anchor`. A library belongs to the project it is registered
     /// for.
     fn ordering_project(
+        &self,
         workspace: &dyn WorkspaceAccess,
         snapshot: &WorkspaceSnapshot,
         anchor: &str,
@@ -409,7 +671,14 @@ impl crate::VerterHost {
         };
         let configured_owner = |file: &str| match registered_project(workspace, snapshot, file) {
             Some(project) => Some(project).filter(configured),
-            None => snapshot.owners_for_file(file).into_iter().find(configured),
+            None => snapshot
+                .owners_for_file(file)
+                .into_iter()
+                .find(configured)
+                .or_else(|| {
+                    self.project_for_canonical_in_snapshot(file, snapshot)
+                        .filter(configured)
+                }),
         };
         configured_owner(anchor)
             .or_else(|| {
@@ -432,7 +701,7 @@ impl crate::VerterHost {
         let Some(root) = workspace.published_root() else {
             return;
         };
-        if let Some(project) = Self::ordering_project(
+        if let Some(project) = self.ordering_project(
             workspace.as_ref(),
             &root.snapshot,
             anchor,
@@ -455,18 +724,18 @@ impl crate::VerterHost {
         let Some(root) = workspace.published_root() else {
             return Arc::new(ProgramFileOrder::unordered());
         };
-        match Self::ordering_project(workspace.as_ref(), &root.snapshot, anchor, ordered) {
+        match self.ordering_project(workspace.as_ref(), &root.snapshot, anchor, ordered) {
             Some(project) => self.project_program_order(&root.snapshot, project),
             None => Arc::new(ProgramFileOrder::unordered()),
         }
     }
 
     /// The order that ranks `candidates` (the files declaring one symbol)
-    /// for a read from `anchor`, or `None` when they need none: no library
-    /// and fewer than two program files. Libraries alone are ranked by the
-    /// project's [`Self::library_order`]; the whole program's order is built
-    /// only when two program files meet, or a library only a program
-    /// file's `/// <reference lib>` can load.
+    /// for a read from `anchor`, or `None` when neither precedence nor
+    /// imported reachability affects them. An imported singleton still
+    /// depends on membership. Libraries alone are ranked by the project's
+    /// [`Self::library_order`] unless a program file's library reference
+    /// can change which ones load.
     pub(crate) fn declaration_order<'c>(
         &self,
         anchor: &str,
@@ -476,14 +745,28 @@ impl crate::VerterHost {
             .clone()
             .any(verter_session_query::inputs::contributors::is_automatic_lib_canonical);
         if !has_library {
-            return orders_across_files(candidates.clone())
+            let workspace = self.workspace();
+            let imported = workspace.published_root().is_some_and(|root| {
+                self.project_for_canonical_in_snapshot(anchor, &root.snapshot)
+                    .is_some_and(|project| {
+                        matches!(
+                            root.snapshot.project(project).payload,
+                            ProjectPayload::Configured { .. }
+                        ) && candidates
+                            .clone()
+                            .any(|file| !root.snapshot.owners_for_file(file).contains(&project))
+                    })
+            });
+            // Removing the sole imported declaration can change an answer
+            // without changing either that declaration or the requester.
+            return (imported || orders_across_files(candidates.clone()))
                 .then(|| self.program_file_order(anchor, &mut candidates.clone()));
         }
         let workspace = self.workspace();
         let Some(root) = workspace.published_root() else {
             return Some(Arc::new(ProgramFileOrder::unordered()));
         };
-        let Some(project) = Self::ordering_project(
+        let Some(project) = self.ordering_project(
             workspace.as_ref(),
             &root.snapshot,
             anchor,
@@ -582,6 +865,18 @@ impl crate::VerterHost {
         let workspace = self.workspace();
         let index = self.project_type_store().indexed().program_order_index();
         let stamp = ProgramOrderStamp::live(workspace.as_ref());
+        if !workspace
+            .published_root()
+            .is_some_and(|root| std::ptr::eq(root.snapshot.as_ref(), snapshot))
+        {
+            let order = Arc::new(ProgramFileOrder::sequence(
+                Arc::from(tsconfig_path.as_str()),
+                std::iter::empty(),
+                |_| None,
+            ));
+            verter_type_engine::resolver_core::resolver_context::observe_program_file_order(&order);
+            return order;
+        }
         if let Some(order) =
             stamp.and_then(|stamp| index.current(tsconfig_path.as_str(), stamp, workspace.as_ref()))
         {
@@ -594,7 +889,7 @@ impl crate::VerterHost {
         let previous = stamp.and_then(|stamp| {
             index
                 .inputs(tsconfig_path.as_str())
-                .filter(|inputs| inputs.same_roots(workspace.as_ref(), stamp))
+                .filter(|inputs| inputs.same_resolution(workspace.as_ref(), stamp))
         });
         let registry = workspace.ambient_libs_view();
         let options = workspace
@@ -603,8 +898,8 @@ impl crate::VerterHost {
         let libraries = ProjectLibraries::of(workspace.as_ref(), &registry, project, &options);
         let candidates = CandidateSet::live(workspace.as_ref());
         let roots: Vec<Arc<str>> = match &previous {
-            Some(previous) => previous.roots.clone(),
-            None => {
+            Some(previous) if previous.candidates == candidates => previous.roots.clone(),
+            _ => {
                 let mut files: Vec<CanonicalPath> =
                     membership.materialized_files.iter().cloned().collect();
                 files.extend(
@@ -627,6 +922,10 @@ impl crate::VerterHost {
                     .collect()
             }
         };
+        let owner = verter_session_query::resolution::ProjectOwnership {
+            project_root: snapshot.project(project).root.as_str().to_owned(),
+            tsconfig_path: Some(tsconfig_path.as_str().to_owned()),
+        };
         let javascript = compiler_options.js_is_member();
         // A file served from outside the store, or a module name the
         // resolver refused, makes this order this request's alone.
@@ -645,10 +944,11 @@ impl crate::VerterHost {
                 let (file, files) = match reused {
                     Some(reused) => reused,
                     None => {
-                        index.note_reference_read();
-                        let files = self.pulled_files(
+                        let (files, _) = self.discovered_files(
                             workspace.as_ref(),
+                            snapshot,
                             libraries.as_ref(),
+                            &owner,
                             javascript,
                             file,
                             &mut provisional,
@@ -676,7 +976,14 @@ impl crate::VerterHost {
         let Some(stamp) = stamp else {
             return order;
         };
-        if provisional || ProgramOrderStamp::live(workspace.as_ref()) != Some(stamp) {
+        if provisional
+            || ProgramOrderStamp::live(workspace.as_ref()) != Some(stamp)
+            || !Arc::ptr_eq(&registry, &workspace.ambient_libs_view())
+        {
+            verter_type_engine::resolver_core::resolver_context::observe_program_file_order(&order);
+            return order;
+        }
+        if order.is_empty() {
             return order;
         }
         let (order, previous_fingerprint) = index.publish(
@@ -691,6 +998,7 @@ impl crate::VerterHost {
             },
         );
         if previous_fingerprint != Some(order.fingerprint()) {
+            self.bump_load_generation();
             verter_type_engine::request_observers::push_structured_event(
                 crate::component_meta_audit::StructuredAuditEvent::ProgramFileOrder {
                     program: Arc::from(tsconfig_path.as_str()),
@@ -708,18 +1016,136 @@ impl crate::VerterHost {
     /// types>` packages, `/// <reference lib>` libraries, then its module
     /// names' files. A library pulls in only the libraries it references.
     /// `None` when the program cannot load `file`.
-    fn pulled_files(
+    #[allow(clippy::too_many_arguments)]
+    fn discovered_files(
         &self,
         workspace: &dyn WorkspaceAccess,
+        snapshot: &WorkspaceSnapshot,
         libraries: Option<&ProjectLibraries>,
+        owner: &verter_session_query::resolution::ProjectOwnership,
         javascript: bool,
         file: &str,
         provisional: &mut bool,
         probes: &mut Vec<Arc<str>>,
+    ) -> (Option<Vec<Arc<str>>>, bool) {
+        let index = self.project_type_store().indexed().program_order_index();
+        let Some(published) = workspace
+            .published_root()
+            .filter(|root| std::ptr::eq(root.snapshot.as_ref(), snapshot))
+        else {
+            *provisional = true;
+            return (None, true);
+        };
+        let key = (
+            Arc::from(owner.tsconfig_path.as_deref().unwrap_or_default()),
+            Arc::from(file),
+        );
+        if let Some(entry) = index
+            .discovered
+            .read()
+            .get(&key)
+            .filter(|entry| entry.current(workspace, file))
+        {
+            probes.extend(entry.probes.iter().cloned());
+            return (entry.files.clone(), false);
+        }
+        index.note_reference_read();
+        let Some(before) = ProgramOrderStamp::live(workspace) else {
+            *provisional = true;
+            return (None, true);
+        };
+        let registry = workspace.ambient_libs_view();
+        if libraries.is_some_and(|libraries| !Arc::ptr_eq(&libraries.registry, &registry)) {
+            *provisional = true;
+            return (None, true);
+        }
+        let transition = workspace.last_content_transition_generation(file);
+        let mut local_probes = Vec::new();
+        let mut local_provisional = false;
+        let mut reference_free = false;
+        let files = self.read_pulled_files(
+            workspace,
+            libraries,
+            owner,
+            javascript,
+            file,
+            &mut local_provisional,
+            &mut local_probes,
+            &mut reference_free,
+        );
+        *provisional |= local_provisional;
+        if !local_provisional
+            && Some(before) == ProgramOrderStamp::live(workspace)
+            && workspace
+                .published_root()
+                .is_some_and(|root| Arc::ptr_eq(&root, &published))
+            && Arc::ptr_eq(&registry, &workspace.ambient_libs_view())
+        {
+            index.discovered.write().insert(
+                key,
+                DiscoveredFile {
+                    transition,
+                    observed_content: before.content_generation,
+                    published,
+                    resolution: before.resolution_generation,
+                    registry,
+                    reference_free,
+                    files: files.clone(),
+                    probes: local_probes.clone(),
+                },
+            );
+        }
+        probes.extend(local_probes);
+        (files, true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn read_pulled_files(
+        &self,
+        workspace: &dyn WorkspaceAccess,
+        libraries: Option<&ProjectLibraries>,
+        owner: &verter_session_query::resolution::ProjectOwnership,
+        javascript: bool,
+        file: &str,
+        provisional: &mut bool,
+        probes: &mut Vec<Arc<str>>,
+        reference_free: &mut bool,
     ) -> Option<Vec<Arc<str>>> {
-        let serve = self.ensure_indexed_ready_serve_unobserved(file)?;
+        if !verter_session_query::inputs::contributors::is_automatic_lib_canonical(file) {
+            let Some(source) = workspace.read_file(file) else {
+                *provisional |= !matches!(
+                    workspace.probe_path(file),
+                    verter_session_query::resolution::PathProbe::Absent
+                        | verter_session_query::resolution::PathProbe::Directory
+                );
+                return None;
+            };
+            // Necessary-condition filter only: the cached parser inventory
+            // remains the authority for actual edges and contributions.
+            if !source.contains("import")
+                && !source.contains("from")
+                && !source.contains("reference")
+                && !source.contains("require")
+                && !source.contains('\\')
+                && !crate::global_contributors::source_has_ambient_contribution(&source)
+                && !crate::global_contributors::source_may_have_file_scope_global_contribution(
+                    &source,
+                )
+            {
+                *reference_free = true;
+                return Some(Vec::new());
+            }
+        }
+        let Some(serve) = self.ensure_indexed_ready_serve_unobserved(file) else {
+            *provisional = true;
+            return None;
+        };
         *provisional |= !serve.store_published;
         let references = &serve.indexed.route_inventory.program_references;
+        *reference_free = references.paths.is_empty()
+            && references.types.is_empty()
+            && references.libs.is_empty()
+            && references.module_names.is_empty();
         if verter_session_query::inputs::contributors::is_automatic_lib_canonical(file) {
             return Some(libraries.map_or_else(Vec::new, |libraries| {
                 libraries.referenced(workspace, &references.libs)
@@ -737,8 +1163,8 @@ impl crate::VerterHost {
                 None => format!("@types/{package}"),
             };
             let target = self
-                .program_module_target(file, &types_package, provisional)
-                .or_else(|| self.program_module_target(file, package, provisional));
+                .program_module_target(owner, file, &types_package, provisional)
+                .or_else(|| self.program_module_target(owner, file, package, provisional));
             pulled.extend(target);
         }
         pulled.retain(|target| is_program_source(target, javascript));
@@ -747,7 +1173,7 @@ impl crate::VerterHost {
         }
         for name in &references.module_names {
             pulled.extend(
-                self.program_module_target(file, name, provisional)
+                self.program_module_target(owner, file, name, provisional)
                     .filter(|target| is_program_source(target, javascript)),
             );
         }
@@ -764,10 +1190,17 @@ impl crate::VerterHost {
         project: ProjectId,
     ) -> Arc<ProgramFileOrder> {
         let workspace = self.workspace();
+        let Some(published) = workspace
+            .published_root()
+            .filter(|root| std::ptr::eq(root.snapshot.as_ref(), snapshot))
+        else {
+            return Arc::new(ProgramFileOrder::unordered());
+        };
         let Some(key) = workspace.project_stable_key(project) else {
             return Arc::new(ProgramFileOrder::unordered());
         };
         let stamp = LibraryStamp {
+            authority: published.authority(),
             snapshot_generation: snapshot.generation.0,
             registry: workspace.ambient_libs_view(),
         };
@@ -787,7 +1220,10 @@ impl crate::VerterHost {
         let order = Arc::new(ProgramFileOrder::libraries(
             libraries.roots.iter().cloned(),
             |file| {
-                let serve = self.ensure_indexed_ready_serve_unobserved(file)?;
+                let Some(serve) = self.ensure_indexed_ready_serve_unobserved(file) else {
+                    provisional = true;
+                    return None;
+                };
                 provisional |= !serve.store_published;
                 Some(libraries.referenced(
                     workspace.as_ref(),
@@ -795,7 +1231,12 @@ impl crate::VerterHost {
                 ))
             },
         ));
-        if !provisional {
+        if !provisional
+            && workspace
+                .published_root()
+                .is_some_and(|root| Arc::ptr_eq(&root, &published))
+            && Arc::ptr_eq(&stamp.registry, &workspace.ambient_libs_view())
+        {
             index.publish_library_order(key, stamp, &order);
         }
         order
@@ -841,11 +1282,25 @@ impl crate::VerterHost {
     /// the one type-route resolution policy.
     fn program_module_target(
         &self,
+        owner: &verter_session_query::resolution::ProjectOwnership,
         file: &str,
         name: &str,
         provisional: &mut bool,
     ) -> Option<Arc<str>> {
-        match self.resolve_type_dependency_canonical(file, name) {
+        let outcome = self.workspace().resolve_import_from_project_outcome(
+            owner,
+            None,
+            file,
+            name,
+            verter_session_query::resolution::ResolutionContext {
+                phase: verter_session_query::resolution::ResolvePhase::ProviderGraph,
+                kind: verter_session_query::resolution::ResolveRequestKind::TypeImport,
+            },
+        );
+        match outcome
+            .into_publication()
+            .map_result(|target| target.source_id)
+        {
             verter_workspace::ResolutionPublication::Admitted(admitted) => {
                 admitted.result().map(|target| Arc::from(target.as_str()))
             }

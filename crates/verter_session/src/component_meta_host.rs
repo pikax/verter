@@ -238,6 +238,13 @@ impl ComponentMetaHost {
         self.inner.project.host()
     }
 
+    /// Read access to the project host's workspace — the VFS view a project
+    /// configuration (a tsconfig and its `extends` chain) is loaded through,
+    /// so it reads what the host reads.
+    pub fn workspace_read(&self) -> Arc<dyn verter_workspace::WorkspaceRead> {
+        self.inner.project.host().workspace_read()
+    }
+
     /// Current base-state revision.
     pub fn generation(&self) -> u64 {
         self.inner.generation.load(Ordering::Acquire)

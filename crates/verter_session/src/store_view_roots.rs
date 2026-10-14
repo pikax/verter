@@ -269,6 +269,7 @@ pub(crate) struct ProjectEnvRoot {
     pub(crate) project_identity: ProjectIdentity,
     pub(crate) project_generation: u64,
     published: Option<Arc<verter_workspace::published_state::PublishedRoot>>,
+    programs: crate::program_order::ProgramMembershipRoot,
     /// Test-only live parse-env override, captured with everything else so
     /// a root-relative read reproduces `host_view_env_hashes_for` exactly.
     #[cfg(test)]
@@ -291,6 +292,7 @@ impl Default for ProjectEnvRoot {
             project_identity: ProjectIdentity([0u8; 16]),
             project_generation: 0,
             published: None,
+            programs: Default::default(),
             #[cfg(test)]
             parse_env_override: None,
         }
@@ -310,9 +312,29 @@ impl ProjectEnvRoot {
             project_identity,
             project_generation,
             published,
+            programs: Default::default(),
             #[cfg(test)]
             parse_env_override,
         }
+    }
+
+    fn project_for_canonical(
+        &self,
+        canonical: &str,
+        root: &verter_workspace::published_state::PublishedRoot,
+    ) -> Option<verter_session_query::resolution::ProjectId> {
+        let owners = root.snapshot.owners_for_file(canonical);
+        owners
+            .iter()
+            .copied()
+            .find(|id| {
+                matches!(
+                    root.snapshot.project(*id).payload,
+                    verter_workspace::ProjectPayload::Configured { .. }
+                )
+            })
+            .or_else(|| self.programs.project_for_member(canonical, &root.snapshot))
+            .or_else(|| owners.first().copied())
     }
 
     /// The `parse_env_hash` dimension for `canonical` AS OF this root.
@@ -323,7 +345,7 @@ impl ProjectEnvRoot {
     /// so the answer cannot drift under a live re-publication.
     pub(crate) fn parse_env_hash_for(&self, canonical: &str) -> Hash16 {
         let resolved = self.published.as_ref().and_then(|root| {
-            let project = root.snapshot.owners_for_file(canonical).first().copied()?;
+            let project = self.project_for_canonical(canonical, root)?;
             let array = root.env_hashes_by_project.get(&project).copied()?;
             Some(array[0])
         });
@@ -352,7 +374,7 @@ impl ProjectEnvRoot {
         self.published
             .as_ref()
             .and_then(|root| {
-                let project = root.snapshot.owners_for_file(canonical).first().copied()?;
+                let project = self.project_for_canonical(canonical, root)?;
                 let array = root.env_hashes_by_project.get(&project).copied()?;
                 Some(array[1])
             })
@@ -370,7 +392,7 @@ impl ProjectEnvRoot {
         self.published
             .as_ref()
             .and_then(|root| {
-                let project = root.snapshot.owners_for_file(canonical).first().copied()?;
+                let project = self.project_for_canonical(canonical, root)?;
                 root.project_identity_hashes.get(&project).copied()
             })
             .map(ProjectIdentity)
@@ -539,6 +561,7 @@ enum WholeHashAuthority {
 /// that remains.
 #[derive(Clone)]
 pub(crate) struct RootCapture {
+    programs: crate::program_order::ProgramMembershipRoot,
     source_root: Arc<verter_scheduler::source_root::SchedulerSourceRoot>,
     artifact_root: Arc<crate::file_artifact_store::FileArtifactRoot>,
     resolution_world: Option<Arc<verter_workspace::CapturedResolutionWorld>>,
@@ -570,6 +593,11 @@ impl RootCapture {
     pub(crate) fn capture(host: &crate::VerterHost) -> Self {
         let workspace = host.workspace();
         Self {
+            programs: host
+                .project_type_store()
+                .indexed()
+                .program_order_index()
+                .capture_membership(workspace.as_ref()),
             source_root: host.scheduler().capture_source_root(),
             artifact_root: host.project_type_store().indexed().capture_root(),
             resolution_world: host.ws().capture_resolution_world(),
@@ -615,14 +643,18 @@ impl StoreViewRoots {
         Self {
             source_root: Some(Arc::clone(&capture.source_root)),
             artifact_root: Some(Arc::clone(&capture.artifact_root)),
-            project_env_root: Arc::new(ProjectEnvRoot::capture(
-                env_hashes,
-                project_identity,
-                project_generation,
-                capture.published.clone(),
-                #[cfg(test)]
-                capture.parse_env_override,
-            )),
+            project_env_root: Arc::new({
+                let mut root = ProjectEnvRoot::capture(
+                    env_hashes,
+                    project_identity,
+                    project_generation,
+                    capture.published.clone(),
+                    #[cfg(test)]
+                    capture.parse_env_override,
+                );
+                root.programs = capture.programs.clone();
+                root
+            }),
             resolution_root: capture.resolution_world.clone(),
             resolution_overlay: None,
             session_root: None,

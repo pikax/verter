@@ -1623,6 +1623,15 @@ generations); the validator re-stamps it while none moved, so an edit
 elsewhere keeps warm results, and a rebuild re-reads only the changed files.
 An order a refused resolution or an unpublished serve produced is never
 published.
+The same compositions supply imported/reference-only members' project context.
+`ProgramMembershipRoot` captures their immutable map and snapshot with fixed-cost Arc clones beside
+source/project roots; root-relative env validation uses that captured membership. Imported singleton
+contributors also observe this dependency on every lookup, including project-view
+cache hits, so removing their incoming edge retires a warm answer.
+Program discovery runs before contributor snapshots and after the workspace's
+batched source publication, so it cannot re-index stale pre-commit bytes.
+Configuration fences use `WorkspaceAuthority` and captured snapshot identity:
+reconstructing a project graph can repeat its scalar snapshot generation.
 
 A typed `ModuleAugmentationStitched` audit event records each cold-path compute.
 Both audit-event variants live on `verter_audit::StructuredAuditEvent`; the

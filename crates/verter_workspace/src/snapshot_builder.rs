@@ -379,7 +379,10 @@ pub fn configured_membership_from_raw(
 /// The [`IdeProjectConfig`] of a project configured by `tsconfig_path`,
 /// read through `ws`: its compiler options and its `files` / `include` /
 /// `exclude` membership — the program's root files and their order. The
-/// materialized set is left empty (see [`configured_membership_from_raw`]).
+/// `include` matches are materialized by walking the project root through
+/// `ws`, as TypeScript enumerates them, so a workspace that has not read a
+/// matching file yet still lists it; a workspace that cannot walk leaves the
+/// set to the `files` entries and the spec (see [`materialize_from_spec`]).
 /// Native only: the tsconfig loaders it reads through are.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn configured_ide_project(
@@ -391,11 +394,17 @@ pub fn configured_ide_project(
     let mut project =
         crate::resolver::ide_project_config(root, workspace_root, Some(tsconfig_path.to_owned()));
     project.compiler_options = crate::config::load_compiler_options(ws, tsconfig_path);
-    project.membership = configured_membership_from_raw(
-        &project.root,
+    let project_root = CanonicalPath::new(&project.root);
+    let spec = membership_to_spec(
+        &project_root,
         &crate::config::load_project_membership(ws, tsconfig_path),
-        &project.compiler_options,
+        &supported_extensions_for(&project.compiler_options),
     );
+    let materialized_files = materialize_from_spec(&spec, &project_root, Some(ws));
+    project.membership = ConfiguredMembership {
+        spec,
+        materialized_files,
+    };
     project
 }
 
@@ -413,7 +422,7 @@ pub fn configured_ide_project(
 fn materialize_from_spec(
     spec: &StaticMembershipSpec,
     project_root: &CanonicalPath,
-    ws: Option<&dyn crate::traits::WorkspaceAccess>,
+    ws: Option<&dyn crate::traits::WorkspaceRead>,
 ) -> FxHashSet<CanonicalPath> {
     let mut result = FxHashSet::default();
 

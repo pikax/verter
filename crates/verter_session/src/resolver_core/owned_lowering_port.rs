@@ -644,16 +644,16 @@ macro_rules! owned_lowering_from_source_inputs {
                     SourceInputProvider::source_session_view(self));
                 let index = host.project_type_store().indexed().global_contributor_index();
                 let root = host.workspace().published_root();
-                let project_for = |canonical: &str| root.as_ref()
-                    .and_then(|root| root.snapshot.owners_for_file(canonical).first().copied());
+                let project_for = |canonical: &str| root.as_ref().and_then(|root| host.project_for_canonical_in_snapshot(canonical, &root.snapshot));
                 let project = project_for(demand_canonical);
                 let lookup = |population: &crate::global_contributors::GlobalContributorPopulation| population.lookup_in_project(name, space, discriminator, project,
                     root.as_ref().map(|root| root.snapshot.generation.0),
                     |entry| {
                         let owner = project_for(entry.artifact_key.canonical.as_ref());
-                        owner.is_none() || owner == project
+                        project.and_then(|project| root.as_ref().and_then(|root| host.program_lists(&root.snapshot, project, entry.artifact_key.canonical.as_ref())))
+                            .unwrap_or(owner.is_none() || owner == project)
                     },
-                    |candidates| host.program_file_order(demand_canonical, candidates));
+                    |entries| host.declaration_order(demand_canonical, entries.iter().map(|entry| entry.artifact_key.canonical.as_ref())));
                 let mut population = index.snapshot();
                 let (mut contributors, mut order) = lookup(&population);
                 // Walking the program indexes the files it reaches; once
@@ -724,11 +724,12 @@ macro_rules! owned_lowering_from_source_inputs {
                 augmenters: &verter_session_query::resolution::AugmenterSet,
                 name: &str,
                 contributors: &verter_session_query::inputs::contributors::SymbolContributors,
+                selection: verter_session_query::inputs::contributors::FileScopeContribution,
             ) -> Arc<[verter_session_query::inputs::contributors::AugmentationCandidate]> {
                 verter_type_engine::count_resolver_context_call!("OwnedLowering::augmentation_contributor_order");
                 let host = SourceInputProvider::source_host(self);
                 let (ordered, order) = host.project_type_store().indexed().global_contributor_index().snapshot()
-                    .augmentation_order(key, augmenters, name, contributors,
+                    .augmentation_order(key, augmenters, name, contributors, selection,
                         |candidates| {
                             let candidates: Vec<&str> = candidates.collect();
                             host.declaration_order(anchor, candidates.iter().copied())

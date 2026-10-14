@@ -742,24 +742,26 @@ fn project_filtered_population_is_shared_and_tracks_membership_revision() {
     }
     let snapshot = store.global_contributor_index().snapshot();
     let visits = Cell::new(0);
-    let lookup =
-        |project, generation, prefix: &str| {
-            snapshot.lookup_in_project(
-            "Shared",
-            SymbolSpace::Type,
-            None,
-            Some(ProjectId(project)),
-            Some(generation),
-            |entry| {
-                visits.set(visits.get() + 1);
-                entry.artifact_key.canonical.starts_with(prefix)
-            },
-            |_| {
-                Arc::new(verter_session_query::inputs::program_order::ProgramFileOrder::unordered())
-            },
-        )
-        .0
-        };
+    let lookup = |project, generation, prefix: &str| {
+        snapshot
+            .lookup_in_project(
+                "Shared",
+                SymbolSpace::Type,
+                None,
+                Some(ProjectId(project)),
+                Some(generation),
+                |entry| {
+                    visits.set(visits.get() + 1);
+                    entry.artifact_key.canonical.starts_with(prefix)
+                },
+                |_| {
+                    Some(Arc::new(
+                        verter_session_query::inputs::program_order::ProgramFileOrder::unordered(),
+                    ))
+                },
+            )
+            .0
+    };
     let first = lookup(0, 1, "/p0/");
     assert_eq!(first.entries.len(), 64);
     let visits_after_first = visits.get();
@@ -837,10 +839,14 @@ fn every_base_borrows_one_augmentation_collection_order() {
         let snapshot = store.global_contributor_index().snapshot();
         let contributors = snapshot.lookup(&key.target, "Shared", None, true);
         let lookup = |order: &Arc<ProgramFileOrder>| {
-            let (view, observed) =
-                snapshot.augmentation_order(&key, &augmenters, "Shared", &contributors, |_| {
-                    Some(Arc::clone(order))
-                });
+            let (view, observed) = snapshot.augmentation_order(
+                &key,
+                &augmenters,
+                "Shared",
+                &contributors,
+                verter_session_query::inputs::contributors::FileScopeContribution::TypeBody,
+                |_| Some(Arc::clone(order)),
+            );
             assert!(observed.is_some_and(|observed| Arc::ptr_eq(&observed, order)));
             view
         };

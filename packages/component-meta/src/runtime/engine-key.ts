@@ -61,11 +61,13 @@ export function stableHash(input: unknown): string {
 }
 
 /**
- * Selective loading makes per-request discovery filters non-semantic for
- * engine reuse. Strip those keys before hashing so engine identity stays
- * stable across different `include` arrays for the same root/config.
+ * Engine identity of an INLINE (tsconfig-less) configuration. An inline
+ * configuration builds a match-all project under the session root, so its
+ * `include` is only a per-request discovery filter under selective loading,
+ * never the program's roots: it is stripped so engine identity stays stable
+ * across different `include` arrays for the same root/config.
  */
-export function stableSelectiveConfigHash(input: unknown): string {
+export function inlineConfigHash(input: unknown): string {
   if (!input || typeof input !== "object" || Array.isArray(input)) {
     return stableHash(input);
   }
@@ -73,6 +75,17 @@ export function stableSelectiveConfigHash(input: unknown): string {
   const normalized = { ...(input as Record<string, unknown>) };
   delete normalized.include;
   return stableHash(normalized);
+}
+
+/**
+ * Engine identity of a configuration read from a tsconfig file. The native
+ * loader builds the project from the tsconfig's `files` / `include` /
+ * `exclude`: they are the program's root files and their order, which
+ * decides the order of declarations merged across files, so every key —
+ * membership included — is part of the identity.
+ */
+export function tsconfigConfigHash(config: unknown): string {
+  return stableHash(config);
 }
 
 function stableSerialize(input: unknown): string {

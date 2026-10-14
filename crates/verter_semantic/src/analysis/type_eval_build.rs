@@ -2247,6 +2247,12 @@ fn collect_augmentation_block(
                 let decl = &export.declaration;
                 collect_augmentation_declaration(decl, source, out, &scope);
             }
+            // An ambient block's enum is a block of the enum of that name
+            // its scope augments, both a type and a value of the block's
+            // scope; the block is ambient.
+            Statement::TSEnumDeclaration(decl) => {
+                collect_enum_into_augmentation(decl, decl.id.name.to_string(), out, &scope);
+            }
             // Value-space declarations (`const`/`let`/`var`, `function`,
             // `class`) augment the target module's VALUE surface. Reuse the
             // file-scope lowering so the full retained parts are built exactly
@@ -2305,6 +2311,9 @@ fn collect_augmentation_declaration(
             let mut inner = LoweredStatementParts::reading(&out.class_fields);
             collect_from_declaration(decl, source, true, &mut inner);
             move_value_parts_into_augmentation(inner, out, scope);
+        }
+        Declaration::TSEnumDeclaration(decl) => {
+            collect_enum_into_augmentation(decl, decl.id.name.to_string(), out, scope);
         }
         Declaration::TSNamespaceDeclaration(module) => {
             collect_augmentation_module_declaration(module, source, out, scope, None);
@@ -2409,6 +2418,14 @@ fn collect_namespaced_statement_into_augmentation(
                 out.aug_value_decls.push((scope.clone(), parts));
             }
         }
+        Statement::TSEnumDeclaration(decl) if implicit_export => {
+            collect_enum_into_augmentation(
+                decl,
+                qualified_name(namespace, &decl.id.name),
+                out,
+                scope,
+            );
+        }
         _ => {}
     }
 }
@@ -2465,8 +2482,30 @@ fn collect_namespaced_declaration_into_augmentation(
                 out.aug_value_decls.push((scope.clone(), parts));
             }
         }
+        Declaration::TSEnumDeclaration(decl) => {
+            collect_enum_into_augmentation(
+                decl,
+                qualified_name(namespace, &decl.id.name),
+                out,
+                scope,
+            );
+        }
         _ => {}
     }
+}
+
+/// An enum an ambient augmentation block declares, under `name` (qualified
+/// by the namespaces it is nested in): lowered as a file-scope enum is,
+/// ambient, into the block's scope.
+fn collect_enum_into_augmentation(
+    decl: &TSEnumDeclaration<'_>,
+    name: String,
+    out: &mut LoweredStatementParts,
+    scope: &AugmentationScopeKind,
+) {
+    let mut inner = LoweredStatementParts::reading(&out.class_fields);
+    collect_enum(decl, name, true, &mut inner);
+    move_value_parts_into_augmentation(inner, out, scope);
 }
 
 /// Reuse the file-scope lowering to build the full retained value parts for a

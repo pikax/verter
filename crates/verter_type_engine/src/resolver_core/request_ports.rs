@@ -653,6 +653,7 @@ pub trait OwnedLowering {
         augmenters: &verter_session_query::resolution::AugmenterSet,
         name: &str,
         contributors: &verter_session_query::inputs::contributors::SymbolContributors,
+        selection: verter_session_query::inputs::contributors::FileScopeContribution,
     ) -> Arc<[verter_session_query::inputs::contributors::AugmentationCandidate]>;
     fn augmenter_artifact_answer(
         &self,

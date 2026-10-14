@@ -13,7 +13,8 @@
 //! that symbol's contributor fingerprint, including a proved-empty set.
 use verter_session_query::inputs::contributors::{
     classify_shallow_module_kind, fingerprint_of, is_automatic_lib_canonical,
-    AugmentationCandidate, ContributorEntry, ContributorOrigin, FileModuleKind, SymbolContributors,
+    AugmentationCandidate, ContributorEntry, ContributorOrigin, FileModuleKind,
+    FileScopeContribution, SymbolContributors,
 };
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -101,8 +102,8 @@ struct ProjectViewKey {
     overlay: Option<Hash16>,
     project: Option<verter_session_query::resolution::ProjectId>,
     membership_generation: Option<u64>,
-    /// Fingerprint of the program order the view is sorted by; `None`
-    /// when its contributors span fewer than two program files.
+    /// Order and imported-membership fingerprint; absent when neither
+    /// relative precedence nor imported reachability affects the view.
     program_order: Option<Hash16>,
 }
 
@@ -110,21 +111,12 @@ struct ProjectViewKey {
 struct CollectionViewKey {
     target: crate::file_artifact_store::AugmentationTargetKey,
     name: Arc<str>,
+    selection: FileScopeContribution,
     augmenters: Hash16,
     contributors: Hash16,
     /// Fingerprint of the program order the view is sorted by; `None`
     /// when its candidates span fewer than two program files.
     program_order: Option<Hash16>,
-}
-
-/// The program order a view sorts by, read through `order` — given the
-/// view's candidate files — only when they span two or more program files.
-fn view_program_order<'c>(
-    mut canonicals: impl Iterator<Item = &'c str> + Clone,
-    order: impl FnOnce(&mut dyn Iterator<Item = &str>) -> Arc<ProgramFileOrder>,
-) -> Option<Arc<ProgramFileOrder>> {
-    verter_session_query::inputs::program_order::orders_across_files(canonicals.clone())
-        .then(|| order(&mut canonicals))
 }
 
 fn program_rank(order: Option<&ProgramFileOrder>, canonical: &str) -> u32 {
@@ -240,8 +232,8 @@ impl GlobalContributorPopulation {
     /// shared for this population, immutable membership revision and
     /// program order. Ownership changes require a new key; the unfiltered
     /// fingerprint remains the population observation rail. The program
-    /// order is read through `order` — and returned, for the reader to
-    /// observe — only when the contributors span two or more program files.
+    /// order/membership dependency is read on every lookup, including cached
+    /// project views, and returned for the reader to observe.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn lookup_in_project(
         &self,
@@ -251,7 +243,7 @@ impl GlobalContributorPopulation {
         project: Option<verter_session_query::resolution::ProjectId>,
         membership_generation: Option<u64>,
         belongs: impl Fn(&ContributorEntry) -> bool,
-        order: impl FnOnce(&mut dyn Iterator<Item = &str>) -> Arc<ProgramFileOrder>,
+        order: impl FnOnce(&[ContributorEntry]) -> Option<Arc<ProgramFileOrder>>,
     ) -> (SymbolContributors, Option<Arc<ProgramFileOrder>>) {
         let contributors = self.lookup_in_space(
             &AugmentationTargetKind::GlobalAugmentation,
@@ -263,13 +255,7 @@ impl GlobalContributorPopulation {
         if contributors.entries.is_empty() {
             return (contributors, None);
         }
-        let order = view_program_order(
-            contributors
-                .entries
-                .iter()
-                .map(|entry| entry.artifact_key.canonical.as_ref()),
-            order,
-        );
+        let order = order(&contributors.entries);
         let key = ProjectViewKey {
             name: Arc::from(name),
             space,
@@ -315,13 +301,15 @@ impl GlobalContributorPopulation {
     /// program order. Each declaring base borrows the same slot order. The
     /// order is read through `order`, given every candidate file — `None`
     /// when they need none — and returned for the reader to observe. A
-    /// library the program does not load contributes nothing.
+    /// library the program does not load contributes nothing. `selection`
+    /// names the file-scope declarations ordered beside the augmenters.
     pub(crate) fn augmentation_order(
         &self,
         key: &crate::file_artifact_store::AugmentationTargetKey,
         augmenters: &verter_session_query::resolution::AugmenterSet,
         name: &str,
         contributors: &SymbolContributors,
+        selection: FileScopeContribution,
         order: impl FnOnce(&mut dyn Iterator<Item = &str>) -> Option<Arc<ProgramFileOrder>>,
     ) -> (
         Arc<[verter_session_query::inputs::contributors::AugmentationCandidate]>,
@@ -347,6 +335,7 @@ impl GlobalContributorPopulation {
         let view_key = CollectionViewKey {
             target: key.clone(),
             name: Arc::from(name),
+            selection,
             augmenters: augmenters.fingerprint,
             contributors: contributors.fingerprint,
             program_order: order.as_ref().map(|order| order.fingerprint()),
@@ -390,13 +379,18 @@ impl GlobalContributorPopulation {
                                     order.loads_library(&entry.artifact_key.canonical)
                                 })
                         })
-                        .filter(|(_, entry)| {
-                            entry.origin == ContributorOrigin::FileScopeInterface
-                                || (entry.origin == ContributorOrigin::FileScopeNamespace
-                                    && !interface_declarers.contains(&(
-                                        entry.artifact_key.canonical.as_ref(),
-                                        entry.symbol.as_ref(),
-                                    )))
+                        .filter(|(_, entry)| match selection {
+                            FileScopeContribution::TypeBody => {
+                                entry.origin == ContributorOrigin::FileScopeInterface
+                                    || (entry.origin == ContributorOrigin::FileScopeNamespace
+                                        && !interface_declarers.contains(&(
+                                            entry.artifact_key.canonical.as_ref(),
+                                            entry.symbol.as_ref(),
+                                        )))
+                            }
+                            FileScopeContribution::EnumBlock => {
+                                entry.origin == ContributorOrigin::FileScopeValue
+                            }
                         })
                         .map(|(i, entry)| {
                             (

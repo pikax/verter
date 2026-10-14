@@ -4529,6 +4529,10 @@ impl VerterHost {
         &self,
         view: &dyn crate::session_view::SessionView,
     ) -> BatchFixedView {
+        // A workspace can publish its configuration after host construction.
+        // Settle shallow membership before freezing project contexts for the
+        // request, including imported files omitted by files/include.
+        self.ingest_configured_programs();
         let (base_view, is_current) = self.resolver_store_view_with_currentness();
         // Base-external fence token: the captured view's token with
         // `overlay_identity` cleared. The base read's token already carries
