@@ -35,7 +35,7 @@ use crate::fact_signature_helpers::ReadSetSignatureExt as _;
 use crate::instant::Instant;
 use crate::semantic_query::demand::MaterializedSet;
 use crate::semantic_query::{
-    CacheRead, DepSignature, PartialReasonSet, QueryError, QueryResult, SemanticNodeId,
+    CacheRead, DepSignature, FactStatus, PartialReasonSet, QueryError, QueryResult, SemanticNodeId,
     SemanticQueryKey, SemanticQueryValue,
 };
 
@@ -255,8 +255,7 @@ pub struct SettledProducer<'s> {
     satisfied_projection: MaterializedSet,
     pending_prefix_backfills: Vec<crate::project_semantic_dispatch::walk::PrefixBackfill>,
     cache_suppress: bool,
-    result_is_partial: bool,
-    partial_reasons: PartialReasonSet,
+    fact_status: FactStatus,
     admissible: bool,
     admission_linearized: bool,
     /// The result entered the family memo.
@@ -298,8 +297,9 @@ impl SemanticGraphStore {
             // never a warm fact; a same-path carrier is a partial the warm
             // gates already refuse.
             cache_suppress: recursion == Recursion::WaitCycle,
-            result_is_partial: true,
-            partial_reasons: PartialReasonSet::SAME_PATH_RECURSION,
+            fact_status: crate::semantic_query::FactStatus::unavailable(
+                PartialReasonSet::SAME_PATH_RECURSION,
+            ),
             receipt: crate::semantic_query::ReadReceipt::Unpriced,
         }
     }
@@ -698,8 +698,9 @@ impl Subscription<'_> {
                 dep_signature: empty_signature(),
                 walker_diagnostics: Arc::from([]),
                 cache_suppress: true,
-                result_is_partial: true,
-                partial_reasons: PartialReasonSet::SUPERSEDED_GENERATION,
+                fact_status: crate::semantic_query::FactStatus::unavailable(
+                    PartialReasonSet::SUPERSEDED_GENERATION,
+                ),
                 receipt: crate::semantic_query::ReadReceipt::Unpriced,
             });
         }
@@ -716,8 +717,8 @@ impl Subscription<'_> {
         // cannot let that build admit around a non-cacheable or partial
         // child.
         let cache_suppress = state.cache_suppress;
-        let result_is_partial = state.result_is_partial;
-        let partial_reasons = state.partial_reasons;
+        let fact_status = state.fact_status;
+        let result_is_partial = !fact_status.is_complete();
         let walker_diagnostics = state
             .walker_diagnostics
             .clone()
@@ -804,8 +805,7 @@ impl Subscription<'_> {
             dep_signature,
             walker_diagnostics,
             cache_suppress,
-            result_is_partial,
-            partial_reasons,
+            fact_status,
             receipt: cost_receipt.into(),
         })
     }
@@ -866,6 +866,7 @@ impl<'s> ProducerLease<'s> {
             walker_diagnostics,
             cache_suppress,
             completeness,
+            approximation,
             taint: _, // §18 taint already consumed upstream by `admit_decision`.
             observed_self_roots: _,
             graph_carrier,
@@ -981,6 +982,20 @@ impl<'s> ProducerLease<'s> {
             }
             other => other,
         };
+        let (result, fact_status) =
+            crate::project_semantic_dispatch::projection_fact::adopt_projection_result(
+                store,
+                prepared.key(),
+                result,
+                if result_is_partial {
+                    crate::semantic_query::ResultCompleteness::partial(partial_reasons)
+                } else {
+                    crate::semantic_query::ResultCompleteness::Complete
+                },
+                approximation,
+            );
+        let cache_suppress = cache_suppress || !fact_status.is_complete();
+        let admissible = admissible && fact_status.is_complete();
         Ok(SettledProducer {
             lease: store
                 .lease_delivery(&result, &walker_diagnostics)
@@ -997,8 +1012,7 @@ impl<'s> ProducerLease<'s> {
             satisfied_projection,
             pending_prefix_backfills,
             cache_suppress,
-            result_is_partial,
-            partial_reasons,
+            fact_status,
             admissible,
             admission_linearized: false,
             published: false,
@@ -1167,8 +1181,7 @@ impl SettledProducer<'_> {
             carrier,
             self_root_canonicals,
             cache_suppress,
-            result_is_partial,
-            partial_reasons,
+            fact_status,
             cost_receipt,
             lease,
             ..
@@ -1186,9 +1199,8 @@ impl SettledProducer<'_> {
 
         // Complete the flight and wake its subscribers. An abort planted by
         // an invalidation stays: subscribers that wake on it retry rather
-        // than read the stale result. The owner still receives the computed
-        // value. A flow return is the exception: a superseded evaluation is
-        // not a deliverable flow result.
+        // than read the stale result. A superseded execution is not
+        // deliverable to its owner in any query family.
         let flight_aborted = {
             let mut state = inflight.state.lock();
             if !state.aborted {
@@ -1202,8 +1214,7 @@ impl SettledProducer<'_> {
                 state.graph_carrier = Some(Box::new(carrier));
                 state.self_root_canonicals = Arc::clone(&self_root_canonicals);
                 state.cache_suppress = cache_suppress;
-                state.result_is_partial = result_is_partial;
-                state.partial_reasons = partial_reasons;
+                state.fact_status = fact_status;
                 state.walker_diagnostics = Some(Arc::clone(&walker_diagnostics));
                 state.cost_receipt = cost_receipt.clone();
                 false
@@ -1212,7 +1223,7 @@ impl SettledProducer<'_> {
             }
         };
         inflight.ready.notify_all();
-        if flight_aborted && matches!(prepared.key(), SemanticQueryKey::FlowReturn(_)) {
+        if flight_aborted {
             let value = match &result {
                 QueryResult::Error(error)
                     if crate::semantic_query::ExecutionAbort::from_query_error(error).is_some() =>
@@ -1230,8 +1241,12 @@ impl SettledProducer<'_> {
                 dep_signature,
                 walker_diagnostics,
                 cache_suppress: true,
-                result_is_partial: true,
-                partial_reasons: partial_reasons.union(PartialReasonSet::SUPERSEDED_GENERATION),
+                fact_status: FactStatus::unavailable(
+                    fact_status
+                        .completeness()
+                        .reasons()
+                        .union(PartialReasonSet::SUPERSEDED_GENERATION),
+                ),
                 receipt: crate::semantic_query::ReadReceipt::Unpriced,
             };
         }
@@ -1249,8 +1264,7 @@ impl SettledProducer<'_> {
             dep_signature,
             walker_diagnostics,
             cache_suppress,
-            result_is_partial,
-            partial_reasons,
+            fact_status,
             receipt: cost_receipt.into(),
         }
     }

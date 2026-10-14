@@ -775,29 +775,26 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             // partial / ReturnOnly. The carrier records the SAME served
             // position.
             verter_type_expr::facts::FunctionReturnSource::Flow(identity) => {
-                let carrier = crate::semantic_query::SignatureReturnCarrier::Function(
+                let mut carrier = crate::semantic_query::SignatureReturnCarrier::Function(
                     verter_type_expr::facts::FunctionReturnSource::Flow(identity.clone()),
                 );
                 let return_type = match ctx.with_interior_step(
                     crate::project_semantic_dispatch::interior_source::InteriorSourceStep::ReturnType,
                     || {
-                        self.execute_function_return_source(
-                            &verter_type_expr::facts::FunctionReturnSource::Flow(identity.clone()),
+                        self.probe_signature_flow_return(
+                            identity,
                             ctx.scope_canonical_id,
                         )
                     },
                 ) {
-                    super::flow_return::FunctionReturnNode::Flow(result) => {
+                    super::flow_return_fact::SignatureReturnProbe::Evaluated(result) => {
                         inferred_predicate = result.inferred_predicate();
                         result.return_type()
                     }
-                    super::flow_return::FunctionReturnNode::Declared(hot) => hot.node(),
-                    super::flow_return::FunctionReturnNode::DeclaredMiss
-                    | super::flow_return::FunctionReturnNode::Aborted(_) | super::flow_return::FunctionReturnNode::NoValue(_) => {
-                        ctx.record_interior_failure();
+                    super::flow_return_fact::SignatureReturnProbe::Deferred(source) => {
+                        carrier = crate::semantic_query::SignatureReturnCarrier::DeferredFlow(source);
                         self.miss_node(&scope)
-                    }
-                    super::flow_return::FunctionReturnNode::Absent => self.miss_node(&scope),
+                    },
                 };
                 (return_type, carrier)
             }
@@ -882,6 +879,18 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     }
                 })
                 .collect();
+        let return_carrier = match return_carrier {
+            crate::semantic_query::SignatureReturnCarrier::DeferredFlow(source) => {
+                crate::semantic_query::SignatureReturnCarrier::DeferredFlow(
+                    source.with_bindings(
+                        type_parameters
+                            .iter()
+                            .map(|parameter| (parameter.name.clone(), parameter.param)),
+                    ),
+                )
+            }
+            carrier => carrier,
+        };
         let kind = if construct {
             crate::semantic_query::SignatureKind::Construct
         } else {

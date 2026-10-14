@@ -74,9 +74,10 @@ impl CompileTarget {
 
     /// Whether compilation consumes authoritative runtime macro semantics.
     ///
-    /// Runtime codegen needs the DTO shapes themselves. IDE codegen consumes
-    /// the same DTO's public prop names to assign template binding ownership;
-    /// it must not rediscover those names from authored type syntax.
+    /// Runtime codegen requires the DTO shapes. IDE codegen registers public
+    /// prop names only from a Complete DTO and uses its ordinary instance
+    /// fallback when those names are unavailable. It must not rediscover names
+    /// from authored type syntax; authored type checking remains independent.
     pub fn needs_runtime_macro_semantics(self) -> bool {
         self.needs_script() || self.needs_tsx()
     }

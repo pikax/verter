@@ -5,8 +5,9 @@ use super::*;
 ///
 /// `FLOW_RETURN_UNVERIFIED` states exactly one thing: every member is present
 /// and one member's TYPE may be wrong. The member set is therefore
-/// publishable and the member TYPES are not, so the honest emit is the full
-/// name set with `type: null` — the same encoding the lane already uses for a
+/// publishable. Unverified member TYPES use `type: null`; an independently
+/// complete selected member retains its own constructor. This preserves the full
+/// name set — the same encoding the lane already uses for a
 /// member it could not resolve. Refusing instead deleted every byte of the
 /// module for parameter reassignment and a conditional `var`, both of which
 /// are ordinary TypeScript that the previous implementation compiled
@@ -20,12 +21,10 @@ use super::*;
 /// (the destructured-parameter row included — its plain element binding is
 /// modelled, so it too needs the test form to stay unverified).
 ///
-/// The degradation is a property of the FRAME (it is seeded from the lowered
-/// slice's effect list before any member is evaluated), so it applies to
-/// every member. Attributing it per member by intersecting each member
-/// value's slot reads with the write's targets is FAIL-OPEN and must not be
-/// done — see `degradation_reason_class` for the counter-example and for the
-/// sound complement.
+/// The whole-return degradation is seeded from the selected slice's effect
+/// list. A separately demanded member may be Complete only when its producer
+/// establishes that independently; graph-only reprojection cannot clear the
+/// whole return's quality. Writes to a parameter remain frame limitations.
 ///
 /// Oracle (TypeScript 7.0.2 `tsc`, `--noEmit --strict --ignoreConfig`):
 /// row 1 is `{ label: string }`, rows 2 and 3 are `{ label: string; n: number
@@ -65,17 +64,32 @@ fn an_unverified_flow_return_publishes_its_member_set_with_validation_off() {
             );
         };
         for member in *members {
+            // The literal label has an independently complete member demand;
+            // the conditional write affects only the selected local `v`.
+            let constructor = if *canonical == "/src/W2CondVar.vue" && *member == "label" {
+                "String"
+            } else if *canonical == "/src/W3Destructure.vue" && *member == "n" {
+                "Number"
+            } else {
+                "null"
+            };
             assert!(
-                props.contains(&format!("{member}: {{ type: null")),
-                "{canonical}: `{member}` must be published with validation off — its name is \
-                 known and its type is not:\n{props}"
+                props.contains(&format!("{member}: {{ type: {constructor}")),
+                "{canonical}: `{member}` must follow its own adopted value fact:\n{props}"
             );
         }
-        assert!(
-            !props.contains("type: String") && !props.contains("type: Number"),
-            "{canonical}: no member may carry a constructor derived from a value the \
-             substrate could not verify:\n{props}"
-        );
+        if *canonical != "/src/W3Destructure.vue" {
+            assert!(
+                !props.contains("type: Number"),
+                "{canonical}: an unverified numeric value cannot supply a constructor:\n{props}"
+            );
+        }
+        if *canonical != "/src/W2CondVar.vue" {
+            assert!(
+                !props.contains("type: String"),
+                "{canonical}: an unverified string value cannot supply a constructor:\n{props}"
+            );
+        }
     }
 }
 

@@ -182,10 +182,19 @@ pub(crate) fn structural_member_value_source<
     dispatch: &ProjectSemanticDispatch<'_, C>,
     node: SemanticNodeId,
     member_key: &verter_type_engine::semantic_query::PropertyKey,
-    type_arg_base: Option<&verter_type_expr::locators::MacroPayloadLocator>,
+    member_source_base: Option<&verter_type_expr::locators::AuthoredBodyLocator>,
 ) -> Option<verter_type_expr::facts::SemanticTypeSource> {
+    // A replay address does not establish a value when reducing its source
+    // failed. Validate the original carrier through the shared demand before
+    // using it to construct a projected member source.
+    let resolved = dispatch
+        .normalize_node_for_structural_fact_demand(
+            node,
+            verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit(),
+        )
+        .into_usable_node()?;
     let data =
-        verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), node)?;
+        verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), resolved)?;
     if matches!(
         data.as_ref(),
         verter_type_engine::semantic_query::SemanticNodeData::Opaque(error)
@@ -202,10 +211,10 @@ pub(crate) fn structural_member_value_source<
     if let Some(upgraded) = published_member_source_upgrade_for_node(dispatch, Some(node), false) {
         return Some(upgraded);
     }
-    let base = type_arg_base?;
+    let base = member_source_base?;
     Some(verter_type_expr::facts::SemanticTypeSource::Projected(
         verter_type_expr::facts::ProjectedTypeFact::MemberPath {
-            base: verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(base.clone()),
+            base: base.clone(),
             path: std::sync::Arc::from(vec![member_key.clone()].into_boxed_slice()),
         },
     ))

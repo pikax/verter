@@ -316,7 +316,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     ) -> ResolveCallStep {
         let mut state = ContextualCallState::default();
         assert!(matches!(
-            self.execute_contextual_call(outer_key, &mut state),
+            self.execute_contextual_call(outer_key, &mut state).0,
             ResolveCallStep::Degraded(ResolveCallFailure::ContextSensitiveInference {
                 contextual: Some(_)
             })
@@ -341,6 +341,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     #[cfg(any(test, feature = "test-support"))]
     pub fn resolve_contextual_call_for_tests(&self, key: ResolveCallKey) -> ResolveCallStep {
         self.execute_contextual_call(key, &mut ContextualCallState::default())
+            .0
     }
 
     pub(super) fn contextual_argument_failure(
@@ -380,7 +381,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         &self,
         key: ResolveCallKey,
         state: &mut ContextualCallState,
-    ) -> ResolveCallStep {
+    ) -> (ResolveCallStep, Option<DeclaredCallResult>) {
         state.owner = Some(key.point.clone());
         let outer = self
             .dispatch_txn
@@ -388,7 +389,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             .call
             .contextual
             .replace(std::mem::take(state));
-        let step = self.execute_resolve_call(key);
+        let (step, proof) = self.execute_resolve_call_with_declared_result(key);
         *state = self
             .dispatch_txn
             .borrow_mut()
@@ -406,7 +407,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             state.active = None;
             state.resume_at = None;
         }
-        step
+        (step, proof)
     }
 
     /// A callback delivery advances only its suspended candidate. Full call
@@ -417,11 +418,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         args: &[CallArgKey],
         position: usize,
         state: &mut ContextualCallState,
-    ) -> ResolveCallStep {
+    ) -> (ResolveCallStep, Option<DeclaredCallResult>) {
         let (_connected_guard, initial_trip) = self.enter_connected_demand(false);
         if initial_trip.is_some() {
             state.active = None;
-            return ResolveCallStep::Degraded(ResolveCallFailure::Budget);
+            return (ResolveCallStep::Degraded(ResolveCallFailure::Budget), None);
         }
         let Some(candidate) = state
             .active
@@ -435,14 +436,22 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             return self.execute_contextual_call(key.clone(), state);
         };
         let Some(argument) = args.get(position) else {
-            return ResolveCallStep::Degraded(ResolveCallFailure::Undecidable);
+            return (
+                ResolveCallStep::Degraded(ResolveCallFailure::Undecidable),
+                None,
+            );
         };
         let mut delivery_key = key.clone();
         delivery_key.args = Arc::from([argument.clone()]);
         let delivery = match self.acquire_call_arguments(&delivery_key) {
             Ok(mut arguments) if arguments.len() == 1 => arguments.pop(),
-            Ok(_) => return ResolveCallStep::Degraded(ResolveCallFailure::Undecidable),
-            Err(failure) => return ResolveCallStep::Degraded(failure),
+            Ok(_) => {
+                return (
+                    ResolveCallStep::Degraded(ResolveCallFailure::Undecidable),
+                    None,
+                )
+            }
+            Err(failure) => return (ResolveCallStep::Degraded(failure), None),
         };
         state.delivery = delivery;
         let resume_at = state.resume_at;
@@ -473,7 +482,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         self.dispatch_txn.borrow_mut().call.applicability = outer_applicability;
         match result {
             Err(ContextualCandidateFailure::Degraded(failure)) => {
-                ResolveCallStep::Degraded(failure)
+                (ResolveCallStep::Degraded(failure), None)
             }
             completed => {
                 if let Ok(arguments) = completed {
@@ -542,15 +551,18 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         state.diagnostics_enabled = true;
         let graph = self.graph();
         let (params, type_parameters) = if resumed.is_none() {
-            let Some(SemanticNodeData::Signature {
-                params,
-                type_parameters,
-                ..
-            }) = graph.node_data(candidate.node).as_deref().cloned()
+            let Some(data) = graph.node_data(candidate.node) else {
+                return Ok(arguments.to_vec());
+            };
+            let Some(header) =
+                data.callable_header(&crate::semantic_query::ResolveOverloadSetConsumer::witness())
             else {
                 return Ok(arguments.to_vec());
             };
-            (params, type_parameters)
+            (
+                Arc::clone(header.params),
+                Arc::clone(header.type_parameters),
+            )
         } else {
             (Arc::from([]), Arc::from([]))
         };

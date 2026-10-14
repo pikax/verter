@@ -3,7 +3,7 @@
 
 use super::checker_probe_lane_tests::{mismatches_in, ProbeProject};
 
-use super::checker_probe_lane_tests::{probe_host, with_probe_on_host};
+use super::checker_probe_lane_tests::{probe_host, upsert_probe_files, with_probe_on_host};
 use super::ProjectSemanticDispatch;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -66,17 +66,21 @@ fn assert_literals(
 
 /// Scale tests prove growth from work counters at sizes a debug build runs in
 /// about a second: between two sizes a counter may grow at most 1.5x faster
-/// than the input, which a quadratic counter (25x over a 5x step) cannot meet
-/// whatever its constant.
-fn assert_proportional_growth(
-    what: &str,
-    (smaller, before): (usize, usize),
-    (larger, after): (usize, usize),
+/// than the input. A quadratic term grows 25x over a 5x step, so it fails this
+/// once it is a material share of the counter at the larger size; a small
+/// quadratic term under a large linear one is left to the absolute per-name
+/// bounds each test also asserts.
+fn assert_proportional_growth<const N: usize>(
+    smaller: (usize, [(&str, usize); N]),
+    larger: (usize, [(&str, usize); N]),
 ) {
-    assert!(
-        2 * after * smaller <= 3 * before * larger,
-        "{what} grew from {before} at {smaller} to {after} at {larger}"
-    );
+    let ((small, before), (large, after)) = (smaller, larger);
+    for ((what, before), (_, after)) in before.into_iter().zip(after) {
+        assert!(
+            2 * after * small <= 3 * before * large,
+            "{what} grew from {before} at {small} to {after} at {large}"
+        );
+    }
 }
 
 #[test]
@@ -231,144 +235,146 @@ fn exported_ambient_imports_keep_their_namespace_values() {
 
 #[test]
 fn barrel_chain_proofs_and_folding_grow_with_the_answer() {
+    assert_proportional_growth(
+        (100, check_barrel_chain_proofs_and_folding(100)),
+        (500, check_barrel_chain_proofs_and_folding(500)),
+    );
+}
+
+#[test]
+fn large_barrel_chain_retains_every_suffix_proof_and_literal() {
+    check_barrel_chain_proofs_and_folding(2_000);
+}
+
+fn check_barrel_chain_proofs_and_folding(count: usize) -> [(&'static str, usize); 4] {
     use verter_session_query::facts::fact_cache::signature_entries;
     use verter_type_engine::resolver_core::request_ports::RouteLookup;
 
-    let mut previous: Option<(usize, [(&str, usize); 4])> = None;
-    for count in [100, 500] {
-        let owned: Vec<_> = (0..count)
-            .map(|i| {
-                let star = if i + 1 == count {
-                    String::new()
-                } else {
-                    format!("export * from './m{}';", i + 1)
-                };
-                (
-                    format!("m{i}.ts"),
-                    format!("export const v{i} = {i} as const; {star}"),
-                )
-            })
-            .collect();
-        let files: Vec<_> = owned
-            .iter()
-            .map(|(name, source)| (name.as_str(), source.as_str()))
-            .collect();
-        let host = probe_host(ProbeProject {
-            files: &files,
-            ..ProbeProject::default()
-        });
-        // Inspect the shared suffixes through one request, as namespace
-        // consumers do, so completed proofs validate once in that view.
-        let table_view = host.resolver_store_view_read().into_owned_view();
-        let table_overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let table_ctx =
-            crate::resolver_core::HostResolverContext::new(&host, &table_view, table_overlay);
-        let signature_before =
-            verter_session_query::facts::fact_read_set::signature_work_for_tests();
-        let root = table_ctx
-            .module_export_table("/wb/m0.ts")
-            .expect("root table");
-        assert_eq!(root.bindings.len(), count);
-        let mut owned_slots = root.owned_binding_slots;
-        let mut proof_entries = 0;
-        for i in 0..count {
-            let table = table_ctx
-                .module_export_table(&format!("/wb/m{i}.ts"))
-                .expect("shared suffix");
-            assert_eq!(table.bindings.len(), count - i);
-            proof_entries += signature_entries(&table.facts).count();
-            if i > 0 {
-                owned_slots += table.owned_binding_slots;
-            }
-        }
-        let proof_work = verter_session_query::facts::fact_read_set::signature_work_for_tests()
-            - signature_before;
-        drop(table_ctx);
-        drop(table_view);
-        let source = "import * as ns from './m0'; type __Probe = (typeof ns)[keyof typeof ns];";
-        crate::u6_flow_shape_corpus_tests::upsert(
-            &host,
-            "/wb/chain-probe.ts",
-            source,
-            crate::FileLanguage::script_ts(),
-        );
-        let view = host.resolver_store_view_read().into_owned_view();
-        let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &view, overlay);
-        let dispatch = ProjectSemanticDispatch::new(&host_ctx);
-        let (_guard, _) = dispatch.enter_connected_demand(false);
-        let result = dispatch.execute_read(SemanticQueryKey::ResolveDecl(super::resolve_decl_key(
-            "/wb/chain-probe.ts",
-            verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            "__Probe",
-        )));
-        assert!(!result.result_is_partial, "complete authored chain probe");
-        let QueryResult::Value(alias) = result.value else {
-            panic!("chain probe: {:?}", result.value);
-        };
-        let node = dispatch
-            .normalize_node_keeping_declaration_refs_for_tests(
-                alias,
-                ProjectionReductionContext::published(ProjectionMode::Expanded),
+    let owned: Vec<_> = (0..count)
+        .map(|i| {
+            let star = if i + 1 == count {
+                String::new()
+            } else {
+                format!("export * from './m{}';", i + 1)
+            };
+            (
+                format!("m{i}.ts"),
+                format!("export const v{i} = {i} as const; {star}"),
             )
-            .into_usable_node()
-            .expect("complete chain values");
-
-        let data = dispatch
-            .graph()
-            .node_data(node)
-            .expect("chain literal union");
-        let SemanticNodeData::Union(arms) = data.as_ref() else {
-            panic!("chain values: {data:?}");
-        };
-        let mut actual = std::collections::BTreeSet::new();
-        for arm in arms.iter() {
-            match dispatch.graph().node_data(*arm).as_deref() {
-                Some(SemanticNodeData::Literal(LiteralValue::Number(value))) => {
-                    assert_eq!(*value, value.trunc());
-                    assert!(actual.insert(*value as usize));
-                }
-                other => panic!("chain values stay literal: {other:?}"),
-            }
+        })
+        .collect();
+    let files: Vec<_> = owned
+        .iter()
+        .map(|(name, source)| (name.as_str(), source.as_str()))
+        .collect();
+    let host = probe_host(ProbeProject {
+        files: &files,
+        ..ProbeProject::default()
+    });
+    // Inspect the shared suffixes through one request, as namespace
+    // consumers do, so completed proofs validate once in that view.
+    let table_view = host.resolver_store_view_read().into_owned_view();
+    let table_overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let table_ctx =
+        crate::resolver_core::HostResolverContext::new(&host, &table_view, table_overlay);
+    let signature_before = verter_session_query::facts::fact_read_set::signature_work_for_tests();
+    let root = table_ctx
+        .module_export_table("/wb/m0.ts")
+        .expect("root table");
+    assert_eq!(root.bindings.len(), count);
+    let mut owned_slots = root.owned_binding_slots;
+    let mut proof_entries = 0;
+    for i in 0..count {
+        let table = table_ctx
+            .module_export_table(&format!("/wb/m{i}.ts"))
+            .expect("shared suffix");
+        assert_eq!(table.bindings.len(), count - i);
+        proof_entries += signature_entries(&table.facts).count();
+        if i > 0 {
+            owned_slots += table.owned_binding_slots;
         }
-        assert_eq!(actual, (0..count).collect());
-
-        let work = host
-            .resolver
-            .runtime
-            .routes
-            .module_export_work
-            .load(Ordering::Relaxed);
-        assert!(
-            proof_entries <= 32 * count,
-            "{proof_entries} retained proof entries for {count} names"
-        );
-        assert!(
-            work <= 64 * count as u64,
-            "{work} folding work for {count} names"
-        );
-        assert!(
-            owned_slots <= 4 * count,
-            "{owned_slots} owned binding slots for {count} names"
-        );
-        assert!(
-            proof_work <= 512 * count,
-            "{proof_work} proof work for {count} names"
-        );
-        println!("chain_names={count} owned_slots={owned_slots} proof_entries={proof_entries} fold_work={work} proof_work={proof_work}");
-        let counters = [
-            ("owned binding slots", owned_slots),
-            ("retained proof entries", proof_entries),
-            ("folding work", work as usize),
-            ("proof work", proof_work),
-        ];
-        if let Some((smaller, before)) = previous {
-            for ((what, before), (_, after)) in before.into_iter().zip(counters) {
-                assert_proportional_growth(what, (smaller, before), (count, after));
-            }
-        }
-        previous = Some((count, counters));
     }
+    let proof_work =
+        verter_session_query::facts::fact_read_set::signature_work_for_tests() - signature_before;
+    drop(table_ctx);
+    drop(table_view);
+    let source = "import * as ns from './m0'; type __Probe = (typeof ns)[keyof typeof ns];";
+    crate::u6_flow_shape_corpus_tests::upsert(
+        &host,
+        "/wb/chain-probe.ts",
+        source,
+        crate::FileLanguage::script_ts(),
+    );
+    let view = host.resolver_store_view_read().into_owned_view();
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &view, overlay);
+    let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    let (_guard, _) = dispatch.enter_connected_demand(false);
+    let result = dispatch.execute_read(SemanticQueryKey::ResolveDecl(super::resolve_decl_key(
+        "/wb/chain-probe.ts",
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        "__Probe",
+    )));
+    assert!(!result.result_is_partial(), "complete authored chain probe");
+    let QueryResult::Value(alias) = result.value else {
+        panic!("chain probe: {:?}", result.value);
+    };
+    let node = dispatch
+        .normalize_node_keeping_declaration_refs_for_tests(
+            alias,
+            ProjectionReductionContext::published(ProjectionMode::Expanded),
+        )
+        .into_usable_node()
+        .expect("complete chain values");
+
+    let data = dispatch
+        .graph()
+        .node_data(node)
+        .expect("chain literal union");
+    let SemanticNodeData::Union(arms) = data.as_ref() else {
+        panic!("chain values: {data:?}");
+    };
+    let mut actual = std::collections::BTreeSet::new();
+    for arm in arms.iter() {
+        match dispatch.graph().node_data(*arm).as_deref() {
+            Some(SemanticNodeData::Literal(LiteralValue::Number(value))) => {
+                assert_eq!(*value, value.trunc());
+                assert!(actual.insert(*value as usize));
+            }
+            other => panic!("chain values stay literal: {other:?}"),
+        }
+    }
+    assert_eq!(actual, (0..count).collect());
+
+    let work = host
+        .resolver
+        .runtime
+        .routes
+        .module_export_work
+        .load(Ordering::Relaxed);
+    assert!(
+        proof_entries <= 32 * count,
+        "{proof_entries} retained proof entries for {count} names"
+    );
+    assert!(
+        work <= 64 * count as u64,
+        "{work} folding work for {count} names"
+    );
+    assert!(
+        owned_slots <= 4 * count,
+        "{owned_slots} owned binding slots for {count} names"
+    );
+    assert!(
+        proof_work <= 512 * count,
+        "{proof_work} proof work for {count} names"
+    );
+    println!("chain_names={count} owned_slots={owned_slots} proof_entries={proof_entries} fold_work={work} proof_work={proof_work}");
+    [
+        ("owned binding slots", owned_slots),
+        ("retained proof entries", proof_entries),
+        ("folding work", work as usize),
+        ("proof work", proof_work),
+    ]
 }
 
 #[test]
@@ -450,119 +456,121 @@ fn export_tables_under_retention_pressure_answer_without_admission() {
 
 #[test]
 fn export_tables_and_namespace_evaluation_have_linear_work() {
-    let mut previous: Option<(usize, [(&str, usize); 3])> = None;
-    for count in [100, 500] {
-        let owned = barrel_files(count);
-        let files: Vec<_> = owned
-            .iter()
-            .map(|(name, source)| (name.as_str(), source.as_str()))
-            .collect();
-        let host = probe_host(ProbeProject {
-            files: &files,
-            ..ProbeProject::default()
-        });
-        let signature_before =
-            verter_session_query::facts::fact_read_set::signature_work_for_tests();
-        crate::u6_flow_shape_corpus_tests::upsert(
-            &host,
-            "/wb/scenario.ts",
-            "import * as ns from './index'; type __Probe = (typeof ns)[keyof typeof ns];",
-            crate::FileLanguage::script_ts(),
-        );
-        let view = host.resolver_store_view_read().into_owned_view();
-        let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &view, overlay);
-        let dispatch = ProjectSemanticDispatch::new(&host_ctx);
-        let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
-        let root = ValueRootKey {
-            scope: ScopeId::file(
-                Arc::from("/wb/scenario.ts"),
-                verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            ),
-            name: Arc::from("ns"),
-        };
-        let (_guard, _) = dispatch.enter_connected_demand(false);
-        let read = |key| {
-            let result = dispatch.execute_read(key);
-            assert!(!result.result_is_partial, "complete namespace demand");
-            match result.value {
-                QueryResult::Value(node) => node,
-                other => panic!("namespace demand: {other:?}"),
-            }
-        };
-        let object = read(dispatch.typeof_key_for(root, context));
-        let keys = read(SemanticQueryKey::KeyOf {
-            base: object,
-            context,
-        });
-        let union = read(SemanticQueryKey::IndexedAccess {
-            base: object,
-            index: IndexKey::Computed(keys),
-            mode: ProjectionMode::Expanded,
-        });
-        assert_literals(&dispatch, union, count);
-        let alias = read(SemanticQueryKey::ResolveDecl(super::resolve_decl_key(
-            "/wb/scenario.ts",
+    assert_proportional_growth(
+        (100, check_export_table_and_namespace_work(100)),
+        (500, check_export_table_and_namespace_work(500)),
+    );
+}
+
+#[test]
+fn large_namespace_evaluation_retains_linear_work_and_every_literal() {
+    check_export_table_and_namespace_work(2_000);
+}
+
+fn check_export_table_and_namespace_work(count: usize) -> [(&'static str, usize); 3] {
+    let owned = barrel_files(count);
+    let files: Vec<_> = owned
+        .iter()
+        .map(|(name, source)| (name.as_str(), source.as_str()))
+        .collect();
+    let host = probe_host(ProbeProject {
+        files: &files,
+        ..ProbeProject::default()
+    });
+    let signature_before = verter_session_query::facts::fact_read_set::signature_work_for_tests();
+    crate::u6_flow_shape_corpus_tests::upsert(
+        &host,
+        "/wb/scenario.ts",
+        "import * as ns from './index'; type __Probe = (typeof ns)[keyof typeof ns];",
+        crate::FileLanguage::script_ts(),
+    );
+    let view = host.resolver_store_view_read().into_owned_view();
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &view, overlay);
+    let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
+    let root = ValueRootKey {
+        scope: ScopeId::file(
+            Arc::from("/wb/scenario.ts"),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            "__Probe",
-        )));
-        let alias = dispatch
-            .normalize_node_keeping_declaration_refs_for_tests(alias, context)
-            .into_usable_node()
-            .expect("complete authored probe alias");
-        assert_literals(&dispatch, alias, count);
-        let table_work = host
-            .resolver
+        ),
+        name: Arc::from("ns"),
+    };
+    let (_guard, _) = dispatch.enter_connected_demand(false);
+    let read = |key| {
+        let result = dispatch.execute_read(key);
+        assert!(!result.result_is_partial(), "complete namespace demand");
+        match result.value {
+            QueryResult::Value(node) => node,
+            other => panic!("namespace demand: {other:?}"),
+        }
+    };
+    let object = read(dispatch.typeof_key_for(root, context));
+    let keys = read(SemanticQueryKey::KeyOf {
+        base: object,
+        context,
+    });
+    let union = read(SemanticQueryKey::IndexedAccess {
+        base: object,
+        index: IndexKey::Computed(keys),
+        mode: ProjectionMode::Expanded,
+    });
+    assert_literals(&dispatch, union, count);
+    let alias = read(SemanticQueryKey::ResolveDecl(super::resolve_decl_key(
+        "/wb/scenario.ts",
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        "__Probe",
+    )));
+    let alias = dispatch
+        .normalize_node_keeping_declaration_refs_for_tests(alias, context)
+        .into_usable_node()
+        .expect("complete authored probe alias");
+    assert_literals(&dispatch, alias, count);
+    let table_work = host
+        .resolver
+        .runtime
+        .routes
+        .module_export_work
+        .load(Ordering::Relaxed);
+    let query_work = dispatch.connected_demand().work_used_for_tests();
+    let proof_work =
+        verter_session_query::facts::fact_read_set::signature_work_for_tests() - signature_before;
+    println!(
+        "leaves={count} table_work={table_work} query_work={query_work} proof_work={proof_work} nodes={}",
+        dispatch.graph().node_count()
+    );
+    assert!(
+        table_work >= count as u64 && table_work <= 16 * count as u64,
+        "table work {table_work} for {count} leaves"
+    );
+    assert!(
+        query_work >= count && query_work <= 64 * count,
+        "probe work {query_work} for {count} leaves"
+    );
+    assert!(
+        proof_work <= 4096 * count,
+        "proof work {proof_work} for {count} leaves"
+    );
+    // A new request shares every table: there is no second table build.
+    let warm = ProjectSemanticDispatch::new(&host_ctx);
+    let table = warm
+        .ctx
+        .module_export_table("/wb/index.ts")
+        .expect("warm table");
+    assert_eq!(table.bindings.len(), count);
+    assert_eq!(
+        host.resolver
             .runtime
             .routes
             .module_export_work
-            .load(Ordering::Relaxed);
-        let query_work = dispatch.connected_demand().work_used_for_tests();
-        let proof_work = verter_session_query::facts::fact_read_set::signature_work_for_tests()
-            - signature_before;
-        println!(
-            "leaves={count} table_work={table_work} query_work={query_work} proof_work={proof_work} nodes={}",
-            dispatch.graph().node_count()
-        );
-        assert!(
-            table_work >= count as u64 && table_work <= 16 * count as u64,
-            "table work {table_work} for {count} leaves"
-        );
-        assert!(
-            query_work >= count && query_work <= 64 * count,
-            "probe work {query_work} for {count} leaves"
-        );
-        assert!(
-            proof_work <= 4096 * count,
-            "proof work {proof_work} for {count} leaves"
-        );
-        let counters = [
-            ("table work", table_work as usize),
-            ("probe work", query_work),
-            ("proof work", proof_work),
-        ];
-        if let Some((smaller, before)) = previous {
-            for ((what, before), (_, after)) in before.into_iter().zip(counters) {
-                assert_proportional_growth(what, (smaller, before), (count, after));
-            }
-        }
-        previous = Some((count, counters));
-        // A new request shares every table: there is no second table build.
-        let warm = ProjectSemanticDispatch::new(&host_ctx);
-        let table = warm
-            .ctx
-            .module_export_table("/wb/index.ts")
-            .expect("warm table");
-        assert_eq!(table.bindings.len(), count);
-        assert_eq!(
-            host.resolver
-                .runtime
-                .routes
-                .module_export_work
-                .load(Ordering::Relaxed),
-            table_work
-        );
-    }
+            .load(Ordering::Relaxed),
+        table_work
+    );
+    [
+        ("table work", table_work as usize),
+        ("probe work", query_work),
+        ("proof work", proof_work),
+    ]
 }
 
 #[test]
@@ -757,14 +765,12 @@ fn a_growing_namespace_shares_unchanged_tables_and_retains_linear_nodes() {
     let mut first_group = None;
     let mut previous_nodes = None;
     for count in [100, 500] {
-        for (name, source) in barrel_files(count) {
-            crate::u6_flow_shape_corpus_tests::upsert(
-                &host,
-                &format!("/wb/{name}"),
-                &source,
-                crate::FileLanguage::script_ts(),
-            );
-        }
+        let files = barrel_files(count);
+        let borrowed_files: Vec<_> = files
+            .iter()
+            .map(|(name, source)| (name.as_str(), source.as_str()))
+            .collect();
+        upsert_probe_files(&host, &borrowed_files);
         crate::u6_flow_shape_corpus_tests::upsert(
             &host,
             "/wb/scenario.ts",
@@ -836,10 +842,10 @@ fn a_growing_namespace_shares_unchanged_tables_and_retains_linear_nodes() {
             nodes <= 12 * count,
             "retained {nodes} nodes for {count} leaves"
         );
-        if let Some(before) = previous_nodes {
-            assert_proportional_growth("retained nodes", before, (count, nodes));
+        let retained = (count, [("retained nodes", nodes)]);
+        if let Some(previous) = previous_nodes.replace(retained) {
+            assert_proportional_growth(previous, retained);
         }
-        previous_nodes = Some((count, nodes));
         println!(
             "session_leaves={count} elapsed={:?} rss_bytes={} nodes={nodes}",
             started.elapsed(),

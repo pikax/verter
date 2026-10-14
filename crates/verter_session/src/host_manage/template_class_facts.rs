@@ -492,7 +492,7 @@ fn classify_binding(
     );
     verter_type_engine::request_context::observe_component_meta_read_suppress(&read);
     match read.value {
-        QueryResult::Value(node) if !read.result_is_partial => {
+        QueryResult::Value(node) if !read.result_is_partial() => {
             classify_node(dispatch, node, subject, route_candidate.as_ref())
         }
         QueryResult::Recursive(_) => unresolved_row(

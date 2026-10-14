@@ -1422,7 +1422,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 side: crate::semantic_query::ClassSurfaceSide::Static,
                 context: class_context,
             });
-            composed_partial |= read.result_is_partial;
+            composed_partial |= read.result_is_partial();
             match read.value {
                 QueryResult::Value(id) => id,
                 _ => return (QueryResult::Error(QueryError::Miss), empty_signature()).into(),
@@ -1472,8 +1472,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     }
                     Some(node) => node,
                     None => {
-                        composed_partial = true;
-                        self.opaque(QueryError::Miss)
+                        // No expression value was produced, so there is no
+                        // addressed representation for a positional guarantee.
+                        return (QueryResult::Error(QueryError::Miss), empty_signature()).into();
                     }
                 }
             } else {
@@ -1663,7 +1664,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // a partial `TypeOf` result (it would otherwise pass through with
             // `result_is_partial = false`).
             output.fold_partial(composed_partial);
-            output
+            output.with_positional_guarantee()
         } else {
             let mut output =
                 self.project_typeof_path(node_id, path, context, observed_hash, value_root);
@@ -2443,9 +2444,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             self.dep_signature_for(&value_root.scope.canonical_id, observed_hash),
         ))
         .with_observed_self_roots([(Arc::clone(&value_root.scope.canonical_id), observed_hash)]);
-        output.fold_partial(read.result_is_partial);
+        output.fold_partial(read.result_is_partial());
         output.add_partial_reasons(read.partial_reason_classes());
-        output
+        // Forward the completed path's typed position through receiver binding.
+        output.with_positional_guarantee()
     }
 
     /// The local value name a dependency module's CommonJS `export = X`
@@ -2987,6 +2989,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 if observed.is_none() || effective_root_missing {
                     output.cache_suppress = true;
                 }
+                output.approximation = Some(if composed_partial {
+                    super::projection_fact::ProjectionInterpretation::PresenceOnly
+                } else {
+                    super::projection_fact::ProjectionInterpretation::Positional
+                });
                 return output.with_observed_self_roots(observed_self_roots);
             }
         };
@@ -2995,7 +3002,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // a budget/recursion/walker-fatal nested side surfaces as a partial
         // (it would otherwise return through the identity projection with
         // `result_is_partial=false`).
-        let composed_is_partial = composed.result_is_partial;
+        let composed_is_partial = composed.result_is_partial();
         // Identity projection: return the composed sub-query node directly.
         let result = composed.value;
         let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput =
@@ -3006,7 +3013,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // refuse warm admission; the value still flows to the caller.
             output.cache_suppress = true;
         }
-        output.with_observed_self_roots(observed_self_roots)
+        output
+            .with_observed_self_roots(observed_self_roots)
+            .with_positional_guarantee()
     }
 
     /// The EFFECTIVE prepared VALUE-decl identity for a `(canonical,
@@ -3203,14 +3212,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             whole_hash: indexed.whole_hash,
             local_scope: None,
         };
-        let scope_payload = self.ctx.prepared_decl_bundle(canonical).map(|bundle| {
-            crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
-                &bundle, owner,
-            )
-        });
-        let shadowing = crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(
-            scope_payload.as_ref(),
-        );
         // The constructor-object SHAPE is a narrowed fact whose member value
         // positions are content-free locators — the authored surface lowers
         // through the ONE located body source (the value anchor's whole
@@ -3231,28 +3232,82 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .prepared_type_decl_return_only(canonical, owner, symbol)
             .map(|type_side| type_side.type_parameters.clone())
             .unwrap_or_default();
+        // The class header owns signature sources before a member body can
+        // demand this same constructor. Deferred sources retain the actual
+        // header binder images for the later value demand.
+        let _header = super::flow_return_fact::SignatureSourceHeaderGuard::enter(
+            &self.signature_source_headers,
+            canonical,
+            owner,
+            symbol,
+        );
         let mut substitutions = Vec::new();
-        Some(self.lower_located_body_with_provenance(
-            verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
-                verter_type_expr::locators::TypeBodySlot {
-                    anchor: verter_type_expr::locators::AuthoredAnchor {
-                        canonical_id: Arc::from(canonical),
-                        owner,
-                        symbol: Arc::from(symbol),
-                        space: verter_type_expr::locators::LocatorSymbolSpace::Value,
-                    },
-                    path: Arc::from(Vec::new().into_boxed_slice()),
+        let source = verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
+            verter_type_expr::locators::TypeBodySlot {
+                anchor: verter_type_expr::locators::AuthoredAnchor {
+                    canonical_id: Arc::from(canonical),
+                    owner,
+                    symbol: Arc::from(symbol),
+                    space: verter_type_expr::locators::LocatorSymbolSpace::Value,
                 },
-            ),
-            verter_session_query::declarations::TypeDeclKind::Alias,
+                path: Arc::from(Vec::new().into_boxed_slice()),
+            },
+        );
+        let QueryResult::Value(shape) = self.lower_locator(source) else {
+            return None;
+        };
+        // Constructor composition consumes the indexed header, not its static
+        // property values. Preserve their source carriers until a member demand
+        // selects them; projecting the whole shape would evaluate every field.
+        let shape = self.bind_located_shape_parameters(
+            shape,
+            &Arc::from(symbol),
             &class_type_params,
-            &prepared.name_resolution,
             &env,
             &scope,
-            scope_payload.as_ref(),
-            &shadowing,
             &mut substitutions,
-            context,
+        );
+        if context.mode != ProjectionMode::Expanded {
+            return Some(shape);
+        }
+        let graph = self.graph();
+        let Some(SemanticNodeData::Object(view)) = graph.node_data(shape).as_deref().cloned()
+        else {
+            return Some(shape);
+        };
+        // An expanded constructor demand owns its return position. Project
+        // only that instance source; sibling static values remain deferred.
+        let entries = view
+            .entries
+            .iter()
+            .map(|entry| {
+                let SurfaceEntry::ConstructSignature(signature) = entry else {
+                    return entry.clone();
+                };
+                let Some(mut data) = graph.node_data(*signature).as_deref().cloned() else {
+                    return entry.clone();
+                };
+                if let SemanticNodeData::Signature {
+                    return_type,
+                    return_carrier:
+                        carrier @ crate::semantic_query::SignatureReturnCarrier::Declared(_),
+                    ..
+                } = &mut data
+                {
+                    *return_type = self.resolve_signature_source_carrier(*return_type, context);
+                    *carrier =
+                        crate::semantic_query::SignatureReturnCarrier::Declared(*return_type);
+                }
+                SurfaceEntry::ConstructSignature(graph.intern_preserving_scope(*signature, data))
+            })
+            .collect();
+        Some(graph.intern_preserving_scope(
+            shape,
+            SemanticNodeData::Object(SurfaceView::from_entries(
+                entries,
+                view.keyspace,
+                view.has_known_index_signature(),
+            )),
         ))
     }
 
@@ -3322,7 +3377,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 side: ClassSurfaceSide::Static,
                 context: base_context,
             });
-            partial |= read.result_is_partial;
+            partial |= read.result_is_partial();
             if let QueryResult::Value(base_node) = read.value {
                 surfaces.push(base_node);
             }
@@ -4771,13 +4826,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // utility path as structural.)
             // `builtin_utility` is the identity the gate above proved; builders
             // never resolve a spelling themselves.
-            let (utility_result, utility_fence, utility_is_partial) = self.build_builtin_utility(
-                base,
-                decl_name.as_ref(),
-                builtin_utility,
-                args,
-                context.into_structural_provenance(),
-            );
+            let (utility_result, utility_fence, utility_is_partial, approximation) = self
+                .build_builtin_utility(
+                    base,
+                    decl_name.as_ref(),
+                    builtin_utility,
+                    args,
+                    context.into_structural_provenance(),
+                );
             let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput =
                 (utility_result, utility_fence).into();
             // Two-signal fold: a mapper-utility surface whose
@@ -4789,6 +4845,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // the nested read does NOT taint this (it is `cache_suppress`
             // on the inner memo only).
             output.fold_partial(utility_is_partial);
+            output.approximation = approximation;
             return InstantiateStart::Done(Box::new(
                 output.with_observed_self_roots(observed_self_roots),
             ));
@@ -5000,14 +5057,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             self.instantiate_context_for(&first.canonical_id, context),
                         ),
                     ));
+                    let completeness = read.fact_status.completeness();
+                    let approximation = read.fact_status.interpretation();
                     let mut out = crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
                         read.value,
                         self.dep_signature_for(decl_canonical, decl_whole_hash),
                     ))
                     .with_observed_self_roots([(Arc::clone(decl_canonical), decl_whole_hash)]);
-                    if read.result_is_partial {
-                        out.mark_partial_with(read.partial_reasons);
-                    }
+                    out.merge_completeness(completeness);
+                    out.approximation = approximation;
                     out.walker_diagnostics = read.walker_diagnostics.to_vec();
                     out.cache_suppress = read.cache_suppress;
                     return InstantiateStart::Done(Box::new(out));
@@ -5089,6 +5147,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             conditional_body: None,
             generic,
             suspend,
+            complete_structure: false,
             enum_body: false,
             body: BodyLowering::Ready(base),
         });
@@ -5117,7 +5176,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         loop {
             let lowered = match self.drain_instantiated_body(build, delivery.take()) {
                 BodyPoll::Need(key) => return InstantiatePoll::Need(key),
-                BodyPoll::Done(node) => node,
+                BodyPoll::Done(node, complete_structure) => {
+                    build.complete_structure = complete_structure;
+                    node
+                }
             };
             // Member-index overlay (carries the caller's provenance):
             // `member_index` holds the declaration's OWN-body direct members.
@@ -5274,10 +5336,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return BodyLowering::Ready(self.enum_type(&enumeration));
         }
         // The declaration's OWN decl-body locator (whole body).
-        let canonical: Arc<str> = match &build.scope {
-            NodeScopeId::File { canonical_id, .. } => Arc::clone(canonical_id),
-            NodeScopeId::Global => Arc::clone(&prepared.root_identity.canonical_id),
-        };
+        let canonical = Arc::clone(&prepared.root_identity.canonical_id);
         let locator = verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
             verter_type_expr::locators::TypeBodySlot {
                 anchor: verter_type_expr::locators::AuthoredAnchor {
@@ -5528,6 +5587,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if unresolved_owner_debt {
             output.mark_partial();
             output.cache_suppress = true;
+        }
+        if build.complete_structure {
+            output = output.with_positional_guarantee();
         }
         output
     }
@@ -7748,7 +7810,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             self_value: self_value.as_ref(),
         };
         match self.drain_located_body_lowering(&mut lowering, &inputs, substitutions, None) {
-            BodyPoll::Done(node) => node,
+            BodyPoll::Done(node, _) => node,
             BodyPoll::Need(_) => {
                 unreachable!("an inline body lowering evaluates the instantiations it reaches")
             }
@@ -7807,20 +7869,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         //    interning — the same ids the shape build bound). An unbound
         //    parameter substitutes the shared miss sentinel, mirroring the
         //    "unbound param propagates a miss through the body" rule.
-        let bindings =
-            self.locator_binder_frame_from_narrow_params(scope, &owner_symbol, type_parameters);
-        let mut substituted = shape;
-        for (name, binder) in bindings {
-            let bound = env.get(name.as_ref()).copied();
-            let replacement = bound.unwrap_or_else(|| self.opaque(QueryError::Miss));
-            let next = self.substitute_semantic_type_param(substituted, binder, replacement);
-            if next != substituted {
-                if let Some(arg_id) = bound {
-                    substitutions.push((name, arg_id));
-                }
-            }
-            substituted = next;
-        }
+        let substituted = self.bind_located_shape_parameters(
+            shape,
+            &owner_symbol,
+            type_parameters,
+            env,
+            scope,
+            substitutions,
+        );
 
         // 3. Plan the projection of the demanded view: per-arm
         //    ProjectionStamp application + deferred-carrier evaluation under
@@ -7834,6 +7890,35 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         )))
     }
 
+    /// Bind a fixed locator shape without demanding any member value.
+    /// Header composition and demanded body projection share this substitution.
+    fn bind_located_shape_parameters(
+        &self,
+        shape: SemanticNodeId,
+        owner_symbol: &Arc<str>,
+        type_parameters: &[verter_type_expr::facts::NarrowTypeParam],
+        env: &FxHashMap<String, SemanticNodeId>,
+        scope: &NodeScopeId,
+        substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
+    ) -> SemanticNodeId {
+        let bindings =
+            self.locator_binder_frame_from_narrow_params(scope, owner_symbol, type_parameters);
+        let mut substituted = shape;
+        for (name, binder) in bindings {
+            let bound = env.get(name.as_ref()).copied();
+            let replacement = bound.unwrap_or_else(|| self.opaque(QueryError::Miss));
+            let next = self.substitute_semantic_type_param(substituted, binder, replacement);
+            if next != substituted {
+                if let Some(arg_id) = bound {
+                    substitutions.push((name, arg_id));
+                }
+            }
+            substituted = next;
+        }
+
+        substituted
+    }
+
     /// Carry a located body lowering on as far as it can go. A partial
     /// projection folds its reasons into the enclosing build.
     fn drain_located_body_lowering(
@@ -7844,7 +7929,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         delivery: Option<SemanticNodeId>,
     ) -> BodyPoll {
         let projection = match lowering {
-            BodyLowering::Ready(node) => return BodyPoll::Done(*node),
+            BodyLowering::Ready(node) => return BodyPoll::Done(*node, false),
             BodyLowering::Project(projection) => projection,
         };
         match self.drain_decl_body_projection(projection, inputs, substitutions, delivery) {
@@ -7857,7 +7942,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 {
                     self.fold_local_partial_completeness(reasons);
                 }
-                BodyPoll::Done(projected.node)
+                BodyPoll::Done(
+                    projected.node,
+                    projected.extent.has_positional_representation(),
+                )
             }
         }
     }
@@ -8860,7 +8948,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         utility: Option<BuiltinUtility>,
         args: &Arc<[SemanticNodeId]>,
         context: crate::semantic_query::ProjectionReductionContext,
-    ) -> (QueryResult<SemanticNodeId>, DepSignature, bool) {
+    ) -> (
+        QueryResult<SemanticNodeId>,
+        DepSignature,
+        bool,
+        Option<super::projection_fact::ProjectionInterpretation>,
+    ) {
         use crate::semantic_query::{MapperKey, OptionalityMod, ReadonlyMod};
 
         let graph = self.graph();
@@ -8941,7 +9034,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 LibAwaited::Refused => self.opaque(QueryError::Miss),
             };
             record_utility_edges(result);
-            return (QueryResult::Value(result), fence, false);
+            return (QueryResult::Value(result), fence, false, None);
         }
 
         // Mapper-based utilities route through `SemanticQueryKey::MappedType`.
@@ -8962,7 +9055,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             });
             // FOLD: a genuinely-incomplete nested KeyOf (budget /
             // recursion / walker-fatal) taints the utility surface.
-            if key_space_read.result_is_partial {
+            if key_space_read.result_is_partial() {
                 result_is_partial.set(true);
             }
             let key_space = match key_space_read.value {
@@ -9039,7 +9132,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // through to the structural arms below unchanged.
         if let Some(absorbed) = self.absorb_builtin_utility_degenerate(name, args.as_ref()) {
             record_utility_edges(absorbed);
-            return (QueryResult::Value(absorbed), fence, false);
+            return (QueryResult::Value(absorbed), fence, false, None);
         }
 
         // ---- Function-signature utilities ----
@@ -9055,11 +9148,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             args.as_ref(),
         ) {
             let source_resolved = self.resolve_signature_source_carrier(*subject, context);
-            let result = self
-                .resolve_signature_utility(utility, source_resolved, context)
-                .unwrap_or_else(|| self.opaque(QueryError::Miss));
+            let result = self.resolve_signature_utility(utility, source_resolved, context);
+            let approximation = result
+                .is_some()
+                .then_some(super::projection_fact::ProjectionInterpretation::Positional);
+            let result = result.unwrap_or_else(|| self.opaque(QueryError::Miss));
             record_utility_edges(result);
-            return (QueryResult::Value(result), fence, false);
+            return (QueryResult::Value(result), fence, false, approximation);
         }
 
         match name {
@@ -9072,7 +9167,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     mapper,
                     context,
                 });
-                if mapped_read.result_is_partial {
+                let approximation = matches!(mapped_read.value, QueryResult::Value(_))
+                    .then_some(super::projection_fact::ProjectionInterpretation::PresenceOnly);
+                if mapped_read.result_is_partial() {
                     result_is_partial.set(true);
                 }
                 let result = match mapped_read.value {
@@ -9080,7 +9177,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     _ => self.opaque(QueryError::Miss),
                 };
                 record_utility_edges(result);
-                (QueryResult::Value(result), fence, result_is_partial.get())
+                (
+                    QueryResult::Value(result),
+                    fence,
+                    result_is_partial.get(),
+                    approximation,
+                )
             }
             "Required" if args.len() == 1 => {
                 let source = args[0];
@@ -9090,7 +9192,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     mapper,
                     context,
                 });
-                if mapped_read.result_is_partial {
+                let approximation = matches!(mapped_read.value, QueryResult::Value(_))
+                    .then_some(super::projection_fact::ProjectionInterpretation::PresenceOnly);
+                if mapped_read.result_is_partial() {
                     result_is_partial.set(true);
                 }
                 let result = match mapped_read.value {
@@ -9098,7 +9202,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     _ => self.opaque(QueryError::Miss),
                 };
                 record_utility_edges(result);
-                (QueryResult::Value(result), fence, result_is_partial.get())
+                (
+                    QueryResult::Value(result),
+                    fence,
+                    result_is_partial.get(),
+                    approximation,
+                )
             }
             "Readonly" if args.len() == 1 => {
                 let source = args[0];
@@ -9108,7 +9217,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     mapper,
                     context,
                 });
-                if mapped_read.result_is_partial {
+                let approximation = matches!(mapped_read.value, QueryResult::Value(_))
+                    .then_some(super::projection_fact::ProjectionInterpretation::PresenceOnly);
+                if mapped_read.result_is_partial() {
                     result_is_partial.set(true);
                 }
                 let result = match mapped_read.value {
@@ -9116,7 +9227,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     _ => self.opaque(QueryError::Miss),
                 };
                 record_utility_edges(result);
-                (QueryResult::Value(result), fence, result_is_partial.get())
+                (
+                    QueryResult::Value(result),
+                    fence,
+                    result_is_partial.get(),
+                    approximation,
+                )
             }
             "Record" if args.len() == 2 => {
                 // Record<K, V>: map K's key space to V.
@@ -9167,7 +9283,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     mapper,
                     context,
                 });
-                if mapped_read.result_is_partial {
+                let approximation = matches!(mapped_read.value, QueryResult::Value(_))
+                    .then_some(super::projection_fact::ProjectionInterpretation::PresenceOnly);
+                if mapped_read.result_is_partial() {
                     result_is_partial.set(true);
                 }
                 let result = match mapped_read.value {
@@ -9175,7 +9293,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     _ => self.opaque(QueryError::Miss),
                 };
                 record_utility_edges(result);
-                (QueryResult::Value(result), fence, result_is_partial.get())
+                (
+                    QueryResult::Value(result),
+                    fence,
+                    result_is_partial.get(),
+                    approximation,
+                )
             }
 
             // ---- Identity utility ----
@@ -9192,7 +9315,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     .expect("one operand"),
                 );
                 record_utility_edges(result);
-                (QueryResult::Value(result), fence, false)
+                (QueryResult::Value(result), fence, false, None)
             }
             "NoInfer" if args.len() == 1 => {
                 let source = args[0];
@@ -9205,7 +9328,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     Arc::clone(&fence),
                 );
                 record_utility_edges(result);
-                (QueryResult::Value(result), fence, false)
+                (QueryResult::Value(result), fence, false, None)
             }
 
             // ---- String intrinsics ----
@@ -9218,7 +9341,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             "Uppercase" | "Lowercase" | "Capitalize" | "Uncapitalize" if args.len() == 1 => {
                 let result = self.apply_string_intrinsic(name, args[0], context);
                 record_utility_edges(result);
-                (QueryResult::Value(result), fence, false)
+                (QueryResult::Value(result), fence, false, None)
             }
 
             // ---- Object-filter utilities ----
@@ -9244,7 +9367,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     None => {
                         let result = self.opaque(QueryError::Miss);
                         record_utility_edges(result);
-                        return (QueryResult::Value(result), fence, false);
+                        return (QueryResult::Value(result), fence, false, None);
                     }
                 };
                 // Context-propagating deferred
@@ -9259,7 +9382,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // when the outer caller dispatched with
                 // `StructuralTransit(Shallow)`).
                 let source_resolved = self
-                    .evaluate_deferred_semantic_node_with_context(source, context)
+                    .evaluate_deferred_semantic_node_with_context(
+                        source,
+                        context.with_mode(ProjectionMode::Shallow),
+                    )
                     .into_active_query_build_node(self);
                 // `Pick<any, K>` (pinned tsgo): a CLOSED surface holding
                 // exactly the enumerated keys, each `any` and required —
@@ -9302,14 +9428,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     let result_surface = SurfaceView::from_members(members, None);
                     let result = graph.intern_node(SemanticNodeData::Object(result_surface));
                     record_utility_edges(result);
-                    return (QueryResult::Value(result), fence, false);
+                    return (QueryResult::Value(result), fence, false, None);
                 }
                 let surface = match self.object_filter_source_surface(source_resolved, context) {
                     Some(view) => view,
                     None => {
                         let result = self.opaque(QueryError::Miss);
                         record_utility_edges(result);
-                        return (QueryResult::Value(result), fence, false);
+                        return (QueryResult::Value(result), fence, false, None);
                     }
                 };
                 let pick_set: FxHashSet<&PropertyKey> = pick_names.iter().collect();
@@ -9337,7 +9463,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 let result_surface = SurfaceView::from_members(picked, None);
                 let result = graph.intern_node(SemanticNodeData::Object(result_surface));
                 record_utility_edges(result);
-                (QueryResult::Value(result), fence, false)
+                (
+                    QueryResult::Value(result),
+                    fence,
+                    false,
+                    Some(super::projection_fact::ProjectionInterpretation::PresenceOnly),
+                )
             }
             "Omit" if args.len() == 2 => {
                 let source = args[0];
@@ -9347,13 +9478,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     None => {
                         let result = self.opaque(QueryError::Miss);
                         record_utility_edges(result);
-                        return (QueryResult::Value(result), fence, false);
+                        return (QueryResult::Value(result), fence, false, None);
                     }
                 };
                 // Context-propagating deferred
                 // resolution (see Pick comment above for chain).
                 let source_resolved = self
-                    .evaluate_deferred_semantic_node_with_context(source, context)
+                    .evaluate_deferred_semantic_node_with_context(
+                        source,
+                        context.with_mode(ProjectionMode::Shallow),
+                    )
                     .into_active_query_build_node(self);
                 // `Omit<any, K-literals>` (pinned tsgo): the index-signature
                 // surface `{ [x: string]: any; [x: number]: any;
@@ -9372,14 +9506,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         crate::semantic_query::PrimitiveKind::Symbol,
                     ]);
                     record_utility_edges(result);
-                    return (QueryResult::Value(result), fence, false);
+                    return (QueryResult::Value(result), fence, false, None);
                 }
                 let surface = match self.object_filter_source_surface(source_resolved, context) {
                     Some(view) => view,
                     None => {
                         let result = self.opaque(QueryError::Miss);
                         record_utility_edges(result);
-                        return (QueryResult::Value(result), fence, false);
+                        return (QueryResult::Value(result), fence, false, None);
                     }
                 };
                 let omit_set: FxHashSet<&PropertyKey> = omit_names.iter().collect();
@@ -9444,7 +9578,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 );
                 let result = graph.intern_node(SemanticNodeData::Object(result_surface));
                 record_utility_edges(result);
-                (QueryResult::Value(result), fence, false)
+                (
+                    QueryResult::Value(result),
+                    fence,
+                    false,
+                    Some(super::projection_fact::ProjectionInterpretation::PresenceOnly),
+                )
             }
 
             // ---- Union-filter utilities ----
@@ -9520,7 +9659,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         // fall through to the deferred shell.
                         let result = self.opaque(QueryError::Miss);
                         record_utility_edges(result);
-                        return (QueryResult::Value(result), fence, false);
+                        return (QueryResult::Value(result), fence, false, None);
                     }
                 };
                 // A single constituent that survives is the source as
@@ -9558,13 +9697,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             // information.
                             let result = self.opaque(QueryError::Miss);
                             record_utility_edges(result);
-                            return (QueryResult::Value(result), fence, false);
+                            return (QueryResult::Value(result), fence, false, None);
                         }
                     }
                 }
                 let result = self.intern_normalized_union_or_intersection(&survivors, true);
                 record_utility_edges(result);
-                (QueryResult::Value(result), fence, false)
+                (QueryResult::Value(result), fence, false, None)
             }
 
             // `NonNullable<T>` strips `null` / `undefined` from a
@@ -9607,7 +9746,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         crate::project_semantic_dispatch::walk::empty_surface_view(),
                     ));
                     record_utility_edges(result);
-                    return (QueryResult::Value(result), fence, false);
+                    return (QueryResult::Value(result), fence, false, None);
                 }
                 let nullish = |id: SemanticNodeId| {
                     matches!(
@@ -9675,7 +9814,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 };
                 let result = reduced.unwrap_or_else(|| self.opaque(QueryError::Miss));
                 record_utility_edges(result);
-                (QueryResult::Value(result), fence, false)
+                (QueryResult::Value(result), fence, false, None)
             }
 
             // ---- Deferred utilities ----
@@ -9685,7 +9824,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             _ => {
                 let result = self.opaque(QueryError::Miss);
                 record_utility_edges(result);
-                (QueryResult::Value(result), fence, false)
+                (QueryResult::Value(result), fence, false, None)
             }
         }
     }
@@ -9916,13 +10055,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let Some(data) = self.graph().node_data(function_node) else {
             return extracted;
         };
-        let SemanticNodeData::Signature {
-            type_parameters, ..
-        } = &*data
+        let Some(header) =
+            data.callable_header(&crate::semantic_query::ResolveOverloadSetConsumer::witness())
         else {
             return extracted;
         };
-        let type_parameters = Arc::clone(type_parameters);
+        let type_parameters = Arc::clone(header.type_parameters);
         drop(data);
         self.instantiate_clause_at_base_constraints(
             type_parameters
@@ -10316,12 +10454,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             bound.push((decl.param, arg));
         }
-        self.graph().intern_node(SemanticNodeData::DeferredCallable(
-            callable.with_substituted(
+        let source = callable.map_source_values(|mut image| {
+            for (binder, argument) in &bound {
+                image = self.substitute_semantic_type_param(image, *binder, *argument);
+            }
+            image
+        });
+        let source = source.with_instantiated_clause(
+            type_parameters
+                .iter()
+                .zip(bound.iter())
+                .map(|(decl, (_, argument))| (Arc::clone(&decl.name), *argument)),
+        );
+        self.graph()
+            .intern_node(SemanticNodeData::DeferredCallable(source.with_substituted(
                 Arc::from(params.into_boxed_slice()),
                 Arc::from(Vec::<crate::semantic_query::TypeParamDecl>::new().into_boxed_slice()),
-            ),
-        ))
+            )))
     }
 
     /// The type argument binding the type parameter at `index`: the
@@ -10542,6 +10691,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     crate::semantic_query::SignatureReturnCarrier::Function(source) => {
                         crate::semantic_query::SignatureReturnCarrier::Function(source.clone())
                     }
+                    crate::semantic_query::SignatureReturnCarrier::DeferredFlow(_)
+                    | crate::semantic_query::SignatureReturnCarrier::EvaluatedFlow(_) => {
+                        return_carrier.clone()
+                    }
                 },
                 signature_span: *signature_span,
                 return_type_span: *return_type_span,
@@ -10653,6 +10806,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     return_type,
                     type_parameters,
                     predicate,
+                    return_carrier,
                     ..
                 } => {
                     // A nested signature re-declaring `name` shadows: its
@@ -10666,6 +10820,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         && !(node == root && root_is_own_signature);
                     if shadows {
                         continue;
+                    }
+                    if let crate::semantic_query::SignatureReturnCarrier::DeferredFlow(source) =
+                        return_carrier
+                    {
+                        stack.extend(source.bindings().iter().map(|(_, image)| *image));
                     }
                     stack.extend(params.iter().map(|param| param.ty));
                     stack.push(*return_type);
@@ -11016,6 +11175,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let Some(data) = self.graph().node_data(function_node) else {
             return function_node;
         };
+        if let SemanticNodeData::DeferredCallable(callable) = data.as_ref() {
+            return self.graph().intern_preserving_scope(
+                function_node,
+                SemanticNodeData::DeferredCallable(callable.without_receiver(ordinary)),
+            );
+        }
         let SemanticNodeData::Signature {
             kind,
             is_abstract,
@@ -11063,10 +11228,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         use crate::semantic_query::TupleElement;
 
         let data = self.graph().node_data(function_node)?;
-        let SemanticNodeData::Signature { params, .. } = &*data else {
-            return None;
+        let params = match data.as_ref() {
+            SemanticNodeData::Signature { params, .. } => Arc::clone(params),
+            SemanticNodeData::DeferredCallable(callable) => Arc::clone(
+                callable
+                    .parts(&crate::semantic_query::ResolveOverloadSetConsumer::witness())
+                    .params,
+            ),
+            _ => return None,
         };
-        let params = Arc::clone(params);
         drop(data);
         // The authored `this` receiver takes no positional slot: TypeScript's
         // `Parameters<F>` / `ConstructorParameters<F>` publish the ordinary
@@ -11196,7 +11366,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 .with_observed_self_roots(
                                     self.observed_self_roots_from_nodes([base, object]),
                                 );
-                            out.fold_partial(norm.result_is_partial);
+                            out.fold_partial(norm.result_is_partial());
                             out.merge_completeness(walker.completeness);
                             out.cache_suppress |= walker.cache_suppress;
                             out.walker_diagnostics = std::mem::take(&mut walker.walker_diagnostics);
@@ -11214,7 +11384,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 index: member_index,
                 mode: context.mode,
             });
-            if read.result_is_partial {
+            if read.result_is_partial() {
                 any_partial = true;
             }
             match read.value {
@@ -11274,7 +11444,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     self.project_generation_signature(),
                 ))
                 .with_observed_self_roots(observed_self_roots);
-                out.fold_partial(any_partial || norm.result_is_partial);
+                out.fold_partial(any_partial || norm.result_is_partial());
                 Some(out)
             }
             _ => None,
@@ -11634,6 +11804,48 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             other => other,
         };
+        // A completed member path has addressed every demanded position.
+        // It can preserve a usable child's positional value without claiming
+        // that an incomplete enclosing domain proves absence or exactness.
+        // A stopped walk has no such interpretation. An opaque terminal can
+        // forward only the explicit guarantee of its adopted child producer.
+        let approximation =
+            if let Some(interpretation) = walker.completed_child_interpretation(result) {
+                Some(interpretation)
+            } else if path.is_empty()
+                && context.mode == ProjectionMode::Shallow
+                && matches!(
+                    self.graph().node_data(result).as_deref(),
+                    Some(
+                        SemanticNodeData::Object(_)
+                            | SemanticNodeData::ObjectSpreadProgram(_)
+                            | SemanticNodeData::Union(_)
+                            | SemanticNodeData::Intersection(_)
+                    )
+                )
+            {
+                // Shallow synthesis emits positive member evidence. It never
+                // establishes absent members or exact member values from a subset.
+                Some(super::projection_fact::ProjectionInterpretation::PresenceOnly)
+            } else if path.is_empty()
+                && matches!(
+                    self.graph().node_data(result).as_deref(),
+                    Some(
+                        SemanticNodeData::Conditional { .. }
+                            | SemanticNodeData::Mapped { .. }
+                            | SemanticNodeData::KeyOf { .. }
+                            | SemanticNodeData::IndexedAccess { .. }
+                            | SemanticNodeData::InstantiationRef { .. }
+                            | SemanticNodeData::TemplateLiteral { .. }
+                    )
+                )
+            {
+                // The whole demand retained this expression and all its operands
+                // as a suspended source at exactly the addressed position.
+                Some(super::projection_fact::ProjectionInterpretation::Positional)
+            } else {
+                None
+            };
         drop(walker);
         // Supplement §5.D.0 r17 — surface a budget-exceeded
         // sentinel as `QueryResult::Recursive` so §5.D.4
@@ -11654,6 +11866,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 walker_diagnostics,
                 cache_suppress,
                 completeness,
+                approximation: None,
                 taint: crate::semantic_query::ResultTaint::Clean,
                 observed_self_roots: Vec::new(),
                 graph_carrier: None,
@@ -11726,6 +11939,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             walker_diagnostics,
             cache_suppress,
             completeness,
+            approximation,
             taint: crate::semantic_query::ResultTaint::Clean,
             observed_self_roots,
             graph_carrier: None,
@@ -11784,6 +11998,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // (budget / recursion / walker-fatal). Carry that partiality onto
         // the published keyof surface.
         let mut keyof_is_partial = false;
+        let enumerated = std::cell::Cell::new(false);
+        let intern_keys = |names| {
+            let node = self.intern_keyspace_keys(base, names, &fence);
+            if node.is_some() {
+                enumerated.set(true);
+            }
+            node
+        };
         let node = match data.as_deref() {
             // `keyof ClassType` yields only public keys (TS semantics): a
             // private/protected member is not part of the keyspace. Filter
@@ -11816,7 +12038,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         }))
                     })
                     .collect();
-                let literal_keys = self.intern_keyspace_keys(base, keys, &fence);
+                let literal_keys = intern_keys(keys);
                 match (literal_keys, index_keys.is_empty()) {
                     (Some(literal_keys), true) => literal_keys,
                     (Some(literal_keys), false) => {
@@ -11829,7 +12051,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             Some(SemanticNodeData::Intersection(members)) => {
                 match self.key_of_composite(&members.members_arc(), false) {
-                    Some(keys) => keys,
+                    Some(keys) => { enumerated.set(true); keys },
                     None => self
                         .member_names_for_published_projection(base)
                         .map(|(names, is_partial)| {
@@ -11837,7 +12059,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             names
                         })
                         .or_else(|| self.key_names_from_base_node(base))
-                        .and_then(|names| self.intern_keyspace_keys(base, names, &fence))
+                        .and_then(&intern_keys)
                         .unwrap_or_else(|| {
                             self.graph().intern_node(SemanticNodeData::KeyOf { base })
                         }),
@@ -11846,6 +12068,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             Some(SemanticNodeData::Union(members))
                 if self.key_of_composite(&members.members_arc(), true).is_some() =>
             {
+                enumerated.set(true);
                 self.key_of_composite(&members.members_arc(), true)
                     .expect("the keys settled")
             }
@@ -11856,7 +12079,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     names
                 })
                 .or_else(|| self.key_names_from_base_node(base))
-                .and_then(|names| self.intern_keyspace_keys(base, names, &fence))
+                .and_then(&intern_keys)
                 .unwrap_or_else(|| self.graph().intern_node(SemanticNodeData::KeyOf { base })),
             // Declaration Merging (CRITICAL): `keyof <merged decl>` routes
             // through the single peer-merge reducer to the merged
@@ -11949,7 +12172,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // `Opaque(Miss)`.
             Some(SemanticNodeData::ObjectSpreadProgram(_)) => self
                 .key_names_from_base_node(base)
-                .and_then(|names| self.intern_keyspace_keys(base, names, &fence))
+                .and_then(intern_keys)
                 .unwrap_or_else(|| self.graph().intern_node(SemanticNodeData::KeyOf { base })),
             _ => self.opaque(QueryError::Miss),
         };
@@ -11963,6 +12186,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         ))
         .with_observed_self_roots(observed_self_roots);
         keyof_output.fold_partial(keyof_is_partial);
+        // The enumeration above emitted only keys contributed by the source;
+        // an unresolved source retains its addressed keyof continuation.
+        keyof_output.approximation = enumerated
+            .get()
+            .then_some(super::projection_fact::ProjectionInterpretation::PresenceOnly);
         keyof_output
     }
 
@@ -12578,7 +12806,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         mapper: self.homomorphic_mapper_at(mapper, source, arm, context),
                         context,
                     });
-                    partial |= read.result_is_partial;
+                    partial |= read.result_is_partial();
                     match read.value {
                         QueryResult::Value(node) | QueryResult::Recursive(node) => {
                             mapped.push(node)
@@ -12592,7 +12820,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 });
                 match united.value {
                     QueryResult::Value(node) => {
-                        Some(finish(node, partial || united.result_is_partial))
+                        Some(finish(node, partial || united.result_is_partial()))
                     }
                     _ => None,
                 }
@@ -12732,10 +12960,28 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             _ => return None,
         };
-        let super::relation::IdentityCarrierUnwrap::Concrete(resolved) =
-            self.unwrap_identity_carrier_for_relation(source)
-        else {
-            return None;
+        // Read authored modifiers before a relation's apparent-type view can
+        // replace them with the member's read type.
+        let resolved = if matches!(
+            graph.node_data(source).as_deref(),
+            Some(SemanticNodeData::Object(_))
+        ) {
+            source
+        } else {
+            let read = self.execute_read(SemanticQueryKey::ProjectPath {
+                base: source,
+                path: Arc::from([]),
+                context: crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Shallow,
+                ),
+            });
+            if !read.fact_status.is_complete() {
+                return None;
+            }
+            let QueryResult::Value(resolved) = read.value else {
+                return None;
+            };
+            resolved
         };
         match graph.node_data(resolved).as_deref()? {
             SemanticNodeData::Object(surface) => {
@@ -12797,7 +13043,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 self.intern_normalized_union_or_intersection(&arms, true)
             }
             crate::semantic_query::OptionalityMod::Remove
-                if arms.iter().any(is_undefined)
+                if !exact_optional
+                    && arms.iter().any(is_undefined)
                     && self.mapped_source_member_optional(source, key) == Some(true) =>
             {
                 let kept: Vec<SemanticNodeId> =
@@ -13440,7 +13687,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     index: IndexKey::from_known(key.key.clone()),
                     mode: ProjectionMode::Navigate,
                 });
-                if read.result_is_partial {
+                if read.result_is_partial() {
                     mapped_partial_reasons =
                         mapped_partial_reasons.union(read.partial_reason_classes());
                 }
@@ -13475,6 +13722,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     break;
                 };
                 self.materialize_mapped_member_value_for_key(mapper, binder, context)
+            };
+            // A surface's optional flag carries absence; adding `undefined`
+            // belongs to a member read. Removing optionality must settle its
+            // value before the source modifier is lost.
+            let value = if mapper.optionality == crate::semantic_query::OptionalityMod::Remove {
+                self.key_domain_binder(key).map_or(value, |key_node| {
+                    self.mapped_member_optionality(mapper, value, source, key_node)
+                })
+            } else {
+                value
             };
             // `produced_names` was decided above, before this key's value
             // operand was forced — see the key-domain ordering note at the
@@ -13614,6 +13871,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         ))
         .with_observed_self_roots(observed_self_roots);
         mapped_output.add_partial_reasons(mapped_partial_reasons);
+        // Every key in the settled domain was processed; unavailable member
+        // values remain typed gaps at those positions in the produced shape.
+        mapped_output.approximation = Some(if source_member_reasons.is_empty() {
+            super::projection_fact::ProjectionInterpretation::Positional
+        } else {
+            super::projection_fact::ProjectionInterpretation::PresenceOnly
+        });
         mapped_output
     }
 
@@ -14167,7 +14431,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 let inst_read = self.execute_read(SemanticQueryKey::Instantiate(
                     crate::semantic_query::InstantiateKey::new(slot, args, inst_ctx),
                 ));
-                if inst_read.result_is_partial {
+                if inst_read.result_is_partial() {
                     reasons = reasons.union(inst_read.partial_reason_classes());
                 }
                 match inst_read.value {
@@ -14931,6 +15195,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // the taint folds into the enclosing request.
             output.cache_suppress = true;
             output.mark_partial();
+            // The refused Cartesian construction keeps every original quasi
+            // and interpolation operand at the addressed template position.
+            output = output.with_positional_guarantee();
         }
         output
     }
@@ -17006,7 +17273,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         &read.dep_signature,
                     );
                     nested_cache_suppress |= read.cache_suppress;
-                    nested_result_is_partial |= read.result_is_partial;
+                    nested_result_is_partial |= read.result_is_partial();
                     read.value
                 }
             }
@@ -17070,7 +17337,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     });
                     local_fence.extend(read.dep_signature.iter().cloned());
                     nested_cache_suppress |= read.cache_suppress;
-                    nested_result_is_partial |= read.result_is_partial;
+                    nested_result_is_partial |= read.result_is_partial();
                     read.value
                 }
             }
@@ -17896,6 +18163,7 @@ pub(super) struct InstantiateBuild {
     /// augmenting ones included, already contributed its members.
     enum_body: bool,
     body: BodyLowering,
+    complete_structure: bool,
 }
 
 /// A declaration body's lowering in progress.
@@ -17908,7 +18176,7 @@ pub(super) enum BodyLowering {
 
 /// Where a body lowering stands after it ran as far as it could.
 pub(super) enum BodyPoll {
-    Done(SemanticNodeId),
+    Done(SemanticNodeId, bool),
     Need(crate::semantic_query::SemanticQueryKey),
 }
 

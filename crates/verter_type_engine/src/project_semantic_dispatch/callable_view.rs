@@ -137,6 +137,7 @@ fn classify_snippet_params_arg(data: Option<&SemanticNodeData>) -> SnippetParams
         | SemanticNodeData::InferRef { .. }
         | SemanticNodeData::Conditional { .. }
         | SemanticNodeData::Signature { .. }
+        | SemanticNodeData::DeferredCallable(_)
         | SemanticNodeData::MergedDecl { .. }
         // A class expression's instance is a reached object shape.
         | SemanticNodeData::ClassExpressionInstance { .. }
@@ -155,8 +156,7 @@ fn classify_snippet_params_arg(data: Option<&SemanticNodeData>) -> SnippetParams
         | SemanticNodeData::TypeOf(_)
         | SemanticNodeData::Opaque(_)
         | SemanticNodeData::RawFallback { .. }
-        | SemanticNodeData::SyntheticBinding { .. }
-        | SemanticNodeData::DeferredCallable(_) => SnippetParamsArg::Unresolved,
+        | SemanticNodeData::SyntheticBinding { .. } => SnippetParamsArg::Unresolved,
     }
 }
 
@@ -256,10 +256,12 @@ impl<'a, 'ctx, C: crate::resolver_core::ResolverCapabilities> CallableNodeView<'
             // A realized callable — return verbatim. CALL kind only: a
             // construct signature (`new (...) => R`) is not invocable as a
             // callback and is not a callable arm.
-            SemanticNodeData::Signature {
-                kind: SignatureKind::Call,
-                ..
-            } => Some(normalized),
+            data if data
+                .callable_header(&crate::semantic_query::ResolveOverloadSetConsumer::witness())
+                .is_some_and(|header| header.kind == SignatureKind::Call) =>
+            {
+                Some(normalized)
+            }
 
             // The view OWNS the arm recursion. RECURSE per surviving arm (so a
             // nested nullish composite — `Union([Union([f, undefined]), …])` —
@@ -389,13 +391,16 @@ impl<'a, 'ctx, C: crate::resolver_core::ResolverCapabilities> CallableNodeView<'
             // Call-kind by construction (`single_callable_arm` only realizes
             // call signatures); matched explicitly so the view's invariant is
             // the pattern, not a comment.
-            Some(SemanticNodeData::Signature {
-                kind: SignatureKind::Call,
-                ..
-            }) => Some(SignatureNodeView {
-                dispatch: self.dispatch,
-                function: realized,
-            }),
+            Some(data)
+                if data
+                    .callable_header(&crate::semantic_query::ResolveOverloadSetConsumer::witness())
+                    .is_some_and(|header| header.kind == SignatureKind::Call) =>
+            {
+                Some(SignatureNodeView {
+                    dispatch: self.dispatch,
+                    function: realized,
+                })
+            }
             _ => None,
         }
     }
@@ -556,7 +561,8 @@ impl<'a, 'ctx, C: crate::resolver_core::ResolverCapabilities> CallableNodeView<'
                 | SemanticNodeData::Literal(_)
                 | SemanticNodeData::Array { .. }
                 | SemanticNodeData::Tuple { .. }
-                | SemanticNodeData::Signature { .. } => Ok(()),
+                | SemanticNodeData::Signature { .. }
+                | SemanticNodeData::DeferredCallable(_) => Ok(()),
                 // ── TRUE / CARVE-OUT ── the shared resolver's DIRECT
                 // self-reference carrier-stop (`type S = 'x' | S` resolves to
                 // `Union(Literal('x'), Opaque(RecursiveRef))`). A CLOSED back-edge
@@ -886,10 +892,10 @@ impl<'a, 'ctx, C: crate::resolver_core::ResolverCapabilities> CallableNodeView<'
         match data.as_ref() {
             // CALL kind only: a construct signature is not slot-callable and
             // falls to the fail-closed realize arm below.
-            SemanticNodeData::Signature {
-                kind: SignatureKind::Call,
-                ..
-            } => {
+            data if data
+                .callable_header(&crate::semantic_query::ResolveOverloadSetConsumer::witness())
+                .is_some_and(|header| header.kind == SignatureKind::Call) =>
+            {
                 out.push(normalized);
                 Some(())
             }
@@ -962,7 +968,15 @@ impl<'a, 'ctx, C: crate::resolver_core::ResolverCapabilities> CallableNodeView<'
         // multi-arm callable has no single span.
         let mut single_return_type_span: Option<Span> = None;
         for arm in arms {
-            let arm_data = self.data(*arm)?;
+            let read = self
+                .dispatch
+                .observe_read(|| self.dispatch.materialize_returned_callable(*arm));
+            let complete = read.observations_are_complete();
+            let materialized = read.adopt(self.dispatch).ok()?;
+            if !complete {
+                return None;
+            }
+            let arm_data = self.data(materialized)?;
             // FAIL CLOSED: a non-CALL-signature arm (incl. a construct
             // signature) means the member is not purely slot-callable.
             let SemanticNodeData::Signature {
@@ -1031,10 +1045,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> SignatureNodeView<'_, '_, C>
     /// The signature's first-parameter node, if any.
     pub fn first_param(&self) -> Option<SemanticNodeId> {
         let data = self.data(self.function)?;
-        let SemanticNodeData::Signature { params, .. } = data.as_ref() else {
-            return None;
-        };
-        params.first().map(|p| p.ty)
+        data.callable_header(&crate::semantic_query::ResolveOverloadSetConsumer::witness())?
+            .params
+            .first()
+            .map(|p| p.ty)
     }
 
     /// The signature's return-type node. `Some` only when `function` is a
@@ -1045,7 +1059,15 @@ impl<C: crate::resolver_core::ResolverCapabilities> SignatureNodeView<'_, '_, C>
     // it; pending a delete-or-wire decision.
     #[allow(dead_code)]
     pub fn return_type(&self) -> Option<SemanticNodeId> {
-        match self.data(self.function).as_deref() {
+        let read = self
+            .dispatch
+            .observe_read(|| self.dispatch.materialize_returned_callable(self.function));
+        let complete = read.observations_are_complete();
+        let materialized = read.adopt(self.dispatch).ok()?;
+        if !complete {
+            return None;
+        }
+        match self.data(materialized).as_deref() {
             Some(SemanticNodeData::Signature { return_type, .. }) => Some(*return_type),
             _ => {
                 verter_debug_assert!(false, "SignatureNodeView function is not a Function node");
@@ -1060,9 +1082,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> SignatureNodeView<'_, '_, C>
     #[allow(dead_code)]
     pub fn return_type_span(&self) -> Option<Span> {
         match self.data(self.function).as_deref() {
-            Some(SemanticNodeData::Signature {
-                return_type_span, ..
-            }) => *return_type_span,
+            Some(data) => data
+                .callable_header(&crate::semantic_query::ResolveOverloadSetConsumer::witness())
+                .and_then(|header| header.return_type_span),
             _ => None,
         }
     }
@@ -1080,7 +1102,19 @@ impl<C: crate::resolver_core::ResolverCapabilities> SignatureNodeView<'_, '_, C>
     /// unreachable and fails closed to an empty slice (never a fabricated param).
     pub fn raw_params(&self) -> Arc<[FunctionParam]> {
         match self.data(self.function).as_deref() {
-            Some(SemanticNodeData::Signature { params, .. }) => Arc::clone(params),
+            Some(data)
+                if data
+                    .callable_header(&crate::semantic_query::ResolveOverloadSetConsumer::witness())
+                    .is_some() =>
+            {
+                Arc::clone(
+                    data.callable_header(
+                        &crate::semantic_query::ResolveOverloadSetConsumer::witness(),
+                    )
+                    .unwrap()
+                    .params,
+                )
+            }
             _ => Arc::from(Vec::new().into_boxed_slice()),
         }
     }
@@ -1105,7 +1139,19 @@ impl<C: crate::resolver_core::ResolverCapabilities> SignatureNodeView<'_, '_, C>
         context: ProjectionReductionContext,
     ) -> Option<Vec<PositionalParamNode>> {
         let params = match self.data(self.function).as_deref() {
-            Some(SemanticNodeData::Signature { params, .. }) => Arc::clone(params),
+            Some(data)
+                if data
+                    .callable_header(&crate::semantic_query::ResolveOverloadSetConsumer::witness())
+                    .is_some() =>
+            {
+                Arc::clone(
+                    data.callable_header(
+                        &crate::semantic_query::ResolveOverloadSetConsumer::witness(),
+                    )
+                    .unwrap()
+                    .params,
+                )
+            }
             _ => return Some(Vec::new()),
         };
         let mut out = Vec::new();
@@ -1337,10 +1383,12 @@ fn realize_callable_member_at<C: crate::resolver_core::ResolverCapabilities>(
         // A CALL signature — the realized callable. A CONSTRUCT signature
         // (`new (...) => R`) is not invocable as a callback and falls
         // through to the non-callable classification below.
-        SemanticNodeData::Signature {
-            kind: SignatureKind::Call,
-            ..
-        } => SurfaceResolution::resolved(normalized),
+        data if data
+            .callable_header(&crate::semantic_query::ResolveOverloadSetConsumer::witness())
+            .is_some_and(|header| header.kind == SignatureKind::Call) =>
+        {
+            SurfaceResolution::resolved(normalized)
+        }
 
         // A composite of slot-callable arms (`default: SlotA | SlotB`
         // raises to `Union(Ref(SlotA), Ref(SlotB))`; `(SlotA & SlotB)['default']`
