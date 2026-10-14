@@ -8311,6 +8311,25 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let _ = concrete_read.discard();
             return result;
         }
+        // An alias application on one side stands for the type its body
+        // instantiates to: a reference to the other side's declaration
+        // relates by type arguments as that reference would.
+        let through_alias = [
+            self.alias_application_reference_to(source, target)
+                .map(|resolved| (resolved, target)),
+            self.alias_application_reference_to(target, source)
+                .map(|resolved| (source, resolved)),
+        ];
+        for (source, target) in through_alias.into_iter().flatten() {
+            if let Some(result) = self.infer_from_type_arguments(source, target, bindings) {
+                let _ = concrete_read.discard();
+                return result;
+            }
+            if let Some(result) = self.relate_by_variance(source, target, bindings) {
+                let _ = concrete_read.discard();
+                return result;
+            }
+        }
         let _ = concrete_read.adopt(self);
         if let Some(r) = self.try_object_vs_record_relation(source, target, bindings) {
             return r;
