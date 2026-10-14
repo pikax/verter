@@ -139,6 +139,26 @@ pub struct ParsedEvalProgram {
     had_errors: bool,
 }
 
+/// The arena's own first chunk when it is created empty.
+const ARENA_FIRST_CHUNK_BYTES: usize = 16 * 1024;
+
+/// The arena a retained parse of `source_len` bytes allocates into.
+///
+/// The arena lives as long as the snapshot's lease, so its unused tail is
+/// retained memory. An empty arena's first chunk is a fixed 16 KiB, which
+/// for a declaration-only file is many times its AST; a file whose expected
+/// AST fits below that starts from a chunk sized to it instead. When the
+/// estimate runs short, the arena grows by its own rule, as it would have.
+fn retained_arena(source_len: usize) -> oxc_allocator::Allocator {
+    let expected = source_len
+        .saturating_mul(verter_session_query::retention::PARSE_SNAPSHOT_BYTES_PER_SOURCE_BYTE);
+    if expected < ARENA_FIRST_CHUNK_BYTES {
+        oxc_allocator::Allocator::with_capacity(expected)
+    } else {
+        oxc_allocator::Allocator::new()
+    }
+}
+
 impl ParsedEvalProgram {
     #[cfg(test)]
     pub(crate) fn parse(source: Arc<str>, source_type: oxc_span::SourceType) -> Option<Self> {
@@ -158,7 +178,7 @@ impl ParsedEvalProgram {
         let mut had_errors = false;
         let cell = ParsedEvalProgramCell::new(
             ParsedEvalProgramOwner {
-                allocator: oxc_allocator::Allocator::new(),
+                allocator: retained_arena(source.len()),
                 source,
                 source_type,
             },

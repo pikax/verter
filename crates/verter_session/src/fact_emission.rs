@@ -375,7 +375,7 @@ pub(crate) fn emit_parse_facts_counting_inventory(
             .synthesised_value_bodies()
             .map(|(key, body)| (key.clone(), Arc::clone(body)))
             .collect(),
-        computed: Arc::new(DashMap::default()),
+        computed: Arc::new(verter_semantic_source::per_file_map::per_file_map()),
     };
 
     (

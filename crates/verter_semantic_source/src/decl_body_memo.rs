@@ -540,13 +540,13 @@ impl DeclBodyMemo {
             counters,
             lens: OnceLock::new(),
             route_lens: OnceLock::new(),
-            type_entries: DashMap::default(),
-            value_entries: DashMap::default(),
-            aug_type_entries: DashMap::default(),
-            aug_value_entries: DashMap::default(),
+            type_entries: crate::per_file_map::per_file_map(),
+            value_entries: crate::per_file_map::per_file_map(),
+            aug_type_entries: crate::per_file_map::per_file_map(),
+            aug_value_entries: crate::per_file_map::per_file_map(),
             whole_env: OnceLock::new(),
             function_index,
-            raw_surfaces: DashMap::default(),
+            raw_surfaces: crate::per_file_map::per_file_map(),
         }
     }
 
@@ -601,13 +601,13 @@ impl DeclBodyMemo {
             counters,
             lens: OnceLock::new(),
             route_lens: OnceLock::new(),
-            type_entries: DashMap::default(),
-            value_entries: DashMap::default(),
-            aug_type_entries: DashMap::default(),
-            aug_value_entries: DashMap::default(),
+            type_entries: crate::per_file_map::per_file_map(),
+            value_entries: crate::per_file_map::per_file_map(),
+            aug_type_entries: crate::per_file_map::per_file_map(),
+            aug_value_entries: crate::per_file_map::per_file_map(),
             whole_env: OnceLock::new(),
             function_index,
-            raw_surfaces: DashMap::default(),
+            raw_surfaces: crate::per_file_map::per_file_map(),
         };
 
         for (name, group) in &env.type_symbols {

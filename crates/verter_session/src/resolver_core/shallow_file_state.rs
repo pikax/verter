@@ -652,7 +652,7 @@ impl ShallowFileState {
                 synthesised_value_symbols: FxHashMap::default(),
             },
             decl_bodies,
-            type_deps_cache: dashmap::DashMap::default(),
+            type_deps_cache: verter_semantic_source::per_file_map::per_file_map(),
             synthesised_value_bodies: FxHashMap::default(),
             route_surface_hash: RouteSurfaceHashMemo::default(),
             syntactic_route_interface_hash: RouteSurfaceHashMemo::default(),
