@@ -45,10 +45,9 @@ import {
   createMetaRuntime,
   getMetaRuntime,
   inlineConfigHash,
-  tsconfigConfigHash,
+  hashTsconfigConfig,
   resolvePath as runtimeResolvePath,
   normalizePath as runtimeNormalizePath,
-  parseTsconfig,
   extractPathAliases,
   tsconfigProjectConfig,
 } from "../runtime/index.js";
@@ -2329,15 +2328,12 @@ export async function createChecker(
   const normalizedAbsPath = runtimeResolvePath(tsconfigPath);
   const projectRoot = dirname(normalizedAbsPath);
   const workspace = createWorkspace(projectRoot);
-  const parsed = await parseTsconfig(normalizedAbsPath, workspace);
   const input: EngineKeyInput = {
     backend: "napi",
     root: runtimeNormalizePath(projectRoot),
     configKind: "tsconfig",
     tsconfigPath: runtimeNormalizePath(normalizedAbsPath),
-    configHash: tsconfigConfigHash(
-      parsed?.config ?? { tsconfigPath: runtimeNormalizePath(normalizedAbsPath) },
-    ),
+    configHash: hashTsconfigConfig(normalizedAbsPath),
     nativeFlags: {
       analysisLevel: "full",
       auditEnabled: options?.logging?.audit ?? false,

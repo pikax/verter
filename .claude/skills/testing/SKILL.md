@@ -89,6 +89,15 @@ it("type is correctly inferred", () => {
 
 ## Rust Test Patterns
 
+Unit-test hosts without explicit project authority use a tsconfig-less
+in-memory project context. Do not fabricate a tsconfig path for that context:
+configured program discovery treats its membership as authored roots and can
+eagerly consume the cold artifact flights a demand or provenance test measures.
+Tests of authored membership, import/reference closure or compiler options use
+`new_standalone_with_tsconfig_projects` or explicitly configure the workspace
+through the shared tsconfig loader. Cold-flight, footprint and parse-count
+assertions remain applicable to tsconfig-less fixtures.
+
 ### Test File Organization
 
 When a Rust source file's inline `#[cfg(test)] mod tests` block exceeds ~400 lines, extract tests to a separate sibling file. Two patterns:

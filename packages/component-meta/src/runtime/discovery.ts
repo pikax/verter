@@ -9,6 +9,7 @@ import { resolve, dirname } from "node:path";
 import { CLIENT_CARRIER_EXTENSIONS } from "@verter/language-shared";
 import type { CheckerWorkspace } from "../compat/checker.js";
 import { dirnamePath, normalizePath, resolvePath } from "./engine-key.js";
+import { parseTsconfigText } from "./tsconfig.js";
 
 /**
  * Whether a file name is a framework-carrier component file — ends in ANY
@@ -19,7 +20,10 @@ function isCarrierComponentFile(name: string): boolean {
   return CLIENT_CARRIER_EXTENSIONS.some((ext) => name.endsWith(ext));
 }
 
-async function readFileSafe(absPath: string, ws: CheckerWorkspace): Promise<string | null> {
+async function readFileSafe(
+  absPath: string,
+  ws: Pick<CheckerWorkspace, "readFile">,
+): Promise<string | null> {
   return (await ws.readFile(normalizePath(absPath))) ?? null;
 }
 
@@ -28,17 +32,13 @@ async function readFileSafe(absPath: string, ws: CheckerWorkspace): Promise<stri
  */
 export async function parseTsconfig(
   tsconfigPath: string,
-  ws: CheckerWorkspace,
+  ws: Pick<CheckerWorkspace, "readFile">,
 ): Promise<{ config: Record<string, unknown>; dir: string } | null> {
   const absPath = resolve(tsconfigPath);
   const raw = await readFileSafe(absPath, ws);
   if (!raw) return null;
-  try {
-    const stripped = raw.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
-    return { config: JSON.parse(stripped), dir: dirname(absPath) };
-  } catch {
-    return null;
-  }
+  const config = parseTsconfigText(raw);
+  return config ? { config, dir: dirname(absPath) } : null;
 }
 
 /**

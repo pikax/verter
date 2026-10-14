@@ -32,7 +32,13 @@ project contexts. Explicit `providerRoot` / `workspaceAliases` /
 does not clear the tsconfig's). A project with no `tsconfigPath` — the inline
 `config` session — keeps the match-all membership: match-all is only for
 tsconfig-less projects. The pooled engine identity follows the same split:
-`tsconfigConfigHash` hashes the whole tsconfig (membership included);
+`runtime/tsconfig.ts::hashTsconfigConfig` fingerprints the tsconfig bytes and
+its ordered `extends` graph (string, array and package specifiers), including
+missing resolution probes and package manifests. Inheritance traversal uses
+the native loader's depth-eight bound; the native loader remains the sole
+options/membership merge authority. A shared JSONC parser preserves URLs,
+alias globs and trailing commas. Both session and compat entrypoints use this
+identity; synchronous eviction computes the same key.
 `inlineConfigHash` strips `include`, which is only a discovery filter for a
 match-all project. Guards: `crates/verter_napi/src/project_config_tests.rs`,
 `packages/component-meta/src/project.program-order.spec.ts`.
