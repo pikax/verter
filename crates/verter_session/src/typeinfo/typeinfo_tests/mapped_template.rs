@@ -313,117 +313,133 @@ fn generic_mapped_index_keeps_the_access_and_alias_arguments() {
 }
 
 #[test]
-fn recursive_mapped_index_publishes_dotted_paths_across_modules() {
-    for (count, groups) in [(20, 3), (100, 5), (300, 5)] {
-        let started = std::time::Instant::now();
-        let mut files = vec![(
-            "/paths/utils.ts".to_string(),
-            "export interface Meta<T> { tag: T; created: number }\n\
-             export type Paths<T, D extends unknown[] = []> = D['length'] extends 3 ? never\n\
-             : T extends object ? { [K in keyof T & string]: K | `${K}.${Paths<T[K], [...D, 0]>}` }[keyof T & string] : never;".to_string(),
-        )];
-        for group in 0..groups {
-            let mut source = "import type { Meta } from './utils';\n".to_string();
-            for other in 0..groups {
-                if other != group {
-                    let imports = (other..count)
-                        .step_by(groups)
-                        .map(|i| format!("E{i}"))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    source.push_str(&format!(
-                        "import type {{ {imports} }} from './entities-{other}';\n"
-                    ));
-                }
-            }
-            for i in (group..count).step_by(groups) {
-                source.push_str(&format!("export interface E{i} {{ id: {i}; name: string; next: E{}; owner: E{}; meta: Meta<{i}> }}\n", (i + 1) % count, (i * 7 + 3) % count));
-            }
-            files.push((format!("/paths/entities-{group}.ts"), source));
-        }
-        let mut api = String::new();
-        for group in 0..groups {
-            let imports = (group..count)
-                .step_by(groups)
-                .map(|i| format!("E{i}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            api.push_str(&format!(
-                "import type {{ {imports} }} from './entities-{group}';\n"
-            ));
-        }
-        api.push_str("export interface Api {\n");
-        for i in 0..count {
-            api.push_str(&format!("e{i}: E{i};\n"));
-        }
-        api.push_str("}\n");
-        files.push(("/paths/api.ts".to_string(), api));
-        files.push(("/paths/scenario.ts".to_string(), "import type { Api } from './api'; import type { Paths } from './utils'; export type Probe = Paths<Api>;".to_string()));
-        let borrowed = files
-            .iter()
-            .map(|(path, source)| (path.as_str(), source.as_str()))
-            .collect::<Vec<_>>();
-        // Complete enumeration of the larger closures needs an explicit
-        // request allowance; the smallest layout exercises the default fuse.
-        let host = make_host_with_workspace_files_config(
-            &borrowed,
-            crate::HostConfig {
-                audit_enabled: true,
-                projection_op_budget: if count == 20 { 0 } else { 50_000 },
-                ..crate::HostConfig::default()
-            },
-        );
-        for (path, source) in &borrowed {
-            upsert_ts(&host, path, source);
-        }
-        let (answer, record) = resolve_expr(
-            &host,
-            "/paths/scenario.ts",
-            "Probe",
-            &[],
-            ProjectionMode::Expanded,
-        );
-        let stats = host.project_type_store().semantic_graph().stats_snapshot();
-        assert!(
-            stats.instantiate_count <= u64::try_from(count * 15 + 20).unwrap(),
-            "recursive applications must share already demanded property types: {count} entities used {} instantiations",
-            stats.instantiate_count,
-        );
-        eprintln!(
-            "layout={count}/{groups} elapsed={:?} instantiates={} evaluations={}",
-            started.elapsed(),
-            stats.instantiate_count,
-            stats.evaluate_deferred_memo_misses
-        );
-        let mut expected = BTreeSet::new();
-        for i in 0..count {
-            expected.insert(format!("e{i}"));
-            for field in ["id", "name", "next", "owner", "meta"] {
-                expected.insert(format!("e{i}.{field}"));
-            }
-            for field in ["next", "owner"] {
-                for child in ["id", "name", "next", "owner", "meta"] {
-                    expected.insert(format!("e{i}.{field}.{child}"));
-                }
-            }
-            for child in ["tag", "created"] {
-                expected.insert(format!("e{i}.meta.{child}"));
+fn recursive_mapped_index_publishes_dotted_paths_across_three_modules() {
+    assert_recursive_paths_layout(20, 3);
+}
+
+#[test]
+fn recursive_mapped_index_publishes_dotted_paths_across_five_modules() {
+    assert_recursive_paths_layout(100, 5);
+}
+
+#[test]
+fn recursive_mapped_index_publishes_dotted_paths_for_three_hundred_entities() {
+    assert_recursive_paths_layout(300, 5);
+}
+
+/// A host holding `Paths<Api>` over `count` entities spread across `groups`
+/// mutually importing modules, under the request allowance `budget`
+/// (`0` keeps the shipped default fuse).
+fn recursive_paths_host(count: usize, groups: usize, budget: usize) -> Arc<crate::VerterHost> {
+    let mut files = vec![(
+        "/paths/utils.ts".to_string(),
+        "export interface Meta<T> { tag: T; created: number }\n\
+         export type Paths<T, D extends unknown[] = []> = D['length'] extends 3 ? never\n\
+         : T extends object ? { [K in keyof T & string]: K | `${K}.${Paths<T[K], [...D, 0]>}` }[keyof T & string] : never;".to_string(),
+    )];
+    for group in 0..groups {
+        let mut source = "import type { Meta } from './utils';\n".to_string();
+        for other in 0..groups {
+            if other != group {
+                let imports = (other..count)
+                    .step_by(groups)
+                    .map(|i| format!("E{i}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                source.push_str(&format!(
+                    "import type {{ {imports} }} from './entities-{other}';\n"
+                ));
             }
         }
-        let TypeExpr::Union(arms) = &answer else {
-            panic!("{count} entities/{groups} modules must publish a path union, got {answer:?}; audit: {:?}", record.kind_payload)
-        };
-        let actual = arms
-            .iter()
-            .map(|arm| {
-                let TypeExpr::Literal(verter_type_expr::LiteralValue::String(path)) = arm else {
-                    panic!("path must be a string literal, got {arm:?}")
-                };
-                path.clone()
-            })
-            .collect::<BTreeSet<_>>();
-        assert_eq!(actual, expected, "{count} entities/{groups} modules");
+        for i in (group..count).step_by(groups) {
+            source.push_str(&format!("export interface E{i} {{ id: {i}; name: string; next: E{}; owner: E{}; meta: Meta<{i}> }}\n", (i + 1) % count, (i * 7 + 3) % count));
+        }
+        files.push((format!("/paths/entities-{group}.ts"), source));
     }
+    let mut api = String::new();
+    for group in 0..groups {
+        let imports = (group..count)
+            .step_by(groups)
+            .map(|i| format!("E{i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        api.push_str(&format!(
+            "import type {{ {imports} }} from './entities-{group}';\n"
+        ));
+    }
+    api.push_str("export interface Api {\n");
+    for i in 0..count {
+        api.push_str(&format!("e{i}: E{i};\n"));
+    }
+    api.push_str("}\n");
+    files.push(("/paths/api.ts".to_string(), api));
+    files.push(("/paths/scenario.ts".to_string(), "import type { Api } from './api'; import type { Paths } from './utils'; export type Probe = Paths<Api>;".to_string()));
+    let borrowed = files
+        .iter()
+        .map(|(path, source)| (path.as_str(), source.as_str()))
+        .collect::<Vec<_>>();
+    let host = make_host_with_workspace_files_config(
+        &borrowed,
+        crate::HostConfig {
+            audit_enabled: true,
+            projection_op_budget: budget,
+            ..crate::HostConfig::default()
+        },
+    );
+    for (path, source) in &borrowed {
+        upsert_ts(&host, path, source);
+    }
+    host
+}
+
+/// `Paths<Api>` over `count` entities spread across `groups` mutually
+/// importing modules publishes every dotted path to depth 3, as tsc does,
+/// with instantiations linear in the entity count.
+fn assert_recursive_paths_layout(count: usize, groups: usize) {
+    // Complete enumeration of the larger closures needs an explicit
+    // request allowance; the smallest layout exercises the default fuse.
+    let host = recursive_paths_host(count, groups, if count == 20 { 0 } else { 50_000 });
+    let (answer, record) = resolve_expr(
+        &host,
+        "/paths/scenario.ts",
+        "Probe",
+        &[],
+        ProjectionMode::Expanded,
+    );
+    let stats = host.project_type_store().semantic_graph().stats_snapshot();
+    assert!(
+        stats.instantiate_count <= u64::try_from(count * 15 + 20).unwrap(),
+        "recursive applications must share already demanded property types: {count} entities used {} instantiations",
+        stats.instantiate_count,
+    );
+    let mut expected = BTreeSet::new();
+    for i in 0..count {
+        expected.insert(format!("e{i}"));
+        for field in ["id", "name", "next", "owner", "meta"] {
+            expected.insert(format!("e{i}.{field}"));
+        }
+        for field in ["next", "owner"] {
+            for child in ["id", "name", "next", "owner", "meta"] {
+                expected.insert(format!("e{i}.{field}.{child}"));
+            }
+        }
+        for child in ["tag", "created"] {
+            expected.insert(format!("e{i}.meta.{child}"));
+        }
+    }
+    let TypeExpr::Union(arms) = &answer else {
+        panic!("{count} entities/{groups} modules must publish a path union, got {answer:?}; audit: {:?}", record.kind_payload)
+    };
+    let actual = arms
+        .iter()
+        .map(|arm| {
+            let TypeExpr::Literal(verter_type_expr::LiteralValue::String(path)) = arm else {
+                panic!("path must be a string literal, got {arm:?}")
+            };
+            path.clone()
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(actual, expected, "{count} entities/{groups} modules");
 }
 
 #[test]
