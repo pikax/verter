@@ -103,13 +103,34 @@ pub struct CompiledGlob {
     raw: NormalizedGlob,
     /// `None` when the raw pattern fails to compile — such globs never match.
     pattern: Option<glob::Pattern>,
+    /// Index of the authored `include` entry this glob expands. One entry
+    /// may expand into a glob per supported extension; TypeScript lists the
+    /// files each entry matches together, in entry order, so the program's
+    /// root order needs the authored entry, not the expanded position.
+    include_entry: u32,
 }
 
 impl CompiledGlob {
     /// Compile a normalized glob once.
     pub fn new(raw: NormalizedGlob) -> Self {
         let pattern = glob::Pattern::new(raw.as_str()).ok();
-        Self { raw, pattern }
+        Self {
+            raw,
+            pattern,
+            include_entry: 0,
+        }
+    }
+
+    /// This glob as an expansion of the authored `include` entry `entry`.
+    #[must_use]
+    pub fn in_include_entry(mut self, entry: u32) -> Self {
+        self.include_entry = entry;
+        self
+    }
+
+    /// The authored `include` entry this glob expands.
+    pub fn include_entry(&self) -> u32 {
+        self.include_entry
     }
 
     /// The raw normalized glob this was compiled from.

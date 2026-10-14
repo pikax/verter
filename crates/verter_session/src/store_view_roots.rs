@@ -434,7 +434,9 @@ pub(crate) struct StoreViewRoots {
     pub(crate) artifact_reader: Option<Arc<crate::project_type_store::ProjectTypeStore>>,
     /// The workspace instance captured at build time. Used ONLY by the
     /// artifact-only authority gate (see
-    /// [`StoreViewRoots::artifact_only_whole_hash_at`]).
+    /// [`StoreViewRoots::artifact_only_whole_hash_at`]) and to stamp the
+    /// live workspace a published program order must still describe (see
+    /// [`StoreViewRoots::program_file_order_fingerprint`]).
     pub(crate) workspace: Option<Arc<dyn verter_workspace::WorkspaceAccess>>,
     /// Dedicated strict-self-root authority captured with the immutable
     /// roots. The live value is re-read only when minting or validating the
@@ -966,6 +968,23 @@ impl StoreViewRoots {
     /// contributor first and then observes the fingerprint of the complete
     /// population. The cost is one recompute for each warm read made while
     /// a contributor waits.
+    /// The published file-order fingerprint of `program`, while it still
+    /// describes the live workspace. `None` once the workspace has moved
+    /// (any project, content or resolution change): the order may differ,
+    /// so no published fingerprint vouches for it. That refuses the warm
+    /// entry; the recompute that follows rebuilds and republishes the
+    /// order and observes its fingerprint, and every other warm entry
+    /// ordered by the same, unchanged sequence validates again.
+    pub(crate) fn program_file_order_fingerprint(&self, program: &str) -> Option<Hash16> {
+        note_owner_visit();
+        let reader = self.artifact_reader.as_ref()?;
+        let stamp = crate::program_order::ProgramOrderStamp::live(self.workspace.as_deref()?)?;
+        reader
+            .indexed()
+            .program_order_index()
+            .published_fingerprint(program, stamp)
+    }
+
     pub(crate) fn global_contributor_fingerprint(
         &self,
         target: crate::file_artifact_store::AugmentationTargetKind,

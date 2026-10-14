@@ -376,6 +376,27 @@ pub fn configured_membership_from_raw(
     }
 }
 
+/// The [`IdeProjectConfig`] of a project configured by `tsconfig_path`,
+/// read through `ws`: its compiler options and its `files` / `include` /
+/// `exclude` membership — the program's root files and their order. The
+/// materialized set is left empty (see [`configured_membership_from_raw`]).
+pub fn configured_ide_project(
+    ws: &dyn crate::traits::WorkspaceRead,
+    root: String,
+    workspace_root: String,
+    tsconfig_path: &str,
+) -> IdeProjectConfig {
+    let mut project =
+        crate::resolver::ide_project_config(root, workspace_root, Some(tsconfig_path.to_owned()));
+    project.compiler_options = crate::config::load_compiler_options(ws, tsconfig_path);
+    project.membership = configured_membership_from_raw(
+        &project.root,
+        &crate::config::load_project_membership(ws, tsconfig_path),
+        &project.compiler_options,
+    );
+    project
+}
+
 /// Materialize the configured file set from a static membership spec.
 ///
 /// When `ws` is `Some` and the workspace supports `walk()`, walks the

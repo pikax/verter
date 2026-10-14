@@ -242,9 +242,16 @@ pub fn static_membership_from_includes(
         .collect();
     let include = include
         .iter()
-        .map(|g| NormalizedGlob::new(&root_membership_entry(root, g, false)))
-        .flat_map(|g| expand_include_glob(&g, supported))
-        .map(CompiledGlob::new)
+        .enumerate()
+        .flat_map(|(entry, g)| {
+            let entry = u32::try_from(entry).unwrap_or(u32::MAX);
+            expand_include_glob(
+                &NormalizedGlob::new(&root_membership_entry(root, g, false)),
+                supported,
+            )
+            .into_iter()
+            .map(move |glob| CompiledGlob::new(glob).in_include_entry(entry))
+        })
         .collect();
     let exclude = exclude
         .iter()

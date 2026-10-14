@@ -101,28 +101,6 @@ fn snapshot_with(mut projects: Vec<OwnershipProject>) -> WorkspaceSnapshot {
 // ── owners_for_file basic ──
 
 #[test]
-fn declaration_precedence_uses_first_files_entry_and_new_snapshot_order() {
-    let ordered = |files: &[&str]| {
-        let mut project = configured_project(0, "/app", "/app/tsconfig.json", files);
-        let ProjectPayload::Configured { membership, .. } = &mut project.payload else {
-            unreachable!()
-        };
-        membership.spec.files = files.iter().map(|file| CanonicalPath::new(file)).collect();
-        snapshot_with(vec![project])
-    };
-    let first = ordered(&["/app/z.ts", "/app/a.ts", "/app/z.ts"]);
-    for _ in 0..128 {
-        assert_eq!(first.declaration_sequence_rank("/app/z.ts"), 0);
-        assert_eq!(first.declaration_sequence_rank("/app/a.ts"), 1);
-    }
-    assert_eq!(first.owners_memo.declaration_ranks.len(), 1);
-    assert_eq!(first.declaration_sequence_rank("/app/extra.ts"), u32::MAX);
-    let next = ordered(&["/app/a.ts", "/app/z.ts"]);
-    assert_eq!(next.declaration_sequence_rank("/app/z.ts"), 1);
-    assert_eq!(first.declaration_sequence_rank("/app/z.ts"), 0);
-}
-
-#[test]
 fn configured_owner_for_materialized_file() {
     let snap = snapshot_with(vec![
         configured_project(

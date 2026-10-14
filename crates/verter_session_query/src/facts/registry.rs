@@ -452,6 +452,18 @@ pub enum FactKey {
         resolved_relative_canonical: Option<Arc<str>>,
         wildcard_pattern: Option<InternedGlobPattern>,
     },
+    /// Fingerprint of one program's FILE ORDER: the sequence a TypeScript
+    /// program lists its source files in — the `files` / `include` roots,
+    /// each preceded by the files its triple-slash references and imports
+    /// pull in, first visit wins. Declarations of a symbol merged across
+    /// files order by it, so a result that ordered contributors from two or
+    /// more files observes it. Unlike the per-file
+    /// [`DeclContributionOrder`](Self::DeclContributionOrder) /
+    /// [`AugmentationContributionOrder`](Self::AugmentationContributionOrder)
+    /// sequences, it moves on an edit to a file that contributes nothing —
+    /// an import added to a non-contributor can place a contributor
+    /// earlier. `program` names the program by its project config path.
+    ProgramFileOrder { program: Arc<str> },
 }
 
 /// Tag-only representation of
@@ -552,7 +564,9 @@ impl FactKey {
                 FactDomain::ResolveImports
             }
 
-            Self::ModuleAugmentationIndexShape { .. } => FactDomain::RouteSurface,
+            Self::ModuleAugmentationIndexShape { .. } | Self::ProgramFileOrder { .. } => {
+                FactDomain::RouteSurface
+            }
         }
     }
 }
@@ -850,12 +864,17 @@ mod registry_tests {
             );
         }
 
-        let route_surface_keys = [FactKey::ModuleAugmentationIndexShape {
-            target_kind_tag: AugmentationTargetKindTag::ExternalSpecifier,
-            external_specifier: Some(InternedSpecifier::from("vue")),
-            resolved_relative_canonical: None,
-            wildcard_pattern: None,
-        }];
+        let route_surface_keys = [
+            FactKey::ModuleAugmentationIndexShape {
+                target_kind_tag: AugmentationTargetKindTag::ExternalSpecifier,
+                external_specifier: Some(InternedSpecifier::from("vue")),
+                resolved_relative_canonical: None,
+                wildcard_pattern: None,
+            },
+            FactKey::ProgramFileOrder {
+                program: Arc::from("/app/tsconfig.json"),
+            },
+        ];
         for k in &route_surface_keys {
             assert_eq!(
                 k.domain(),

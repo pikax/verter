@@ -742,8 +742,9 @@ fn project_filtered_population_is_shared_and_tracks_membership_revision() {
     }
     let snapshot = store.global_contributor_index().snapshot();
     let visits = Cell::new(0);
-    let lookup = |project, generation, prefix: &str| {
-        snapshot.lookup_in_project(
+    let lookup =
+        |project, generation, prefix: &str| {
+            snapshot.lookup_in_project(
             "Shared",
             SymbolSpace::Type,
             None,
@@ -753,9 +754,12 @@ fn project_filtered_population_is_shared_and_tracks_membership_revision() {
                 visits.set(visits.get() + 1);
                 entry.artifact_key.canonical.starts_with(prefix)
             },
-            |_| 0,
+            |_| {
+                Arc::new(verter_session_query::inputs::program_order::ProgramFileOrder::unordered())
+            },
         )
-    };
+        .0
+        };
     let first = lookup(0, 1, "/p0/");
     assert_eq!(first.entries.len(), 64);
     let visits_after_first = visits.get();
@@ -799,8 +803,8 @@ fn project_filtered_population_is_shared_and_tracks_membership_revision() {
 
 #[test]
 fn every_base_borrows_one_augmentation_collection_order() {
-    use std::cell::Cell;
     use verter_session_query::inputs::contributors::AugmentationCandidate;
+    use verter_session_query::inputs::program_order::ProgramFileOrder;
     use verter_session_query::resolution::{
         AugmentationPopulation, AugmentationTargetKey, AugmenterSet, ProjectIdentity,
     };
@@ -817,44 +821,40 @@ fn every_base_borrows_one_augmentation_collection_order() {
     };
     for size in [128usize, 512, 2048] {
         let store = FileArtifactStore::new();
-        for i in 0..size {
-            publish(
-                &store,
-                &format!("/decl{i:04}.d.ts"),
-                &format!("interface Shared {{ p{i}: {i} }}"),
-            );
+        let names: Vec<String> = (0..size).map(|i| format!("/decl{i:04}.d.ts")).collect();
+        for (i, name) in names.iter().enumerate() {
+            publish(&store, name, &format!("interface Shared {{ p{i}: {i} }}"));
         }
+        let program = |roots: Vec<&String>| {
+            Arc::new(ProgramFileOrder::sequence(
+                Arc::from("/tsconfig.json"),
+                roots.into_iter().map(|name| Arc::from(name.as_str())),
+                |_| Some(Vec::new()),
+            ))
+        };
+        let listed = program(names.iter().collect());
+        let first_last = program(names[1..].iter().chain(&names[..1]).collect());
         let snapshot = store.global_contributor_index().snapshot();
         let contributors = snapshot.lookup(&key.target, "Shared", None, true);
-        let ranks = Cell::new(0);
-        let lookup = |generation, reverse| {
-            snapshot.augmentation_order(
-                &key,
-                &augmenters,
-                "Shared",
-                &contributors,
-                Some(generation),
-                |canonical| {
-                    ranks.set(ranks.get() + 1);
-                    if reverse && canonical == "/decl0000.d.ts" {
-                        1
-                    } else {
-                        0
-                    }
-                },
-            )
+        let lookup = |order: &Arc<ProgramFileOrder>| {
+            let (view, observed) =
+                snapshot.augmentation_order(&key, &augmenters, "Shared", &contributors, |_| {
+                    Arc::clone(order)
+                });
+            assert!(observed.is_some_and(|observed| Arc::ptr_eq(&observed, order)));
+            view
         };
-        let first = lookup(1, false);
+        let first = lookup(&listed);
         assert_eq!(first.len(), size);
         let copied = snapshot.materialized_view_entry_count();
-        assert_eq!(ranks.get(), size, "rank each contributor once");
+        let work = snapshot.ordering_work_count();
         for _ in 0..size {
-            assert!(Arc::ptr_eq(&first, &lookup(1, false)));
+            assert!(Arc::ptr_eq(&first, &lookup(&listed)));
         }
         assert_eq!(
-            ranks.get(),
-            size,
-            "base demands do not recollect the population"
+            snapshot.ordering_work_count(),
+            work,
+            "base demands do not reorder the population"
         );
         assert_eq!(
             snapshot.materialized_view_entry_count(),
@@ -862,12 +862,11 @@ fn every_base_borrows_one_augmentation_collection_order() {
             "base demands copy no contributor slots"
         );
         assert!(matches!(first[0], AugmentationCandidate::FileScope(0)));
-        let reordered = lookup(2, true);
+        let reordered = lookup(&first_last);
         assert!(
             matches!(reordered[size - 1], AugmentationCandidate::FileScope(0)),
-            "membership revision changes precedence"
+            "the program order decides precedence"
         );
-        assert_eq!(ranks.get(), 2 * size);
     }
 }
 

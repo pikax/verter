@@ -139,8 +139,12 @@ impl IndexedInputs for crate::VerterHost {
     ) -> Option<verter_session_query::resolution::ProjectId> {
         crate::VerterHost::resolve_project_for_canonical(self, canonical)
     }
-    fn declaration_sequence_rank(&self, canonical: &str) -> u32 {
-        crate::VerterHost::declaration_sequence_rank(self, canonical)
+    fn program_file_order(
+        &self,
+        anchor: &str,
+        ordered: &mut dyn Iterator<Item = &str>,
+    ) -> Arc<verter_session_query::inputs::program_order::ProgramFileOrder> {
+        crate::VerterHost::program_file_order(self, anchor, ordered)
     }
 
     fn engine_policy(&self) -> verter_type_engine::project_semantic_dispatch::EnginePolicy {
@@ -800,11 +804,13 @@ where
         );
         self.0.host().resolve_project_for_canonical(canonical)
     }
-    fn declaration_sequence_rank(&self, canonical: &str) -> u32 {
-        verter_type_engine::count_resolver_context_call!(
-            "IndexedInputs::declaration_sequence_rank"
-        );
-        self.0.host().declaration_sequence_rank(canonical)
+    fn program_file_order(
+        &self,
+        anchor: &str,
+        ordered: &mut dyn Iterator<Item = &str>,
+    ) -> Arc<verter_session_query::inputs::program_order::ProgramFileOrder> {
+        verter_type_engine::count_resolver_context_call!("IndexedInputs::program_file_order");
+        self.0.host().program_file_order(anchor, ordered)
     }
 
     fn engine_policy(&self) -> verter_type_engine::project_semantic_dispatch::EnginePolicy {

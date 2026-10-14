@@ -647,13 +647,16 @@ macro_rules! owned_lowering_from_source_inputs {
                 let project_for = |canonical: &str| root.as_ref()
                     .and_then(|root| root.snapshot.owners_for_file(canonical).first().copied());
                 let project = project_for(demand_canonical);
-                let contributors = population.lookup_in_project(name, space, discriminator, project,
+                let (contributors, order) = population.lookup_in_project(name, space, discriminator, project,
                     root.as_ref().map(|root| root.snapshot.generation.0),
                     |entry| {
                         let owner = project_for(entry.artifact_key.canonical.as_ref());
                         owner.is_none() || owner == project
                     },
-                    |canonical| root.as_ref().map_or(u32::MAX, |root| root.snapshot.declaration_sequence_rank(canonical)));
+                    |candidates| host.program_file_order(demand_canonical, candidates));
+                if let Some(order) = order {
+                    verter_type_engine::resolver_core::resolver_context::observe_program_file_order(&order);
+                }
                 verter_type_engine::resolver_core::request_ports::ContributorAnswer {
                     population_fingerprint: population.observation_fingerprint(
                         &crate::file_artifact_store::AugmentationTargetKind::GlobalAugmentation,
@@ -692,6 +695,7 @@ macro_rules! owned_lowering_from_source_inputs {
             }
             fn augmentation_contributor_order(
                 &self,
+                anchor: &str,
                 key: &crate::file_artifact_store::AugmentationTargetKey,
                 augmenters: &verter_session_query::resolution::AugmenterSet,
                 name: &str,
@@ -699,11 +703,13 @@ macro_rules! owned_lowering_from_source_inputs {
             ) -> Arc<[verter_session_query::inputs::contributors::AugmentationCandidate]> {
                 verter_type_engine::count_resolver_context_call!("OwnedLowering::augmentation_contributor_order");
                 let host = SourceInputProvider::source_host(self);
-                let root = host.workspace().published_root();
-                host.project_type_store().indexed().global_contributor_index().snapshot()
+                let (ordered, order) = host.project_type_store().indexed().global_contributor_index().snapshot()
                     .augmentation_order(key, augmenters, name, contributors,
-                        root.as_ref().map(|root| root.snapshot.generation.0),
-                        |canonical| root.as_ref().map_or(u32::MAX, |root| root.snapshot.declaration_sequence_rank(canonical)))
+                        |candidates| host.program_file_order(anchor, candidates));
+                if let Some(order) = order {
+                    verter_type_engine::resolver_core::resolver_context::observe_program_file_order(&order);
+                }
+                ordered
             }
             fn augmenter_artifact_answer(
                 &self,

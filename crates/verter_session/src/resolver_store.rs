@@ -3306,10 +3306,10 @@ impl verter_session_query::facts::store_view::StoreView for HostStoreView {
 
     /// Route-surface-domain validator (R26 + R29 + G1).
     ///
-    /// `RouteSurface` is a ONE-ARM domain:
     /// `ModuleAugmentationIndexShape` → consult the snapshot of
     /// augmentation-index fingerprints captured at view-build time
-    /// (R29 / G1 producer state).
+    /// (R29 / G1 producer state). `ProgramFileOrder` → the program's
+    /// published file order, while it still describes the live workspace.
     fn validates_route_surface_domain(
         &self,
         fact: &verter_session_query::facts::fact_cache::RouteSurfaceFactRef,
@@ -3401,6 +3401,10 @@ impl verter_session_query::facts::store_view::StoreView for HostStoreView {
                     // through the cold path (which will populate the index).
                     None => false,
                 }
+            }
+            FactKey::ProgramFileOrder { program } => {
+                self.snapshot.roots.program_file_order_fingerprint(program)
+                    == Some(fact.expected_hash)
             }
             // Other parse-domain / resolve-domain keys do not belong
             // to the route-surface domain; the dispatch layer guards

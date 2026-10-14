@@ -92,7 +92,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         None => self.file_module_object(&dependency, context),
                     },
                     None => {
-                        let blocks = self.ambient_module_blocks(&target.source_specifier);
+                        let blocks =
+                            self.ambient_module_blocks(canonical, &target.source_specifier);
                         match blocks
                             .iter()
                             .find(|block| block.export_assignment.is_some())
@@ -330,21 +331,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         && entry.module_kind == FileModuleKind::Script
                 })
                 .collect();
-        declarations.sort_by(|left, right| {
-            self.ctx
-                .declaration_sequence_rank(left.artifact_key.canonical.as_ref())
-                .cmp(
-                    &self
-                        .ctx
-                        .declaration_sequence_rank(right.artifact_key.canonical.as_ref()),
-                )
-                .then_with(|| {
-                    left.artifact_key
-                        .canonical
-                        .as_ref()
-                        .cmp(right.artifact_key.canonical.as_ref())
-                })
-        });
+        self.sort_in_program_order(
+            demand_canonical,
+            &mut declarations,
+            |entry| entry.artifact_key.canonical.as_ref(),
+            |_, _| std::cmp::Ordering::Equal,
+        );
         let first = declarations.first()?;
         let mut roots: Vec<ObservedGraphSelfRoot> = Vec::new();
         let mut members: Vec<(Arc<str>, ValueRootKey)> = Vec::new();

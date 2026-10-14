@@ -364,18 +364,13 @@ fn configure_project(
     let lib_text = read(dir, lib)?;
     let tsconfig_path = format!("{PROJECT_ROOT}/tsconfig.json");
     workspace.inject_file(tsconfig_path.clone(), Arc::from(tsconfig.as_str()));
-    let mut project = verter_workspace::ide_project_config(
-        PROJECT_ROOT.to_string(),
-        PROJECT_ROOT.to_string(),
-        Some(tsconfig_path.clone()),
-    );
-    project.compiler_options = verter_workspace::load_compiler_options(workspace, &tsconfig_path);
     // The scenario's `files` sequence is its program order, which orders
     // the declarations of a symbol merged across files.
-    project.membership.spec = verter_workspace::membership_to_spec(
-        &verter_workspace::CanonicalPath::new(PROJECT_ROOT),
-        &verter_workspace::load_project_membership(workspace, &tsconfig_path),
-        &verter_workspace::snapshot_builder::supported_extensions_for(&project.compiler_options),
+    let project = verter_workspace::configured_ide_project(
+        workspace,
+        PROJECT_ROOT.to_string(),
+        PROJECT_ROOT.to_string(),
+        &tsconfig_path,
     );
     host.configure_projects(vec![project]);
     match lib_mode {

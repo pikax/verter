@@ -75,6 +75,11 @@ pub const EXPECTED_MODULE_AUGMENTATION_INDEX_SHAPE_INSTALL: &str =
 pub const EXPECTED_MODULE_AUGMENTATION_INDEX_SHAPE_REFRESH: &str =
     "ModuleAugmentationIndexShape(ext=vue, prev=05060708, new=090a0b0c, n=2)";
 
+pub const EXPECTED_PROGRAM_FILE_ORDER_INSTALL: &str =
+    "ProgramFileOrder(/w/tsconfig.json, install=01020304, n=3)";
+pub const EXPECTED_PROGRAM_FILE_ORDER_REFRESH: &str =
+    "ProgramFileOrder(/w/tsconfig.json, prev=01020304, new=05060708, n=4)";
+
 pub const EXPECTED_FILE_ARTIFACT_CACHE_ADMIT: &str =
     "FileArtifactCache(/w/a.ts, Admit, ch=01020304, pe=05060708, n=1)";
 
@@ -368,6 +373,24 @@ pub fn fixture_module_augmentation_index_shape_install() -> Event {
     }
 }
 
+pub fn fixture_program_file_order_install() -> Event {
+    Event::ProgramFileOrder {
+        program: Arc::from("/w/tsconfig.json"),
+        prev_fingerprint: None,
+        new_fingerprint: [1, 2, 3, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        file_count: 3,
+    }
+}
+
+pub fn fixture_program_file_order_refresh() -> Event {
+    Event::ProgramFileOrder {
+        program: Arc::from("/w/tsconfig.json"),
+        prev_fingerprint: Some([1, 2, 3, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+        new_fingerprint: [5, 6, 7, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        file_count: 4,
+    }
+}
+
 pub fn fixture_module_augmentation_index_shape_refresh() -> Event {
     Event::ModuleAugmentationIndexShape {
         target_kind_tag: AugmentationTargetKindTag::ExternalSpecifier,
@@ -598,6 +621,14 @@ pub fn all_snapshots() -> Vec<(Event, &'static str)> {
             EXPECTED_MODULE_AUGMENTATION_INDEX_SHAPE_REFRESH,
         ),
         (
+            fixture_program_file_order_install(),
+            EXPECTED_PROGRAM_FILE_ORDER_INSTALL,
+        ),
+        (
+            fixture_program_file_order_refresh(),
+            EXPECTED_PROGRAM_FILE_ORDER_REFRESH,
+        ),
+        (
             fixture_file_artifact_cache_admit(),
             EXPECTED_FILE_ARTIFACT_CACHE_ADMIT,
         ),
@@ -697,6 +728,7 @@ mod tests {
             | Event::FactSignatureAdmissionRefused { .. }
             | Event::ModuleAugmentationStitched { .. }
             | Event::ModuleAugmentationIndexShape { .. }
+            | Event::ProgramFileOrder { .. }
             | Event::FileArtifactCache { .. }
             | Event::FactRegistryWrite { .. }
             | Event::FactValidationSummary { .. }
@@ -741,6 +773,7 @@ mod tests {
             "FactSignatureAdmissionRefused",
             "ModuleAugmentationStitched",
             "ModuleAugmentationIndexShape",
+            "ProgramFileOrder",
             "FileArtifactCache",
             "FactRegistryWrite",
             "FactValidationSummary",
@@ -788,6 +821,7 @@ mod tests {
                 Event::FactSignatureAdmissionRefused { .. } => "FactSignatureAdmissionRefused",
                 Event::ModuleAugmentationStitched { .. } => "ModuleAugmentationStitched",
                 Event::ModuleAugmentationIndexShape { .. } => "ModuleAugmentationIndexShape",
+                Event::ProgramFileOrder { .. } => "ProgramFileOrder",
                 Event::FileArtifactCache { .. } => "FileArtifactCache",
                 Event::FactRegistryWrite { .. } => "FactRegistryWrite",
                 Event::FactValidationSummary { .. } => "FactValidationSummary",

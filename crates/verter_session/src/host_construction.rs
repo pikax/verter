@@ -787,23 +787,12 @@ impl VerterHost {
                 let root = root.trim_end_matches('/').to_string();
                 let tsconfig_path = format!("{root}/tsconfig.json");
                 workspace.inject_file(tsconfig_path.clone(), Arc::from(*tsconfig_json));
-                let mut project = verter_workspace::ide_project_config(
+                verter_workspace::configured_ide_project(
+                    &*workspace,
                     root.clone(),
                     root,
-                    Some(tsconfig_path.clone()),
-                );
-                project.compiler_options =
-                    verter_workspace::load_compiler_options(&*workspace, &tsconfig_path);
-                // `files` / `include` / `exclude` are the project's roots and
-                // their order, as the LSP's configured projects load them.
-                project.membership.spec = verter_workspace::membership_to_spec(
-                    &verter_workspace::CanonicalPath::new(&project.root),
-                    &verter_workspace::load_project_membership(&*workspace, &tsconfig_path),
-                    &verter_workspace::snapshot_builder::supported_extensions_for(
-                        &project.compiler_options,
-                    ),
-                );
-                project
+                    &tsconfig_path,
+                )
             })
             .collect();
         let host = Self::new(config, workspace);
@@ -1192,16 +1181,6 @@ impl VerterHost {
     ) -> Option<verter_session_query::resolution::ProjectId> {
         let root = self.workspace().published_root()?;
         root.snapshot.owners_for_file(canonical).first().copied()
-    }
-
-    /// Configured `files` index for `canonical`, or `u32::MAX` when the
-    /// path was discovered by include/globs (unordered inputs are then
-    /// normalized by canonical spelling).
-    pub(crate) fn declaration_sequence_rank(&self, canonical: &str) -> u32 {
-        let Some(root) = self.workspace().published_root() else {
-            return u32::MAX;
-        };
-        root.snapshot.declaration_sequence_rank(canonical)
     }
 
     /// IndexedReady for a declaration file whose source is a global/ambient

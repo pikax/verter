@@ -379,3 +379,88 @@ fn export_declarations_are_not_export_modifiers() {
         );
     }
 }
+
+fn program_references_of(
+    source: &str,
+    source_type: SourceType,
+) -> verter_session_query::analysis::route_inventory::ProgramReferences {
+    let allocator = Box::leak(Box::new(Allocator::default()));
+    let parsed = Parser::new(allocator, source, source_type).parse();
+    assert!(
+        parsed.diagnostics.is_empty(),
+        "{source}: {:?}",
+        parsed.diagnostics
+    );
+    build_script_route_inventory(&parsed.program).program_references
+}
+
+/// A file pulls its program files in TypeScript's visiting order: leading
+/// triple-slash references by kind, then import specifiers in statement
+/// order, then dynamic imports and import types in source order, then
+/// augmented module names. A directive after the first token is no
+/// directive.
+#[test]
+fn program_references_follow_typescript_collection_order() {
+    let source = r#"#!/usr/bin/env node
+/// <reference path="./late.ts" />
+// an ordinary comment between directives
+/// <reference types="node" />
+/// <Reference lib='es2015' />
+/// <reference no-default-lib="true" />
+/// <reference path="./early.d.ts" />
+/* a block comment */
+import type { A } from './a';
+const lazy = () => import('./dynamic');
+type T = import('./typed').T;
+export * from './star';
+declare module './augmented' { interface A {} }
+export { b } from './b';
+/// <reference path="./ignored.ts" />
+"#;
+    let references = program_references_of(source, SourceType::ts());
+    assert_eq!(references.paths, ["./late.ts", "./early.d.ts"]);
+    assert_eq!(references.types, ["node"]);
+    assert_eq!(references.libs, ["es2015"]);
+    assert_eq!(
+        references.module_names,
+        [
+            "./a",
+            "./star",
+            "./b",
+            "./dynamic",
+            "./typed",
+            "./augmented"
+        ]
+    );
+}
+
+/// In a script, a `declare module "m"` declares an ambient module rather
+/// than augmenting one: its body's non-relative imports are the file's,
+/// and an ambient module nested in it augments its name.
+#[test]
+fn script_ambient_module_bodies_contribute_their_bare_imports() {
+    let source = r#"
+declare module 'host' {
+    import { x } from 'dep';
+    import { y } from './relative';
+    module 'nested' {}
+}
+declare module './not-ambient-in-a-script';
+"#;
+    let references = program_references_of(source, SourceType::ts());
+    assert_eq!(references.module_names, ["dep", "nested"]);
+}
+
+/// `require("m")` pulls `m` in only from a JavaScript file.
+#[test]
+fn require_calls_name_program_files_only_in_javascript() {
+    let source = "const a = require('./a');\nimport('./b');\n";
+    assert_eq!(
+        program_references_of(source, SourceType::cjs()).module_names,
+        ["./a", "./b"]
+    );
+    assert_eq!(
+        program_references_of(source, SourceType::ts()).module_names,
+        ["./b"]
+    );
+}

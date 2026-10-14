@@ -299,69 +299,93 @@ impl Contributor {
     }
 }
 
+/// A host over one project rooted at [`PROGRAM_ROOT`], configured by
+/// `tsconfig`, holding `files` (`(name, source)`), upserted in order.
+fn program_host(tsconfig: &serde_json::Value, files: &[(String, String)]) -> crate::VerterHost {
+    let host = crate::VerterHost::new_standalone_with_tsconfig_projects(
+        crate::HostConfig::default(),
+        &[(PROGRAM_ROOT, &tsconfig.to_string())],
+    );
+    for (name, source) in files {
+        program_upsert(&host, name, source);
+    }
+    host
+}
+
+fn program_upsert(host: &crate::VerterHost, name: &str, source: &str) {
+    let path = format!("{PROGRAM_ROOT}/{name}");
+    let language = crate::LanguageRegistry::global()
+        .classify_static(&path)
+        .static_resolution();
+    crate::u6_flow_shape_corpus_tests::upsert(host, &path, source, language);
+}
+
+/// The literal `__Probe` in `scenario.ts` settles on.
+fn probe(host: &crate::VerterHost) -> f64 {
+    use verter_type_engine::semantic_query::{LiteralValue, ProjectionMode, SemanticNodeData};
+    let scenario = format!("{PROGRAM_ROOT}/scenario.ts");
+    let mut node = host
+        .resolve_named_symbol(&scenario, "__Probe", Some(ProjectionMode::Expanded))
+        .expect("the probe answers");
+    let graph = host.project_type_store().semantic_graph();
+    loop {
+        match graph.node_data(node).as_deref().expect("a live answer") {
+            SemanticNodeData::Alias(inner) => node = *inner,
+            SemanticNodeData::Literal(LiteralValue::Number(value)) => return *value,
+            other => panic!("`__Probe` is no number literal: {other:?}"),
+        }
+    }
+}
+
+/// `lib.bench.d.ts`, the program's whole library under `noLib`.
+fn bench_lib() -> (String, String) {
+    (
+        "lib.bench.d.ts".to_owned(),
+        "interface Object { toString(): string; }\n".to_owned(),
+    )
+}
+
 /// The literal `__Probe` settles on in a project whose `tsconfig.json`
 /// lists `lib.bench.d.ts`, the contributor files in `listed` order and
 /// `scenario.ts`; each contributor `i` answers `answers[i]`. The files are
-/// upserted in `upserted` order, then `edits` (`(i, answer)`) are applied
-/// and the probe is read again; returns the answer before and after.
+/// upserted in `upserted` order and the probe is read twice — a cold, then
+/// a warm read of the unchanged host — then `edits` (`(i, answer)`) are
+/// applied and the probe is read again. Returns the cold, warm and
+/// incremental answers.
 fn program_order_answer(
     kind: Contributor,
     answers: &[usize],
     listed: &[usize],
     upserted: &[usize],
     edits: &[(usize, usize)],
-) -> (f64, f64) {
-    use verter_type_engine::semantic_query::{LiteralValue, ProjectionMode, SemanticNodeData};
-    let mut files: Vec<String> = vec!["lib.bench.d.ts".to_owned()];
-    files.extend(listed.iter().map(|&i| kind.file(i)));
-    files.push("scenario.ts".to_owned());
+) -> (f64, f64, f64) {
+    let mut listing: Vec<String> = vec!["lib.bench.d.ts".to_owned()];
+    listing.extend(listed.iter().map(|&i| kind.file(i)));
+    listing.push("scenario.ts".to_owned());
     let tsconfig = serde_json::json!({
         "compilerOptions": { "strict": true, "noLib": true, "noEmit": true },
-        "files": files,
-    })
-    .to_string();
-    let host = crate::VerterHost::new_standalone_with_tsconfig_projects(
-        crate::HostConfig::default(),
-        &[(PROGRAM_ROOT, &tsconfig)],
-    );
-    let upsert = |name: &str, source: &str| {
-        let path = format!("{PROGRAM_ROOT}/{name}");
-        let language = crate::LanguageRegistry::global()
-            .classify_static(&path)
-            .static_resolution();
-        crate::u6_flow_shape_corpus_tests::upsert(&host, &path, source, language);
-    };
-    upsert(
-        "lib.bench.d.ts",
-        "interface Object { toString(): string; }\n",
-    );
+        "files": listing,
+    });
+    let mut files = vec![bench_lib()];
     if matches!(kind, Contributor::ModuleAugmentation) {
-        upsert("core.ts", "export interface Props { base: -1 }\n");
+        files.push((
+            "core.ts".to_owned(),
+            "export interface Props { base: -1 }\n".to_owned(),
+        ));
     }
-    for &i in upserted {
-        upsert(&kind.file(i), &kind.source(i, answers[i]));
-    }
-    let scenario = format!("{PROGRAM_ROOT}/scenario.ts");
-    upsert("scenario.ts", &kind.scenario(answers.len()));
-    let read = || {
-        let node = host
-            .resolve_named_symbol(&scenario, "__Probe", Some(ProjectionMode::Expanded))
-            .expect("the probe answers");
-        let graph = host.project_type_store().semantic_graph();
-        let mut node = node;
-        loop {
-            match graph.node_data(node).as_deref().expect("a live answer") {
-                SemanticNodeData::Alias(inner) => node = *inner,
-                SemanticNodeData::Literal(LiteralValue::Number(value)) => return *value,
-                other => panic!("{kind:?}: `__Probe` is no number literal: {other:?}"),
-            }
-        }
-    };
-    let before = read();
+    files.extend(
+        upserted
+            .iter()
+            .map(|&i| (kind.file(i), kind.source(i, answers[i]))),
+    );
+    files.push(("scenario.ts".to_owned(), kind.scenario(answers.len())));
+    let host = program_host(&tsconfig, &files);
+    let cold = probe(&host);
+    let warm = probe(&host);
     for &(i, answer) in edits {
-        upsert(&kind.file(i), &kind.source(i, answer));
+        program_upsert(&host, &kind.file(i), &kind.source(i, answer));
     }
-    (before, read())
+    (cold, warm, probe(&host))
 }
 
 /// A deterministic permutation of `0..count`, different per `seed`.
@@ -436,8 +460,9 @@ fn merged_global_interface_follows_program_file_order_at_scale() {
 }
 
 /// The merge order is the program's whatever order the files reach the
-/// host in, and an edit answers what a cold build of the edited files
-/// answers: cold, warm and incremental agree.
+/// host in; a warm read of the unchanged host answers what its cold read
+/// did; and an edit answers what a cold build of the edited files answers:
+/// cold, warm and incremental agree.
 ///
 /// Mutation: ordering contributors by upsert (ingestion) order answers a
 /// shuffled host differently from the cold one.
@@ -460,21 +485,189 @@ fn merged_declaration_order_is_independent_of_upsert_order_and_edits() {
         for &(i, answer) in &edits {
             edited[i] = answer;
         }
-        let (cold, _) = program_order_answer(kind, &answers, &listed, &forward, &[]);
-        let (cold_edited, _) = program_order_answer(kind, &edited, &listed, &forward, &[]);
+        let (cold, cold_warm, _) = program_order_answer(kind, &answers, &listed, &forward, &[]);
+        let (cold_edited, _, _) = program_order_answer(kind, &edited, &listed, &forward, &[]);
         assert_eq!(cold, answers[last] as f64, "{kind:?}: cold answer");
+        assert_eq!(cold_warm, cold, "{kind:?}: warm read of the cold host");
         assert_eq!(
             cold_edited, 1000.0,
             "{kind:?}: cold answer of the edited files"
         );
         for seed in [5, 11] {
-            let (warm, incremental) =
+            let (shuffled_cold, warm, incremental) =
                 program_order_answer(kind, &answers, &listed, &shuffled(count, seed), &edits);
-            assert_eq!(warm, cold, "{kind:?} seed {seed}: shuffled upserts");
+            assert_eq!(
+                shuffled_cold, cold,
+                "{kind:?} seed {seed}: shuffled upserts"
+            );
+            assert_eq!(
+                warm, cold,
+                "{kind:?} seed {seed}: warm read, unchanged host"
+            );
             assert_eq!(
                 incremental, cold_edited,
                 "{kind:?} seed {seed}: after editing two contributors"
             );
         }
     }
+}
+
+/// A script adding one `emit` overload answering `answer` to the global
+/// `interface BenchBus`, after `prefix` (triple-slash references).
+fn bus_script(prefix: &str, answer: usize) -> String {
+    format!("{prefix}interface BenchBus {{ emit(e: {{ k{answer}: 1 }}): {answer}; }}\n")
+}
+
+/// `scenario.ts` calling `BenchBus.emit` with every key of `answers`.
+fn bus_scenario(answers: &[usize]) -> String {
+    let keys: Vec<String> = answers.iter().map(|key| format!("k{key}: 1")).collect();
+    format!(
+        "declare const bus: BenchBus;\ndeclare const ev: {{ {} }};\n\
+         const r = bus.emit(ev);\ntype __Probe = typeof r;\nexport {{}};\n",
+        keys.join("; ")
+    )
+}
+
+/// A noLib project listing `listed` between `lib.bench.d.ts` and
+/// `scenario.ts`, with an optional `include`.
+fn bus_tsconfig(listed: &[&str], include: Option<&[&str]>) -> serde_json::Value {
+    let mut files = vec!["lib.bench.d.ts"];
+    files.extend_from_slice(listed);
+    files.push("scenario.ts");
+    let mut tsconfig = serde_json::json!({
+        "compilerOptions": { "strict": true, "noLib": true, "noEmit": true },
+        "files": files,
+    });
+    if let Some(include) = include {
+        tsconfig["include"] = serde_json::json!(include);
+    }
+    tsconfig
+}
+
+fn bus_project(
+    tsconfig: &serde_json::Value,
+    sources: &[(&str, String)],
+    answers: &[usize],
+) -> crate::VerterHost {
+    let mut files = vec![bench_lib()];
+    files.extend(
+        sources
+            .iter()
+            .map(|(name, source)| ((*name).to_owned(), source.clone())),
+    );
+    files.push(("scenario.ts".to_owned(), bus_scenario(answers)));
+    program_host(tsconfig, &files)
+}
+
+/// The program places a file before the first file that pulls it in —
+/// through an import or a `/// <reference path>` (with or without an
+/// extension) — not at the end, however it is listed. Each case lists
+/// `a.ts` then `b.ts`; `c.ts` is unlisted, or listed after `b.ts`, and
+/// `a.ts` pulls it in, so the program is `c, a, b` and `b.ts`'s overload,
+/// the last declaration's, is tried first.
+///
+/// Measured on TypeScript 7.0.2: every case answers `2`. Ordering by the
+/// `files` sequence alone ranks the unlisted `c.ts` last (answer `3`).
+#[test]
+fn files_a_program_pulls_in_precede_the_file_that_pulls_them() {
+    let cases: [(&str, &[&str], &str); 4] = [
+        (
+            "an import of an unlisted file",
+            &["a.ts", "b.ts"],
+            "import './c';\nexport {};\n",
+        ),
+        (
+            "an import of a file listed later",
+            &["a.ts", "b.ts", "c.ts"],
+            "import './c';\nexport {};\n",
+        ),
+        (
+            "a path reference",
+            &["a.ts", "b.ts"],
+            "/// <reference path=\"./c.ts\" />\nexport {};\n",
+        ),
+        (
+            "an extensionless path reference",
+            &["a.ts", "b.ts"],
+            "/// <reference path=\"c\" />\nexport {};\n",
+        ),
+    ];
+    for (case, listed, a_source) in cases {
+        let host = bus_project(
+            &bus_tsconfig(listed, None),
+            &[
+                ("a.ts", a_source.to_owned()),
+                ("b.ts", bus_script("", 2)),
+                ("c.ts", bus_script("", 3)),
+            ],
+            &[2, 3],
+        );
+        assert_eq!(probe(&host), 2.0, "{case}");
+        assert_eq!(probe(&host), 2.0, "{case}: warm");
+    }
+}
+
+/// `include` roots follow `files`, grouped by the first authored entry a
+/// file matches, each entry's files in directory-walk order — a
+/// directory's files before its subdirectories — not path order.
+///
+/// Measured on TypeScript 7.0.2 with `"include": ["lib/**/*",
+/// "app/**/*"]`: the program lists `lib/a.ts`, `app/z.ts`,
+/// `app/sub/m.ts`, so `app/sub/m.ts`'s overload is tried first (`2`).
+/// Path order would end with `lib/a.ts` (`3`); walk order without entry
+/// grouping with `app/z.ts` (`1`).
+#[test]
+fn include_roots_follow_entry_then_directory_walk_order() {
+    let host = bus_project(
+        &bus_tsconfig(&[], Some(&["lib/**/*", "app/**/*"])),
+        &[
+            ("app/z.ts", bus_script("", 1)),
+            ("app/sub/m.ts", bus_script("", 2)),
+            ("lib/a.ts", bus_script("", 3)),
+        ],
+        &[1, 2, 3],
+    );
+    assert_eq!(probe(&host), 2.0);
+}
+
+/// An edit to a file that declares nothing — adding or removing the
+/// import that pulls a contributor in — reorders the program and so
+/// changes which overload wins; a warm answer from before the edit never
+/// survives it, and every state answers what a cold build of it does.
+///
+/// Measured on TypeScript 7.0.2, listing `a.ts`, `b.ts`, `c.ts`: with
+/// `a.ts` importing nothing the answer is `3` (`c.ts` last); importing
+/// `./c` it is `2` (`c, a, b`).
+///
+/// Mutation: not observing the program's file order on the merged
+/// result serves the stale warm `3` after the import is added.
+#[test]
+fn a_non_contributor_import_edit_reorders_the_merge() {
+    let tsconfig = bus_tsconfig(&["a.ts", "b.ts", "c.ts"], None);
+    let detached = "export {};\n".to_owned();
+    let importing = "import './c';\nexport {};\n".to_owned();
+    let project = |a_source: &str| {
+        bus_project(
+            &tsconfig,
+            &[
+                ("a.ts", a_source.to_owned()),
+                ("b.ts", bus_script("", 2)),
+                ("c.ts", bus_script("", 3)),
+            ],
+            &[2, 3],
+        )
+    };
+    let cold_detached = probe(&project(&detached));
+    let cold_importing = probe(&project(&importing));
+    assert_eq!(cold_detached, 3.0, "cold, a.ts imports nothing");
+    assert_eq!(cold_importing, 2.0, "cold, a.ts imports ./c");
+
+    let host = project(&detached);
+    assert_eq!(probe(&host), cold_detached, "first read");
+    assert_eq!(probe(&host), cold_detached, "warm read");
+    program_upsert(&host, "a.ts", &importing);
+    assert_eq!(probe(&host), cold_importing, "after adding the import");
+    assert_eq!(probe(&host), cold_importing, "warm after adding the import");
+    program_upsert(&host, "a.ts", &detached);
+    assert_eq!(probe(&host), cold_detached, "after removing the import");
 }

@@ -301,7 +301,7 @@ impl VerterHost {
                             .get_or_insert_with(|| {
                                 verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx)
                             })
-                            .ambient_value_export_root(source_specifier, original_name)
+                            .ambient_value_export_root(canonical, source_specifier, original_name)
                         {
                             inputs.local.insert(name, Some(ModuleExportBinding::Value(root)));
                         }

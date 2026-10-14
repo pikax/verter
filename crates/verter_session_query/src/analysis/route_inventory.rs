@@ -86,6 +86,26 @@ pub struct ScriptRouteCounts {
     pub export_assignment_count: usize,
 }
 
+/// The files one source file pulls into its TypeScript program, in the
+/// order the program visits them: triple-slash `path` references, then
+/// `types` references, then `lib` references, then module names — import
+/// and re-export specifiers in statement order (including the bare
+/// specifiers an ambient `declare module "m" { … }` body imports), then
+/// dynamic `import("m")` calls and `import("m")` types in source order,
+/// then the names of `declare module "m"` augmentations. Authored text
+/// only: resolving a name is the program-order authority's job.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct ProgramReferences {
+    /// `/// <reference path="…" />`, as written.
+    pub paths: Vec<String>,
+    /// `/// <reference types="…" />` package names.
+    pub types: Vec<String>,
+    /// `/// <reference lib="…" />` library names.
+    pub libs: Vec<String>,
+    /// Module names in TypeScript's import collection order.
+    pub module_names: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ScriptRouteInventory {
     /// Top-level module syntax, including empty exports with no route rows.
@@ -99,4 +119,8 @@ pub struct ScriptRouteInventory {
     pub local_exports: Vec<ScriptLocalExportRoute>,
     pub export_assignments: Vec<ScriptExportAssignmentRoute>,
     pub counts: ScriptRouteCounts,
+    /// The files this source pulls into its program, for program file
+    /// order. Not part of the route surface: no route hash reads it.
+    #[serde(default)]
+    pub program_references: ProgramReferences,
 }

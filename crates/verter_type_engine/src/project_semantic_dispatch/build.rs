@@ -2219,7 +2219,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             else {
                 // No file answers the specifier: the program's ambient
                 // declaration of the module names the member.
-                return self.ambient_import_member_root(target, path);
+                return self.ambient_import_member_root(canonical, target, path);
             };
             // The imported namespace's own file names its members.
             let (declaring, skipped) = if target.is_namespace {
@@ -5855,6 +5855,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let mut base_position: Option<usize> = None;
         use verter_session_query::inputs::contributors::AugmentationCandidate as OrderedOrigin;
         let ordered = self.ctx.augmentation_contributor_order(
+            request_canonical,
             &key,
             &augmenter_set,
             decl_name,
@@ -6413,6 +6414,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// Contributor-set and declaration observations join the active fact tracer.
     pub fn ambient_value_export_root(
         &self,
+        importer: &str,
         specifier: &str,
         name: &str,
     ) -> Option<ResolvedRootIdentity> {
@@ -6421,7 +6423,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             imported_name: name.to_owned(),
             is_namespace: false,
         };
-        let (root, _) = self.ambient_import_member_root(&target, &[])?;
+        let (root, _) = self.ambient_import_member_root(importer, &target, &[])?;
         Some(ResolvedRootIdentity::new_in_owner(
             root.scope.canonical_id,
             root.scope.owner,
@@ -6438,10 +6440,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// declared qualified member (`AN.f`) the rest of the path names.
     fn ambient_import_member_root(
         &self,
+        importer: &str,
         target: &verter_session_query::inputs::shallow::ImportTarget,
         path: &[Arc<str>],
     ) -> Option<(ValueRootKey, usize)> {
-        let blocks = self.ambient_module_blocks(&target.source_specifier);
+        let blocks = self.ambient_module_blocks(importer, &target.source_specifier);
         let (member, skipped): (Arc<str>, usize) = if target.is_import_equals() {
             let block = blocks
                 .iter()
@@ -6504,12 +6507,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// tracer, so a block that appears, disappears or changes shape later
     /// misses every warm read that went through it, including a read that
     /// found no block.
-    pub(super) fn ambient_module_blocks(&self, specifier: &str) -> Vec<AmbientModuleBlock> {
+    pub(super) fn ambient_module_blocks(
+        &self,
+        anchor: &str,
+        specifier: &str,
+    ) -> Vec<AmbientModuleBlock> {
         use verter_session_query::facts::registry::InternedSpecifier;
         use verter_session_query::resolution::AugmentationTargetKind;
         let scope =
             verter_session_query::declarations::AugmentationScopeKind::Module(specifier.to_owned());
         self.module_augmentation_blocks(
+            anchor,
             AugmentationTargetKind::ExternalSpecifier(InternedSpecifier::from(specifier)),
             specifier,
             |_, block_scope| *block_scope == scope,
@@ -6529,6 +6537,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let _ = self.ctx.ensure_indexed_ready_serve(&rdep);
         }
         self.module_augmentation_blocks(
+            module,
             AugmentationTargetKind::ResolvedRelativeCanonical(Arc::from(module)),
             module,
             |augmenter, block_scope| match block_scope {
@@ -6547,6 +6556,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// tracer. `attribution` names the target in the shape fact.
     fn module_augmentation_blocks(
         &self,
+        anchor: &str,
         target: verter_session_query::resolution::AugmentationTargetKind,
         attribution: &str,
         declares: impl Fn(&str, &verter_session_query::declarations::AugmentationScopeKind) -> bool,
@@ -6569,12 +6579,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .iter()
             .map(|entry| Arc::clone(entry.canonical()))
             .collect();
-        canonicals.sort_by(|left, right| {
-            self.ctx
-                .declaration_sequence_rank(left)
-                .cmp(&self.ctx.declaration_sequence_rank(right))
-                .then_with(|| left.cmp(right))
-        });
+        self.sort_in_program_order(
+            anchor,
+            &mut canonicals,
+            |canonical| canonical,
+            |_, _| std::cmp::Ordering::Equal,
+        );
         canonicals.dedup();
         let mut blocks = Vec::new();
         for canonical in canonicals {
@@ -6752,6 +6762,43 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         Some(merged)
     }
 
+    /// Sort `items` into declaration precedence among program files: the
+    /// file order of `anchor`'s program (or, when no configured project
+    /// owns `anchor`, of the canonically first item one does), then
+    /// canonical spelling, then `then`. The program order is read — and
+    /// observed onto the active tracer — only when the items span two or
+    /// more program files; the sort is stable, so one file's items keep
+    /// their source order.
+    pub(super) fn sort_in_program_order<T>(
+        &self,
+        anchor: &str,
+        items: &mut [T],
+        canonical: impl Fn(&T) -> &str,
+        then: impl Fn(&T, &T) -> std::cmp::Ordering,
+    ) {
+        if !verter_session_query::inputs::program_order::orders_across_files(
+            items.iter().map(&canonical),
+        ) {
+            items.sort_by(|left, right| {
+                canonical(left)
+                    .cmp(canonical(right))
+                    .then_with(|| then(left, right))
+            });
+            return;
+        }
+        let order = self
+            .ctx
+            .program_file_order(anchor, &mut items.iter().map(&canonical));
+        crate::resolver_core::resolver_context::observe_program_file_order(&order);
+        items.sort_by(|left, right| {
+            order
+                .rank(canonical(left))
+                .cmp(&order.rank(canonical(right)))
+                .then_with(|| canonical(left).cmp(canonical(right)))
+                .then_with(|| then(left, right))
+        });
+    }
+
     /// The program's contributors to the global `name` in `space`, with the
     /// global contributor population observed onto the active fact tracer:
     /// a contributor added, removed or reordered misses every warm read that
@@ -6829,8 +6876,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// The identity of the merged GLOBAL declaration named `name` that a
     /// reference in `demand_canonical` reads: its FIRST declaration in
     /// declaration precedence order — the project's library
-    /// ([`Self::lib_global_declaration`]), then the program's files in the
-    /// configured file sequence, then by canonical path — among every
+    /// ([`Self::lib_global_declaration`]), then the program's files in
+    /// program file order, then by canonical path — among every
     /// module's `declare global` contribution and every script's file-scope
     /// interface. `None` when neither declares such a global type.
     ///
@@ -6896,21 +6943,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         && entry.module_kind == FileModuleKind::Script
                 })
                 .collect();
-        declarations.sort_by(|left, right| {
-            self.ctx
-                .declaration_sequence_rank(left.artifact_key.canonical.as_ref())
-                .cmp(
-                    &self
-                        .ctx
-                        .declaration_sequence_rank(right.artifact_key.canonical.as_ref()),
-                )
-                .then_with(|| {
-                    left.artifact_key
-                        .canonical
-                        .as_ref()
-                        .cmp(right.artifact_key.canonical.as_ref())
-                })
-        });
+        self.sort_in_program_order(
+            demand_canonical,
+            &mut declarations,
+            |entry| entry.artifact_key.canonical.as_ref(),
+            |_, _| std::cmp::Ordering::Equal,
+        );
         declarations.into_iter().find_map(|entry| {
             let indexed = self
                 .ctx
@@ -7034,22 +7072,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             };
             declarations.push((entry, kind));
         }
-        declarations.sort_by(|(left, _), (right, _)| {
-            self.ctx
-                .declaration_sequence_rank(left.artifact_key.canonical.as_ref())
-                .cmp(
-                    &self
-                        .ctx
-                        .declaration_sequence_rank(right.artifact_key.canonical.as_ref()),
-                )
-                .then_with(|| {
-                    left.artifact_key
-                        .canonical
-                        .as_ref()
-                        .cmp(right.artifact_key.canonical.as_ref())
-                })
-                .then_with(|| left.parse_stable_hash.cmp(&right.parse_stable_hash))
-        });
+        self.sort_in_program_order(
+            demand_canonical,
+            &mut declarations,
+            |(entry, _)| entry.artifact_key.canonical.as_ref(),
+            |(left, _), (right, _)| left.parse_stable_hash.cmp(&right.parse_stable_hash),
+        );
         let mut declarations: Vec<(ResolvedRootIdentity, ValueDeclKind)> = lib
             .into_iter()
             .chain(declarations.into_iter().map(|(entry, kind)| {
