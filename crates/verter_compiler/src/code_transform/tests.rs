@@ -730,6 +730,48 @@ fn test_move_slice_to_end() {
     assert_eq!(ct.build_string(), "CDEFAB");
 }
 
+/// Rebuilding a source by moving its tokens, in order, to the end anchor and
+/// appending synthetic text there is linear: no edit rescans the chunks that
+/// earlier edits left at the end.
+#[test]
+fn reordering_through_the_end_anchor_scans_linearly() {
+    let mut samples = Vec::new();
+    for n in [64usize, 128, 256, 512] {
+        let tokens: Vec<String> = (0..n).map(|i| format!("t{i}")).collect();
+        let source = tokens.join(" ");
+        let end = source.len() as u32;
+        let mut spans = Vec::new();
+        let mut cursor = 0u32;
+        for token in &tokens {
+            spans.push((cursor, cursor + token.len() as u32));
+            cursor += token.len() as u32 + 1;
+        }
+        let allocator = Allocator::default();
+        let mut ct = CodeTransform::new(&source, &allocator);
+        take_code_transform_chunk_visits();
+        for pair in spans.windows(2) {
+            ct.remove(pair[0].1, pair[1].0);
+        }
+        for &(start, stop) in &spans {
+            ct.append_left(end, "<");
+            ct.move_slice(start, stop, end);
+            ct.append_left(end, ">");
+        }
+        let visits = take_code_transform_chunk_visits();
+        let expected: String = tokens.iter().map(|token| format!("<{token}>")).collect();
+        assert_eq!(ct.build_string(), expected, "{n} tokens reordered");
+        samples.push((n, visits));
+    }
+    for pair in samples.windows(2) {
+        let ((small, small_visits), (large, large_visits)) = (pair[0], pair[1]);
+        let ratio = large_visits as f64 / small_visits.max(1) as f64;
+        assert!(
+            ratio <= 2.2,
+            "{small} → {large} tokens: chunk visits {small_visits} → {large_visits} grow {ratio:.3}×"
+        );
+    }
+}
+
 #[test]
 fn test_move_slice_to_middle() {
     let allocator = Allocator::default();
