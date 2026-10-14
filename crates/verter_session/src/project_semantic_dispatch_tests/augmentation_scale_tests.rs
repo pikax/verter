@@ -260,6 +260,32 @@ fn contributor_bodies_lower_once_in_batches_per_shard() {
     }
 }
 
+/// A merged declaration read through `M[keyof M]` is instantiated under
+/// more than one projection context in one request (the index evaluates
+/// `keyof M` published, the access reads `M` in structural transit). Its
+/// contributors are folded once per request: a later context projects the
+/// planned bodies without re-reading any contributor's shape.
+#[test]
+fn a_merged_declaration_folds_its_contributors_once_per_request() {
+    for global in [false, true] {
+        let size = 256;
+        let host = contributor_host(size, global);
+        let graph = host.project_type_store().semantic_graph();
+        let before = graph.stats_snapshot();
+        host.resolve_named_symbol("/scenario.ts", "Probe", Some(ProjectionMode::Expanded))
+            .expect("probe answers");
+        let after = graph.stats_snapshot();
+        // Re-folding under a second context would re-read every
+        // contributor's shape as a warm hit: `size` hits per context.
+        let shape_rereads = after.hits - before.hits;
+        assert!(
+            shape_rereads < size as u64 / 4,
+            "global={global}: a later projection context must not re-read the \
+             contributors, read {shape_rereads} warm results for {size} contributors"
+        );
+    }
+}
+
 #[test]
 fn global_interface_bases_share_the_merged_instantiation() {
     let host = VerterHost::new_standalone(HostConfig::default());

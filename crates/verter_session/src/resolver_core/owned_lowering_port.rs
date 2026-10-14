@@ -598,12 +598,13 @@ macro_rules! owned_lowering_from_source_inputs {
                 SourceInputProvider::raw_prepared_type_decl(self, canonical_id, owner, symbol_name)
             }
 
-            fn augmentation_index(
+            fn augmentation_index_with_resolutions(
                 &self,
                 target: crate::file_artifact_store::AugmentationTargetKind,
             ) -> (
                 crate::file_artifact_store::AugmentationTargetKey,
                 Arc<verter_session_query::resolution::AugmenterSet>,
+                verter_type_engine::resolver_core::request_ports::AugmenterResolutions,
             ) {
                 verter_type_engine::count_resolver_context_call!("OwnedLowering::augmentation_index");
                 let host = SourceInputProvider::source_host(self);
@@ -618,18 +619,28 @@ macro_rules! owned_lowering_from_source_inputs {
                     population,
                     target,
                 };
+                let resolutions = std::cell::RefCell::new(
+                    verter_type_engine::resolver_core::request_ports::AugmenterResolutions::default(),
+                );
                 let answer = crate::host_manage::source_augmentation::AugmentationRequestDriver::new(
                     host.project_type_store().indexed(),
                 )
                 .ensure_populated(
                     &key,
                     |canonical, spec| {
-                        verter_type_engine::resolver_core::request_ports::RouteLookup::resolve_type_dependency_canonical(self, canonical, spec)
-                            .map(Arc::from)
+                        let resolved: Option<Arc<str>> =
+                            verter_type_engine::resolver_core::request_ports::RouteLookup::resolve_type_dependency_canonical(self, canonical, spec)
+                                .map(Arc::from);
+                        resolutions
+                            .borrow_mut()
+                            .entry(Arc::from(canonical))
+                            .or_default()
+                            .push((Arc::from(spec), resolved.clone()));
+                        resolved
                     },
                     discriminator,
                 );
-                (key, answer)
+                (key, answer, resolutions.into_inner())
             }
             fn global_contributor_answer(
                 &self,

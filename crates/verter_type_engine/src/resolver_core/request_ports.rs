@@ -487,6 +487,10 @@ pub trait HostAttachmentPort {
     fn host_attachment(&self) -> &Self::HostAttachment;
 }
 
+/// The relative specifiers an augmentation-index population resolved: per
+/// augmenter canonical, each specifier and the canonical it resolved to.
+pub type AugmenterResolutions = rustc_hash::FxHashMap<Arc<str>, Vec<(Arc<str>, Option<Arc<str>>)>>;
+
 /// A single population read and its owned query result. The all-space shape
 /// fingerprint travels beside the filtered answer, including an empty answer.
 pub struct ContributorAnswer {
@@ -623,6 +627,21 @@ pub trait OwnedLowering {
     ) -> (
         verter_session_query::resolution::AugmentationTargetKey,
         Arc<verter_session_query::resolution::AugmenterSet>,
+    ) {
+        let (key, set, _) = self.augmentation_index_with_resolutions(target);
+        (key, set)
+    }
+    /// [`Self::augmentation_index`], with the relative specifiers the read
+    /// resolved while it populated the index: `(augmenter, specifier)` to
+    /// the canonical it resolved to. Empty when the read was served from
+    /// an already populated index.
+    fn augmentation_index_with_resolutions(
+        &self,
+        target: verter_session_query::resolution::AugmentationTargetKind,
+    ) -> (
+        verter_session_query::resolution::AugmentationTargetKey,
+        Arc<verter_session_query::resolution::AugmenterSet>,
+        AugmenterResolutions,
     );
     fn global_contributor_answer(
         &self,
