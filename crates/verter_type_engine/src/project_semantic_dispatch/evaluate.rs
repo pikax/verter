@@ -716,8 +716,9 @@ impl StructuralFactDemandOutcome {
 }
 
 impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
-    /// A mapped object's values belong to the consuming index, while
-    /// ordinary objects retain the caller's navigation policy.
+    /// A mapped object's values belong to the consuming index. A `typeof`
+    /// operand shares the keys-only transit context used by `keyof`, so the
+    /// two operands of `T[keyof T]` read one source surface.
     pub(crate) fn indexed_access_operand_context(
         &self,
         object: SemanticNodeId,
@@ -725,7 +726,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> ProjectionReductionContext {
         if matches!(
             self.graph().node_data(object).as_deref(),
-            Some(SemanticNodeData::Mapped { .. })
+            Some(SemanticNodeData::Mapped { .. } | SemanticNodeData::TypeOf(_))
         ) {
             context.into_structural_transit_with_mode(ProjectionMode::Navigate)
         } else {
@@ -2801,7 +2802,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         match &finalise {
                             FactReadSetFinalise::Ok(facts)
                             | FactReadSetFinalise::NonCacheable(facts) => {
-                                self.ctx.observe_borrowed_signature(facts)
+                                crate::fact_tracing::tracing::observe_fan_out_canonical(facts)
                             }
                             FactReadSetFinalise::MutationUnstable => {}
                         }
@@ -2822,7 +2823,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         match &finalise {
                             FactReadSetFinalise::Ok(facts)
                             | FactReadSetFinalise::NonCacheable(facts) => {
-                                self.ctx.observe_borrowed_signature(facts)
+                                crate::fact_tracing::tracing::observe_fan_out_canonical(facts)
                             }
                             FactReadSetFinalise::MutationUnstable => {}
                         }
