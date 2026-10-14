@@ -1240,14 +1240,16 @@ async fn coordinator_loop(
                 // runs inline above the arming's debounce window) is done.
                 let mut settled_edits: Vec<String> = Vec::new();
 
-                for (canonical_id, signal) in ready {
+                for (canonical_id, mut signal) in ready {
                     pending_files.remove(&canonical_id);
                     // Whatever this tick decides supersedes a held publication.
                     awaiting_dependencies.remove(&canonical_id);
-                    // The touch has done its job once its document is served; what
-                    // it said about the user's attention outlives the service.
-                    let touched = touch_tracker.lock().remove(&canonical_id);
-                    if let Some(attended) = signal.user_received_at.max(touched) {
+                    // Selection is not service: a busy lane or a held dependency
+                    // can requeue this signal. Carry its attention through that
+                    // retry, and consume the touch only at publication handoff.
+                    let touched = touch_tracker.lock().get(&canonical_id).copied();
+                    signal.user_received_at = signal.user_received_at.max(touched);
+                    if let Some(attended) = signal.user_received_at {
                         let latest = last_attention.entry(canonical_id.clone()).or_insert(attended);
                         *latest = (*latest).max(attended);
                     }
@@ -1373,7 +1375,14 @@ async fn coordinator_loop(
                     }
 
                     if publish_diagnostics {
-
+                        // A newer touch may have arrived while provider sync was
+                        // awaited. It belongs to the next service, not this one.
+                        if let Some(served_touch) = touched {
+                            let mut live_touches = touch_tracker.lock();
+                            if live_touches.get(&canonical_id) == Some(&served_touch) {
+                                live_touches.remove(&canonical_id);
+                            }
+                        }
                         if let Some(stale) = diagnostic_tasks.remove(&canonical_id) {
                             stale.abort();
                         }

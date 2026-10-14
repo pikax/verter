@@ -118,6 +118,7 @@ pub(super) struct ResolveCallFrame<'e> {
     frame_arguments: Option<Arc<[SliceCallArgument]>>,
     args: Vec<crate::semantic_query::CallArgKey>,
     function_arguments: Vec<Option<SliceExpr>>,
+    argument_observations: Vec<Option<super::super::flow_return_fact::ObservedRead<()>>>,
     /// The binding of the argument whose lowered value is awaited.
     awaiting: Option<FlowIndexedArgumentBinding>,
     /// The typed function value of the argument being typed, once its
@@ -133,6 +134,11 @@ pub(super) struct FinishRoute {
     key: crate::semantic_query::ResolveCallKey,
     args: Vec<crate::semantic_query::CallArgKey>,
     function_arguments: Vec<Option<SliceExpr>>,
+    argument_observations: Vec<Option<super::super::flow_return_fact::ObservedRead<()>>>,
+    step_observations: super::super::flow_return_fact::ObservedRead<()>,
+    /// Relation observations owned by this executor attempt, excluding arguments.
+    undecided_relations: u64,
+    declared_result: Option<super::super::call_resolve::DeclaredCallResult>,
     step: Positional<ResolveCallStep>,
     contextual: super::super::call_resolve::ContextualCallState,
     retyped: bool,
@@ -301,7 +307,13 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// route.
     fn drive_call<'e>(&mut self, mut flight: CallInFlight<'e>) -> CallStep<'e> {
         let enclosing = self.call_drive.replace(flight.drive);
-        let value = self.eval_call_value(flight.call, flight.site, flight.arguments);
+        let driver = self.dispatch;
+        let read = driver
+            .observe_read(|| self.eval_call_value(flight.call, flight.site, flight.arguments));
+        // The call is a required value dependency, including a no-surface
+        // result represented by this position's gap. Selected siblings own
+        // separate value observations and need not adopt this dependency.
+        let value = driver.adopt_read(read).unwrap_or(Positional::Unmodeled);
         flight.drive = std::mem::replace(&mut self.call_drive, enclosing)
             .expect("the call's drive stays installed while its value computes");
         if let Some(callee) = flight.drive.demand.take() {
@@ -496,6 +508,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             frame_arguments,
             args: Vec::with_capacity(count),
             function_arguments: Vec::with_capacity(count),
+            argument_observations: (0..count).map(|_| None).collect(),
             awaiting: None,
             delivered_function: None,
         };
@@ -506,7 +519,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// argument it asked for.
     pub(super) fn deliver_resolve_call_argument<'e>(
         &mut self,
-        route: ResolveCallFrame<'e>,
+        mut route: ResolveCallFrame<'e>,
         lowered: &SliceExpr,
         value: Positional<SemanticNodeId>,
     ) -> ResolveCallProgress<'e> {
@@ -516,7 +529,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 fresh_call: self.is_fresh_call_value(lowered, node),
                 const_view: None,
             },
-            Positional::Hold => return ResolveCallProgress::Done(Some(Positional::Hold)),
+            Positional::Hold => {
+                self.adopt_argument_observations(&mut route.argument_observations);
+                return ResolveCallProgress::Done(Some(Positional::Hold));
+            }
             Positional::Unmodeled => TypedArgument {
                 node: None,
                 fresh_call: false,
@@ -548,6 +564,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 ),
                 None => {
                     let Some(root) = indexed.argument_roots.get(ordinal) else {
+                        self.adopt_argument_observations(&mut route.argument_observations);
                         return ResolveCallProgress::Done(None);
                     };
                     let binding = self.indexed_argument_binding(*root);
@@ -635,27 +652,42 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                             return ResolveCallProgress::Argument(route, lowered);
                         }
                         (None, None) => {
-                            let frame_value = match (&binding, frame_arguments.as_deref()) {
-                                (
-                                    FlowIndexedArgumentBinding::NonBindingExpression,
-                                    Some(frame_arguments),
-                                ) => frame_arguments.get(ordinal).and_then(|frame_argument| {
-                                    let value =
-                                        self.eval_frame_call_argument(&frame_argument.value)?;
-                                    const_view = frame_argument
-                                        .const_context
-                                        .as_ref()
-                                        .and_then(|expr| self.eval_frame_call_argument(expr));
-                                    Some(value)
-                                }),
-                                _ => None,
+                            let driver = self.dispatch;
+                            let read = driver.observe_read(|| {
+                                let frame_value = match (&binding, frame_arguments.as_deref()) {
+                                    (
+                                        FlowIndexedArgumentBinding::NonBindingExpression,
+                                        Some(frame_arguments),
+                                    ) => frame_arguments.get(ordinal).and_then(|frame_argument| {
+                                        let value =
+                                            self.eval_frame_call_argument(&frame_argument.value)?;
+                                        const_view = frame_argument
+                                            .const_context
+                                            .as_ref()
+                                            .and_then(|expr| self.eval_frame_call_argument(expr));
+                                        Some(value)
+                                    }),
+                                    _ => None,
+                                };
+                                frame_value.or_else(|| {
+                                    let value = self.eval_indexed_call_argument(
+                                        &argument.expression,
+                                        &binding,
+                                    )?;
+                                    fresh_call = value.fresh;
+                                    Some(value.node)
+                                })
+                            });
+                            let Ok((node, observations)) = read.split() else {
+                                self.adopt_argument_observations(&mut route.argument_observations);
+                                return ResolveCallProgress::Done(None);
                             };
-                            frame_value.or_else(|| {
-                                let value = self
-                                    .eval_indexed_call_argument(&argument.expression, &binding)?;
-                                fresh_call = value.fresh;
-                                Some(value.node)
-                            })
+                            if argument.context_sensitive && node.is_some() {
+                                route.argument_observations[ordinal] = Some(observations);
+                            } else {
+                                let _ = self.dispatch.adopt_read(observations);
+                            }
+                            node
                         }
                     };
                     (
@@ -673,6 +705,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 // applicability without its evidence: the executor refuses
                 // as surely, and degrading here is the same typed marker
                 // with one less hop.
+                self.adopt_argument_observations(&mut route.argument_observations);
                 return ResolveCallProgress::Done(None);
             };
             // A read of a WIDENING-literal `const` is a FRESH literal source
@@ -760,17 +793,15 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             indexed,
             args,
             function_arguments,
+            mut argument_observations,
             ..
         } = route;
         let call = &indexed.call;
         let mut explicit_type_args = Vec::with_capacity(call.explicit_type_args.len());
         for argument in call.explicit_type_args.iter() {
-            let node = self.dispatch.lower_type_expr_in_owner_scope_with_mode(
-                self.canonical,
-                self.owner,
-                argument,
-                crate::semantic_query::ProjectionMode::Navigate,
-            )?;
+            // Explicit arguments belong to the calling body's lexical clause,
+            // including a permutation of that clause's still-generic binders.
+            let node = self.lower_body_type(argument);
             explicit_type_args.push(node);
         }
         // A member call's receiver rides the key: `.call` / `.apply`
@@ -783,12 +814,17 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let receiver = match call.receiver.as_deref() {
             _ if evaluated_receiver.is_some() => evaluated_receiver,
             Some(receiver) => {
-                let root = indexed.receiver_root?;
+                let Some(root) = indexed.receiver_root else {
+                    self.adopt_argument_observations(&mut argument_observations);
+                    return None;
+                };
                 let receiver_binding = self.indexed_argument_binding(root);
-                Some(
-                    self.eval_indexed_call_argument(receiver, &receiver_binding)?
-                        .node,
-                )
+                let Some(value) = self.eval_indexed_call_argument(receiver, &receiver_binding)
+                else {
+                    self.adopt_argument_observations(&mut argument_observations);
+                    return None;
+                };
+                Some(value.node)
             }
             None => None,
         };
@@ -818,15 +854,30 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             context: self.dispatch.resolve_call_context_for(self.canonical),
         };
         let mut contextual = super::super::call_resolve::ContextualCallState::default();
-        let step = Positional::Value(
+        let relations_before = self.dispatch.call_undecided_relations();
+        let read = self.dispatch.observe_read(|| {
             self.dispatch
-                .execute_contextual_call(key.clone(), &mut contextual),
-        );
+                .execute_contextual_call(key.clone(), &mut contextual)
+        });
+        let undecided_relations = self
+            .dispatch
+            .call_undecided_relations()
+            .saturating_sub(relations_before);
+        let complete = read.observations_are_complete();
+        let Ok(((step, declared_result), step_observations)) = read.split() else {
+            self.adopt_argument_observations(&mut argument_observations);
+            return None;
+        };
+        let step = Positional::Value(step);
         Some(Box::new(FinishRoute {
             _serve,
             key,
             args,
             function_arguments,
+            argument_observations,
+            step_observations,
+            undecided_relations,
+            declared_result: declared_result.filter(|_| complete),
             step,
             contextual,
             retyped: false,
@@ -896,7 +947,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             });
             let Some((ty, spread)) = retyped else {
                 return RetypeRound::Progress(Box::new(ResolveCallProgress::Done(
-                    Self::settle_retyped_call(*finish),
+                    self.settle_retyped_call(*finish),
                 )));
             };
             finish.retyped = true;
@@ -908,12 +959,34 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 first_pass: None,
                 literal_mode: crate::semantic_query::ArgumentLiteralMode::Literal,
             };
-            finish.step = Positional::Value(self.dispatch.resume_contextual_call(
-                &mut finish.key,
-                &finish.args,
-                position,
-                &mut finish.contextual,
-            ));
+            if let Some(old) = finish.argument_observations[position].take() {
+                let _ = old.discard();
+            }
+            self.dispatch
+                .discard_call_relation_observations(finish.undecided_relations);
+            let relations_before = self.dispatch.call_undecided_relations();
+            let read = self.dispatch.observe_read(|| {
+                self.dispatch.resume_contextual_call(
+                    &mut finish.key,
+                    &finish.args,
+                    position,
+                    &mut finish.contextual,
+                )
+            });
+            finish.undecided_relations = self
+                .dispatch
+                .call_undecided_relations()
+                .saturating_sub(relations_before);
+            let complete = read.observations_are_complete();
+            let Ok(((step, proof), observations)) = read.split() else {
+                return RetypeRound::Progress(Box::new(ResolveCallProgress::Done(
+                    self.settle_retyped_call(*finish),
+                )));
+            };
+            let old = std::mem::replace(&mut finish.step_observations, observations);
+            let _ = old.discard();
+            finish.step = Positional::Value(step);
+            finish.declared_result = proof.filter(|_| complete);
         }
         match self.next_retyped_argument(&finish) {
             Some((position, Some(request))) => {
@@ -930,7 +1003,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 RetypeRound::InPlace(finish)
             }
             None => RetypeRound::Progress(Box::new(ResolveCallProgress::Done(
-                Self::settle_retyped_call(*finish),
+                self.settle_retyped_call(*finish),
             ))),
         }
     }
@@ -957,8 +1030,96 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     }
 
     /// The executor's step for a call once no argument is retyped again.
-    fn settle_retyped_call(finish: FinishRoute) -> Option<Positional<ResolveCallStep>> {
-        let FinishRoute { step, retyped, .. } = finish;
+    fn settle_retyped_call(&mut self, finish: FinishRoute) -> Option<Positional<ResolveCallStep>> {
+        let FinishRoute {
+            step,
+            retyped,
+            mut argument_observations,
+            step_observations,
+            undecided_relations,
+            declared_result,
+            key,
+            ..
+        } = finish;
+        self.adopt_argument_observations(&mut argument_observations);
+        // A declined executor does not own the fixed declared result read by
+        // the direct-call route. Its failed applicability probes are not that
+        // route's evidence; authored argument observations remain adopted.
+        let declined = !retyped
+            && matches!(
+                step,
+                Positional::Value(ResolveCallStep::Degraded(
+                    crate::semantic_query::ResolveCallFailure::Undecidable
+                        | crate::semantic_query::ResolveCallFailure::Budget
+                ))
+            )
+            && !self.undecided_call_return_reads_clause(key.callee);
+        let validity = if declined {
+            self.dispatch
+                .discard_call_relation_observations(undecided_relations);
+            step_observations.discard()
+        } else {
+            self.dispatch.adopt_read(step_observations)
+        };
+        if validity.is_err() {
+            return None;
+        }
+        if let Some(proof) = declared_result {
+            if key.kind == crate::semantic_query::CallKind::Call {
+                if let (
+                    Some((_, result)),
+                    Positional::Value(ResolveCallStep::Complete(
+                        crate::semantic_query::ResolvedCallResult::Selected {
+                            substitution, ..
+                        },
+                    )),
+                ) = (proof.result(&key), &step)
+                {
+                    let sources: Vec<_> = self
+                        .constructive_values
+                        .iter()
+                        .filter_map(|(node, value)| match value {
+                            super::ConstructiveValue::Class {
+                                instance,
+                                declaration,
+                            } => Some((*node, *instance, declaration.clone())),
+                            _ => None,
+                        })
+                        .collect();
+                    for (source, instance, declaration) in sources {
+                        let substituted = self.dispatch.substitute_canonical(source, substitution);
+                        if substituted == result {
+                            let instance =
+                                self.dispatch.substitute_canonical(instance, substitution);
+                            self.heritage_self_roots.extend_from_slice(proof.roots());
+                            self.constructive_values.insert(
+                                result,
+                                super::ConstructiveValue::Class {
+                                    instance,
+                                    declaration,
+                                },
+                            );
+                            break;
+                        }
+                    }
+                }
+            }
+            if key.kind == crate::semantic_query::CallKind::Construct
+                && key.args.is_empty()
+                && key.explicit_type_args.is_empty()
+            {
+                if let (Some((_, result)), Some(super::ConstructiveValue::Class { instance, .. })) = (
+                    proof.result(&key),
+                    self.constructive_values.get(&key.callee),
+                ) {
+                    if result == *instance {
+                        self.heritage_self_roots.extend_from_slice(proof.roots());
+                        self.constructive_values
+                            .insert(result, super::ConstructiveValue::Instance);
+                    }
+                }
+            }
+        }
         let mut step = step;
         // A call asked again after a retyped argument that still does not
         // decide answers no uninferred parameter's fallback either.
@@ -978,5 +1139,14 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             ));
         }
         Some(step)
+    }
+
+    fn adopt_argument_observations(
+        &self,
+        observations: &mut [Option<super::super::flow_return_fact::ObservedRead<()>>],
+    ) {
+        for observation in observations.iter_mut().filter_map(Option::take) {
+            let _ = self.dispatch.adopt_read(observation);
+        }
     }
 }

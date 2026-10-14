@@ -397,6 +397,23 @@ fn promises_and_collections_resolve_as_the_checker_resolves_them() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+#[test]
+fn explicit_constructor_context_preserves_executor_parameter_rejection() {
+    let matrix = Matrix::new(
+        r#"
+export function rejectedExecutor() {
+    return new Promise<boolean>((resolve: string) => resolve);
+}
+"#,
+    )
+    .lib(GLOBALS_LIB);
+    let verdicts = matrix.verdicts(&[(Read::Return("rejectedExecutor"), vec!["Promise<boolean>"])]);
+    for verdict in &verdicts[0] {
+        assert_eq!(verdict.diagnostics, [2345], "{}", verdict.lane);
+        assert!(verdict.matched, "{}", verdict.lane);
+    }
+}
+
 /// Method calls on `Promise<number>`, `Map<string, number>` and `Set<string>`
 /// resolve through the instantiated interface: `p.then((v) => "" + v)` is
 /// `Promise<string>`, `p.then()` `Promise<number>`, `p.catch(() => "e" as
@@ -420,6 +437,7 @@ fn promises_and_collections_resolve_as_the_checker_resolves_them() {
 ///   UnmodeledPosition>` degraded by UnrepresentableCallee.
 /// - `sAdd`: the checker answers `Set<string>`; the lane measured `<opaque
 ///   UnmodeledPosition>` degraded by UnrepresentableCallee.
+
 #[test]
 #[ignore = "a method call on an instantiated library generic interface resolves its signature"]
 fn a_method_call_on_a_library_generic_instance_resolves() {

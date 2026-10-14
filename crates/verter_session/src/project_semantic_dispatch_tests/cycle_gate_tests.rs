@@ -90,7 +90,7 @@ fn assert_decided(
         "{row}: a Decided outcome must not suppress family admission"
     );
     assert!(
-        !read.result_is_partial,
+        !read.result_is_partial(),
         "{row}: a Decided outcome must not be partial"
     );
 }
@@ -277,7 +277,7 @@ fn cycle_gate_hop_cap_plain_is_continue_return_only_not_partial() {
         "a LegacyFallback always suppresses family admission"
     );
     assert!(
-        !read.result_is_partial,
+        !read.result_is_partial(),
         "HopLimit is ReturnOnly, NOT partial — a bounded complete observation"
     );
 }
@@ -309,7 +309,7 @@ fn cycle_gate_hop_cap_complex_is_stop_return_only_not_partial() {
     );
     assert!(read.cache_suppress, "a LegacyFallback always suppresses");
     assert!(
-        !read.result_is_partial,
+        !read.result_is_partial(),
         "HopLimit is ReturnOnly, NOT partial"
     );
 }
@@ -339,11 +339,11 @@ fn cycle_gate_missing_body_is_decided_continue() {
     // finalizer refuses the OUTER entry (`cache_suppress`, NOT partial):
     // the verdict flows, admission follows the generic rails.
     assert!(
-        read.cache_suppress && !read.result_is_partial,
+        read.cache_suppress && !read.result_is_partial(),
         "the non-cacheable missing-decl hop must refuse outer admission \
          without going partial (cache_suppress={}, result_is_partial={})",
         read.cache_suppress,
-        read.result_is_partial
+        read.result_is_partial()
     );
 }
 

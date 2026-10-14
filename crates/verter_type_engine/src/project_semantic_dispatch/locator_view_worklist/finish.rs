@@ -46,7 +46,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         )
         .with_authored_resolution_debt(inputs.authored_resolution_debt);
         match self.plan_bare_ref_head(&resolver_context, &name, type_args.len()) {
-            CarrierResolutionPlan::Ready(value) => ReferenceProjectionPlan::Ready(value),
+            CarrierResolutionPlan::Ready(value) => ReferenceProjectionPlan::Ready(value.node),
             CarrierResolutionPlan::NeedsArgs(continuation) => {
                 let argument_context = self.reference_argument_context(&continuation, context);
                 ReferenceProjectionPlan::NeedsArgs {
@@ -93,7 +93,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             typeof_query,
             type_args.len(),
         ) {
-            CarrierResolutionPlan::Ready(value) => ReferenceProjectionPlan::Ready(value),
+            CarrierResolutionPlan::Ready(value) => ReferenceProjectionPlan::Ready(value.node),
             CarrierResolutionPlan::NeedsArgs(continuation) => {
                 let argument_context = self.reference_argument_context(&continuation, context);
                 ReferenceProjectionPlan::NeedsArgs {
@@ -160,12 +160,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .into_boxed_slice(),
         );
         let projected_args = if may_reduce_operator(context) {
-            let (args, completeness) =
-                self.evaluate_carrier_arguments(base, &projected_args, context);
-            if let crate::semantic_query::ResultCompleteness::Partial(reasons) = completeness {
-                self.fold_local_partial_completeness(reasons);
-            }
-            args
+            self.evaluate_carrier_arguments(base, &projected_args, context)
+                .into_active_query_build_arguments(self)
         } else {
             projected_args
         };
@@ -632,7 +628,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         is_const: parameter.is_const,
                     })
                     .collect();
-                graph.intern_preserving_scope(
+                let signature = graph.intern_preserving_scope(
                     node,
                     SemanticNodeData::Signature {
                         kind: *kind,
@@ -655,6 +651,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                     source.clone(),
                                 )
                             }
+                            crate::semantic_query::SignatureReturnCarrier::DeferredFlow(_)
+                    | crate::semantic_query::SignatureReturnCarrier::EvaluatedFlow(_) => return_carrier.clone(),
                         },
                         signature_span: *signature_span,
                         return_type_span: *return_type_span,
@@ -662,7 +660,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             .map(|predicate| predicate.map_type(|ty| projected(memo, ty, context))),
                         is_abstract: *is_abstract,
                     },
-                )
+                );
+                if context.mode == crate::semantic_query::ProjectionMode::Expanded {
+                    self.materialize_returned_callable(signature)
+                } else {
+                    signature
+                }
             }
             SemanticNodeData::KeyOf { base } => {
                 let base_id = projected(
@@ -691,7 +694,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
             SemanticNodeData::IndexedAccess { object, index } => {
-                let object_context = super::super::raise::indexed_access_object_context(context);
+                let object_context = self.indexed_access_operand_context(*object, context);
                 let object_id = projected(memo, *object, object_context);
                 let index = match index {
                     IndexKey::String(value) => IndexKey::String(Arc::clone(value)),

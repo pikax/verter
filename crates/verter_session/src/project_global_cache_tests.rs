@@ -390,6 +390,7 @@ fn execute_returns_typed_type_node_with_clean_provenance() {
             assert_eq!(
                 out.provenance,
                 ResultProvenance {
+                    fact_status: verter_type_engine::semantic_query::FactStatus::Complete,
                     taint: ResultTaint::Clean
                 },
                 "boundary provenance must be clean"

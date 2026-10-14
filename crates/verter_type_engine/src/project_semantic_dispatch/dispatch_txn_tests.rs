@@ -197,7 +197,7 @@ fn relate_identity(seed: u64, occurrence: InferenceOccurrence) -> ObligationIden
 }
 
 /// A zero-env `FlowReturn` key over one served declaration-body position.
-fn flow_return_key() -> FlowReturnKey {
+pub(in crate::project_semantic_dispatch) fn flow_return_key() -> FlowReturnKey {
     FlowReturnKey {
         function: crate::semantic_query::FlowFunctionSlotIdentity {
             declaration_slot: crate::semantic_query::ResolvedDeclSlotIdentity::value_slot(

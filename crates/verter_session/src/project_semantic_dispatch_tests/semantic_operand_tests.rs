@@ -1372,7 +1372,8 @@ fn force_boundary_and_nested_dispatches_are_budget_charged() {
     assert!(matches!(
         limited_dispatch
             .force_semantic_operand_for_tests(&operand, request(ProjectionMode::Expanded)),
-        QueryResult::Error(QueryError::BudgetExceeded(_))
+        QueryResult::Error(QueryError::IncompleteSemanticOperand { reasons })
+            if reasons.contains(verter_type_engine::semantic_query::PartialReasonSet::PROJECTION_WORK_LIMIT)
     ));
     assert_eq!(limited.projection_budget.projection_ops_executed_count(), 2);
     assert_eq!(

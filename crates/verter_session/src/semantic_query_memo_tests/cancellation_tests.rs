@@ -120,7 +120,7 @@ fn cancelled_joiner_detaches_without_aborting_live_winner() {
         detached.value,
         QueryResult::Error(QueryError::Cancelled)
     ));
-    assert!(detached.cache_suppress && detached.result_is_partial);
+    assert!(detached.cache_suppress && detached.result_is_partial());
     let _ = join_within(joiner, "cancelled joiner");
 
     release_tx.send(()).unwrap();
@@ -214,7 +214,7 @@ fn cancelled_leader_never_publishes_and_live_follower_retries_cold() {
         leader.value,
         QueryResult::Error(QueryError::Cancelled)
     ));
-    assert!(leader.cache_suppress && leader.result_is_partial);
+    assert!(leader.cache_suppress && leader.result_is_partial());
 
     let follower_node = match follower.value {
         QueryResult::Value(node) => node,
@@ -615,6 +615,7 @@ fn post_admission_cancellation_keeps_parent_and_prefix_backfill() {
                         cache_suppress: false,
                         completeness:
                             verter_type_engine::semantic_query::ResultCompleteness::Complete,
+                        approximation: None,
                         taint: verter_type_engine::semantic_query::ResultTaint::Clean,
                         observed_self_roots: Vec::new(),
                         graph_carrier: None,
@@ -797,7 +798,7 @@ fn a_joiner_parked_when_the_winner_panics_retries_cold() {
         *store.node_data(node).unwrap(),
         SemanticNodeData::Primitive(PrimitiveKind::Number)
     ));
-    assert!(!joined.cache_suppress && !joined.result_is_partial);
+    assert!(!joined.cache_suppress && !joined.result_is_partial());
     assert_eq!(
         builds.load(Ordering::SeqCst),
         2,
@@ -870,7 +871,7 @@ fn a_joiner_of_an_inline_member_flight_aborted_under_cancellation_retries_cold()
         *store.node_data(node).unwrap(),
         SemanticNodeData::Primitive(PrimitiveKind::Number)
     ));
-    assert!(!joined.cache_suppress && !joined.result_is_partial);
+    assert!(!joined.cache_suppress && !joined.result_is_partial());
     assert_eq!(
         builds.load(Ordering::SeqCst),
         1,

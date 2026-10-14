@@ -1089,7 +1089,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // Raw-fallback / synthetic-binding carriers pass through this
             // reducer unchanged — the dispatch resolves them as a whole.
             | SemanticNodeData::RawFallback { .. }
-            | SemanticNodeData::DeferredCallable(_)
             | SemanticNodeData::SyntheticBinding { .. } => node,
 
             // Unresolved bare-name / dynamic-import reference carriers: a
@@ -1320,7 +1319,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 let typeof_key = self.typeof_key_with_path(value_root, path, context);
                 let root_read = self.execute_read(typeof_key);
                 state.merge_dep_signature(&root_read.dep_signature);
-                if root_read.result_is_partial {
+                if root_read.result_is_partial() {
                     state.result_is_partial = true;
                     crate::request_context::mark_request_result_partial();
                 }
@@ -1567,6 +1566,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 rebuild_tuple(self, node, elements, *readonly, &state.mapping, context)
                     .unwrap_or(node)
             }
+            SemanticNodeData::DeferredCallable(_) => {
+                if is_whole_surface_published(context) {
+                    self.materialize_returned_callable(node)
+                } else {
+                    node
+                }
+            }
             SemanticNodeData::Signature {
                 kind,
                 params,
@@ -1577,8 +1583,35 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 signature_span,
                 return_type_span,
                 predicate,
-                is_abstract: _,
-            } => rebuild_function(
+                is_abstract,
+            } => {
+                if is_whole_surface_published(context) {
+                    if let crate::semantic_query::SignatureReturnCarrier::DeferredFlow(source) = return_carrier {
+                        let (returned, inferred) = match self.execute_function_return_source(
+                            source.source(), source.identity().anchor.canonical_id.as_ref(),
+                        ) {
+                            super::flow_return::FunctionReturnNode::Flow(result) =>
+                                (source.apply_result(self, result.return_type()), result.inferred_predicate()),
+                            super::flow_return::FunctionReturnNode::Aborted(abort) =>
+                                (self.opaque(QueryError::ExecutionAborted(abort)), None),
+                            _ => (self.opaque(QueryError::Miss), None),
+                        };
+                        let names: Vec<_> = type_parameters.iter().map(|p| Arc::clone(&p.name)).collect();
+                        let arguments: Vec<_> = type_parameters.iter().map(|p| p.param).collect();
+                        let returned = self.bind_flow_return_own_clause(returned,
+                            source.identity().anchor.canonical_id.as_ref(), source.identity().anchor.owner,
+                            &names, &arguments).unwrap_or(returned);
+                        let demanded = self.graph().intern_preserving_scope(node, SemanticNodeData::Signature {
+                            kind: *kind, params: Arc::clone(params), return_type: returned,
+                            type_parameters: Arc::clone(type_parameters), occurrence: occurrence.clone(),
+                            return_carrier: crate::semantic_query::SignatureReturnCarrier::Function(source.source().clone()),
+                            signature_span: *signature_span, return_type_span: *return_type_span,
+                            predicate: predicate.or(inferred), is_abstract: *is_abstract,
+                        });
+                        return self.reduce_subtree(demanded, context, state);
+                    }
+                }
+                rebuild_function(
                 self,
                 node,
                 *kind,
@@ -1593,7 +1626,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 &state.mapping,
                 context,
             )
-            .unwrap_or(node),
+            .unwrap_or(node)
+            },
             SemanticNodeData::MergedDecl { contributors } => {
                 // Reduce the peer-merged surface, then drive it through the
                 // reducer so its demanded children reduce under `context`.
@@ -1656,7 +1690,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // fenced serve / unrootable self-root) is NOT folded here: it refuses
         // only its own inner-memo admission and MUST NOT suppress a
         // complete component-meta result.
-        if read.result_is_partial {
+        if read.result_is_partial() {
             state.result_is_partial = true;
             crate::request_context::mark_request_result_partial();
         }
@@ -1677,6 +1711,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
             QueryResult::Recursive(_id) => node,
+            QueryResult::Error(error @ QueryError::IncompleteSemanticOperand { .. }) => {
+                // This demanded reduction completed without a usable value.
+                // Preserve its typed failure instead of republishing the
+                // authored subject as if it were a deliberate carrier stop.
+                self.graph()
+                    .intern_preserving_scope(node, SemanticNodeData::Opaque(error))
+            }
             QueryResult::Error(_) => node,
         };
 
@@ -1758,9 +1799,8 @@ fn is_whole_surface_published(ctx: ProjectionReductionContext) -> bool {
 /// body and the indexed access can pick `'a'` out of it.
 ///
 /// Under any `Published` parent → demote the object operand to
-/// `StructuralTransit(Navigate)` (provenance + merge_role preserved).
-/// Keeping Published demand would still expand mapped values before the
-/// index selects them. The object operand is the INTERMEDIATE hop of the
+/// [`ProjectionMode::Navigate`] (demand + provenance + merge_role
+/// preserved). The object operand is the INTERMEDIATE hop of the
 /// indexed-access path (`Root['a']` in `Root['a']['b']`): it must be
 /// navigated (followed through aliases / generic bodies so the outer
 /// `IndexedAccess` dispatch can look up the index) but NOT expanded.
@@ -1783,7 +1823,7 @@ pub(crate) fn indexed_access_object_context(
     parent_context: ProjectionReductionContext,
 ) -> ProjectionReductionContext {
     if matches!(parent_context.demand, ReductionDemand::Published) {
-        parent_context.into_structural_transit_with_mode(ProjectionMode::Navigate)
+        parent_context.with_mode(ProjectionMode::Navigate)
     } else {
         structural_operand_context(parent_context)
     }
@@ -2067,6 +2107,8 @@ fn rebuild_function<C: crate::resolver_core::ResolverCapabilities>(
                 crate::semantic_query::SignatureReturnCarrier::Function(source) => {
                     crate::semantic_query::SignatureReturnCarrier::Function(source)
                 }
+                other @ (crate::semantic_query::SignatureReturnCarrier::DeferredFlow(_)
+                | crate::semantic_query::SignatureReturnCarrier::EvaluatedFlow(_)) => other,
             },
             signature_span,
             return_type_span,
@@ -2092,9 +2134,9 @@ struct ReduceState {
     visited: FxHashSet<(SemanticNodeId, ProjectionReductionContext)>,
     mapping: MappingMap,
     dep_facts: Vec<(Arc<str>, crate::semantic_query::DepVersion)>,
-    /// OR-fold of every `read.result_is_partial` observed by `reduce_one`
+    /// OR-fold of every `read.result_is_partial()` observed by `reduce_one`
     /// during this reduce pass. Propagated into the returned
-    /// `MaterializedTypeExpr.result_is_partial` so direct consumers
+    /// `MaterializedTypeExpr.result_is_partial()` so direct consumers
     /// (e.g. `field_types::materialize_component_meta_type_expr_until_stable_full`)
     /// can refuse to publish a PARTIAL result into shared caches without
     /// needing to inspect the request-scoped TLS flag. NOT set by a
@@ -4124,8 +4166,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> OpenWalk<'a, C> {
         // the check/extends operands terminates bounded instead of
         // diverging.
         let dispatch = self.dispatch;
-        if let Some(super::conditional_decision::ConditionalReading::Reduced(selected)) =
-            super::conditional_decision::exact_reading(dispatch.conditional_outcome(node))
+        if let Some(super::conditional_decision::ConditionalReading::Reduced(selected)) = dispatch
+            .probe_optional(|| {
+                super::conditional_decision::exact_reading(dispatch.conditional_outcome(node))
+            })
         {
             return self.node_is_open(ctx, selected);
         }
@@ -4331,9 +4375,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> OpenWalk<'a, C> {
     /// Bounded ONE-HOP reduction fallback behind the builtin registry rule.
     ///
     /// Resolves a `__builtin__` instantiation the per-utility output-key
-    /// rule could not prove closed through the ONE shared structural-fact
-    /// demand ([`ProjectSemanticDispatch::normalize_node_for_structural_fact_demand`]
-    /// — the residual-`InstantiationRef` `Instantiate` hop: bounded,
+    /// rule could not prove closed through a structural source-domain demand
+    /// (the residual-`InstantiationRef` `Instantiate` hop: bounded,
     /// fail-closed, dep-signature facts recorded into the active tracer),
     /// then classifies the REDUCED node with this same walk at the
     /// key-domain position. Returns `false` (not provably closed) on a
@@ -4351,14 +4394,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> OpenWalk<'a, C> {
             return false;
         }
         self.budget -= 1;
-        let Some(reduced) = self
-            .dispatch
-            .normalize_node_for_structural_fact_demand(
-                node,
-                ProjectionReductionContext::structural_transit(),
-            )
-            .into_complete_node()
-        else {
+        // Demand the utility's shallow structural result, not a projected
+        // positive-member surface. A flow-backed signature utility can supply
+        // its independently certified exact key domain here, retaining each
+        // unfinished value as a deferred member demand. Structural transit
+        // instead consumes its whole return, whose value limitations cannot
+        // establish whether the keys themselves are complete.
+        // A partial presence subset alone cannot prove a closed domain.
+        let Some(reduced) = self.dispatch.probe_optional(|| {
+            self.dispatch
+                .normalize_node_for_structural_fact_demand(
+                    node,
+                    ProjectionReductionContext::published(ProjectionMode::Shallow),
+                )
+                .into_complete_node()
+        }) else {
             return false;
         };
         if reduced == node {

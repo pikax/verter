@@ -322,7 +322,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             self.project_generation_signature(),
                         )
                             .into();
-                        return output.with_observed_self_roots(observed_self_roots);
+                        return output.with_observed_self_roots(observed_self_roots).with_positional_guarantee();
                     }
                 }
                 let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput = (
@@ -556,7 +556,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             self.project_generation_signature(),
         )
             .into();
-        output.with_observed_self_roots(observed_self_roots)
+        output
+            .with_observed_self_roots(observed_self_roots)
+            .with_positional_guarantee()
     }
 
     /// Empty-path value `DeclBody` locators address the binding's type
@@ -729,8 +731,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // the lowered graph with one is the typed miss.
                 Step::ClassMembersNamed { .. } | Step::ClassHeritage => return None,
                 Step::FunctionParam { ordinal } => match data {
-                    SemanticNodeData::Signature { params, .. } => {
-                        Position::Node(params.get(*ordinal as usize)?.ty)
+                    data if data
+                        .callable_header(
+                            &crate::semantic_query::ResolveOverloadSetConsumer::witness(),
+                        )
+                        .is_some() =>
+                    {
+                        Position::Node(
+                            data.callable_header(
+                                &crate::semantic_query::ResolveOverloadSetConsumer::witness(),
+                            )?
+                            .params
+                            .get(*ordinal as usize)?
+                            .ty,
+                        )
                     }
                     _ => return None,
                 },
@@ -848,6 +862,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let Some(data) = self.graph().node_data(node) else {
             return node;
         };
+        if let SemanticNodeData::DeferredCallable(callable) = data.as_ref() {
+            return self.graph().intern_preserving_scope(
+                node,
+                SemanticNodeData::DeferredCallable(callable.clone().with_occurrence(occurrence)),
+            );
+        }
         let mut new_data = (*data).clone();
         let SemanticNodeData::Signature {
             occurrence: slot, ..

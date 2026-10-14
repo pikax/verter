@@ -359,14 +359,10 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
         let data = graph
             .node_data(*signature)
             .ok_or(IncompleteReason::UnsettledInput)?;
-        let SemanticNodeData::Signature {
-            params,
-            type_parameters,
-            ..
-        } = &*data
-        else {
-            return Err(IncompleteReason::UnsettledInput);
-        };
+        let header = data
+            .callable_header(&crate::semantic_query::ResolveOverloadSetConsumer::witness())
+            .ok_or(IncompleteReason::UnsettledInput)?;
+        let (params, type_parameters) = (header.params, header.type_parameters);
         let constraints: Vec<_> = type_parameters
             .iter()
             .filter_map(|decl| {

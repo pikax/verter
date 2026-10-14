@@ -450,7 +450,7 @@ pub fn fold_result_completeness(joined: ResultCompleteness) {
 /// the sole correct authority.
 #[inline]
 pub fn observe_component_meta_read_suppress<T>(read: &crate::semantic_query::CacheRead<T>) {
-    if read.result_is_partial {
+    if read.result_is_partial() {
         mark_request_result_partial_from_read_with(read.partial_reason_classes());
     }
 }

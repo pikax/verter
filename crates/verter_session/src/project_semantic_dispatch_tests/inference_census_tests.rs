@@ -400,7 +400,7 @@ fn conditional_inference() {
                 r#"{ x: 1; }"#,
             ],
             diagnostics: [&[], &[], &[], &[]],
-            baseline: [Class::Gap, Class::Gap, Class::Gap, Class::Gap],
+            baseline: [Class::Exact, Class::Exact, Class::Exact, Class::Exact],
         },
         Row {
             read: Read::Type(r#"Rep<[1, 2]>"#),
@@ -487,9 +487,11 @@ fn library_inference() {
             diagnostics: [&[], &[], &[], &[]],
             baseline: [
                 Class::WrongClean,
+                // The unfixed Awaited relation is carried as an explicit
+                // proof refusal rather than silently claiming completeness.
+                Class::Gap,
                 Class::WrongClean,
-                Class::WrongClean,
-                Class::WrongClean,
+                Class::Gap,
             ],
         },
     ];

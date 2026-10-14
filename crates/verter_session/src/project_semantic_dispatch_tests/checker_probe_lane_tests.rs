@@ -433,16 +433,41 @@ pub(super) fn probe_host(project: ProbeProject<'_>) -> Arc<crate::VerterHost> {
             })
             .expect("the probe's ambient library registers against its project");
     }
-    for (name, file_source) in project.files {
-        let path = format!("{PROBE_ROOT}/{name}");
-        // A sibling is classified by its name, as the host classifies it: a
-        // `.d.ts` sibling is a declaration file.
-        let language = crate::LanguageRegistry::global()
-            .classify_static(&path)
-            .static_resolution();
-        crate::u6_flow_shape_corpus_tests::upsert(&host, &path, file_source, language);
-    }
+    // Materialize the sibling project through the shared atomic upsert
+    // boundary. Every source is ready before the probe; thousands of
+    // singleton scheduler submissions add no semantic coverage.
+    upsert_probe_files(&host, project.files);
     host
+}
+
+pub(super) fn upsert_probe_files(host: &crate::VerterHost, files: &[(&str, &str)]) {
+    let requests = files
+        .iter()
+        .map(|(name, file_source)| {
+            let path = format!("{PROBE_ROOT}/{name}");
+            let file_language = crate::LanguageRegistry::global()
+                .classify_static(&path)
+                .static_resolution();
+            crate::UpsertRequest {
+                canonical_id: Some(path.clone()),
+                input_id: path,
+                source: Arc::from(*file_source),
+                file_language,
+                aliases: Vec::new(),
+            }
+        })
+        .collect();
+    let outcomes =
+        host.upsert_many_with_priority(requests, verter_scheduler::stage::Priority::Interactive);
+    assert_eq!(outcomes.len(), files.len());
+    for outcome in outcomes {
+        let _ = outcome
+            .result
+            .unwrap_or_else(|error| {
+                panic!("fixture {} must upsert: {error:?}", outcome.canonical_id)
+            })
+            .expect("fixture source must be committed");
+    }
 }
 
 /// Every `(probe, checker print)` pair whose live answer does not match the

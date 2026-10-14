@@ -55,8 +55,13 @@ use verter_session_query::{flow::completion::NormalCompletion, transports_comple
 /// their own mode.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FlowReturnResult {
+    /// A separate producer proof for a selected member; never promotes fact().
+    independent_member:
+        Option<std::sync::Arc<crate::project_semantic_dispatch::flow_return::ExactMemberValue>>,
     /// Quality of the reads supporting this independently valid evaluation.
     observed_completeness: super::ResultCompleteness,
+    exact_return_keys:
+        Option<std::sync::Arc<crate::project_semantic_dispatch::flow_return::ExactReturnKeyDomain>>,
     /// The whole-function return type (widened join of every contributor).
     ///
     /// PRIVATE for the same reason as [`Self::degradation`]: the
@@ -221,6 +226,8 @@ impl FlowReturnResult {
                 .then_some(FlowReturnDegradation::UnresolvedValue)
         });
         Self {
+            independent_member: None,
+            exact_return_keys: None,
             observed_completeness: super::ResultCompleteness::Complete,
             return_type,
             can_fall_through,
@@ -262,6 +269,23 @@ impl FlowReturnResult {
         self
     }
 
+    pub(crate) fn with_independent_member(
+        mut self,
+        proof: crate::project_semantic_dispatch::flow_return::ExactMemberValue,
+    ) -> Self {
+        self.independent_member = Some(std::sync::Arc::new(proof));
+        self
+    }
+
+    pub(crate) fn independent_member(
+        &self,
+        key: &super::FlowReturnKey,
+    ) -> Option<&crate::project_semantic_dispatch::flow_return::ExactMemberValue> {
+        self.independent_member
+            .as_deref()
+            .filter(|proof| proof.matches(key, self.return_type))
+    }
+
     /// The diagnostics riding with the value (see the field).
     #[must_use]
     pub fn checker_diagnostics(&self) -> &std::sync::Arc<[super::CheckerDiagnostic]> {
@@ -277,6 +301,32 @@ impl FlowReturnResult {
     ) -> Self {
         self.checker_diagnostics = diagnostics;
         self
+    }
+
+    /// Required value observations invalidate a previously minted certificate.
+    /// Whole-proof refusal is a separate producer outcome and does not use this.
+    pub(crate) fn with_dependent_value_limitations(
+        mut self,
+        reasons: super::PartialReasonSet,
+    ) -> Self {
+        self.independent_member = None;
+        self.observed_completeness = self
+            .observed_completeness
+            .merge(super::ResultCompleteness::partial(reasons));
+        self
+    }
+
+    pub(crate) fn with_exact_return_keys(
+        mut self,
+        proof: crate::project_semantic_dispatch::flow_return::ExactReturnKeyDomain,
+    ) -> Self {
+        self.exact_return_keys = Some(std::sync::Arc::new(proof));
+        self
+    }
+    pub(crate) fn exact_return_keys(
+        &self,
+    ) -> Option<&crate::project_semantic_dispatch::flow_return::ExactReturnKeyDomain> {
+        self.exact_return_keys.as_deref()
     }
 
     /// The whole-function return type.
@@ -297,6 +347,7 @@ impl FlowReturnResult {
     /// [`FlowReturnDegradation::PartialInterior`].
     #[must_use]
     pub fn with_partial_interior(mut self) -> Self {
+        self.independent_member = None;
         self.degradation
             .get_or_insert(FlowReturnDegradation::PartialInterior);
         self
@@ -307,6 +358,7 @@ impl FlowReturnResult {
     /// when it has one, else [`FlowReturnDegradation::OperationBudget`].
     #[must_use]
     pub(crate) fn with_operation_budget(mut self) -> Self {
+        self.independent_member = None;
         self.degradation
             .get_or_insert(FlowReturnDegradation::OperationBudget);
         self
@@ -384,6 +436,12 @@ impl FlowReturnResult {
         );
         Self {
             observed_completeness: self.observed_completeness,
+            exact_return_keys: (return_type == self.return_type)
+                .then(|| self.exact_return_keys.clone())
+                .flatten(),
+            independent_member: (return_type == self.return_type)
+                .then(|| self.independent_member.clone())
+                .flatten(),
             facet: self.facet,
             checker_diagnostics: std::sync::Arc::clone(&self.checker_diagnostics),
             ..rebuilt

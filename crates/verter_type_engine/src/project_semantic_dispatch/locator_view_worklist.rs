@@ -46,13 +46,46 @@ use crate::semantic_query::{
 pub struct ProjectedViewOutcome {
     pub node: SemanticNodeId,
     pub completeness: ResultCompleteness,
+    pub(super) extent: ProjectionExtent,
+}
+
+/// The representation the projection actually completed. A suspended walk
+/// returns its entire original source, never its unfinished rewritten prefix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ProjectionExtent {
+    Projected,
+    SourceContinuation,
+    Unavailable,
+}
+
+impl ProjectionExtent {
+    pub(super) fn join(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Unavailable, _) | (_, Self::Unavailable) => Self::Unavailable,
+            (Self::SourceContinuation, _) | (_, Self::SourceContinuation) => {
+                Self::SourceContinuation
+            }
+            _ => Self::Projected,
+        }
+    }
+
+    pub(super) fn has_positional_representation(self) -> bool {
+        self != Self::Unavailable
+    }
 }
 
 impl ProjectedViewOutcome {
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn has_positional_representation_for_tests(&self) -> bool {
+        self.extent.has_positional_representation()
+    }
+
     fn complete(node: SemanticNodeId) -> Self {
         Self {
             node,
             completeness: ResultCompleteness::Complete,
+            extent: ProjectionExtent::Projected,
         }
     }
 
@@ -60,6 +93,37 @@ impl ProjectedViewOutcome {
         Self {
             node,
             completeness: ResultCompleteness::partial(reasons),
+            extent: ProjectionExtent::SourceContinuation,
+        }
+    }
+
+    fn unavailable(node: SemanticNodeId) -> Self {
+        Self {
+            node,
+            completeness: ResultCompleteness::partial(
+                crate::semantic_query::PartialReasonSet::SEMANTIC_QUERY_FAULT,
+            ),
+            extent: ProjectionExtent::Unavailable,
+        }
+    }
+}
+
+enum ProjectionFailure {
+    Limit(crate::semantic_query::PartialReasonSet),
+    MissingNode,
+}
+
+impl From<crate::semantic_query::PartialReasonSet> for ProjectionFailure {
+    fn from(reasons: crate::semantic_query::PartialReasonSet) -> Self {
+        Self::Limit(reasons)
+    }
+}
+
+impl ProjectionFailure {
+    fn outcome(self, root: SemanticNodeId) -> ProjectedViewOutcome {
+        match self {
+            Self::Limit(reasons) => ProjectedViewOutcome::partial(root, reasons),
+            Self::MissingNode => ProjectedViewOutcome::unavailable(root),
         }
     }
 }
@@ -425,7 +489,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     Arc::clone(&path),
                     context,
                 )) {
-                    QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
+                    QueryResult::Value(SemanticQueryOutput { value, provenance }) => {
+                        (value, provenance.fact_status)
+                    }
                     _ if !path.is_empty() => {
                         let joined: Arc<str> =
                             Arc::from(format!("{}.{}", value_root.name, path[0]));
@@ -439,7 +505,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             rest,
                             context,
                         )) {
-                            QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
+                            QueryResult::Value(SemanticQueryOutput { value, provenance }) => {
+                                (value, provenance.fact_status)
+                            }
                             _ => {
                                 return ReferenceProjectionPlan::Ready(
                                     self.opaque(QueryError::Miss),
@@ -452,10 +520,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     }
                 };
                 if type_args.is_empty() {
-                    ReferenceProjectionPlan::Ready(result)
+                    ReferenceProjectionPlan::Ready(result.0)
                 } else {
                     ReferenceProjectionPlan::NeedsArgs {
-                        continuation: CarrierArgsContinuation::ApplyTypeof { base: result },
+                        continuation: CarrierArgsContinuation::ApplyTypeof {
+                            base: result.0,
+                            source_status: result.1,
+                        },
                         args: type_args,
                         argument_context: context,
                     }
@@ -598,8 +669,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             if let Err(reasons) = self.charge_connected_work() {
                 return Err(ProjectedViewOutcome::partial(root, reasons));
             }
-            memo.insert((root, root_context), root);
-            return Err(ProjectedViewOutcome::complete(root));
+            return Err(ProjectedViewOutcome::unavailable(root));
         };
         if let Err(reasons) = self.charge_connected_work() {
             return Err(ProjectedViewOutcome::partial(root, reasons));
@@ -681,7 +751,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             };
             self.memoize_projected(memo, node, context, instantiated);
         }
-        let mut trip = None;
+        let mut trip: Option<ProjectionFailure> = None;
         // A step that stops at an instantiation leaves the run at once: the
         // node awaiting it stays on top of the stack for its delivery.
         while seam.need.is_none() {
@@ -694,8 +764,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         match self.prepare_projection_node(node, context, memo, &mut work_credit) {
                             Ok(Some(data)) => data,
                             Ok(None) => continue,
-                            Err(reasons) => {
-                                trip = Some(reasons);
+                            Err(failure) => {
+                                trip = Some(failure);
                                 break;
                             }
                         };
@@ -710,7 +780,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         &mut work_credit,
                         seam,
                     ) {
-                        trip = Some(reasons);
+                        trip = Some(reasons.into());
                         break;
                     }
                 }
@@ -727,7 +797,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         context: child_context,
                     } = &child_plan
                     {
-                        if let Err(reasons) = self.resume_uniform_projection(
+                        if let Err(failure) = self.resume_uniform_projection(
                             node,
                             context,
                             &data,
@@ -741,7 +811,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             &mut work_credit,
                             seam,
                         ) {
-                            trip = Some(reasons);
+                            trip = Some(failure);
                             break;
                         }
                         continue;
@@ -777,7 +847,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             };
                             if synchronize {
                                 if let Err(reasons) = work_credit.refresh() {
-                                    trip = Some(reasons);
+                                    trip = Some(reasons.into());
                                     break;
                                 }
                             }
@@ -795,8 +865,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 cursor += 1;
                                 continue;
                             }
-                            Err(reasons) => {
-                                trip = Some(reasons);
+                            Err(failure) => {
+                                trip = Some(failure);
                                 break;
                             }
                         };
@@ -826,7 +896,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             Ok(true) => break,
                             Ok(false) => {}
                             Err(reasons) => {
-                                trip = Some(reasons);
+                                trip = Some(reasons.into());
                                 break;
                             }
                         }
@@ -918,7 +988,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         _ => self.opaque(QueryError::Miss),
                     };
                     if let Err(reasons) = work_credit.refresh() {
-                        trip = Some(reasons);
+                        trip = Some(reasons.into());
                         break;
                     }
                     if self.graph().node_data(selected).as_deref() != Some(&decision_shell) {
@@ -1025,7 +1095,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         _ => self.opaque(QueryError::Miss),
                     };
                     if let Err(reasons) = work_credit.refresh() {
-                        trip = Some(reasons);
+                        trip = Some(reasons.into());
                         break;
                     }
                     self.memoize_projected(memo, node, context, result);
@@ -1069,7 +1139,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 _ => self.opaque(QueryError::Miss),
                             };
                             if let Err(reasons) = work_credit.refresh() {
-                                trip = Some(reasons);
+                                trip = Some(reasons.into());
                                 break;
                             }
                             result
@@ -1100,7 +1170,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         key_space,
                     );
                     if let Err(reasons) = work_credit.refresh() {
-                        trip = Some(reasons);
+                        trip = Some(reasons.into());
                         break;
                     }
                     self.memoize_projected(memo, node, context, result);
@@ -1161,7 +1231,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             CarrierFinish::Instantiate(key) => self.instantiated_node(key),
                         };
                         if let Err(reasons) = work_credit.refresh() {
-                            trip = Some(reasons);
+                            trip = Some(reasons.into());
                             break;
                         }
                         self.memoize_projected(memo, node, context, result);
@@ -1172,7 +1242,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 break;
             }
             if let Some(reasons) = self.connected_demand_trip() {
-                trip = Some(reasons);
+                trip = Some(reasons.into());
                 break;
             }
         }
@@ -1182,8 +1252,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return ProjectionPoll::Need(key);
         }
         ProjectionPoll::Done(
-            if let Some(reasons) = trip.or_else(|| self.connected_demand_trip()) {
-                ProjectedViewOutcome::partial(root, reasons)
+            if let Some(failure) = trip.or_else(|| self.connected_demand_trip().map(Into::into)) {
+                failure.outcome(root)
             } else {
                 ProjectedViewOutcome::complete(projected(memo, root, root_context))
             },
@@ -1220,7 +1290,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         context: ProjectionReductionContext,
         memo: &mut ViewMemo,
         work_credit: &mut ConnectedWorkCredit<'_, '_>,
-    ) -> Result<Option<Arc<SemanticNodeData>>, crate::semantic_query::PartialReasonSet> {
+    ) -> Result<Option<Arc<SemanticNodeData>>, ProjectionFailure> {
         if memo.contains_key(&(node, context)) {
             return Ok(None);
         }
@@ -1229,8 +1299,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             work_credit.consume()?;
             crate::loop5_instrumentation::watchdog_beat();
             crate::loop5_instrumentation::watchdog_check_and_dump("project_view_node_worklist");
-            memo.insert((node, context), node);
-            return Ok(None);
+            return Err(ProjectionFailure::MissingNode);
         };
         match data.as_ref() {
             SemanticNodeData::Primitive(_)
@@ -1301,7 +1370,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         frames: &mut SmallVec<[ProjectionFrame; 16]>,
         work_credit: &mut ConnectedWorkCredit<'_, '_>,
         seam: &mut ProjectionSeam,
-    ) -> Result<(), crate::semantic_query::PartialReasonSet> {
+    ) -> Result<(), ProjectionFailure> {
         let remaining_children = children.get(next_child..).unwrap_or_default();
         for (offset, &child) in remaining_children.iter().enumerate() {
             let cursor = next_child + offset;
@@ -1315,8 +1384,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 work_credit.consume()?;
                 crate::loop5_instrumentation::watchdog_beat();
                 crate::loop5_instrumentation::watchdog_check_and_dump("project_view_node_worklist");
-                vacant.insert(child);
-                continue;
+                return Err(ProjectionFailure::MissingNode);
             };
             match child_data.as_ref() {
                 SemanticNodeData::Primitive(_)
@@ -1487,6 +1555,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         seam: &mut ProjectionSeam,
     ) -> Result<bool, crate::semantic_query::PartialReasonSet> {
         match data.as_ref() {
+            SemanticNodeData::DeferredCallable(_) => {
+                work_credit.settle();
+                let value = if context.mode == ProjectionMode::Expanded {
+                    self.materialize_returned_callable(node)
+                } else {
+                    node
+                };
+                work_credit.refresh()?;
+                self.memoize_projected(memo, node, context, value);
+                Ok(false)
+            }
             SemanticNodeData::Primitive(_)
             | SemanticNodeData::Literal(_)
             | SemanticNodeData::EnumLiteral(_)
@@ -1693,7 +1772,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 object,
                 index: index_key,
             } => {
-                let object_context = super::raise::indexed_access_object_context(context);
+                let object_context = self.indexed_access_operand_context(*object, context);
                 match (index, index_key) {
                     (0, _) => Some((*object, object_context)),
                     (1, IndexKey::Computed(index)) => Some((*index, context)),

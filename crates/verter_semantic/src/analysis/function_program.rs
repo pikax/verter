@@ -4427,21 +4427,34 @@ pub fn build_indexed_program_expression_ir(
     ) = (&record.source, &mut indexed)
     {
         for (argument, indexed_argument) in site.args.iter().zip(Arc::make_mut(&mut call.args)) {
-            indexed_argument.function_return_source = argument.function_return_source.clone();
-            if let (
-                Some(verter_type_expr::facts::FunctionReturnSource::Flow(identity)),
-                verter_type_expr::IndexedValueExpression::Value(
-                    verter_type_expr::TypeExpr::Function(function),
-                ),
-            ) = (
-                indexed_argument.function_return_source.as_ref(),
-                &mut indexed_argument.expression,
-            ) {
-                Arc::make_mut(function).flow_return = Some(Box::new(identity.clone()));
+            if let Some(source) = &argument.function_return_source {
+                attach_indexed_callback_return_source(indexed_argument, source);
             }
         }
     }
     Some(indexed)
+}
+
+/// Attach an indexed callback's exact served return source before its
+/// transient signature is lowered. Body-derived return spellings are not
+/// authored annotations; the shared flow producer owns those values. An
+/// authored TS return annotation keeps its original type and span.
+pub fn attach_indexed_callback_return_source(
+    argument: &mut verter_type_expr::IndexedValueCallArg,
+    source: &verter_type_expr::facts::FunctionReturnSource,
+) {
+    argument.function_return_source = Some(source.clone());
+    if let (
+        verter_type_expr::facts::FunctionReturnSource::Flow(identity),
+        verter_type_expr::IndexedValueExpression::Value(verter_type_expr::TypeExpr::Function(
+            function,
+        )),
+    ) = (source, &mut argument.expression)
+    {
+        if function.spans.return_type.is_none() {
+            Arc::make_mut(function).flow_return = Some(Box::new(identity.clone()));
+        }
+    }
 }
 
 /// The `ordinal`-th call expression inside one function body's statement

@@ -129,6 +129,25 @@ pub enum ResolveCallStep {
     Degraded(ResolveCallFailure),
 }
 
+/// A result supplied by a completed declared result recipe.
+/// This is independent of the enclosing component's runtime capture proof.
+#[derive(Debug, Clone)]
+pub(super) struct DeclaredCallResult {
+    key: ResolveCallKey,
+    signature: SemanticNodeId,
+    node: SemanticNodeId,
+    roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
+}
+
+impl DeclaredCallResult {
+    pub(super) fn result(&self, key: &ResolveCallKey) -> Option<(SemanticNodeId, SemanticNodeId)> {
+        (&self.key == key).then_some((self.signature, self.node))
+    }
+    pub(super) fn roots(&self) -> &[crate::semantic_query_memo::ObservedGraphSelfRoot] {
+        &self.roots
+    }
+}
+
 enum ResolveCallRootClose {
     /// A complete selected value plus its SCC-unioned self-roots and
     /// whether the component's dependency proof is complete (root AND
@@ -218,6 +237,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// The typed call-resolution authority: reentry hold, validated warm
     /// result, then root-family or inline mixed-obligation execution.
     pub fn execute_resolve_call(&self, key: ResolveCallKey) -> ResolveCallStep {
+        self.execute_resolve_call_with_declared_result(key).0
+    }
+
+    pub(super) fn execute_resolve_call_with_declared_result(
+        &self,
+        key: ResolveCallKey,
+    ) -> (ResolveCallStep, Option<DeclaredCallResult>) {
         // Per-request dispatch-mask trace, mirroring the cold-build choke point:
         // an INLINE call resolution (one running under an open flow or relation
         // obligation) never funnels through `execute_via_cold_build_helper`, so
@@ -236,25 +262,70 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let mut txn = self.dispatch_txn.borrow_mut();
             if let Some(idx) = txn.reentry().find(&identity) {
                 txn.obligations.record_assumption(idx);
-                return ResolveCallStep::Hold(Box::new(key));
+                return (ResolveCallStep::Hold(Box::new(key)), None);
             }
             if let Some(result) = super::dispatch_txn::provisional_resolve_call_result(
                 txn.obligations.substitution(),
                 &key,
             ) {
-                return ResolveCallStep::Complete(result.clone());
+                return (ResolveCallStep::Complete(result.clone()), None);
             }
         }
         if let Some(served) = self.graph().get_resolve_call_result(self.ctx, &key) {
             if self.admits_served(&served.receipt) {
-                return ResolveCallStep::Complete(served.value);
+                self.fold_cache_read_rails(
+                    served.result_is_partial(),
+                    served.cache_suppress,
+                    served.partial_reasons(),
+                );
+                let proof = if served.fact_status.is_complete() {
+                    let roots = self.observed_self_roots_from_nodes([
+                        key.callee,
+                        super::return_equation::resolved_call_return_type(&served.value),
+                    ]);
+                    self.declared_call_result(&key, &served.value, roots)
+                } else {
+                    None
+                };
+                return (ResolveCallStep::Complete(served.value), proof);
             }
         }
         if self.dispatch_txn.borrow().obligations.decides_root() {
-            self.execute_resolve_call_root(key)
+            (self.execute_resolve_call_root(key), None)
         } else {
-            self.execute_resolve_call_inline(key)
+            self.execute_resolve_call_inline_with_declared_result(key)
         }
+    }
+
+    fn declared_call_result(
+        &self,
+        key: &ResolveCallKey,
+        result: &ResolvedCallResult,
+        roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
+    ) -> Option<DeclaredCallResult> {
+        let ResolvedCallResult::Selected {
+            selected_signature,
+            return_type,
+            recovery_diagnostic: None,
+            ..
+        } = result
+        else {
+            return None;
+        };
+        let graph = self.graph();
+        let Some(SemanticNodeData::Signature {
+            return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(_),
+            ..
+        }) = graph.node_data(*selected_signature).as_deref().cloned()
+        else {
+            return None;
+        };
+        Some(DeclaredCallResult {
+            key: key.clone(),
+            signature: *selected_signature,
+            node: *return_type,
+            roots,
+        })
     }
 
     /// Open the transparent executor frame before any call-owned inference
@@ -318,14 +389,32 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
-    fn execute_resolve_call_inline(&self, key: ResolveCallKey) -> ResolveCallStep {
+    fn execute_resolve_call_inline_with_declared_result(
+        &self,
+        key: ResolveCallKey,
+    ) -> (ResolveCallStep, Option<DeclaredCallResult>) {
         let (_connected_guard, initial_trip) = self.enter_connected_demand(false);
         if initial_trip.is_some() {
-            return ResolveCallStep::Degraded(ResolveCallFailure::Budget);
+            return (ResolveCallStep::Degraded(ResolveCallFailure::Budget), None);
         }
         let idx = self.resolve_call_frame_open(&key);
         let outcome = self.run_resolve_call(&key);
-        match self.resolve_call_frame_pop(idx, outcome, false) {
+        // Only a completed winner with no return or applicability assumptions
+        // supplies the declared recipe. A provisional cached seed never does.
+        let proof = match &outcome {
+            CandidateVerdict::Selected(state)
+                if state.holds.is_empty()
+                    && !state.replay_applicability
+                    && state.concrete_seeds.len() == 1 =>
+            {
+                let result = state
+                    .selection
+                    .with_return_type(self, state.concrete_seeds[0]);
+                self.declared_call_result(&key, &result, state.self_roots.clone())
+            }
+            _ => None,
+        };
+        let step = match self.resolve_call_frame_pop(idx, outcome, false) {
             ResolveCallFramePop::Provisional(step) => step,
             ResolveCallFramePop::RootClose(ResolveCallRootClose::Complete(result, _, _))
             | ResolveCallFramePop::RootClose(ResolveCallRootClose::CompleteReturnOnly(result)) => {
@@ -334,7 +423,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             ResolveCallFramePop::RootClose(ResolveCallRootClose::Degraded(failure)) => {
                 ResolveCallStep::Degraded(failure)
             }
-        }
+        };
+        let proof = proof.filter(|proof| matches!(&step, ResolveCallStep::Complete(ResolvedCallResult::Selected { selected_signature, return_type, .. }) if *selected_signature == proof.signature && *return_type == proof.node));
+        (step, proof)
     }
 
     fn execute_resolve_call_root(&self, key: ResolveCallKey) -> ResolveCallStep {
@@ -396,7 +487,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     QueryResult::Value(SemanticQueryValue::ResolveCall(Arc::new(result))),
                     fence,
                 ))
-                .with_observed_self_roots(self_roots);
+                .with_observed_self_roots(self_roots)
+                .with_positional_guarantee();
                 output.cache_suppress |= !admits;
                 output
             }
@@ -411,7 +503,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 )
                     .into();
                 output.cache_suppress = true;
-                output
+                output.with_positional_guarantee()
             }
             ResolveCallFramePop::RootClose(ResolveCallRootClose::Degraded(failure)) => {
                 self.dispatch_txn.borrow_mut().call.last_root_failure = Some(failure);
@@ -1565,8 +1657,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         type_args: &Arc<[SemanticNodeId]>,
         resolve_env_hash: crate::semantic_query::HashValue,
     ) -> CallCandidates {
-        if let QueryResult::Value(SemanticQueryValue::OverloadSet(candidates)) = self
-            .execute_via_cold_build_helper(SemanticQueryKey::ResolveOverloadSet {
+        let probe = self.observe_read(|| {
+            self.execute_via_cold_build_helper(SemanticQueryKey::ResolveOverloadSet {
                 callee,
                 kind: bucket,
                 type_args: Arc::clone(type_args),
@@ -1575,9 +1667,25 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     ..Default::default()
                 },
             })
-            .value
-        {
-            return CallCandidates::Candidates(candidates);
+        });
+        if matches!(
+            &probe.value().value,
+            QueryResult::Value(SemanticQueryValue::OverloadSet(_))
+        ) {
+            if let Ok(read) = probe.adopt(self) {
+                if let QueryResult::Value(SemanticQueryValue::OverloadSet(candidates)) = read.value
+                {
+                    return CallCandidates::Candidates(candidates);
+                }
+            }
+            return CallCandidates::Incomplete(
+                crate::semantic_query::IncompleteReason::UnsettledInput,
+            );
+        }
+        if probe.discard().is_err() {
+            return CallCandidates::Incomplete(
+                crate::semantic_query::IncompleteReason::UnsettledInput,
+            );
         }
         match self.shared_signature_nodes(callee, bucket) {
             super::signature_discovery::SharedSignatureNodes::Nodes(nodes) if nodes.is_empty() => {
@@ -1872,12 +1980,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             _ => return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable),
         };
-        let own_return_function = match &candidate.return_carrier {
-            SignatureReturnCarrier::Function(
-                verter_type_expr::facts::FunctionReturnSource::Flow(identity),
-            ) => Some(self.flow_return_key_for(identity).function),
-            _ => None,
-        };
+        let own_return_function = candidate
+            .return_carrier
+            .flow_identity()
+            .map(|identity| self.flow_return_key_for(identity).function);
         let receiver_source = key
             .receiver
             .map(|receiver| self.substitute_canonical(receiver, &key.context.substitution));
@@ -2734,8 +2840,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let mut concrete_seeds = Vec::new();
         let mut holds = Vec::new();
         let mut fresh_literal_returns = Vec::new();
-        match &candidate.return_carrier {
-            SignatureReturnCarrier::Declared(declared) => {
+        match candidate.return_carrier.result_source() {
+            crate::semantic_query::SignatureResultSource::Declared(declared) => {
                 // Per-binder freshness at the call boundary (the checker's
                 // inference-widening rule, measured against the pinned
                 // checker): a FRESH literal deposit widens at the call
@@ -2793,7 +2899,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     ),
                 ));
             }
-            SignatureReturnCarrier::Function(source) => match source {
+            crate::semantic_query::SignatureResultSource::Function(source) => match source {
                 verter_type_expr::facts::FunctionReturnSource::Flow(identity) => {
                     let flow_key = self.flow_return_key_for_instantiation(
                         identity,
@@ -2806,7 +2912,33 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         .obligations
                         .pending()
                         .pending_len();
-                    match self.execute_flow_return(flow_key.clone()) {
+                    let read = self.observe_flow_return_value(flow_key.clone());
+                    let provisional = self
+                        .dispatch_txn
+                        .borrow()
+                        .obligations
+                        .pending()
+                        .pending_len()
+                        != pending_before;
+                    let declined = (provisional
+                        && matches!(
+                            read.value(),
+                            crate::semantic_query::FlowReturnStep::Complete(_)
+                        ))
+                        || matches!(
+                            read.value(),
+                            crate::semantic_query::FlowReturnStep::Hold(_)
+                                | crate::semantic_query::FlowReturnStep::NoValue(
+                                    crate::semantic_query::FlowReturnFailure::EmptyCycle
+                                )
+                        );
+                    let step = if declined {
+                        read.discard()
+                    } else {
+                        read.adopt(self)
+                    }
+                    .unwrap_or_else(crate::semantic_query::FlowReturnStep::Aborted);
+                    match step {
                         // A callee that closed its own SCC independently
                         // is FINAL: its return is a concrete seed of this
                         // call, not an equation edge. A naked flow return
@@ -2902,15 +3034,25 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                     .obligations
                                     .pending()
                                     .pending_len();
-                                match self.execute_flow_return(binder_key) {
+                                let read = self.observe_flow_return_value(binder_key);
+                                let exact = read.observations_are_complete()
+                                    && matches!(read.value(), crate::semantic_query::FlowReturnStep::Complete(value) if value.fact().status().is_complete())
+                                    && self
+                                        .dispatch_txn
+                                        .borrow()
+                                        .obligations
+                                        .pending()
+                                        .pending_len()
+                                        == binder_pending_before;
+                                let step = if exact {
+                                    read.adopt(self)
+                                } else {
+                                    read.discard()
+                                }
+                                .unwrap_or_else(crate::semantic_query::FlowReturnStep::Aborted);
+                                match step {
                                     crate::semantic_query::FlowReturnStep::Complete(binder)
-                                        if self
-                                            .dispatch_txn
-                                            .borrow()
-                                            .obligations
-                                            .pending()
-                                            .pending_len()
-                                            == binder_pending_before =>
+                                        if exact =>
                                     {
                                         Some(binder.return_type())
                                     }
@@ -2993,7 +3135,25 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                     .obligations
                                     .pending()
                                     .pending_len();
-                                match self.execute_flow_return(widened_key) {
+                                let read = self.observe_flow_return_value(widened_key);
+                                let retained = self
+                                    .dispatch_txn
+                                    .borrow()
+                                    .obligations
+                                    .pending()
+                                    .pending_len()
+                                    == widened_pending_before
+                                    && matches!(
+                                        read.value(),
+                                        crate::semantic_query::FlowReturnStep::Complete(_)
+                                    );
+                                let step = if retained {
+                                    read.adopt(self)
+                                } else {
+                                    read.discard()
+                                }
+                                .unwrap_or_else(crate::semantic_query::FlowReturnStep::Aborted);
+                                match step {
                                     crate::semantic_query::FlowReturnStep::Complete(widened)
                                         if self
                                             .dispatch_txn
@@ -3701,7 +3861,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             ),
         ));
         crate::request_context::observe_component_meta_read_suppress(&read);
-        if read.result_is_partial {
+        if read.result_is_partial() {
             return AliasExpansion::Incomplete;
         }
         match read.value {
