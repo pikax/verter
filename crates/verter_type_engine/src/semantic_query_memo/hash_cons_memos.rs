@@ -154,7 +154,7 @@ impl SemanticGraphStore {
                 }
             })
             .map(|entry| {
-                crate::fact_signature_helpers::bubble_fact_signature_via_tls(&entry.evidence.0);
+                crate::fact_tracing::tracing::observe_fan_out_canonical(&entry.evidence.0);
                 crate::semantic_query::CacheRead {
                     lease: entry.lease.clone(),
                     value: entry.result,
