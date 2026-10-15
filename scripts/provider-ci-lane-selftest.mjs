@@ -16,14 +16,9 @@ import {
   verifyProviderCiPartition,
 } from "./provider-ci-internals.mjs";
 import {
-  listInvocationTests,
-  parseShard,
-  parseTerseList,
   providerCargoInvocations,
   providerTestTimer,
   runProviderLane,
-  shardInvocations,
-  shardOf,
   verifyArchive,
 } from "./provider-ci.mjs";
 
@@ -245,105 +240,6 @@ test("verify fails at its listing bound and reaps a listing that never returns",
   }
 });
 
-function fakeListing(names) {
-  const child = new EventEmitter();
-  child.stdout = new EventEmitter();
-  setImmediate(() => {
-    child.stdout.emit("data", Buffer.from(names.map((name) => `${name}: test\n`).join("")));
-    child.stdout.emit("data", Buffer.from(`\n${names.length} tests, 0 benchmarks\n`));
-    child.emit("close", 0, null);
-  });
-  return child;
-}
-
-test("sharded provider lanes run every test exactly once, serially, and never unfiltered", async () => {
-  for (const lane of ["tsserver", "tsgo"]) {
-    const whole = providerCargoInvocations(lane);
-    const listed = new Map(
-      whole
-        .filter((invocation) => invocation.split)
-        .map((invocation) => [
-          invocation.label,
-          Array.from({ length: 23 }, (_, i) => `real_provider_tests::m${i % 5}::case_${i}_${lane}`),
-        ]),
-    );
-    assert.ok(listed.size > 0, `${lane} must have a splittable selector`);
-    for (const count of [1, 2, 3]) {
-      const ran = new Map();
-      const wholeRuns = [];
-      for (let index = 1; index <= count; index++) {
-        const invocations = await shardInvocations(lane, { index, count }, async (invocation) => {
-          assert.ok(invocation.split, "only splittable invocations are listed");
-          return listed.get(invocation.label);
-        });
-        for (const invocation of invocations) {
-          assert.equal(invocation.args[0], "test");
-          assert.ok(invocation.args.includes("--test-threads=1"));
-          if (whole.some((candidate) => candidate.label === invocation.label)) {
-            wholeRuns.push(invocation.label);
-            continue;
-          }
-          // A shard's share of a split selector: exact names after the
-          // libtest options, never an empty (unfiltered) list.
-          const libtest = invocation.args.slice(invocation.args.indexOf("--") + 1);
-          assert.deepEqual(libtest.slice(0, 2), ["--exact", "--test-threads=1"]);
-          const names = libtest.slice(2);
-          assert.ok(names.length > 0, "a split invocation always names its tests");
-          for (const name of names) ran.set(name, (ran.get(name) || 0) + 1);
-        }
-      }
-      const unsplit = whole.filter((invocation) => !invocation.split || count === 1);
-      assert.deepEqual(
-        [...wholeRuns].sort(),
-        unsplit.map((invocation) => invocation.label).sort(),
-        `${lane} ${count}: every whole invocation runs on exactly one shard`,
-      );
-      if (count > 1) {
-        const expected = [...listed.values()].flat();
-        assert.equal(ran.size, expected.length, `${lane} ${count}: every listed test runs`);
-        assert.ok(
-          [...ran.values()].every((times) => times === 1),
-          "no test runs twice",
-        );
-      }
-    }
-  }
-});
-
-test("a sharded lane fails when its split selector lists nothing, and lists with the selector's own filters", async () => {
-  const split = providerCargoInvocations("tsserver").find((invocation) => invocation.split);
-  let seen;
-  const names = await listInvocationTests(split, (command, args) => {
-    seen = { command, args };
-    return fakeListing([
-      "real_provider_tests::a::x_tsserver",
-      "real_provider_tests::a::x_tsserver",
-    ]);
-  });
-  assert.deepEqual(names, ["real_provider_tests::a::x_tsserver"]);
-  assert.equal(seen.command, "cargo");
-  assert.deepEqual(seen.args.slice(0, split.args.length), split.args);
-  assert.deepEqual(seen.args.slice(split.args.length), ["--list", "--format=terse"]);
-
-  let diagnostics = "";
-  const verdict = await runProviderLane("tsserver", {
-    shard: { index: 1, count: 2 },
-    listTests: async () => [],
-    spawnCargo: () => assert.fail("nothing may run when a split selector listed zero tests"),
-    writeStderr: (text) => {
-      diagnostics += text;
-    },
-    saveTimings: () => {},
-  });
-  assert.equal(verdict, 1);
-  assert.match(diagnostics, /listing selected zero tests/);
-
-  assert.deepEqual(parseShard("2/3"), { index: 2, count: 3 });
-  for (const bad of ["0/2", "3/2", "1", "a/b", "1/0"]) assert.throws(() => parseShard(bad));
-  assert.deepEqual(parseTerseList("a: test\nb: benchmark\na: test\n\n1 tests\n"), ["a"]);
-  assert.equal(shardOf("x", 1), 1);
-});
-
 test("provider runners use serial libtest commands instead of nextest", () => {
   for (const lane of ["tsserver", "tsgo"]) {
     const invocations = providerCargoInvocations(lane);
@@ -390,8 +286,8 @@ test("CI builds one provider-free archive and runs providers serially in their o
   assert.match(core, /provider-ci\.mjs filter core/);
   assert.match(core, /cargo nextest run --archive-file/);
   assert.match(success, /^\s*- rust-test\s*$/m);
-  // A matrix of serial libtest shards: the tsserver lane split in two and
-  // tsgo whole. No engine's run goes through the nextest archive.
+  // One job compiles the workspace once and runs each engine's serial libtest
+  // lane in turn; neither engine's run goes through the nextest archive.
   assert.match(providers, /needs:\s*detect-changes/);
   assert.match(providers, /needs\.detect-changes\.outputs\.providers\s*==\s*'true'/);
   assert.match(providers, /Swatinem\/rust-cache/);
@@ -400,42 +296,43 @@ test("CI builds one provider-free archive and runs providers serially in their o
     /cargo nextest|install-action@nextest|name:\s*rust-nextest-archive|download-artifact/,
   );
   assert.match(success, /^\s*- rust-providers-live\s*$/m);
-  assert.match(providers, /strategy:\s*\n\s+fail-fast:\s*false/);
-  assert.match(providers, /name:\s*Rust Test \(providers \$\{\{ matrix\.part \}\}\)/);
-  const shards = [
-    ...providers.matchAll(
-      /- part: .*\n\s+lane: (\w+)\n\s+shard: (\d+)\/(\d+)\n\s+plugin: (true|false)/g,
-    ),
-  ].map(([, lane, index, count, plugin]) => ({
-    lane,
-    index: Number(index),
-    count: Number(count),
-    plugin,
-  }));
-  for (const lane of ["tsserver", "tsgo"]) {
-    assert.match(
-      providers,
-      new RegExp(`provider-ci\\.mjs run ${lane} --shard \\$\\{\\{ matrix\\.shard \\}\\}`),
-    );
-    assert.match(providers, new RegExp(`if: matrix\\.lane == '${lane}'`));
-    // Every shard 1..n of a lane is in the matrix exactly once.
-    const owned = shards.filter((shard) => shard.lane === lane);
-    assert.ok(owned.length > 0, `${lane} must have at least one shard`);
-    const count = owned[0].count;
-    assert.deepEqual(
-      owned.map((shard) => shard.index).sort((a, b) => a - b),
-      Array.from({ length: count }, (_, i) => i + 1),
-      `${lane} shards must be 1..${count}, once each`,
-    );
-    assert.ok(owned.every((shard) => shard.count === count));
-  }
-  assert.equal(shards.filter((shard) => shard.plugin === "true").length, 1);
-  assert.match(providers, /if: matrix\.plugin\n/);
-  assert.match(providers, /VERTER_REQUIRE_TSSERVER:\s*"1"/);
-  assert.match(providers, /packages\/typescript-plugin\/src/);
-  assert.match(providers, /--exclude ['"]packages\/typescript-plugin\/src\/tsc\/\*\*['"]/);
+  // Pull request CI runs tsgo, the main platform. tsserver, the legacy engine,
+  // and its plugin run in the scheduled tsserver nightly workflow.
+  assert.match(providers, /provider-ci\.mjs run tsgo/);
   assert.match(providers, /VERTER_REQUIRE_TSGO:\s*"1"/);
+  assert.doesNotMatch(providers, /VERTER_REQUIRE_TSSERVER/);
+  assert.doesNotMatch(
+    workflow,
+    /provider-ci\.mjs run tsserver|vitest run packages\/typescript-plugin\//,
+  );
   assert.doesNotMatch(core, /VERTER_REQUIRE_TS(?:GO|SERVER)/);
+
+  const nightly = readFileSync(
+    join(REPO_ROOT, ".github", "workflows", "tsserver-nightly.yml"),
+    "utf8",
+  );
+  assert.match(nightly, /^name: tsserver nightly$/m);
+  assert.match(nightly, /^\s+schedule:\s*$/m);
+  assert.match(nightly, /^\s+workflow_dispatch:\s*$/m);
+  const tsserver = yamlJob(nightly, "providers");
+  assert.match(tsserver, /provider-ci\.mjs run tsserver/);
+  assert.match(tsserver, /VERTER_REQUIRE_TSSERVER:\s*"1"/);
+  assert.doesNotMatch(tsserver, /cargo nextest|install-action@nextest/);
+  const plugin = yamlJob(nightly, "plugin");
+  assert.match(
+    plugin,
+    /vitest run packages\/typescript-plugin\/src --exclude ['"]packages\/typescript-plugin\/src\/tsc\/\*\*['"]/,
+  );
+  // The one job a watcher reads must depend on every lane in the workflow.
+  const result = yamlJob(nightly, "result");
+  const jobs = nightly.slice(nightly.search(/^jobs:\s*$/m));
+  const lanes = [...jobs.matchAll(/^ {2}([a-z0-9-]+):\r?\n/gm)]
+    .map((match) => match[1])
+    .filter((job) => !["jobs", "result"].includes(job));
+  assert.ok(lanes.length >= 5, `expected the nightly lanes, found ${lanes.join(", ")}`);
+  for (const job of lanes) {
+    assert.match(result, new RegExp(`needs:.*\\b${job}\\b`), `the nightly result must need ${job}`);
+  }
   // Timings are written under CARGO_TARGET_DIR (default target/). The upload
   // must use that same root or a relocated target dir drops the artifact.
   assert.match(
@@ -445,11 +342,16 @@ test("CI builds one provider-free archive and runs providers serially in their o
   assert.doesNotMatch(providers, /path:\s*target\/provider-timings\/\*\.json/);
 });
 
-test("native-only TypeScript plugin specs remain with the native artifact", () => {
-  const workflow = readFileSync(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
-  const native = yamlJob(workflow, "native-test");
-  assert.match(native, /vitest run packages\/typescript-plugin\/src\/tsc/);
-  assert.doesNotMatch(native, /pnpm --filter @verter\/typescript-plugin test/);
+test("native-only TypeScript plugin specs run after a native build in the tsserver nightly", () => {
+  const nightly = readFileSync(
+    join(REPO_ROOT, ".github", "workflows", "tsserver-nightly.yml"),
+    "utf8",
+  );
+  const plugin = yamlJob(nightly, "plugin");
+  const build = plugin.indexOf("pnpm run build:native");
+  const specs = plugin.indexOf("vitest run packages/typescript-plugin/src/tsc");
+  assert.ok(build !== -1 && specs !== -1 && build < specs, "src/tsc specs run after build:native");
+  assert.doesNotMatch(plugin, /pnpm --filter @verter\/typescript-plugin test/);
 
   const pkg = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8"));
   assert.match(pkg.scripts["test:scripts"], /provider-ci-lane-selftest\.mjs/);

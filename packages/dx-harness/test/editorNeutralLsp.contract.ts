@@ -28,13 +28,37 @@ const WORKSPACE_ROOT = path.join(
   "fixtures",
   "editor-neutral",
 );
-const ROUTES: readonly EditorNeutralProviderRoute[] = ["tsserver", "tsgo", "shared-tsgo"];
+const ALL_ROUTES: readonly EditorNeutralProviderRoute[] = ["tsserver", "tsgo", "shared-tsgo"];
+
+/**
+ * The routes this run executes: `VERTER_EDITOR_NEUTRAL_ROUTES` (comma-separated)
+ * or, unset, every route. CI splits them: pull requests run tsgo and
+ * shared-tsgo, the scheduled `tsserver nightly` workflow runs tsserver. Every
+ * selected route must still execute every case that applies to it; an unknown
+ * or empty selection is refused rather than read as "all".
+ */
+function selectedRoutes(raw: string | undefined): readonly EditorNeutralProviderRoute[] {
+  if (raw === undefined) return ALL_ROUTES;
+  const names = raw.split(",").map((name) => name.trim());
+  const unknown = names.filter((name) => !(ALL_ROUTES as readonly string[]).includes(name));
+  if (names.length === 0 || unknown.length > 0 || new Set(names).size !== names.length) {
+    throw new Error(
+      `VERTER_EDITOR_NEUTRAL_ROUTES must list distinct routes from ${ALL_ROUTES.join(", ")}; got ${JSON.stringify(raw)}`,
+    );
+  }
+  return ALL_ROUTES.filter((route) => names.includes(route));
+}
+
+const ROUTES = selectedRoutes(process.env.VERTER_EDITOR_NEUTRAL_ROUTES);
 const INVENTORY = createEditorNeutralContractInventory();
-const EXPECTED_EXECUTIONS = ROUTES.reduce(
-  (total, route) =>
-    total + INVENTORY.filter((testCase) => testCase.providers.includes(route)).length,
-  0,
-);
+function expectedExecutions(routes: readonly EditorNeutralProviderRoute[]): number {
+  return routes.reduce(
+    (total, route) =>
+      total + INVENTORY.filter((testCase) => testCase.providers.includes(route)).length,
+    0,
+  );
+}
+const EXPECTED_EXECUTIONS = expectedExecutions(ROUTES);
 
 interface RunCounters {
   attempted: number;
@@ -340,7 +364,7 @@ afterAll(() => {
       (testCase) => `${testCase.framework ?? "none"}:${testCase.language ?? "none"}`,
     ),
     byRoute: Object.fromEntries(
-      ROUTES.map((route) => [
+      ALL_ROUTES.map((route) => [
         route,
         INVENTORY.filter((testCase) => testCase.providers.includes(route)).length,
       ]),
@@ -418,11 +442,11 @@ afterAll(() => {
   //        shared-provider topology case outside the standard-LSP surface.
   // The two authored `@ts-check` rows run on tsserver only: the pinned managed/shared
   // TSGO API does not expose the per-file enable override when `checkJs` is false.
-  // EXPECTED_EXECUTIONS is COMPUTED from per-route applicability (see ROUTES.reduce
+  // EXPECTED_EXECUTIONS is COMPUTED from per-route applicability (see expectedExecutions
   // above), never hardcoded; the .toBe(278) below is a drift-guard on that computation.
   expect(INVENTORY.length, "the complete shared inventory must be discovered").toBe(95);
   expect(
-    EXPECTED_EXECUTIONS,
+    expectedExecutions(ALL_ROUTES),
     "standard + custom on each applicable route, plus shared topology",
   ).toBe(278);
   expect(

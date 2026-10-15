@@ -440,38 +440,21 @@ jobs:
           reporter: java-junit
           fail-on-error: false
 
-  # The real-provider lanes. Each engine's tests run exactly as before —
-  # serial libtest, explicitly initialized, one test at a time per runner —
-  # but spread over three runners. Measured over the week to 2026-10-15 the
-  # single job took 29 minutes (p50), the longest job in the workflow and the
-  # last to finish in a third of all runs: about 15.5 minutes of serial
-  # tsserver tests and 7 of tsgo tests behind roughly 2.5 minutes of compile
-  # each. Splitting the paired tsserver variants in two (`--shard`, which
-  # deals that selector's listed tests out by name and keeps every other
-  # invocation whole) and giving tsgo its own runner bounds each shard at
-  # about 9 minutes of tests, paying the compile once per shard.
+  # The real-provider lane: tsgo, the main platform. Its tests run exactly as
+  # before — serial libtest, explicitly initialized, one test at a time.
+  #
+  # The tsserver provider lane and the tsserver plugin
+  # suites run in the scheduled `tsserver nightly` workflow
+  # (`tsserver-nightly.yml`), not here: tsserver is the legacy engine. Measured
+  # over the week to 2026-10-15 this job ran both engines in 29 minutes (p50),
+  # the longest job in the workflow and the last to finish in a third of all
+  # runs; about 15.5 of those minutes were serial tsserver tests.
   rust-providers-live:
-    name: Rust Test (providers ${{ matrix.part }})
+    name: Rust Test (providers)
     needs: detect-changes
     if: needs.detect-changes.outputs.providers == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 95
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - part: tsserver 1/2
-            lane: tsserver
-            shard: 1/2
-            plugin: true
-          - part: tsserver 2/2
-            lane: tsserver
-            shard: 2/2
-            plugin: false
-          - part: tsgo
-            lane: tsgo
-            shard: 1/1
-            plugin: false
     env:
       SCCACHE_GHA_ENABLED: "true"
       SCCACHE_GHA_VERSION: "verter-providers-v1"
@@ -491,61 +474,21 @@ jobs:
           cache: pnpm
       # The lockfile install provides the pinned project-local tsgo engine.
       - run: pnpm install --frozen-lockfile
-      # The live tsserver tests resolve the plugin through its workspace probe
-      # location. pnpm install creates the symlink but not these build outputs.
-      - name: Build the tsserver plugin prerequisites
+      # The tsgo suites always ran after this build (it once served both
+      # engines); keep that precondition rather than discover which test
+      # silently depends on it.
+      - name: Build the language-shared and plugin prerequisites
         run: pnpm --filter @verter/language-shared --filter @verter/typescript-plugin build
-      - name: Run serial tsserver provider tests
-        id: tsserver
-        if: matrix.lane == 'tsserver'
-        continue-on-error: true
-        env:
-          VERTER_REQUIRE_TSSERVER: "1"
-        run: node scripts/provider-ci.mjs run tsserver --shard ${{ matrix.shard }}
-      # These source-level plugin specs do not import @verter/native. The two
-      # src/tsc specs that do are retained in native-test below.
-      - name: Native-free TypeScript plugin tests
-        id: plugin
-        if: matrix.plugin
-        continue-on-error: true
-        run: pnpm vitest run packages/typescript-plugin/src --exclude 'packages/typescript-plugin/src/tsc/**'
       - name: Run serial tsgo provider tests
-        id: tsgo
-        if: matrix.lane == 'tsgo'
-        continue-on-error: true
         env:
           VERTER_REQUIRE_TSGO: "1"
-        run: node scripts/provider-ci.mjs run tsgo --shard ${{ matrix.shard }}
-      # Every suite this shard owns runs even when an earlier one failed, so
-      # one run reports every regression; the job's result is this verdict.
-      # A suite this shard does not own must be skipped, and one it owns must
-      # succeed: a skip of an owned suite is a failure, not a pass.
-      - name: Provider lane verdict
-        if: always()
-        env:
-          TSSERVER: ${{ steps.tsserver.outcome }}
-          PLUGIN: ${{ steps.plugin.outcome }}
-          TSGO: ${{ steps.tsgo.outcome }}
-          OWNS_TSSERVER: ${{ matrix.lane == 'tsserver' }}
-          OWNS_PLUGIN: ${{ matrix.plugin }}
-          OWNS_TSGO: ${{ matrix.lane == 'tsgo' }}
-        run: |
-          echo "tsserver: $TSSERVER | plugin tests: $PLUGIN | tsgo: $TSGO"
-          failed=0
-          for lane in "tsserver:$OWNS_TSSERVER:$TSSERVER" "plugin:$OWNS_PLUGIN:$PLUGIN" "tsgo:$OWNS_TSGO:$TSGO"; do
-            name="${lane%%:*}"; rest="${lane#*:}"; owns="${rest%%:*}"; outcome="${rest#*:}"
-            case "$owns:$outcome" in
-              true:success|false:skipped) ;;
-              *) echo "::error::$name lane: owned=$owns, outcome=$outcome"; failed=1;;
-            esac
-          done
-          exit "$failed"
+        run: node scripts/provider-ci.mjs run tsgo
       - name: Upload provider test timings
         if: always()
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
-          name: provider-test-timings-${{ matrix.lane }}-${{ strategy.job-index }}
+          name: provider-test-timings
           path: ${{ format('{0}/provider-timings/*.json', env.CARGO_TARGET_DIR || 'target') }}
           if-no-files-found: warn
   # Required and parallel with the shared archive build. Compile-fail fixtures
@@ -705,11 +648,8 @@ jobs:
         # required. Needs the `Build TS packages` step above — the fixtures
         # assert the built `dist` declarations as well as the source ones.
         run: pnpm --filter @verter/component-meta run test:types
-      - name: Carrier-routing no-Vue-gate guard (typescript-plugin)
-        # The full native-free plugin suite runs in rust-tsserver-live. Keep
-        # this focused duplicate as an early JS-only carrier-routing signal;
-        # src/tsc remains in native-test because those specs import .node code.
-        run: pnpm vitest run packages/typescript-plugin/src/carrier-routing-no-vue-gate.spec.ts
+      # @verter/typescript-plugin (the tsserver plugin) is tested by the
+      # scheduled `tsserver nightly` workflow, carrier-routing guard included.
       - name: Rust build-tooling helper self-tests (sccache-env, publish set)
         # Explicit-path root run: scripts/ is not a workspace package, so
         # `pnpm -r run test` never reaches these specs — same convention as
@@ -1098,19 +1038,19 @@ jobs:
           node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      # Full publication-ready lane (bindgen + wasm-opt), deliberately NOT the
-      # root `pnpm build:wasm` — that is the host-developer lane and never
-      # runs wasm-opt. It runs as the package's own `build` does (`build:wasm`
-      # = `build:bindgen` then `opt:wasm`, then `build:ts`), with the upload
-      # moved between the halves.
+      # The package's own `build` in steps (`build:bindgen`, `build:ts`, then
+      # `opt:wasm`), deliberately NOT the root `pnpm build:wasm` host-developer
+      # lane. On a push to main it is the full publication-ready lane.
       #
-      # The consumers (playground-test, browser-host, transport-route-
-      # equivalence) download the artifact uploaded BEFORE `wasm-opt`: on a
-      # cache miss `wasm-opt -Os` spends ~6.5 of this job's ~14 minutes
-      # (22 MB module, week to 2026-10-15) while three jobs wait on it.
-      # `-Os` is a size optimisation and must preserve behaviour; this job
-      # still runs it, fails if it fails, and runs every check below against
-      # the optimised module. `release.yml` builds its own artifacts.
+      # On a pull request `wasm-opt` does not run: on a cache miss `wasm-opt
+      # -Os` spent ~6.5 of this job's ~14 minutes (22 MB module, week to
+      # 2026-10-15) while three jobs (playground-test, browser-host,
+      # transport-route-equivalence) waited for the job to finish. `-Os` is a
+      # size optimisation and must preserve behaviour; the optimised module is
+      # still built and checked by every push to main that runs this job, by
+      # the daily `Nightly` playground build and by `release.yml`, which all
+      # run the package's full `build`. Every check below runs against the
+      # module this job built.
       - name: Build WASM (bindgen)
         run: pnpm --filter @verter/wasm run build:bindgen
       - name: Build @verter/wasm TypeScript
@@ -1129,8 +1069,10 @@ jobs:
           if-no-files-found: error
           retention-days: 1
       - name: Optimize WASM (wasm-opt)
+        if: github.event_name != 'pull_request'
         run: pnpm --filter @verter/wasm run opt:wasm
-      - name: Smoke test WASM
+      - name: Smoke test WASM (optimised)
+        if: github.event_name != 'pull_request'
         run: node -e "const fs = require('fs'); const wasm = fs.readFileSync('packages/wasm/wasm/verter_wasm_bg.wasm'); console.log('WASM size:', wasm.length, 'bytes'); if (wasm.length < 1000) throw new Error('WASM too small');"
       # The committed carrier fixture the playground's in-context
       # LanguageService guards load is a snapshot of real host output. Those
@@ -1288,10 +1230,13 @@ jobs:
       # local development.
       - name: Prepare VS Code E2E artifacts
         run: pnpm --filter verter-vscode prepare:e2e:ts
+      # The pull request tier: every required route except the tsserver ones
+      # (`@tsserver`, `editor-owned-project@editor-tsserver`), which the
+      # scheduled `tsserver nightly` workflow runs as `--tier=tsserver`.
       - name: Derive VS Code E2E route matrix
         id: e2e-matrix
         shell: bash
-        run: echo "matrix=$(node packages/vue-vscode/out-test/e2e/printCiMatrix.js)" >> "$GITHUB_OUTPUT"
+        run: echo "matrix=$(node packages/vue-vscode/out-test/e2e/printCiMatrix.js --tier=pr)" >> "$GITHUB_OUTPUT"
       - name: Upload built extension
         uses: actions/upload-artifact@v6
         with:
@@ -1331,8 +1276,10 @@ jobs:
           path: packages
       - name: Build editor-neutral contract packages
         run: pnpm --filter "@verter/dx-harness..." build
-      - name: Run tsserver, tsgo, and real shared-tsgo contract
+      # The tsserver route runs in the scheduled `tsserver nightly` workflow.
+      - name: Run tsgo and real shared-tsgo contract
         env:
+          VERTER_EDITOR_NEUTRAL_ROUTES: tsgo,shared-tsgo
           VERTER_EDITOR_NEUTRAL_RECEIPT: ${{ runner.temp }}/verter-editor-neutral-lsp.json
         run: pnpm --filter @verter/dx-harness test:editor-neutral-lsp
       - name: Upload editor-neutral contract receipt
@@ -1525,8 +1472,9 @@ jobs:
         run: pnpm run build:ts
       - name: Test @verter/native
         run: pnpm --filter @verter/native test
-      - name: Native-backed @verter/typescript-plugin tests
-        run: pnpm vitest run packages/typescript-plugin/src/tsc
+      # The native-backed @verter/typescript-plugin specs (src/tsc) run in the
+      # scheduled `tsserver nightly` workflow with the tsserver plugin's other
+      # suites.
       - name: Test @verter/unplugin
         run: pnpm --filter @verter/unplugin test
       # MANDATORY native-eval gate: the @verter/component-meta suite that

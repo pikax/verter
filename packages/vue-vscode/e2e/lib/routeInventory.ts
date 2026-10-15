@@ -340,12 +340,43 @@ export function e2eRouteWeight(route: E2eRoute): number {
 }
 
 /**
- * How many CI runners the required matrix is spread across. Every shard pays
+ * The routes whose engine is tsserver: the managed tsserver route and the
+ * editor-owned tsserver tier. tsserver is the legacy engine, so these routes
+ * run in the scheduled `tsserver nightly` workflow rather than on every pull
+ * request; every other required route runs on pull requests.
+ */
+export const TSSERVER_TYPE_PROVIDER_ROUTES: readonly E2eTypeProviderRoute[] = [
+  "tsserver",
+  "editor-tsserver",
+];
+
+/** Which CI workflow a required route runs in. */
+export type E2eCiTier = "pr" | "tsserver";
+
+export const E2E_CI_TIERS: readonly E2eCiTier[] = ["pr", "tsserver"];
+
+export function e2eRouteCiTier(route: E2eRoute): E2eCiTier {
+  return TSSERVER_TYPE_PROVIDER_ROUTES.includes(route.typeProvider) ? "tsserver" : "pr";
+}
+
+/**
+ * The required routes one CI tier runs. The tiers partition the required
+ * matrix: every required route is in exactly one of them.
+ */
+export function buildE2eCiRouteInventory(tier: E2eCiTier): E2eRoute[] {
+  return buildRequiredE2eRouteInventory().filter((route) => e2eRouteCiTier(route) === tier);
+}
+
+/**
+ * How many CI runners each tier's routes are spread across. Every shard pays
  * checkout, dependency install, artifact download and VS Code acquisition once,
  * then runs its routes back to back in one process; fewer, fuller shards cost
  * far less runner time and queue depth than one runner per route.
  */
-export const E2E_CI_SHARD_COUNT = 6;
+export const E2E_CI_SHARD_COUNTS: Readonly<Record<E2eCiTier, number>> = { pr: 4, tsserver: 3 };
+
+/** The pull request tier's shard count. */
+export const E2E_CI_SHARD_COUNT = E2E_CI_SHARD_COUNTS.pr;
 
 export interface E2eCiShard {
   /** One-based shard ordinal; the shard label is `${shard}/${shardCount}`. */
@@ -354,7 +385,7 @@ export interface E2eCiShard {
 }
 
 /**
- * Partition the required matrix into `shardCount` duration-balanced shards.
+ * Partition one tier of the required matrix into `shardCount` duration-balanced shards.
  *
  * Longest-processing-time first: routes are taken heaviest first and each goes
  * onto the currently lightest shard, ties broken by shard ordinal. The input
@@ -362,8 +393,11 @@ export interface E2eCiShard {
  * pure function of the inventory and the weight table. Every required route
  * lands in exactly one shard; deselected routes are never scheduled.
  */
-export function buildE2eCiShards(shardCount: number = E2E_CI_SHARD_COUNT): E2eCiShard[] {
-  const required = buildRequiredE2eRouteInventory();
+export function buildE2eCiShards(
+  shardCount: number = E2E_CI_SHARD_COUNT,
+  tier: E2eCiTier = "pr",
+): E2eCiShard[] {
+  const required = buildE2eCiRouteInventory(tier);
   if (!Number.isInteger(shardCount) || shardCount < 1 || shardCount > required.length) {
     throw new Error(
       `VS Code E2E shard count must be an integer in 1..${required.length}, got ${shardCount}`,
@@ -390,14 +424,14 @@ export function buildE2eCiShards(shardCount: number = E2E_CI_SHARD_COUNT): E2eCi
  * comma-separated route list the runner receives through `E2E_ROUTES`, so the
  * workflow never re-derives which routes a shard owns.
  */
-export function buildGitHubActionsMatrix(): {
+export function buildGitHubActionsMatrix(tier: E2eCiTier = "pr"): {
   readonly include: Array<{
     readonly shard: string;
     readonly shard_count: string;
     readonly routes: string;
   }>;
 } {
-  const shards = buildE2eCiShards();
+  const shards = buildE2eCiShards(E2E_CI_SHARD_COUNTS[tier], tier);
   return {
     include: shards.map(({ shard, routes }) => ({
       shard: String(shard),
