@@ -419,3 +419,51 @@ fn deep_finite_structure_renders_completely_without_a_depth_cap() {
     assert!(rendered.text.contains("Leaf"));
     assert!(!rendered.text.contains('\u{2026}'));
 }
+
+#[test]
+fn an_infer_bound_by_an_enclosing_clause_renders_as_a_reference() {
+    let infer = |name: &str| TypeExpr::Infer {
+        name: name.into(),
+        constraint: None,
+    };
+    let object = |name: &str, value: TypeExpr| {
+        TypeExpr::Object(Arc::new(ObjectExpr {
+            properties: vec![ObjectMember::Property(
+                ObjectProperty::synthetic_public_key(name.into(), value, false, false),
+            )],
+        }))
+    };
+    let conditional =
+        |check: TypeExpr, extends: TypeExpr, true_type: TypeExpr, false_type: TypeExpr| {
+            TypeExpr::Conditional {
+                check: Arc::new(check),
+                extends: Arc::new(extends),
+                true_type: Arc::new(true_type),
+                false_type: Arc::new(false_type),
+            }
+        };
+    // The nested clause in the true branch references `U`; the false branch
+    // is outside its scope, so a clause there declares `U` afresh.
+    let expression = conditional(
+        reference("T"),
+        object("a", infer("U")),
+        conditional(
+            reference("T"),
+            object("b", infer("U")),
+            infer("U"),
+            TypeExpr::Literal(LiteralValue::Number(2.0)),
+        ),
+        conditional(
+            reference("T"),
+            object("c", infer("U")),
+            infer("U"),
+            TypeExpr::Primitive(PrimitiveName::Never),
+        ),
+    );
+    assert_eq!(
+        render_type_expr_display(&expression)
+            .expect("the conditional renders")
+            .text,
+        "T extends { a: infer U } ? T extends { b: U } ? U : 2 : T extends { c: infer U } ? U : never"
+    );
+}

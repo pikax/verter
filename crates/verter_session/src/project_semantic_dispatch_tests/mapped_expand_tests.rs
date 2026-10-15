@@ -446,6 +446,10 @@ fn a_concrete_mapping_maps_the_source_index_signatures() {
                   interface Frozen { readonly [k: string]: number; b?: 2 }\n\
                   interface Keyed { [k: number]: 1; [k: `t_${string}`]: 2; s: 3 }\n\
                   interface Numbered { [k: number]: 1 }\n\
+                  interface Only { [k: string]: number }\n\
+                  interface Mixed { readonly [k: number]: 1; [k: `t_${string}`]: 2 }\n\
+                  interface Mixed2 { [k: `t_${string}`]: 2; readonly [k: number]: 1 }\n\
+                  interface RoStr { readonly [k: string]: 1; [k: number]: 1 }\n\
                   class Holder { x = 1 as const }\n\
                   declare const Dynamic: new () => Dict;\n\
                   class Derived extends Dynamic {}";
@@ -492,9 +496,62 @@ fn a_concrete_mapping_maps_the_source_index_signatures() {
                 "{ [K in keyof Dict as `g_${K & string}`]: Dict[K] }",
                 "{ [x: `g_${string}`]: number; g_fixed: 1; }",
             ),
+            // A key type remapped to a property name is a property of the
+            // value at that key type, with only the mapping's modifiers.
+            ("{ [K in keyof Only as 'x']: Only[K] }", "{ x: number; }"),
+            ("{ [K in keyof Dict as 'x']: Dict[K] }", "{ x: number; }"),
+            (
+                "{ [K in keyof Only as K extends string ? 's' : 'n']: Only[K] }",
+                "{ s: number; }",
+            ),
+            (
+                "{ [K in keyof Only as 'x']+?: Only[K] }",
+                "{ x?: number | undefined; }",
+            ),
+            (
+                "{ [K in keyof Dict as 'x' | K]: Dict[K] }",
+                "{ [x: string]: number; fixed: 1; x: 1; }",
+            ),
+            // A remapped signature keeps the `readonly` of the source
+            // signature that applies to the key type it produces, in either
+            // declaration order.
+            (
+                "{ [K in keyof Mixed as string]: Mixed[K] }",
+                "{ [x: string]: 1 | 2; }",
+            ),
+            (
+                "{ [K in keyof Mixed2 as string]: Mixed2[K] }",
+                "{ [x: string]: 1 | 2; }",
+            ),
+            (
+                "{ [K in keyof RoStr as number]: RoStr[K] }",
+                "{ [x: number]: 1; }",
+            ),
+            (
+                "{ [K in keyof Mixed as `${number}`]: Mixed[K] }",
+                "{ readonly [x: `${number}`]: 1 | 2; }",
+            ),
         ],
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A conditional nested in another's true branch references the outer
+/// clause's `infer` binder by name in its own `extends` clause, as the
+/// checker prints it; a binder declared twice in one clause is declared
+/// both times.
+#[test]
+fn a_nested_conditional_references_the_outer_infer_binder() {
+    let source = "declare function j<T>(): T extends { a: infer U } ? T extends { b: U } ? 1 : 2 : never;\n\
+                  declare function k<T>(): T extends { a: infer U; b: infer U } ? [U] extends [infer V] ? T extends { c: V; d: U } ? V : 0 : 1 : 2;\n";
+    assert_eq!(
+        display(&named_answer(source, "typeof j").answer),
+        "<T>() => T extends { a: infer U } ? T extends { b: U } ? 1 : 2 : never"
+    );
+    assert_eq!(
+        display(&named_answer(source, "typeof k").answer),
+        "<T>() => T extends { a: infer U; b: infer U } ? [U] extends [infer V] ? T extends { c: V; d: U } ? V : 0 : 1 : 2"
+    );
 }
 
 /// A deferred conditional over a type parameter prints each `infer` binder

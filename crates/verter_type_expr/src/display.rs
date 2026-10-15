@@ -153,6 +153,18 @@ enum Frame<'a> {
     /// Whether the frames after this one render inside a conditional's
     /// `extends` clause, where an `infer` binder is declared.
     InExtends(bool),
+    /// A conditional's `extends` clause begins: the binders it declares are
+    /// collected until its true branch.
+    BeginExtends,
+    /// A conditional's true branch begins: the binders its `extends` clause
+    /// declared are in scope, and the branch renders in the enclosing
+    /// clause context.
+    BindDeclared {
+        in_extends: bool,
+    },
+    /// A conditional's true branch ended: only the binders in scope before
+    /// it remain.
+    UnbindTo(usize),
     Borrowed(&'a str),
     MemberName(&'a str),
     PropertyKey(&'a TypeAuthoredPropertyKey),
@@ -178,11 +190,30 @@ pub fn render_type_expr_display(
     let mut seen_references = FxHashSet::default();
     let mut work = vec![Frame::Expr(expression, Precedence::Lowest)];
     let mut in_extends = false;
+    // The `infer` binders in scope (declared by an enclosing conditional's
+    // `extends` clause whose true branch is rendering), and per open
+    // `extends` clause the binders it declares. An `infer` inside an
+    // `extends` clause whose binder is already in scope references it; the
+    // typed form carries one variant for both, so a nested clause redeclaring
+    // an in-scope name renders as the reference.
+    let mut bound: Vec<&str> = Vec::new();
+    let mut declaring: Vec<Vec<&str>> = Vec::new();
 
     while let Some(frame) = work.pop() {
         match frame {
             Frame::Text(value) => text.push_str(value),
             Frame::InExtends(value) => in_extends = value,
+            Frame::BeginExtends => {
+                declaring.push(Vec::new());
+                in_extends = true;
+            }
+            Frame::BindDeclared {
+                in_extends: enclosing,
+            } => {
+                bound.extend(declaring.pop().unwrap_or_default());
+                in_extends = enclosing;
+            }
+            Frame::UnbindTo(len) => bound.truncate(len),
             Frame::Borrowed(value) => text.push_str(value),
             Frame::GeneratedParameterName(index) => {
                 write!(&mut text, "_arg{index}").expect("writing to String cannot fail");
@@ -225,7 +256,11 @@ pub fn render_type_expr_display(
                 text.push('n');
             }
             Frame::Expr(expr, minimum) => {
-                if expression_precedence(expr, in_extends) < minimum {
+                let declares_infer = matches!(
+                    expr,
+                    TypeExpr::Infer { name, .. } if in_extends && !bound.contains(&name.as_str())
+                );
+                if expression_precedence(expr, declares_infer) < minimum {
                     work.push(Frame::Text(")"));
                     work.push(Frame::ExprBody(expr));
                     work.push(Frame::Text("("));
@@ -338,15 +373,16 @@ pub fn render_type_expr_display(
                     false_type,
                 } => {
                     // An `infer` binder is declared in the `extends` clause
-                    // and only referenced in the branches.
+                    // and in scope in the true branch alone.
                     work.push(Frame::InExtends(in_extends));
                     work.push(Frame::Expr(false_type, Precedence::Lowest));
                     work.push(Frame::Text(" : "));
+                    work.push(Frame::UnbindTo(bound.len()));
                     work.push(Frame::Expr(true_type, Precedence::Lowest));
-                    work.push(Frame::InExtends(false));
+                    work.push(Frame::BindDeclared { in_extends });
                     work.push(Frame::Text(" ? "));
                     work.push(Frame::Expr(extends, Precedence::Union));
-                    work.push(Frame::InExtends(true));
+                    work.push(Frame::BeginExtends);
                     work.push(Frame::Text(" extends "));
                     work.push(Frame::Expr(check, Precedence::Union));
                 }
@@ -395,14 +431,17 @@ pub fn render_type_expr_display(
                     work.push(Frame::TemplateQuasi(&quasis[0]));
                     work.push(Frame::Text("`"));
                 }
-                // Outside an `extends` clause the binder is a reference: its
-                // name.
-                TypeExpr::Infer { name, .. } if !in_extends => {
+                // Outside an `extends` clause, or bound by an enclosing
+                // clause, the binder is a reference: its name.
+                TypeExpr::Infer { name, .. } if !in_extends || bound.contains(&name.as_str()) => {
                     ensure_type_name(name, "infer binding")?;
                     work.push(Frame::Borrowed(name));
                 }
                 TypeExpr::Infer { name, constraint } => {
                     ensure_type_name(name, "infer binding")?;
+                    if let Some(clause) = declaring.last_mut() {
+                        clause.push(name);
+                    }
                     if let Some(constraint) = constraint {
                         work.push(Frame::Expr(constraint, Precedence::Union));
                         work.push(Frame::Text(" extends "));
@@ -640,12 +679,11 @@ fn primitive_keyword(name: PrimitiveName) -> &'static str {
     name.as_str()
 }
 
-/// `in_extends` says whether the expression renders inside a conditional's
-/// `extends` clause, where an `infer` binder is a declaration; elsewhere it
-/// is a reference by name.
-fn expression_precedence(expression: &TypeExpr, in_extends: bool) -> Precedence {
+/// `declares_infer` says whether an `infer` expression renders as the
+/// declaration of its binder; otherwise it is a reference by name.
+fn expression_precedence(expression: &TypeExpr, declares_infer: bool) -> Precedence {
     match expression {
-        TypeExpr::Infer { .. } if !in_extends => Precedence::Primary,
+        TypeExpr::Infer { .. } if !declares_infer => Precedence::Primary,
         TypeExpr::Conditional { .. }
         | TypeExpr::Function(_)
         | TypeExpr::ConstructorType(_)

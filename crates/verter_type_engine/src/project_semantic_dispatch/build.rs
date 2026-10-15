@@ -14752,7 +14752,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // Each key type maps to an index signature keyed by the type its
         // remap produces (the key type itself without one), its value the
         // mapping's value at that key type. Signatures keyed alike unite
-        // their values (`appendIndexInfo`).
+        // their values (`appendIndexInfo`). A property name the remap
+        // produces from a key type is a property of that value.
         let mut produced_index: Vec<crate::semantic_query::IndexSignature> = Vec::new();
         for index_key in &index_keys {
             if remap_defers || cancelled {
@@ -14762,11 +14763,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 cancelled = true;
                 break;
             }
-            let produced_key_types = match mapper.name_remap {
-                None => vec![index_key.key_type],
+            let MappedIndexRemap {
+                key_types: produced_key_types,
+                names: produced_names,
+            } = match mapper.name_remap {
+                None => MappedIndexRemap {
+                    key_types: vec![index_key.key_type],
+                    names: Vec::new(),
+                },
                 Some(remap) => {
                     match self.mapped_index_name_remap(mapper, remap, index_key.key_type, context) {
-                        Some(key_types) => key_types,
+                        Some(produced) => produced,
                         None => {
                             remap_defers = true;
                             break;
@@ -14774,7 +14781,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     }
                 }
             };
-            if produced_key_types.is_empty() {
+            if produced_key_types.is_empty() && produced_names.is_empty() {
                 continue;
             }
             let value = match (&index_key.source, value_is_identity) {
@@ -14798,6 +14805,41 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     context,
                 ),
             };
+            // A property named from a key type has no source property to
+            // inherit modifiers from: only the mapping's own `+?` and
+            // `+readonly` apply. A name produced again unites its values.
+            for produced_name in produced_names {
+                let spelling = crate::semantic_query::property_spelling(produced_name.clone());
+                if let Some(&ordinal) = produced_by_key.get(&spelling) {
+                    let existing: &mut SurfaceMember = &mut produced[ordinal];
+                    if existing.value != value {
+                        existing.value = self.intern_normalized_union_or_intersection(
+                            &[existing.value, value],
+                            true,
+                        );
+                    }
+                    project_member_edges.push((value, produced_name));
+                    continue;
+                }
+                produced_by_key.insert(spelling, produced.len());
+                produced.push(SurfaceMember {
+                    key: crate::semantic_query::AuthoredPropertyKey::from_known(
+                        produced_name.clone(),
+                    ),
+                    value,
+                    optional: mapper.optionality == crate::semantic_query::OptionalityMod::Add,
+                    readonly: mapper.readonly == crate::semantic_query::ReadonlyMod::Add,
+                    method_kind: None,
+                    has_implementation_body: false,
+                    visibility: verter_type_expr::MemberVisibility::Public,
+                    excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+                    declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                    merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                    spans: Default::default(),
+                    declaration_origin: None,
+                });
+                project_member_edges.push((value, produced_name));
+            }
             // `+?` adds `undefined` to an index signature's value; `-?`
             // leaves it, as an index signature is never optional.
             let value = if mapper.optionality == crate::semantic_query::OptionalityMod::Add {
@@ -14806,15 +14848,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             } else {
                 value
             };
-            let readonly = match mapper.readonly {
-                crate::semantic_query::ReadonlyMod::Add => true,
-                crate::semantic_query::ReadonlyMod::Remove => false,
-                crate::semantic_query::ReadonlyMod::Keep => index_key
-                    .source
-                    .as_ref()
-                    .is_some_and(|signature| signature.readonly),
-            };
             for key_type in produced_key_types {
+                // A kept modifier is the one of the source signature the
+                // checker applies to the PRODUCED key type, never the one
+                // the key type was read from: `[k: number]` remapped to
+                // `string` keeps no `readonly` of the number signature.
+                let readonly = match mapper.readonly {
+                    crate::semantic_query::ReadonlyMod::Add => true,
+                    crate::semantic_query::ReadonlyMod::Remove => false,
+                    crate::semantic_query::ReadonlyMod::Keep => {
+                        self.applicable_source_index_readonly(&source_index_signatures, key_type)
+                    }
+                };
                 if let Some(existing) = produced_index
                     .iter_mut()
                     .find(|signature| signature.key_type == key_type)
@@ -15484,24 +15529,24 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         Some(matched)
     }
 
-    /// The index-signature key types a mapping's `as` clause produces for
-    /// the key TYPE `key_type` (`string` of a `[k: string]` source): the
-    /// remap evaluated at it, a union read arm by arm — `never` produces
-    /// none; `string`, `number`, `symbol` or a template pattern produces
-    /// itself. `None` when the remap does not settle to such key types (a
-    /// property name produced from a key type included): the mapping then
-    /// stays deferred.
+    /// The index-signature key types and property names a mapping's `as`
+    /// clause produces for the key TYPE `key_type` (`string` of a
+    /// `[k: string]` source): the remap evaluated at it, a union read arm by
+    /// arm — `never` produces none; `string`, `number`, `symbol` or a
+    /// template pattern produces itself as an index key type; a string or
+    /// number literal produces a property name. `None` when the remap does
+    /// not settle to such keys: the mapping then stays deferred.
     fn mapped_index_name_remap(
         &self,
         mapper: &crate::semantic_query::MapperKey,
         remap: SemanticNodeId,
         key_type: SemanticNodeId,
         context: crate::semantic_query::ProjectionReductionContext,
-    ) -> Option<Vec<SemanticNodeId>> {
+    ) -> Option<MappedIndexRemap> {
         let substituted =
             self.substitute_semantic_type_param(remap, mapper.parameter_node, key_type);
         let mut pending = vec![substituted];
-        let mut produced = Vec::new();
+        let mut produced = MappedIndexRemap::default();
         while let Some(node) = pending.pop() {
             let evaluated = self
                 .evaluate_deferred_semantic_node_with_context(node, context)
@@ -15511,11 +15556,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 Some(SemanticNodeData::Primitive(PrimitiveKind::Never)) => {}
                 Some(SemanticNodeData::Primitive(
                     PrimitiveKind::String | PrimitiveKind::Number | PrimitiveKind::Symbol,
-                )) => produced.push(evaluated),
+                )) => produced.key_types.push(evaluated),
                 Some(SemanticNodeData::TemplateLiteral { .. })
                     if !super::raise::builtin_lowering_argument_is_open(self, evaluated) =>
                 {
-                    produced.push(evaluated);
+                    produced.key_types.push(evaluated);
+                }
+                Some(SemanticNodeData::Literal(LiteralValue::String(text))) => {
+                    produced
+                        .names
+                        .push(PropertyKey::string_literal(text.as_str()));
+                }
+                Some(SemanticNodeData::Literal(LiteralValue::Number(number))) => {
+                    produced.names.push(PropertyKey::from_js_number(*number));
                 }
                 Some(SemanticNodeData::Union(members)) => {
                     pending.extend(members.members_arc().iter().rev().copied());
@@ -15524,6 +15577,84 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
         }
         Some(produced)
+    }
+
+    /// Whether the source index signature the checker applies to the index
+    /// key type `key_type` is readonly — `getApplicableIndexInfo` over a
+    /// homomorphic mapping's modifiers type. Every applicable non-`string`
+    /// signature must be readonly; when none applies, a `string` signature
+    /// applies to any key but a symbol. No applicable signature leaves the
+    /// produced signature mutable.
+    fn applicable_source_index_readonly(
+        &self,
+        signatures: &[crate::semantic_query::IndexSignature],
+        key_type: SemanticNodeId,
+    ) -> bool {
+        let graph = self.graph();
+        let mut string_readonly = None;
+        let mut applicable_readonly = None;
+        for signature in signatures {
+            // A union key type declares one signature per constituent.
+            let arms: Vec<SemanticNodeId> = match graph.node_data(signature.key_type).as_deref() {
+                Some(SemanticNodeData::Union(members)) => members.members_arc().to_vec(),
+                _ => vec![signature.key_type],
+            };
+            for arm in arms {
+                if matches!(
+                    graph.node_data(arm).as_deref(),
+                    Some(SemanticNodeData::Primitive(PrimitiveKind::String))
+                ) {
+                    string_readonly = Some(signature.readonly);
+                } else if self.index_key_type_applies(key_type, arm) {
+                    applicable_readonly =
+                        Some(applicable_readonly.unwrap_or(true) && signature.readonly);
+                }
+            }
+        }
+        let symbol_key = matches!(
+            graph.node_data(key_type).as_deref(),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Symbol))
+        );
+        applicable_readonly
+            .or(string_readonly.filter(|_| !symbol_key))
+            .unwrap_or(false)
+    }
+
+    /// Whether a non-`string` index signature keyed by `index_key` applies to
+    /// the key type `key` (`isApplicableIndexType`): the key is assignable to
+    /// it, or the key is `` `${number}` `` and the index `number`.
+    fn index_key_type_applies(&self, key: SemanticNodeId, index_key: SemanticNodeId) -> bool {
+        if key == index_key {
+            return true;
+        }
+        let graph = self.graph();
+        let numeric_index = matches!(
+            graph.node_data(index_key).as_deref(),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Number))
+        );
+        let numeric_string_key = match graph.node_data(key).as_deref() {
+            Some(SemanticNodeData::TemplateLiteral {
+                quasis,
+                expressions,
+            }) => {
+                quasis.iter().all(|quasi| quasi.is_empty())
+                    && matches!(
+                        expressions.as_ref(),
+                        [only] if matches!(
+                            graph.node_data(*only).as_deref(),
+                            Some(SemanticNodeData::Primitive(PrimitiveKind::Number))
+                        )
+                    )
+            }
+            _ => false,
+        };
+        if numeric_index && numeric_string_key {
+            return true;
+        }
+        matches!(
+            self.execute_relate_pair(key, index_key),
+            super::dispatch_txn::RelationStep::Assignable { .. }
+        )
     }
 
     /// Classify an evaluated key-remap node into a [`MappedKeyRemapOutcome`].
@@ -19114,6 +19245,15 @@ pub(super) struct InstantiateBuild {
     enum_body: bool,
     body: BodyLowering,
     complete_structure: bool,
+}
+
+/// What a mapping's `as` clause produces for one key TYPE of its key domain.
+#[derive(Default)]
+struct MappedIndexRemap {
+    /// The index-signature key types it produces.
+    key_types: Vec<SemanticNodeId>,
+    /// The property names it produces.
+    names: Vec<PropertyKey>,
 }
 
 /// A key TYPE of a homomorphic mapping's key domain — its source's index
