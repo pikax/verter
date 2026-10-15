@@ -979,6 +979,29 @@ test("a wrong Verter answer is a finding, never a comparison, and fails --requir
   failsWith(run, /require-all-matched/, { requireAllMatched: true });
 });
 
+for (const [label, cls, plant] of [
+  [
+    "a refused",
+    "refusal",
+    (probe) => (probe.cold.outcome = { kind: "fault", detail: "BudgetExceeded(..)" }),
+  ],
+  [
+    "a partial",
+    "partial",
+    (probe) => (probe.observation.error = "the observation stopped before the answer completed"),
+  ],
+])
+  test(`${label} Verter answer passes ordinary validation and fails --require-all-matched`, () => {
+    const run = syntheticRun();
+    for (const inv of run.invocations) if (inv.arm === "verter") plant(inv.probe.probes[0]);
+    resummarize(run);
+    assert.deepEqual(validate(run).failures, []);
+    assert.equal(run.summary.cells[0].arms.verter.class, cls);
+    failsWith(run, new RegExp(`Verter's answer is ${cls} .*--require-all-matched`), {
+      requireAllMatched: true,
+    });
+  });
+
 test("a summary claiming a match the raw answers do not support fails validation", () => {
   const run = syntheticRun();
   for (const inv of run.invocations)

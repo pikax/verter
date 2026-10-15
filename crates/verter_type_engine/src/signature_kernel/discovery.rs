@@ -201,7 +201,12 @@ pub fn publish_signature(
             },
         });
     }
-    store.claim_space_key(input.space_key, input.space_identity)?;
+    // The key names the space's binder tokens. A space with no binders
+    // mints none, so another identity under its key can alias nothing:
+    // only a space that will mint tokens claims its key.
+    if !input.binders.is_empty() {
+        store.claim_space_key(input.space_key, input.space_identity)?;
+    }
     let space = store.intern_binder_space(
         BinderSpace {
             key: input.space_key,

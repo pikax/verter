@@ -319,7 +319,7 @@ impl FinalComponentAdmissionProof {
 pub(crate) struct ComponentMetaRefusalEffects {
     pub(crate) request: Option<RequestSpent>,
     pub(crate) work: usize,
-    pub(crate) bytes: usize,
+    pub(crate) bytes: u64,
     pub(crate) trip: PartialReasonSet,
 }
 

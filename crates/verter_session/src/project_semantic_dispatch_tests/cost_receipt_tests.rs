@@ -1160,7 +1160,7 @@ struct RootAnswer {
     partial: bool,
     reasons: verter_type_engine::semantic_query::PartialReasonSet,
     work: usize,
-    bytes: usize,
+    bytes: u64,
     /// The operation refusals the read reports.
     refusals: Vec<super::walk::ShallowDiagnostic>,
 }

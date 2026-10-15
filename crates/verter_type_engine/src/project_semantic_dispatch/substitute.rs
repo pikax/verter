@@ -54,8 +54,8 @@ use super::ProjectSemanticDispatch;
 use crate::request_context::RecursiveSubstituteIdentity;
 use crate::semantic_query::{
     ConditionalPendingSubstitution, FunctionParam, IndexKey, IndexSignature, MapperKey,
-    PendingSubstitutionFrame, QueryError, SemanticNodeData, SemanticNodeId, SurfaceMember,
-    SurfaceView, TypeParamDecl,
+    PendingSubstitutionFrame, PrimitiveKind, QueryError, SemanticNodeData, SemanticNodeId,
+    SurfaceMember, SurfaceView, TypeParamDecl,
 };
 
 impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
@@ -1133,6 +1133,52 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 if !any_changed {
                     return (node, false);
                 }
+                // Substitution is a template CONSTRUCTION site, as it is for
+                // a union: the checker instantiates a template literal type
+                // through `getTemplateLiteralType`, which folds literal,
+                // `null`, `undefined` and `boolean` holes into its text and
+                // maps over a union hole, so a template whose every hole is
+                // now one of those is the strings it builds (`${P}${S}` with
+                // `P := "/a/"` and `S := "x"` is `"/a/x"`; `x${N}` with
+                // `N := null` is `"xnull"`). The template authority builds
+                // it, its cross product and that product's limit included.
+                let graph = self.graph();
+                let folds = |expression: SemanticNodeId| {
+                    matches!(
+                        graph.node_data(expression).as_deref(),
+                        Some(
+                            SemanticNodeData::Literal(_)
+                                | SemanticNodeData::Primitive(
+                                    PrimitiveKind::Null
+                                        | PrimitiveKind::Undefined
+                                        | PrimitiveKind::Boolean
+                                        | PrimitiveKind::Never
+                                )
+                        )
+                    )
+                };
+                let all_closed = new_expressions.iter().all(|expression| {
+                    match graph.node_data(*expression).as_deref() {
+                        Some(SemanticNodeData::Union(members)) => {
+                            members.iter().all(|member| folds(*member))
+                        }
+                        _ => folds(*expression),
+                    }
+                });
+                if all_closed {
+                    let read = self.execute_read(
+                        crate::semantic_query::SemanticQueryKey::TemplateLiteralReduce {
+                            pattern: Arc::clone(quasis),
+                            args: Arc::from(new_expressions.as_slice()),
+                            context: self.template_literal_reduce_context(),
+                        },
+                    );
+                    if let (crate::semantic_query::QueryResult::Value(built), false) =
+                        (&read.value, read.result_is_partial())
+                    {
+                        return (*built, true);
+                    }
+                }
                 (
                     self.graph().intern_preserving_scope(
                         node,
@@ -1325,8 +1371,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 } else {
                     next_pending = next_pending.append_both(parameter_node, arg);
                     // A distributive conditional's check IS this parameter:
-                    // its branches see each member it distributes over.
-                    if *distributive && *check == parameter_node {
+                    // its branches see each member it distributes over. An
+                    // `infer` binder's check is a reference carrying its
+                    // binder identity, never the declaration node itself.
+                    let check_is_parameter = *check == parameter_node
+                        || parameter_infer_binder.as_ref().is_some_and(|binder| {
+                            matches!(
+                                self.graph().node_data(*check).as_deref(),
+                                Some(
+                                    SemanticNodeData::Infer { binder: written, .. }
+                                        | SemanticNodeData::InferRef { binder: written, .. }
+                                ) if written == binder
+                            )
+                        });
+                    if *distributive && check_is_parameter {
                         next_pending = next_pending.distributing(parameter_node);
                     }
                 }

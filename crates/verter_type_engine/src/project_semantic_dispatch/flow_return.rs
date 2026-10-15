@@ -3463,8 +3463,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// structural `T | T = T`) — with an O(1) canonicality test first: a
     /// top whose payload carries the at-rest `Canonical` origin category
     /// was minted by a COMPLETE canonicalization — the canonical builder
-    /// refuses that stamp on incomplete evidence (over-cap arm set,
-    /// exhausted compare budget, dangling arm, undecided peek all mint
+    /// refuses that stamp on incomplete evidence (exhausted compare
+    /// budget, dangling arm, undecided peek all mint
     /// `CanonicalUnproven`) — so its list IS in canonical form (a
     /// complete canonicalization is deterministic over immutable node
     /// data) and the closure returns it unchanged WITHOUT re-running the

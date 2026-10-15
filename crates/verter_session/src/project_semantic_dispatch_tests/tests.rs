@@ -4565,6 +4565,53 @@ fn wide_distinct_object_union_canonicalizes_without_budget_exhaustion() {
     );
 }
 
+/// A wide union of DEEP distinct arms canonicalizes completely however
+/// many nodes its arms hold together: every arm is keyed by its whole
+/// structure, so distinct arms never reach the pairwise tier. 4,000 arms of
+/// three nested objects hold 24,000 nodes; an unkeyed arm set this wide
+/// could only be left unproven (the elements of a large `as const` tree
+/// that an `infer` binds as one union).
+#[test]
+fn wide_union_of_deep_distinct_arms_canonicalizes_completely() {
+    use verter_type_engine::semantic_query::LiteralValue;
+
+    let host = host();
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let literal =
+        |text: String| graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(text)));
+    let arms: Vec<SemanticNodeId> = (0..4000)
+        .map(|index| {
+            let deep = simple_object(&graph, &[("x", literal(format!("deep-{index}")))]);
+            let inner = simple_object(
+                &graph,
+                &[("w", literal(format!("inner-{index}"))), ("d", deep)],
+            );
+            simple_object(
+                &graph,
+                &[("v", literal(format!("value-{index}"))), ("c", inner)],
+            )
+        })
+        .collect();
+
+    let union =
+        verter_type_engine::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
+            &graph,
+            &arms,
+            verter_session_query::flow::policy::NullabilityPolicy::Strict,
+        );
+    assert!(
+        matches!(
+            graph.node_data(union.node).as_deref(),
+            Some(SemanticNodeData::Union(m)) if m.len() == 4000
+        ),
+        "4,000 structurally distinct arms all survive"
+    );
+    assert!(
+        !union.evidence.incomplete,
+        "deep distinct arms are keyed apart, so the canonicalization is complete"
+    );
+}
+
 /// `Incomplete` has ONE disposition: suppression of the enclosing
 /// publication's warm admission, at the single funnel
 /// (`deposit_canonical_evidence`). Inside a cold build it folds
@@ -32835,8 +32882,8 @@ fn substituted_union_interns_global_while_callable_intersection_preserves_scope(
 }
 
 /// An INCOMPLETE canonicalization (here an undecidable over-deep alias
-/// peek; the over-cap arm set, an exhausted compare budget and a dangling
-/// arm take the same evidence path) must REFUSE the `Canonical` stamp on
+/// peek; an exhausted compare budget and a dangling arm take the same
+/// evidence path) must REFUSE the `Canonical` stamp on
 /// its multi-arm output. The stamp is the pre-seal closure's O(1) skip
 /// witness of canonical FORM; stamping an unproven list would let a
 /// budget-degraded result resurface in a later request as skip-eligible

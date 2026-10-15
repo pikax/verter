@@ -1014,3 +1014,52 @@ fn return_equation_identity_spans_flow_return_and_resolve_call() {
         ReturnDomainMetadata::FlowReturn
     ));
 }
+
+/// Finished sessions stay on the stack for the rest of the transaction, so
+/// the innermost collecting session is searched among the open ones only:
+/// a thousand sessions closed above an open one leave the search as short
+/// as one, and a collecting session suspended off the stack while others
+/// close is the active one again once it returns.
+#[test]
+fn closed_sessions_leave_the_collecting_search() {
+    let mut txn = CheckerDispatchTransaction::default();
+    let outer = txn.push_collecting_session(one_parameter_session_setup(), None);
+    // bounded-loop: a thousand sessions, each opened and closed once.
+    for _ in 0..1_000 {
+        let inner = txn.push_collecting_session(one_parameter_session_setup(), None);
+        assert_eq!(txn.active_session().map(|session| session.id), Some(inner));
+        txn.relation
+            .session_mut(inner)
+            .expect("pushed session")
+            .abandon();
+    }
+    assert_eq!(txn.active_session().map(|session| session.id), Some(outer));
+    assert_eq!(
+        txn.active_session_mut().map(|session| session.id),
+        Some(outer)
+    );
+    assert_eq!(txn.relation.sessions.len(), 1_001);
+    assert!(
+        txn.relation.collecting_ids.len() <= 2,
+        "{} ids searched for one open session",
+        txn.relation.collecting_ids.len()
+    );
+
+    let position = txn.relation.session_position(outer).expect("outer session");
+    let suspended = txn.relation.sessions.remove(position);
+    // bounded-loop: ten sessions, each opened and closed once.
+    for _ in 0..10 {
+        let inner = txn.push_collecting_session(one_parameter_session_setup(), None);
+        txn.relation
+            .session_mut(inner)
+            .expect("pushed session")
+            .abandon();
+    }
+    assert!(txn.active_session().is_none());
+    let position = txn
+        .relation
+        .sessions
+        .partition_point(|other| other.id < suspended.id);
+    txn.relation.sessions.insert(position, suspended);
+    assert_eq!(txn.active_session().map(|session| session.id), Some(outer));
+}

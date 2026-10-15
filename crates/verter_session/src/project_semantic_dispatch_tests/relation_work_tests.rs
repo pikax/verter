@@ -257,7 +257,7 @@ fn a_recorded_comparison_costs_the_ledgers_mapped_units() {
 /// is not.
 #[test]
 fn a_relation_past_its_byte_allowance_stops_on_the_memory_rail() {
-    let limit = 100 * super::connected_demand::RELATION_PAIR_BYTES;
+    let limit = 100 * super::connected_demand::RELATION_PAIR_BYTES as u64;
     with_probe(&reversed_object_unions(40), "[S, T]", |dispatch, node| {
         let (s, t) = pair(dispatch, node);
         dispatch.set_construction_byte_limit_for_tests(limit);

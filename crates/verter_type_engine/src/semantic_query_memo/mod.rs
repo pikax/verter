@@ -655,18 +655,27 @@ pub struct SemanticGraphStore {
     // `HASH_CONS_MEMO_RETENTION_CAP` (FIFO eviction via the
     // sidecar deque) so a long-running workspace cannot grow either
     // memo without bound; see `hash_cons_memos.rs` for the
-    // eviction contract.
-    pub(super) structural_domains:
-        DashMap<SemanticNodeId, structural_domains::StructuralDomainEntry>,
+    // eviction contract. Their keys are arena-allocated node ids and
+    // closed internal enums, never authored text, so they hash with
+    // `FxHash`: no input can choose colliding keys.
+    pub(super) structural_domains: DashMap<
+        SemanticNodeId,
+        structural_domains::StructuralDomainEntry,
+        rustc_hash::FxBuildHasher,
+    >,
     pub(super) structural_domains_fifo:
         parking_lot::Mutex<std::collections::VecDeque<SemanticNodeId>>,
-    pub(super) binder_dependencies:
-        DashMap<SemanticNodeId, binder_dependencies::BinderDependencyEntry>,
+    pub(super) binder_dependencies: DashMap<
+        SemanticNodeId,
+        binder_dependencies::BinderDependencyEntry,
+        rustc_hash::FxBuildHasher,
+    >,
     pub(super) binder_dependencies_fifo:
         parking_lot::Mutex<std::collections::VecDeque<SemanticNodeId>>,
     pub(super) substitute_memo: DashMap<
         (SemanticNodeId, SemanticNodeId, SemanticNodeId),
         (SemanticNodeId, node_roots::NodeRootSet),
+        rustc_hash::FxBuildHasher,
     >,
     pub(super) substitute_memo_fifo: parking_lot::Mutex<
         std::collections::VecDeque<(SemanticNodeId, SemanticNodeId, SemanticNodeId)>,
@@ -678,6 +687,7 @@ pub struct SemanticGraphStore {
             crate::project_semantic_dispatch::evaluate::DeferredEvaluationDemand,
         ),
         Arc<hash_cons_memos::DeferredEvaluationMemoEntry>,
+        rustc_hash::FxBuildHasher,
     >,
     pub(super) evaluate_deferred_memo_fifo: parking_lot::Mutex<
         std::collections::VecDeque<(

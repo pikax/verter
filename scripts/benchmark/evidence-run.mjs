@@ -39,7 +39,14 @@ const REQUIRED_FIELDS = [
   "noise",
   "requiredCells",
 ];
-const OPTIONAL_FIELDS = ["scenarios", "settings", "repeat", "warmup", "warmRepeats"];
+const OPTIONAL_FIELDS = [
+  "scenarios",
+  "settings",
+  "repeat",
+  "warmup",
+  "warmRepeats",
+  "requireAllMatched",
+];
 const CELL_FIELDS = ["scenario", "setting", "arm", "mode", "threads", "metrics"];
 
 /** The workload modes the harness measures: a fresh-process cold demand and in-process warm repeats. */
@@ -220,6 +227,8 @@ export function validateManifest(manifest, file) {
   ])
     if (key in manifest && !isInt(manifest[key], min))
       problems.push(`${key} must be an integer >= ${min}`);
+  if ("requireAllMatched" in manifest && typeof manifest.requireAllMatched !== "boolean")
+    problems.push("requireAllMatched must be true or false");
 
   const noiseRefs = typeof noise === "string" ? [noise] : noise;
   if (!stringList(noiseRefs)) problems.push("noise must be a reference or a list of references");
@@ -274,6 +283,7 @@ export function validateManifest(manifest, file) {
   const run = {
     scenarios: scenarios.map((s) => s.id),
     settings,
+    requireAllMatched: manifest.requireAllMatched === true,
     harnessArgs: [
       "--tier",
       tier,
@@ -532,6 +542,7 @@ export function buildSummary(loaded, { dryRun, worker, results, harness, validat
       name: loaded.manifest.name,
       manifest: relPath(loaded.path),
       manifestSha256: loaded.sha256,
+      requireAllMatched: loaded.run.requireAllMatched,
     },
     dryRun,
     worker,
@@ -553,11 +564,20 @@ function defaultHarness(args) {
   return { status: r.status ?? 2 };
 }
 
-/** The harness's own validator over the written results (its FAIL lines are the problems). */
-function defaultValidator(resultsPath) {
+/**
+ * The harness's own validator over the written results (its FAIL lines are
+ * the problems). `requireAllMatched` forwards the manifest's policy as
+ * validate.mjs's `--require-all-matched`, so a Verter answer that is not
+ * matched (wrong, partial, refused or killed) fails the run instead of being
+ * reported as a finding. `script` replaces validate.mjs (self-tests).
+ */
+export function defaultValidator(
+  resultsPath,
+  { requireAllMatched = false, script = join(HERE, "semantic-perf", "validate.mjs") } = {},
+) {
   const r = spawnSync(
     process.execPath,
-    [join(HERE, "semantic-perf", "validate.mjs"), resultsPath],
+    [script, resultsPath, ...(requireAllMatched ? ["--require-all-matched"] : [])],
     {
       cwd: ROOT,
       encoding: "utf8",
@@ -663,7 +683,9 @@ export async function main(argv, deps = {}) {
     ]);
     const resultsPath = join(harnessDir, "results.json");
     const results = existsSync(resultsPath) ? JSON.parse(readFileSync(resultsPath, "utf8")) : null;
-    const validatorProblems = results ? validate(resultsPath) : [];
+    const validatorProblems = results
+      ? validate(resultsPath, { requireAllMatched: loaded.run.requireAllMatched })
+      : [];
     summary = buildSummary(loaded, { dryRun: false, worker, results, harness, validatorProblems });
   }
   const summaryPath = join(outDir, SUMMARY_FILE);
