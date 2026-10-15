@@ -68,7 +68,10 @@ pub(crate) struct WorkspaceResolutionSlots {
 struct Slot {
     generation: u64,
     owner: String,
-    candidates: SmallVec<[RetainedCandidate; CANDIDATE_CAP]>,
+    /// Inline room for one candidate, the common occupancy: the slot table
+    /// stores every slot inline in each of its buckets, so room for the full
+    /// [`CANDIDATE_CAP`] would be paid by every bucket, occupied or not.
+    candidates: SmallVec<[RetainedCandidate; 1]>,
 }
 
 struct RetainedCandidate {

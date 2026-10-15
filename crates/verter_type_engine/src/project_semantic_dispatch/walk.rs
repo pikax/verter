@@ -9426,7 +9426,9 @@ fn merge_declaration_surfaces(
     {
         match entry {
             ShallowSurfaceEntry::Member(member) => {
-                if let Some(member) = remaining_members.shift_remove(&member.key) {
+                // The contributor streams give the order; the map's own order
+                // is never read, so an O(1) removal keeps the merge linear.
+                if let Some(member) = remaining_members.swap_remove(&member.key) {
                     entries.push(ShallowSurfaceEntry::Member(member));
                 }
             }
@@ -9511,7 +9513,9 @@ fn merge_intersection_surfaces_with_graph(
         for entry in &surface.entries {
             match entry {
                 ShallowSurfaceEntry::Member(member) => {
-                    if let Some(member) = members.shift_remove(&member.key) {
+                    // The arm streams give the order; the map's own order is
+                    // never read, so an O(1) removal keeps the merge linear.
+                    if let Some(member) = members.swap_remove(&member.key) {
                         entries.push(ShallowSurfaceEntry::Member(member));
                     }
                 }

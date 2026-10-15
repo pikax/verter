@@ -418,6 +418,9 @@ pub struct CanonicalEvidence {
     /// Nodes already scope-classified — one sidecar lookup per unique node
     /// per canonicalization, regardless of how many walks revisit it.
     seen_nodes: FxHashSet<SemanticNodeId>,
+    /// The roots [`Self::inspected_file_roots`] holds, so recording one is
+    /// constant time however many files the walk inspects.
+    seen_roots: FxHashSet<ObservedGraphSelfRoot>,
 }
 
 /// Fresh literal values contributed by one input. Partial roots may themselves
@@ -684,13 +687,7 @@ impl CanonicalEvidence {
         self.incomplete |= other.incomplete;
         self.refusal = self.refusal.or(other.refusal);
         for root in other.inspected_file_roots {
-            if !self
-                .inspected_file_roots
-                .iter()
-                .any(|(c, h)| *c == root.0 && *h == root.1)
-            {
-                self.inspected_file_roots.push(root);
-            }
+            self.note_file_root(root);
         }
         self.seen_nodes.extend(other.seen_nodes);
     }
@@ -705,13 +702,18 @@ impl CanonicalEvidence {
             ..
         }) = graph.node_scope(node)
         {
-            if !self
-                .inspected_file_roots
-                .iter()
-                .any(|(c, h)| *c == canonical_id && *h == whole_hash)
-            {
-                self.inspected_file_roots.push((canonical_id, whole_hash));
-            }
+            self.note_file_root((canonical_id, whole_hash));
+        }
+    }
+
+    /// Record `root` once, in first-inspection order.
+    fn note_file_root(&mut self, root: ObservedGraphSelfRoot) {
+        if self.seen_roots.len() != self.inspected_file_roots.len() {
+            // A caller assigned the list directly; index what it holds.
+            self.seen_roots = self.inspected_file_roots.iter().cloned().collect();
+        }
+        if self.seen_roots.insert(root.clone()) {
+            self.inspected_file_roots.push(root);
         }
     }
 

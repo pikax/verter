@@ -2367,29 +2367,15 @@ impl VerterHost {
             // the lease to the artifact's memo below, so the header-index
             // parse and every later body demand share ONE parse for the
             // artifact's whole life (no LRU, no silent re-parse).
-            let cold_lease =
-                self.decl_lowering
-                    .acquire_lease(&snapshot_key, &eval_source, source_type);
-            // A program refused for want of stack is not retained: the flight
-            // publishes nothing for the source, never an artifact read off an
-            // empty program.
-            if cold_lease.refused.is_some() {
-                return None;
-            }
-            if cold_lease.parsed_now {
-                self.provenance
-                    .decl_lowering
-                    .eval_program_parses
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            }
-            // LEASE-ONLY run: `cold_lease` (acquired above) is held on
-            // this stack, so the retained snapshot is pinned for the
-            // whole flight and this cold-index job reuses it — the run
-            // cannot parse, per the lease-only worker contract.
-            // The job runs on a declaration-lowering worker, so it records its
-            // own refusals: a refused one publishes nothing, as a refused parse.
-            let outcome = self.decl_lowering.run_leased(
+            //
+            // The parse and the cold-index job over it are one worker
+            // rendezvous. A program refused for want of stack is not
+            // retained and runs no job: the flight publishes nothing for the
+            // source, never an artifact read off an empty program.
+            let (cold_lease, outcome) = self.decl_lowering.acquire_lease_and_run(
                 &snapshot_key,
+                &eval_source,
+                source_type,
                 move |program: Option<&verter_semantic_source::parsed_eval_program::ParsedEvalProgram>| {
                     verter_parser::oxc_parse::refusals_within(|| {
                         let owner_table = Arc::new(match program {
@@ -2437,12 +2423,19 @@ impl VerterHost {
                     })
                 },
             );
-            // The parse was already counted at lease acquisition above; the
-            // cold-index run reused the pinned snapshot. A lease miss is
-            // impossible by construction (`cold_lease` is held on this
-            // stack), so the `None` arm is an invariant break: fail
-            // CLOSED (no artifact) — loud in debug builds — never a
-            // transient re-parse.
+            if cold_lease.refused.is_some() {
+                return None;
+            }
+            if cold_lease.parsed_now {
+                self.provenance
+                    .decl_lowering
+                    .eval_program_parses
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            // The cold-index job ran over the snapshot its own acquisition
+            // pinned, so a missing answer for an unrefused parse is an
+            // invariant break: fail CLOSED (no artifact) — loud in debug
+            // builds — never a transient re-parse.
             let Some(products) = outcome else {
                 verter_debug_assert!(
                     false,

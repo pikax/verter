@@ -1203,11 +1203,12 @@ pub enum ModeSlot {
     VueRuntimeSurfaceShallow,
 }
 
-/// SmallVec inline capacity for the per-slot candidate list — a
-/// STORAGE optimization only, NOT the retention policy. The semantic
-/// candidate cap is per-family ([`FamilyKey::candidate_cap`]); a slot
-/// whose family cap exceeds the inline capacity spills to the heap.
-pub(super) const CANDIDATE_LIST_INLINE_CAP: usize = 4;
+/// Inline capacity of a slot SNAPSHOT — the candidate list a warm read or
+/// a publish copies out of the `entries` mutex to validate outside it. A
+/// storage optimization only, NOT the retention policy: the semantic
+/// candidate cap is per-family ([`FamilyKey::candidate_cap`]), and a
+/// snapshot of a slot holding more candidates spills to the heap.
+pub(super) const CANDIDATE_SNAPSHOT_INLINE_CAP: usize = 4;
 
 /// Per-slot candidate list (semantic cap: [`FamilyKey::candidate_cap`]).
 ///
@@ -1217,7 +1218,15 @@ pub(super) const CANDIDATE_LIST_INLINE_CAP: usize = 4;
 /// the back ([`FamilySlots::mark_validated_freshest`]). Eviction at the
 /// family cap is invalid-first, then the front of this order — see
 /// [`FamilySlots::publish_one`] and [`select_eviction_victim`].
-pub(super) type CandidateList = smallvec::SmallVec<[MemoEntry; CANDIDATE_LIST_INLINE_CAP]>;
+///
+/// A stored list keeps no inline storage: a family populates one or two of
+/// its thirteen slots, and inline candidates in every slot would cost
+/// each family kilobytes before it held anything. An empty slot is a
+/// small header; a populated one grows to its candidate count.
+pub(super) type CandidateList = smallvec::SmallVec<[MemoEntry; 0]>;
+
+/// A copy of one slot's candidates, in the slot's LRU order.
+pub(super) type CandidateSnapshot = smallvec::SmallVec<[MemoEntry; CANDIDATE_SNAPSHOT_INLINE_CAP]>;
 
 /// The eviction victim a publish site selected for a slot at its
 /// family cap. Computed by [`select_eviction_victim`] OUTSIDE the
@@ -1245,7 +1254,7 @@ pub(super) enum EvictionVictim {
 /// invalid candidate can never warm-hit, so evicting it ahead of any
 /// still-valid candidate is pure win.
 pub(super) fn select_eviction_victim(
-    candidates: &CandidateList,
+    candidates: &CandidateSnapshot,
     ctx: &dyn crate::resolver_core::fact_validation_port::FactValidation,
 ) -> EvictionVictim {
     // Reached only when the slot is at its family cap and a publish must
@@ -1290,7 +1299,7 @@ pub(super) fn plan_family_slot_eviction(
     cap: usize,
     ctx: &dyn crate::resolver_core::fact_validation_port::FactValidation,
 ) -> EvictionVictim {
-    let snapshot: Option<CandidateList> = {
+    let snapshot: Option<CandidateSnapshot> = {
         let entries = entries.lock();
         entries.get(family).and_then(|slots| {
             if slots.primary_slot_needs_victim(slot, entry, cap) {
@@ -1439,8 +1448,8 @@ impl FamilySlots {
     /// walk serialises every unrelated warm read and cold publish
     /// during validation, which the multi-candidate substrate makes
     /// worse.
-    pub(super) fn snapshot_slot(&self, slot: ModeSlot) -> CandidateList {
-        self.slot_list(slot).clone()
+    pub(super) fn snapshot_slot(&self, slot: ModeSlot) -> CandidateSnapshot {
+        self.slot_list(slot).iter().cloned().collect()
     }
 
     /// Move the candidate matching `(validated_at_generation, facts)`

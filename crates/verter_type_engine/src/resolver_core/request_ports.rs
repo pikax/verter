@@ -487,6 +487,10 @@ pub trait HostAttachmentPort {
     fn host_attachment(&self) -> &Self::HostAttachment;
 }
 
+/// The relative specifiers an augmentation-index population resolved: per
+/// augmenter canonical, each specifier and the canonical it resolved to.
+pub type AugmenterResolutions = rustc_hash::FxHashMap<Arc<str>, Vec<(Arc<str>, Option<Arc<str>>)>>;
+
 /// A single population read and its owned query result. The all-space shape
 /// fingerprint travels beside the filtered answer, including an empty answer.
 pub struct ContributorAnswer {
@@ -623,6 +627,21 @@ pub trait OwnedLowering {
     ) -> (
         verter_session_query::resolution::AugmentationTargetKey,
         Arc<verter_session_query::resolution::AugmenterSet>,
+    ) {
+        let (key, set, _) = self.augmentation_index_with_resolutions(target);
+        (key, set)
+    }
+    /// [`Self::augmentation_index`], with the relative specifiers the read
+    /// resolved while it populated the index: `(augmenter, specifier)` to
+    /// the canonical it resolved to. Empty when the read was served from
+    /// an already populated index.
+    fn augmentation_index_with_resolutions(
+        &self,
+        target: verter_session_query::resolution::AugmentationTargetKind,
+    ) -> (
+        verter_session_query::resolution::AugmentationTargetKey,
+        Arc<verter_session_query::resolution::AugmenterSet>,
+        AugmenterResolutions,
     );
     fn global_contributor_answer(
         &self,
@@ -717,6 +736,15 @@ pub trait OwnedLowering {
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
     ) -> verter_session_query::inputs::prepared::PreparedTypeDeclResolution;
+    /// Lower the type declarations of `demands` that are not lowered yet as
+    /// one batch — one lowering-service rendezvous per occupied worker
+    /// shard instead of one per declaration — registering each one's facts
+    /// as a single demand would and keeping its body for the locator read
+    /// that follows while the returned guard lives.
+    fn batch_type_bodies(
+        &self,
+        demands: &[verter_session_query::source::demand::TypeBodyBatchDemand<'_>],
+    ) -> verter_session_query::source::demand::BatchedBodies;
     fn prepare_augmentation_type(
         &self,
         input: &PreparedInputRecord,

@@ -166,6 +166,32 @@ pub trait ExpressionSourceDemand: Send + Sync {
     ) -> DemandOutcome<TypeExpr>;
 }
 
+/// One type declaration a batched body demand lowers: `name` declared by
+/// `owner` in the shallow source `source`, in the augmentation `scope` or
+/// the file scope when `None`.
+pub struct TypeBodyBatchDemand<'a> {
+    pub source: &'a crate::inputs::shallow::ShallowInputRecord,
+    pub owner: verter_type_expr::TopLevelOwnerId,
+    pub name: &'a str,
+    pub scope: Option<&'a crate::declarations::AugmentationScopeKind>,
+}
+
+/// Holds the transient bodies a batched body demand kept for the reads that
+/// follow it; dropping it releases any that were not read.
+#[must_use = "dropping the guard releases the batched bodies before they are read"]
+pub struct BatchedBodies {
+    _guard: Option<Box<dyn Send>>,
+}
+
+impl BatchedBodies {
+    /// Wrap the owner's release guard.
+    pub fn new(guard: Box<dyn Send>) -> Self {
+        Self {
+            _guard: Some(guard),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
