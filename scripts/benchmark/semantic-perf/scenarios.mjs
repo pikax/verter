@@ -73,6 +73,86 @@ export function allScenarios() {
     );
   }
 
+  // Mapped types over concrete sources resolve to the object type: a class
+  // built from a stack of mixins, the intersection a builder accumulates,
+  // an imported interface's keys remapped by a recursive template
+  // conditional, and a generic interface heritage chain.
+  for (const count of [10, 25, 40]) {
+    let call = "Base";
+    let mixins = "";
+    for (const i of range(count)) {
+      mixins += `function M${i}<TBase extends Ctor>(B: TBase) { return class extends B { p${i} = ${i} as const; }; }\n`;
+      call = `M${i}(${call})`;
+    }
+    out.push(
+      scenario(
+        `mapped-expand-mixins-${count}`,
+        "mapped-expand",
+        `map over the keys of a class built from ${count} mixins`,
+        "type Ctor<T = {}> = new (...args: any[]) => T;\n" +
+          "class Base { base = -1 as const; }\n" +
+          mixins +
+          `class C extends ${call} {}\n` +
+          "declare const __v: { [K in keyof C]: C[K] };\n",
+        "typeof __v",
+      ),
+    );
+  }
+  for (const count of [50, 200, 500]) {
+    out.push(
+      scenario(
+        `mapped-expand-builder-${count}`,
+        "mapped-expand",
+        `map over the intersection a builder accumulates over ${count} calls`,
+        "interface Builder<T> {\n" +
+          "  add<K extends string, V extends string | number | boolean>(k: K, v: V): Builder<T & { [P in K]: V }>;\n" +
+          "  build(): { [K in keyof T]: T[K] };\n" +
+          "}\n" +
+          "declare function builder(): Builder<{}>;\n" +
+          `const r = builder()${range(count)
+            .map((i) => `.add("a${i}", ${i})`)
+            .join("")}.build();\n`,
+        "typeof r",
+      ),
+    );
+  }
+  for (const count of [100, 1000, 3000]) {
+    out.push(
+      scenario(
+        `mapped-expand-remap-${count}`,
+        "mapped-expand",
+        `remap the ${count} keys of an imported interface through a recursive template conditional`,
+        'import type { Model } from "./model";\n' +
+          "type Kebab<S extends string> = S extends `${infer A}_${infer B}` ? `${A}-${Kebab<B>}` : S;\n" +
+          "declare const __v: { [K in keyof Model as Kebab<K & string>]: Model[K] };\n",
+        "typeof __v",
+        {
+          files: {
+            "model.ts": `export interface Model {${range(count)
+              .map((i) => ` field_${i}_name_x: ${i};`)
+              .join("")} }\n`,
+          },
+        },
+      ),
+    );
+  }
+  for (const depth of [10, 40, 100]) {
+    const last = depth - 1;
+    out.push(
+      scenario(
+        `mapped-expand-heritage-${depth}`,
+        "mapped-expand",
+        `map over the keys of a generic interface heritage chain ${depth} levels deep`,
+        "interface L0<T> { p0: T }\n" +
+          range(depth - 1)
+            .map((i) => `interface L${i + 1}<T> extends L${i}<[T]> { p${i + 1}: T }\n`)
+            .join("") +
+          `declare const __v: { [K in keyof L${last}<0>]: L${last}<0>[K] };\n`,
+        "typeof __v",
+      ),
+    );
+  }
+
   // Relations: object unions related position by position, and reversed.
   for (const m of [200, 600, 1800, 3200]) {
     out.push(
@@ -655,6 +735,18 @@ export const SCENARIO_TIERS = {
   "mapped-index-tags-1000": "quick",
   "mapped-index-tags-3000": "standard",
   "mapped-index-tags-10000": "stress",
+  "mapped-expand-mixins-10": "quick",
+  "mapped-expand-mixins-25": "standard",
+  "mapped-expand-mixins-40": "standard",
+  "mapped-expand-builder-50": "quick",
+  "mapped-expand-builder-200": "standard",
+  "mapped-expand-builder-500": "stress",
+  "mapped-expand-remap-100": "quick",
+  "mapped-expand-remap-1000": "standard",
+  "mapped-expand-remap-3000": "stress",
+  "mapped-expand-heritage-10": "quick",
+  "mapped-expand-heritage-40": "standard",
+  "mapped-expand-heritage-100": "standard",
   "return-chain-20": "quick",
   "return-chain-100": "standard",
   "return-chain-300": "standard",

@@ -870,6 +870,129 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         path: &[Arc<str>],
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+        self.build_typeof_suspending(value_root, path, context, None)
+    }
+
+    /// Begin a `typeof` build on the continuation runtime: answer it at
+    /// once, or — when the value's type is its authored annotation — begin
+    /// lowering that annotation as a projection that stops at each
+    /// instantiation it reaches, the build [`Self::drain_typeof`] carries
+    /// on. A chain of instantiations the annotation names (an interface
+    /// whose heritage nests a hundred levels) then waits in heap-owned
+    /// frames instead of nesting natively.
+    pub(super) fn begin_typeof(
+        &self,
+        value_root: &ValueRootKey,
+        path: &[Arc<str>],
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> TypeofStart {
+        let mut suspended = None;
+        let output = self.build_typeof_suspending(value_root, path, context, Some(&mut suspended));
+        match suspended {
+            Some(build) => TypeofStart::Build(build),
+            None => TypeofStart::Done(Box::new(output)),
+        }
+    }
+
+    /// Carry a suspended `typeof` build on: its annotation's projection
+    /// resumes with `delivery`, the instantiation it waited on, and either
+    /// needs another or completes the build's output.
+    pub(super) fn drain_typeof(
+        &self,
+        build: &mut TypeofBuild,
+        delivery: Option<SemanticNodeId>,
+    ) -> InstantiatePoll {
+        let TypeofBuild {
+            prepared,
+            env,
+            scope,
+            scope_payload,
+            shadowing,
+            substitutions,
+            self_value,
+            body,
+            ..
+        } = build;
+        let poll = self.drain_located_body_lowering(
+            body,
+            &crate::project_semantic_dispatch::locator_view::LocatorViewInputs {
+                env,
+                scope,
+                name_resolution: &prepared.name_resolution,
+                scope_payload: scope_payload.as_ref(),
+                shadowing,
+                authored_resolution_debt: None,
+                self_value: self_value.as_ref(),
+            },
+            substitutions,
+            delivery,
+        );
+        match poll {
+            BodyPoll::Need(key) => InstantiatePoll::Need(key),
+            BodyPoll::Done(node, _) => {
+                let output = self.typeof_output(
+                    node,
+                    false,
+                    &build.value_root,
+                    &build.path,
+                    build.context,
+                    build.observed_hash,
+                );
+                InstantiatePoll::Done(Box::new(self.with_augmentation_roots(
+                    output,
+                    Vec::new(),
+                    false,
+                )))
+            }
+        }
+    }
+
+    /// The output of a `typeof` whose value has the type `node`: the
+    /// value's own type rooted on its declaring file, or the member `path`
+    /// reads from it.
+    fn typeof_output(
+        &self,
+        node: SemanticNodeId,
+        composed_partial: bool,
+        value_root: &ValueRootKey,
+        path: &[Arc<str>],
+        context: crate::semantic_query::ProjectionReductionContext,
+        observed_hash: verter_session_query::analysis::types::Hash16,
+    ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+        if path.is_empty() {
+            let signature = self.dep_signature_for(&value_root.scope.canonical_id, observed_hash);
+            let mut output = crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+                QueryResult::Value(node),
+                signature,
+            ))
+            .with_observed_self_roots([(
+                Arc::clone(&value_root.scope.canonical_id),
+                observed_hash,
+            )]);
+            // Two-signal fold: a partial composed class-surface read surfaces as
+            // a partial `TypeOf` result (it would otherwise pass through with
+            // `result_is_partial = false`).
+            output.fold_partial(composed_partial);
+            output.with_positional_guarantee()
+        } else {
+            let mut output =
+                self.project_typeof_path(node, path, context, observed_hash, value_root);
+            output.fold_partial(composed_partial);
+            output
+        }
+    }
+
+    /// [`Self::build_typeof`], which with `suspend` stops where the value's
+    /// type is its authored annotation: it hands the annotation's lowering
+    /// over in `suspend` for [`Self::drain_typeof`] to carry on, and its own
+    /// output is then not the answer.
+    fn build_typeof_suspending(
+        &self,
+        value_root: &ValueRootKey,
+        path: &[Arc<str>],
+        context: crate::semantic_query::ProjectionReductionContext,
+        suspend: Option<&mut Option<Box<TypeofBuild>>>,
+    ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
         // Telemetry for the typeof traversal site.
         if let Some(observer) = verter_audit::current_observer() {
             observer.record_event(verter_audit::AuditEvent::BuildTypeofCall);
@@ -1573,8 +1696,46 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         &mut substitutions,
                         context,
                     ),
-                    Some(verter_type_expr::facts::SemanticTypeSource::Authored(locator)) => self
-                        .lower_located_body_with_provenance(
+                    Some(verter_type_expr::facts::SemanticTypeSource::Authored(locator)) => {
+                        if let Some(suspended) = suspend {
+                            let self_value = match locator {
+                                verter_type_expr::locators::AuthoredBodyLocator::DeclBody(slot)
+                                    if slot.anchor.space
+                                        == verter_type_expr::locators::LocatorSymbolSpace::Value =>
+                                {
+                                    Some(slot.anchor.clone())
+                                }
+                                _ => None,
+                            };
+                            let body = self.begin_located_body_lowering(
+                                locator.clone(),
+                                verter_session_query::declarations::TypeDeclKind::Alias,
+                                &[],
+                                &empty_env,
+                                &scope,
+                                &mut substitutions,
+                                context,
+                                &[],
+                                super::locator_view_worklist::ProjectionSeam::suspending(),
+                            );
+                            *suspended = Some(Box::new(TypeofBuild {
+                                prepared: Arc::clone(&prepared),
+                                env: empty_env,
+                                scope,
+                                scope_payload,
+                                shadowing,
+                                substitutions,
+                                self_value,
+                                body,
+                                value_root: value_root.clone(),
+                                path: Arc::from(path.to_vec().into_boxed_slice()),
+                                context,
+                                observed_hash,
+                            }));
+                            return (QueryResult::Error(QueryError::Miss), empty_signature())
+                                .into();
+                        }
+                        self.lower_located_body_with_provenance(
                             locator.clone(),
                             verter_session_query::declarations::TypeDeclKind::Alias,
                             &[],
@@ -1585,7 +1746,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             &shadowing,
                             &mut substitutions,
                             context,
-                        ),
+                        )
+                    }
                     // A complex INFERRED annotation carries no closed fact — it is
                     // recovered by demand through the SAME authored value-position
                     // locator (the transient value-part re-borrow serves the
@@ -1727,27 +1889,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         } else {
             return (QueryResult::Error(QueryError::Miss), empty_signature()).into();
         };
-        let output = if path.is_empty() {
-            let signature = self.dep_signature_for(&value_root.scope.canonical_id, observed_hash);
-            let mut output = crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
-                QueryResult::Value(node_id),
-                signature,
-            ))
-            .with_observed_self_roots([(
-                Arc::clone(&value_root.scope.canonical_id),
-                observed_hash,
-            )]);
-            // Two-signal fold: a partial composed class-surface read surfaces as
-            // a partial `TypeOf` result (it would otherwise pass through with
-            // `result_is_partial = false`).
-            output.fold_partial(composed_partial);
-            output.with_positional_guarantee()
-        } else {
-            let mut output =
-                self.project_typeof_path(node_id, path, context, observed_hash, value_root);
-            output.fold_partial(composed_partial);
-            output
-        };
+        let output = self.typeof_output(
+            node_id,
+            composed_partial,
+            value_root,
+            path,
+            context,
+            observed_hash,
+        );
         self.with_augmentation_roots(output, augmentation_roots, augmentation_unobservable)
     }
 
@@ -12607,8 +12756,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
             Some(SemanticNodeData::Intersection(members)) => {
-                match self.key_of_composite(&members.members_arc(), false) {
+                let members = members.members_arc();
+                match self.key_of_composite(&members, false) {
                     Some(keys) => { enumerated.set(true); keys },
+                    // An arm over a generic (`keyof (S & { a: 1 })`) has
+                    // keys only its instantiation names: the keys stay the
+                    // deferred `keyof`, never the other arms' names alone.
+                    None if self.intersection_key_arms(&members).into_iter().any(|arm| {
+                        self.key_set_of(arm).is_none()
+                            && super::raise::builtin_lowering_argument_is_open(self, arm)
+                    }) =>
+                    {
+                        self.graph().intern_node(SemanticNodeData::KeyOf { base })
+                    }
                     None => self
                         .member_names_for_published_projection(base)
                         .map(|(names, is_partial)| {
@@ -12787,6 +12947,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if !is_union && self.intersection_arms_reduce_to_never(members) {
             return Some(self.string_number_symbol());
         }
+        let flattened;
+        let members = if is_union {
+            members
+        } else {
+            flattened = self.intersection_key_arms(members);
+            &flattened
+        };
         let keys: Vec<SemanticNodeId> = members
             .iter()
             .map(|member| self.key_set_of(*member))
@@ -12813,6 +12980,45 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return None;
         }
         Some(self.intern_normalized_union_or_intersection(&keys, !is_union))
+    }
+
+    /// The arms of an intersection whose keys `keyof` unions, with every
+    /// nested intersection spread in place — one written inside it, or the
+    /// body a declaration or application resolves to (an interface's or
+    /// class's heritage) — the flattening the checker's `getIntersectionType`
+    /// gives the same type. The walk is iterative, so a chain of N heritage
+    /// levels or N nested `&` operands is N sibling key reads, never N
+    /// nested `keyof` queries.
+    fn intersection_key_arms(&self, members: &[SemanticNodeId]) -> Vec<SemanticNodeId> {
+        let transit = crate::semantic_query::ProjectionReductionContext::structural_transit();
+        let mut arms = Vec::with_capacity(members.len());
+        let mut seen = FxHashSet::default();
+        let mut pending: Vec<SemanticNodeId> = members.iter().rev().copied().collect();
+        while let Some(arm) = pending.pop() {
+            if !seen.insert(arm) {
+                continue;
+            }
+            let nested = match self.graph().node_data(arm).as_deref() {
+                Some(SemanticNodeData::Intersection(nested)) => Some(nested.members_arc()),
+                Some(
+                    SemanticNodeData::DeclRef { .. } | SemanticNodeData::InstantiationRef { .. },
+                ) => {
+                    let settled = self.resolve_signature_source_carrier(arm, transit);
+                    match self.graph().node_data(settled).as_deref() {
+                        Some(SemanticNodeData::Intersection(nested)) if settled != arm => {
+                            Some(nested.members_arc())
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            };
+            match nested {
+                Some(nested) => pending.extend(nested.iter().rev().copied()),
+                None => arms.push(arm),
+            }
+        }
+        arms
     }
 
     /// `keyof` over a carrier the checker resolves: a declaration, an
@@ -13185,11 +13391,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         caller_context: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<(Vec<SurfaceMember>, crate::semantic_query::PartialReasonSet)> {
         self.source_projection_with_key_domain(source, caller_context)
-            .map(|(members, reasons, _)| (members, reasons))
+            .map(|(members, reasons, _, _)| (members, reasons))
     }
 
     /// Keep the shallow surface's finite-domain witness beside its members.
     /// Dropping this witness makes a named dictionary look like a finite map.
+    /// The surface's listed index signatures ride beside it: a homomorphic
+    /// mapping maps each one, as it maps each member.
     fn source_projection_with_key_domain(
         &self,
         source: SemanticNodeId,
@@ -13198,6 +13406,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         Vec<SurfaceMember>,
         crate::semantic_query::PartialReasonSet,
         bool,
+        Vec<crate::semantic_query::IndexSignature>,
     )> {
         fn public_members(members: &[SurfaceMember]) -> Vec<SurfaceMember> {
             members
@@ -13212,6 +13421,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 public_members(view.positive_members()),
                 crate::semantic_query::PartialReasonSet::empty(),
                 view.key_domain_is_closed(),
+                view.index_signatures.to_vec(),
             ));
         }
 
@@ -13239,6 +13449,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             crate::semantic_query::PartialReasonSet::empty()
                         },
                         !partial,
+                        Vec::new(),
                     )
                 });
         }
@@ -13270,6 +13481,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 public_members(view.positive_members()),
                 read_partial_classes,
                 view.key_domain_is_closed(),
+                view.index_signatures.to_vec(),
             )),
             // A carrier that resolved to a construction program (the
             // walker's typed open evidence) degrades through the same
@@ -13285,6 +13497,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             crate::semantic_query::PartialReasonSet::empty()
                         },
                         !partial,
+                        Vec::new(),
                     )
                 }),
             _ => None,
@@ -14044,15 +14257,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // is distinct from a source that did NOT project: only the latter
         // defers a homomorphic mapping — see the resolved-empty arm below.
         let source_surface_resolved = source_projection.is_some();
-        let (source_members, source_member_reasons, source_domain_is_finite): (
+        let (
+            source_members,
+            source_member_reasons,
+            source_domain_is_finite,
+            source_index_signatures,
+        ): (
             Vec<SurfaceMember>,
             crate::semantic_query::PartialReasonSet,
             bool,
+            Vec<crate::semantic_query::IndexSignature>,
         ) = source_projection.unwrap_or_else(|| {
             (
                 Vec::new(),
                 crate::semantic_query::PartialReasonSet::empty(),
                 false,
+                Vec::new(),
             )
         });
         mapped_partial_reasons = mapped_partial_reasons.union(source_member_reasons);
@@ -14144,8 +14364,38 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             })
             .flatten();
-        let keys: Vec<super::enumerate::KeyDomainKey> = if let Some(keys) = finite_homomorphic_keys
-        {
+        // A homomorphic mapping (`[K in keyof S]`, its key space possibly
+        // reduced already) over a source with index signatures maps each
+        // signature's key type to an index signature beside the source's
+        // properties, as the checker's `resolveMappedTypeMembers` maps it
+        // (`forEachMappedTypePropertyKeyTypeAndIndexSignatureKeyType`): it
+        // reads the source's own signatures, never `keyof S`'s widened
+        // `string | number`.
+        let homomorphic = homomorphic_over_source || mapper.key_space != source;
+        let index_domain: Option<(Vec<super::enumerate::KeyDomainKey>, Vec<MappedIndexKey>)> =
+            (homomorphic
+                && source_surface_resolved
+                && source_keys_are_nameable
+                && !source_index_signatures.is_empty())
+            .then(|| {
+                (
+                    source_member_keys(&source_members),
+                    source_index_signatures
+                        .iter()
+                        .map(|signature| MappedIndexKey {
+                            key_type: signature.key_type,
+                            source: Some(signature.clone()),
+                        })
+                        .collect(),
+                )
+            });
+        let (index_keys, index_domain_keys) = match index_domain {
+            Some((keys, index_keys)) => (index_keys, Some(keys)),
+            None => (Vec::new(), None),
+        };
+        let keys: Vec<super::enumerate::KeyDomainKey> = if let Some(keys) = index_domain_keys {
+            keys
+        } else if let Some(keys) = finite_homomorphic_keys {
             keys
         } else if !homomorphic_over_source && !source_members.is_empty() && source_keys_are_nameable
         {
@@ -14499,6 +14749,147 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
         }
 
+        // Each key type maps to an index signature keyed by the type its
+        // remap produces (the key type itself without one), its value the
+        // mapping's value at that key type. Signatures keyed alike unite
+        // their values (`appendIndexInfo`). A property name the remap
+        // produces from a key type is a property of that value.
+        let mut produced_index: Vec<crate::semantic_query::IndexSignature> = Vec::new();
+        for index_key in &index_keys {
+            if remap_defers || cancelled {
+                break;
+            }
+            if self.cancellation.is_cancelled() {
+                cancelled = true;
+                break;
+            }
+            let MappedIndexRemap {
+                key_types: produced_key_types,
+                names: produced_names,
+            } = match mapper.name_remap {
+                None => MappedIndexRemap {
+                    key_types: vec![index_key.key_type],
+                    names: Vec::new(),
+                },
+                Some(remap) => {
+                    match self.mapped_index_name_remap(mapper, remap, index_key.key_type, context) {
+                        Some(produced) => produced,
+                        None => {
+                            remap_defers = true;
+                            break;
+                        }
+                    }
+                }
+            };
+            if produced_key_types.is_empty() && produced_names.is_empty() {
+                continue;
+            }
+            let value = match (&index_key.source, value_is_identity) {
+                (Some(signature), true) => signature.value_type,
+                (None, true) => graph.intern_node(SemanticNodeData::IndexedAccess {
+                    object: source,
+                    index: IndexKey::Computed(index_key.key_type),
+                }),
+                (_, false) if value_expr_is_k_independent => {
+                    if shared_value.is_none() {
+                        let (value, reasons) =
+                            self.evaluate_k_independent_mapped_value(mapper, context);
+                        mapped_partial_reasons = mapped_partial_reasons.union(reasons);
+                        shared_value = Some(value);
+                    }
+                    shared_value.expect("initialised immediately above")
+                }
+                (_, false) => self.materialize_mapped_member_value_for_key(
+                    mapper,
+                    index_key.key_type,
+                    context,
+                ),
+            };
+            // A property named from a key type has no source property to
+            // inherit modifiers from: only the mapping's own `+?` and
+            // `+readonly` apply. A name produced again unites its values.
+            for produced_name in produced_names {
+                let spelling = crate::semantic_query::property_spelling(produced_name.clone());
+                if let Some(&ordinal) = produced_by_key.get(&spelling) {
+                    let existing: &mut SurfaceMember = &mut produced[ordinal];
+                    if existing.value != value {
+                        existing.value = self.intern_normalized_union_or_intersection(
+                            &[existing.value, value],
+                            true,
+                        );
+                    }
+                    project_member_edges.push((value, produced_name));
+                    continue;
+                }
+                produced_by_key.insert(spelling, produced.len());
+                produced.push(SurfaceMember {
+                    key: crate::semantic_query::AuthoredPropertyKey::from_known(
+                        produced_name.clone(),
+                    ),
+                    value,
+                    optional: mapper.optionality == crate::semantic_query::OptionalityMod::Add,
+                    readonly: mapper.readonly == crate::semantic_query::ReadonlyMod::Add,
+                    method_kind: None,
+                    has_implementation_body: false,
+                    visibility: verter_type_expr::MemberVisibility::Public,
+                    excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+                    declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                    merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                    spans: Default::default(),
+                    declaration_origin: None,
+                });
+                project_member_edges.push((value, produced_name));
+            }
+            // `+?` adds `undefined` to an index signature's value; `-?`
+            // leaves it, as an index signature is never optional.
+            let value = if mapper.optionality == crate::semantic_query::OptionalityMod::Add {
+                let undefined = self.primitive_node(PrimitiveKind::Undefined);
+                self.intern_normalized_union_or_intersection(&[value, undefined], true)
+            } else {
+                value
+            };
+            for key_type in produced_key_types {
+                // A kept modifier is the one of the source signature the
+                // checker applies to the PRODUCED key type, never the one
+                // the key type was read from: `[k: number]` remapped to
+                // `string` keeps no `readonly` of the number signature.
+                let readonly = match mapper.readonly {
+                    crate::semantic_query::ReadonlyMod::Add => true,
+                    crate::semantic_query::ReadonlyMod::Remove => false,
+                    crate::semantic_query::ReadonlyMod::Keep => {
+                        self.applicable_source_index_readonly(&source_index_signatures, key_type)
+                    }
+                };
+                if let Some(existing) = produced_index
+                    .iter_mut()
+                    .find(|signature| signature.key_type == key_type)
+                {
+                    if existing.value_type != value {
+                        existing.value_type = self.intern_normalized_union_or_intersection(
+                            &[existing.value_type, value],
+                            true,
+                        );
+                    }
+                    existing.readonly |= readonly;
+                    continue;
+                }
+                produced_index.push(crate::semantic_query::IndexSignature {
+                    key_type,
+                    value_type: value,
+                    readonly,
+                    spans: index_key
+                        .source
+                        .as_ref()
+                        .map(|signature| signature.spans)
+                        .unwrap_or_default(),
+                    declaration_origin: index_key
+                        .source
+                        .as_ref()
+                        .and_then(|signature| signature.declaration_origin.clone()),
+                });
+            }
+        }
+
         // Cancelled mid-loop: return the typed `Cancelled` output rather
         // than publishing the keys that happened to complete first.
         if cancelled || self.cancellation.is_cancelled() {
@@ -14530,7 +14921,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return deferred_output;
         }
 
-        let view = SurfaceView::from_members(produced, Some(mapper.key_space));
+        let has_index_signature = !produced_index.is_empty();
+        let view = SurfaceView::from_entries(
+            produced_index
+                .into_iter()
+                .map(crate::semantic_query::SurfaceEntry::IndexSignature)
+                .chain(
+                    produced
+                        .into_iter()
+                        .map(crate::semantic_query::SurfaceEntry::Member),
+                )
+                .collect(),
+            Some(mapper.key_space),
+            has_index_signature,
+        );
         let node = graph.intern_node(SemanticNodeData::Object(view));
 
         // 3. Emit origin edges.
@@ -15125,6 +15529,134 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         Some(matched)
     }
 
+    /// The index-signature key types and property names a mapping's `as`
+    /// clause produces for the key TYPE `key_type` (`string` of a
+    /// `[k: string]` source): the remap evaluated at it, a union read arm by
+    /// arm — `never` produces none; `string`, `number`, `symbol` or a
+    /// template pattern produces itself as an index key type; a string or
+    /// number literal produces a property name. `None` when the remap does
+    /// not settle to such keys: the mapping then stays deferred.
+    fn mapped_index_name_remap(
+        &self,
+        mapper: &crate::semantic_query::MapperKey,
+        remap: SemanticNodeId,
+        key_type: SemanticNodeId,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Option<MappedIndexRemap> {
+        let substituted =
+            self.substitute_semantic_type_param(remap, mapper.parameter_node, key_type);
+        let mut pending = vec![substituted];
+        let mut produced = MappedIndexRemap::default();
+        while let Some(node) = pending.pop() {
+            let evaluated = self
+                .evaluate_deferred_semantic_node_with_context(node, context)
+                .into_active_query_build_node(self);
+            let evaluated = self.reduce_remap_instantiation_carrier(evaluated, context);
+            match self.graph().node_data(evaluated).as_deref() {
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Never)) => {}
+                Some(SemanticNodeData::Primitive(
+                    PrimitiveKind::String | PrimitiveKind::Number | PrimitiveKind::Symbol,
+                )) => produced.key_types.push(evaluated),
+                Some(SemanticNodeData::TemplateLiteral { .. })
+                    if !super::raise::builtin_lowering_argument_is_open(self, evaluated) =>
+                {
+                    produced.key_types.push(evaluated);
+                }
+                Some(SemanticNodeData::Literal(LiteralValue::String(text))) => {
+                    produced
+                        .names
+                        .push(PropertyKey::string_literal(text.as_str()));
+                }
+                Some(SemanticNodeData::Literal(LiteralValue::Number(number))) => {
+                    produced.names.push(PropertyKey::from_js_number(*number));
+                }
+                Some(SemanticNodeData::Union(members)) => {
+                    pending.extend(members.members_arc().iter().rev().copied());
+                }
+                _ => return None,
+            }
+        }
+        Some(produced)
+    }
+
+    /// Whether the source index signature the checker applies to the index
+    /// key type `key_type` is readonly — `getApplicableIndexInfo` over a
+    /// homomorphic mapping's modifiers type. Every applicable non-`string`
+    /// signature must be readonly; when none applies, a `string` signature
+    /// applies to any key but a symbol. No applicable signature leaves the
+    /// produced signature mutable.
+    fn applicable_source_index_readonly(
+        &self,
+        signatures: &[crate::semantic_query::IndexSignature],
+        key_type: SemanticNodeId,
+    ) -> bool {
+        let graph = self.graph();
+        let mut string_readonly = None;
+        let mut applicable_readonly = None;
+        for signature in signatures {
+            // A union key type declares one signature per constituent.
+            let arms: Vec<SemanticNodeId> = match graph.node_data(signature.key_type).as_deref() {
+                Some(SemanticNodeData::Union(members)) => members.members_arc().to_vec(),
+                _ => vec![signature.key_type],
+            };
+            for arm in arms {
+                if matches!(
+                    graph.node_data(arm).as_deref(),
+                    Some(SemanticNodeData::Primitive(PrimitiveKind::String))
+                ) {
+                    string_readonly = Some(signature.readonly);
+                } else if self.index_key_type_applies(key_type, arm) {
+                    applicable_readonly =
+                        Some(applicable_readonly.unwrap_or(true) && signature.readonly);
+                }
+            }
+        }
+        let symbol_key = matches!(
+            graph.node_data(key_type).as_deref(),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Symbol))
+        );
+        applicable_readonly
+            .or(string_readonly.filter(|_| !symbol_key))
+            .unwrap_or(false)
+    }
+
+    /// Whether a non-`string` index signature keyed by `index_key` applies to
+    /// the key type `key` (`isApplicableIndexType`): the key is assignable to
+    /// it, or the key is `` `${number}` `` and the index `number`.
+    fn index_key_type_applies(&self, key: SemanticNodeId, index_key: SemanticNodeId) -> bool {
+        if key == index_key {
+            return true;
+        }
+        let graph = self.graph();
+        let numeric_index = matches!(
+            graph.node_data(index_key).as_deref(),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Number))
+        );
+        let numeric_string_key = match graph.node_data(key).as_deref() {
+            Some(SemanticNodeData::TemplateLiteral {
+                quasis,
+                expressions,
+            }) => {
+                quasis.iter().all(|quasi| quasi.is_empty())
+                    && matches!(
+                        expressions.as_ref(),
+                        [only] if matches!(
+                            graph.node_data(*only).as_deref(),
+                            Some(SemanticNodeData::Primitive(PrimitiveKind::Number))
+                        )
+                    )
+            }
+            _ => false,
+        };
+        if numeric_index && numeric_string_key {
+            return true;
+        }
+        matches!(
+            self.execute_relate_pair(key, index_key),
+            super::dispatch_txn::RelationStep::Assignable { .. }
+        )
+    }
+
     /// Classify an evaluated key-remap node into a [`MappedKeyRemapOutcome`].
     /// `never` ⇒ Drop, a string / numeric literal or a finite union of them ⇒
     /// Keys (numeric literals under their canonical `js_number_to_string`
@@ -15134,8 +15666,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// evaluating each arm through the shared deferred-node evaluator first:
     /// the root evaluation folds a bare template remap, but a one-to-many
     /// union remap (`as K | `x-${K}``) reaches here with its substituted arm
-    /// shells unfolded — each arm gets the same evaluation demand the root
-    /// already received.
+    /// shells unfolded — each arm gets the same evaluation demand, and the
+    /// same helper instantiation, the root already received.
     fn classify_remap_outcome(
         &self,
         node: SemanticNodeId,
@@ -15156,6 +15688,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     let evaluated = self
                         .evaluate_deferred_semantic_node_with_context(*member, context)
                         .into_active_query_build_node(self);
+                    // An arm that applies a helper (`as Rename<K> | 'x'`)
+                    // binds its key argument as a root helper remap does.
+                    let evaluated = self.reduce_remap_instantiation_carrier(evaluated, context);
                     match self.classify_remap_outcome(evaluated, context) {
                         MappedKeyRemapOutcome::Keys(ks) => keys.extend(ks),
                         // A `never` arm contributes no key (filtered);
@@ -18710,6 +19245,49 @@ pub(super) struct InstantiateBuild {
     enum_body: bool,
     body: BodyLowering,
     complete_structure: bool,
+}
+
+/// What a mapping's `as` clause produces for one key TYPE of its key domain.
+#[derive(Default)]
+struct MappedIndexRemap {
+    /// The index-signature key types it produces.
+    key_types: Vec<SemanticNodeId>,
+    /// The property names it produces.
+    names: Vec<PropertyKey>,
+}
+
+/// A key TYPE of a homomorphic mapping's key domain — its source's index
+/// signature — which maps to an index signature.
+struct MappedIndexKey {
+    key_type: SemanticNodeId,
+    /// The source's index signature it reads.
+    source: Option<crate::semantic_query::IndexSignature>,
+}
+
+/// How a `typeof` build begins on the continuation runtime.
+pub(super) enum TypeofStart {
+    /// The `typeof` is answered.
+    Done(Box<crate::project_semantic_dispatch::walk::QueryBuildOutput>),
+    /// Its value's authored annotation is being lowered.
+    Build(Box<TypeofBuild>),
+}
+
+/// A `typeof` whose value's authored annotation is lowering, between the
+/// steps of its frame: the lowering's scope, the projection itself, and
+/// what the build's output roots on.
+pub(super) struct TypeofBuild {
+    prepared: Arc<verter_session_query::type_solver::PreparedValueDecl>,
+    env: FxHashMap<String, SemanticNodeId>,
+    scope: NodeScopeId,
+    scope_payload: Option<crate::resolver_core::bare_name_resolve::DeclarationScopePayload>,
+    shadowing: crate::resolver_core::scope_shadowing::ScopeShadowing,
+    substitutions: Vec<(Arc<str>, SemanticNodeId)>,
+    self_value: Option<verter_type_expr::locators::AuthoredAnchor>,
+    body: BodyLowering,
+    value_root: ValueRootKey,
+    path: Arc<[Arc<str>]>,
+    context: crate::semantic_query::ProjectionReductionContext,
+    observed_hash: verter_session_query::analysis::types::Hash16,
 }
 
 /// A declaration body's lowering in progress.

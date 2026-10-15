@@ -1017,8 +1017,8 @@ Recorded plainly so no reader mistakes absence for a pass:
     locator lowering's stack; each body's binder frames push onto a shared
     chain; a binder's identity folds each nested mapped type by a digest
     its drive computes once; and the openness walk's recursive arms are
-    functions of their own (the walk is bounded by its 256-node budget, and
-    a level now carries only the arm it takes).
+    functions of their own (their re-entry nests at most 256 levels deep,
+    and a level now carries only the arm it takes).
     `mapped_types_nested_10000_deep_return_on_production_stacks` returns
     the connected-demand work budget's typed failure 10,000 deep (5.9 s,
     against 256 s before the digest fix) and

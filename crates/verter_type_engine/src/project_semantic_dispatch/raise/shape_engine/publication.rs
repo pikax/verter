@@ -449,9 +449,9 @@ impl RaisedShapeAlgebra for PublicationScoreAlg {
             tag,
         }
     }
-    fn recursive_ref(&mut self, _name: Arc<str>) -> ScoredOut {
+    fn recursive_ref(&mut self, _name: Arc<str>, type_arguments: Vec<ScoredOut>) -> ScoredOut {
         ScoredOut {
-            score: combine::recursive_ref(std::iter::empty()),
+            score: combine::recursive_ref(type_arguments.iter().map(|a| a.score)),
             tag: FactShapeTag::Other,
         }
     }

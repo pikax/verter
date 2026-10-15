@@ -486,19 +486,10 @@ fn class_expressions_and_single_mixins_read_as_the_checker_reads_them() {
 }
 
 /// `Timed(Tagged(Plain))` is an instance with `time`, `stamp`, `tag` and `p`,
-/// and is below `Plain`.
-///
-/// What the lane gives:
-/// - `InstanceType<typeof Both>['time']`: the checker answers `number`; the
-///   lane measured `<opaque Miss>`.
-/// - `InstanceType<typeof Both>['tag']`: the checker answers `string`; the lane
-///   measured `<opaque Miss>`.
-/// - `ReturnType<InstanceType<typeof Both>['stamp']>`: the checker answers
-///   `number`; the lane measured `<opaque Miss>`.
-/// - `[InstanceType<typeof Both>] extends [Plain] ? 1 : 2`: the checker answers
-///   `1`; the lane measured `<unreduced conditional>`.
+/// and is below `Plain`: the outer mixin's constructor and the inner
+/// application's constructors are one intersection, each mixin mixing its
+/// instance into `Plain`'s construct signature.
 #[test]
-#[ignore = "a mixin applied to a mixin application carries every layer's members"]
 fn a_nested_mixin_application_carries_every_layer() {
     let matrix = Matrix::new(MIXINS);
     let failures = matrix.types(&[
