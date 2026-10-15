@@ -334,6 +334,17 @@ export function allScenarios() {
       ),
     );
   }
+  // The names alone past two thousand parents: twelve thousand names, every
+  // child name collected through the recursive branch.
+  out.push(
+    scenario(
+      "route-tree-names-2000",
+      "recursive-inference",
+      "every name of an as-const route tree of 2000 parents with five children each",
+      routeTree(2000),
+      "Names<typeof routes>",
+    ),
+  );
 
   // Inference.
   for (const n of [1025, 5000]) {
@@ -379,7 +390,7 @@ export function allScenarios() {
       ),
     );
   }
-  for (const n of [10, 100, 1000]) {
+  for (const n of [10, 100, 1000, 6000]) {
     out.push(
       scenario(
         `infer-pattern-repeat-${n}`,
@@ -676,6 +687,8 @@ export const SCENARIO_TIERS = {
   "alias-chain-1000-1mib": "stress",
   "conditional-chain-500": "stress",
   "infer-pattern-repeat-1000": "stress",
+  "infer-pattern-repeat-6000": "stress",
+  "route-tree-names-2000": "stress",
 };
 
 export const TIERS = ["quick", "standard", "stress"];
