@@ -1005,6 +1005,7 @@ impl VerterHost {
         &self,
         canonical: &str,
     ) -> Option<verter_session_query::source::artifact_key::FileArtifactKey> {
+        use crate::host_executor::HostSourceData;
         let analysis_canonical = self.normalized_analysis_canonical(canonical);
         let analysis_canonical = analysis_canonical.as_ref();
         if self
@@ -1014,27 +1015,32 @@ impl VerterHost {
         {
             return None;
         }
-        let state = self.effective_file_state(analysis_canonical, None)?;
+        // The key reads four fields of the source snapshot, so it borrows
+        // them rather than projecting the whole effective file state (whose
+        // carrier meta and analysis handles this hot read never uses).
+        let snap = self.scheduler.try_get_source(analysis_canonical)?;
+        let hd = snap.downcast_data::<HostSourceData>()?;
         // A plain script's parse identity was derived once with its source
         // snapshot: reuse it rather than hashing the source bytes again on
         // every artifact read.
-        if let (None, Some(parse_key)) = (state.framework_parse.as_ref(), state.script_parse_key) {
+        if let (None, Some(parse_key)) = (hd.framework_parse.as_ref(), hd.script_parse_key.as_ref())
+        {
             return Some(
                 verter_session_query::source::artifact_key::FileArtifactKey::for_script_parse_identity(
                     Arc::from(analysis_canonical),
-                    state.whole_hash,
-                    parse_key,
-                    state.file_language,
+                    hd.parse.whole_hash,
+                    parse_key.clone(),
+                    hd.file_language.clone(),
                     verter_session_query::source::artifact_key::BASE_PARSE_ENV_HASH,
                 ),
             );
         }
         verter_session_query::source::artifact_key::FileArtifactKey::for_source_identity(
             Arc::from(analysis_canonical),
-            state.whole_hash,
-            state.source.as_ref(),
-            state.file_language,
-            state.framework_parse.as_deref(),
+            hd.parse.whole_hash,
+            snap.source.as_ref(),
+            hd.file_language.clone(),
+            hd.framework_parse.as_deref(),
             verter_session_query::source::artifact_key::BASE_PARSE_ENV_HASH,
         )
     }
@@ -1513,11 +1519,23 @@ impl VerterHost {
         if !Arc::ptr_eq(&artifacts.indexed, indexed) {
             return None;
         }
+        Self::syntactic_route_interface_fact_of(canonical.to_string(), &artifacts)
+    }
+
+    /// The `SyntacticRouteInterface` parse fact of `artifacts`, the current
+    /// base entry for `canonical`; `None` when its surface is not resolvable.
+    pub(crate) fn syntactic_route_interface_fact_of(
+        canonical: String,
+        artifacts: &crate::file_artifact_store::FileArtifacts,
+    ) -> Option<verter_session_query::facts::fact_cache::ParseFactRef> {
+        if !artifacts.indexed.shallow_state.has_resolvable_surface() {
+            return None;
+        }
         let fact = artifacts
             .facts
             .lookup(&verter_session_query::facts::FactKey::SyntacticRouteInterface)?;
         Some(verter_session_query::facts::fact_cache::ParseFactRef {
-            canonical_id: canonical.to_string(),
+            canonical_id: canonical,
             key: verter_session_query::facts::FactKey::SyntacticRouteInterface,
             lane: verter_session_query::facts::FactLane::Semantic,
             expected_hash: fact.semantic_hash,
