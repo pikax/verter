@@ -5,10 +5,10 @@
 //!   (`Names` / `Paths` below) distributes over each tree level once, and
 //!   the conditional nested in a distributed branch sees that branch's
 //!   member, never the whole union the outer `infer` bound;
-//! - a pattern that repeats an `infer` distributes over a 1,000-member union
-//!   of distinct object aliases;
-//! - a tuple of 1,000 distinct aliases of one generic infers through each
-//!   alias once.
+//! - a pattern that repeats an `infer` distributes over a union of distinct
+//!   object aliases;
+//! - a tuple of distinct aliases of one generic infers through each alias
+//!   once.
 //!
 //! Each demand is the named demand the semantic benchmark makes (`__Probe`
 //! resolved by name and projected to its wire answer). Every expected answer
@@ -17,6 +17,14 @@
 //! (`scripts/benchmark/semantic-perf/measure-expected.mjs`) at the listed
 //! sizes and in all four `strictNullChecks` × `noImplicitAny` settings,
 //! which agree, with no diagnostic.
+//!
+//! The growth proofs here run at sizes a debug build answers in seconds: the
+//! smallest listed size of each shape, or a size below it, and a step about
+//! three times larger, which a quadratic term could not stay within. The
+//! largest listed sizes (300 parents, 1,000 members) and the larger
+//! obligations (2,000 parents, 6,000 members) are answered in a release
+//! build by the `skr-scale-answers` evidence run, which requires every
+//! answer to match TypeScript's exactly.
 //!
 //! No size of these shapes may be refused below the checker's own limits.
 //! The checker refuses with TS2589 once one statement has instantiated
@@ -227,7 +235,8 @@ fn assert_answer(label: &str, answer: &BTreeSet<Literal>, expected: &BTreeSet<Li
 
 /// Between a size and a larger one each work counter may grow at most 1.5
 /// times faster than the input: a quadratic term grows 9 times over the
-/// route tree's threefold step and 100 times over the unions' tenfold one.
+/// route tree's threefold step and 11 times over the unions' step from 30
+/// members to 100.
 fn assert_linear_growth(
     label: &str,
     (small, before): (usize, Work),
@@ -243,11 +252,11 @@ fn assert_linear_growth(
 }
 
 /// The route tree answers every name at each size the checker answers,
-/// with work linear from the middle size to the largest. Measured: 120, 600
-/// and 1,800 string literals.
+/// with work linear from the smaller size to the larger. Measured: 120 and
+/// 360 string literals.
 #[test]
 fn route_tree_names_answer_at_every_size_with_linear_work() {
-    let work = [20, 100, 300].map(|parents| {
+    let work = [20, 60].map(|parents| {
         let (names, work) = named_probe(
             &route_tree(parents),
             "Names<typeof routes>",
@@ -260,15 +269,15 @@ fn route_tree_names_answer_at_every_size_with_linear_work() {
         );
         (parents, work)
     });
-    assert_linear_growth("Names", work[1], work[2]);
+    assert_linear_growth("Names", work[0], work[1]);
 }
 
 /// The route tree answers every joined path, each a string the template
 /// builds, at each size the checker answers, with work linear from the
-/// middle size to the largest. Measured: 120, 600 and 1,800 string literals.
+/// smaller size to the larger. Measured: 120 and 360 string literals.
 #[test]
 fn route_tree_paths_answer_at_every_size_with_linear_work() {
-    let work = [20, 100, 300].map(|parents| {
+    let work = [20, 60].map(|parents| {
         let (paths, work) = named_probe(
             &route_tree(parents),
             "Paths<typeof routes>",
@@ -281,7 +290,7 @@ fn route_tree_paths_answer_at_every_size_with_linear_work() {
         );
         (parents, work)
     });
-    assert_linear_growth("Paths", work[1], work[2]);
+    assert_linear_growth("Paths", work[0], work[1]);
 }
 
 /// A conditional nested in a distributed branch over an `infer` binding sees
@@ -310,11 +319,11 @@ fn a_nested_conditional_over_a_distributed_infer_sees_one_member() {
 }
 
 /// The repeated-infer pattern answers at each size the checker answers,
-/// with work linear from the middle size to the largest. Measured: the
-/// numbers `0` to `n - 1`.
+/// with work linear from 30 members to 100. Measured: the numbers `0` to
+/// `n - 1`.
 #[test]
 fn repeated_infer_answers_at_every_size_with_linear_work() {
-    let work = [10, 100, 1000].map(|members| {
+    let work = [10, 30, 100].map(|members| {
         let (source, probe) = repeated_infer(members);
         let (answer, work) = named_probe(
             &source,
@@ -332,7 +341,7 @@ fn repeated_infer_answers_at_every_size_with_linear_work() {
 /// `n - 1`.
 #[test]
 fn distinct_aliases_answer_at_every_size_with_linear_work() {
-    let work = [100, 1000].map(|members| {
+    let work = [30, 100].map(|members| {
         let (source, probe) = distinct_aliases(members);
         let (answer, work) = named_probe(&source, &probe, checker_instantiations_aliases(members));
         assert_answer(
