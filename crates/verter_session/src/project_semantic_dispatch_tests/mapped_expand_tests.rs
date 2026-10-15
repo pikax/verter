@@ -352,8 +352,9 @@ fn mapping_a_heritage_chain_holds_every_level() {
 /// A mapping over a type parameter stays the deferred mapped type the
 /// checker prints, with its modifiers and its remap. Measured:
 /// `<S>(s: S) => { [K in keyof S]: S[K]; }`, `<S>(s: S) => { -readonly [K
-/// in keyof S]-?: S[K]; }` and `<S>(s: S) => { [K in keyof S as Exclude<K,
-/// "x">]: S[K]; }`.
+/// in keyof S]-?: S[K]; }`, `<S>(s: S) => { [K in keyof S as Exclude<K,
+/// "x">]: S[K]; }` and `<S>(s: S) => { [K in keyof (S & { a: 1; })]: (S & {
+/// a: 1; })[K]; }`.
 #[test]
 fn a_mapping_over_a_type_parameter_stays_deferred() {
     for (probe, checker) in [
@@ -369,6 +370,13 @@ fn a_mapping_over_a_type_parameter_stays_deferred() {
             "<S>(s: S) => { [K in keyof S as Exclude<K, 'x'>]: S[K] }",
             "<S>(s: S) => { [K in keyof S as Exclude<K, \"x\">]: S[K]; }",
         ),
+        // `keyof (S & { a: 1 })` is `keyof S | 'a'`: the keys `S` brings
+        // are unknown until it is instantiated, so the mapping stays deferred
+        // over the whole intersection, never over `'a'` alone.
+        (
+            "<S>(s: S) => { [K in keyof (S & { a: 1 })]: (S & { a: 1 })[K] }",
+            "<S>(s: S) => { [K in keyof (S & { a: 1; })]: (S & { a: 1; })[K]; }",
+        ),
     ] {
         let printed = display(&named_answer("", probe).answer);
         // The checker separates members with `;` and quotes with `"`.
@@ -379,11 +387,16 @@ fn a_mapping_over_a_type_parameter_stays_deferred() {
 
 /// A homomorphic mapping keeps the source's `readonly` and `?`, its own
 /// `-`/`+` modifiers remove or add them, and a remap keeps the modifiers of
-/// the key it renames and drops a key it maps to `never`. Measured on
-/// `interface Src { readonly a: 1; b?: 2; c: 3 }`.
+/// the key it renames and drops a key it maps to `never`; a remap to a union
+/// that applies a helper renames every key through it and adds the union's
+/// other names. Measured on `interface Src { readonly a: 1; b?: 2; c: 3 }`
+/// and `interface Model { field_0_name_x: 0; field_1_y: 1; plain: 2 }`.
 #[test]
 fn a_concrete_mapping_applies_the_checker_modifiers_and_drops_never_keys() {
-    let source = "interface Src { readonly a: 1; b?: 2; c: 3 }";
+    let source = "interface Src { readonly a: 1; b?: 2; c: 3 }\n\
+                  interface Model { field_0_name_x: 0; field_1_y: 1; plain: 2 }\n\
+                  type Kebab<S extends string> = S extends `${infer A}_${infer B}` ? `${A}-${Kebab<B>}` : S;\n\
+                  type Pre<S extends string> = `p_${S}`;";
     let failures = mismatches(
         source,
         &[
@@ -407,6 +420,83 @@ fn a_concrete_mapping_applies_the_checker_modifiers_and_drops_never_keys() {
             (
                 "{ [K in keyof Src as `get_${K & string}`]: Src[K] }",
                 "{ readonly get_a: 1; get_b?: 2 | undefined; get_c: 3; }",
+            ),
+            (
+                "{ [K in keyof Model as Kebab<K & string> | 'extra']: Model[K] }",
+                "{ extra: 0 | 1 | 2; \"field-0-name-x\": 0; \"field-1-y\": 1; plain: 2; }",
+            ),
+            (
+                "{ [K in keyof Model as Kebab<K & string> | Pre<K & string>]: Model[K] }",
+                "{ \"field-0-name-x\": 0; p_field_0_name_x: 0; \"field-1-y\": 1; p_field_1_y: 1; plain: 2; p_plain: 2; }",
+            ),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A mapping over a concrete source with index signatures maps each one to
+/// an index signature, as it maps each property: the value is the mapping's
+/// at the signature's key type, `readonly` follows the source's or the
+/// mapping's modifier, `+?` adds `undefined` to it, and an `as` clause keys
+/// it by the type the remap produces. A key space naming `string` or
+/// `number` maps it the same way. Measured on the sources below.
+#[test]
+fn a_concrete_mapping_maps_the_source_index_signatures() {
+    let source = "interface Dict { [k: string]: number; fixed: 1 }\n\
+                  interface Maybe { [k: string]: number | undefined; b?: 2 }\n\
+                  interface Frozen { readonly [k: string]: number; b?: 2 }\n\
+                  interface Keyed { [k: number]: 1; [k: `t_${string}`]: 2; s: 3 }\n\
+                  interface Numbered { [k: number]: 1 }\n\
+                  class Holder { x = 1 as const }\n\
+                  declare const Dynamic: new () => Dict;\n\
+                  class Derived extends Dynamic {}";
+    let failures = mismatches(
+        source,
+        &[
+            (
+                "{ [K in keyof Dict]: Dict[K] }",
+                "{ [x: string]: number; fixed: 1; }",
+            ),
+            (
+                "{ [K in keyof Derived]: Derived[K] }",
+                "{ [x: string]: number; fixed: 1; }",
+            ),
+            (
+                "{ [K in keyof (Holder & Numbered)]: 1 }",
+                "{ [x: number]: 1; x: 1; }",
+            ),
+            (
+                "{ [K in keyof Maybe]-?: Maybe[K] }",
+                "{ [x: string]: number | undefined; b: 2; }",
+            ),
+            (
+                "{ [K in keyof Dict]+?: Dict[K] }",
+                "{ [x: string]: number | undefined; fixed?: 1 | undefined; }",
+            ),
+            (
+                "{ [K in keyof Frozen]: K }",
+                "{ readonly [x: string]: string; b?: \"b\" | undefined; }",
+            ),
+            (
+                "{ readonly [K in keyof Dict]: Dict[K] }",
+                "{ readonly [x: string]: number; readonly fixed: 1; }",
+            ),
+            (
+                "{ [K in keyof Keyed]: Keyed[K] }",
+                "{ [x: number]: 1; [x: `t_${string}`]: 2; s: 3; }",
+            ),
+            (
+                "{ [K in keyof Keyed as K extends number ? never : K]: Keyed[K] }",
+                "{ [x: `t_${string}`]: 2; s: 3; }",
+            ),
+            (
+                "{ [K in keyof Dict as `g_${K & string}`]: Dict[K] }",
+                "{ [x: `g_${string}`]: number; g_fixed: 1; }",
+            ),
+            ("{ [K in string]: 1 }", "{ [x: string]: 1; }"),
+            (
+                "{ [K in 'a' | number]: K }",
+                "{ [x: number]: number; a: \"a\"; }",
             ),
         ],
     );

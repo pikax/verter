@@ -160,10 +160,14 @@ fn renders_operators_carriers_and_literals_without_precedence_loss() {
                     constraint: None,
                 }]),
             }),
-            // The branch references the binder the clause declares.
-            true_type: Arc::new(TypeExpr::Infer {
-                name: "V".into(),
-                constraint: None,
+            // The branch references the binder the clause declares, by its
+            // bare name even where a postfix operator applies to it.
+            true_type: Arc::new(TypeExpr::IndexedAccess {
+                object: Arc::new(TypeExpr::Infer {
+                    name: "V".into(),
+                    constraint: None,
+                }),
+                index: Arc::new(TypeExpr::Primitive(PrimitiveName::Number)),
             }),
             false_type: Arc::new(TypeExpr::Primitive(PrimitiveName::Never)),
         }),
@@ -227,7 +231,7 @@ fn renders_operators_carriers_and_literals_without_precedence_loss() {
     let rendered = render_type_expr_display(&expression).expect("the complete union must render");
     assert_eq!(
         rendered.text,
-        "{ readonly [K in keyof Source as `get${K}`]-?: Source[K] extends Expected<infer V> ? V : never } | typeof factory.make<Input> | import('./module\\'s').Nested.Member<Arg> | Tree<Leaf> | readonly [head?: 'it\\'s', ...tail: Array<42n>] | (Custom & Raw)"
+        "{ readonly [K in keyof Source as `get${K}`]-?: Source[K] extends Expected<infer V> ? V[number] : never } | typeof factory.make<Input> | import('./module\\'s').Nested.Member<Arg> | Tree<Leaf> | readonly [head?: 'it\\'s', ...tail: Array<42n>] | (Custom & Raw)"
     );
     assert_eq!(
         rendered

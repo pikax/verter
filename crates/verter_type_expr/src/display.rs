@@ -225,7 +225,7 @@ pub fn render_type_expr_display(
                 text.push('n');
             }
             Frame::Expr(expr, minimum) => {
-                if expression_precedence(expr) < minimum {
+                if expression_precedence(expr, in_extends) < minimum {
                     work.push(Frame::Text(")"));
                     work.push(Frame::ExprBody(expr));
                     work.push(Frame::Text("("));
@@ -640,8 +640,12 @@ fn primitive_keyword(name: PrimitiveName) -> &'static str {
     name.as_str()
 }
 
-fn expression_precedence(expression: &TypeExpr) -> Precedence {
+/// `in_extends` says whether the expression renders inside a conditional's
+/// `extends` clause, where an `infer` binder is a declaration; elsewhere it
+/// is a reference by name.
+fn expression_precedence(expression: &TypeExpr, in_extends: bool) -> Precedence {
     match expression {
+        TypeExpr::Infer { .. } if !in_extends => Precedence::Primary,
         TypeExpr::Conditional { .. }
         | TypeExpr::Function(_)
         | TypeExpr::ConstructorType(_)

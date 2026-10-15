@@ -634,6 +634,26 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         Some(keys)
     }
 
+    /// The finite literal keys of a key space beside its broad key kinds
+    /// (`string`, `number`, `symbol`, in that order) — the key types a
+    /// mapped type over it maps to index signatures. `None` when the key
+    /// space does not settle.
+    pub(super) fn key_space_literals_and_broad_kinds(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<(Vec<KeyDomainKey>, Vec<PrimitiveKind>)> {
+        let domain = self.key_space_domain(node)?;
+        let broad = [
+            PrimitiveKind::String,
+            PrimitiveKind::Number,
+            PrimitiveKind::Symbol,
+        ]
+        .into_iter()
+        .filter(|kind| domain.broad.contains(kind))
+        .collect();
+        Some((domain.keys.clone(), broad))
+    }
+
     /// The mapped binder for a nominal or broad access, only when the shared
     /// key-domain proof admits the entire requested domain. Literal selection
     /// and remap preimages remain the path walker's existing owners.
