@@ -1258,3 +1258,36 @@ pub(crate) fn resolution_witness_fact_for_tests(
         .expect("an admitted resolution must carry at least one resolution-currency fact")
         .clone()
 }
+
+/// The SKR-ENUM-MERGE AC fixture: three global-script files whose enum
+/// declarations merge across files — auto-increment after a constant member
+/// computed from another file's block, string members concatenating another
+/// block's, a `const enum`, an enum merged with a namespace, a non-constant
+/// member, two blocks omitting their first initializer, and auto-increment
+/// after a non-constant member. Shared by the session engine test
+/// (`global_enum_blocks_evaluate_as_the_checker_evaluates_them`) and the
+/// `verter_lsp` real-provider diagnostics lane, so both lanes always prove
+/// the same program instead of divergent copies.
+///
+/// tsc 7.0.2 reports exactly one TS2432 on `Two`'s second initializer-less
+/// block and one TS1061 on `Bad`'s bare member after `Math.random()` — both
+/// in `MERGED_B` — and nothing else in any of the three files.
+pub const MERGED_A: &str = "\
+enum AutoInc { A = 3 }
+enum Str { A = \"a\" }
+const enum CE { A = 1 }
+enum NE { A = 1 }
+enum Rand { A = 1 }
+enum Two { A }
+enum Bad { A = 1 }
+";
+pub const MERGED_B: &str = "\
+enum AutoInc { B = AutoInc.A * 2, C }
+enum Str { B = Str.A + \"b\", C = `${B}c` }
+const enum CE { B = CE.A + 1, C }
+namespace NE { export const x = 2; }
+enum Rand { F = Math.random() }
+enum Two { B, C }
+enum Bad { R = Math.random(), S }
+";
+pub const MERGED_C: &str = "enum NE { B = NE.A + 1 }\n";

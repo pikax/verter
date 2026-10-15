@@ -1144,3 +1144,201 @@ real_provider_test!(
         );
     }
 );
+
+// ---------------------------------------------------------------------------
+// SKR-ENUM-MERGE AC2: merged-enum diagnostic codes through the real providers
+// ---------------------------------------------------------------------------
+
+/// Map each declaration line of a merged-enum fixture file to the declared
+/// name (`enum X`, `const enum X`, `namespace X`): the anchor a diagnostic
+/// on that line belongs to.
+fn merged_enum_declaration_anchors(source: &str) -> std::collections::HashMap<u32, String> {
+    let mut anchors = std::collections::HashMap::new();
+    for (index, line) in source.lines().enumerate() {
+        let trimmed = line.trim_start();
+        let declared = trimmed
+            .strip_prefix("const enum ")
+            .or_else(|| trimmed.strip_prefix("enum "))
+            .or_else(|| trimmed.strip_prefix("namespace "));
+        let Some(rest) = declared else { continue };
+        let name = rest
+            .split(|character: char| !(character.is_alphanumeric() || character == '_'))
+            .next()
+            .unwrap_or_default();
+        if !name.is_empty() {
+            anchors.insert(index as u32, name.to_string());
+        }
+    }
+    anchors
+}
+
+/// The SKR-ENUM-MERGE AC2 contract: the merged-enum controls must match
+/// tsc 7.0.2's DIAGNOSTICS as well as its types, through the real tsgo
+/// provider lane (tsgo is the tsc 7 native engine). The fixture is the
+/// engine test's own three global-script files (`verter_session::for_tests`
+/// MERGED_A/B/C — shared, never copied), opened through the Verter LSP; per
+/// file and anchor the merged diagnostic set must be exactly tsc's: clean
+/// for AutoInc, Str, CE (const enum), NE (enum + namespace) and Rand
+/// (Math.random member); exactly TS2432 on Two's second initializer-less
+/// block; exactly TS1061 on Bad's bare member after Math.random(); and no
+/// verter/* or engine-refusal diagnostic on any file.
+///
+/// Discriminance: TS2432 exists only once a.ts's and b.ts's `Two` blocks
+/// sit in ONE program, so its arrival (waited for positively below)
+/// witnesses the cross-file merge before the empty-set assertions can be
+/// accepted. Giving Two's second block an initializer, or dropping a
+/// fixture file's declarations from the program (a.ts: unresolved members
+/// flood the b.ts anchors; b.ts: both expected codes vanish), changes the
+/// code sets and fails the exact-match assertions. Dropping MERGED_C alone
+/// changes no diagnostic — its NE block is clean in tsc too — so its merge
+/// is witnessed by the engine test's type probes over the same shared
+/// fixture, not by this lane.
+///
+/// tsgo-scoped by charter: bare tsserver 6.0.3's session API itself drops
+/// TS2432 for this program (verified with `semanticDiagnosticsSync` on a
+/// plain tsserver over the same three files, no Verter in the loop — even
+/// with all three only on disk in the configured project — while `tsc`
+/// and tsgo both report it, and `reloadProjects` does not repair it). The
+/// LSP faithfully surfaces what tsserver returns, so no production change
+/// applies here; the divergence is upstream of the merge this lane pins.
+#[tokio::test(flavor = "multi_thread")]
+async fn diagnostics_merged_enum_blocks_match_tsc_codes_tsgo() {
+    use tower_lsp_server::ls_types::{DidChangeWatchedFilesParams, FileChangeType, FileEvent};
+    use tower_lsp_server::LanguageServer;
+
+    use verter_session::for_tests::{MERGED_A, MERGED_B, MERGED_C};
+
+    let Some(session) =
+        crate::test_harness::TestSessionBuilder::new(crate::test_harness::TestProviderKind::Tsgo)
+            .fixture("external-ts-engine")
+            .build()
+            .await
+    else {
+        return;
+    };
+
+    let relative_a = "src/__merged_enum_a.ts";
+    let relative_b = "src/__merged_enum_b.ts";
+    let relative_c = "src/__merged_enum_c.ts";
+    let _published_a = session.publish_workspace_file(relative_a, MERGED_A);
+    let _published_b = session.publish_workspace_file(relative_b, MERGED_B);
+    let _published_c = session.publish_workspace_file(relative_c, MERGED_C);
+    let created = |relative: &str| FileEvent {
+        uri: session.workspace_uri(relative),
+        typ: FileChangeType::CREATED,
+    };
+    session
+        .server()
+        .did_change_watched_files(DidChangeWatchedFilesParams {
+            changes: vec![
+                created(relative_a),
+                created(relative_b),
+                created(relative_c),
+            ],
+        })
+        .await;
+
+    // The exact per-anchor code sets tsc 7.0.2 reports over the three
+    // files (measured with `tsc --strict --noEmit` on the fixture).
+    let expected = [
+        ("a", "AutoInc", &[] as &[&str]),
+        ("a", "Str", &[]),
+        ("a", "CE", &[]),
+        ("a", "NE", &[]),
+        ("a", "Rand", &[]),
+        ("a", "Two", &[]),
+        ("a", "Bad", &[]),
+        ("b", "AutoInc", &[]),
+        ("b", "Str", &[]),
+        ("b", "CE", &[]),
+        ("b", "NE", &[]),
+        ("b", "Rand", &[]),
+        ("b", "Two", &["2432"]),
+        ("b", "Bad", &["1061"]),
+        ("c", "NE", &[]),
+    ];
+
+    let uri_a = session.open_fixture_file(relative_a).await;
+    let uri_b = session.open_fixture_file(relative_b).await;
+    let uri_c = session.open_fixture_file(relative_c).await;
+
+    // Warm the program the way an interactive session does — the same
+    // completion-driven lever the watched-dependency test uses for files
+    // created after the session built. `A` appears after `AutoInc.` in
+    // b.ts only once a.ts's block and b.ts's block sit in ONE configured
+    // project, so this wait is itself a cross-file-merge witness.
+    assert!(
+        session
+            .wait_until_ready(&uri_b, "B = AutoInc.", "B = AutoInc.".len(), "A")
+            .await,
+        "the merged-enum program must warm up: completions after `AutoInc.` list `A` \
+         only once the a and b blocks share one configured project"
+    );
+
+    // Wait for BOTH expected codes positively: until they arrive the
+    // diagnostics passes may still be settling, and every empty-set
+    // assertion below would be vacuous.
+    let has_both_codes = |diagnostics: &[Diagnostic]| {
+        let codes: Vec<String> = diagnostics.iter().filter_map(lsp_diagnostic_code).collect();
+        codes.contains(&"2432".to_string()) && codes.contains(&"1061".to_string())
+    };
+    let diagnostics_b = session
+        .merged_diagnostics_until(&uri_b, has_both_codes)
+        .await;
+    let diagnostics_a = session
+        .merged_diagnostics_until(&uri_a, |diagnostics| diagnostics.is_empty())
+        .await;
+    let diagnostics_c = session
+        .merged_diagnostics_until(&uri_c, |diagnostics| diagnostics.is_empty())
+        .await;
+
+    let mut actual: std::collections::BTreeMap<(&str, String), Vec<String>> =
+        std::collections::BTreeMap::new();
+    for (stem, _uri, source, diagnostics) in [
+        ("a", &uri_a, MERGED_A, &diagnostics_a),
+        ("b", &uri_b, MERGED_B, &diagnostics_b),
+        ("c", &uri_c, MERGED_C, &diagnostics_c),
+    ] {
+        let anchors = merged_enum_declaration_anchors(source);
+        for diagnostic in diagnostics {
+            let code = lsp_diagnostic_code(diagnostic);
+            let code = code.as_deref().unwrap_or("<no code>");
+            let anchor = anchors
+                .get(&diagnostic.range.start.line)
+                .cloned()
+                .unwrap_or_else(|| "<off every declaration line>".to_string());
+            actual
+                .entry((stem, anchor))
+                .or_default()
+                .push(code.to_string());
+            assert!(
+                !code.starts_with("verter/"),
+                "a verter/* diagnostic surfaced on the {stem} fixture file: {diagnostic:?}"
+            );
+            assert!(
+                !diagnostic.message.to_lowercase().contains("refus"),
+                "an engine-refusal diagnostic surfaced on the {stem} fixture file: \
+                 {diagnostic:?}"
+            );
+        }
+    }
+
+    for (stem, anchor, codes) in expected {
+        let mut got = actual
+            .remove(&(stem, anchor.to_string()))
+            .unwrap_or_default();
+        got.sort();
+        let want: Vec<String> = codes.iter().map(|code| code.to_string()).collect();
+        assert_eq!(
+            got, want,
+            "the {anchor} block in the {stem} fixture file must report exactly \
+             tsc 7.0.2's diagnostic codes"
+        );
+    }
+    assert!(
+        actual.is_empty(),
+        "diagnostics outside the fixture's declared anchors: {actual:?}"
+    );
+
+    session.shutdown().await;
+}
