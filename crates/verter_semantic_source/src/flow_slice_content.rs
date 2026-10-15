@@ -12450,10 +12450,16 @@ impl<'a> Lowerer<'a> {
             // rooted at a frame binding, it reads exactly as the dotted
             // spelling does — through the frame's substitution and every
             // narrowing standing at the path.
+            // Free of frame bindings (`ROLES[0]` over an imported `as const`
+            // tuple), it is the shared leaf's answer, or — where that
+            // lowering has no answer for the indexed read — the checker's
+            // element access of its object's type by its key's type.
             Expression::ComputedMemberExpression(_) if literal_member_chain(expr).is_some() => {
                 match self.lower_literal_member_read(expr) {
                     Some(read) => read,
-                    None => self.lower_leaf(expr, mode),
+                    None => self
+                        .lower_operator_form(expr, mode)
+                        .unwrap_or_else(|| self.lower_leaf(expr, mode)),
                 }
             }
             // A sequence whose LAST operand is its structural value

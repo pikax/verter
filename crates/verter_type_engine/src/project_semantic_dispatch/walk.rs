@@ -1068,10 +1068,15 @@ enum LiteralKey {
 /// `AliasResolve`, `ConditionalSelect`) as the walker descends. The
 /// caller emits the whole-path `ProjectPath` edge after the walk finishes.
 /// Numeric demand a pending path segment places on a tuple / array
-/// base: a concrete integer position or the broad `number` key.
+/// base: a concrete integer position, a negative integer key, or the broad
+/// `number` key.
 #[derive(Debug, Clone, Copy)]
 enum NumericIndexDemand {
     Position(usize),
+    /// A negative integer key (`T[-1]`): no tuple position, so the
+    /// checker reads it through the number index — `undefined` off a
+    /// tuple without a rest element (TS2514), every element off one with.
+    Negative,
     BroadNumber,
 }
 
@@ -2550,10 +2555,11 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
 
     /// Classify a pending path segment as a numeric tuple/array demand:
     /// a concrete integer position (`T[0]`, `T['1']`, `T[index-node
-    /// normalising to an integer literal]`) or the broad `number` key
-    /// (`T[number]`). Returns `None` for every non-numeric segment —
-    /// member names, string keys, negative / fractional positions, and
-    /// symbolic index nodes that do not settle to a numeric domain.
+    /// normalising to an integer literal]`), a negative integer key
+    /// (`T[-1]`) or the broad `number` key (`T[number]`). Returns
+    /// `None` for every non-numeric segment — member names, string keys,
+    /// fractional positions, and symbolic index nodes that do not settle to
+    /// a numeric domain.
     fn classify_numeric_index_segment(&self, segment: &PathSegment) -> Option<NumericIndexDemand> {
         let key = match segment {
             PathSegment::Index(IndexKey::Number(n)) => IndexKey::Number(*n),
@@ -2567,9 +2573,11 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             PathSegment::Member(_) => return None,
         };
         match key {
-            IndexKey::Number(n) => usize::try_from(n.get())
-                .ok()
-                .map(NumericIndexDemand::Position),
+            IndexKey::Number(n) => Some(
+                usize::try_from(n.get()).map_or(NumericIndexDemand::Negative, |position| {
+                    NumericIndexDemand::Position(position)
+                }),
+            ),
             // TS coerces only CANONICAL numeric string keys
             // (`String(Number(s)) === s`): `T["0"]` projects position 0,
             // but `T["01"]` / `T["+1"]` / `T["1.0"]` are NOT numeric keys.
@@ -3096,8 +3104,13 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
     ///   `element.value` is returned). On a rest-bearing tuple, fixed
     ///   positions STRICTLY BEFORE the rest start resolve exactly (tsgo:
     ///   `[string, ...number[]][0]` = `string`); positions AT/AFTER the
-    ///   rest start have suffix-dependent arithmetic this walker does not
-    ///   guess → `None` (honest miss). Out-of-range → `None`.
+    ///   rest start read every element from the rest start on. A position
+    ///   past the end of a tuple without a rest element reads `undefined`
+    ///   (the checker's `getTupleElementTypeOutOfStartCount`, beside its
+    ///   TS2493 error).
+    /// - `Negative`: `undefined` off a tuple without a rest element (the
+    ///   checker's TS2514 recovery), else the `BroadNumber` read — the
+    ///   tuple's number index.
     /// - `BroadNumber`: the renormalised union of every element's
     ///   contribution — optional slots add `undefined`, a rest element
     ///   contributes its array ELEMENT type (an unresolved rest carrier
@@ -3130,10 +3143,20 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         );
                     }
                 }
-                let element = elements.get(position)?;
-                Some(self.index_read(element.value, element.optional, declaring_file))
+                Some(match elements.get(position) {
+                    Some(element) => {
+                        self.index_read(element.value, element.optional, declaring_file)
+                    }
+                    None => self
+                        .graph()
+                        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined)),
+                })
             }
-            NumericIndexDemand::BroadNumber => {
+            NumericIndexDemand::Negative if !elements.iter().any(|element| element.rest) => Some(
+                self.graph()
+                    .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined)),
+            ),
+            NumericIndexDemand::Negative | NumericIndexDemand::BroadNumber => {
                 let mut arms: Vec<SemanticNodeId> = Vec::with_capacity(elements.len() + 1);
                 for element in elements {
                     if element.rest {

@@ -12028,14 +12028,16 @@ fn project_path_tuple_numeric_index_projects_positions_and_broad_union() {
         other => panic!("expected 3-arm union, got {other:?}"),
     }
 
-    // Out-of-range literal positions miss (TS rejects them).
+    // An out-of-range literal position reads `undefined`, the checker's
+    // recovery beside its TS2493 error (TypeScript 7.0.2: `[1?, 2?][2]` is
+    // `undefined`).
     let out_of_range = project(num_key(7));
     assert!(
         matches!(
             graph.node_data(out_of_range).as_deref(),
-            Some(SemanticNodeData::Opaque(_))
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Undefined))
         ),
-        "out-of-range position must miss"
+        "an out-of-range position reads `undefined`"
     );
 }
 

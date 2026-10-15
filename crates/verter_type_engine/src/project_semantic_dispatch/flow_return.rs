@@ -26529,8 +26529,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             loop {
                 match run.waiting.pop() {
                     None => return ExprProgress::Done(value),
+                    // A declared type enters the flow as the checker reads
+                    // it: a positional indexed access resolved to the
+                    // element it reads, then erased.
                     Some(Waiting::Erase) => {
                         if let Positional::Value(node) = value {
+                            let node = self.declared_positional_read(node);
                             value = Positional::Value(
                                 self.dispatch.erase_nullable_members(node, self.nullability),
                             );

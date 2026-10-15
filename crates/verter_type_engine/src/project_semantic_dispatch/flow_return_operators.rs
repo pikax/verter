@@ -9,7 +9,7 @@ use std::sync::Arc;
 use super::super::dispatch_txn::RelationStep;
 use super::{FlowDemandDriver, FlowEvaluator, FlowProductSubject, Positional};
 use crate::semantic_query::{
-    FlowReturnDegradation, LiteralValue, PrimitiveKind, SemanticNodeData, SemanticNodeId,
+    FlowReturnDegradation, IndexKey, LiteralValue, PrimitiveKind, SemanticNodeData, SemanticNodeId,
 };
 use verter_session_query::flow::policy::FlowGap;
 use verter_session_query::flow::slice::{
@@ -228,21 +228,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
         }
         // A numeric position of an array, a tuple or a string: the checker's
         // indexed access by the key's type.
-        let positional = self.operand_arms(object).into_iter().all(|arm| {
-            matches!(
-                self.dispatch
-                    .graph()
-                    .node_data(self.dispatch.resolved_reduction_view(arm))
-                    .as_deref(),
-                Some(
-                    SemanticNodeData::Array { .. }
-                        | SemanticNodeData::Tuple { .. }
-                        | SemanticNodeData::Primitive(PrimitiveKind::String)
-                        | SemanticNodeData::Literal(LiteralValue::String(_))
-                )
-            )
-        }) && self.is_numeric_key(index);
-        if positional {
+        if self.is_positional_object(object) && self.is_numeric_key(index) {
             return self.positional_element(object, index);
         }
         // A key of string or numeric literal types reads the members it
@@ -269,6 +255,60 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
             members.push(self.project_member_path(object, std::slice::from_ref(&name))?);
         }
         (!members.is_empty()).then(|| self.union(&members))
+    }
+
+    /// A declared type as it enters the flow: an indexed access of an
+    /// array, a tuple or a string by a numeric key (`(typeof ROLES)[number]`
+    /// over an `as const` tuple, `T[0]`) is the element it reads, as the
+    /// checker resolves a `T[K]` whose object is no type parameter when it
+    /// reads the declaration. Any other node, and an access whose read this
+    /// lane cannot answer, is itself.
+    pub(super) fn declared_positional_read(&mut self, node: SemanticNodeId) -> SemanticNodeId {
+        let (object, index) = match self.dispatch.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::IndexedAccess { object, index }) => (*object, index.clone()),
+            _ => return node,
+        };
+        let index =
+            match index {
+                IndexKey::Computed(index) => index,
+                IndexKey::Number(position) => self.dispatch.graph().intern_node(
+                    SemanticNodeData::Literal(LiteralValue::Number(position.get() as f64)),
+                ),
+                IndexKey::String(_) | IndexKey::UniqueSymbol(_) => return node,
+            };
+        if !self.is_positional_object(object) || !self.is_numeric_key(index) {
+            return node;
+        }
+        match self.positional_element(object, index) {
+            Some(read)
+                if !matches!(
+                    self.dispatch.graph().node_data(read).as_deref(),
+                    Some(SemanticNodeData::Opaque(_))
+                ) =>
+            {
+                read
+            }
+            _ => node,
+        }
+    }
+
+    /// Whether every member of `object` reads numeric positions: an array,
+    /// a tuple or a string.
+    fn is_positional_object(&self, object: SemanticNodeId) -> bool {
+        self.operand_arms(object).into_iter().all(|arm| {
+            matches!(
+                self.dispatch
+                    .graph()
+                    .node_data(self.dispatch.resolved_reduction_view(arm))
+                    .as_deref(),
+                Some(
+                    SemanticNodeData::Array { .. }
+                        | SemanticNodeData::Tuple { .. }
+                        | SemanticNodeData::Primitive(PrimitiveKind::String)
+                        | SemanticNodeData::Literal(LiteralValue::String(_))
+                )
+            )
+        })
     }
 
     /// [`SliceExpr::Update`]: the value is the unary numeric result over
