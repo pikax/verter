@@ -153,7 +153,14 @@ fn renders_operators_carriers_and_literals_without_precedence_loss() {
                     is_const: false,
                 })),
             }),
-            extends: Arc::new(reference("Expected")),
+            extends: Arc::new(TypeExpr::Ref {
+                name: "Expected".into(),
+                type_arguments: Arc::from([TypeExpr::Infer {
+                    name: "V".into(),
+                    constraint: None,
+                }]),
+            }),
+            // The branch references the binder the clause declares.
             true_type: Arc::new(TypeExpr::Infer {
                 name: "V".into(),
                 constraint: None,
@@ -220,7 +227,7 @@ fn renders_operators_carriers_and_literals_without_precedence_loss() {
     let rendered = render_type_expr_display(&expression).expect("the complete union must render");
     assert_eq!(
         rendered.text,
-        "{ readonly [K in keyof Source as `get${K}`]-?: Source[K] extends Expected ? infer V : never } | typeof factory.make<Input> | import('./module\\'s').Nested.Member<Arg> | Tree<Leaf> | readonly [head?: 'it\\'s', ...tail: Array<42n>] | (Custom & Raw)"
+        "{ readonly [K in keyof Source as `get${K}`]-?: Source[K] extends Expected<infer V> ? V : never } | typeof factory.make<Input> | import('./module\\'s').Nested.Member<Arg> | Tree<Leaf> | readonly [head?: 'it\\'s', ...tail: Array<42n>] | (Custom & Raw)"
     );
     assert_eq!(
         rendered

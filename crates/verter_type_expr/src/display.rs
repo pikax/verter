@@ -150,6 +150,9 @@ enum Frame<'a> {
     TypeParameterDeclaration(&'a TypeParam),
     GeneratedParameterName(usize),
     Text(&'static str),
+    /// Whether the frames after this one render inside a conditional's
+    /// `extends` clause, where an `infer` binder is declared.
+    InExtends(bool),
     Borrowed(&'a str),
     MemberName(&'a str),
     PropertyKey(&'a TypeAuthoredPropertyKey),
@@ -174,10 +177,12 @@ pub fn render_type_expr_display(
     let mut referenced_type_names = Vec::new();
     let mut seen_references = FxHashSet::default();
     let mut work = vec![Frame::Expr(expression, Precedence::Lowest)];
+    let mut in_extends = false;
 
     while let Some(frame) = work.pop() {
         match frame {
             Frame::Text(value) => text.push_str(value),
+            Frame::InExtends(value) => in_extends = value,
             Frame::Borrowed(value) => text.push_str(value),
             Frame::GeneratedParameterName(index) => {
                 write!(&mut text, "_arg{index}").expect("writing to String cannot fail");
@@ -332,11 +337,16 @@ pub fn render_type_expr_display(
                     true_type,
                     false_type,
                 } => {
+                    // An `infer` binder is declared in the `extends` clause
+                    // and only referenced in the branches.
+                    work.push(Frame::InExtends(in_extends));
                     work.push(Frame::Expr(false_type, Precedence::Lowest));
                     work.push(Frame::Text(" : "));
                     work.push(Frame::Expr(true_type, Precedence::Lowest));
+                    work.push(Frame::InExtends(false));
                     work.push(Frame::Text(" ? "));
                     work.push(Frame::Expr(extends, Precedence::Union));
+                    work.push(Frame::InExtends(true));
                     work.push(Frame::Text(" extends "));
                     work.push(Frame::Expr(check, Precedence::Union));
                 }
@@ -384,6 +394,12 @@ pub fn render_type_expr_display(
                     }
                     work.push(Frame::TemplateQuasi(&quasis[0]));
                     work.push(Frame::Text("`"));
+                }
+                // Outside an `extends` clause the binder is a reference: its
+                // name.
+                TypeExpr::Infer { name, .. } if !in_extends => {
+                    ensure_type_name(name, "infer binding")?;
+                    work.push(Frame::Borrowed(name));
                 }
                 TypeExpr::Infer { name, constraint } => {
                     ensure_type_name(name, "infer binding")?;

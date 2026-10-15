@@ -412,3 +412,19 @@ fn a_concrete_mapping_applies_the_checker_modifiers_and_drops_never_keys() {
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// A deferred conditional over a type parameter prints each `infer` binder
+/// as `infer` only where its `extends` clause declares it, and a recursive
+/// reference with its type arguments: the remap the mapped type above
+/// applies per key, left open, reads `${A}` and `Kebab<B>` in its true
+/// branch. The checker prints the application by its alias, `<S extends
+/// string>(s: S) => Kebab<S>`; the expanded body is the same type.
+#[test]
+fn a_deferred_recursive_conditional_names_its_binders_and_arguments() {
+    let kebab = "type Kebab<S extends string> = S extends `${infer A}_${infer B}` ? `${A}-${Kebab<B>}` : S;\n";
+    let printed = display(&named_answer(kebab, "<S extends string>(s: S) => Kebab<S>").answer);
+    assert_eq!(
+        printed,
+        "<S extends string>(s: S) => S extends `${infer A}_${infer B}` ? `${A}-${Kebab<B>}` : S"
+    );
+}
