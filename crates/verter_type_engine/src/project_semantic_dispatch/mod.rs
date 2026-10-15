@@ -619,6 +619,40 @@ pub struct BuildLocalTaint {
     pub(super) operation_refusals: Vec<crate::project_semantic_dispatch::walk::ShallowDiagnostic>,
 }
 
+/// Append each of `roots` to `into` unless it is already there, keeping
+/// first-insertion order. A batch whose pairwise scan would be large is
+/// checked against a hash index of `into`, so merging two wide root sets
+/// (a merged declaration's thousands of contributor files) is linear in
+/// their sizes rather than their product.
+pub(crate) fn extend_unique_self_roots(
+    into: &mut Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
+    roots: impl IntoIterator<Item = crate::semantic_query_memo::ObservedGraphSelfRoot>,
+) {
+    const PAIRWISE_SCAN_LIMIT: usize = 256;
+    let mut roots = roots.into_iter().peekable();
+    if roots.peek().is_none() {
+        return;
+    }
+    let (batch, _) = roots.size_hint();
+    // A handful of roots scans `into` directly: indexing `into` costs more
+    // than scanning it once per root.
+    if batch <= 4 || into.len().saturating_mul(batch) <= PAIRWISE_SCAN_LIMIT {
+        for root in roots {
+            if !into.contains(&root) {
+                into.push(root);
+            }
+        }
+        return;
+    }
+    let mut seen: rustc_hash::FxHashSet<crate::semantic_query_memo::ObservedGraphSelfRoot> =
+        into.iter().cloned().collect();
+    for root in roots {
+        if seen.insert(root.clone()) {
+            into.push(root);
+        }
+    }
+}
+
 /// Panic-safe RAII guard for a cold-build-local taint frame.
 ///
 /// On construction it pushes a fresh [`BuildLocalTaint`] frame onto the
@@ -1561,15 +1595,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return;
         }
         if let Some(top) = self.build_local_taint.borrow_mut().last_mut() {
-            for root in evidence.inspected_file_roots {
-                if !top
-                    .observed_self_roots
-                    .iter()
-                    .any(|(c, h)| *c == root.0 && *h == root.1)
-                {
-                    top.observed_self_roots.push(root);
-                }
-            }
+            extend_unique_self_roots(&mut top.observed_self_roots, evidence.inspected_file_roots);
         }
     }
 
@@ -1584,15 +1610,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let Some(top) = stack.last_mut() else {
             return;
         };
-        for root in roots {
-            if !top
-                .observed_self_roots
-                .iter()
-                .any(|existing| existing == root)
-            {
-                top.observed_self_roots.push(root.clone());
-            }
-        }
+        extend_unique_self_roots(&mut top.observed_self_roots, roots.iter().cloned());
     }
 
     /// Record the operation refusals among `diagnostics` on the top
@@ -1637,15 +1655,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return;
         }
         if let Some(top) = self.build_local_taint.borrow_mut().last_mut() {
-            for root in &observed.observed_self_roots {
-                if !top
-                    .observed_self_roots
-                    .iter()
-                    .any(|(c, h)| c == &root.0 && *h == root.1)
-                {
-                    top.observed_self_roots.push(root.clone());
-                }
-            }
+            extend_unique_self_roots(
+                &mut top.observed_self_roots,
+                observed.observed_self_roots.iter().cloned(),
+            );
         }
     }
 
@@ -3258,15 +3271,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // Canonical-construction self-roots deposited during this build
         // (discarded structural duplicates included) join the build's
         // own observed roots on the memo entry.
-        for root in build_local.observed_self_roots {
-            if !output
-                .observed_self_roots
-                .iter()
-                .any(|(c, h)| *c == root.0 && *h == root.1)
-            {
-                output.observed_self_roots.push(root);
-            }
-        }
+        extend_unique_self_roots(
+            &mut output.observed_self_roots,
+            build_local.observed_self_roots,
+        );
         // ReturnOnly never publishes — fenced-serve arm. A build
         // whose traced scope consumed a FENCED (ReturnOnly)
         // `IndexedReady` serve computed its value basis from a

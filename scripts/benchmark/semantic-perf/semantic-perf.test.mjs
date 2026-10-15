@@ -2071,13 +2071,30 @@ function observeSessionRun() {
 }
 const INCREMENTAL = allSessions().find((x) => x.id === "incremental-edits");
 
-test("the session catalog is well-formed and its workloads sit in the quick tier", () => {
+test("the session catalog is well-formed and each workload sits in its tier", () => {
   const sessions = allSessions();
-  assert.deepEqual(sessions.map((x) => x.family).sort(), ["concurrent", "editor", "incremental"]);
+  assert.deepEqual(sessions.map((x) => x.family).sort(), [
+    "augmentation",
+    "concurrent",
+    "editor",
+    "incremental",
+  ]);
   for (const session of sessions) {
     assert.deepEqual(sessionProblems(session), [], session.id);
-    assert.equal(SESSION_TIERS[session.id], "quick");
+    assert.equal(
+      SESSION_TIERS[session.id],
+      session.family === "augmentation" ? "standard" : "quick",
+    );
   }
+  // The growth session demands the 500-contributor interface, then the
+  // 2,000-contributor one, in one engine; the quick tier leaves it out.
+  const growth = sessions.find((x) => x.family === "augmentation");
+  assert.deepEqual(
+    growth.steps.map((x) => x.requests.map((r) => r.expect.split(" | ").length)),
+    [[500], [2000]],
+  );
+  assert.ok(!sessionsFor("quick", TIERS).some((x) => x.id === growth.id));
+  assert.ok(sessionsFor("standard", TIERS).some((x) => x.id === growth.id));
   // The incremental script edits a leaf, an intermediate type and an
   // unrelated file, re-requesting after each; the editor session demands
   // component metadata; the concurrent one issues its demands at once.

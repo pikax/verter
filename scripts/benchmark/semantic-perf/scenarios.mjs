@@ -568,6 +568,49 @@ export function allScenarios() {
     );
   }
 
+  // Declaration merging: one interface merged from many contributing files.
+  for (const n of [100, 500, 2000]) {
+    out.push(
+      scenario(
+        `augment-global-${n}`,
+        "augmentation",
+        `a global interface merged from ${n} script contributors, read through every member's tag`,
+        "",
+        'BenchRegistry[keyof BenchRegistry]["tag"]',
+        {
+          files: Object.fromEntries(
+            range(n).map((i) => [
+              `reg-${i}.ts`,
+              `interface BenchRegistry { r${i}: { id: ${i}; tag: "t${i}" } }\n`,
+            ]),
+          ),
+        },
+      ),
+    );
+  }
+  for (const n of [100, 500, 2000]) {
+    out.push(
+      scenario(
+        `augment-module-${n}`,
+        "augmentation",
+        `a module interface augmented by ${n} modules the entry never imports`,
+        'import type { Props } from "./core";\n',
+        "Props[keyof Props]",
+        {
+          files: {
+            "core.ts": "export interface Props { base: -1 }\nexport {};\n",
+            ...Object.fromEntries(
+              range(n).map((i) => [
+                `plugin-${i}.ts`,
+                `declare module "./core" { interface Props { p${i}: ${i} } }\nexport {};\n`,
+              ]),
+            ),
+          },
+        },
+      ),
+    );
+  }
+
   return out;
 }
 
@@ -615,6 +658,12 @@ export const SCENARIO_TIERS = {
   "return-chain-20": "quick",
   "return-chain-100": "standard",
   "return-chain-300": "standard",
+  "augment-global-100": "quick",
+  "augment-global-500": "standard",
+  "augment-global-2000": "standard",
+  "augment-module-100": "quick",
+  "augment-module-500": "standard",
+  "augment-module-2000": "standard",
   "contextual-this-20": "quick",
   "contextual-this-100": "standard",
   "contextual-this-400": "standard",

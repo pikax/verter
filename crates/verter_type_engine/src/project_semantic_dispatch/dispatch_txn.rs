@@ -2616,6 +2616,64 @@ pub struct CheckerDispatchTransaction {
     pub flow: FlowReturnDomainRuntime,
     /// The call-resolution domain runtime.
     pub call: ResolveCallDomainRuntime,
+    /// The type-body augmentation folds completed on this transaction.
+    pub augmentation: AugmentationPlanTable,
+}
+
+/// The demand a type-body augmentation fold answers: the declaration the
+/// target and name select, the arguments its contributors bind, the
+/// requesting file (it orders the contributors) and the contributor the
+/// caller already holds as its base body. The projection context is not
+/// part of it: a fold is context-free until it is projected.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AugmentationPlanKey {
+    pub target: verter_session_query::resolution::AugmentationTargetKind,
+    pub decl_name: Arc<str>,
+    pub type_arguments: Arc<[SemanticNodeId]>,
+    pub request_canonical: Arc<str>,
+    pub excluded_contributor: Option<Arc<str>>,
+}
+
+/// A type-body fold completed on this transaction: the plan, how far it
+/// may travel, and what reusing it replays (the same rails a completed
+/// flow result replays).
+pub struct TransactionAugmentationPlan {
+    pub(super) plan: Arc<super::build::AugmentationPlan>,
+    pub reuse: verter_session_query::facts::reuse::ReuseClass,
+    pub replay: FlowMemberReuse,
+}
+
+/// The type-body augmentation folds completed on this transaction, keyed
+/// by their demand. Like [`FlowResultTable`] it holds only complete,
+/// request-reusable folds, evicts nothing and lives exactly as long as the
+/// transaction.
+#[derive(Default)]
+pub struct AugmentationPlanTable {
+    plans: FxHashMap<AugmentationPlanKey, TransactionAugmentationPlan>,
+}
+
+impl std::fmt::Debug for AugmentationPlanTable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AugmentationPlanTable")
+            .field("plans", &self.plans.len())
+            .finish()
+    }
+}
+
+impl AugmentationPlanTable {
+    /// The completed fold of `key`, if any.
+    pub fn get(&self, key: &AugmentationPlanKey) -> Option<&TransactionAugmentationPlan> {
+        self.plans.get(key)
+    }
+
+    /// Record `key`'s completed fold. Only a request-reusable class
+    /// enters; the first completion answers every later demand.
+    pub fn complete(&mut self, key: AugmentationPlanKey, plan: TransactionAugmentationPlan) {
+        if !plan.reuse.is_request_reusable() {
+            return;
+        }
+        self.plans.entry(key).or_insert(plan);
+    }
 }
 
 /// One entry of a tagged flow component awaiting its equation fixed

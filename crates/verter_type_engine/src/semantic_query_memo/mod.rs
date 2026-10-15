@@ -132,7 +132,7 @@ use arena::NodeArena;
 use derivation::DerivationStore;
 pub use family::AuditEagerKeyRow;
 use family::{
-    carrier_facts_reference_canonical, family_and_slot, requested_path_for_key, CandidateList,
+    carrier_facts_reference_canonical, family_and_slot, requested_path_for_key, CandidateSnapshot,
     FamilyKey, FamilySlots, MemoEntry, ModeSlot,
 };
 // Used only by the `#[cfg(any(test, feature = "test-support"))]` publish
@@ -2026,7 +2026,7 @@ impl SemanticGraphStore {
         // — which walks the path-precise fact rail against the resolver
         // store view — would serialise every unrelated warm read and
         // cold publish on the single global memo mutex.
-        let snapshot: Option<CandidateList> = {
+        let snapshot: Option<CandidateSnapshot> = {
             let entries = self.entries_lock_diagnosed();
             entries.get(family).map(|slots| slots.snapshot_slot(slot))
         };
@@ -2170,7 +2170,7 @@ impl SemanticGraphStore {
         // mutex across it would serialise every unrelated warm read
         // and cold publish during validation. Stale candidates are
         // skipped without bubbling.
-        let snapshot: Option<CandidateList> = {
+        let snapshot: Option<CandidateSnapshot> = {
             let entries = self.entries.lock();
             entries.get(family).map(|slots| slots.snapshot_slot(slot))
         };

@@ -58,10 +58,10 @@ fn lookup_path_source_has_no_known_canonicals_scan() {
         "the lib runtime nominal must not pick the first overlay file"
     );
     let collect = build
-        .split("fn collect_augmentation_contributions(")
+        .split("fn fold_augmentation_contributions(")
         .nth(1)
         .and_then(|rest| rest.split("\n    fn ").next())
-        .expect("collect_augmentation_contributions body");
+        .expect("fold_augmentation_contributions body");
     assert!(
         collect.contains("augmentation_contributor_order"),
         "augmenter and file-scope contributors must be ordered together before lowering"

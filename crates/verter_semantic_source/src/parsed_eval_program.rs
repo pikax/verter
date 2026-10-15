@@ -139,26 +139,56 @@ pub struct ParsedEvalProgram {
     had_errors: bool,
 }
 
-impl ParsedEvalProgram {
-    #[cfg(test)]
-    pub(crate) fn parse(source: Arc<str>, source_type: oxc_span::SourceType) -> Option<Self> {
-        Self::parse_outcome(source, source_type).ok()
-    }
+/// The first chunk an empty arena takes: `oxc_allocator`'s
+/// `FIRST_ALLOCATION_GOAL` (16 KiB, `src/arena/create.rs`). Any chunk the
+/// arena adds later is at least this size.
+const ARENA_FIRST_CHUNK_BYTES: usize = 16 * 1024;
 
-    /// Parse `source`: the program, or, for a fatal parse, the stack
-    /// refusal it carries when it was refused for want of stack rather
-    /// than for its syntax.
-    pub(crate) fn parse_outcome(
+/// Typical arena bytes per source byte of small declaration files, used
+/// only to size a first chunk. It is an estimate, not a bound: a denser
+/// file outgrows the sized chunk and is parsed again into a default arena.
+const ARENA_BYTES_PER_SOURCE_BYTE_ESTIMATE: usize = 32;
+
+/// Arena bytes a parse takes whatever its source: the program node and its
+/// empty lists.
+const ARENA_PROGRAM_BYTES: usize = 512;
+
+/// The first chunk to size a retained parse of `source_len` bytes to, or
+/// `None` for a default arena.
+///
+/// The arena lives as long as the snapshot's lease, so its unused tail is
+/// retained memory, and a 16 KiB first chunk is many times a small file's
+/// AST. A parse that outgrows a sized chunk adds a full default chunk beside
+/// it, so [`ParsedEvalProgram::parse_outcome`] parses such a file again into
+/// a default arena: a retained arena never exceeds the default one.
+fn sized_first_chunk(source_len: usize) -> Option<usize> {
+    let estimate = source_len
+        .saturating_mul(ARENA_BYTES_PER_SOURCE_BYTE_ESTIMATE)
+        .saturating_add(ARENA_PROGRAM_BYTES);
+    (estimate < ARENA_FIRST_CHUNK_BYTES).then_some(estimate)
+}
+
+/// One parse of `source` into `allocator`: the retained cell, and whether
+/// the parse was fatal, its stack refusal, and whether it recovered errors.
+struct ParseAttempt {
+    cell: ParsedEvalProgramCell,
+    panicked: bool,
+    refused: Option<verter_parser::oxc_parse::StackUnavailable>,
+    had_errors: bool,
+}
+
+impl ParseAttempt {
+    fn run(
+        allocator: oxc_allocator::Allocator,
         source: Arc<str>,
         source_type: oxc_span::SourceType,
-    ) -> Result<Self, Option<verter_parser::oxc_parse::StackUnavailable>> {
-        verter_audit::attribute_n!(EvalProgramParse, source.len());
+    ) -> Self {
         let mut panicked = false;
         let mut refused = None;
         let mut had_errors = false;
         let cell = ParsedEvalProgramCell::new(
             ParsedEvalProgramOwner {
-                allocator: oxc_allocator::Allocator::new(),
+                allocator,
                 source,
                 source_type,
             },
@@ -176,17 +206,66 @@ impl ParsedEvalProgram {
                 panicked = result.fatal_error;
                 refused = verter_parser::oxc_parse::parse_refusal(&result);
                 had_errors = !result.diagnostics.is_empty();
-                // The retained arena is the dominant per-file live footprint;
-                // `used_bytes()` walks the chunk list, which is why the amount
-                // must never be evaluated when attribution is off.
-                verter_audit::attribute_n!(ParseArenaUsed, owner.allocator.used_bytes());
-                verter_audit::attribute_max!(ParseArenaCapacity, owner.allocator.capacity());
                 result.program
             },
         );
-        if panicked {
-            return Err(refused);
+        Self {
+            cell,
+            panicked,
+            refused,
+            had_errors,
         }
+    }
+
+    fn arena_capacity(&self) -> usize {
+        self.cell.borrow_owner().allocator.capacity()
+    }
+}
+
+impl ParsedEvalProgram {
+    #[cfg(test)]
+    pub(crate) fn parse(source: Arc<str>, source_type: oxc_span::SourceType) -> Option<Self> {
+        Self::parse_outcome(source, source_type).ok()
+    }
+
+    /// Parse `source`: the program, or, for a fatal parse, the stack
+    /// refusal it carries when it was refused for want of stack rather
+    /// than for its syntax.
+    pub(crate) fn parse_outcome(
+        source: Arc<str>,
+        source_type: oxc_span::SourceType,
+    ) -> Result<Self, Option<verter_parser::oxc_parse::StackUnavailable>> {
+        verter_audit::attribute_n!(EvalProgramParse, source.len());
+        let mut attempt = match sized_first_chunk(source.len()) {
+            Some(first_chunk) => {
+                let allocator = oxc_allocator::Allocator::with_capacity(first_chunk);
+                let sized = allocator.capacity();
+                let attempt = ParseAttempt::run(allocator, Arc::clone(&source), source_type);
+                if attempt.arena_capacity() > sized {
+                    // Denser than the estimate: the sized chunk plus the
+                    // default chunk added beside it would retain more than
+                    // a default arena.
+                    ParseAttempt::run(oxc_allocator::Allocator::new(), source, source_type)
+                } else {
+                    attempt
+                }
+            }
+            None => ParseAttempt::run(oxc_allocator::Allocator::new(), source, source_type),
+        };
+        // The retained arena is the dominant per-file live footprint;
+        // `used_bytes()` walks the chunk list, which is why the amount
+        // must never be evaluated when attribution is off.
+        verter_audit::attribute_n!(
+            ParseArenaUsed,
+            attempt.cell.borrow_owner().allocator.used_bytes()
+        );
+        verter_audit::attribute_max!(ParseArenaCapacity, attempt.arena_capacity());
+        if attempt.panicked {
+            return Err(attempt.refused.take());
+        }
+        let ParseAttempt {
+            cell, had_errors, ..
+        } = attempt;
         Ok(Self {
             cell: Rc::new(cell),
             functions: OnceCell::new(),
@@ -338,5 +417,82 @@ impl ParsedEvalProgram {
     /// for any walker consuming this program.
     pub fn source_type(&self) -> oxc_span::SourceType {
         self.cell.borrow_owner().source_type
+    }
+
+    /// Bytes the retained arena holds, used or not: what the snapshot's
+    /// retention pin charges.
+    pub(crate) fn arena_capacity(&self) -> usize {
+        self.cell.borrow_owner().allocator.capacity()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The capacity an empty arena holds once it has allocated.
+    fn default_capacity() -> usize {
+        let probe = oxc_allocator::Allocator::new();
+        probe.alloc(0u8);
+        probe.capacity()
+    }
+
+    fn retained_capacity(source: String) -> usize {
+        ParsedEvalProgram::parse(Arc::from(source), oxc_span::SourceType::ts())
+            .expect("the fixture parses")
+            .arena_capacity()
+    }
+
+    /// A small file never retains more arena than an empty arena would have
+    /// taken, whatever its density: a pre-sized chunk the parse outgrows
+    /// would keep both itself and the default chunk added beside it.
+    #[test]
+    fn a_small_file_never_retains_more_arena_than_the_default_chunk() {
+        let default_capacity = default_capacity();
+        let interfaces = |n: usize| {
+            (0..n)
+                .map(|i| {
+                    format!("export interface I{i} {{ a{i}: string; b{i}?: number; c{i}(x: number): void }}\n")
+                })
+                .collect::<String>()
+        };
+        let functions = |n: usize| {
+            (0..n)
+                .map(|i| {
+                    format!("export function f{i}(a: number, b: string): number {{ return a; }}\n")
+                })
+                .collect::<String>()
+        };
+        // Six source bytes per method signature: denser than the sizing
+        // estimate, so the sized chunk overflows.
+        let terse_methods = format!("interface I{{{}}}", "a():0;".repeat(40));
+        for source in [
+            terse_methods,
+            interfaces(1),
+            interfaces(5),
+            interfaces(8),
+            functions(4),
+            functions(8),
+        ] {
+            let len = source.len();
+            let capacity = retained_capacity(source);
+            assert!(
+                capacity <= default_capacity,
+                "a {len}-byte file retains {capacity} arena bytes, above the {default_capacity} an empty arena takes"
+            );
+        }
+    }
+
+    /// A declaration-only file small enough to pre-size retains a chunk of
+    /// its bound, not the default chunk.
+    #[test]
+    fn a_tiny_declaration_file_retains_less_than_the_default_chunk() {
+        let default_capacity = default_capacity();
+        let capacity =
+            retained_capacity("interface BenchRegistry { r0: { id: 0; tag: \"t0\" } }\n".into());
+        assert!(
+            capacity * 4 < default_capacity,
+            "a one-line declaration retains {capacity} arena bytes of {default_capacity}"
+        );
     }
 }

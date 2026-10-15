@@ -1,0 +1,32 @@
+{
+  "name": "skr-augment-scaleb",
+  "description": "A global interface merged from 2,000 script contributors and a module interface augmented by 2,000 unimported modules, each read through an indexed access over every member: cold release latency and peak memory.",
+  "tier": "standard",
+  "scenarios": ["augment-global-2000", "augment-module-2000"],
+  "settings": ["strict"],
+  "arms": ["verter"],
+  "modes": ["cold"],
+  "threads": ["default"],
+  "noise": [
+    "docs/contributing/semantic-benchmark.md#verdicts",
+    "docs/contributing/semantic-benchmark.md#schedule"
+  ],
+  "requiredCells": [
+    {
+      "scenario": "augment-global-2000",
+      "setting": "strict",
+      "arm": "verter",
+      "mode": "cold",
+      "threads": "default",
+      "metrics": ["firstTypeMs", "coldMs", "peakBytes"]
+    },
+    {
+      "scenario": "augment-module-2000",
+      "setting": "strict",
+      "arm": "verter",
+      "mode": "cold",
+      "threads": "default",
+      "metrics": ["firstTypeMs", "coldMs", "peakBytes"]
+    }
+  ]
+}
