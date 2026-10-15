@@ -229,7 +229,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
         // A numeric position of an array, a tuple or a string: the checker's
         // indexed access by the key's type.
         if self.is_positional_object(object) && self.is_numeric_key(index) {
-            return self.positional_element(object, index);
+            return self.positional_read(object, index, true);
         }
         // A key of string or numeric literal types reads the members it
         // names, a `unique symbol` key the member it keys; a key of any
@@ -279,17 +279,68 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
         if !self.is_positional_object(object) || !self.is_numeric_key(index) {
             return node;
         }
-        match self.positional_element(object, index) {
-            Some(read)
-                if !matches!(
-                    self.dispatch.graph().node_data(read).as_deref(),
-                    Some(SemanticNodeData::Opaque(_))
-                ) =>
-            {
-                read
-            }
-            _ => node,
+        self.positional_read(object, index, false).unwrap_or(node)
+    }
+
+    /// The indexed access of a positional object by a numeric key, read per
+    /// key as the checker reads it. A negative key of any object but a
+    /// single tuple without a rest element — a union, a tuple with a rest
+    /// element, an array, a string — reads the number index. Of that single
+    /// tuple it is `undefined` where the access is `written` over it (the
+    /// checker's recovery beside TS2514); a declared access may be an
+    /// instantiation, which reads the number index, so it stays unread.
+    /// Every other key is the position it reads.
+    fn positional_read(
+        &mut self,
+        object: SemanticNodeId,
+        index: SemanticNodeId,
+        written: bool,
+    ) -> Option<SemanticNodeId> {
+        let keys = self.operand_arms(index);
+        if !keys.iter().any(|key| self.is_negative_key(*key)) {
+            return self.positional_element(object, index);
         }
+        let mut reads = Vec::with_capacity(keys.len());
+        for key in keys {
+            let read = if !self.is_negative_key(key) {
+                self.positional_element(object, key)?
+            } else if !self.is_single_fixed_tuple(object) {
+                let number = self.primitive(PrimitiveKind::Number);
+                self.positional_element(object, number)?
+            } else if written {
+                self.primitive(PrimitiveKind::Undefined)
+            } else {
+                return None;
+            };
+            reads.push(read);
+        }
+        Some(match reads.as_slice() {
+            [single] => *single,
+            _ => self.union(&reads),
+        })
+    }
+
+    /// Whether `key` is a negative numeric literal (`-1`; `-0` is `0`).
+    fn is_negative_key(&self, key: SemanticNodeId) -> bool {
+        matches!(
+            self.dispatch.graph().node_data(key).as_deref(),
+            Some(SemanticNodeData::Literal(LiteralValue::Number(value))) if *value < 0.0
+        )
+    }
+
+    /// Whether `object` is one tuple, not a union, without a rest element.
+    fn is_single_fixed_tuple(&self, object: SemanticNodeId) -> bool {
+        let [arm] = self.operand_arms(object)[..] else {
+            return false;
+        };
+        matches!(
+            self.dispatch
+                .graph()
+                .node_data(self.dispatch.resolved_reduction_view(arm))
+                .as_deref(),
+            Some(SemanticNodeData::Tuple { elements, .. })
+                if !elements.iter().any(|element| element.rest)
+        )
     }
 
     /// Whether every member of `object` reads numeric positions: an array,
@@ -358,7 +409,16 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
                 }
                 _ => {
                     drop(data);
-                    self.indexed_access(resolved, index)?
+                    let read = self.indexed_access(resolved, index)?;
+                    // An arm the shared walker leaves unread leaves the
+                    // whole access unread.
+                    if matches!(
+                        self.dispatch.graph().node_data(read).as_deref(),
+                        Some(SemanticNodeData::Opaque(_))
+                    ) {
+                        return None;
+                    }
+                    read
                 }
             };
             elements.push(element);

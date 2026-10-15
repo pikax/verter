@@ -12039,6 +12039,55 @@ fn project_path_tuple_numeric_index_projects_positions_and_broad_union() {
         ),
         "an out-of-range position reads `undefined`"
     );
+
+    // A negative key of this single tuple stays unread: the checker answers
+    // `undefined` for an access written over it and its number index for an
+    // instantiated one, which the walk cannot tell apart. As an arm of a
+    // union it reads the union's number index (TypeScript 7.0.2:
+    // `([string, boolean?] | [number])[-1]` is
+    // `string | number | boolean | undefined`).
+    assert!(
+        matches!(
+            graph.node_data(project(num_key(-1))).as_deref(),
+            Some(SemanticNodeData::Opaque(_))
+        ),
+        "a negative key of a single tuple without a rest element stays unread"
+    );
+    let single = graph.intern_node(SemanticNodeData::Tuple {
+        elements: Arc::from(
+            vec![TupleElement {
+                label: None,
+                value: number_node,
+                optional: false,
+                rest: false,
+            }]
+            .into_boxed_slice(),
+        ),
+        readonly: false,
+    });
+    let union = graph.intern_node(SemanticNodeData::Union(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![tuple, single].into_boxed_slice(),
+        )),
+    ));
+    let negative = match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
+        base: union,
+        path: Arc::from(vec![PathSegment::Index(num_key(-1))].into_boxed_slice()),
+        context: ProjectionReductionContext::published(ProjectionMode::Expanded),
+    }) {
+        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+        other => panic!("expected projected value, got {other:?}"),
+    };
+    match graph.node_data(negative).as_deref() {
+        Some(SemanticNodeData::Union(members)) => {
+            assert_eq!(
+                members.len(),
+                4,
+                "a negative key of a union of tuples reads string|number|boolean|undefined"
+            );
+        }
+        other => panic!("expected a 4-arm union, got {other:?}"),
+    }
 }
 
 /// TS coerces only CANONICAL numeric string keys (`String(Number(s)) ===
