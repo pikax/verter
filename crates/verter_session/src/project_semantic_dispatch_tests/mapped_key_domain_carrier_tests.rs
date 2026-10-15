@@ -696,24 +696,19 @@ fn key_domain_undecidable_source_answers_open() {
 // ── 6b. REAL budget exhaustion drives the `budget==0` arm → OPEN → carrier-stop
 //
 // This test ACTUALLY exhausts the openness walk's node budget
-// (`ENUMERATION_DOMAIN_OPENNESS_NODE_BUDGET = 256`, `raise.rs:3543`) — it does
-// not merely assert the undecidable-TypeParam path. Construction: fold a chain
-// of transparent `Alias` nodes around a CLOSED `Object` source. Each `Alias`
-// hop is a DISTINCT interned `SemanticNodeId` (hash-consing keys on
-// `(payload, scope)`, and each alias wraps a distinct target), so the per-node
-// memo `(node, position)` never collides; every hop calls
-// `node_openness_uncached`, which decrements `self.budget` by 1
-// (`raise.rs:4221`) and then recurses into the alias target
-// (`SemanticNodeData::Alias(target) => self.node_is_open(ctx, *target)`,
-// `raise.rs:4514`).
+// (`ENUMERATION_DOMAIN_OPENNESS_NODE_BUDGET`) — it does not merely assert the
+// undecidable-TypeParam path. Construction: fold a chain of transparent
+// `Alias` nodes around a CLOSED `Object` source. Each `Alias` hop is a
+// DISTINCT interned `SemanticNodeId` (hash-consing keys on `(payload,
+// scope)`, and each alias wraps a distinct target), so the per-node memo
+// `(node, position)` never collides; every hop decrements the walk's budget
+// by 1 and then visits the alias target on the walk's worklist.
 //
-// PROOF the `budget==0` arm is hit: the walk starts at the top alias with
-// budget 256 and decrements once per hop. After 256 hops the budget is 0; the
-// 257th `node_openness_uncached` call returns at the `if self.budget == 0` arm
-// (`raise.rs:4211`) BEFORE reaching the closed `Object` at the bottom. With
-// ALIAS_DEPTH = 320 > 256 the walk provably reaches `budget==0` while still
-// inside the alias chain, and the `KeyDomain` question's
-// `undecidable_is_open()` returns OPEN there.
+// PROOF the `budget==0` arm is hit: the walk starts at the top alias with the
+// full budget and decrements once per hop. With ALIAS_DEPTH strictly greater
+// than the budget the walk provably reaches `budget==0` while still inside
+// the alias chain, and the `KeyDomain` question's `undecidable_is_open()`
+// returns OPEN there.
 //
 // DISCRIMINATION: a SHALLOW alias chain (depth 4, well under budget) over the
 // SAME closed `Object` classifies CLOSED and enumerates `{a}` — so the deep
@@ -722,9 +717,9 @@ fn key_domain_undecidable_source_answers_open() {
 // answered CLOSED, the deep-chain assertions (a)+(b) below would BOTH FAIL.
 #[test]
 fn key_domain_budget_exhaustion_carrier_stops() {
-    // Depth strictly greater than the 256 node budget so the walk provably
+    // Depth strictly greater than the node budget so the walk provably
     // reaches `budget==0` before the closed bottom.
-    const ALIAS_DEPTH: usize = 320;
+    const ALIAS_DEPTH: usize = super::raise::ENUMERATION_DOMAIN_OPENNESS_NODE_BUDGET as usize + 64;
 
     let handle = std::thread::Builder::new()
         .stack_size(16 * 1024 * 1024)
@@ -743,7 +738,7 @@ fn key_domain_budget_exhaustion_carrier_stops() {
                 ProjectionReductionContext::structural_transit(),
             );
 
-            // CONTROL: a SHALLOW alias chain (depth 4 ≪ 256) over the closed
+            // CONTROL: a SHALLOW alias chain (depth 4 ≪ the budget) over the closed
             // bottom enumerates `{a}` — the walk reaches the closed object well
             // within budget and classifies CLOSED.
             let mut shallow_chain = closed_bottom;
@@ -761,7 +756,7 @@ fn key_domain_budget_exhaustion_carrier_stops() {
                  CLOSED and enumerate {{a}} — the budget is intact, so the bottom is reached"
             );
 
-            // DEEP chain: 320 distinct alias hops > 256 budget. The key-domain
+            // DEEP chain: more distinct alias hops than the budget. The key-domain
             // walk hits `budget==0` partway down and the KeyDomain question
             // answers OPEN.
             let mut deep_chain = closed_bottom;
@@ -781,7 +776,7 @@ fn key_domain_budget_exhaustion_carrier_stops() {
                     deep_chain,
                     &deep_mapper,
                 ),
-                "a {ALIAS_DEPTH}-deep alias chain (> the 256 node budget) over a CLOSED bottom \
+                "a {ALIAS_DEPTH}-deep alias chain (> the node budget) over a CLOSED bottom \
                  must classify the KEY domain OPEN via the `budget==0` arm — the shallow control \
                  over the identical bottom is CLOSED, so the verdict is attributable to budget \
                  exhaustion, not an open bottom"

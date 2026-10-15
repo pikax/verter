@@ -870,6 +870,129 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         path: &[Arc<str>],
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+        self.build_typeof_suspending(value_root, path, context, None)
+    }
+
+    /// Begin a `typeof` build on the continuation runtime: answer it at
+    /// once, or — when the value's type is its authored annotation — begin
+    /// lowering that annotation as a projection that stops at each
+    /// instantiation it reaches, the build [`Self::drain_typeof`] carries
+    /// on. A chain of instantiations the annotation names (an interface
+    /// whose heritage nests a hundred levels) then waits in heap-owned
+    /// frames instead of nesting natively.
+    pub(super) fn begin_typeof(
+        &self,
+        value_root: &ValueRootKey,
+        path: &[Arc<str>],
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> TypeofStart {
+        let mut suspended = None;
+        let output = self.build_typeof_suspending(value_root, path, context, Some(&mut suspended));
+        match suspended {
+            Some(build) => TypeofStart::Build(build),
+            None => TypeofStart::Done(Box::new(output)),
+        }
+    }
+
+    /// Carry a suspended `typeof` build on: its annotation's projection
+    /// resumes with `delivery`, the instantiation it waited on, and either
+    /// needs another or completes the build's output.
+    pub(super) fn drain_typeof(
+        &self,
+        build: &mut TypeofBuild,
+        delivery: Option<SemanticNodeId>,
+    ) -> InstantiatePoll {
+        let TypeofBuild {
+            prepared,
+            env,
+            scope,
+            scope_payload,
+            shadowing,
+            substitutions,
+            self_value,
+            body,
+            ..
+        } = build;
+        let poll = self.drain_located_body_lowering(
+            body,
+            &crate::project_semantic_dispatch::locator_view::LocatorViewInputs {
+                env,
+                scope,
+                name_resolution: &prepared.name_resolution,
+                scope_payload: scope_payload.as_ref(),
+                shadowing,
+                authored_resolution_debt: None,
+                self_value: self_value.as_ref(),
+            },
+            substitutions,
+            delivery,
+        );
+        match poll {
+            BodyPoll::Need(key) => InstantiatePoll::Need(key),
+            BodyPoll::Done(node, _) => {
+                let output = self.typeof_output(
+                    node,
+                    false,
+                    &build.value_root,
+                    &build.path,
+                    build.context,
+                    build.observed_hash,
+                );
+                InstantiatePoll::Done(Box::new(self.with_augmentation_roots(
+                    output,
+                    Vec::new(),
+                    false,
+                )))
+            }
+        }
+    }
+
+    /// The output of a `typeof` whose value has the type `node`: the
+    /// value's own type rooted on its declaring file, or the member `path`
+    /// reads from it.
+    fn typeof_output(
+        &self,
+        node: SemanticNodeId,
+        composed_partial: bool,
+        value_root: &ValueRootKey,
+        path: &[Arc<str>],
+        context: crate::semantic_query::ProjectionReductionContext,
+        observed_hash: verter_session_query::analysis::types::Hash16,
+    ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+        if path.is_empty() {
+            let signature = self.dep_signature_for(&value_root.scope.canonical_id, observed_hash);
+            let mut output = crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+                QueryResult::Value(node),
+                signature,
+            ))
+            .with_observed_self_roots([(
+                Arc::clone(&value_root.scope.canonical_id),
+                observed_hash,
+            )]);
+            // Two-signal fold: a partial composed class-surface read surfaces as
+            // a partial `TypeOf` result (it would otherwise pass through with
+            // `result_is_partial = false`).
+            output.fold_partial(composed_partial);
+            output.with_positional_guarantee()
+        } else {
+            let mut output =
+                self.project_typeof_path(node, path, context, observed_hash, value_root);
+            output.fold_partial(composed_partial);
+            output
+        }
+    }
+
+    /// [`Self::build_typeof`], which with `suspend` stops where the value's
+    /// type is its authored annotation: it hands the annotation's lowering
+    /// over in `suspend` for [`Self::drain_typeof`] to carry on, and its own
+    /// output is then not the answer.
+    fn build_typeof_suspending(
+        &self,
+        value_root: &ValueRootKey,
+        path: &[Arc<str>],
+        context: crate::semantic_query::ProjectionReductionContext,
+        suspend: Option<&mut Option<Box<TypeofBuild>>>,
+    ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
         // Telemetry for the typeof traversal site.
         if let Some(observer) = verter_audit::current_observer() {
             observer.record_event(verter_audit::AuditEvent::BuildTypeofCall);
@@ -1573,8 +1696,46 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         &mut substitutions,
                         context,
                     ),
-                    Some(verter_type_expr::facts::SemanticTypeSource::Authored(locator)) => self
-                        .lower_located_body_with_provenance(
+                    Some(verter_type_expr::facts::SemanticTypeSource::Authored(locator)) => {
+                        if let Some(suspended) = suspend {
+                            let self_value = match locator {
+                                verter_type_expr::locators::AuthoredBodyLocator::DeclBody(slot)
+                                    if slot.anchor.space
+                                        == verter_type_expr::locators::LocatorSymbolSpace::Value =>
+                                {
+                                    Some(slot.anchor.clone())
+                                }
+                                _ => None,
+                            };
+                            let body = self.begin_located_body_lowering(
+                                locator.clone(),
+                                verter_session_query::declarations::TypeDeclKind::Alias,
+                                &[],
+                                &empty_env,
+                                &scope,
+                                &mut substitutions,
+                                context,
+                                &[],
+                                super::locator_view_worklist::ProjectionSeam::suspending(),
+                            );
+                            *suspended = Some(Box::new(TypeofBuild {
+                                prepared: Arc::clone(&prepared),
+                                env: empty_env,
+                                scope,
+                                scope_payload,
+                                shadowing,
+                                substitutions,
+                                self_value,
+                                body,
+                                value_root: value_root.clone(),
+                                path: Arc::from(path.to_vec().into_boxed_slice()),
+                                context,
+                                observed_hash,
+                            }));
+                            return (QueryResult::Error(QueryError::Miss), empty_signature())
+                                .into();
+                        }
+                        self.lower_located_body_with_provenance(
                             locator.clone(),
                             verter_session_query::declarations::TypeDeclKind::Alias,
                             &[],
@@ -1585,7 +1746,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             &shadowing,
                             &mut substitutions,
                             context,
-                        ),
+                        )
+                    }
                     // A complex INFERRED annotation carries no closed fact — it is
                     // recovered by demand through the SAME authored value-position
                     // locator (the transient value-part re-borrow serves the
@@ -1727,27 +1889,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         } else {
             return (QueryResult::Error(QueryError::Miss), empty_signature()).into();
         };
-        let output = if path.is_empty() {
-            let signature = self.dep_signature_for(&value_root.scope.canonical_id, observed_hash);
-            let mut output = crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
-                QueryResult::Value(node_id),
-                signature,
-            ))
-            .with_observed_self_roots([(
-                Arc::clone(&value_root.scope.canonical_id),
-                observed_hash,
-            )]);
-            // Two-signal fold: a partial composed class-surface read surfaces as
-            // a partial `TypeOf` result (it would otherwise pass through with
-            // `result_is_partial = false`).
-            output.fold_partial(composed_partial);
-            output.with_positional_guarantee()
-        } else {
-            let mut output =
-                self.project_typeof_path(node_id, path, context, observed_hash, value_root);
-            output.fold_partial(composed_partial);
-            output
-        };
+        let output = self.typeof_output(
+            node_id,
+            composed_partial,
+            value_root,
+            path,
+            context,
+            observed_hash,
+        );
         self.with_augmentation_roots(output, augmentation_roots, augmentation_unobservable)
     }
 
@@ -12787,6 +12936,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if !is_union && self.intersection_arms_reduce_to_never(members) {
             return Some(self.string_number_symbol());
         }
+        let flattened;
+        let members = if is_union {
+            members
+        } else {
+            flattened = self.intersection_key_arms(members);
+            &flattened
+        };
         let keys: Vec<SemanticNodeId> = members
             .iter()
             .map(|member| self.key_set_of(*member))
@@ -12813,6 +12969,45 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return None;
         }
         Some(self.intern_normalized_union_or_intersection(&keys, !is_union))
+    }
+
+    /// The arms of an intersection whose keys `keyof` unions, with every
+    /// nested intersection spread in place — one written inside it, or the
+    /// body a declaration or application resolves to (an interface's or
+    /// class's heritage) — the flattening the checker's `getIntersectionType`
+    /// gives the same type. The walk is iterative, so a chain of N heritage
+    /// levels or N nested `&` operands is N sibling key reads, never N
+    /// nested `keyof` queries.
+    fn intersection_key_arms(&self, members: &[SemanticNodeId]) -> Vec<SemanticNodeId> {
+        let transit = crate::semantic_query::ProjectionReductionContext::structural_transit();
+        let mut arms = Vec::with_capacity(members.len());
+        let mut seen = FxHashSet::default();
+        let mut pending: Vec<SemanticNodeId> = members.iter().rev().copied().collect();
+        while let Some(arm) = pending.pop() {
+            if !seen.insert(arm) {
+                continue;
+            }
+            let nested = match self.graph().node_data(arm).as_deref() {
+                Some(SemanticNodeData::Intersection(nested)) => Some(nested.members_arc()),
+                Some(
+                    SemanticNodeData::DeclRef { .. } | SemanticNodeData::InstantiationRef { .. },
+                ) => {
+                    let settled = self.resolve_signature_source_carrier(arm, transit);
+                    match self.graph().node_data(settled).as_deref() {
+                        Some(SemanticNodeData::Intersection(nested)) if settled != arm => {
+                            Some(nested.members_arc())
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            };
+            match nested {
+                Some(nested) => pending.extend(nested.iter().rev().copied()),
+                None => arms.push(arm),
+            }
+        }
+        arms
     }
 
     /// `keyof` over a carrier the checker resolves: a declaration, an
@@ -18710,6 +18905,32 @@ pub(super) struct InstantiateBuild {
     enum_body: bool,
     body: BodyLowering,
     complete_structure: bool,
+}
+
+/// How a `typeof` build begins on the continuation runtime.
+pub(super) enum TypeofStart {
+    /// The `typeof` is answered.
+    Done(Box<crate::project_semantic_dispatch::walk::QueryBuildOutput>),
+    /// Its value's authored annotation is being lowered.
+    Build(Box<TypeofBuild>),
+}
+
+/// A `typeof` whose value's authored annotation is lowering, between the
+/// steps of its frame: the lowering's scope, the projection itself, and
+/// what the build's output roots on.
+pub(super) struct TypeofBuild {
+    prepared: Arc<verter_session_query::type_solver::PreparedValueDecl>,
+    env: FxHashMap<String, SemanticNodeId>,
+    scope: NodeScopeId,
+    scope_payload: Option<crate::resolver_core::bare_name_resolve::DeclarationScopePayload>,
+    shadowing: crate::resolver_core::scope_shadowing::ScopeShadowing,
+    substitutions: Vec<(Arc<str>, SemanticNodeId)>,
+    self_value: Option<verter_type_expr::locators::AuthoredAnchor>,
+    body: BodyLowering,
+    value_root: ValueRootKey,
+    path: Arc<[Arc<str>]>,
+    context: crate::semantic_query::ProjectionReductionContext,
+    observed_hash: verter_session_query::analysis::types::Hash16,
 }
 
 /// A declaration body's lowering in progress.

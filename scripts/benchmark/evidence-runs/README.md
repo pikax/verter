@@ -32,7 +32,7 @@ edits it. Shipped: `skr-perf0-structural`, `skr-mapped-indexb`, `switch-discrimi
 and peak memory beside whole-program TypeScript wall time),
 `skr-augment-scaleb` (a global interface merged from 2,000 script contributors
 and a module interface augmented by 2,000 unimported modules; cold Verter time
-and peak memory), `skr-scale-answers`.
+and peak memory), `skr-scale-answers`, `skr-mapped-expand`.
 
 `skr-mapped-indexb` demands conditional mapped values through the entire source
 key domain at 1,000, 3,000 and 10,000 keys. The recorded TypeScript 7.0.2 answer
@@ -52,6 +52,16 @@ numbers). Those two are answer obligations, not timing cells: the run sets
 `requireAllMatched`, so any Verter answer in it that does not match the
 measured TypeScript answer exactly (wrong, partial, refused or killed) fails
 the run.
+
+`skr-mapped-expand` demands homomorphic and remapped mapped types over
+concrete sources: the keys of a class built from 10, 25 and 40 mixins, the
+intersection a builder accumulates over 50, 200 and 500 calls, the 100, 1,000
+and 3,000 keys of an imported interface remapped through a recursive template
+conditional, and a generic interface heritage chain 10, 40 and 100 levels
+deep. TypeScript 7.0.2 answers each with the resolved object type. The run sets
+`requireAllMatched`, so every Verter answer must match the measured reference
+exactly; its required cells are the largest sizes' cold Verter `coldMs` and
+`peakBytes`.
 
 | Field                             | Meaning                                                                                                                                                                                                  |
 | --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

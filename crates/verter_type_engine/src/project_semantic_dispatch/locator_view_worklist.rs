@@ -250,8 +250,9 @@ struct ReferenceArgsState {
 
 enum ReferenceProjectionPlan {
     Ready(SemanticNodeId),
-    /// The reference projects to this instantiation's node.
-    Instantiate(SemanticQueryKey),
+    /// The reference projects to the node this query answers: an
+    /// instantiation, or a value's `typeof`.
+    Query(SemanticQueryKey),
     NeedsArgs {
         continuation: CarrierArgsContinuation,
         args: Arc<[SemanticNodeId]>,
@@ -484,6 +485,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 {
                     return ReferenceProjectionPlan::Ready(node);
                 }
+                // The value's own type is the node its `typeof` answers,
+                // which a suspending projection waits on as it waits on an
+                // instantiation.
+                if path.is_empty() && type_args.is_empty() {
+                    return ReferenceProjectionPlan::Query(
+                        self.typeof_key_with_path(value_root, path, context),
+                    );
+                }
                 let result = match self.execute_type_node(self.typeof_key_with_path(
                     value_root.clone(),
                     Arc::clone(&path),
@@ -576,7 +585,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 if !routes_through_instantiate {
                     return ReferenceProjectionPlan::Ready(anchor);
                 }
-                ReferenceProjectionPlan::Instantiate(SemanticQueryKey::Instantiate(
+                ReferenceProjectionPlan::Query(SemanticQueryKey::Instantiate(
                     crate::semantic_query::InstantiateKey::new(
                         self.type_slot_for(
                             Arc::clone(&identity.canonical_id),
@@ -1627,12 +1636,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         self.memoize_projected(memo, node, context, result);
                         Ok(false)
                     }
-                    ReferenceProjectionPlan::Instantiate(key) if seam.suspend => {
+                    ReferenceProjectionPlan::Query(key) if seam.suspend => {
                         frames.push(ProjectionFrame::AwaitInstantiation { node, context });
                         seam.need = Some(key);
                         Ok(true)
                     }
-                    ReferenceProjectionPlan::Instantiate(key) => {
+                    ReferenceProjectionPlan::Query(key) => {
                         let result = self.instantiated_node(key);
                         work_credit.refresh()?;
                         self.memoize_projected(memo, node, context, result);

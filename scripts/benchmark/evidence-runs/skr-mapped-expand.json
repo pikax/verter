@@ -1,0 +1,59 @@
+{
+  "name": "skr-mapped-expand",
+  "description": "Mapped types over concrete sources resolved to object types: a 10/25/40-mixin class, a 50/200/500-call builder intersection, a 100/1,000/3,000-key recursive template remap and a 10/40/100-level generic heritage chain; cold Verter time and peak memory at each largest size, and every answer must match tsc exactly.",
+  "tier": "standard",
+  "scenarios": [
+    "mapped-expand-mixins-10",
+    "mapped-expand-mixins-25",
+    "mapped-expand-mixins-40",
+    "mapped-expand-builder-50",
+    "mapped-expand-builder-200",
+    "mapped-expand-builder-500",
+    "mapped-expand-remap-100",
+    "mapped-expand-remap-1000",
+    "mapped-expand-remap-3000",
+    "mapped-expand-heritage-10",
+    "mapped-expand-heritage-40",
+    "mapped-expand-heritage-100"
+  ],
+  "settings": ["strict"],
+  "arms": ["verter"],
+  "modes": ["cold"],
+  "threads": ["default"],
+  "requireAllMatched": true,
+  "noise": "docs/contributing/semantic-benchmark.md#verdicts",
+  "requiredCells": [
+    {
+      "scenario": "mapped-expand-mixins-40",
+      "setting": "strict",
+      "arm": "verter",
+      "mode": "cold",
+      "threads": "default",
+      "metrics": ["coldMs", "peakBytes"]
+    },
+    {
+      "scenario": "mapped-expand-builder-500",
+      "setting": "strict",
+      "arm": "verter",
+      "mode": "cold",
+      "threads": "default",
+      "metrics": ["coldMs", "peakBytes"]
+    },
+    {
+      "scenario": "mapped-expand-remap-3000",
+      "setting": "strict",
+      "arm": "verter",
+      "mode": "cold",
+      "threads": "default",
+      "metrics": ["coldMs", "peakBytes"]
+    },
+    {
+      "scenario": "mapped-expand-heritage-100",
+      "setting": "strict",
+      "arm": "verter",
+      "mode": "cold",
+      "threads": "default",
+      "metrics": ["coldMs", "peakBytes"]
+    }
+  ]
+}
