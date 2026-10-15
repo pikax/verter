@@ -2825,7 +2825,13 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 crate::semantic_query::LiteralValue::String(name.to_string()),
             ));
             let mut selected_mapper = mapper.clone();
-            if !source_reads.is_empty() {
+            // An accessor read infers its getter's return. That demand
+            // belongs only to a branch that selects the read, so the
+            // ordinary evaluator reads accessors lazily.
+            let accessor_read = source_index
+                .as_ref()
+                .is_some_and(|index| index.project_known_key_accessor(&property).is_some());
+            if !source_reads.is_empty() && !accessor_read {
                 let (Some(SemanticNodeData::Object(surface)), Some(index), Some(source_object)) =
                     (source_data.as_deref(), source_index.as_ref(), source_object)
                 else {
@@ -2834,10 +2840,11 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 let Some(read_value) =
                     self.known_member_read(source_object, surface, &property, Some(index), true)
                 else {
-                    return FiniteMappedIndexValues::Stopped(Box::new(QueryBuildOutput::from((
+                    let miss = QueryBuildOutput::from((
                         QueryResult::Error(QueryError::Miss),
                         Arc::clone(self.fence),
-                    ))));
+                    ));
+                    return self.stop_finite_mapped_with(miss, object, index_node);
                 };
                 // A prepared read carries the same polymorphic receiver as
                 // the ordinary single-member projection.
@@ -2883,7 +2890,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             self.cache_suppress |= output.cache_suppress;
             let value = match output.result {
                 QueryResult::Value(value) => value,
-                _ => return FiniteMappedIndexValues::Stopped(Box::new(output)),
+                _ => return self.stop_finite_mapped_with(output, object, index_node),
             };
             let value = self.mapped_index_read(mapper, value, source, source_optional);
             self.graph().record_origin_edge(
@@ -2907,14 +2914,35 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 self.graph().node_data(value).as_deref(),
                 Some(SemanticNodeData::Opaque(QueryError::Miss))
             ) {
-                return FiniteMappedIndexValues::Stopped(Box::new(QueryBuildOutput::from((
+                let miss = QueryBuildOutput::from((
                     QueryResult::Error(QueryError::Miss),
                     Arc::clone(self.fence),
-                ))));
+                ));
+                return self.stop_finite_mapped_with(miss, object, index_node);
             }
             values.push(value);
         }
         FiniteMappedIndexValues::Complete(values)
+    }
+
+    /// A batch that stops on a direct result keeps the state earlier keys
+    /// collected: completeness, cache suppression, diagnostics and roots.
+    fn stop_finite_mapped_with(
+        &mut self,
+        output: QueryBuildOutput,
+        object: SemanticNodeId,
+        index: SemanticNodeId,
+    ) -> FiniteMappedIndexValues {
+        let mut output = output.with_observed_self_roots(
+            self.dispatch
+                .observed_self_roots_from_nodes([object, index]),
+        );
+        output.merge_completeness(self.completeness);
+        output.cache_suppress |= self.cache_suppress;
+        output
+            .walker_diagnostics
+            .append(&mut self.walker_diagnostics);
+        FiniteMappedIndexValues::Stopped(Box::new(output))
     }
 
     fn stop_finite_mapped_batch(

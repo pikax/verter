@@ -505,32 +505,79 @@ fn assert_navigate_mapped_value(source: &str, probe: &str, expected: &str) {
     );
 }
 
-#[test]
-fn selected_mapped_conditional_does_not_read_a_dormant_getter() {
+/// Resolve `Probe` through the public named-symbol request: `None` when the
+/// demand does not complete, else whether the answer matches `expected`.
+fn public_probe(source: &str, probe: &str, expected: &str) -> Option<bool> {
+    use crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::checker_syntax;
     use std::sync::Arc;
-    use verter_type_engine::project_semantic_dispatch::raise::{
-        enable_dispatch_trace_for_test, DISPATCH_TRACE,
-    };
     let host = crate::VerterHost::new_standalone(crate::HostConfig::default());
-    let _ = host.upsert(crate::UpsertRequest {
-        canonical_id: Some("/getters.ts".into()), input_id: "/getters.ts".into(),
-        source: Arc::from("function value() { return { value: 1 }; } class S { get a() { return value().value; } b = 1 as const; } type Probe = { [K in keyof S]: K extends 'a' ? 'ok' : S[K] }[keyof S];"),
-        file_language: crate::FileLanguage::script_ts(), aliases: vec![],
-    }).expect("fixture admitted");
-    let _trace = enable_dispatch_trace_for_test();
+    let _ = host
+        .upsert(crate::UpsertRequest {
+            canonical_id: Some("/getters.ts".into()),
+            input_id: "/getters.ts".into(),
+            source: Arc::from(format!("{source}\ntype Probe = {probe}; export {{}};")),
+            file_language: crate::FileLanguage::script_ts(),
+            aliases: vec![],
+        })
+        .expect("fixture admitted");
     let (answer, _) = host
         .resolve_named_symbol_with_audit("/getters.ts", "Probe", None)
         .into_parts();
-    assert!(answer.expect("demand completes").is_some());
-    let getter_reads = DISPATCH_TRACE.with(|trace| {
-        trace
-            .borrow()
-            .iter()
-            .filter(|kind| **kind == "FlowReturn")
-            .count()
-    });
+    let node = answer.ok()?.expect("probe exists");
+    let dispatch = super::ProjectSemanticDispatch::new(&host);
+    let expected = checker_syntax::parse(expected).expect("checker answer parses");
+    Some(checker_syntax::matches_node(&dispatch, node, &expected, 0))
+}
+
+/// A getter whose return inference this engine refuses (a closure assigns
+/// the returned local), so any read of `S['a']` is observable by its outcome.
+const REFUSED_GETTER: &str =
+    "class S { get a() { let x = 0; (() => { x = 1; })(); return x; } b = 1 as const; }";
+
+#[test]
+fn selected_mapped_conditional_does_not_read_a_dormant_getter() {
     assert_eq!(
-        getter_reads, 0,
-        "the winning literal branch never reads the getter body"
+        public_probe(REFUSED_GETTER, "S['a']", "number"),
+        None,
+        "fixture precondition: a direct getter read does not complete"
     );
+    // Control: the branch `K = 'a'` selects reads the getter, with the
+    // same outcome as the direct read.
+    assert_eq!(
+        public_probe(
+            REFUSED_GETTER,
+            "{ [K in keyof S]: K extends 'b' ? 'ok' : S[K] }[keyof S]",
+            "\"ok\" | number",
+        ),
+        None,
+        "a selected getter read reaches the getter"
+    );
+    // TypeScript 7.0.2 answers `"ok" | 1`: the getter is read only by the
+    // branch `K = 'a'` does not select, so it cannot taint the answer.
+    assert_eq!(
+        public_probe(
+            REFUSED_GETTER,
+            "{ [K in keyof S]: K extends 'a' ? 'ok' : S[K] }[keyof S]",
+            "\"ok\" | 1",
+        ),
+        Some(true),
+        "the winning literal branch never reads the getter"
+    );
+}
+
+#[test]
+fn branded_key_space_never_enumerates_its_brand_members() {
+    // TypeScript 7.0.2 keeps `string & { __brand: "U" }` as the key type:
+    // the object arm brands the string, it never contributes `__brand`.
+    let source = "type B = string & { __brand: 'U' };";
+    for (probe, forbidden) in [
+        ("{ [K in B]: K }[B]", "\"__brand\""),
+        ("{ [K in 'x' | B]: K }['x' | B]", "\"x\" | \"__brand\""),
+    ] {
+        assert_ne!(
+            public_probe(source, probe, forbidden),
+            Some(true),
+            "{probe} must not read the brand's member names as keys"
+        );
+    }
 }
