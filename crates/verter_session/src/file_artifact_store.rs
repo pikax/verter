@@ -1551,6 +1551,25 @@ impl FileArtifactStore {
         expected_parse_key: &verter_language::ParseKey,
         expected_file_language: &FileLanguage,
     ) -> Option<Arc<IndexedReady>> {
+        self.get_base_artifacts(
+            canonical_id,
+            expected_whole_hash,
+            expected_parse_key,
+            expected_file_language,
+        )
+        .map(|artifacts| Arc::clone(&artifacts.indexed))
+    }
+
+    /// [`Self::get`] returning the whole base `FileArtifacts` entry, for a
+    /// reader that also consumes the artifact's parse facts.
+    #[must_use]
+    pub(crate) fn get_base_artifacts(
+        &self,
+        canonical_id: &str,
+        expected_whole_hash: Hash16,
+        expected_parse_key: &verter_language::ParseKey,
+        expected_file_language: &FileLanguage,
+    ) -> Option<Arc<FileArtifacts>> {
         if self.schema_version != verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
             return None;
         }
@@ -1569,7 +1588,7 @@ impl FileArtifactStore {
                     let stored = entry.value();
                     stored.record_hit();
                     stored.record_access(self.next_access_tick());
-                    Arc::clone(&stored.payload.indexed)
+                    Arc::clone(&stored.payload)
                 })
         });
         if let Some(ctx) = verter_type_engine::request_context::current_request_context() {
