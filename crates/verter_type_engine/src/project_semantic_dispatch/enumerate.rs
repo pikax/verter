@@ -779,26 +779,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     return None;
                 }
                 work.push((node, true));
-                match data.as_ref() {
-                    composite
-                    @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => work
-                        .extend(
-                            composite
-                                .composite_members()
-                                .expect("key composition")
-                                .iter()
-                                .rev()
-                                .map(|&child| (child, false)),
-                        ),
-                    SemanticNodeData::KeyOf { base }
-                        if matches!(
-                            self.graph().node_data(*base).as_deref(),
-                            Some(SemanticNodeData::Object(_))
-                        ) =>
-                    {
-                        work.push((*base, false))
-                    }
-                    _ => {}
+                if let composite
+                @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) =
+                    data.as_ref()
+                {
+                    work.extend(
+                        composite
+                            .composite_members()
+                            .expect("key composition")
+                            .iter()
+                            .rev()
+                            .map(|&child| (child, false)),
+                    );
                 }
                 continue;
             }
@@ -831,57 +823,56 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     broad: FxHashSet::from_iter([*kind]),
                     ..Default::default()
                 }),
-                SemanticNodeData::Object(surface) => {
-                    let mut keys = Vec::new();
-                    let mut broad = FxHashSet::default();
-                    let mut closed = !(surface.closed().has_index_signature()
-                        && surface.index_signatures.is_empty());
-                    for member in surface.positive_members() {
-                        if let Err(reasons) = self.charge_connected_work() {
-                            self.fold_local_partial_completeness(reasons);
-                            return None;
-                        }
-                        if !member.visibility.is_public() {
-                            if surface.closed().has_index_signature() {
-                                closed = false;
+                // An object surface names keys only as a `keyof` base; an
+                // object arm of a key type (`string & { __brand: 'U' }`)
+                // is a brand, not a key set.
+                SemanticNodeData::KeyOf { base } => {
+                    match self.graph().node_data(*base).as_deref() {
+                        Some(SemanticNodeData::Object(surface)) => {
+                            let mut keys = Vec::new();
+                            let mut broad = FxHashSet::default();
+                            let mut closed = !(surface.closed().has_index_signature()
+                                && surface.index_signatures.is_empty());
+                            for member in surface.positive_members() {
+                                if let Err(reasons) = self.charge_connected_work() {
+                                    self.fold_local_partial_completeness(reasons);
+                                    return None;
+                                }
+                                if !member.visibility.is_public() {
+                                    if surface.closed().has_index_signature() {
+                                        closed = false;
+                                    }
+                                    continue;
+                                }
+                                if let Some(key) = member.key.cloned_known() {
+                                    keys.push(key);
+                                } else {
+                                    closed = false;
+                                }
                             }
-                            continue;
+                            for signature in surface.index_signatures.iter() {
+                                match self.graph().node_data(signature.key_type).as_deref() {
+                                    Some(SemanticNodeData::Primitive(PrimitiveKind::String)) => {
+                                        broad
+                                            .extend([PrimitiveKind::String, PrimitiveKind::Number]);
+                                    }
+                                    Some(SemanticNodeData::Primitive(
+                                        kind @ (PrimitiveKind::Number | PrimitiveKind::Symbol),
+                                    )) => {
+                                        broad.insert(*kind);
+                                    }
+                                    _ => closed = false,
+                                }
+                            }
+                            closed.then(|| {
+                                let mut domain =
+                                    KeySpaceDomain::finite(KeyDomainKey::from_keys(keys));
+                                domain.broad = broad;
+                                domain
+                            })
                         }
-                        if let Some(key) = member.key.cloned_known() {
-                            keys.push(key);
-                        } else {
-                            closed = false;
-                        }
+                        _ => None,
                     }
-                    for signature in surface.index_signatures.iter() {
-                        match self.graph().node_data(signature.key_type).as_deref() {
-                            Some(SemanticNodeData::Primitive(PrimitiveKind::String)) => {
-                                broad.extend([PrimitiveKind::String, PrimitiveKind::Number]);
-                            }
-                            Some(SemanticNodeData::Primitive(
-                                kind @ (PrimitiveKind::Number | PrimitiveKind::Symbol),
-                            )) => {
-                                broad.insert(*kind);
-                            }
-                            _ => closed = false,
-                        }
-                    }
-                    closed.then(|| {
-                        let mut domain = KeySpaceDomain::finite(KeyDomainKey::from_keys(keys));
-                        domain.broad = broad;
-                        domain
-                    })
-                }
-                SemanticNodeData::KeyOf { base }
-                    if matches!(
-                        self.graph().node_data(*base).as_deref(),
-                        Some(SemanticNodeData::Object(_))
-                    ) =>
-                {
-                    done.get(base)
-                        .cloned()
-                        .flatten()
-                        .map(|domain| (*domain).clone())
                 }
                 composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
                     let arms = composite.composite_members().expect("key composition");
@@ -933,7 +924,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 self.graph().node_data(object).as_deref(),
                 Some(SemanticNodeData::Object(_))
             ) {
-                return self.known_key_space_domain(object);
+                // The resolved view's own `keyof` node carries the reusable
+                // domain memo.
+                let keyof = self
+                    .graph()
+                    .intern_node(SemanticNodeData::KeyOf { base: object });
+                return self.known_key_space_domain(keyof);
             }
         }
         // Key-set reads stay in structural transit. The explicit stack also
@@ -1216,6 +1212,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
                 Some(KeySpaceLeaf::Next(instantiated))
             }
+            // An object arm of a key type (`string & { __brand: 'U' }`) is a
+            // brand, not a key set; its member names are `keyof` evidence
+            // only, which the `KeyOf` arm owns.
+            SemanticNodeData::Object(_)
+            | SemanticNodeData::ObjectSpreadProgram(_)
+            | SemanticNodeData::MergedDecl { .. } => None,
             _ => self
                 .key_names_from_base_node(resolved)
                 .map(KeyDomainKey::from_keys)
