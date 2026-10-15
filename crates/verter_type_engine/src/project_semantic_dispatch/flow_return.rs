@@ -3463,8 +3463,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// structural `T | T = T`) — with an O(1) canonicality test first: a
     /// top whose payload carries the at-rest `Canonical` origin category
     /// was minted by a COMPLETE canonicalization — the canonical builder
-    /// refuses that stamp on incomplete evidence (over-cap arm set,
-    /// exhausted compare budget, dangling arm, undecided peek all mint
+    /// refuses that stamp on incomplete evidence (exhausted compare
+    /// budget, dangling arm, undecided peek all mint
     /// `CanonicalUnproven`) — so its list IS in canonical form (a
     /// complete canonicalization is deterministic over immutable node
     /// data) and the closure returns it unchanged WITHOUT re-running the
@@ -6553,6 +6553,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             self_slot: Some(key),
             resolving_functions: std::rc::Rc::default(),
             this_free_values: std::rc::Rc::default(),
+            declared_type_reads: std::rc::Rc::default(),
             canonical,
             owner,
             nullability: key.context.policy.nullability,
@@ -11390,6 +11391,13 @@ struct FlowEvaluator<'d, 'b, D: FlowDemandDriver> {
     /// it holds only nodes this evaluation walked, so it is bounded by the
     /// evaluation's own work.
     this_free_values: std::rc::Rc<std::cell::RefCell<rustc_hash::FxHashSet<SemanticNodeId>>>,
+    /// Every type this evaluation has read as the checker reads a declared
+    /// type ([`FlowEvaluator::declared_positional_read`]), by node, shared
+    /// by every nested evaluator of one root evaluation and dropped with
+    /// it. Request-scoped: it holds only nodes this evaluation read, so a
+    /// structure entering the flow again is walked once.
+    declared_type_reads:
+        std::rc::Rc<std::cell::RefCell<rustc_hash::FxHashMap<SemanticNodeId, SemanticNodeId>>>,
     canonical: &'d str,
     owner: verter_type_expr::TopLevelOwnerId,
     /// The `null` / `undefined` algebra of the function's own project
@@ -26529,8 +26537,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             loop {
                 match run.waiting.pop() {
                     None => return ExprProgress::Done(value),
+                    // A declared type enters the flow as the checker reads
+                    // it: a positional indexed access resolved to the
+                    // element it reads, then erased.
                     Some(Waiting::Erase) => {
                         if let Positional::Value(node) = value {
+                            let node = self.declared_positional_read(node);
                             value = Positional::Value(
                                 self.dispatch.erase_nullable_members(node, self.nullability),
                             );

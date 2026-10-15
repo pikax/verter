@@ -332,8 +332,8 @@ pub fn relate_named_types_for_tests(
     scope_canonical_id: &str,
     source: &str,
     target: &str,
-    construction_byte_limit: Option<usize>,
-) -> (bool, usize, usize) {
+    construction_byte_limit: Option<u64>,
+) -> (bool, usize, u64) {
     let dispatch =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
     if let Some(limit) = construction_byte_limit {
@@ -371,8 +371,8 @@ pub fn reduce_named_template_for_tests(
     host: &crate::VerterHost,
     scope_canonical_id: &str,
     name: &str,
-    construction_byte_limit: Option<usize>,
-) -> (bool, usize) {
+    construction_byte_limit: Option<u64>,
+) -> (bool, u64) {
     let dispatch =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
     if let Some(limit) = construction_byte_limit {

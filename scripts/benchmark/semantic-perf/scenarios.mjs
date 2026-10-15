@@ -294,6 +294,58 @@ export function allScenarios() {
     );
   }
 
+  // Recursive conditionals over an `as const` route tree: n parents of five
+  // children each, every name and every joined path collected by inferring
+  // through the readonly tuples.
+  const routeTree = (n) =>
+    `const routes = [\n${range(n)
+      .map(
+        (i) =>
+          `  { name: "r${i}", path: "/r${i}", children: [${range(5)
+            .map((j) => `{ name: "r${i}c${j}", path: "c${j}" }`)
+            .join(", ")}] },\n`,
+      )
+      .join("")}] as const;\n` +
+    "type Names<R> = R extends readonly (infer E)[]\n" +
+    "  ? E extends { name: infer N } ? N | (E extends { children: infer C } ? Names<C> : never) : never\n" +
+    "  : never;\n" +
+    'type Paths<R, P extends string = ""> = R extends readonly (infer E)[]\n' +
+    "  ? E extends { path: infer S extends string }\n" +
+    "    ? `${P}${S}` | (E extends { children: infer C } ? Paths<C, `${P}${S}/`> : never)\n" +
+    "    : never\n" +
+    "  : never;\n";
+  for (const n of [20, 100, 300]) {
+    out.push(
+      scenario(
+        `route-tree-names-${n}`,
+        "recursive-inference",
+        `every name of an as-const route tree of ${n} parents with five children each`,
+        routeTree(n),
+        "Names<typeof routes>",
+      ),
+    );
+    out.push(
+      scenario(
+        `route-tree-paths-${n}`,
+        "recursive-inference",
+        `every joined path of an as-const route tree of ${n} parents with five children each`,
+        routeTree(n),
+        "Paths<typeof routes>",
+      ),
+    );
+  }
+  // The names alone past two thousand parents: twelve thousand names, every
+  // child name collected through the recursive branch.
+  out.push(
+    scenario(
+      "route-tree-names-2000",
+      "recursive-inference",
+      "every name of an as-const route tree of 2000 parents with five children each",
+      routeTree(2000),
+      "Names<typeof routes>",
+    ),
+  );
+
   // Inference.
   for (const n of [1025, 5000]) {
     out.push(
@@ -338,7 +390,7 @@ export function allScenarios() {
       ),
     );
   }
-  for (const n of [10, 100, 1000]) {
+  for (const n of [10, 100, 1000, 6000]) {
     out.push(
       scenario(
         `infer-pattern-repeat-${n}`,
@@ -629,6 +681,8 @@ export const SCENARIO_TIERS = {
   "alias-chain-50": "quick",
   "conditional-chain-97": "quick",
   "tail-recursive-parse-50": "quick",
+  "route-tree-names-20": "quick",
+  "route-tree-paths-20": "quick",
   "inference-deposits-1025": "quick",
   "overloads-1025": "quick",
   "contravariant-callbacks-10": "quick",
@@ -662,6 +716,10 @@ export const SCENARIO_TIERS = {
   "tail-recursive-parse-500": "standard",
   "tail-recursive-parse-999": "standard",
   "tail-recursive-parse-1000": "standard",
+  "route-tree-names-100": "standard",
+  "route-tree-paths-100": "standard",
+  "route-tree-names-300": "standard",
+  "route-tree-paths-300": "standard",
   "inference-deposits-5000": "standard",
   "contravariant-callbacks-100": "standard",
   "contravariant-callbacks-500": "standard",
@@ -678,6 +736,8 @@ export const SCENARIO_TIERS = {
   "alias-chain-1000-1mib": "stress",
   "conditional-chain-500": "stress",
   "infer-pattern-repeat-1000": "stress",
+  "infer-pattern-repeat-6000": "stress",
+  "route-tree-names-2000": "stress",
 };
 
 export const TIERS = ["quick", "standard", "stress"];

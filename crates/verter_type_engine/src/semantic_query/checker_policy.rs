@@ -30,6 +30,15 @@ use crate::semantic_query_memo::SemanticGraphStore;
 /// deep fails with TS2589.
 pub(crate) const INSTANTIATION_DEPTH: u32 = 100;
 
+/// The checker's `instantiationCount` limit: once checking one statement
+/// has instantiated this many types, the next instantiation fails with
+/// TS2589. Measured on TypeScript 7.0.2 (`--extendedDiagnostics`): a
+/// distributive conditional repeating one `infer` instantiates 7 types per
+/// union member, and the recursive conditional collecting an `as const`
+/// route tree's names 219 per parent of five children, so the checker
+/// answers those shapes up to about 714,000 members and 22,800 parents.
+pub(crate) const INSTANTIATION_COUNT: u32 = 5_000_000;
+
 /// The checker's `checkCrossProductUnion` limit: an intersection
 /// distributed over unions, a template literal over union spans, or an
 /// object spread over union operands whose cross product has at least this

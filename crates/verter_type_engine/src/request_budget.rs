@@ -22,7 +22,7 @@ use crate::project_semantic_dispatch::cost_receipt::CostIdentity;
 /// utility / projection / generic-expansion recursion before the call
 /// stack exhausts. The cap is constructor-time on
 /// `HostConfig::projection_op_budget`; a value of `0` preserves the
-/// default of 16,384.
+/// default, [`DEFAULT_PROJECTION_OP_BUDGET`].
 ///
 /// The set of `SemanticQueryKey` kinds that count is the aggregate
 /// work-budget gate
@@ -36,12 +36,16 @@ use crate::project_semantic_dispatch::cost_receipt::CostIdentity;
 ///
 /// # Default rationale
 ///
-/// The default `16,384` is a **fuse threshold**, not a correctness
-/// boundary. It is sized so legitimate component-meta resolutions on
-/// representative corpora (nuxt-ui, element-plus, primevue, etc.)
-/// complete well under the cap with substantial headroom. Wide, finite
-/// switch unions also project each discriminant and return member.
-/// Pathological projections — recursive `Pick<...>` chains over
+/// The default is a **fuse threshold**, not a correctness boundary: the
+/// checker's own instantiation allowance
+/// ([`checker_policy::INSTANTIATION_COUNT`]). One operation is one counted
+/// query computed, coarser than the checker's instantiation: a distributive
+/// conditional repeating an `infer` costs 3 operations per union member
+/// where the checker instantiates 7, and a recursive conditional over an
+/// `as const` route tree 13 per parent where the checker instantiates 219.
+/// So a finite computation the checker answers within its allowance does
+/// not trip the fuse, and a smaller allowance would refuse where the
+/// checker answers. Pathological projections — recursive `Pick<...>` chains over
 /// untyped barrels, deep `Surface[K1][K2]...[Kn]` walks with missing
 /// types, generic-helper instantiation storms — still exhaust the finite
 /// allowance and surface a partial.
@@ -74,6 +78,8 @@ use crate::project_semantic_dispatch::cost_receipt::CostIdentity;
 /// ([`Self::admit_replayed_operations`]), so a request trips the fuse at
 /// the same point whether its sub-results were computed now, earlier in
 /// the request, or by an earlier request.
+///
+/// [`checker_policy::INSTANTIATION_COUNT`]: crate::semantic_query::checker_policy::INSTANTIATION_COUNT
 #[derive(Debug)]
 pub struct RequestBudget {
     /// Projection-operation budget for the request.
@@ -85,8 +91,10 @@ pub struct RequestBudget {
 }
 
 /// Default finite headroom for projection operations, shared by host
-/// configuration and the zero-config fallback.
-pub const DEFAULT_PROJECTION_OP_BUDGET: usize = 16_384;
+/// configuration and the zero-config fallback: the checker's instantiation
+/// allowance (see [`RequestBudget`]'s default rationale).
+pub const DEFAULT_PROJECTION_OP_BUDGET: usize =
+    crate::semantic_query::checker_policy::INSTANTIATION_COUNT as usize;
 
 /// The computations a request has paid the operations of, in the order it
 /// paid them, with an order-independent digest of the set: a demand's entry
@@ -568,12 +576,21 @@ mod tests {
         );
     }
 
+    /// A zero cap falls back to the finite default, the checker's whole
+    /// instantiation allowance: a smaller one would refuse inputs the
+    /// checker answers.
     #[test]
     fn request_budget_zero_cap_falls_back_to_finite_default() {
+        assert_eq!(
+            DEFAULT_PROJECTION_OP_BUDGET,
+            crate::semantic_query::checker_policy::INSTANTIATION_COUNT as usize
+        );
         let budget = RequestBudget::new(0);
-        for _ in 0..DEFAULT_PROJECTION_OP_BUDGET - 1 {
-            assert!(!budget.check_projection_op_count());
-        }
+        assert!(budget.admit_replayed_operations(
+            (DEFAULT_PROJECTION_OP_BUDGET - 1) as u64,
+            budget.operations_paid(),
+            Vec::new(),
+        ));
         assert!(!budget.check_projection_op_count(), "last call at cap");
         assert!(
             budget.check_projection_op_count(),

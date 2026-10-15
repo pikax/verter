@@ -2510,6 +2510,10 @@ fn snippet_unresolved_params_carrier_drops_the_slot_at_the_dto_surface() {
         &recovered_view,
         recovered_overlay,
     );
+    // The fresh resolution reads through the post-upsert view: a dispatch
+    // bound to the earlier view keeps validating against that earlier world.
+    let recovered_dispatch =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&recovered_ctx);
     let recovered_facts = host
         .resolve_svelte_script_facts_with_ctx(&recovered_ctx, component)
         .expect_exact("svelte facts after the dependency appears");
@@ -2518,10 +2522,14 @@ fn snippet_unresolved_params_carrier_drops_the_slot_at_the_dto_surface() {
         .props_type
         .as_ref()
         .expect("props type");
-    let recovered_surface =
-        navigate_param_to_object_surface(&recovered_ctx, &dispatch, component, recovered_props)
-            .resolved_for_tests()
-            .expect("props surface after recovery");
+    let recovered_surface = navigate_param_to_object_surface(
+        &recovered_ctx,
+        &recovered_dispatch,
+        component,
+        recovered_props,
+    )
+    .resolved_for_tests()
+    .expect("props surface after recovery");
     let recovered_filtered = retain_test_snippet_members(&recovered_surface, &["bad", "good"]);
     let recovered_resolved = macro_surface_shell(
         recovered_filtered,
@@ -2529,7 +2537,7 @@ fn snippet_unresolved_params_carrier_drops_the_slot_at_the_dto_surface() {
         component,
     );
     let recovered_slots =
-        svelte_snippet_slot_fields_from_typeinfo_surface(&dispatch, &recovered_resolved);
+        svelte_snippet_slot_fields_from_typeinfo_surface(&recovered_dispatch, &recovered_resolved);
     let recovered_bad = recovered_slots
         .iter()
         .find(|s| s.name == "bad")

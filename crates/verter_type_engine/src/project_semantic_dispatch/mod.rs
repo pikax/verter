@@ -927,7 +927,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// Replace the construction-byte allowance for the next connected
     /// demand. Test-only.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn set_construction_byte_limit_for_tests(&self, bytes: usize) {
+    pub fn set_construction_byte_limit_for_tests(&self, bytes: u64) {
         self.connected_demand.set_byte_limit_for_tests(bytes);
     }
 

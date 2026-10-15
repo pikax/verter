@@ -271,6 +271,13 @@ pub fn dispatch_warm_for(key: &crate::semantic_query::SemanticQueryKey) -> usize
     DISPATCH_KEY_WARM_COUNTS.with(|c| c.borrow().get(&digest).copied().unwrap_or(0) as usize)
 }
 
+/// The number of keys this thread has built cold more than once since
+/// thread start: each is a read a stored entry should have served.
+#[cfg(any(test, feature = "test-support"))]
+pub fn keys_built_cold_more_than_once() -> usize {
+    DISPATCH_KEY_COLD_COUNTS.with(|c| c.borrow().values().filter(|count| **count > 1).count())
+}
+
 #[cfg(any(test, feature = "test-support"))]
 pub(super) fn query_key_discriminant(key: &SemanticQueryKey) -> &'static str {
     match key {

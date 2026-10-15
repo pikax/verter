@@ -3395,10 +3395,11 @@ impl verter_session_query::facts::store_view::StoreView for HostStoreView {
                     .augmentation_fingerprint(target, self.augmentation_population())
                 {
                     Some(current) => current == fact.expected_hash,
-                    // No entry visible from this view's artifact root — the
-                    // augmentation index has not been populated under this
-                    // view. Refuse the candidate so the consumer recomputes
-                    // through the cold path (which will populate the index).
+                    // Neither a version visible at this view's artifact
+                    // root nor a live entry — the augmentation index has
+                    // not been populated. Refuse the candidate so the
+                    // consumer recomputes through the cold path (which will
+                    // populate the index).
                     None => false,
                 }
             }

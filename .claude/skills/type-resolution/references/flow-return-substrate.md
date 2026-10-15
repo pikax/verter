@@ -70,7 +70,7 @@ member. A reduction keeping every constituent preserves the original declared
 carrier and its print origin.
 The partition is evaluation-local and introduces no reusable-cache authority.
 The finite default limits allow 16,384 selected graph nodes and 32,768 proof
-obligations; the request projection fuse defaults to 16,384 operations.
+obligations; the request projection fuse defaults to the checker's 5,000,000-instantiation allowance.
 These limits admit wide finite switches without changing the typed refusal or
 no-warm-admission rules for a request that exceeds its configured allowance.
 
@@ -265,6 +265,20 @@ A `switch` clause's relation is `SliceSwitchTest::{Default, Literal, Unmodeled}`
 Statement-position calls take the same discipline: a callee is inert only when it is a closed same-file declaration that is not an assertion and provably completes; a proven non-returning callee ends the path; every other call degrades rather than lowering to a bare throw point with its argument dropped.
 
 Gap COUNT cannot discriminate these defects — a modeled fact and a proved-inert fact both mint zero gaps — so a regression test for this contract must assert the lowered guard SHAPE or the boundary degradation, never the gap count alone.
+
+### Positional Element Reads
+
+A numeric key of an array, a tuple or a string is the checker's indexed access by the key's type, in expression position and in a declared type alike.
+
+- **Expression position.** A literal-index read rooted at a frame binding reads through the frame's substitution and narrowings. One free of frame bindings (`ROLES[0]` over an imported or module-level `as const` tuple) lowers in `flow_slice_content.rs` to `SliceExpr::ElementAccess` when the shared leaf has no answer, and the evaluator reads its object's type by its key's type (`flow_return_operators.rs` `element_type` → `positional_read`).
+- **Declared types.** A declared type entering the flow (`Waiting::Erase` in `run_expr`) passes `declared_positional_read` first: an `IndexedAccess` of a positional object by a numeric key — `(typeof ROLES)[number]`, `T[0]` — is the element it reads, as the checker resolves a non-generic `T[K]` when it reads the type node — wherever it is nested: a union member (`T[number] | null`, an optional member's `| undefined`), an array or tuple element, an object member or index-signature value, a signature's parameter, return or predicate. The walk is structural and memoized per root evaluation (`declared_type_reads`); it rebuilds a node only when a part reads differently and never unfolds a declaration reference. An access the lane cannot read stays the node it was.
+- **Positions.** A fixed position reads its element (optional ⇒ `| undefined`). A position at or past a rest element reads every element from the rest start on. A position past the end of a tuple with no rest element reads `undefined` per arm (`getTupleElementTypeOutOfStartCount`, beside TS2493) — in every context, so the shared walker answers it. A tuple that is an arm of a composite reads the composite's number index there, through the global `Array` wrapper; when that wrapper is unsettled the read is a miss, never the lone tuple's `undefined`. A position wider than the target's `usize` is still a position (past every element), never a negative key: the walker classifies keys by sign, not by a failed `usize` conversion.
+- **Negative keys.** A negative key reads the number index of every object except a SINGLE tuple with no rest element — a union of tuples (TS2339), a rest-bearing tuple, an array, a string. Of that single tuple the checker answers `undefined` (TS2514) only for an access WRITTEN over it; an instantiated access (`Last<["a","b"]>` over `X[-1]`) reads the number index. So: an expression-position access answers `undefined`; a declared access cannot tell which it is and stays unread; the shared walker, seeing one tuple without the access, misses — it reads the number index only for a tuple that is an arm of a composite split. Deciding this per arm is the defect to avoid: it fabricates `undefined` into `([1, 2] | [1, ...string[]])[-1]` (tsc: `string | 1 | 2`).
+- **Unread arms.** `positional_element` reads each object arm; an arm the walker leaves `Opaque` leaves the whole access unread, never a union carrying an opaque member.
+
+Limits: `noUncheckedIndexedAccess` is not consumed — an array or number-index read in expression position omits the checker's `| undefined` under that option, for frame bindings and module-level bindings alike. Fractional keys are unread.
+
+Acceptance: `a_const_tuple_element_read_is_the_element_the_checker_reads`, `a_negative_key_reads_the_number_index_unless_the_access_decides`, `a_composite_past_end_read_without_a_settled_wrapper_stays_unanswered`, `an_out_of_range_tuple_position_reads_undefined`, `a_return_over_merged_globals_and_a_const_tuple_reads_like_the_checker`, `project_path_tuple_numeric_index_projects_positions_and_broad_union`.
 
 
 ### Flow-Return Substrate (U6) Debt Notes

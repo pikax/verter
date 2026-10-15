@@ -593,8 +593,9 @@ pub struct HostConfig {
     /// observe the same cap.
     ///
     /// Constructor-time per §0.6.5: callers may NOT mutate this on
-    /// an existing host. Default: `16,384` (the
-    /// `FuseBudgets::projection_op_count` default).
+    /// an existing host. Default:
+    /// [`verter_type_engine::request_budget::DEFAULT_PROJECTION_OP_BUDGET`]
+    /// (the `FuseBudgets::projection_op_count` default).
     ///
     /// When `0`, the legacy `FuseBudgets::default()` value is used as
     /// a fall-back so existing tests that construct a `HostConfig`

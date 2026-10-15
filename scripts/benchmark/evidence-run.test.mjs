@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 import {
   BENCH_TAG,
   buildSummary,
+  defaultValidator,
   loadManifest,
   main,
   MANIFEST_DIR,
@@ -90,6 +91,7 @@ describe("manifest validation", () => {
     ["settings-subset", /the harness runs either strict alone or all/],
     ["unknown-scenario", /scenario no-such-scenario selects no scenario/],
     ["duplicate-cell", /duplicate cell/],
+    ["bad-require-all-matched", /requireAllMatched must be true or false/],
   ];
   for (const [name, message] of rejected)
     test(`rejects ${name}`, () => assert.throws(() => loadManifest(name, FIXTURES), message));
@@ -119,6 +121,33 @@ describe("manifest validation", () => {
     );
     assert.equal(r.status, 2);
     assert.match(r.stderr, /unknown arm tsc-watch/);
+  });
+});
+
+describe("skr-scale-answers", () => {
+  test("demands the larger answers exactly and keeps the timing cells", () => {
+    const { manifest, run } = loadManifest("skr-scale-answers");
+    assert.equal(run.requireAllMatched, true);
+    for (const id of ["infer-pattern-repeat-6000", "route-tree-names-2000"]) {
+      assert.ok(run.scenarios.includes(id), id);
+      for (const arm of ["verter", "tsc-cli"])
+        assert.ok(
+          manifest.requiredCells.some((c) => c.scenario === id && c.arm === arm),
+          `${id} ${arm}`,
+        );
+    }
+    for (const id of [
+      "route-tree-names-300",
+      "route-tree-paths-300",
+      "infer-pattern-repeat-1000",
+      "reference-infer-aliases-1000",
+    ])
+      assert.ok(
+        manifest.requiredCells.some(
+          (c) => c.scenario === id && c.arm === "verter" && c.metrics.includes("coldMs"),
+        ),
+        id,
+      );
   });
 });
 
@@ -197,10 +226,17 @@ function syntheticResults({ arms = ["verter", "tsc-api", "verter-counted"], drop
 }
 
 /** Run valid-minimal through a stand-in harness; returns the exit code, summary and harness args. */
-async function fakeRun({ results, harnessStatus = 0, validatorProblems = [], worker = null }) {
+async function fakeRun({
+  results,
+  harnessStatus = 0,
+  validatorProblems = [],
+  worker = null,
+  run = "valid-minimal",
+}) {
   const out = freshDir();
   let harnessArgs = null;
-  const argv = ["--run", "valid-minimal", "--manifest-dir", FIXTURES, "--out", out];
+  let validatorOptions = null;
+  const argv = ["--run", run, "--manifest-dir", FIXTURES, "--out", out];
   if (worker) {
     const path = join(out, "worker.json");
     writeFileSync(path, JSON.stringify(worker));
@@ -217,10 +253,13 @@ async function fakeRun({ results, harnessStatus = 0, validatorProblems = [], wor
         }
         return { status: harnessStatus };
       },
-      validate: () => validatorProblems,
+      validate: (_path, options) => {
+        validatorOptions = options;
+        return validatorProblems;
+      },
     }),
   );
-  return { code, summary: readSummary(out), harnessArgs };
+  return { code, summary: readSummary(out), harnessArgs, validatorOptions };
 }
 
 describe("real run", () => {
@@ -442,6 +481,50 @@ describe("session retention proofs", () => {
       loaded.path,
     );
     assert.ok(unknown.problems.some((p) => /session no-such-session is not a session/.test(p)));
+  });
+});
+
+describe("answer policy", () => {
+  test("a manifest without requireAllMatched validates answers as findings", async () => {
+    const { code, summary, validatorOptions } = await fakeRun({ results: syntheticResults() });
+    assert.equal(code, 0);
+    assert.deepEqual(validatorOptions, { requireAllMatched: false });
+    assert.equal(summary.run.requireAllMatched, false);
+  });
+
+  test("an opted-in manifest forwards the policy and fails on the validator's rejection", async () => {
+    const { code, summary, validatorOptions } = await fakeRun({
+      run: "valid-require-all-matched",
+      results: syntheticResults(),
+      validatorProblems: [
+        "baseline-empty/strict|verter: Verter's answer is refusal (BudgetExceeded); --require-all-matched",
+      ],
+    });
+    assert.deepEqual(validatorOptions, { requireAllMatched: true });
+    assert.equal(summary.run.requireAllMatched, true);
+    assert.equal(code, 1);
+    assert.ok(summary.validation.problems.some((p) => /--require-all-matched/.test(p)));
+  });
+
+  test("the default validator passes the policy to validate.mjs as --require-all-matched", () => {
+    // A stand-in validate.mjs that rejects exactly when it is told every
+    // answer must match: the policy is forwarded, its FAIL lines read back.
+    const dir = freshDir();
+    const script = join(dir, "validate-stand-in.mjs");
+    writeFileSync(
+      script,
+      'if (process.argv.includes("--require-all-matched")) {\n' +
+        '  console.log("FAIL: synthetic: Verter\'s answer is partial (x); --require-all-matched");\n' +
+        "  process.exit(1);\n" +
+        "}\n" +
+        'console.log("validation passed");\n',
+    );
+    const results = join(dir, "results.json");
+    writeFileSync(results, "{}");
+    assert.deepEqual(defaultValidator(results, { requireAllMatched: false, script }), []);
+    assert.deepEqual(defaultValidator(results, { requireAllMatched: true, script }), [
+      "synthetic: Verter's answer is partial (x); --require-all-matched",
+    ]);
   });
 });
 

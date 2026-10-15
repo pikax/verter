@@ -59,8 +59,24 @@ fn identity_u128<T: Hash>(value: &T) -> u128 {
 
 /// `VerterStableV1`-independent, order-independent binder-space key: derived
 /// from logical identity, never from intern order.
+///
+/// The key keeps 31 bits of the hash. An FxHash mixes its input's
+/// high-order bytes poorly into its low bits, so identities that differ only
+/// there (the stable keys of `(x: 249) => void` and `(x: 511) => void`, whose
+/// number literals differ in the high bytes of an `f64`) agree on them far
+/// more often than chance; the finalizer spreads every hashed bit over the
+/// bits the key keeps. The finalizer is SplitMix64's output mix (Steele,
+/// Lea and Flood, "Fast Splittable Pseudorandom Number Generators",
+/// OOPSLA 2014; shift/multiply constants from Stafford's "Mix13" variant of
+/// the MurmurHash3 `fmix64` finalizer).
 fn space_key_of<T: Hash>(value: &T) -> u64 {
-    hash_u64(value) & 0x7FFF_FFFF
+    let mut mixed = hash_u64(value);
+    mixed ^= mixed >> 30;
+    mixed = mixed.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    mixed ^= mixed >> 27;
+    mixed = mixed.wrapping_mul(0x94D0_49BB_1331_11EB);
+    mixed ^= mixed >> 31;
+    mixed & 0x7FFF_FFFF
 }
 
 /// The binder space of a signature with no authored occurrence, named by

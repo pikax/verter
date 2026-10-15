@@ -4565,6 +4565,53 @@ fn wide_distinct_object_union_canonicalizes_without_budget_exhaustion() {
     );
 }
 
+/// A wide union of DEEP distinct arms canonicalizes completely however
+/// many nodes its arms hold together: every arm is keyed by its whole
+/// structure, so distinct arms never reach the pairwise tier. 4,000 arms of
+/// three nested objects hold 24,000 nodes; an unkeyed arm set this wide
+/// could only be left unproven (the elements of a large `as const` tree
+/// that an `infer` binds as one union).
+#[test]
+fn wide_union_of_deep_distinct_arms_canonicalizes_completely() {
+    use verter_type_engine::semantic_query::LiteralValue;
+
+    let host = host();
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let literal =
+        |text: String| graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(text)));
+    let arms: Vec<SemanticNodeId> = (0..4000)
+        .map(|index| {
+            let deep = simple_object(&graph, &[("x", literal(format!("deep-{index}")))]);
+            let inner = simple_object(
+                &graph,
+                &[("w", literal(format!("inner-{index}"))), ("d", deep)],
+            );
+            simple_object(
+                &graph,
+                &[("v", literal(format!("value-{index}"))), ("c", inner)],
+            )
+        })
+        .collect();
+
+    let union =
+        verter_type_engine::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
+            &graph,
+            &arms,
+            verter_session_query::flow::policy::NullabilityPolicy::Strict,
+        );
+    assert!(
+        matches!(
+            graph.node_data(union.node).as_deref(),
+            Some(SemanticNodeData::Union(m)) if m.len() == 4000
+        ),
+        "4,000 structurally distinct arms all survive"
+    );
+    assert!(
+        !union.evidence.incomplete,
+        "deep distinct arms are keyed apart, so the canonicalization is complete"
+    );
+}
+
 /// `Incomplete` has ONE disposition: suppression of the enclosing
 /// publication's warm admission, at the single funnel
 /// (`deposit_canonical_evidence`). Inside a cold build it folds
@@ -11981,15 +12028,66 @@ fn project_path_tuple_numeric_index_projects_positions_and_broad_union() {
         other => panic!("expected 3-arm union, got {other:?}"),
     }
 
-    // Out-of-range literal positions miss (TS rejects them).
+    // An out-of-range literal position reads `undefined`, the checker's
+    // recovery beside its TS2493 error (TypeScript 7.0.2: `[1?, 2?][2]` is
+    // `undefined`).
     let out_of_range = project(num_key(7));
     assert!(
         matches!(
             graph.node_data(out_of_range).as_deref(),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Undefined))
+        ),
+        "an out-of-range position reads `undefined`"
+    );
+
+    // A negative key of this single tuple stays unread: the checker answers
+    // `undefined` for an access written over it and its number index for an
+    // instantiated one, which the walk cannot tell apart. As an arm of a
+    // union it reads the union's number index (TypeScript 7.0.2:
+    // `([string, boolean?] | [number])[-1]` is
+    // `string | number | boolean | undefined`).
+    assert!(
+        matches!(
+            graph.node_data(project(num_key(-1))).as_deref(),
             Some(SemanticNodeData::Opaque(_))
         ),
-        "out-of-range position must miss"
+        "a negative key of a single tuple without a rest element stays unread"
     );
+    let single = graph.intern_node(SemanticNodeData::Tuple {
+        elements: Arc::from(
+            vec![TupleElement {
+                label: None,
+                value: number_node,
+                optional: false,
+                rest: false,
+            }]
+            .into_boxed_slice(),
+        ),
+        readonly: false,
+    });
+    let union = graph.intern_node(SemanticNodeData::Union(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![tuple, single].into_boxed_slice(),
+        )),
+    ));
+    let negative = match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
+        base: union,
+        path: Arc::from(vec![PathSegment::Index(num_key(-1))].into_boxed_slice()),
+        context: ProjectionReductionContext::published(ProjectionMode::Expanded),
+    }) {
+        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+        other => panic!("expected projected value, got {other:?}"),
+    };
+    match graph.node_data(negative).as_deref() {
+        Some(SemanticNodeData::Union(members)) => {
+            assert_eq!(
+                members.len(),
+                4,
+                "a negative key of a union of tuples reads string|number|boolean|undefined"
+            );
+        }
+        other => panic!("expected a 4-arm union, got {other:?}"),
+    }
 }
 
 /// TS coerces only CANONICAL numeric string keys (`String(Number(s)) ===
@@ -32835,8 +32933,8 @@ fn substituted_union_interns_global_while_callable_intersection_preserves_scope(
 }
 
 /// An INCOMPLETE canonicalization (here an undecidable over-deep alias
-/// peek; the over-cap arm set, an exhausted compare budget and a dangling
-/// arm take the same evidence path) must REFUSE the `Canonical` stamp on
+/// peek; an exhausted compare budget and a dangling arm take the same
+/// evidence path) must REFUSE the `Canonical` stamp on
 /// its multi-arm output. The stamp is the pre-seal closure's O(1) skip
 /// witness of canonical FORM; stamping an unproven list would let a
 /// budget-degraded result resurface in a later request as skip-eligible

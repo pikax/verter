@@ -44,6 +44,7 @@ mod closure_narrowing_tests;
 mod conditional_decision_tests;
 mod conditional_indexed_check_tests;
 mod conditional_operand_tests;
+mod conditional_scale_tests;
 mod conditional_tail_tests;
 mod connected_demand_tests;
 mod const_literal_widening_tests;

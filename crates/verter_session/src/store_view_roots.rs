@@ -961,7 +961,10 @@ impl StoreViewRoots {
         }
     }
 
-    /// Root-relative augmentation-index fingerprint for one target shape.
+    /// Augmentation-index fingerprint for one target shape, as this view
+    /// observes it: the version visible at the captured root, or the live
+    /// entry for a target first populated after the root was captured (see
+    /// [`FileArtifactStore::augmenter_set_observed_at_root`](crate::file_artifact_store::FileArtifactStore::augmenter_set_observed_at_root)).
     ///
     /// Composes the full [`AugmentationTargetKey`](crate::file_artifact_store::AugmentationTargetKey)
     /// — including the project / resolve-env / lib-env dimensions the
@@ -984,7 +987,7 @@ impl StoreViewRoots {
         };
         reader
             .indexed()
-            .augmenter_set_at_root(root, &key)
+            .augmenter_set_observed_at_root(root, &key)
             .map(|set| set.fingerprint)
     }
 
