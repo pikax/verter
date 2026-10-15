@@ -327,6 +327,95 @@ function sessionArmSummary(arm, invs, session, limits) {
   return out;
 }
 
+/** The completed measured records of one session arm. */
+function completedRecords(invs, limits) {
+  return invs
+    .filter(
+      (i) =>
+        !i.warmup &&
+        i.session &&
+        ["exited", "observe-killed"].includes(invocationEnd(i, limits).kind),
+    )
+    .map((i) => i.session);
+}
+
+/**
+ * The retention proof of a growth session (sessions.mjs `retentionProof`):
+ * after its last answer, the engine that answered the first demand and then
+ * grew must retain what its baseline session's engine retains after
+ * answering only the grown demand, plus the first answer.
+ *
+ * Per-file state must not exceed the baseline's: live artifacts, superseded
+ * versions, their parse-snapshot leases and pinned bytes. The first demand's
+ * own cached answers may survive as superseded memo candidates, so the
+ * candidate excess is bounded by the candidates that demand added beyond one
+ * lowering per first-step contributor, and the retained-byte excess by the
+ * bytes that demand added. Every figure is a retention-account byte or an
+ * object count, deterministic for one build and tree: every pair of
+ * completed measured invocations is compared, and a session with none on
+ * either side has no verdict ("n/a").
+ */
+export function retentionProof(session, growthRecords, baselineRecords) {
+  const { baseline, first } = session.retentionProof;
+  const firstStep = session.steps.findIndex((step) => step.kind === "demand");
+  const out = { baseline, first, verdict: "n/a", pairs: 0, figures: null, problems: [] };
+  if (!growthRecords.length || !baselineRecords.length) return out;
+  const problems = new Set();
+  for (const growth of growthRecords) {
+    const init = growth.initRetention;
+    const opened = growth.stepRetention?.[firstStep];
+    const grown = growth.stepRetention?.[session.steps.length - 1];
+    for (const base of baselineRecords) {
+      const fresh = base.stepRetention?.[base.stepRetention.length - 1];
+      if (!init || !opened || !grown || !fresh) {
+        problems.add("a record carries no per-step retention");
+        continue;
+      }
+      const firstAnswers = {
+        memoCandidates: Math.max(
+          0,
+          opened.semanticMemoCandidates - init.semanticMemoCandidates - first,
+        ),
+        retainedBytes: Math.max(0, opened.retainedBytes - init.retainedBytes),
+      };
+      out.pairs += 1;
+      out.figures ??= {
+        growth: pickFigures(grown),
+        baseline: pickFigures(fresh),
+        firstAnswers,
+      };
+      if (grown.liveArtifacts !== fresh.liveArtifacts)
+        problems.add(`live artifacts ${grown.liveArtifacts}, baseline ${fresh.liveArtifacts}`);
+      for (const figure of ["retiredVersions", "snapshotLeases", "pinnedBytes"])
+        if (grown[figure] > fresh[figure])
+          problems.add(`${figure} ${grown[figure]} exceeds the baseline's ${fresh[figure]}`);
+      for (const figure of ["memoCandidates", "retainedBytes"]) {
+        const key = figure === "memoCandidates" ? "semanticMemoCandidates" : figure;
+        const allowed = fresh[key] + firstAnswers[figure];
+        if (grown[key] > allowed)
+          problems.add(
+            `${key} ${grown[key]} exceeds the baseline's ${fresh[key]} plus the first answer's ${firstAnswers[figure]}`,
+          );
+      }
+    }
+  }
+  out.problems = [...problems].sort();
+  out.verdict = out.problems.length ? "failed" : out.pairs ? "passed" : "n/a";
+  return out;
+}
+
+/** The figures a retention proof compares and reports. */
+export const RETENTION_PROOF_FIGURES = [
+  "liveArtifacts",
+  "retiredVersions",
+  "snapshotLeases",
+  "pinnedBytes",
+  "semanticMemoCandidates",
+  "retainedBytes",
+];
+const pickFigures = (r) =>
+  Object.fromEntries(RETENTION_PROOF_FIGURES.map((k) => [k, r[k] ?? null]));
+
 /** Summarise the run's sessions. `resolution` is the run's timer resolution. */
 export function summarizeSessions(run, sessions, resolution = { single: 1 }) {
   const limits = runLimits(run.meta?.options ?? {});
@@ -375,14 +464,21 @@ export function summarizeSessions(run, sessions, resolution = { single: 1 }) {
       arms.verter && arms["verter-observe"]
         ? requiredStateComparison(arms.verter.retention, arms["verter-observe"].retention)
         : null;
-    cells.push({
+    const cell = {
       key: id,
       family: session.family,
       note: session.note,
       arms,
       comparison,
       requiredState,
-    });
+    };
+    if (session.retentionProof)
+      cell.retentionProof = retentionProof(
+        session,
+        completedRecords(armInvs.verter ?? [], limits),
+        completedRecords(groups.get(session.retentionProof.baseline)?.verter ?? [], limits),
+      );
+    cells.push(cell);
   }
   return { cells };
 }

@@ -141,7 +141,8 @@ export const USAGE = `usage: node scripts/benchmark/semantic-perf.mjs [options]
 
 Every tier also runs the session workloads (scripts/benchmark/semantic-perf/sessions.mjs): INCREMENTAL
 edits, an EDITOR SESSION over an InputMenu-equivalent Vue component, CONCURRENT demands and (from the
-standard tier) AUGMENTATION GROWTH over two merged interfaces, each one live
+standard tier) AUGMENTATION GROWTH (each merged-interface reproduction answered at 500 contributors, then
+at 2,000 after edits, beside a 2,000-only baseline, with a retention proof), each one live
 process per invocation in the verter, verter-observe and tsc-api arms (tsc incremental: API snapshot reuse).
 The verter-observe arm is the probe built with semantic-observe (capture compiled in) in its own target
 directory; the production probe has it physically compiled out.`;

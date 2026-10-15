@@ -564,6 +564,9 @@ impl RetentionEpochs {
 #[derive(Debug, Default)]
 struct LiveRootRegistry {
     state: parking_lot::Mutex<RootRegistryState>,
+    /// Set when the last root of some epoch is released: versions only
+    /// that root still saw may now be reclaimable.
+    released: std::sync::atomic::AtomicBool,
 }
 
 /// [`LiveRootRegistry`]'s guarded state.
@@ -604,6 +607,7 @@ impl LiveRootRegistry {
             *count = count.saturating_sub(1);
             if *count == 0 {
                 slot.remove();
+                self.released.store(true, Ordering::Release);
             }
         }
     }
@@ -919,6 +923,10 @@ pub struct FileArtifactStore {
     /// the amortised self-triggered sweep at
     /// [`RECLAIM_TRIGGER_RETIREMENTS`].
     retirements_since_reclaim: AtomicU64,
+    /// Retired versions the last sweep kept because a live root still
+    /// saw them, plus retirements since. A released root reclaims only
+    /// when this is non-zero (see [`Self::reclaim_after_root_release`]).
+    unreclaimed_retirements: AtomicU64,
     /// Global monotonic access-tick source for the per-entry
     /// [`StoredArtifact::last_access_tick`] stamps consumed by
     /// [`Self::evict_lru_promoted`] under explicit memory pressure.
@@ -1056,6 +1064,7 @@ impl FileArtifactStore {
             membership_epoch: AtomicU64::new(0),
             live_roots: Arc::new(LiveRootRegistry::default()),
             retirements_since_reclaim: AtomicU64::new(0),
+            unreclaimed_retirements: AtomicU64::new(0),
             access_tick: AtomicU64::new(0),
             live_counter: live,
             stale_sweeps: stale,
@@ -1363,16 +1372,19 @@ impl FileArtifactStore {
         let retention = self.retention_epochs();
         self.retirements_since_reclaim.store(0, Ordering::Relaxed);
         let mut reclaimed = 0usize;
+        let mut kept = 0usize;
         self.retired_artifacts.retain(|_key, chain| {
             let before = chain.len();
             chain.retain(|version| !retention.reclaimable(&version.span));
             reclaimed += before - chain.len();
+            kept += chain.len();
             !chain.is_empty()
         });
         self.retired_augmenters.retain(|_key, chain| {
             let before = chain.len();
             chain.retain(|version| !retention.reclaimable(&version.span));
             reclaimed += before - chain.len();
+            kept += chain.len();
             !chain.is_empty()
         });
         // The canonical→keys index is versioned membership too: a
@@ -1384,9 +1396,36 @@ impl FileArtifactStore {
             let before = slot.len();
             slot.retain(|version| !retention.reclaimable(&version.span));
             reclaimed += before - slot.len();
+            kept += slot
+                .iter()
+                .filter(|version| !version.span.is_live())
+                .count();
             !slot.is_empty()
         });
+        self.unreclaimed_retirements
+            .store(kept as u64, Ordering::Relaxed);
         reclaimed
+    }
+
+    /// Reclaim what a released root kept reachable.
+    ///
+    /// The amortised sweep runs while edits retire versions, and a store
+    /// view published before those edits still holds its root then, so
+    /// the sweep keeps every version that root sees. Once the view is
+    /// superseded and its root released, nothing triggers another sweep
+    /// until later retirements do: a burst of edits followed by a request
+    /// would keep every superseded version — its payload, decl memo and
+    /// parse-snapshot lease — resident. The store-view manager calls this
+    /// after it replaces its published view. It sweeps only when some
+    /// root was released since and a sweep left versions behind, so a
+    /// request that retired nothing pays one atomic read.
+    pub fn reclaim_after_root_release(&self) -> usize {
+        if self.unreclaimed_retirements.load(Ordering::Relaxed) == 0
+            || !self.live_roots.released.swap(false, Ordering::AcqRel)
+        {
+            return 0;
+        }
+        self.reclaim_retired_versions()
     }
 
     /// Amortised self-triggered reclamation. Retirement is logical, so
@@ -1396,6 +1435,8 @@ impl FileArtifactStore {
         if count == 0 {
             return;
         }
+        self.unreclaimed_retirements
+            .fetch_add(count as u64, Ordering::Relaxed);
         let before = self
             .retirements_since_reclaim
             .fetch_add(count as u64, Ordering::Relaxed);

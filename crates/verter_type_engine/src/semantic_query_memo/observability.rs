@@ -145,6 +145,19 @@ impl SemanticGraphStore {
         out
     }
 
+    /// Number of retained memo candidates across every family and slot.
+    /// A slot holding variants for several store versions counts each, so
+    /// unlike [`Self::memo_entry_count`] this sees superseded candidates a
+    /// slot keeps beside its current one.
+    #[must_use]
+    pub fn memo_candidate_count(&self) -> usize {
+        self.entries
+            .lock()
+            .values()
+            .map(FamilySlots::candidate_count)
+            .sum()
+    }
+
     /// Number of warm memo entries — sums populated slots across every
     /// family. Useful for tests and counters. Two distinct mode slots in
     /// the same family count as two entries.

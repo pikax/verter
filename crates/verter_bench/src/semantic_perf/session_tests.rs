@@ -61,6 +61,14 @@ fn complete_session_journal_contains_each_real_answer_in_order() {
     let out = dir.path().join("session.json");
     let result = run_session(&job(dir.path()), &Sink::new(&out)).unwrap();
     assert_eq!(result.steps.len(), 4);
+    // Each step carries what the engine retains after it; the first demand
+    // caches its answer, which repeats of the same demand reuse.
+    assert_eq!(result.step_retention.len(), 4);
+    assert!(result.step_retention[0].semantic_memo_candidates > 0);
+    assert_eq!(
+        result.step_retention[3].semantic_memo_candidates,
+        result.step_retention[0].semantic_memo_candidates
+    );
     let journal = std::fs::read_to_string(dir.path().join("session.json.steps.jsonl")).unwrap();
     let entries: Vec<serde_json::Value> = journal
         .lines()
@@ -72,6 +80,10 @@ fn complete_session_journal_contains_each_real_answer_in_order() {
         assert_eq!(entry["index"], index);
         assert_eq!(entry["step"]["requests"][0]["observation"]["text"], "42");
         assert_eq!(entry["step"]["requests"][0]["outcome"]["kind"], "value");
+        assert_eq!(
+            entry["retention"]["semanticMemoCandidates"],
+            result.step_retention[index].semantic_memo_candidates
+        );
     }
 }
 

@@ -24,6 +24,28 @@ fn upsert_ts(host: &VerterHost, canonical: &str, source: &str) {
 /// script declarations, or module augmentations of `./core` — in a
 /// shuffled tsconfig `files` order, and the scenario reading it.
 fn contributor_host(size: usize, global: bool) -> VerterHost {
+    contributor_host_with(size, size, global)
+}
+
+/// The text of contributor `i`: its file name and the source declaring it.
+fn contributor(i: usize, global: bool) -> (String, String) {
+    if global {
+        (
+            format!("/reg-{i:04}.ts"),
+            format!("interface BenchRegistry {{ r{i}: {{ id: {i}; tag: \"t{i}\" }} }}"),
+        )
+    } else {
+        (
+            format!("/plugin-{i:04}.ts"),
+            format!("declare module './core' {{ interface Props {{ p{i}: {i} }} }}\nexport {{}};"),
+        )
+    }
+}
+
+/// A host whose project lists `size` contributor files, of which the first
+/// `active` contribute; the others hold a declaration-free file of the same
+/// kind (a global script, or a module) until an edit fills them in.
+fn contributor_host_with(size: usize, active: usize, global: bool) -> VerterHost {
     let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(
         verter_workspace::MemoryOptions::default(),
     ));
@@ -68,19 +90,14 @@ fn contributor_host(size: usize, global: bool) -> VerterHost {
         );
     }
     for i in 0..size {
-        let (canonical, source) = if global {
-            (
-                format!("/reg-{i:04}.ts"),
-                format!("interface BenchRegistry {{ r{i}: {{ id: {i}; tag: \"t{i}\" }} }}"),
-            )
-        } else {
-            (
-                format!("/plugin-{i:04}.ts"),
-                format!(
-                    "declare module './core' {{ interface Props {{ p{i}: {i} }} }}\nexport {{}};"
-                ),
-            )
-        };
+        let (canonical, mut source) = contributor(i, global);
+        if i >= active {
+            source = if global {
+                "// an empty contributor slot\n".to_owned()
+            } else {
+                "export {};\n".to_owned()
+            };
+        }
         upsert_ts(&host, &canonical, &source);
         host.ensure_indexed_ready(&canonical)
             .expect("contributor indexed");
@@ -763,5 +780,114 @@ fn merged_global_instantiation_preserves_approximation_from_every_declaration() 
                 first = Some(answer);
             }
         }
+    }
+}
+
+/// Answer the probe and require one literal per contributor at `size`.
+fn probe_answer(host: &VerterHost, size: usize, global: bool) {
+    let graph = host.project_type_store().semantic_graph();
+    let node = host
+        .resolve_named_symbol("/scenario.ts", "Probe", Some(ProjectionMode::Expanded))
+        .expect("probe answers");
+    let mut pending = vec![node];
+    let mut members = 0usize;
+    while let Some(node) = pending.pop() {
+        match graph.node_data(node).as_deref().expect("live result") {
+            SemanticNodeData::Union(arms) => pending.extend(arms.iter().copied()),
+            SemanticNodeData::Alias(inner) => pending.push(*inner),
+            SemanticNodeData::Literal(_) => members += 1,
+            other => panic!("size={size}, global={global}: incomplete answer {other:?}"),
+        }
+    }
+    assert_eq!(
+        members,
+        if global { size } else { size + 1 },
+        "size={size}, global={global}: every contributor must answer"
+    );
+}
+
+/// What one engine retains after a step, read from the host's own
+/// retention figures and the aggregate account.
+#[derive(Debug, Clone, Copy)]
+struct Retained {
+    retained_bytes: usize,
+    pinned_bytes: usize,
+    live_artifacts: usize,
+    retired_versions: usize,
+    snapshot_leases: usize,
+    memo_candidates: usize,
+}
+
+fn retained(host: &VerterHost) -> Retained {
+    let snapshot = host.retention_snapshot();
+    Retained {
+        retained_bytes: snapshot.retained_bytes,
+        pinned_bytes: snapshot.pinned_bytes,
+        live_artifacts: snapshot.live_artifacts,
+        retired_versions: snapshot.retained_retired_versions,
+        snapshot_leases: snapshot.snapshot_leases,
+        memo_candidates: snapshot.semantic_memo_candidates,
+    }
+}
+
+/// Answering a merged interface at `FIRST` contributors and then, after
+/// edits add the rest, at `GROWN` leaves the engine retaining what a fresh
+/// engine answering only `GROWN` retains, plus the first answer.
+///
+/// Per-file state — artifacts, superseded versions, their parse-snapshot
+/// leases and pinned bytes — must equal the fresh engine's. The first
+/// demand's own cached answers may survive as superseded candidates, so
+/// the candidate excess is bounded by that demand's answers (its
+/// candidates beyond one lowering per contributor), and the retained-byte
+/// excess by what the first step retained. A per-contributor retention
+/// grows with the contributor count and fails both.
+#[test]
+fn growing_merged_contributors_between_answers_retains_only_the_answers() {
+    const FIRST: usize = 64;
+    const GROWN: usize = 256;
+    for global in [true, false] {
+        // The account is process-wide: the baseline engine is measured and
+        // dropped before the growing one starts.
+        let baseline = {
+            let host = contributor_host_with(GROWN, GROWN, global);
+            probe_answer(&host, GROWN, global);
+            retained(&host)
+        };
+        let host = contributor_host_with(GROWN, FIRST, global);
+        let setup = retained(&host);
+        probe_answer(&host, FIRST, global);
+        let first = retained(&host);
+        for i in FIRST..GROWN {
+            let (canonical, source) = contributor(i, global);
+            upsert_ts(&host, &canonical, &source);
+            host.ensure_indexed_ready(&canonical)
+                .expect("contributor indexed");
+        }
+        probe_answer(&host, GROWN, global);
+        let grown = retained(&host);
+        eprintln!("global={global}: baseline={baseline:?} first={first:?} grown={grown:?}");
+        let label = format!("global={global}, baseline={baseline:?}, grown={grown:?}");
+        assert_eq!(grown.live_artifacts, baseline.live_artifacts, "{label}");
+        assert!(
+            grown.retired_versions <= baseline.retired_versions,
+            "superseded versions must not stay retained: {label}"
+        );
+        assert!(
+            grown.snapshot_leases <= baseline.snapshot_leases
+                && grown.pinned_bytes <= baseline.pinned_bytes,
+            "superseded parse snapshots must not stay pinned: {label}"
+        );
+        let first_answers = first
+            .memo_candidates
+            .saturating_sub(setup.memo_candidates + FIRST);
+        assert!(
+            grown.memo_candidates <= baseline.memo_candidates + first_answers,
+            "only the first demand's answers may survive: first={first:?}, {label}"
+        );
+        assert!(
+            grown.retained_bytes
+                <= baseline.retained_bytes + (first.retained_bytes - setup.retained_bytes),
+            "retained bytes may exceed a fresh engine's only by the first step's: first={first:?}, {label}"
+        );
     }
 }

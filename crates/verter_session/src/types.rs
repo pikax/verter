@@ -3942,6 +3942,9 @@ pub struct HostRetentionSnapshot {
     pub semantic_node_slots: usize,
     /// Populated semantic memo slots across every family.
     pub semantic_memo_entries: usize,
+    /// Retained semantic memo candidates across every family: each slot's
+    /// current candidate plus the superseded variants it still holds.
+    pub semantic_memo_candidates: usize,
     /// Semantic-graph `unresolved_reach` entries.
     pub unresolved_reach: usize,
     /// Resident union member views (one per distinct union built, released

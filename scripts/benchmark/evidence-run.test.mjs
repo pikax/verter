@@ -16,6 +16,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   BENCH_TAG,
+  buildSummary,
   loadManifest,
   main,
   MANIFEST_DIR,
@@ -311,6 +312,136 @@ describe("real run", () => {
     const { summary } = await fakeRun({ results: null, harnessStatus: 2 });
     for (const p of Object.values(summary.prerequisites)) assert.equal(p.status, "unavailable");
     assert.ok(summary.cells.every((c) => c.status === "missing"));
+  });
+});
+
+/** Synthetic harness results for skr-augment-scaleb with the given retention-proof verdicts. */
+function augmentResults(verdicts, { dropSession = null } = {}) {
+  const stat = (v) => ({ n: 3, min: v, median: v, max: v });
+  const verter = {
+    class: "matched",
+    metrics: { firstTypeMs: stat(20), coldMs: stat(25), peakBytes: stat(50_000_000) },
+  };
+  const ids = [
+    "augment-global-growth",
+    "augment-global-baseline",
+    "augment-module-growth",
+    "augment-module-baseline",
+  ];
+  const sessionCells = ids
+    .filter((id) => id !== dropSession)
+    .map((id) => {
+      const cell = { key: id, arms: { verter: { class: "matched" } } };
+      if (id.endsWith("-growth")) {
+        const verdict = verdicts[id] ?? "passed";
+        cell.retentionProof = {
+          baseline: id.replace("-growth", "-baseline"),
+          first: 500,
+          verdict,
+          pairs: verdict === "n/a" ? 0 : 9,
+          figures: null,
+          problems: verdict === "failed" ? ["snapshotLeases 3503 exceeds the baseline's 2003"] : [],
+        };
+      }
+      return cell;
+    });
+  return {
+    schema: 1,
+    meta: {
+      options: { tier: "standard", arms: ["verter"], settings: "strict" },
+      scenarios: {
+        "augment-global-2000/strict": { id: "augment-global-2000" },
+        "augment-module-2000/strict": { id: "augment-module-2000" },
+      },
+      sessions: Object.fromEntries(ids.map((id) => [id, { id }])),
+    },
+    invocations: [],
+    summary: {
+      cells: ["augment-global-2000", "augment-module-2000"].map((id) => ({
+        key: `${id}/strict`,
+        arms: { verter },
+      })),
+      sessions: { cells: sessionCells },
+    },
+  };
+}
+
+describe("session retention proofs", () => {
+  const loaded = loadManifest("skr-augment-scaleb");
+  const summarize = (results) =>
+    buildSummary(loaded, {
+      dryRun: false,
+      worker: readWorker(null),
+      results,
+      harness: { status: 0 },
+      validatorProblems: [],
+    });
+
+  test("the manifest runs its scenarios and both growth sessions with their baselines", () => {
+    assert.deepEqual(loaded.run.sessions, [
+      "augment-global-growth",
+      "augment-global-baseline",
+      "augment-module-growth",
+      "augment-module-baseline",
+    ]);
+    const only = loaded.run.harnessArgs[loaded.run.harnessArgs.indexOf("--only") + 1];
+    assert.deepEqual(only.split(","), [...loaded.manifest.scenarios, ...loaded.run.sessions]);
+  });
+
+  test("passing proofs are read on any worker", () => {
+    const summary = summarize(augmentResults({}));
+    assert.equal(summary.validation.verdict, "passed", summary.validation.problems.join("\n"));
+    const growth = summary.sessions.find((x) => x.session === "augment-module-growth");
+    assert.equal(growth.retentionProof.verdict, "passed");
+    assert.equal(growth.answerClass, "matched");
+  });
+
+  const failing = [
+    [
+      "a failed proof",
+      augmentResults({ "augment-global-growth": "failed" }),
+      /augment-global-growth: retained growth beyond the answers against augment-global-baseline: snapshotLeases/,
+    ],
+    [
+      "a proof with nothing compared",
+      augmentResults({ "augment-module-growth": "n/a" }),
+      /augment-module-growth: the retention proof has no completed pair to compare/,
+    ],
+    [
+      "a missing session",
+      augmentResults({}, { dropSession: "augment-module-baseline" }),
+      /session augment-module-baseline is missing/,
+    ],
+  ];
+  for (const [label, results, message] of failing)
+    test(`fails on ${label}`, () => {
+      const summary = summarize(results);
+      assert.equal(summary.validation.verdict, "failed");
+      assert.ok(
+        summary.validation.problems.some((p) => message.test(p)),
+        summary.validation.problems.join("\n"),
+      );
+    });
+
+  test("a growth session without its baseline is rejected", () => {
+    const manifest = {
+      ...loaded.manifest,
+      sessions: ["augment-global-growth", "augment-module-growth", "augment-module-baseline"],
+    };
+    const { problems } = validateManifest(manifest, loaded.path);
+    assert.ok(
+      problems.some((p) =>
+        /augment-global-growth is proved against augment-global-baseline, which sessions does not list/.test(
+          p,
+        ),
+      ),
+      problems.join("\n"),
+    );
+    const unknown = validateManifest(
+      { ...loaded.manifest, sessions: ["no-such-session"] },
+      loaded.path,
+    );
+    assert.ok(unknown.problems.some((p) => /session no-such-session is not a session/.test(p)));
   });
 });
 
