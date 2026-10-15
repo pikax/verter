@@ -53,6 +53,29 @@ pub(crate) struct IndexedReadyServe {
     pub(crate) store_published: bool,
 }
 
+/// An [`IndexedReadyServe`] with the store entry that served it when the
+/// serve was a scheduler-current fast hit.
+struct LocatedIndexedServe {
+    serve: IndexedReadyServe,
+    current_hit: Option<CurrentIndexedHit>,
+}
+
+/// The exact base `FileArtifacts` entry a fast hit served, under the
+/// normalized canonical it was read for.
+struct CurrentIndexedHit {
+    canonical: String,
+    artifacts: Arc<crate::file_artifact_store::FileArtifacts>,
+}
+
+impl From<IndexedReadyServe> for LocatedIndexedServe {
+    fn from(serve: IndexedReadyServe) -> Self {
+        Self {
+            serve,
+            current_hit: None,
+        }
+    }
+}
+
 /// Outcome of one prepared-decl-bundle cold producer
 /// ([`VerterHost::materialize_prepared_decl_bundle_from_routed_shallow`] /
 /// [`VerterHost::materialize_prepared_decl_bundle`]). Both arms carry the
@@ -2088,7 +2111,11 @@ impl VerterHost {
     ) -> Option<IndexedReadyServe> {
         verter_session_query::probe_scope!(ENSURE_INDEXED_READY);
         verter_audit::attribute_scope!(IndexedReadyBuild);
-        let serve = self.ensure_indexed_ready_serve_uninstrumented(canonical_id, None);
+        let (serve, current_hit) = match self.ensure_indexed_ready_serve_located(canonical_id, None)
+        {
+            Some(located) => (Some(located.serve), located.current_hit),
+            None => (None, None),
+        };
         // Test-only deterministic fenced-serve override: convert a would-be
         // PUBLISHED serve into a FENCED one (fire the non-cacheability fan-out +
         // `store_published = false`) WITHOUT a `project_generation` bump, so a
@@ -2133,18 +2160,32 @@ impl VerterHost {
         if verter_type_engine::resolver_core::resolver_context::fact_tracer_installed() {
             if let Some(serve) = serve.as_ref() {
                 if serve.store_published {
-                    let normalized = self.normalized_analysis_canonical(canonical_id);
-                    if self.indexed_surface_is_current(normalized.as_ref(), &serve.indexed) {
-                        if let Some(fact) = self.syntactic_route_interface_fact_for_indexed(
-                            normalized.as_ref(),
-                            &serve.indexed,
-                        ) {
-                            verter_type_engine::resolver_core::resolver_context::observe_fan_out(
-                                verter_session_query::facts::fact_cache::FactVersionRef::Parse(
-                                    fact,
-                                ),
-                            );
+                    let fact = match current_hit {
+                        // The fast hit served this exact entry as the
+                        // scheduler-current, parse-env-current base
+                        // artifact: its own facts answer, with no second
+                        // currency derivation.
+                        Some(CurrentIndexedHit {
+                            canonical,
+                            artifacts,
+                        }) => Self::syntactic_route_interface_fact_of(canonical, &artifacts),
+                        None => {
+                            let normalized = self.normalized_analysis_canonical(canonical_id);
+                            if self.indexed_surface_is_current(normalized.as_ref(), &serve.indexed)
+                            {
+                                self.syntactic_route_interface_fact_for_indexed(
+                                    normalized.as_ref(),
+                                    &serve.indexed,
+                                )
+                            } else {
+                                None
+                            }
                         }
+                    };
+                    if let Some(fact) = fact {
+                        verter_type_engine::resolver_core::resolver_context::observe_fan_out(
+                            verter_session_query::facts::fact_cache::FactVersionRef::Parse(fact),
+                        );
                     }
                 }
             }
@@ -2168,6 +2209,17 @@ impl VerterHost {
         canonical_id: &str,
         held_source: Option<&HeldIndexedSource>,
     ) -> Option<IndexedReadyServe> {
+        self.ensure_indexed_ready_serve_located(canonical_id, held_source)
+            .map(|located| located.serve)
+    }
+
+    /// [`Self::ensure_indexed_ready_serve_uninstrumented`], also naming the
+    /// store entry a scheduler-current fast hit served.
+    fn ensure_indexed_ready_serve_located(
+        &self,
+        canonical_id: &str,
+        held_source: Option<&HeldIndexedSource>,
+    ) -> Option<LocatedIndexedServe> {
         let normalized_canonical_id = self.normalized_analysis_canonical(canonical_id);
         let canonical_id = normalized_canonical_id.as_ref();
 
@@ -2181,12 +2233,13 @@ impl VerterHost {
         // version per R1 (content-addressed identity).
         let current_key = self.authoritative_current_artifact_key(canonical_id);
         if let Some(current_key) = current_key {
-            if let Some(indexed) = self.project_type_store.indexed().get(
+            if let Some(artifacts) = self.project_type_store.indexed().get_base_artifacts(
                 canonical_id,
                 current_key.content_hash,
                 &current_key.parse_key,
                 &current_key.file_language_id,
             ) {
+                let indexed = Arc::clone(&artifacts.indexed);
                 // A content-current artifact is reusable while its parse
                 // environment is unchanged. A moved parse env means the
                 // retained `framework_parse` / `shallow_state` /
@@ -2202,9 +2255,15 @@ impl VerterHost {
                             crate::types::format_hash16_hex(&indexed.whole_hash)
                         ),
                     );
-                    return Some(IndexedReadyServe {
-                        indexed,
-                        store_published: true,
+                    return Some(LocatedIndexedServe {
+                        serve: IndexedReadyServe {
+                            indexed,
+                            store_published: true,
+                        },
+                        current_hit: Some(CurrentIndexedHit {
+                            canonical: canonical_id.to_owned(),
+                            artifacts,
+                        }),
                     });
                 }
             }
@@ -2237,10 +2296,13 @@ impl VerterHost {
                     crate::types::format_hash16_hex(&indexed.whole_hash)
                 ),
             );
-            return Some(IndexedReadyServe {
-                indexed,
-                store_published: true,
-            });
+            return Some(
+                IndexedReadyServe {
+                    indexed,
+                    store_published: true,
+                }
+                .into(),
+            );
         }
 
         if canonical_id.is_empty() || is_raw_import_specifier_id(canonical_id) {
@@ -2715,10 +2777,13 @@ impl VerterHost {
             };
             let outcome = (*run_result.value).clone();
             if outcome.published {
-                return Some(IndexedReadyServe {
-                    indexed: outcome.indexed,
-                    store_published: true,
-                });
+                return Some(
+                    IndexedReadyServe {
+                        indexed: outcome.indexed,
+                        store_published: true,
+                    }
+                    .into(),
+                );
             }
             if matches!(
                 run_result.role,
@@ -2745,10 +2810,13 @@ impl VerterHost {
                 verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
                     verter_session_query::facts::reuse::NonCacheableReadReason::FencedServe,
                 );
-                return Some(IndexedReadyServe {
-                    indexed: outcome.indexed,
-                    store_published: false,
-                });
+                return Some(
+                    IndexedReadyServe {
+                        indexed: outcome.indexed,
+                        store_published: false,
+                    }
+                    .into(),
+                );
             }
             last_fenced = Some(outcome.indexed);
             #[cfg(test)]
@@ -2776,9 +2844,12 @@ impl VerterHost {
                 verter_session_query::facts::reuse::NonCacheableReadReason::FencedServe,
             );
         }
-        last_fenced.map(|indexed| IndexedReadyServe {
-            indexed,
-            store_published: false,
+        last_fenced.map(|indexed| {
+            IndexedReadyServe {
+                indexed,
+                store_published: false,
+            }
+            .into()
         })
     }
 
