@@ -779,18 +779,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     return None;
                 }
                 work.push((node, true));
-                match data.as_ref() {
-                    composite
-                    @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => work
-                        .extend(
-                            composite
-                                .composite_members()
-                                .expect("key composition")
-                                .iter()
-                                .rev()
-                                .map(|&child| (child, false)),
-                        ),
-                    _ => {}
+                if let composite
+                @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) =
+                    data.as_ref()
+                {
+                    work.extend(
+                        composite
+                            .composite_members()
+                            .expect("key composition")
+                            .iter()
+                            .rev()
+                            .map(|&child| (child, false)),
+                    );
                 }
                 continue;
             }
