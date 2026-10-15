@@ -18,25 +18,30 @@ Filter globs are plain positive globs (`**` spans path segments, `*` stays in on
 
 **A merge is not tested twice.** On a push to `main`, `detect-changes` first runs `scripts/release-proof.mjs --landed`: when the pushed commit is the squash of a pull request, and a successful CI run of THAT pull request recorded testing exactly the squash's tree, every lane is off and `CI Required` passes on that proof, so the commit on `main` keeps its green tick without re-running the pull request's lanes. The record is a `ci-tested` notice (`pull=<number> tree=<sha>`) that `detect-changes` leaves on every pull request run: a `pull_request` run tests `refs/pull/N/merge`, not the head, and GitHub forgets which pull request a run belonged to once it merges. Another pull request sharing the head tested another base, so its run never counts. A force-push, a direct push, a run that tested another tree, or any commit the proof cannot vouch for runs CI as usual.
 
-- **Rust changes** (`crates/**`, `Cargo.toml`, etc.) -- `rust-fmt`, `rust-clippy`, `rust-build-configs`, one provider-free `rust-test-build` archive consumed by `rust-test`; the closure-gated `rust-providers-live` job (serial tsserver then tsgo libtest lanes in one job, compiled once), the standalone `compiler-contracts` lane, BF2 and the Svelte conformance lane run when their root crates' closure is touched
+- **Rust changes** (`crates/**`, `Cargo.toml`, etc.) -- `rust-fmt`, `rust-clippy`, `rust-build-configs`, one provider-free `rust-test-build` archive consumed by `rust-test`; the closure-gated `rust-providers-live` matrix (serial libtest lanes on three runners: the tsserver lane split in two with `provider-ci.mjs run tsserver --shard i/2`, tsgo whole), the standalone `compiler-contracts` lane, BF2 and the Svelte conformance lane run when their root crates' closure is touched
 - **Proto changes** -- `proto-fmt` regenerates with the pinned `buf`/`oxfmt` tools and byte-compares the complete committed TypeScript binding tree
 - **JS changes** (`packages/**`, `package.json`, etc.) -- `js-build-test`, plus the native binding's workspace suites; its script self-tests run `test:scripts:ci`, which omits the tests another required lane already owns (the ARH dirty twins in `architecture-health`, the lane self-tests in their lanes, the sfc-projection verifiers in `sfc-projection`, the aggregate test in its own step)
 - **Script changes** (`scripts/**`) -- `js-build-test` for the scripts' self-tests; a script a lane executes also selects that lane
-- **SFC projection changes** (`tests/sfc-projection/**`, `scripts/sfc-projection/**`, the lockfile, and the verter_compiler / verter_language / verter_session / verter_validation_probe crate closure) -- `sfc-projection` runs `pnpm run test:sfc-projection`: each node's protocol runs `cargo test` and typechecks its probes on both TypeScript engines
+- **SFC projection changes** (`tests/sfc-projection/**`, `scripts/sfc-projection/**`, the lockfile, and the verter_compiler / verter_language / verter_session / verter_validation_probe crate closure) -- `sfc-projection` runs `pnpm run test:sfc-projection` on two shards: each node's protocol runs `cargo test` and typechecks its probes on both TypeScript engines. Shard 1 runs the node verifiers its `SFC_SHARD_1` title pattern names; shard 2 runs the whole chain with that pattern skipped, so a new or renamed verifier runs in shard 2
 - **Docs and other CI-inert paths only** -- no lane; `CI Required` passes
-- **WASM changes** (verter_wasm's crate closure plus `packages/wasm/**`, `packages/browser-host/**`) -- `wasm-build`
+- **WASM changes** (verter_wasm's crate closure plus `packages/wasm/**`, `packages/browser-host/**`) -- `wasm-build`, which uploads the bindgen output for its consumers before running `wasm-opt`, then runs its own checks against the optimised module
 - **Browser-host changes** (`packages/browser-host/**`, `scripts/browser-host-gate*.mjs`, `tests/browser-host/**`, plus the wasm filter) -- `browser-host` runs `node scripts/browser-host-gate.mjs --skip-build` after `wasm-build`: wasm32 census, native same-fixture probe, Chromium/Firefox/WebKit workers; missing browsers, exports, tests or empty operation arrays fail
 - **JetBrains plugin changes** (`extensions/jetbrains/**`, `scripts/jetbrains-gate*.mjs`, `tests/jetbrains-product/**`) -- `jetbrains-plugin` runs `node scripts/jetbrains-gate.mjs` on a JDK 21 runner: the pinned Gradle build's real JVM tests (including JBT1H real-IDE capture hooks), the IntelliJ plugin verifier (every failure level, pinned WebStorm build only) and installable packaging, failing closed on missing JDK/SDK, build output or test evidence. The comparison recorder (`packages/dx-harness/jetbrains`) is typechecked and unit-tested on the `dx-harness-hermetic` lane; that job is the Node side of the jetbrains-product profile.
 
 Most jobs run independently. Core nextest alone consumes the shared archive.
-Real tsserver/tsgo provider tests run serially with libtest in their own job so
-third-party engines have explicit initialization and lifecycle ownership; that
-job and the editor-contracts job run every engine or editor even after an
+Real tsserver/tsgo provider tests run serially with libtest in their own jobs so
+third-party engines have explicit initialization and lifecycle ownership. A
+sharded lane (`--shard i/n`) lists its paired real-provider selector with that
+selector's own filters, deals the sorted names round-robin and runs its share
+with `--exact`; every other invocation runs whole on the shard its label
+hashes to, and a split selector that lists nothing fails the shard. Those jobs
+and the editor-contracts job run every engine or editor even after an
 earlier one failed and decide with a final verdict step, so one run reports
 every regression. The
 provider runner also prints `PROVIDER TEST TIME` for each serial libtest result
-and writes `target/provider-timings/{tsserver,tsgo}.json` (under
-`CARGO_TARGET_DIR` when set). CI uploads these as `provider-test-timings`.
+and writes `target/provider-timings/<lane>.json` (`<lane>-<i>of<n>.json` for a
+shard; under `CARGO_TARGET_DIR` when set). CI uploads these as
+`provider-test-timings-<lane>-<job index>`.
 Durations measure the stdout stream edges from the flushed test name to its
 terminal status; Cargo compilation and failure-detail output are excluded.
 Pipe batching can round very short tests down to zero, so timings are advisory

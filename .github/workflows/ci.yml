@@ -441,18 +441,37 @@ jobs:
           fail-on-error: false
 
   # The real-provider lanes. Each engine's tests run exactly as before —
-  # serial libtest, explicitly initialized — but in ONE job: the workspace is
-  # compiled once for both engines instead of once per engine, and the
-  # account spends one runner slot instead of two. (Measured on a warm cache:
-  # about two minutes of compile per lane against roughly five minutes of
-  # tsserver tests and three and a half of tsgo tests, so the lane is bound
-  # by the serial suites, not by the compile the split used to duplicate.)
+  # serial libtest, explicitly initialized, one test at a time per runner —
+  # but spread over three runners. Measured over the week to 2026-10-15 the
+  # single job took 29 minutes (p50), the longest job in the workflow and the
+  # last to finish in a third of all runs: about 15.5 minutes of serial
+  # tsserver tests and 7 of tsgo tests behind roughly 2.5 minutes of compile
+  # each. Splitting the paired tsserver variants in two (`--shard`, which
+  # deals that selector's listed tests out by name and keeps every other
+  # invocation whole) and giving tsgo its own runner bounds each shard at
+  # about 9 minutes of tests, paying the compile once per shard.
   rust-providers-live:
-    name: Rust Test (providers)
+    name: Rust Test (providers ${{ matrix.part }})
     needs: detect-changes
     if: needs.detect-changes.outputs.providers == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 95
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - part: tsserver 1/2
+            lane: tsserver
+            shard: 1/2
+            plugin: true
+          - part: tsserver 2/2
+            lane: tsserver
+            shard: 2/2
+            plugin: false
+          - part: tsgo
+            lane: tsgo
+            shard: 1/1
+            plugin: false
     env:
       SCCACHE_GHA_ENABLED: "true"
       SCCACHE_GHA_VERSION: "verter-providers-v1"
@@ -478,35 +497,47 @@ jobs:
         run: pnpm --filter @verter/language-shared --filter @verter/typescript-plugin build
       - name: Run serial tsserver provider tests
         id: tsserver
+        if: matrix.lane == 'tsserver'
         continue-on-error: true
         env:
           VERTER_REQUIRE_TSSERVER: "1"
-        run: node scripts/provider-ci.mjs run tsserver
+        run: node scripts/provider-ci.mjs run tsserver --shard ${{ matrix.shard }}
       # These source-level plugin specs do not import @verter/native. The two
       # src/tsc specs that do are retained in native-test below.
       - name: Native-free TypeScript plugin tests
         id: plugin
+        if: matrix.plugin
         continue-on-error: true
         run: pnpm vitest run packages/typescript-plugin/src --exclude 'packages/typescript-plugin/src/tsc/**'
       - name: Run serial tsgo provider tests
         id: tsgo
+        if: matrix.lane == 'tsgo'
         continue-on-error: true
         env:
           VERTER_REQUIRE_TSGO: "1"
-        run: node scripts/provider-ci.mjs run tsgo
-      # Every engine's suite runs even when an earlier one failed, so one
-      # run reports every regression; the job's result is this verdict.
+        run: node scripts/provider-ci.mjs run tsgo --shard ${{ matrix.shard }}
+      # Every suite this shard owns runs even when an earlier one failed, so
+      # one run reports every regression; the job's result is this verdict.
+      # A suite this shard does not own must be skipped, and one it owns must
+      # succeed: a skip of an owned suite is a failure, not a pass.
       - name: Provider lane verdict
         if: always()
         env:
           TSSERVER: ${{ steps.tsserver.outcome }}
           PLUGIN: ${{ steps.plugin.outcome }}
           TSGO: ${{ steps.tsgo.outcome }}
+          OWNS_TSSERVER: ${{ matrix.lane == 'tsserver' }}
+          OWNS_PLUGIN: ${{ matrix.plugin }}
+          OWNS_TSGO: ${{ matrix.lane == 'tsgo' }}
         run: |
           echo "tsserver: $TSSERVER | plugin tests: $PLUGIN | tsgo: $TSGO"
           failed=0
-          for lane in "tsserver:$TSSERVER" "plugin:$PLUGIN" "tsgo:$TSGO"; do
-            case "$lane" in *:success) ;; *) echo "::error::${lane%%:*} lane did not succeed (${lane#*:})"; failed=1;; esac
+          for lane in "tsserver:$OWNS_TSSERVER:$TSSERVER" "plugin:$OWNS_PLUGIN:$PLUGIN" "tsgo:$OWNS_TSGO:$TSGO"; do
+            name="${lane%%:*}"; rest="${lane#*:}"; owns="${rest%%:*}"; outcome="${rest#*:}"
+            case "$owns:$outcome" in
+              true:success|false:skipped) ;;
+              *) echo "::error::$name lane: owned=$owns, outcome=$outcome"; failed=1;;
+            esac
           done
           exit "$failed"
       - name: Upload provider test timings
@@ -514,7 +545,7 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
-          name: provider-test-timings
+          name: provider-test-timings-${{ matrix.lane }}-${{ strategy.job-index }}
           path: ${{ format('{0}/provider-timings/*.json', env.CARGO_TARGET_DIR || 'target') }}
           if-no-files-found: warn
   # Required and parallel with the shared archive build. Compile-fail fixtures
@@ -716,12 +747,27 @@ jobs:
   # (rebuilding verter_compiler once per applied dirty-twin source patch) and
   # typechecks its probes on both TypeScript engines, so the gate is that
   # crate closure plus the node trees, not any JavaScript change.
+  #
+  # Two shards. The node verifiers in verify-node.test.mjs are ~15 of this
+  # lane's ~16 minutes (week to 2026-10-15), seven of them 85-152 s each, run
+  # one after another. Shard 1 runs the verifiers SFC_SHARD_1 names (by
+  # `--test-name-pattern`); shard 2 runs the whole `test:sfc-projection`
+  # chain with the same pattern SKIPPED. The two are complements of one
+  # pattern, so a verifier added later, or renamed, runs in shard 2 rather
+  # than in neither; shard 1 fails if its pattern selects nothing.
   sfc-projection:
-    name: SFC projection verifiers
+    name: SFC projection verifiers (${{ matrix.shard }}/2)
     needs: detect-changes
     if: needs.detect-changes.outputs.sfc_projection == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+    env:
+      # No spaces: NODE_OPTIONS splits on them.
+      SFC_SHARD_1: '^STP(6|9|10|16|18)\sverify:'
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.97.1
@@ -746,7 +792,20 @@ jobs:
       # twin, so a non-incremental rebuild of the whole crate per twin
       # (measured ~2.3x slower than incremental) dominates this lane;
       # re-enable incremental for this step only.
-      - name: Verify the sfc-projection nodes
+      - name: Verify the sfc-projection nodes (shard 1/2)
+        if: matrix.shard == 1
+        shell: bash
+        run: |
+          CARGO_INCREMENTAL=1 node --test "--test-name-pattern=$SFC_SHARD_1" \
+            scripts/sfc-projection/verify-node.test.mjs | tee "$RUNNER_TEMP/sfc-shard-1.log"
+          if ! grep -Eq '^ℹ tests [1-9]' "$RUNNER_TEMP/sfc-shard-1.log"; then
+            echo "::error::SFC_SHARD_1 selected no verifier; update the pattern to the verifiers' titles"
+            exit 1
+          fi
+      - name: Verify the sfc-projection nodes (shard 2/2)
+        if: matrix.shard == 2
+        env:
+          NODE_OPTIONS: --test-skip-pattern=${{ env.SFC_SHARD_1 }}
         run: CARGO_INCREMENTAL=1 pnpm run test:sfc-projection
 
   # The ARH0/ARH1/ARH2/ARH4/ARH5/ARH7 verifiers join their products to the
@@ -1041,9 +1100,36 @@ jobs:
       - run: pnpm install --frozen-lockfile
       # Full publication-ready lane (bindgen + wasm-opt), deliberately NOT the
       # root `pnpm build:wasm` — that is the host-developer lane and never
-      # runs wasm-opt. This artifact is uploaded for playground-test/release.
-      - name: Build WASM
-        run: pnpm --filter @verter/wasm build
+      # runs wasm-opt. It runs as the package's own `build` does (`build:wasm`
+      # = `build:bindgen` then `opt:wasm`, then `build:ts`), with the upload
+      # moved between the halves.
+      #
+      # The consumers (playground-test, browser-host, transport-route-
+      # equivalence) download the artifact uploaded BEFORE `wasm-opt`: on a
+      # cache miss `wasm-opt -Os` spends ~6.5 of this job's ~14 minutes
+      # (22 MB module, week to 2026-10-15) while three jobs wait on it.
+      # `-Os` is a size optimisation and must preserve behaviour; this job
+      # still runs it, fails if it fails, and runs every check below against
+      # the optimised module. `release.yml` builds its own artifacts.
+      - name: Build WASM (bindgen)
+        run: pnpm --filter @verter/wasm run build:bindgen
+      - name: Build @verter/wasm TypeScript
+        run: pnpm --filter @verter/wasm run build:ts
+      - name: Smoke test WASM (bindgen output)
+        run: node -e "const fs = require('fs'); const wasm = fs.readFileSync('packages/wasm/wasm/verter_wasm_bg.wasm'); console.log('WASM size:', wasm.length, 'bytes'); if (wasm.length < 1000) throw new Error('WASM too small');"
+      # Shared with playground-test, browser-host and transport-route-
+      # equivalence so wasm32 is compiled ONCE per run.
+      - name: Upload WASM build
+        uses: actions/upload-artifact@v6
+        with:
+          name: wasm-build
+          path: |
+            packages/wasm/wasm/
+            packages/wasm/dist/
+          if-no-files-found: error
+          retention-days: 1
+      - name: Optimize WASM (wasm-opt)
+        run: pnpm --filter @verter/wasm run opt:wasm
       - name: Smoke test WASM
         run: node -e "const fs = require('fs'); const wasm = fs.readFileSync('packages/wasm/wasm/verter_wasm_bg.wasm'); console.log('WASM size:', wasm.length, 'bytes'); if (wasm.length < 1000) throw new Error('WASM too small');"
       # The committed carrier fixture the playground's in-context
@@ -1076,16 +1162,6 @@ jobs:
       # helpers, so the two cannot disagree on what passing means.
       - name: WASM JavaScript-boundary lane
         run: node scripts/wasm-js-boundary-lane.mjs --exhaustive
-      # Shared with playground-test so wasm32 is compiled ONCE per run.
-      - name: Upload WASM build
-        uses: actions/upload-artifact@v6
-        with:
-          name: wasm-build
-          path: |
-            packages/wasm/wasm/
-            packages/wasm/dist/
-          if-no-files-found: error
-          retention-days: 1
       - name: Build TS packages
         run: pnpm run build:ts
       - name: Test @verter/wasm
