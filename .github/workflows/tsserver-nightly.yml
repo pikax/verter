@@ -39,6 +39,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
         with:
+          # A daily run; its targets would crowd the 10 GB cache budget pull
+          # requests restore from (see ci.yml, "Caches").
+          save-if: false
           key: tsserver-nightly-providers
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
@@ -72,6 +75,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
         with:
+          # A daily run; its targets would crowd the 10 GB cache budget pull
+          # requests restore from (see ci.yml, "Caches").
+          save-if: false
           key: tsserver-nightly-native
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
@@ -106,6 +112,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
         with:
+          # A daily run; its targets would crowd the 10 GB cache budget pull
+          # requests restore from (see ci.yml, "Caches").
+          save-if: false
           key: tsserver-nightly-lsp-debug
       - name: Build verter-lsp, relay shim, DX baseline and MCP server (debug)
         run: cargo build -p verter_lsp -p verter_relay_shim -p verter_dx_baseline -p verter_mcp

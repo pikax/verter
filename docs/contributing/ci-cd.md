@@ -29,6 +29,11 @@ Filter globs are plain positive globs (`**` spans path segments, `*` stays in on
 - **JetBrains plugin changes** (`extensions/jetbrains/**`, `scripts/jetbrains-gate*.mjs`, `tests/jetbrains-product/**`) -- `jetbrains-plugin` runs `node scripts/jetbrains-gate.mjs` on a JDK 21 runner: the pinned Gradle build's real JVM tests (including JBT1H real-IDE capture hooks), the IntelliJ plugin verifier (every failure level, pinned WebStorm build only) and installable packaging, failing closed on missing JDK/SDK, build output or test evidence. The comparison recorder (`packages/dx-harness/jetbrains`) is typechecked and unit-tested on the `dx-harness-hermetic` lane; that job is the Node side of the jetbrains-product profile.
 
 Most jobs run independently. Core nextest alone consumes the shared archive.
+Caches are restored on every ref and saved only from `main` (`save-if` on
+rust-cache, a restore/save split for Playwright and Gradle): the repository's
+cache is capped at 10 GB, and a pull request's saves, readable by that pull
+request alone, used to evict the `main` entries every other pull request
+restores. The VS Code host and sccache's per-compile entries are the exceptions.
 Real tsgo provider tests run serially with libtest in their own job so the
 third-party engine has explicit initialization and lifecycle ownership; that
 job and the editor-contracts job run every engine or editor even after an

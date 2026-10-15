@@ -13,6 +13,18 @@ permissions:
   contents: read
   checks: write
 
+# Caches. The repository's Actions cache is capped at 10 GB and evicts the
+# least recently used entry first. A pull request's saves are scoped to its own
+# ref, where no other pull request can read them, and on 2026-10-15 those saves
+# held 8 of 12.8 GB and had evicted main's rust-cache entries, so every pull
+# request compiled cold and saved yet another private copy. Every cache step
+# here therefore RESTORES on any ref and SAVES only from main
+# (`save-if` on rust-cache; a restore/save split elsewhere). Two exceptions:
+# the VS Code host (one 330 MB entry per pinned version, saved by whichever
+# run misses, so a lost entry never means a CDN download per shard), and
+# sccache's GitHub backend, which writes small per-compile entries from every
+# ref.
+
 jobs:
   detect-changes:
     # Reads the pull request a push to main merged, and that pull request's CI
@@ -97,6 +109,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           key: detect-changes
           cache-targets: false
       - uses: actions/setup-node@v5
@@ -206,6 +219,7 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           key: rust-clippy
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
@@ -275,6 +289,7 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           key: rust-build-configs
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
@@ -316,6 +331,7 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           # Job-scoped by default. The previous shared
           # `${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}` key was
           # used by SEVEN ci.yml jobs building different artifact sets; on an
@@ -463,6 +479,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           key: rust-providers
       - uses: mozilla-actions/sccache-action@v0.0.11
         with:
@@ -516,6 +533,7 @@ jobs:
           components: rust-src
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           key: compiler-contracts
           cache-directories: target/tests/trybuild
       - uses: mozilla-actions/sccache-action@v0.0.11
@@ -562,6 +580,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           key: bf2-authoritative
       - uses: mozilla-actions/sccache-action@v0.0.11
         with:
@@ -602,6 +621,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           key: js-build-test
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
@@ -715,6 +735,7 @@ jobs:
       # rebuilds only the patched crate.
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           key: sfc-projection
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
@@ -807,6 +828,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           key: svelte-oracle
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
@@ -844,6 +866,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           key: svelte-conformance
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
@@ -907,6 +930,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           key: svelte-compiler-benchmark
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
@@ -1024,6 +1048,7 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           key: wasm-build
       # Prebuilt binary. The previous guarded `cargo install` compiled
       # wasm-bindgen-cli from source on any runner where the version probe
@@ -1128,6 +1153,7 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           key: browser-host
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
@@ -1147,15 +1173,23 @@ jobs:
         id: playwright-version
         working-directory: packages/playground
         run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
-      - name: Cache Playwright browsers
+      # Restored everywhere, saved only from main (see "Caches" at the top).
+      - name: Restore Playwright browsers
         id: playwright-cache
-        uses: actions/cache@v5
+        uses: actions/cache/restore@v5
         with:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-${{ steps.playwright-version.outputs.version }}-chromium-firefox-webkit
       - name: Install Playwright browsers (Chromium, Firefox, WebKit)
         if: steps.playwright-cache.outputs.cache-hit != 'true'
         run: pnpm --filter @verter/playground exec playwright install chromium firefox webkit --with-deps
+      - name: Save Playwright browsers
+        if: github.ref == 'refs/heads/main' && steps.playwright-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v5
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ steps.playwright-cache.outputs.cache-primary-key }}
       - name: Install Playwright system dependencies
         if: steps.playwright-cache.outputs.cache-hit == 'true'
         run: pnpm --filter @verter/playground exec playwright install-deps chromium firefox webkit
@@ -1188,6 +1222,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           key: build-lsp-debug
       - name: Build verter-lsp, relay shim, DX baseline and MCP server (debug)
         run: cargo build -p verter_lsp -p verter_relay_shim -p verter_dx_baseline -p verter_mcp
@@ -1425,6 +1460,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           key: build-native-node
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
@@ -1530,6 +1566,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           key: transport-route-equivalence
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
@@ -1728,6 +1765,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           key: build-editor-lsp
       - name: Build verter-lsp (release)
         run: cargo build -p verter_lsp --release
@@ -1757,6 +1795,7 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           key: editor-contracts
           workspaces: |
             . -> target
@@ -2100,7 +2139,17 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
-          cache: gradle
+      # The Gradle caches (the pinned WebStorm SDK among them, ~2.5 GB) are
+      # restored everywhere and saved only from main (see "Caches" at the top);
+      # setup-java's own `cache: gradle` saved a copy per pull request.
+      - name: Restore Gradle caches
+        id: gradle-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('extensions/jetbrains/**/*.gradle*', 'extensions/jetbrains/**/gradle-wrapper.properties', 'extensions/jetbrains/gradle.properties') }}
       # This lane never installs the JS workspace. setup-node@v5 otherwise
       # auto-caches from package.json#packageManager and fails looking up
       # `pnpm` (the rust-test-build job documents the same gotcha).
@@ -2111,6 +2160,15 @@ jobs:
           package-manager-cache: false
       - name: Run the jetbrains-product gate (JVM tests, verifier, packaging)
         run: node scripts/jetbrains-gate.mjs
+      - name: Save Gradle caches
+        if: github.ref == 'refs/heads/main' && steps.gradle-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ steps.gradle-cache.outputs.cache-primary-key }}
 
   # ---------------------------------------------------------------------------
   # Release pull requests. Beside the lanes above (the tests), a release PR
