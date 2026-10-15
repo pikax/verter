@@ -36,3 +36,5 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     verter_mcp::run::run(cli).await
 }
+
+// CI selection demo: a change to this leaf crate runs only the rust and arch lanes.
