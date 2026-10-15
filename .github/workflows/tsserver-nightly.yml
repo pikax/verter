@@ -17,6 +17,9 @@ name: tsserver nightly
 # Run it by hand with `gh workflow run tsserver-nightly.yml`.
 
 on:
+  # DEMO ONLY (#908): run the nightly once on this branch to validate it.
+  push:
+    branches: [ci/speed-selective-demo]
   schedule:
     - cron: "30 4 * * *" # 04:30 UTC daily, before the 06:00 Nightly
   workflow_dispatch:
