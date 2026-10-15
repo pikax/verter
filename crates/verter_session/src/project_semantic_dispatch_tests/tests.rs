@@ -17299,21 +17299,13 @@ fn substitute_recurses_into_function_params_and_return_type() {
     }
 }
 
-/// `keyof (A & B)` invariant: where `A` is enumerable (Object
-/// surface) and `B` is unresolvable (a deferred shell or TypeParam),
-/// the result must be `A`'s keys. The Intersection arm must
-/// accumulate the union of keys across every enumerable arm and
-/// only return `None` when every arm is unresolvable; an all-or-
-/// nothing `?`-propagating arm would erase A's keys whenever any
-/// arm was unresolvable.
-///
-/// Discriminator: build `{ a: number, b: number } & TypeParam(K)`
-/// and query `keyof`. The Object arm enumerates `["a", "b"]`; the
-/// TypeParam arm is unresolvable. The accumulator must yield
-/// `Union(Literal("a"), Literal("b"))` (keys = Some(["a", "b"]))
-/// rather than collapsing to a deferred KeyOf shell.
+/// `keyof (A & K)` where `A` is an object and `K` a type parameter is
+/// `keyof K | keyof A` (the checker's `getIndexType` over an intersection):
+/// the keys `K` contributes are unknown until it is instantiated, so the
+/// keys stay the deferred `keyof` over the whole intersection — never `A`'s
+/// keys alone, which would drop every key an instantiation of `K` brings.
 #[test]
-fn keyof_intersection_accumulates_enumerable_arms_and_ignores_unresolvable() {
+fn keyof_intersection_with_a_type_parameter_arm_stays_deferred() {
     use verter_type_engine::semantic_query::DeclIdentity;
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -17321,8 +17313,7 @@ fn keyof_intersection_accumulates_enumerable_arms_and_ignores_unresolvable() {
 
     let num = primitive(&graph, PrimitiveKind::Number);
     let obj = simple_object(&graph, &[("a", num), ("b", num)]);
-    // Unresolvable arm: a TypeParam — the key-name enumerator's
-    // catch-all returns `None` for TypeParam shells.
+    // The generic arm: its keys are known only once it is instantiated.
     let type_param = graph.intern_node(SemanticNodeData::TypeParam {
         decl: DeclIdentity::synthetic("K"),
         param_index: 0,
@@ -17346,39 +17337,14 @@ fn keyof_intersection_accumulates_enumerable_arms_and_ignores_unresolvable() {
         other => panic!("expected Value from keyof, got {other:?}"),
     };
 
-    let data = graph.node_data(result).expect("result data");
-    let names: Vec<String> = match &*data {
-        SemanticNodeData::Union(arms) => arms
-            .iter()
-            .filter_map(|a| match graph.node_data(*a).as_deref() {
-                Some(SemanticNodeData::Literal(
-                    verter_type_engine::semantic_query::LiteralValue::String(s),
-                )) => Some(s.clone()),
-                Some(SemanticNodeData::Primitive(PrimitiveKind::String)) => Some(String::new()),
-                _ => None,
-            })
-            .collect(),
-        SemanticNodeData::Literal(verter_type_engine::semantic_query::LiteralValue::String(s)) => {
-            vec![s.clone()]
-        }
-        SemanticNodeData::KeyOf { .. } => {
-            panic!(
-                "`keyof (Object & TypeParam)` must enumerate \
-                 Object's keys, not fall through to a deferred KeyOf \
-                 shell via `?` propagation; the intersection arm keys \
-                 must accumulate."
-            );
-        }
-        other => panic!("expected Union or Literal(String), got {other:?}"),
-    };
-    let mut names_sorted = names.clone();
-    names_sorted.sort();
-    assert_eq!(
-        names_sorted,
-        vec!["a".to_string(), "b".to_string()],
-        "Intersection key accumulation must surface keys from \
-         the enumerable arm (Object) even when a coexisting arm \
-         (TypeParam) is unresolvable",
+    assert!(
+        matches!(
+            graph.node_data(result).as_deref(),
+            Some(SemanticNodeData::KeyOf { base }) if *base == intersection
+        ),
+        "`keyof (Object & TypeParam)` must stay the deferred `keyof` over the \
+         intersection, got {:?}",
+        graph.node_data(result)
     );
 }
 

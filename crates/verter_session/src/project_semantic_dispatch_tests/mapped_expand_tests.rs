@@ -438,8 +438,7 @@ fn a_concrete_mapping_applies_the_checker_modifiers_and_drops_never_keys() {
 /// an index signature, as it maps each property: the value is the mapping's
 /// at the signature's key type, `readonly` follows the source's or the
 /// mapping's modifier, `+?` adds `undefined` to it, and an `as` clause keys
-/// it by the type the remap produces. A key space naming `string` or
-/// `number` maps it the same way. Measured on the sources below.
+/// it by the type the remap produces. Measured on the sources below.
 #[test]
 fn a_concrete_mapping_maps_the_source_index_signatures() {
     let source = "interface Dict { [k: string]: number; fixed: 1 }\n\
@@ -492,11 +491,6 @@ fn a_concrete_mapping_maps_the_source_index_signatures() {
             (
                 "{ [K in keyof Dict as `g_${K & string}`]: Dict[K] }",
                 "{ [x: `g_${string}`]: number; g_fixed: 1; }",
-            ),
-            ("{ [K in string]: 1 }", "{ [x: string]: 1; }"),
-            (
-                "{ [K in 'a' | number]: K }",
-                "{ [x: number]: number; a: \"a\"; }",
             ),
         ],
     );

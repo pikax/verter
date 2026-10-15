@@ -14364,48 +14364,31 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             })
             .flatten();
-        // A key domain that holds key TYPES beside its literal keys — a
-        // homomorphic source's index signatures (`{ [k: string]: V }`), or a
-        // `string` / `number` / `symbol` a key space names — maps each key
-        // type to an index signature, as the checker's
-        // `resolveMappedTypeMembers` maps it (`addMemberForKeyType`). A
-        // homomorphic mapping (`[K in keyof S]`, its key space possibly
-        // reduced already) reads the source's own index signatures, never
-        // `keyof S`'s widened `string | number`.
+        // A homomorphic mapping (`[K in keyof S]`, its key space possibly
+        // reduced already) over a source with index signatures maps each
+        // signature's key type to an index signature beside the source's
+        // properties, as the checker's `resolveMappedTypeMembers` maps it
+        // (`forEachMappedTypePropertyKeyTypeAndIndexSignatureKeyType`): it
+        // reads the source's own signatures, never `keyof S`'s widened
+        // `string | number`.
         let homomorphic = homomorphic_over_source || mapper.key_space != source;
         let index_domain: Option<(Vec<super::enumerate::KeyDomainKey>, Vec<MappedIndexKey>)> =
-            if homomorphic {
-                (source_surface_resolved
-                    && source_keys_are_nameable
-                    && !source_index_signatures.is_empty())
-                .then(|| {
-                    (
-                        source_member_keys(&source_members),
-                        source_index_signatures
-                            .iter()
-                            .map(|signature| MappedIndexKey {
-                                key_type: signature.key_type,
-                                source: Some(signature.clone()),
-                            })
-                            .collect(),
-                    )
-                })
-            } else {
-                self.key_space_literals_and_broad_kinds(mapper.key_space)
-                    .filter(|(_, broad)| !broad.is_empty())
-                    .map(|(keys, broad)| {
-                        (
-                            keys,
-                            broad
-                                .into_iter()
-                                .map(|kind| MappedIndexKey {
-                                    key_type: self.primitive_node(kind),
-                                    source: None,
-                                })
-                                .collect(),
-                        )
-                    })
-            };
+            (homomorphic
+                && source_surface_resolved
+                && source_keys_are_nameable
+                && !source_index_signatures.is_empty())
+            .then(|| {
+                (
+                    source_member_keys(&source_members),
+                    source_index_signatures
+                        .iter()
+                        .map(|signature| MappedIndexKey {
+                            key_type: signature.key_type,
+                            source: Some(signature.clone()),
+                        })
+                        .collect(),
+                )
+            });
         let (index_keys, index_domain_keys) = match index_domain {
             Some((keys, index_keys)) => (index_keys, Some(keys)),
             None => (Vec::new(), None),
@@ -19133,12 +19116,11 @@ pub(super) struct InstantiateBuild {
     complete_structure: bool,
 }
 
-/// A key TYPE of a mapped type's key domain, which maps to an index
-/// signature: a homomorphic source's index signature, or a broad key kind
-/// of the key space.
+/// A key TYPE of a homomorphic mapping's key domain — its source's index
+/// signature — which maps to an index signature.
 struct MappedIndexKey {
     key_type: SemanticNodeId,
-    /// The source's index signature it reads, for a homomorphic mapping.
+    /// The source's index signature it reads.
     source: Option<crate::semantic_query::IndexSignature>,
 }
 
