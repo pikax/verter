@@ -36,7 +36,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use verter_type_engine::project_semantic_dispatch::raise::{
-    enable_dispatch_trace_for_test, DISPATCH_TRACE,
+    enable_dispatch_trace_for_test, keys_built_cold_more_than_once, DISPATCH_TRACE,
 };
 use verter_type_expr::{LiteralValue, TypeExpr};
 
@@ -234,11 +234,20 @@ fn assert_answer(label: &str, answer: &BTreeSet<Literal>, expected: &BTreeSet<Li
 /// Between a size and a larger one each work counter may grow at most 1.5
 /// times faster than the input: a quadratic term grows 9 times over the
 /// route tree's threefold step and 100 times over the unions' tenfold one.
+/// A counter that is zero at the smaller size is compared as one, so it may
+/// reach a few units at the larger size; that residue is not a growth term.
+/// The connected work and the query reads must be non-zero at both sizes, so
+/// a counter that stopped counting cannot pass as linear.
 fn assert_linear_growth(
     label: &str,
     (small, before): (usize, Work),
     (large, after): (usize, Work),
 ) {
+    for (size, work) in [(small, &before), (large, &after)] {
+        for (what, value) in &work[..2] {
+            assert!(*value > 0, "{label}: {what} is zero at {size}");
+        }
+    }
     for ((what, before), (_, after)) in before.into_iter().zip(after) {
         println!("{label}: {what} {before} at {small}, {after} at {large}");
         assert!(
@@ -366,6 +375,62 @@ fn distinct_aliases_answer_at_every_size_with_linear_work() {
         (members, work)
     });
     assert_linear_growth("aliases", work[0], work[1]);
+}
+
+/// One request builds each query once: a later read of the same key is
+/// served by the entry the first read stored. Every type declaration's
+/// body records the augmentation-index shape of its own file, and that
+/// index is first populated during the request, after the request's view
+/// was captured. A view that validated the shape only at its captured root
+/// refused every such entry, so the repeated `infer` rebuilt each member
+/// alias at every read of it: eight times per member.
+#[test]
+fn one_request_builds_each_query_once() {
+    let (pattern, pattern_probe) = repeated_infer(3);
+    let (aliases, aliases_probe) = distinct_aliases(3);
+    let tree = route_tree(3);
+    let demands = [
+        (
+            "Pat",
+            pattern.as_str(),
+            pattern_probe.as_str(),
+            checker_instantiations_repeated_infer(3),
+        ),
+        (
+            "aliases",
+            aliases.as_str(),
+            aliases_probe.as_str(),
+            checker_instantiations_aliases(3),
+        ),
+        (
+            "Names",
+            tree.as_str(),
+            "Names<typeof routes>",
+            checker_instantiations_names(3),
+        ),
+        (
+            "Paths",
+            tree.as_str(),
+            "Paths<typeof routes>",
+            checker_instantiations_paths(3),
+        ),
+    ];
+    for (label, source, probe, operations) in demands {
+        // The cold-build counts are per thread: each demand runs on its own.
+        let rebuilt = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let _ = named_probe(source, probe, operations);
+                    keys_built_cold_more_than_once()
+                })
+                .join()
+                .expect("the demand completes")
+        });
+        assert_eq!(
+            rebuilt, 0,
+            "{label}: {rebuilt} queries were built more than once"
+        );
+    }
 }
 
 /// The first level of `Names` over 2,000 parents answers every parent's
