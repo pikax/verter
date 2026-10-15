@@ -45,6 +45,16 @@ pub fn current_request_cancellation_token() -> Option<CancellationToken> {
     current_request_context().map(|ctx| ctx.cancellation_token())
 }
 
+/// Whether the installed request's cancellation token is cancelled, read in
+/// place; `None` when no request is installed.
+pub(crate) fn current_request_cancelled() -> Option<bool> {
+    CURRENT_REQUEST_CONTEXT.with(|c| {
+        c.borrow()
+            .as_ref()
+            .map(|ctx| ctx.cancellation.is_cancelled())
+    })
+}
+
 use crate::semantic_query::{PartialReasonSet, ResultCompleteness};
 
 thread_local! {

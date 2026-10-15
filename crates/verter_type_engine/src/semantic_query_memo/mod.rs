@@ -923,16 +923,18 @@ pub enum WarmPublishOutcome {
 /// Reverse-index type alias. See
 /// [`SemanticGraphStore::canonical_to_entries`] for the contract.
 ///
-/// The per-canonical shard maps each
-/// `(family, slot, admission_seq)` PER-CANDIDATE entry identity to the
-/// candidate's `ReadSetSignature.facts` rail — the path-precise fact
-/// signature, kept as a diagnostic stamp of what was registered.
+/// The per-canonical shard maps each `(family, slot, admission_seq)`
+/// PER-CANDIDATE entry identity to the candidate's
+/// `ReadSetSignature.facts` rail — the path-precise fact signature, kept
+/// as a diagnostic stamp of what was registered. The store hands out each
+/// `admission_seq` once, so `(admission_seq, slot)` alone identifies the
+/// registration and is its key; the family travels with the rail.
 /// `invalidate_canonical`'s drain identifies registrations by the
 /// per-candidate identity (NOT by `(family, slot)` alone), so a
 /// cross-canonical cleanup for one evicted candidate does NOT strip a
 /// surviving sibling candidate's registrations in the same slot.
 type CanonicalToEntries =
-    DashMap<Arc<str>, Mutex<FxHashMap<(FamilyKey, ModeSlot, u64), RegisteredFacts>>>;
+    DashMap<Arc<str>, Mutex<FxHashMap<(u64, ModeSlot), (FamilyKey, RegisteredFacts)>>>;
 
 /// The `ReadSetSignature.facts` rail an entry registered under a
 /// canonical in [`CanonicalToEntries`] — the diagnostic stamp + the
@@ -1284,7 +1286,9 @@ impl SemanticGraphStore {
                             .map(|t| t.elapsed())
                             .unwrap_or(std::time::Duration::ZERO);
                         crate::request_observers::record_family_map_lock_acquisition(lock_wait);
-                        map.drain().collect()
+                        map.drain()
+                            .map(|((seq, slot), (family, facts))| ((family, slot, seq), facts))
+                            .collect()
                     }
                     None => {
                         // Still account for the canonical-shard removal

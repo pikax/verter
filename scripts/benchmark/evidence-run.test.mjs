@@ -355,7 +355,7 @@ describe("real run", () => {
 });
 
 /** Synthetic harness results for skr-augment-scaleb with the given retention-proof verdicts. */
-function augmentResults(verdicts, { dropSession = null } = {}) {
+function augmentResults(verdicts, { dropSession = null, classes = {} } = {}) {
   const stat = (v) => ({ n: 3, min: v, median: v, max: v });
   const verter = {
     class: "matched",
@@ -370,7 +370,7 @@ function augmentResults(verdicts, { dropSession = null } = {}) {
   const sessionCells = ids
     .filter((id) => id !== dropSession)
     .map((id) => {
-      const cell = { key: id, arms: { verter: { class: "matched" } } };
+      const cell = { key: id, arms: { verter: { class: classes[id] ?? "matched" } } };
       if (id.endsWith("-growth")) {
         const verdict = verdicts[id] ?? "passed";
         cell.retentionProof = {
@@ -445,6 +445,16 @@ describe("session retention proofs", () => {
       "a proof with nothing compared",
       augmentResults({ "augment-module-growth": "n/a" }),
       /augment-module-growth: the retention proof has no completed pair to compare/,
+    ],
+    [
+      "a passing proof over a growth session that answered wrongly",
+      augmentResults({}, { classes: { "augment-global-growth": "mismatch" } }),
+      /augment-global-growth: the retention proof needs augment-global-growth to answer every demand, its class is mismatch/,
+    ],
+    [
+      "a passing proof over a baseline that refused",
+      augmentResults({}, { classes: { "augment-module-baseline": "refusal" } }),
+      /augment-module-growth: the retention proof needs augment-module-baseline to answer every demand, its class is refusal/,
     ],
     [
       "a missing session",

@@ -289,7 +289,17 @@ pub(crate) fn observe_fan_out_borrowed(sig: &[FactVersionRef]) {
 /// The read set verifies its order and falls back for an unordered witness.
 #[inline]
 pub(crate) fn observe_fan_out_canonical(sig: &std::sync::Arc<[FactVersionRef]>) {
-    observe_signature_consumers(sig, |cell| cell.absorb_canonical_signature(sig));
+    // The witness's order is verified once for every consumer, by the
+    // first that does not already hold it.
+    let verified = std::cell::OnceCell::new();
+    observe_signature_consumers(sig, |cell| {
+        match verified.get_or_init(|| {
+            verter_session_query::facts::fact_read_set::VerifiedCanonicalRun::verify(sig)
+        }) {
+            Some(run) => cell.absorb_verified_run(run),
+            None => cell.observe_borrowed_signature(sig),
+        }
+    });
 }
 
 #[inline]

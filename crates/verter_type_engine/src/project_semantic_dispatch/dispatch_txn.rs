@@ -2634,6 +2634,37 @@ pub struct AugmentationPlanKey {
     pub excluded_contributor: Option<Arc<str>>,
 }
 
+impl AugmentationPlanKey {
+    /// The demand an absent fold answers. No contributor exists for the
+    /// declaration whatever its arguments, so the arguments are not part
+    /// of it.
+    pub fn absence(&self) -> AugmentationAbsenceKey {
+        AugmentationAbsenceKey {
+            target: self.target.clone(),
+            decl_name: Arc::clone(&self.decl_name),
+            request_canonical: Arc::clone(&self.request_canonical),
+            excluded_contributor: self.excluded_contributor.clone(),
+        }
+    }
+}
+
+/// The declaration a fold read no contributor for: its target and name,
+/// the requesting file and the contributor the caller already holds.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AugmentationAbsenceKey {
+    pub target: verter_session_query::resolution::AugmentationTargetKind,
+    pub decl_name: Arc<str>,
+    pub request_canonical: Arc<str>,
+    pub excluded_contributor: Option<Arc<str>>,
+}
+
+/// A fold this transaction completed that read no contributor: how far
+/// the read may travel and what reusing it replays.
+pub struct TransactionAugmentationAbsence {
+    pub reuse: verter_session_query::facts::reuse::ReuseClass,
+    pub replay: FlowMemberReuse,
+}
+
 /// A type-body fold completed on this transaction: the plan, how far it
 /// may travel, and what reusing it replays (the same rails a completed
 /// flow result replays).
@@ -2650,12 +2681,14 @@ pub struct TransactionAugmentationPlan {
 #[derive(Default)]
 pub struct AugmentationPlanTable {
     plans: FxHashMap<AugmentationPlanKey, TransactionAugmentationPlan>,
+    absences: FxHashMap<AugmentationAbsenceKey, TransactionAugmentationAbsence>,
 }
 
 impl std::fmt::Debug for AugmentationPlanTable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AugmentationPlanTable")
             .field("plans", &self.plans.len())
+            .field("absences", &self.absences.len())
             .finish()
     }
 }
@@ -2673,6 +2706,25 @@ impl AugmentationPlanTable {
             return;
         }
         self.plans.entry(key).or_insert(plan);
+    }
+
+    /// The completed absent fold of `key`, if any.
+    pub fn absence(&self, key: &AugmentationAbsenceKey) -> Option<&TransactionAugmentationAbsence> {
+        self.absences.get(key)
+    }
+
+    /// Record that `key`'s fold read no contributor. Only a
+    /// request-reusable class enters; the first completion answers every
+    /// later demand.
+    pub fn complete_absence(
+        &mut self,
+        key: AugmentationAbsenceKey,
+        absence: TransactionAugmentationAbsence,
+    ) {
+        if !absence.reuse.is_request_reusable() {
+            return;
+        }
+        self.absences.entry(key).or_insert(absence);
     }
 }
 

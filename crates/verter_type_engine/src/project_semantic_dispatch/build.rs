@@ -195,11 +195,29 @@ enum TransactionFold {
     Plan(Arc<AugmentationPlan>),
 }
 
-/// What an augmentation fold produced: lowered contributions, or the
-/// unprojected plan of a type-body fold.
+/// What an augmentation fold produced: lowered contributions, the
+/// unprojected plan of a type-body fold, or the read that no declaration
+/// beside the base exists for the target.
 enum FoldedAugmentation {
     Contributions(AugmentationContributions),
     Plan(AugmentationPlan),
+    /// Neither an augmenting block nor another file-scope declaration
+    /// targets the declaration. Decided before the declaration's arguments
+    /// or projection context are consulted, so it answers every
+    /// instantiation of the declaration alike.
+    Absent,
+}
+
+impl FoldedAugmentation {
+    fn into_transaction_fold(self) -> Option<TransactionFold> {
+        match self {
+            Self::Contributions(contributions) => {
+                Some(TransactionFold::Contributions(contributions))
+            }
+            Self::Plan(plan) => Some(TransactionFold::Plan(Arc::new(plan))),
+            Self::Absent => None,
+        }
+    }
 }
 
 /// Shared return shape of the augmenter-fold path
@@ -5925,6 +5943,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         {
             return Some(self.project_augmentation_plan(&plan, type_arguments, context));
         }
+        if key
+            .as_ref()
+            .is_some_and(|key| self.reuse_augmentation_absence(&key.absence()))
+        {
+            return None;
+        }
         let fold = || {
             self.fold_augmentation_contributions(
                 contribution,
@@ -5939,12 +5963,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         };
         let folded = match key {
             Some(key) => self.record_augmentation_plan(key, fold),
-            None => fold().map(|folded| match folded {
-                FoldedAugmentation::Contributions(contributions) => {
-                    TransactionFold::Contributions(contributions)
-                }
-                FoldedAugmentation::Plan(plan) => TransactionFold::Plan(Arc::new(plan)),
-            }),
+            None => fold().and_then(FoldedAugmentation::into_transaction_fold),
         }?;
         Some(match folded {
             TransactionFold::Contributions(contributions) => contributions,
@@ -5975,6 +5994,29 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         Some(Arc::clone(&completed.plan))
     }
 
+    /// Whether this transaction already read that nothing augments the
+    /// declaration `key` names; a hit replays that read — its facts,
+    /// refusal and file self-roots — into the scopes live now, exactly as
+    /// folding it again would.
+    fn reuse_augmentation_absence(
+        &self,
+        key: &super::dispatch_txn::AugmentationAbsenceKey,
+    ) -> bool {
+        let txn = self.dispatch_txn.borrow();
+        let Some(completed) = txn.augmentation.absence(key) else {
+            return false;
+        };
+        let replay = &completed.replay;
+        crate::resolver_core::resolver_context::observe_fan_out_borrowed(&replay.reads.facts);
+        crate::fact_tracing::replay_reuse_refusal(&completed.reuse);
+        self.deposit_operand_self_roots(&replay.observed_self_roots);
+        if replay.canonical_evidence_deposited {
+            self.canonical_evidence_epoch
+                .set(self.canonical_evidence_epoch.get().wrapping_add(1));
+        }
+        true
+    }
+
     /// Fold a type body, keeping a complete plan for the rest of the
     /// transaction with what reusing it replays. A fold is recorded only
     /// when every channel an enclosing build observes is observable here
@@ -5985,12 +6027,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         key: super::dispatch_txn::AugmentationPlanKey,
         fold: impl FnOnce() -> Option<FoldedAugmentation>,
     ) -> Option<TransactionFold> {
-        let into_transaction_fold = |folded: FoldedAugmentation| match folded {
-            FoldedAugmentation::Contributions(contributions) => {
-                TransactionFold::Contributions(contributions)
-            }
-            FoldedAugmentation::Plan(plan) => TransactionFold::Plan(Arc::new(plan)),
-        };
         let completeness_scope_active =
             crate::request_context::cold_compute_completeness_scope_active();
         let recordable = crate::resolver_core::resolver_context::fact_tracer_installed()
@@ -5998,7 +6034,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             && !(completeness_scope_active
                 && crate::request_context::current_cold_compute_completeness().is_partial());
         if !recordable {
-            return fold().map(into_transaction_fold);
+            return fold().and_then(FoldedAugmentation::into_transaction_fold);
         }
         let private_completeness = (!completeness_scope_active)
             .then(crate::request_context::ColdComputeCompletenessScope::enter);
@@ -6017,11 +6053,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // The frame's rails reach the enclosing build exactly as if they had
         // folded there directly.
         self.fold_observed_frame_into_top(&observed);
-        let folded = folded.map(into_transaction_fold)?;
-        let TransactionFold::Plan(plan) = &folded else {
-            return Some(folded);
-        };
-        let complete = plan.context_free && !observed.result_is_partial && !folded_partial;
         let refusal = match refused {
             Some(reason) => verter_session_query::facts::reuse::ObservedRefusal::Typed(reason),
             None if reads.non_cacheable || observed.cache_suppress => {
@@ -6029,6 +6060,34 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             None => verter_session_query::facts::reuse::ObservedRefusal::None,
         };
+        let complete_read = !observed.result_is_partial && !folded_partial;
+        let folded = match folded? {
+            FoldedAugmentation::Absent => {
+                let reuse =
+                    verter_session_query::facts::reuse::classify_reuse(refusal, complete_read);
+                self.dispatch_txn
+                    .borrow_mut()
+                    .augmentation
+                    .complete_absence(
+                        key.absence(),
+                        super::dispatch_txn::TransactionAugmentationAbsence {
+                            reuse,
+                            replay: super::dispatch_txn::FlowMemberReuse {
+                                reads,
+                                observed_self_roots: observed.observed_self_roots,
+                                canonical_evidence_deposited: self.canonical_evidence_epoch.get()
+                                    != evidence_epoch,
+                            },
+                        },
+                    );
+                return None;
+            }
+            folded => folded.into_transaction_fold()?,
+        };
+        let TransactionFold::Plan(plan) = &folded else {
+            return Some(folded);
+        };
+        let complete = plan.context_free && complete_read;
         let reuse = verter_session_query::facts::reuse::classify_reuse(refusal, complete);
         if reuse.is_request_reusable() {
             self.dispatch_txn.borrow_mut().augmentation.complete(
@@ -6298,7 +6357,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
         });
         if augmenter_set.entries.is_empty() && !has_file_scope {
-            return None;
+            return Some(FoldedAugmentation::Absent);
         }
 
         let mut contributor_nodes: Vec<SemanticNodeId> = Vec::new();

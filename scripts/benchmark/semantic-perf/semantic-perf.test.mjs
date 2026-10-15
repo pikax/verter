@@ -49,6 +49,7 @@ import {
   sessionArmsOf,
   sessionInputs,
   sessionAnswers,
+  sessionRecordProblems,
   summarizeSessions,
 } from "./session-analyze.mjs";
 import {
@@ -2572,11 +2573,102 @@ test("a growth session's retention proof discriminates retained growth beyond th
     retentionProof(session, [growthRecord(session, bytes)], [baseline]).problems.join(),
     /retainedBytes 6900001 exceeds/,
   );
+  // A reading without its counters is no comparison: otherwise valid,
+  // matching records whose readings are emptied fail rather than pass.
+  const emptied = growthRecord(session, answersOnly);
+  emptied.initRetention = {};
+  emptied.stepRetention = emptied.stepRetention.map(() => ({}));
+  const blank = retentionProof(session, [emptied], [baseline]);
+  assert.equal(blank.verdict, "failed");
+  assert.equal(blank.pairs, 0);
+  assert.match(blank.problems.join(), /the growth's init reading has no numeric retainedBytes/);
+  assert.match(blank.problems.join(), /the growth's last reading has no numeric pinnedBytes/);
+  const unread = { stepRetention: [retentionFigures({ snapshotLeases: undefined })] };
+  assert.match(
+    retentionProof(session, [growthRecord(session, answersOnly)], [unread]).problems.join(),
+    /the baseline's last reading has no numeric snapshotLeases/,
+  );
+  // A completed record that did not answer fails the proof.
+  const unanswered = retentionProof(session, [growthRecord(session, answersOnly)], [baseline], {
+    unanswered: 1,
+  });
+  assert.equal(unanswered.verdict, "failed");
+  assert.match(unanswered.problems.join(), /did not answer every demand/);
   // Nothing to compare is no verdict, never a pass.
   assert.equal(retentionProof(session, [], [baseline]).verdict, "n/a");
   assert.equal(
     retentionProof(session, [{ initRetention: null, stepRetention: [] }], [baseline]).verdict,
     "failed",
+  );
+});
+
+/** Retention readings a growth session's records and its baseline's carry, within the proof's bounds. */
+function provableRetention(session) {
+  if (session.retentionProof)
+    return growthRecord(
+      session,
+      retentionFigures({ semanticMemoCandidates: 2053, retainedBytes: 6_100_000 }),
+    );
+  return {
+    initRetention: retentionFigures(),
+    stepRetention: session.steps.map(() => retentionFigures()),
+  };
+}
+
+test("a retention proof compares only records that answered every demand", () => {
+  const sessions = allSessions().filter((x) => x.id.startsWith("augment-"));
+  const summarizeWith = (plant) => {
+    const run = syntheticRun({ arms: ["verter"] });
+    run.meta.options.only = ["synthetic", ...sessions.map((x) => x.id)];
+    addSessions(run, sessions);
+    for (const inv of run.sessionInvocations) {
+      const session = sessions.find((x) => x.id === inv.sessionId);
+      Object.assign(inv.session, provableRetention(session));
+      plant(inv, session);
+    }
+    return summarizeSessions(run, sessions).cells;
+  };
+  const lastDemand = (inv, session) =>
+    inv.session.steps[session.steps.findLastIndex((step) => step.kind === "demand")];
+  for (const cell of summarizeWith(() => {}).filter((c) => c.retentionProof))
+    assert.equal(cell.retentionProof.verdict, "passed", cell.retentionProof.problems.join("; "));
+  const cells = summarizeWith((inv, session) => {
+    if (session.id === "augment-global-growth")
+      lastDemand(inv, session).requests[0].observation = verterObservation("never");
+    if (session.id === "augment-module-baseline")
+      lastDemand(inv, session).requests[0].outcome = {
+        kind: "fault",
+        detail: "the request's projection budget was exceeded",
+      };
+  });
+  for (const key of ["augment-global-growth", "augment-module-growth"]) {
+    const proof = cells.find((c) => c.key === key).retentionProof;
+    assert.equal(proof.verdict, "failed", key);
+    assert.match(proof.problems.join(), /did not answer every demand with its constructed answer/);
+  }
+});
+
+test("a growth session's Verter record must carry every retention reading", () => {
+  const session = allSessions().find((x) => x.id === "augment-module-growth");
+  const record = { ...verterSessionRecord(session), ...provableRetention(session) };
+  assert.deepEqual(sessionRecordProblems(record, session, { tool: "verter" }), []);
+  const bare = verterSessionRecord(session);
+  assert.ok(
+    sessionRecordProblems(bare, session, { tool: "verter" }).includes(
+      "the init retention reading carries no retention counters",
+    ),
+  );
+  const emptied = { ...record, stepRetention: record.stepRetention.map(() => ({})) };
+  assert.ok(
+    sessionRecordProblems(emptied, session, { tool: "verter" }).some((p) =>
+      /step 0's retention reading has no numeric liveArtifacts/.test(p),
+    ),
+  );
+  const baseline = allSessions().find((x) => x.id === "augment-module-baseline");
+  assert.ok(
+    sessionRecordProblems(verterSessionRecord(baseline), baseline, { tool: "verter" }).some((p) =>
+      /retention/.test(p),
+    ),
   );
 });
 

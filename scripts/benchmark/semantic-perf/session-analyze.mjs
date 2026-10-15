@@ -27,7 +27,7 @@ import {
 } from "./analyze.mjs";
 import { canonicalDigest } from "./canonical.mjs";
 import { sha256Text } from "./provenance.mjs";
-import { INCREMENTAL_FACILITY, sessionTsconfigText, tscFiles } from "./sessions.mjs";
+import { allSessions, INCREMENTAL_FACILITY, sessionTsconfigText, tscFiles } from "./sessions.mjs";
 import { supervisorRecordProblems } from "./supervisor.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -327,8 +327,13 @@ function sessionArmSummary(arm, invs, session, limits) {
   return out;
 }
 
-/** The completed measured records of one session arm. */
-function completedRecords(invs, limits) {
+/**
+ * The completed measured records of one Verter session arm, each with
+ * whether every demand it answered reproduced the constructed answer. A
+ * record that failed, refused or answered wrongly retains nothing a proof
+ * may compare: it did not compute the answers the proof is about.
+ */
+function provedRecords(invs, session, limits) {
   return invs
     .filter(
       (i) =>
@@ -336,7 +341,28 @@ function completedRecords(invs, limits) {
         i.session &&
         ["exited", "observe-killed"].includes(invocationEnd(i, limits).kind),
     )
-    .map((i) => i.session);
+    .map((i) => ({
+      record: i.session,
+      answered: sessionAnswers(i, session, limits).every(
+        (e) => classifyEntry(e, "verter", limits.budgetBytes).class === "matched",
+      ),
+    }));
+}
+
+/** Whether `session`'s Verter records feed a retention proof, as its growth or its baseline. */
+function provesRetention(session) {
+  return (
+    Boolean(session.retentionProof) ||
+    allSessions().some((s) => s.retentionProof?.baseline === session.id)
+  );
+}
+
+/** Each figure a retention proof compares that `counters` does not carry as a finite count. */
+function retentionCounterProblems(counters, where) {
+  if (!counters || typeof counters !== "object") return [`${where} carries no retention counters`];
+  return RETENTION_PROOF_FIGURES.filter((k) => !finite(counters[k])).map(
+    (k) => `${where} has no numeric ${k}`,
+  );
 }
 
 /**
@@ -352,23 +378,35 @@ function completedRecords(invs, limits) {
  * lowering per first-step contributor, and the retained-byte excess by the
  * bytes that demand added. Every figure is a retention-account byte or an
  * object count, deterministic for one build and tree: every pair of
- * completed measured invocations is compared, and a session with none on
- * either side has no verdict ("n/a").
+ * completed measured invocations that answered every demand is compared. A
+ * figure that is not a finite count fails the proof, as does any completed
+ * record that did not answer (`unanswered` counts them); a session with no
+ * pair and no such record has no verdict ("n/a").
  */
-export function retentionProof(session, growthRecords, baselineRecords) {
+export function retentionProof(session, growthRecords, baselineRecords, { unanswered = 0 } = {}) {
   const { baseline, first } = session.retentionProof;
   const firstStep = session.steps.findIndex((step) => step.kind === "demand");
   const out = { baseline, first, verdict: "n/a", pairs: 0, figures: null, problems: [] };
-  if (!growthRecords.length || !baselineRecords.length) return out;
   const problems = new Set();
-  for (const growth of growthRecords) {
+  if (unanswered)
+    problems.add(
+      `${unanswered} completed record(s) did not answer every demand with its constructed answer`,
+    );
+  if (!finite(first)) problems.add("the first demand's contributor count is not a finite count");
+  for (const growth of problems.size ? [] : growthRecords) {
     const init = growth.initRetention;
     const opened = growth.stepRetention?.[firstStep];
     const grown = growth.stepRetention?.[session.steps.length - 1];
     for (const base of baselineRecords) {
       const fresh = base.stepRetention?.[base.stepRetention.length - 1];
-      if (!init || !opened || !grown || !fresh) {
-        problems.add("a record carries no per-step retention");
+      const missing = [
+        ...retentionCounterProblems(init, "the growth's init reading"),
+        ...retentionCounterProblems(opened, "the growth's first-demand reading"),
+        ...retentionCounterProblems(grown, "the growth's last reading"),
+        ...retentionCounterProblems(fresh, "the baseline's last reading"),
+      ];
+      if (missing.length) {
+        for (const problem of missing) problems.add(problem);
         continue;
       }
       const firstAnswers = {
@@ -472,12 +510,17 @@ export function summarizeSessions(run, sessions, resolution = { single: 1 }) {
       comparison,
       requiredState,
     };
-    if (session.retentionProof)
-      cell.retentionProof = retentionProof(
-        session,
-        completedRecords(armInvs.verter ?? [], limits),
-        completedRecords(groups.get(session.retentionProof.baseline)?.verter ?? [], limits),
-      );
+    if (session.retentionProof) {
+      const baseline = byId.get(session.retentionProof.baseline);
+      const growth = provedRecords(armInvs.verter ?? [], session, limits);
+      const base = baseline
+        ? provedRecords(groups.get(baseline.id)?.verter ?? [], baseline, limits)
+        : [];
+      const answered = (records) => records.filter((r) => r.answered).map((r) => r.record);
+      cell.retentionProof = retentionProof(session, answered(growth), answered(base), {
+        unanswered: [...growth, ...base].filter((r) => !r.answered).length,
+      });
+    }
     cells.push(cell);
   }
   return { cells };
@@ -546,6 +589,17 @@ export function sessionRecordProblems(record, session, { tool, partial = false }
     (record?.statsErrors ?? []).length === 0,
     `statistics errors: ${(record?.statsErrors ?? []).join("; ")}`,
   );
+  if (tool === "verter" && provesRetention(session)) {
+    p.push(...retentionCounterProblems(record?.initRetention, "the init retention reading"));
+    const readings = record?.stepRetention ?? [];
+    need(
+      readings.length === session.steps.length,
+      `${readings.length} step retention readings, the script has ${session.steps.length} steps`,
+    );
+    readings.forEach((reading, s) =>
+      p.push(...retentionCounterProblems(reading, `step ${s}'s retention reading`)),
+    );
+  }
   return p;
 }
 

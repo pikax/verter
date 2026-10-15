@@ -479,12 +479,14 @@ impl ReadSetSignature {
     /// its evidence reaches (its summary, not a walk).
     #[must_use]
     pub fn canonical_ids(&self) -> Vec<Arc<str>> {
-        let mut seen = rustc_hash::FxHashSet::<Arc<str>>::default();
+        // Deduplicate on the borrowed text: a canonical is copied into its
+        // own `Arc` once, however many facts name it.
+        let mut seen = rustc_hash::FxHashSet::<&str>::default();
         let mut out = Vec::new();
         for fact in self.facts.iter() {
             if let FactVersionRef::Receipt(receipt) = fact {
                 for canonical_id in receipt.canonicals().iter() {
-                    if seen.insert(Arc::clone(canonical_id)) {
+                    if seen.insert(canonical_id.as_ref()) {
                         out.push(Arc::clone(canonical_id));
                     }
                 }
@@ -493,9 +495,8 @@ impl ReadSetSignature {
             let Some(canonical_id) = fact.canonical_id() else {
                 continue;
             };
-            let canonical_id: Arc<str> = Arc::from(canonical_id);
-            if seen.insert(Arc::clone(&canonical_id)) {
-                out.push(canonical_id);
+            if seen.insert(canonical_id) {
+                out.push(Arc::from(canonical_id));
             }
         }
         out

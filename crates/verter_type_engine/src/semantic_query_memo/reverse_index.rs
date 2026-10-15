@@ -8,9 +8,11 @@
 //! per-candidate drain on displacement / FIFO eviction, and single
 //! `(family, slot, seq)` removal during cross-canonical cleanup.
 //!
-//! **Per-candidate keying.** Reverse-index entries are keyed
+//! **Per-candidate keying.** Reverse-index entries identify
 //! `(FamilyKey, ModeSlot, admission_seq)` — per-candidate, not
-//! per-`(family, slot)`. With multi-candidate slots a single
+//! per-`(family, slot)`. The store hands out each `admission_seq` once,
+//! so a shard keys an entry by `(admission_seq, ModeSlot)` and keeps its
+//! family beside the registered rail. With multi-candidate slots a single
 //! `(family, slot)` may hold up to 4 candidates; each registers
 //! independently under its own seq so a cross-canonical cleanup for
 //! one evicted candidate strips ONLY that candidate's seq from each
@@ -62,7 +64,7 @@ impl ReverseIndexInputs {
 
 /// Register the just-published candidate's reverse-index entries.
 ///
-/// Inserts one `(family, slot, admission_seq) -> registered_facts`
+/// Inserts one `(admission_seq, slot) -> (family, registered_facts)`
 /// record per `(populated_slot × canonical)` pair, where canonicals
 /// are the UNION of the carrier's `canonical_ids()` and the
 /// dispatch-fence canonicals. The two sets overlap in production
@@ -147,15 +149,16 @@ pub(super) fn prune_reverse_index_registration(
     canonical: &Arc<str>,
     registration: &(FamilyKey, ModeSlot, u64),
 ) {
+    let (_, slot, seq) = registration;
     if let Some(shard) = canonical_to_entries.get(canonical) {
-        shard.value().lock().remove(registration);
+        shard.value().lock().remove(&(*seq, *slot));
     }
     canonical_to_entries.remove_if(canonical, |_, mutex| mutex.lock().is_empty());
 }
 
 /// Single-shard registration step used by
 /// [`register_reverse_index`]. Inserts one
-/// `(family, slot, seq) -> registered_facts` record into the
+/// `(seq, slot) -> (family, registered_facts)` record into the
 /// `canonical_to_entries[canonical]` shard, taking the shard write
 /// lock for the whole `entry(canonical).or_insert_with(...)` + inner
 /// `insert` pair.
@@ -183,8 +186,8 @@ fn register_single_canonical(
         .unwrap_or(std::time::Duration::ZERO);
     crate::request_observers::record_family_map_lock_acquisition(lock_wait);
     map.insert(
-        (family.clone(), populated, admission_seq),
-        Arc::clone(registered_facts),
+        (admission_seq, populated),
+        (family.clone(), Arc::clone(registered_facts)),
     );
 }
 

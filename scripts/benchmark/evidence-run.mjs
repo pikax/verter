@@ -594,10 +594,17 @@ export function buildSummary(loaded, { dryRun, worker, results, harness, validat
     for (const session of sessions) {
       if (session.status === "missing") problems.push(`session ${session.session} is missing`);
       const proof = session.retentionProof;
-      if (
-        session.status === "present" &&
-        allSessions().find((s) => s.id === session.session)?.retentionProof
-      ) {
+      const proved = allSessions().find((s) => s.id === session.session)?.retentionProof;
+      if (session.status === "present" && proved) {
+        // The proof compares what answering retains, so every answer of the
+        // growth and of its baseline must be the constructed one.
+        for (const id of [session.session, proved.baseline]) {
+          const answered = sessions.find((s) => s.session === id)?.answerClass;
+          if (answered !== "matched")
+            problems.push(
+              `session ${session.session}: the retention proof needs ${id} to answer every demand, its class is ${answered ?? "missing"}`,
+            );
+        }
         if (!proof || proof.verdict === "n/a")
           problems.push(
             `session ${session.session}: the retention proof has no completed pair to compare`,

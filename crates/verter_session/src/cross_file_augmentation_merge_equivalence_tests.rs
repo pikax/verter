@@ -1896,6 +1896,63 @@ fn augmenter_entering_the_program_after_a_warm_no_augmentation_result_invalidate
     );
 }
 
+/// One request instantiating a declaration several times reads its absent
+/// augmentation once and replays that read into every later instantiation.
+/// Each instantiation's own warm result must still carry the read: when an
+/// augmenter enters the program, every one of them misses.
+///
+/// Discriminating: if a replayed absence dropped the augmenter-set fact, the
+/// second instantiation's warm result would validate after the edit and the
+/// re-resolved tuple would keep its stale `"base"` element.
+#[test]
+fn every_instantiation_sharing_an_absent_augmentation_read_invalidates_when_an_augmenter_enters() {
+    let host = make_host();
+    upsert_ts(
+        host.as_ref(),
+        "/types.ts",
+        "export interface Box<T> { base: T }\n\
+         export type Keys = `${keyof Box<string>}|${keyof Box<number>}`;\n",
+    );
+    assert!(
+        live_augmenter_canonicals_for_types(&host).is_empty(),
+        "the absent-augmentation read must be the shared one"
+    );
+    let keys = |host: &VerterHost| {
+        let node = host
+            .resolve_named_symbol("/types.ts", "Keys", Some(ProjectionMode::Expanded))
+            .expect("Keys must resolve");
+        format!(
+            "{:?}",
+            host.project_node_to_type_expr_for_test(node)
+                .expect("Keys projects")
+        )
+    };
+    let cold = keys(&host);
+    assert!(cold.contains("\"base|base\""), "{cold}");
+    assert!(!cold.contains("fromAug"), "{cold}");
+
+    upsert_ts(
+        host.as_ref(),
+        "/aug.ts",
+        "import type { Box } from './types'\n\
+         declare module './types' { interface Box<T> { fromAug: T[] } }\n",
+    );
+    host.ensure_indexed_ready("/aug.ts")
+        .expect("the augmenter must index");
+    let warm = keys(&host);
+    for both in [
+        "\"fromAug|base\"",
+        "\"base|fromAug\"",
+        "\"fromAug|fromAug\"",
+    ] {
+        assert!(
+            warm.contains(both),
+            "both instantiations must see the augmenter that entered after them: \
+             {both} is missing from {warm}"
+        );
+    }
+}
+
 /// BEHAVIOURAL half of the NON-CONTRIBUTING arm: an augmenter set that is
 /// NON-empty but supplies no contributor for the requested declaration takes
 /// the collector's SECOND early return, which on the pre-change tree also

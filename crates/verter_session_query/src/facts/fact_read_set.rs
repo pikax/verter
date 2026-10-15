@@ -541,11 +541,31 @@ impl FactReadSet {
     /// canonical set — there is exactly one canonicaliser.
     #[inline]
     pub fn absorb_canonical_signature(&mut self, signature: &Arc<[FactVersionRef]>) {
-        if signature.is_empty() {
+        if signature.is_empty() || self.recently_absorbed(signature) {
             return;
         }
-        // An immutable retained run already proved its canonical order.
-        // Replaying it must not grow live storage for each warm read.
+        match VerifiedCanonicalRun::verify(signature) {
+            Some(run) => self.canonical_runs.push(Arc::clone(run.0)),
+            None => self.observe_borrowed_signature(signature),
+        }
+    }
+
+    /// [`Self::absorb_canonical_signature`] for a run whose order a caller
+    /// already verified, so a witness replayed into several read sets is
+    /// verified once.
+    #[inline]
+    pub fn absorb_verified_run(&mut self, run: &VerifiedCanonicalRun<'_>) {
+        if run.0.is_empty() || self.recently_absorbed(run.0) {
+            return;
+        }
+        self.canonical_runs.push(Arc::clone(run.0));
+    }
+
+    /// Whether one of the last [`INLINE_CAPACITY`] absorbed runs is
+    /// `signature`. An immutable retained run already proved its canonical
+    /// order; replaying it must not grow live storage for each warm read.
+    #[inline]
+    fn recently_absorbed(&self, signature: &Arc<[FactVersionRef]>) -> bool {
         let mut comparisons = 0;
         let seen = self
             .canonical_runs
@@ -562,14 +582,7 @@ impl FactReadSet {
                         }))
             });
         record_signature_work(comparisons);
-        if seen {
-            return;
-        }
-        if is_canonical_run(signature) {
-            self.canonical_runs.push(Arc::clone(signature));
-        } else {
-            self.observe_borrowed_signature(signature);
-        }
+        seen
     }
 
     /// The mark of everything observed so far.
@@ -783,6 +796,13 @@ impl FactReadSetCell {
         self.0.borrow_mut().absorb_canonical_signature(signature);
     }
 
+    /// Absorb a verified canonical run through `&self`. See
+    /// [`FactReadSet::absorb_verified_run`].
+    #[inline]
+    pub fn absorb_verified_run(&self, run: &VerifiedCanonicalRun<'_>) {
+        self.0.borrow_mut().absorb_verified_run(run);
+    }
+
     /// The mark of everything observed so far, through `&self`. See
     /// [`FactReadSet::mark`].
     #[inline]
@@ -980,6 +1000,21 @@ pub fn signature_work_for_tests() -> usize {
 fn is_canonical_run(run: &[FactVersionRef]) -> bool {
     run.windows(2)
         .all(|pair| compare_fact_refs(&pair[0], &pair[1]) == std::cmp::Ordering::Less)
+}
+
+/// A signature verified to be a canonical run — strictly increasing under
+/// the canonical fact order — so it can be absorbed as a run by any number
+/// of read sets. The only way to obtain one is [`Self::verify`]: an
+/// `Arc<[FactVersionRef]>` alone carries no proof of order.
+#[derive(Clone, Copy)]
+pub struct VerifiedCanonicalRun<'a>(&'a Arc<[FactVersionRef]>);
+
+impl<'a> VerifiedCanonicalRun<'a> {
+    /// `signature` as a verified run, or `None` when it is not canonical.
+    #[must_use]
+    pub fn verify(signature: &'a Arc<[FactVersionRef]>) -> Option<Self> {
+        is_canonical_run(signature).then_some(Self(signature))
+    }
 }
 
 /// Merge two strictly-increasing runs into one strictly-increasing run,

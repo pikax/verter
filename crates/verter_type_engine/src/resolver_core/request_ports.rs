@@ -429,21 +429,19 @@ impl CancellationCheckpoint {
     pub(crate) const fn new() -> Self {
         Self { _private: () }
     }
-    pub(crate) fn token(self) -> Option<verter_execution::cancellation::CancellationToken> {
-        let job = verter_execution::cancellation::current_job_cancellation_token();
-        if job
-            .as_ref()
-            .is_some_and(|token| token.has_registered_owners())
-        {
-            return job;
-        }
-        crate::request_context::current_request_cancellation_token().or(job)
-    }
     /// Whether the selected cancellation token is cancelled now.
     #[cfg_attr(feature = "test-support", track_caller)]
     #[inline]
     pub fn is_cancelled(self) -> bool {
-        let cancelled = self.token().is_some_and(|token| token.is_cancelled());
+        // A job token that accepted a request owner decides; otherwise the
+        // installed request's token, else the ownerless job token. Each is
+        // read in place.
+        let cancelled =
+            verter_execution::cancellation::with_current_job_cancellation_token(|job| match job {
+                Some(token) if token.has_registered_owners() => token.is_cancelled(),
+                _ => crate::request_context::current_request_cancelled()
+                    .unwrap_or_else(|| job.is_some_and(|token| token.is_cancelled())),
+            });
         #[cfg(feature = "test-support")]
         if cancelled {
             crate::cancel_trace::observed(std::panic::Location::caller());
