@@ -29,7 +29,10 @@ manifests under `scripts/benchmark/evidence-run-fixtures/` (`pnpm test:scripts`)
 owner: the change that needs the run adds its manifest and no other change
 edits it. Shipped: `skr-perf0-structural`, `skr-mapped-indexb`, `switch-discriminated`,
 `skr-callback-cost` (10, 100 and 500 contravariant callbacks; cold Verter time
-and peak memory beside whole-program TypeScript wall time), `skr-scale-answers`.
+and peak memory beside whole-program TypeScript wall time),
+`skr-augment-scaleb` (a global interface merged from 2,000 script contributors
+and a module interface augmented by 2,000 unimported modules; cold Verter time
+and peak memory), `skr-scale-answers`.
 
 `skr-mapped-indexb` demands conditional mapped values through the entire source
 key domain at 1,000, 3,000 and 10,000 keys. The recorded TypeScript 7.0.2 answer
