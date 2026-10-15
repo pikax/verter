@@ -365,3 +365,40 @@ fn a_conditional_over_a_two_thousand_parent_tree_answers_every_parent() {
         .collect();
     assert_answer("the first level over 2,000 parents", &names, &expected);
 }
+
+/// A template whose holes an `infer` binds to `null`, `undefined` or a
+/// union of literals is the strings it builds, as the checker's template
+/// construction folds those holes into its text. Measured on TypeScript
+/// 7.0.2: `"xtrue" | "xnull" | "xundefined"` for the nullish holes, and
+/// `"p/r0" | "q/r0" | "p/r0/c0" | … | "q/r0/c4"` for a union prefix.
+#[test]
+fn templates_built_at_substitution_fold_nullish_and_union_holes() {
+    let source = "const items = [{ n: true }, { n: null }, { n: undefined }] as const;\n\
+                  type X<R> = R extends readonly (infer E)[]\n\
+                  \x20 ? E extends { n: infer N extends boolean | null | undefined } ? `x${N}` : never\n\
+                  \x20 : never;\n";
+    let (strings, _) = named_probe(
+        source,
+        "X<typeof items>",
+        verter_type_engine::request_budget::DEFAULT_PROJECTION_OP_BUDGET,
+    );
+    let expected = ["xtrue", "xnull", "xundefined"]
+        .map(|text| Literal::String(text.into()))
+        .into();
+    assert_answer("nullish holes", &strings, &expected);
+
+    let (paths, _) = named_probe(
+        &route_tree(1),
+        "Paths<typeof routes, \"p\" | \"q\">",
+        verter_type_engine::request_budget::DEFAULT_PROJECTION_OP_BUDGET,
+    );
+    let expected = ["p", "q"]
+        .into_iter()
+        .flat_map(|prefix| {
+            std::iter::once(format!("{prefix}/r0"))
+                .chain((0..5).map(move |j| format!("{prefix}/r0/c{j}")))
+        })
+        .map(Literal::String)
+        .collect();
+    assert_answer("a union prefix", &paths, &expected);
+}

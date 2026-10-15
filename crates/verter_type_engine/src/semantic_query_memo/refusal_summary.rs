@@ -57,7 +57,7 @@ pub struct RefusalPrefix {
     /// Work units the connected demand charged.
     pub work: usize,
     /// Construction bytes the connected demand reserved.
-    pub bytes: usize,
+    pub bytes: u64,
     /// The request the evaluation ran in: where it entered it, and what it
     /// did to it alone. `None` outside any request.
     pub request: Option<crate::request_budget::RequestSpent>,

@@ -77,17 +77,13 @@ pub const WORK_UNITS_PER_INSTANTIATION: usize = 9;
 /// instantiations, the route tree 41 KB per parent against 219.
 pub const CONSTRUCTION_BYTES_PER_INSTANTIATION: usize = 1_280;
 
-const fn larger(a: usize, b: usize) -> usize {
-    if a > b {
-        a
-    } else {
-        b
-    }
-}
-
 /// Work-unit cap for one connected semantic demand: the operational
-/// backstop, sized to cover both of the checker's own allowances, so it
-/// never refuses an input the checker answers. The relation envelope is
+/// backstop, sized to cover both of the checker's own allowances at once,
+/// so it never refuses an input the checker answers. The checker counts
+/// relation comparisons and instantiations against separate limits, so one
+/// demand may spend both in full: a conditional distributing over a union
+/// relates every member it instantiates. The cap is their sum. The relation
+/// envelope is
 /// [`checker_policy::RELATION_COMPARISONS`] structured comparisons at
 /// [`RELATION_UNITS_PER_COMPARISON`] reducer units plus one cold query-entry
 /// unit each (the reducer mapping alone excludes the enclosing dispatch
@@ -104,31 +100,31 @@ const fn larger(a: usize, b: usize) -> usize {
 ///
 /// [`checker_policy::RELATION_COMPARISONS`]: crate::semantic_query::checker_policy::RELATION_COMPARISONS
 /// [`checker_policy::INSTANTIATION_COUNT`]: crate::semantic_query::checker_policy::INSTANTIATION_COUNT
-pub const MAX_CONNECTED_PROJECTION_WORK: usize = larger(
+pub const MAX_CONNECTED_PROJECTION_WORK: usize =
     crate::semantic_query::checker_policy::RELATION_COMPARISONS as usize
-        * (RELATION_UNITS_PER_COMPARISON + 1),
-    crate::semantic_query::checker_policy::INSTANTIATION_COUNT as usize
-        * WORK_UNITS_PER_INSTANTIATION,
-);
+        * (RELATION_UNITS_PER_COMPARISON + 1)
+        + crate::semantic_query::checker_policy::INSTANTIATION_COUNT as usize
+            * WORK_UNITS_PER_INSTANTIATION;
 /// Nested query-boundary cap for one connected semantic demand.
 pub const MAX_CONNECTED_QUERY_DEPTH: u16 = 24;
 /// Construction-byte allowance for one connected semantic demand: the bytes
 /// it reserves before it builds, never refunded within the demand, so the
-/// allowance bounds what the demand holds at its peak. The larger of the
+/// allowance bounds what the demand holds at its peak. The sum of the
 /// relation mapping (the full checker relation envelope at
 /// [`RELATION_PAIR_BYTES`] a pair) and the instantiation mapping (the
 /// checker's instantiation allowance at
-/// [`CONSTRUCTION_BYTES_PER_INSTANTIATION`]), with the non-relation
-/// allowance left for operand construction and the consuming projection.
-/// This is logical construction accounting, not an allocation or a
-/// retained-memory quota.
-pub(super) const MAX_CONNECTED_CONSTRUCTION_BYTES: usize = larger(
-    (crate::semantic_query::checker_policy::RELATION_COMPARISONS as usize)
-        .saturating_mul(RELATION_PAIR_BYTES),
-    (crate::semantic_query::checker_policy::INSTANTIATION_COUNT as usize)
-        .saturating_mul(CONSTRUCTION_BYTES_PER_INSTANTIATION),
-)
-.saturating_add(512 << 20);
+/// [`CONSTRUCTION_BYTES_PER_INSTANTIATION`]), for the same reason the work
+/// cap sums them, with the non-relation allowance left for operand
+/// construction and the consuming projection. This is logical construction
+/// accounting, not an allocation or a retained-memory quota, so it is
+/// counted in `u64` on every target: the allowance exceeds a 32-bit
+/// `usize`, and a target's pointer width must not change which inputs a
+/// demand answers.
+pub(super) const MAX_CONNECTED_CONSTRUCTION_BYTES: u64 =
+    crate::semantic_query::checker_policy::RELATION_COMPARISONS as u64 * RELATION_PAIR_BYTES as u64
+        + crate::semantic_query::checker_policy::INSTANTIATION_COUNT as u64
+            * CONSTRUCTION_BYTES_PER_INSTANTIATION as u64
+        + (512 << 20);
 
 /// What one connected demand has charged so far: its work units and its
 /// construction bytes.
@@ -136,7 +132,7 @@ pub(super) const MAX_CONNECTED_CONSTRUCTION_BYTES: usize = larger(
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct DemandUsage {
     pub work: usize,
-    pub bytes: usize,
+    pub bytes: u64,
 }
 
 /// Verter's own instantiation budget for one connected semantic demand:
@@ -292,8 +288,8 @@ pub struct ConnectedDemandLedger<'a> {
     active: Cell<bool>,
     work_used: Cell<usize>,
     work_limit: Cell<usize>,
-    bytes_used: Cell<usize>,
-    bytes_limit: Cell<usize>,
+    bytes_used: Cell<u64>,
+    bytes_limit: Cell<u64>,
     query_depth: Cell<u16>,
     query_depth_limit: Cell<u16>,
     instantiation_depth_limit: u32,
@@ -334,7 +330,7 @@ pub(crate) struct RequestEffects {
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct ComponentMetaSpan {
     pub(crate) work: usize,
-    pub(crate) bytes: usize,
+    pub(crate) bytes: u64,
     pub(crate) trip: PartialReasonSet,
     pub(crate) schedule_cuts: u64,
     pub(crate) certificates: u64,
@@ -413,7 +409,7 @@ fn remember_work(n: usize) {
     });
 }
 
-fn remember_bytes(n: usize) {
+fn remember_bytes(n: u64) {
     if n == 0 || !span_open() {
         return;
     }
@@ -675,7 +671,8 @@ impl<'a> ConnectedDemandLedger<'a> {
 
     /// Construction room for a batch, before committing any reservation.
     pub(crate) fn construction_bytes_available(&self) -> usize {
-        self.bytes_limit.get().saturating_sub(self.bytes_used.get())
+        usize::try_from(self.bytes_limit.get().saturating_sub(self.bytes_used.get()))
+            .unwrap_or(usize::MAX)
     }
 
     /// Add `work` units and `bytes` to the open recording, if any: the cost
@@ -742,10 +739,10 @@ impl<'a> ConnectedDemandLedger<'a> {
             return Err(tripped);
         }
         let used = self.bytes_used.get();
-        match used.checked_add(bytes) {
+        match used.checked_add(bytes as u64) {
             Some(total) if total <= self.bytes_limit.get() => {
                 self.bytes_used.set(total);
-                remember_bytes(bytes);
+                remember_bytes(bytes as u64);
                 self.accrue(0, bytes);
                 Ok(())
             }
@@ -778,8 +775,8 @@ impl<'a> ConnectedDemandLedger<'a> {
             )
         } else if reasons.contains(PartialReasonSet::CONNECTED_MEMORY_LIMIT) {
             (
-                self.bytes_limit.get(),
-                self.bytes_used.get() as u64,
+                usize::try_from(self.bytes_limit.get()).unwrap_or(usize::MAX),
+                self.bytes_used.get(),
                 "construction-bytes",
             )
         } else {
@@ -806,7 +803,7 @@ impl<'a> ConnectedDemandLedger<'a> {
     /// Replace the construction-byte allowance. Test-only, and refused inside
     /// an active demand.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn set_byte_limit_for_tests(&self, bytes: usize) {
+    pub fn set_byte_limit_for_tests(&self, bytes: u64) {
         assert!(
             !self.active.get(),
             "test limits must be set before entering a connected demand"
@@ -817,7 +814,7 @@ impl<'a> ConnectedDemandLedger<'a> {
     /// The construction bytes the last connected demand reserved. Test-only:
     /// kept after the demand ends, and reset when the next one enters.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn bytes_used_for_tests(&self) -> usize {
+    pub fn bytes_used_for_tests(&self) -> u64 {
         self.bytes_used.get()
     }
 
@@ -1193,7 +1190,7 @@ impl ConnectedDemandLedger<'_> {
             );
         }
         let replayed_work = total.work as usize;
-        let replayed_bytes = total.bytes as usize;
+        let replayed_bytes = total.bytes;
         self.work_used.set(self.work_used.get() + replayed_work);
         self.bytes_used
             .set(self.bytes_used.get().saturating_add(replayed_bytes));
@@ -1321,13 +1318,13 @@ impl ConnectedDemandLedger<'_> {
     }
 
     /// The work units and construction bytes the active demand charged.
-    pub(crate) fn charged(&self) -> (usize, usize) {
+    pub(crate) fn charged(&self) -> (usize, u64) {
         (self.work_used.get(), self.bytes_used.get())
     }
 
     /// Leave the active demand as a sealed refusal's evaluation left it:
     /// its work and bytes charged and `trip` tripped.
-    pub(crate) fn apply_refusal(&self, work: usize, bytes: usize, trip: PartialReasonSet) {
+    pub(crate) fn apply_refusal(&self, work: usize, bytes: u64, trip: PartialReasonSet) {
         self.work_used
             .set(self.work_used.get().saturating_add(work));
         self.bytes_used
@@ -1435,7 +1432,7 @@ impl ComponentMetaDemandRoot<'_> {
     }
 
     /// Work, construction bytes, and the sticky trip charged on this root.
-    pub fn charges(&self) -> (usize, usize, PartialReasonSet) {
+    pub fn charges(&self) -> (usize, u64, PartialReasonSet) {
         (
             self.ledger.work_used.get(),
             self.ledger.bytes_used.get(),
@@ -1523,5 +1520,41 @@ mod ownership_tests {
         );
         drop(receipt);
         assert_eq!(harness.live_nodes(), 0);
+    }
+}
+
+#[cfg(test)]
+mod envelope_tests {
+    use super::*;
+    use crate::semantic_query::checker_policy::{INSTANTIATION_COUNT, RELATION_COMPARISONS};
+
+    /// The checker counts relation comparisons and instantiations against
+    /// separate limits, so one demand that spends both allowances in full is
+    /// still one the checker answers: neither operational rail refuses it.
+    #[test]
+    fn a_demand_spending_both_checker_allowances_is_not_refused() {
+        let flags = crate::resolver_core::resolver_context::RequestFlags::new(
+            crate::resolver_core::resolver_context::ProjectGenerationClock::new(Arc::new(
+                std::sync::atomic::AtomicU64::new(0),
+            )),
+        );
+        let ledger = ConnectedDemandLedger::new(DemandCancellation::from_flags(&flags));
+        let (guard, trip) = ledger.enter(false);
+        assert!(trip.is_none());
+
+        ledger
+            .charge_units(INSTANTIATION_COUNT as usize * WORK_UNITS_PER_INSTANTIATION)
+            .expect("the instantiation allowance's work is granted");
+        ledger
+            .charge_units(RELATION_COMPARISONS as usize * (RELATION_UNITS_PER_COMPARISON + 1))
+            .expect("the relation allowance's work is granted beside it");
+
+        let reserve =
+            |bytes: u64| ledger.reserve_bytes(usize::try_from(bytes).expect("a 64-bit test host"));
+        reserve(u64::from(INSTANTIATION_COUNT) * CONSTRUCTION_BYTES_PER_INSTANTIATION as u64)
+            .expect("the instantiation allowance's bytes are granted");
+        reserve(u64::from(RELATION_COMPARISONS) * RELATION_PAIR_BYTES as u64)
+            .expect("the relation allowance's bytes are granted beside them");
+        drop(guard);
     }
 }

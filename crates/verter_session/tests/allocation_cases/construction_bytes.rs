@@ -102,7 +102,7 @@ const DEMAND_SETUP_BYTES: i64 = 4 << 20;
 /// read, under `limit` construction bytes when given: whether `S` holds, the
 /// bytes the demand charged, and the peak live bytes the allocator handed
 /// out on this thread meanwhile.
-fn relate_measured(count: usize, limit: Option<usize>) -> (bool, usize, i64) {
+fn relate_measured(count: usize, limit: Option<u64>) -> (bool, u64, i64) {
     let host = host_with(&reversed_unions(count));
     let _ = verter_session::for_tests::relate_named_types_for_tests(&host, FILE, "S", "S", None);
     let _ = verter_session::for_tests::relate_named_types_for_tests(&host, FILE, "T", "T", None);

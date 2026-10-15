@@ -156,7 +156,7 @@ fn stopped_demands_never_offer_unevaluated_subjects_as_positional_values() {
     }
     dispatch
         .connected_demand()
-        .set_byte_limit_for_tests(usize::MAX);
+        .set_byte_limit_for_tests(u64::MAX);
     for key in keys {
         let read = dispatch.execute_read(key);
         assert_eq!(

@@ -54,8 +54,8 @@ use super::ProjectSemanticDispatch;
 use crate::request_context::RecursiveSubstituteIdentity;
 use crate::semantic_query::{
     ConditionalPendingSubstitution, FunctionParam, IndexKey, IndexSignature, MapperKey,
-    PendingSubstitutionFrame, QueryError, SemanticNodeData, SemanticNodeId, SurfaceMember,
-    SurfaceView, TypeParamDecl,
+    PendingSubstitutionFrame, PrimitiveKind, QueryError, SemanticNodeData, SemanticNodeId,
+    SurfaceMember, SurfaceView, TypeParamDecl,
 };
 
 impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
@@ -1135,17 +1135,37 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
                 // Substitution is a template CONSTRUCTION site, as it is for
                 // a union: the checker instantiates a template literal type
-                // through `getTemplateLiteralType`, which folds literal holes
-                // into its text, so a template whose every hole is now a
-                // literal is that string (`${P}${S}` with `P := "/a/"` and
-                // `S := "x"` is `"/a/x"`). The template authority builds it.
-                let all_literal = new_expressions.iter().all(|expression| {
+                // through `getTemplateLiteralType`, which folds literal,
+                // `null`, `undefined` and `boolean` holes into its text and
+                // maps over a union hole, so a template whose every hole is
+                // now one of those is the strings it builds (`${P}${S}` with
+                // `P := "/a/"` and `S := "x"` is `"/a/x"`; `x${N}` with
+                // `N := null` is `"xnull"`). The template authority builds
+                // it, its cross product and that product's limit included.
+                let graph = self.graph();
+                let folds = |expression: SemanticNodeId| {
                     matches!(
-                        self.graph().node_data(*expression).as_deref(),
-                        Some(SemanticNodeData::Literal(_))
+                        graph.node_data(expression).as_deref(),
+                        Some(
+                            SemanticNodeData::Literal(_)
+                                | SemanticNodeData::Primitive(
+                                    PrimitiveKind::Null
+                                        | PrimitiveKind::Undefined
+                                        | PrimitiveKind::Boolean
+                                        | PrimitiveKind::Never
+                                )
+                        )
                     )
+                };
+                let all_closed = new_expressions.iter().all(|expression| {
+                    match graph.node_data(*expression).as_deref() {
+                        Some(SemanticNodeData::Union(members)) => {
+                            members.iter().all(|member| folds(*member))
+                        }
+                        _ => folds(*expression),
+                    }
                 });
-                if all_literal {
+                if all_closed {
                     let read = self.execute_read(
                         crate::semantic_query::SemanticQueryKey::TemplateLiteralReduce {
                             pattern: Arc::clone(quasis),

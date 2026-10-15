@@ -557,7 +557,7 @@ pub struct BudgetProfileSpec {
     /// The connected demand's work-unit allowance.
     pub work: usize,
     /// The connected demand's construction-byte allowance.
-    pub bytes: usize,
+    pub bytes: u64,
     /// The connected demand's nested query-depth allowance.
     pub query_depth: u16,
     /// The continuation runtime's instantiation-depth allowance.
