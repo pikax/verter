@@ -5,10 +5,10 @@
 //!   (`Names` / `Paths` below) distributes over each tree level once, and
 //!   the conditional nested in a distributed branch sees that branch's
 //!   member, never the whole union the outer `infer` bound;
-//! - a pattern that repeats an `infer` distributes over a union of distinct
-//!   object aliases;
-//! - a tuple of distinct aliases of one generic infers through each alias
-//!   once.
+//! - a pattern that repeats an `infer` distributes over a 1,000-member union
+//!   of distinct object aliases;
+//! - a tuple of 1,000 distinct aliases of one generic infers through each
+//!   alias once.
 //!
 //! Each demand is the named demand the semantic benchmark makes (`__Probe`
 //! resolved by name and projected to its wire answer). Every expected answer
@@ -18,13 +18,11 @@
 //! sizes and in all four `strictNullChecks` × `noImplicitAny` settings,
 //! which agree, with no diagnostic.
 //!
-//! The growth proofs here run at sizes a debug build answers in seconds: the
-//! smallest listed size of each shape, or a size below it, and a step about
-//! three times larger, which a quadratic term could not stay within. The
-//! largest listed sizes (300 parents, 1,000 members) and the larger
-//! obligations (2,000 parents, 6,000 members) are answered in a release
-//! build by the `skr-scale-answers` evidence run, which requires every
-//! answer to match TypeScript's exactly.
+//! The growth proofs compare the middle listed size with the largest: 100
+//! and 300 parents, 100 and 1,000 members. The larger obligations (2,000
+//! parents, 6,000 members) are answered in a release build by the
+//! `skr-scale-answers` evidence run, which requires every answer to match
+//! TypeScript's exactly.
 //!
 //! No size of these shapes may be refused below the checker's own limits.
 //! The checker refuses with TS2589 once one statement has instantiated
@@ -38,7 +36,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use verter_type_engine::project_semantic_dispatch::raise::{
-    enable_dispatch_trace_for_test, DISPATCH_TRACE,
+    enable_dispatch_trace_for_test, keys_built_cold_more_than_once, DISPATCH_TRACE,
 };
 use verter_type_expr::{LiteralValue, TypeExpr};
 
@@ -235,13 +233,21 @@ fn assert_answer(label: &str, answer: &BTreeSet<Literal>, expected: &BTreeSet<Li
 
 /// Between a size and a larger one each work counter may grow at most 1.5
 /// times faster than the input: a quadratic term grows 9 times over the
-/// route tree's threefold step and 11 times over the unions' step from 30
-/// members to 100.
+/// route tree's threefold step and 100 times over the unions' tenfold one.
+/// A counter that is zero at the smaller size is compared as one, so it may
+/// reach a few units at the larger size; that residue is not a growth term.
+/// The connected work and the query reads must be non-zero at both sizes, so
+/// a counter that stopped counting cannot pass as linear.
 fn assert_linear_growth(
     label: &str,
     (small, before): (usize, Work),
     (large, after): (usize, Work),
 ) {
+    for (size, work) in [(small, &before), (large, &after)] {
+        for (what, value) in &work[..2] {
+            assert!(*value > 0, "{label}: {what} is zero at {size}");
+        }
+    }
     for ((what, before), (_, after)) in before.into_iter().zip(after) {
         println!("{label}: {what} {before} at {small}, {after} at {large}");
         assert!(
@@ -251,12 +257,31 @@ fn assert_linear_growth(
     }
 }
 
-/// The route tree answers every name at each size the checker answers,
-/// with work linear from the smaller size to the larger. Measured: 120 and
-/// 360 string literals.
+/// Both route-tree conditionals answer every name and every joined path at
+/// the smallest listed size. Measured: 120 string literals each.
+#[test]
+fn route_tree_names_and_paths_answer_at_twenty_parents() {
+    let source = route_tree(20);
+    let (names, _) = named_probe(
+        &source,
+        "Names<typeof routes>",
+        checker_instantiations_names(20),
+    );
+    assert_answer("Names over 20", &names, &route_names(20));
+    let (paths, _) = named_probe(
+        &source,
+        "Paths<typeof routes>",
+        checker_instantiations_paths(20),
+    );
+    assert_answer("Paths over 20", &paths, &route_paths(20));
+}
+
+/// The route tree answers every name at the middle and largest listed
+/// sizes, with work linear from one to the other. Measured: 600 and 1,800
+/// string literals.
 #[test]
 fn route_tree_names_answer_at_every_size_with_linear_work() {
-    let work = [20, 60].map(|parents| {
+    let work = [100, 300].map(|parents| {
         let (names, work) = named_probe(
             &route_tree(parents),
             "Names<typeof routes>",
@@ -273,11 +298,11 @@ fn route_tree_names_answer_at_every_size_with_linear_work() {
 }
 
 /// The route tree answers every joined path, each a string the template
-/// builds, at each size the checker answers, with work linear from the
-/// smaller size to the larger. Measured: 120 and 360 string literals.
+/// builds, at the middle and largest listed sizes, with work linear from
+/// one to the other. Measured: 600 and 1,800 string literals.
 #[test]
 fn route_tree_paths_answer_at_every_size_with_linear_work() {
-    let work = [20, 60].map(|parents| {
+    let work = [100, 300].map(|parents| {
         let (paths, work) = named_probe(
             &route_tree(parents),
             "Paths<typeof routes>",
@@ -318,12 +343,11 @@ fn a_nested_conditional_over_a_distributed_infer_sees_one_member() {
     assert_answer("Paths over two parents", &paths, &expected);
 }
 
-/// The repeated-infer pattern answers at each size the checker answers,
-/// with work linear from 30 members to 100. Measured: the numbers `0` to
-/// `n - 1`.
+/// The repeated-infer pattern answers at both listed sizes, with work
+/// linear from one to the other. Measured: the numbers `0` to `n - 1`.
 #[test]
 fn repeated_infer_answers_at_every_size_with_linear_work() {
-    let work = [10, 30, 100].map(|members| {
+    let work = [100, 1000].map(|members| {
         let (source, probe) = repeated_infer(members);
         let (answer, work) = named_probe(
             &source,
@@ -333,15 +357,14 @@ fn repeated_infer_answers_at_every_size_with_linear_work() {
         assert_answer(&format!("Pat over {members}"), &answer, &numbers(members));
         (members, work)
     });
-    assert_linear_growth("Pat", work[1], work[2]);
+    assert_linear_growth("Pat", work[0], work[1]);
 }
 
-/// The distinct aliases answer at each size the checker answers, with work
-/// linear from the smaller size to the larger. Measured: the numbers `0` to
-/// `n - 1`.
+/// The distinct aliases answer at both listed sizes, with work linear from
+/// one to the other. Measured: the numbers `0` to `n - 1`.
 #[test]
 fn distinct_aliases_answer_at_every_size_with_linear_work() {
-    let work = [30, 100].map(|members| {
+    let work = [100, 1000].map(|members| {
         let (source, probe) = distinct_aliases(members);
         let (answer, work) = named_probe(&source, &probe, checker_instantiations_aliases(members));
         assert_answer(
@@ -352,6 +375,62 @@ fn distinct_aliases_answer_at_every_size_with_linear_work() {
         (members, work)
     });
     assert_linear_growth("aliases", work[0], work[1]);
+}
+
+/// One request builds each query once: a later read of the same key is
+/// served by the entry the first read stored. Every type declaration's
+/// body records the augmentation-index shape of its own file, and that
+/// index is first populated during the request, after the request's view
+/// was captured. A view that validated the shape only at its captured root
+/// refused every such entry, so the repeated `infer` rebuilt each member
+/// alias at every read of it: eight times per member.
+#[test]
+fn one_request_builds_each_query_once() {
+    let (pattern, pattern_probe) = repeated_infer(3);
+    let (aliases, aliases_probe) = distinct_aliases(3);
+    let tree = route_tree(3);
+    let demands = [
+        (
+            "Pat",
+            pattern.as_str(),
+            pattern_probe.as_str(),
+            checker_instantiations_repeated_infer(3),
+        ),
+        (
+            "aliases",
+            aliases.as_str(),
+            aliases_probe.as_str(),
+            checker_instantiations_aliases(3),
+        ),
+        (
+            "Names",
+            tree.as_str(),
+            "Names<typeof routes>",
+            checker_instantiations_names(3),
+        ),
+        (
+            "Paths",
+            tree.as_str(),
+            "Paths<typeof routes>",
+            checker_instantiations_paths(3),
+        ),
+    ];
+    for (label, source, probe, operations) in demands {
+        // The cold-build counts are per thread: each demand runs on its own.
+        let rebuilt = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let _ = named_probe(source, probe, operations);
+                    keys_built_cold_more_than_once()
+                })
+                .join()
+                .expect("the demand completes")
+        });
+        assert_eq!(
+            rebuilt, 0,
+            "{label}: {rebuilt} queries were built more than once"
+        );
+    }
 }
 
 /// The first level of `Names` over 2,000 parents answers every parent's

@@ -829,30 +829,10 @@ fn assembling_a_merged_enum_grows_linearly_with_its_blocks() {
     );
 }
 
-/// Global enums merged across script files: auto-increment after a
-/// constant member computed from another file's block, string members
-/// concatenating another block's, a `const enum`, an enum merged with a
-/// namespace, a non-constant member, two blocks omitting their first
-/// initializer, and auto-increment after a non-constant member.
-const MERGED_A: &str = "\
-enum AutoInc { A = 3 }
-enum Str { A = \"a\" }
-const enum CE { A = 1 }
-enum NE { A = 1 }
-enum Rand { A = 1 }
-enum Two { A }
-enum Bad { A = 1 }
-";
-const MERGED_B: &str = "\
-enum AutoInc { B = AutoInc.A * 2, C }
-enum Str { B = Str.A + \"b\", C = `${B}c` }
-const enum CE { B = CE.A + 1, C }
-namespace NE { export const x = 2; }
-enum Rand { F = Math.random() }
-enum Two { B, C }
-enum Bad { R = Math.random(), S }
-";
-const MERGED_C: &str = "enum NE { B = NE.A + 1 }\n";
+// The three merged-enum fixture files live in `crate::for_tests` so the
+// `verter_lsp` real-provider diagnostics lane proves the SAME program this
+// engine lane does (see the consts' doc comment for the measured tsc codes).
+use crate::for_tests::{MERGED_A, MERGED_B, MERGED_C};
 
 /// Every block of a global enum merged across files evaluates as the
 /// checker evaluates it: auto-increment continues after a constant member

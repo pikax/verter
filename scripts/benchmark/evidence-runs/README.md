@@ -37,7 +37,9 @@ and peak memory), `skr-scale-answers`, `skr-mapped-expand`.
 `skr-mapped-indexb` demands conditional mapped values through the entire source
 key domain at 1,000, 3,000 and 10,000 keys. The recorded TypeScript 7.0.2 answer
 is `"b" | "n" | "s"`. Its strict, cold Verter cells require `firstTypeMs` and
-`peakBytes`; the fleet measures those cells on the benchmark worker.
+`peakBytes`; the fleet measures those cells on the benchmark worker. The run
+sets `requireAllMatched`, so a Verter answer at any of the three sizes that
+does not match the measured TypeScript answer exactly fails the run.
 
 `skr-scale-answers` demands the recursive `Names` and `Paths` conditionals over
 an `as const` route tree of 100 and 300 parents (five children each), a repeated
@@ -48,10 +50,11 @@ largest sizes: cold Verter `coldMs` and `peakBytes` beside whole-program
 `tsc-cli` `wallMs`; the middle sizes run beside them for comparison. The
 run also demands the `Names` of a 2,000-parent tree (12,000 names, every child
 name included) and the repeated `infer` over a 6,000-member union (6,000
-numbers). Those two are answer obligations, not timing cells: the run sets
-`requireAllMatched`, so any Verter answer in it that does not match the
-measured TypeScript answer exactly (wrong, partial, refused or killed) fails
-the run.
+numbers). Those two are answer obligations with timing evidence: their Verter
+`coldMs` and `peakBytes` and `tsc-cli` `wallMs` cells are required, but no
+timing threshold passes or fails the run. The run sets `requireAllMatched`, so
+any Verter answer in it that does not match the measured TypeScript answer
+exactly (wrong, partial, refused or killed) fails the run.
 
 `skr-mapped-expand` demands homomorphic and remapped mapped types over
 concrete sources: the keys of a class built from 10, 25 and 40 mixins, the
