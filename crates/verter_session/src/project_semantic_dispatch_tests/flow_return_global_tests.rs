@@ -931,3 +931,57 @@ fn the_global_identity_does_not_follow_ingest_order() {
         assert_clean_warm(host, READER, "readExtra", primitive(PrimitiveName::Number));
     }
 }
+
+/// A return that reads a global interface merged from a declaration file,
+/// a script and a module's `declare global`, global values and an element
+/// of an imported `as const` tuple: every member is the type the checker
+/// reads, through the public `ReturnType<typeof …>` lane.
+///
+/// TypeScript 7.0.2 (`.d.ts` return type of `describe`):
+///
+/// ```text
+/// { id: `u-${number}`; env: "dev" | "prod"; role: "admin" | "editor" | "viewer";
+///   first: "admin"; name: string; flags: { beta: boolean; seats: number; }; }
+/// ```
+///
+/// `role` is declared `(typeof ROLES)[number]`, which the checker reads as
+/// the union of the tuple's elements; `first` is `ROLES[0]`, the tuple's
+/// first element.
+///
+/// Mutation: without the declared positional read `role` stays the
+/// unreduced `readonly ["admin", "editor", "viewer"][number]`; without the
+/// element access of an imported tuple `first` is an unmodeled position.
+#[test]
+fn a_return_over_merged_globals_and_a_const_tuple_reads_like_the_checker() {
+    use super::checker_probe_lane_tests::{return_failures_in_one_host, ProbeProject};
+    let project = ProbeProject {
+        files: &[
+            (
+                "globals.d.ts",
+                "declare const BENCH_ENV: \"dev\" | \"prod\";\ndeclare const BENCH_ID: `u-${number}`;\ninterface BenchUser { id: number; name: string; }\n",
+            ),
+            (
+                "flags.ts",
+                "interface BenchUser { flags: { beta: boolean; seats: number }; }\n",
+            ),
+            (
+                "roles.ts",
+                "export const ROLES = [\"admin\", \"editor\", \"viewer\"] as const;\ndeclare global { interface BenchUser { role: (typeof ROLES)[number]; } }\n",
+            ),
+        ],
+        ..ProbeProject::default()
+    };
+    let failures = return_failures_in_one_host(
+        project,
+        r#"import { ROLES } from "./roles";
+export function describe(u: BenchUser) {
+  return { id: BENCH_ID, env: BENCH_ENV, role: u.role, first: ROLES[0], name: u.name, flags: u.flags };
+}
+"#,
+        &[(
+            "describe",
+            "{ id: `u-${number}`; env: \"dev\" | \"prod\"; role: \"admin\" | \"editor\" | \"viewer\"; first: \"admin\"; name: string; flags: { beta: boolean; seats: number; }; }",
+        )],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

@@ -9,7 +9,7 @@ use std::sync::Arc;
 use super::super::dispatch_txn::RelationStep;
 use super::{FlowDemandDriver, FlowEvaluator, FlowProductSubject, Positional};
 use crate::semantic_query::{
-    FlowReturnDegradation, LiteralValue, PrimitiveKind, SemanticNodeData, SemanticNodeId,
+    FlowReturnDegradation, IndexKey, LiteralValue, PrimitiveKind, SemanticNodeData, SemanticNodeId,
 };
 use verter_session_query::flow::policy::FlowGap;
 use verter_session_query::flow::slice::{
@@ -228,22 +228,8 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
         }
         // A numeric position of an array, a tuple or a string: the checker's
         // indexed access by the key's type.
-        let positional = self.operand_arms(object).into_iter().all(|arm| {
-            matches!(
-                self.dispatch
-                    .graph()
-                    .node_data(self.dispatch.resolved_reduction_view(arm))
-                    .as_deref(),
-                Some(
-                    SemanticNodeData::Array { .. }
-                        | SemanticNodeData::Tuple { .. }
-                        | SemanticNodeData::Primitive(PrimitiveKind::String)
-                        | SemanticNodeData::Literal(LiteralValue::String(_))
-                )
-            )
-        }) && self.is_numeric_key(index);
-        if positional {
-            return self.positional_element(object, index);
+        if self.is_positional_object(object) && self.is_numeric_key(index) {
+            return self.positional_read(object, index, true);
         }
         // A key of string or numeric literal types reads the members it
         // names, a `unique symbol` key the member it keys; a key of any
@@ -269,6 +255,281 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
             members.push(self.project_member_path(object, std::slice::from_ref(&name))?);
         }
         (!members.is_empty()).then(|| self.union(&members))
+    }
+
+    /// A declared type as it enters the flow: an indexed access of an
+    /// array, a tuple or a string by a numeric key (`(typeof ROLES)[number]`
+    /// over an `as const` tuple, `T[0]`) is the element it reads, as the
+    /// checker resolves a `T[K]` whose object is no type parameter when it
+    /// reads the declaration — wherever the access sits in the structure:
+    /// a union member (`T[number] | null`, an optional member's `|
+    /// undefined`), an array element, a tuple element, an object member or
+    /// index-signature value, or a signature's parameter, return or
+    /// predicate. Any other node, and an access whose read this lane
+    /// cannot answer, is itself; a declaration reference is not unfolded,
+    /// as its members enter the flow where a read projects them.
+    pub(super) fn declared_positional_read(&mut self, node: SemanticNodeId) -> SemanticNodeId {
+        if let Some(done) = self.declared_type_reads.borrow().get(&node) {
+            return *done;
+        }
+        // The walk starts from every part this evaluation already read, so
+        // a nest whose every level enters the flow is walked once overall.
+        let mut read = std::mem::take(&mut *self.declared_type_reads.borrow_mut());
+        let result = self.declared_read_within(node, &mut read);
+        let mut shared = self.declared_type_reads.borrow_mut();
+        if shared.is_empty() {
+            *shared = read;
+        } else {
+            shared.extend(read);
+        }
+        result
+    }
+
+    /// The structural walk behind [`Self::declared_positional_read`]:
+    /// post-order over an explicit stack (a nest as deep as its source
+    /// costs heap, never thread stack), memoized per walk — every node is
+    /// rebuilt at most once, only when a part of it reads differently, and
+    /// a node revisited while in flight answers itself.
+    fn declared_read_within(
+        &mut self,
+        root: SemanticNodeId,
+        read: &mut rustc_hash::FxHashMap<SemanticNodeId, SemanticNodeId>,
+    ) -> SemanticNodeId {
+        struct Frame {
+            node: SemanticNodeId,
+            data: Option<Arc<SemanticNodeData>>,
+            parts: Vec<SemanticNodeId>,
+            next: usize,
+        }
+        let enter =
+            |this: &Self,
+             node: SemanticNodeId,
+             read: &mut rustc_hash::FxHashMap<SemanticNodeId, SemanticNodeId>| {
+                read.insert(node, node);
+                let data = this.dispatch.graph().node_data(node);
+                let parts = data.as_deref().map_or_else(Vec::new, declared_read_parts);
+                Frame {
+                    node,
+                    data,
+                    parts,
+                    next: 0,
+                }
+            };
+        if let Some(done) = read.get(&root) {
+            return *done;
+        }
+        let mut stack = vec![enter(self, root, read)];
+        while let Some(frame) = stack.last_mut() {
+            if let Some(&part) = frame.parts.get(frame.next) {
+                frame.next += 1;
+                if !read.contains_key(&part) {
+                    let entered = enter(self, part, read);
+                    stack.push(entered);
+                }
+                continue;
+            }
+            let Frame { node, data, .. } = stack.pop().expect("a frame on the stack");
+            let result = match data {
+                Some(data) => self.declared_read_rebuild(node, &data, read),
+                None => node,
+            };
+            read.insert(node, result);
+        }
+        read.get(&root).copied().unwrap_or(root)
+    }
+
+    /// One node of [`Self::declared_read_within`], its parts already read.
+    fn declared_read_rebuild(
+        &mut self,
+        node: SemanticNodeId,
+        data: &SemanticNodeData,
+        read: &rustc_hash::FxHashMap<SemanticNodeId, SemanticNodeId>,
+    ) -> SemanticNodeId {
+        let part = |id: SemanticNodeId| read.get(&id).copied().unwrap_or(id);
+        match data {
+            SemanticNodeData::IndexedAccess { object, index } => {
+                return self.declared_indexed_read(node, *object, index.clone());
+            }
+            SemanticNodeData::Union(members) => {
+                let rebuilt: Vec<SemanticNodeId> =
+                    members.iter().map(|member| part(*member)).collect();
+                return if rebuilt.as_slice() == members.as_ref() {
+                    node
+                } else {
+                    self.union(&rebuilt)
+                };
+            }
+            _ => {}
+        }
+        let mut rebuilt = data.clone();
+        let mut changed = false;
+        let mut slot = |id: &mut SemanticNodeId| {
+            let value = part(*id);
+            changed |= value != *id;
+            *id = value;
+        };
+        match &mut rebuilt {
+            SemanticNodeData::Array { element, .. } => slot(element),
+            SemanticNodeData::Tuple { elements, .. } => {
+                let mut values = elements.to_vec();
+                for element in &mut values {
+                    slot(&mut element.value);
+                }
+                *elements = Arc::from(values.into_boxed_slice());
+            }
+            SemanticNodeData::Object(surface) => {
+                use crate::semantic_query::{SurfaceEntry, SurfaceView};
+                let mut entries = surface.entries.to_vec();
+                for entry in &mut entries {
+                    match entry {
+                        SurfaceEntry::Member(member) => slot(&mut member.value),
+                        SurfaceEntry::CallSignature(signature)
+                        | SurfaceEntry::ConstructSignature(signature) => slot(signature),
+                        SurfaceEntry::IndexSignature(index) => slot(&mut index.value_type),
+                    }
+                }
+                *surface = SurfaceView::from_entries(
+                    entries,
+                    surface.keyspace,
+                    surface.has_known_index_signature(),
+                );
+            }
+            SemanticNodeData::Signature {
+                params,
+                return_type,
+                return_carrier,
+                predicate,
+                ..
+            } => {
+                let mut values = params.to_vec();
+                for param in &mut values {
+                    slot(&mut param.ty);
+                }
+                *params = Arc::from(values.into_boxed_slice());
+                let declared = *return_type;
+                slot(return_type);
+                // A declared return carrier names the return type it
+                // seeds; it follows the read.
+                if let crate::semantic_query::SignatureReturnCarrier::Declared(carried) =
+                    return_carrier
+                {
+                    if *carried == declared {
+                        *carried = *return_type;
+                    }
+                }
+                if let Some(target) = predicate.as_mut().and_then(|p| p.ty.as_mut()) {
+                    slot(target);
+                }
+            }
+            _ => {}
+        }
+        if changed {
+            self.dispatch.graph().intern_preserving_scope(node, rebuilt)
+        } else {
+            node
+        }
+    }
+
+    /// One indexed access of a declared type, read as
+    /// [`Self::declared_positional_read`] reads it.
+    fn declared_indexed_read(
+        &mut self,
+        node: SemanticNodeId,
+        object: SemanticNodeId,
+        index: IndexKey,
+    ) -> SemanticNodeId {
+        let index =
+            match index {
+                IndexKey::Computed(index) => index,
+                IndexKey::Number(position) => self.dispatch.graph().intern_node(
+                    SemanticNodeData::Literal(LiteralValue::Number(position.get() as f64)),
+                ),
+                IndexKey::String(_) | IndexKey::UniqueSymbol(_) => return node,
+            };
+        if !self.is_positional_object(object) || !self.is_numeric_key(index) {
+            return node;
+        }
+        self.positional_read(object, index, false).unwrap_or(node)
+    }
+
+    /// The indexed access of a positional object by a numeric key, read per
+    /// key as the checker reads it. A negative key of any object but a
+    /// single tuple without a rest element — a union, a tuple with a rest
+    /// element, an array, a string — reads the number index. Of that single
+    /// tuple it is `undefined` where the access is `written` over it (the
+    /// checker's recovery beside TS2514); a declared access may be an
+    /// instantiation, which reads the number index, so it stays unread.
+    /// Every other key is the position it reads.
+    fn positional_read(
+        &mut self,
+        object: SemanticNodeId,
+        index: SemanticNodeId,
+        written: bool,
+    ) -> Option<SemanticNodeId> {
+        let keys = self.operand_arms(index);
+        if !keys.iter().any(|key| self.is_negative_key(*key)) {
+            return self.positional_element(object, index);
+        }
+        let mut reads = Vec::with_capacity(keys.len());
+        for key in keys {
+            let read = if !self.is_negative_key(key) {
+                self.positional_element(object, key)?
+            } else if !self.is_single_fixed_tuple(object) {
+                let number = self.primitive(PrimitiveKind::Number);
+                self.positional_element(object, number)?
+            } else if written {
+                self.primitive(PrimitiveKind::Undefined)
+            } else {
+                return None;
+            };
+            reads.push(read);
+        }
+        Some(match reads.as_slice() {
+            [single] => *single,
+            _ => self.union(&reads),
+        })
+    }
+
+    /// Whether `key` is a negative numeric literal (`-1`; `-0` is `0`).
+    fn is_negative_key(&self, key: SemanticNodeId) -> bool {
+        matches!(
+            self.dispatch.graph().node_data(key).as_deref(),
+            Some(SemanticNodeData::Literal(LiteralValue::Number(value))) if *value < 0.0
+        )
+    }
+
+    /// Whether `object` is one tuple, not a union, without a rest element.
+    fn is_single_fixed_tuple(&self, object: SemanticNodeId) -> bool {
+        let [arm] = self.operand_arms(object)[..] else {
+            return false;
+        };
+        matches!(
+            self.dispatch
+                .graph()
+                .node_data(self.dispatch.resolved_reduction_view(arm))
+                .as_deref(),
+            Some(SemanticNodeData::Tuple { elements, .. })
+                if !elements.iter().any(|element| element.rest)
+        )
+    }
+
+    /// Whether every member of `object` reads numeric positions: an array,
+    /// a tuple or a string.
+    fn is_positional_object(&self, object: SemanticNodeId) -> bool {
+        self.operand_arms(object).into_iter().all(|arm| {
+            matches!(
+                self.dispatch
+                    .graph()
+                    .node_data(self.dispatch.resolved_reduction_view(arm))
+                    .as_deref(),
+                Some(
+                    SemanticNodeData::Array { .. }
+                        | SemanticNodeData::Tuple { .. }
+                        | SemanticNodeData::Primitive(PrimitiveKind::String)
+                        | SemanticNodeData::Literal(LiteralValue::String(_))
+                )
+            )
+        })
     }
 
     /// [`SliceExpr::Update`]: the value is the unary numeric result over
@@ -318,7 +579,16 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
                 }
                 _ => {
                     drop(data);
-                    self.indexed_access(resolved, index)?
+                    let read = self.indexed_access(resolved, index)?;
+                    // An arm the shared walker leaves unread leaves the
+                    // whole access unread.
+                    if matches!(
+                        self.dispatch.graph().node_data(read).as_deref(),
+                        Some(SemanticNodeData::Opaque(_))
+                    ) {
+                        return None;
+                    }
+                    read
                 }
             };
             elements.push(element);
@@ -577,6 +847,44 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
             return Some(self.primitive(PrimitiveKind::String));
         }
         Some(self.primitive(PrimitiveKind::Any))
+    }
+}
+
+/// The parts of a declared type [`FlowEvaluator::declared_positional_read`]
+/// reads through: a union's members, an array's element, a tuple's element
+/// values, an object's member, signature and index-signature values, a
+/// signature's parameter, return and predicate types. Every other node
+/// (an indexed access included) has none.
+fn declared_read_parts(data: &SemanticNodeData) -> Vec<SemanticNodeId> {
+    use crate::semantic_query::SurfaceEntry;
+    match data {
+        SemanticNodeData::Union(members) => members.to_vec(),
+        SemanticNodeData::Array { element, .. } => vec![*element],
+        SemanticNodeData::Tuple { elements, .. } => {
+            elements.iter().map(|element| element.value).collect()
+        }
+        SemanticNodeData::Object(surface) => surface
+            .entries
+            .iter()
+            .map(|entry| match entry {
+                SurfaceEntry::Member(member) => member.value,
+                SurfaceEntry::CallSignature(signature)
+                | SurfaceEntry::ConstructSignature(signature) => *signature,
+                SurfaceEntry::IndexSignature(index) => index.value_type,
+            })
+            .collect(),
+        SemanticNodeData::Signature {
+            params,
+            return_type,
+            predicate,
+            ..
+        } => params
+            .iter()
+            .map(|param| param.ty)
+            .chain(std::iter::once(*return_type))
+            .chain(predicate.as_ref().and_then(|predicate| predicate.ty))
+            .collect(),
+        _ => Vec::new(),
     }
 }
 

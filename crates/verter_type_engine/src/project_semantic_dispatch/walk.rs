@@ -1068,10 +1068,16 @@ enum LiteralKey {
 /// `AliasResolve`, `ConditionalSelect`) as the walker descends. The
 /// caller emits the whole-path `ProjectPath` edge after the walk finishes.
 /// Numeric demand a pending path segment places on a tuple / array
-/// base: a concrete integer position or the broad `number` key.
+/// base: a concrete integer position, a negative integer key, or the broad
+/// `number` key.
 #[derive(Debug, Clone, Copy)]
 enum NumericIndexDemand {
     Position(usize),
+    /// A negative integer key (`T[-1]`): no tuple position. The checker
+    /// reads it through the number index, except that an access written
+    /// over a single tuple without a rest element recovers to `undefined`
+    /// beside its TS2514 error — a context this walker cannot see.
+    Negative,
     BroadNumber,
 }
 
@@ -2550,10 +2556,11 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
 
     /// Classify a pending path segment as a numeric tuple/array demand:
     /// a concrete integer position (`T[0]`, `T['1']`, `T[index-node
-    /// normalising to an integer literal]`) or the broad `number` key
-    /// (`T[number]`). Returns `None` for every non-numeric segment —
-    /// member names, string keys, negative / fractional positions, and
-    /// symbolic index nodes that do not settle to a numeric domain.
+    /// normalising to an integer literal]`), a negative integer key
+    /// (`T[-1]`) or the broad `number` key (`T[number]`). Returns
+    /// `None` for every non-numeric segment — member names, string keys,
+    /// fractional positions, and symbolic index nodes that do not settle to
+    /// a numeric domain.
     fn classify_numeric_index_segment(&self, segment: &PathSegment) -> Option<NumericIndexDemand> {
         let key = match segment {
             PathSegment::Index(IndexKey::Number(n)) => IndexKey::Number(*n),
@@ -2567,9 +2574,12 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             PathSegment::Member(_) => return None,
         };
         match key {
-            IndexKey::Number(n) => usize::try_from(n.get())
-                .ok()
-                .map(NumericIndexDemand::Position),
+            // The sign alone decides a negative key; a position wider than
+            // the target's `usize` is past every element a tuple can hold.
+            IndexKey::Number(n) => Some(match n.get() {
+                key if key < 0 => NumericIndexDemand::Negative,
+                key => NumericIndexDemand::Position(usize::try_from(key).unwrap_or(usize::MAX)),
+            }),
             // TS coerces only CANONICAL numeric string keys
             // (`String(Number(s)) === s`): `T["0"]` projects position 0,
             // but `T["01"]` / `T["+1"]` / `T["1.0"]` are NOT numeric keys.
@@ -3096,8 +3106,17 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
     ///   `element.value` is returned). On a rest-bearing tuple, fixed
     ///   positions STRICTLY BEFORE the rest start resolve exactly (tsgo:
     ///   `[string, ...number[]][0]` = `string`); positions AT/AFTER the
-    ///   rest start have suffix-dependent arithmetic this walker does not
-    ///   guess → `None` (honest miss). Out-of-range → `None`.
+    ///   rest start read every element from the rest start on. A position
+    ///   past the end of a tuple without a rest element reads `undefined`
+    ///   (the checker's `getTupleElementTypeOutOfStartCount`, beside its
+    ///   TS2493 error).
+    /// - `Negative`: on a tuple with a rest element, the `BroadNumber`
+    ///   read — the tuple's number index, which the checker reads in every
+    ///   context. On a tuple without one, `None`: the checker answers
+    ///   `undefined` for an access written over that single tuple (its
+    ///   TS2514 recovery) and the number index for an instantiated one
+    ///   (`Last<["a", "b"]>` over `X[-1]`) or a union member, and this
+    ///   walker sees neither the access nor the whole object.
     /// - `BroadNumber`: the renormalised union of every element's
     ///   contribution — optional slots add `undefined`, a rest element
     ///   contributes its array ELEMENT type (an unresolved rest carrier
@@ -3130,10 +3149,17 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         );
                     }
                 }
-                let element = elements.get(position)?;
-                Some(self.index_read(element.value, element.optional, declaring_file))
+                Some(match elements.get(position) {
+                    Some(element) => {
+                        self.index_read(element.value, element.optional, declaring_file)
+                    }
+                    None => self
+                        .graph()
+                        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined)),
+                })
             }
-            NumericIndexDemand::BroadNumber => {
+            NumericIndexDemand::Negative if !elements.iter().any(|element| element.rest) => None,
+            NumericIndexDemand::Negative | NumericIndexDemand::BroadNumber => {
                 let mut arms: Vec<SemanticNodeId> = Vec::with_capacity(elements.len() + 1);
                 for element in elements {
                     if element.rest {
@@ -5350,10 +5376,30 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                                     }
                                 }
                             }
+                            // Past the end of a tuple without a rest
+                            // element the composite reads its number index,
+                            // which an unsettled wrapper leaves unknown: the
+                            // lone tuple's `undefined` is not that read.
+                            if matches!(demand, Some(NumericIndexDemand::Position(_)))
+                                && fixed == elements.len()
+                            {
+                                results.push(self.opaque_miss());
+                                return;
+                            }
                         }
                     }
+                    // A negative key over a composite this tuple is an arm
+                    // of reads the composite's number index: the checker's
+                    // TS2514 recovery needs the whole object to be one tuple.
+                    let in_composite = arm_read.is_some_and(|read| read.at == index);
                     let projected = self
                         .classify_numeric_index_segment(segment)
+                        .map(|demand| match demand {
+                            NumericIndexDemand::Negative if in_composite => {
+                                NumericIndexDemand::BroadNumber
+                            }
+                            demand => demand,
+                        })
                         .and_then(|demand| {
                             let declaring_file = self
                                 .graph()
