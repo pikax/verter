@@ -1259,7 +1259,7 @@ pub(crate) fn resolution_witness_fact_for_tests(
         .clone()
 }
 
-/// The SKR-ENUM-MERGE AC fixture: three global-script files whose enum
+/// The merged-enum fixture: three global-script files whose enum
 /// declarations merge across files — auto-increment after a constant member
 /// computed from another file's block, string members concatenating another
 /// block's, a `const enum`, an enum merged with a namespace, a non-constant

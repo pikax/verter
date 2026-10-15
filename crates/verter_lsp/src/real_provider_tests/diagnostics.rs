@@ -1146,7 +1146,7 @@ real_provider_test!(
 );
 
 // ---------------------------------------------------------------------------
-// SKR-ENUM-MERGE AC2: merged-enum diagnostic codes through the real providers
+// Merged global enums: diagnostic codes through the real providers
 // ---------------------------------------------------------------------------
 
 /// Map each declaration line of a merged-enum fixture file to the declared
@@ -1172,7 +1172,7 @@ fn merged_enum_declaration_anchors(source: &str) -> std::collections::HashMap<u3
     anchors
 }
 
-/// The SKR-ENUM-MERGE AC2 contract: the merged-enum controls must match
+/// The merged-enum diagnostics contract: the merged-enum controls must match
 /// tsc 7.0.2's DIAGNOSTICS as well as its types, through the real tsgo
 /// provider lane (tsgo is the tsc 7 native engine). The fixture is the
 /// engine test's own three global-script files (`verter_session::for_tests`
@@ -1187,12 +1187,15 @@ fn merged_enum_declaration_anchors(source: &str) -> std::collections::HashMap<u3
 /// sit in ONE program, so its arrival (waited for positively below)
 /// witnesses the cross-file merge before the empty-set assertions can be
 /// accepted. Giving Two's second block an initializer, or dropping a
-/// fixture file's declarations from the program (a.ts: unresolved members
-/// flood the b.ts anchors; b.ts: both expected codes vanish), changes the
-/// code sets and fails the exact-match assertions. Dropping MERGED_C alone
-/// changes no diagnostic — its NE block is clean in tsc too — so its merge
-/// is witnessed by the engine test's type probes over the same shared
-/// fixture, not by this lane.
+/// fixture file's declarations from the program, fails the test: a.ts's
+/// declarations missing floods the b.ts anchors with unresolved-member
+/// codes, b.ts's missing vanishes both expected codes (and the warm-up
+/// needle with them), and c.ts's missing fails the completion probe on c —
+/// c's NE block is clean in tsc too, so its empty code set is guarded by
+/// that probe instead: completions after `NE.` inside c must list the
+/// merged NE member set (`A` from a.ts's enum block, `B` from c.ts's own,
+/// `x` from b.ts's namespace block), proving all three files' NE blocks
+/// sit in ONE program before c's empty-set assertion is accepted.
 ///
 /// tsgo-scoped by charter: bare tsserver 6.0.3's session API itself drops
 /// TS2432 for this program (verified with `semanticDiagnosticsSync` on a
@@ -1274,6 +1277,38 @@ async fn diagnostics_merged_enum_blocks_match_tsc_codes_tsgo() {
         "the merged-enum program must warm up: completions after `AutoInc.` list `A` \
          only once the a and b blocks share one configured project"
     );
+
+    // c's empty diagnostic set must not be vacuous: c's NE block is clean in
+    // tsc too, so the code sets alone cannot tell a merged c from a dropped
+    // one. The merged NE member set can: completions after `NE.` inside c
+    // must list `A` (declared only in a.ts's enum block), `B` (only in c's)
+    // and `x` (only in b.ts's namespace block), so all three files' NE
+    // blocks are proven to share c's program. A c published without its
+    // declarations has no `NE.` to address, so the probe fails the test
+    // before the empty-set assertion below can pass vacuously.
+    assert!(
+        session
+            .wait_until_ready(&uri_c, "NE.", "NE.".len(), "A")
+            .await,
+        "completions after `NE.` in the c fixture file must list `A`: the \
+         member a.ts declares is reachable from c only while both files' NE \
+         blocks sit in one configured project"
+    );
+    let merged_ne_members = session
+        .completion_labels(
+            &uri_c,
+            session.find_position(&uri_c, "NE.", "NE.".len()),
+            None,
+        )
+        .await;
+    for member in ["B", "x"] {
+        assert!(
+            merged_ne_members.contains(&member.to_string()),
+            "completions after `NE.` in the c fixture file must list the \
+             merged NE member `{member}` (c's own block and b.ts's namespace \
+             block must share c's program); got {merged_ne_members:?}"
+        );
+    }
 
     // Wait for BOTH expected codes positively: until they arrive the
     // diagnostics passes may still be settling, and every empty-set
