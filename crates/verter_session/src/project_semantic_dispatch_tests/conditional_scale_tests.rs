@@ -17,6 +17,14 @@
 //! (`scripts/benchmark/semantic-perf/measure-expected.mjs`) at the listed
 //! sizes and in all four `strictNullChecks` × `noImplicitAny` settings,
 //! which agree, with no diagnostic.
+//!
+//! No size of these shapes may be refused below the checker's own limits.
+//! The checker refuses with TS2589 once one statement has instantiated
+//! 5,000,000 types; the request's operation fuse defaults to that same
+//! allowance. So each demand here runs under a fuse of exactly the
+//! instantiations the checker makes for the same program (measured with
+//! `tsc --extendedDiagnostics`): answering within it at every size shows
+//! the fuse never stops one of these shapes before the checker would.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -109,6 +117,26 @@ fn numbers(members: usize) -> BTreeSet<Literal> {
     (0..members).map(|i| Literal::Number(i as u64)).collect()
 }
 
+/// The types TypeScript 7.0.2 instantiates checking each program, in its
+/// `--extendedDiagnostics` count (measured at 0, 10, 100 and 1,000, and
+/// exactly linear): `Names` 219 per parent, `Paths` 234, the repeated
+/// `infer` 7 per member and the distinct aliases 5.
+fn checker_instantiations_names(parents: usize) -> usize {
+    219 * parents + 40
+}
+
+fn checker_instantiations_paths(parents: usize) -> usize {
+    234 * parents + 41
+}
+
+fn checker_instantiations_repeated_infer(members: usize) -> usize {
+    7 * members + 4
+}
+
+fn checker_instantiations_aliases(members: usize) -> usize {
+    5 * members + 20
+}
+
 /// A literal member of an answer.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum Literal {
@@ -123,9 +151,14 @@ type Work = [(&'static str, u64); 6];
 /// benchmark's probe does, and return its literal members and its work. An
 /// answer that is not a union of literals (an unevaluated conditional, the
 /// probe expression itself, a template not built into its string) fails.
-fn named_probe(source: &str, probe: &str) -> (BTreeSet<Literal>, Work) {
+///
+/// The request's operation fuse is `operations`.
+fn named_probe(source: &str, probe: &str, operations: usize) -> (BTreeSet<Literal>, Work) {
     let host = crate::VerterHost::new_standalone_with_tsconfig_projects(
-        crate::HostConfig::default(),
+        crate::HostConfig {
+            projection_op_budget: operations,
+            ..crate::HostConfig::default()
+        },
         &[("/scale", r#"{ "compilerOptions": { "strict": true } }"#)],
     );
     let _ = host
@@ -215,7 +248,11 @@ fn assert_linear_growth(
 #[test]
 fn route_tree_names_answer_at_every_size_with_linear_work() {
     let work = [20, 100, 300].map(|parents| {
-        let (names, work) = named_probe(&route_tree(parents), "Names<typeof routes>");
+        let (names, work) = named_probe(
+            &route_tree(parents),
+            "Names<typeof routes>",
+            checker_instantiations_names(parents),
+        );
         assert_answer(
             &format!("Names over {parents}"),
             &names,
@@ -232,7 +269,11 @@ fn route_tree_names_answer_at_every_size_with_linear_work() {
 #[test]
 fn route_tree_paths_answer_at_every_size_with_linear_work() {
     let work = [20, 100, 300].map(|parents| {
-        let (paths, work) = named_probe(&route_tree(parents), "Paths<typeof routes>");
+        let (paths, work) = named_probe(
+            &route_tree(parents),
+            "Paths<typeof routes>",
+            checker_instantiations_paths(parents),
+        );
         assert_answer(
             &format!("Paths over {parents}"),
             &paths,
@@ -257,7 +298,11 @@ fn a_nested_conditional_over_a_distributed_infer_sees_one_member() {
             .split_once("] as const;\n")
             .expect("the aliases")
             .1;
-    let (paths, _) = named_probe(&source, "Paths<typeof routes>");
+    let (paths, _) = named_probe(
+        &source,
+        "Paths<typeof routes>",
+        checker_instantiations_paths(2),
+    );
     let expected = ["/a", "/a/x", "/b", "/b/y"]
         .map(|path| Literal::String(path.into()))
         .into();
@@ -271,7 +316,11 @@ fn a_nested_conditional_over_a_distributed_infer_sees_one_member() {
 fn repeated_infer_answers_at_every_size_with_linear_work() {
     let work = [10, 100, 1000].map(|members| {
         let (source, probe) = repeated_infer(members);
-        let (answer, work) = named_probe(&source, &probe);
+        let (answer, work) = named_probe(
+            &source,
+            &probe,
+            checker_instantiations_repeated_infer(members),
+        );
         assert_answer(&format!("Pat over {members}"), &answer, &numbers(members));
         (members, work)
     });
@@ -285,7 +334,7 @@ fn repeated_infer_answers_at_every_size_with_linear_work() {
 fn distinct_aliases_answer_at_every_size_with_linear_work() {
     let work = [100, 1000].map(|members| {
         let (source, probe) = distinct_aliases(members);
-        let (answer, work) = named_probe(&source, &probe);
+        let (answer, work) = named_probe(&source, &probe, checker_instantiations_aliases(members));
         assert_answer(
             &format!("aliases over {members}"),
             &answer,
@@ -294,4 +343,25 @@ fn distinct_aliases_answer_at_every_size_with_linear_work() {
         (members, work)
     });
     assert_linear_growth("aliases", work[0], work[1]);
+}
+
+/// The first level of `Names` over 2,000 parents answers every parent's
+/// name. Its `infer E` binds the union of the tree's 2,000 elements, each a
+/// distinct object holding a tuple of five more (28,000 nodes); building
+/// that union keys every element by its structure, however many nodes the
+/// elements hold, as the checker reads every constituent of a union it
+/// builds. Measured on TypeScript 7.0.2: `"r0" | … | "r1999"`, with no
+/// diagnostic.
+#[test]
+fn a_conditional_over_a_two_thousand_parent_tree_answers_every_parent() {
+    let parents = 2000;
+    let (names, _) = named_probe(
+        &route_tree(parents),
+        "typeof routes extends readonly (infer E)[] ? E extends { name: infer N } ? N : never : never",
+        verter_type_engine::request_budget::DEFAULT_PROJECTION_OP_BUDGET,
+    );
+    let expected = (0..parents)
+        .map(|i| Literal::String(format!("r{i}")))
+        .collect();
+    assert_answer("the first level over 2,000 parents", &names, &expected);
 }

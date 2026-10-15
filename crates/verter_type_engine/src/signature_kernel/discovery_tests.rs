@@ -242,6 +242,19 @@ fn colliding_space_keys_of_distinct_identities_are_rejected() {
     );
 }
 
+/// A signature with no type parameters mints no binder token, so two of
+/// them may share a binder-space key: a union of hundreds of thousands of
+/// distinct callable members, which the checker answers, claims more keys
+/// than 31 bits keep apart, and none of them may fail on a collision that
+/// cannot alias anything.
+#[test]
+fn binder_free_signatures_sharing_a_space_key_both_publish() {
+    let store = SignatureStore::new();
+    let first = sig_with(&store, 1, 7, 1, vec![], 100, 200);
+    let second = sig_with(&store, 2, 7, 2, vec![], 101, 200);
+    assert_ne!(first.signature, second.signature);
+}
+
 /// Two union arms settling to the same callable each keep their own edge,
 /// so the result is a composite candidate rather than the bare authored one.
 #[test]

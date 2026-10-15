@@ -61,36 +61,74 @@ pub(crate) fn derived_node_bytes(payload_bytes: usize) -> usize {
         + payload_bytes
 }
 
+/// The work units one instantiation the checker counts costs a connected
+/// demand at most, on the shapes whose size only the checker's
+/// instantiation allowance bounds: a distributive conditional repeating an
+/// `infer` charges 60 units per union member where the checker instantiates
+/// 7 types, a tuple inferring through distinct aliases of one generic 30
+/// against 5, and a recursive conditional over an `as const` route tree 132
+/// per parent against 219 (measured with `tsc --extendedDiagnostics` on
+/// TypeScript 7.0.2).
+pub const WORK_UNITS_PER_INSTANTIATION: usize = 9;
+
+/// The construction bytes one instantiation the checker counts costs a
+/// connected demand at most, on the same shapes: the repeated `infer`
+/// reserves 8,192 bytes per union member against the checker's 7
+/// instantiations, the route tree 41 KB per parent against 219.
+pub const CONSTRUCTION_BYTES_PER_INSTANTIATION: usize = 1_280;
+
+const fn larger(a: usize, b: usize) -> usize {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
 /// Work-unit cap for one connected semantic demand: the operational
-/// backstop, sized from the checker's relation-complexity envelope
-/// ([`checker_policy::RELATION_COMPARISONS`] structured comparisons at
+/// backstop, sized to cover both of the checker's own allowances, so it
+/// never refuses an input the checker answers. The relation envelope is
+/// [`checker_policy::RELATION_COMPARISONS`] structured comparisons at
 /// [`RELATION_UNITS_PER_COMPARISON`] reducer units plus one cold query-entry
-/// unit each). The reducer mapping alone excludes the enclosing dispatch
+/// unit each (the reducer mapping alone excludes the enclosing dispatch
 /// entries and would stop the reversed-object conditional construction
-/// before its comparison allowance. This maps that construction's footprint,
-/// not every arbitrary projection surrounding a relation.
-/// Work units do not bound
+/// before its comparison allowance). The instantiation envelope is
+/// [`checker_policy::INSTANTIATION_COUNT`] instantiations at
+/// [`WORK_UNITS_PER_INSTANTIATION`] units each: a distribution over a union
+/// of hundreds of thousands of members, which the checker answers, runs no
+/// relation the first envelope would size. Work units do not bound
 /// memory; the construction-byte rail
 /// ([`MAX_CONNECTED_CONSTRUCTION_BYTES`]) does. Both operational rails
-/// include the checker's full relation envelope, so neither substitutes an
-/// unevaluated conditional for the checker's answer.
+/// include both checker envelopes, so neither substitutes an unevaluated
+/// conditional for the checker's answer.
 ///
 /// [`checker_policy::RELATION_COMPARISONS`]: crate::semantic_query::checker_policy::RELATION_COMPARISONS
-pub const MAX_CONNECTED_PROJECTION_WORK: usize =
+/// [`checker_policy::INSTANTIATION_COUNT`]: crate::semantic_query::checker_policy::INSTANTIATION_COUNT
+pub const MAX_CONNECTED_PROJECTION_WORK: usize = larger(
     crate::semantic_query::checker_policy::RELATION_COMPARISONS as usize
-        * (RELATION_UNITS_PER_COMPARISON + 1);
+        * (RELATION_UNITS_PER_COMPARISON + 1),
+    crate::semantic_query::checker_policy::INSTANTIATION_COUNT as usize
+        * WORK_UNITS_PER_INSTANTIATION,
+);
 /// Nested query-boundary cap for one connected semantic demand.
 pub const MAX_CONNECTED_QUERY_DEPTH: u16 = 24;
 /// Construction-byte allowance for one connected semantic demand: the bytes
 /// it reserves before it builds, never refunded within the demand, so the
-/// allowance bounds what the demand holds at its peak. The comparison mapping
-/// covers the full checker relation envelope, with the non-relation allowance
-/// left for operand construction and the consuming projection. This is logical
-/// construction accounting, not an allocation or a retained-memory quota.
-pub(super) const MAX_CONNECTED_CONSTRUCTION_BYTES: usize =
+/// allowance bounds what the demand holds at its peak. The larger of the
+/// relation mapping (the full checker relation envelope at
+/// [`RELATION_PAIR_BYTES`] a pair) and the instantiation mapping (the
+/// checker's instantiation allowance at
+/// [`CONSTRUCTION_BYTES_PER_INSTANTIATION`]), with the non-relation
+/// allowance left for operand construction and the consuming projection.
+/// This is logical construction accounting, not an allocation or a
+/// retained-memory quota.
+pub(super) const MAX_CONNECTED_CONSTRUCTION_BYTES: usize = larger(
     (crate::semantic_query::checker_policy::RELATION_COMPARISONS as usize)
-        .saturating_mul(RELATION_PAIR_BYTES)
-        .saturating_add(512 << 20);
+        .saturating_mul(RELATION_PAIR_BYTES),
+    (crate::semantic_query::checker_policy::INSTANTIATION_COUNT as usize)
+        .saturating_mul(CONSTRUCTION_BYTES_PER_INSTANTIATION),
+)
+.saturating_add(512 << 20);
 
 /// What one connected demand has charged so far: its work units and its
 /// construction bytes.

@@ -70,7 +70,7 @@ member. A reduction keeping every constituent preserves the original declared
 carrier and its print origin.
 The partition is evaluation-local and introduces no reusable-cache authority.
 The finite default limits allow 16,384 selected graph nodes and 32,768 proof
-obligations; the request projection fuse defaults to 16,384 operations.
+obligations; the request projection fuse defaults to the checker's 5,000,000-instantiation allowance.
 These limits admit wide finite switches without changing the typed refusal or
 no-warm-admission rules for a request that exceeds its configured allowance.
 
