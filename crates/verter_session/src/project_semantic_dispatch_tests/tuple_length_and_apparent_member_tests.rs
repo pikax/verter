@@ -11,7 +11,8 @@
 //! message.
 
 use super::checker_probe_lane_tests::{
-    mismatches, mismatches_in, return_failures_in_one_host, with_probe, ProbeProject,
+    degradation_in, mismatches, mismatches_in, return_failures_in_one_host, with_probe,
+    ProbeProject,
 };
 use crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::render_node;
 
@@ -205,23 +206,64 @@ fn a_negative_key_reads_the_number_index_unless_the_access_decides() {
     }
 }
 
+/// A position past the end of a tuple that is one arm of an intersection
+/// reads the intersection's number index, which needs the global `Array`
+/// wrapper; in a project whose library declares none that read is not
+/// settled, so the access stays unanswered rather than reading the lone
+/// tuple's `undefined`.
+///
+/// Mutation: projecting the arm as a single tuple when its wrapper is
+/// unavailable reads both probes as `undefined`.
+#[test]
+fn a_composite_past_end_read_without_a_settled_wrapper_stays_unanswered() {
+    let source = "type It = readonly [\"a\"] & { x: 1 };\n";
+    let measured = with_probe(source, "It[3]", |dispatch, node| {
+        render_node(dispatch, node, 0)
+    });
+    assert_eq!(measured, "Opaque(Miss)", "`It[3]` must stay unanswered");
+    let returned = degradation_in(
+        ProbeProject::default(),
+        "export const IT = [\"a\"] as unknown as readonly [\"a\"] & { x: 1 };\nexport function it3() { return IT[3]; }\n",
+        "it3",
+    );
+    assert!(
+        matches!(returned, Ok(Some(_))),
+        "`IT[3]` must not answer a definite type: {returned:?}"
+    );
+}
+
 /// The module an `as const` tuple is imported from, with a global
 /// interface whose members are declared through it.
 const ROLES: &str = "\
 export const ROLES = [\"admin\", \"editor\", \"viewer\"] as const;
-declare global { interface Account { role: (typeof ROLES)[number]; head: (typeof ROLES)[0]; } }
+declare global {
+  interface Account {
+    role: (typeof ROLES)[number];
+    head: (typeof ROLES)[0];
+    opt?: (typeof ROLES)[number];
+    nul: (typeof ROLES)[number] | null;
+    arr: (typeof ROLES)[number][];
+    pair: [(typeof ROLES)[0], (typeof ROLES)[number]];
+    nested: { inner: (typeof ROLES)[number] };
+    cb: (r: (typeof ROLES)[number]) => (typeof ROLES)[0];
+  }
+}
 ";
 
 /// Element reads in a function's return: a literal index of an imported
 /// `as const` tuple is that element, a numeric key the union of the
 /// elements it can read, a member declared `(typeof ROLES)[number]` or
-/// `(typeof ROLES)[0]` the element type it names, and an out-of-range or
-/// negative literal `undefined`; a rest-element tuple and a mutable array
-/// read as the checker reads them.
+/// `(typeof ROLES)[0]` the element type it names — wherever the access
+/// sits in the declared type: an optional member, a union, an array or
+/// tuple element, a nested object member, a function type's parameter or
+/// return — and an out-of-range or negative literal `undefined`; a
+/// rest-element tuple and a mutable array read as the checker reads them.
 ///
 /// Measured on TypeScript 7.0.2 (`tsc --declaration --emitDeclarationOnly
 /// --strict`): the `.d.ts` return type beside each row; `r3`, `rNeg` and
-/// `opt2` beside their TS2493 / TS2514 errors. A negative key reads
+/// `opt2` beside their TS2493 / TS2514 errors; `nestedRole` and `cbRole`,
+/// whose `.d.ts` reuses the authored type node, off the TS2322 message of
+/// `const s: null = nestedRole(a)`. A negative key reads
 /// `undefined` only off a single tuple without a rest element; off a union
 /// (`uniNeg`, `mixNeg`, beside TS2339) or a tuple with a rest element it
 /// reads the number index.
@@ -229,9 +271,11 @@ declare global { interface Account { role: (typeof ROLES)[number]; head: (typeof
 /// Mutation: without the element access of a binding the frame does not
 /// own, every literal-index row is an unmodeled position; without the
 /// declared positional read `roleIn` keeps an unreduced indexed access in
-/// its member; answering an out-of-range position with a miss leaves `r3`,
-/// `rNeg` and `opt2` unmodeled; deciding a negative key per union member
-/// reads `mixNeg` as `string | undefined | 1`.
+/// its member; reading only an access that is the whole declared type
+/// leaves `optRole`, `nulRole`, `arrRole`, `pairRole`, `nestedRole` and
+/// `cbRole` holding one; answering an out-of-range position with a miss
+/// leaves `r3`, `rNeg` and `opt2` unmodeled; deciding a negative key per
+/// union member reads `mixNeg` as `string | undefined | 1`.
 #[test]
 fn a_const_tuple_element_read_is_the_element_the_checker_reads() {
     let project = ProbeProject {
@@ -259,6 +303,13 @@ export function rStr() { return ROLES["1"]; }
 export function role(a: Account) { return a.role; }
 export function head(a: Account) { return a.head; }
 export function roleIn(a: Account) { return { role: a.role }; }
+export function optRole(a: Account) { return a.opt; }
+export function nulRole(a: Account) { return a.nul; }
+export function arrRole(a: Account) { return a.arr; }
+export function pairRole(a: Account) { return a.pair; }
+export function nestedRole(a: Account) { return a.nested; }
+export function innerRole(a: Account) { return a.nested.inner; }
+export function cbRole(a: Account) { return a.cb; }
 export function rest0() { return REST[0]; }
 export function rest1() { return REST[1]; }
 export function rest9() { return REST[9]; }
@@ -288,6 +339,22 @@ export function opt2() { return OPT[2]; }
             ("role", "\"admin\" | \"editor\" | \"viewer\""),
             ("head", "\"admin\""),
             ("roleIn", "{ role: \"admin\" | \"editor\" | \"viewer\"; }"),
+            ("optRole", "\"admin\" | \"editor\" | \"viewer\" | undefined"),
+            ("nulRole", "\"admin\" | \"editor\" | \"viewer\" | null"),
+            ("arrRole", "(\"admin\" | \"editor\" | \"viewer\")[]"),
+            (
+                "pairRole",
+                "[\"admin\", \"admin\" | \"editor\" | \"viewer\"]",
+            ),
+            (
+                "nestedRole",
+                "{ inner: \"admin\" | \"editor\" | \"viewer\"; }",
+            ),
+            ("innerRole", "\"admin\" | \"editor\" | \"viewer\""),
+            (
+                "cbRole",
+                "(r: \"admin\" | \"editor\" | \"viewer\") => \"admin\"",
+            ),
             ("rest0", "1"),
             ("rest1", "string"),
             ("rest9", "string"),

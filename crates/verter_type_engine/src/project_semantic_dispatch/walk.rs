@@ -5376,6 +5376,16 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                                     }
                                 }
                             }
+                            // Past the end of a tuple without a rest
+                            // element the composite reads its number index,
+                            // which an unsettled wrapper leaves unknown: the
+                            // lone tuple's `undefined` is not that read.
+                            if matches!(demand, Some(NumericIndexDemand::Position(_)))
+                                && fixed == elements.len()
+                            {
+                                results.push(self.opaque_miss());
+                                return;
+                            }
                         }
                     }
                     // A negative key over a composite this tuple is an arm

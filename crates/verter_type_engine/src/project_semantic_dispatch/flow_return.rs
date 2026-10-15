@@ -6553,6 +6553,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             self_slot: Some(key),
             resolving_functions: std::rc::Rc::default(),
             this_free_values: std::rc::Rc::default(),
+            declared_type_reads: std::rc::Rc::default(),
             canonical,
             owner,
             nullability: key.context.policy.nullability,
@@ -11390,6 +11391,13 @@ struct FlowEvaluator<'d, 'b, D: FlowDemandDriver> {
     /// it holds only nodes this evaluation walked, so it is bounded by the
     /// evaluation's own work.
     this_free_values: std::rc::Rc<std::cell::RefCell<rustc_hash::FxHashSet<SemanticNodeId>>>,
+    /// Every type this evaluation has read as the checker reads a declared
+    /// type ([`FlowEvaluator::declared_positional_read`]), by node, shared
+    /// by every nested evaluator of one root evaluation and dropped with
+    /// it. Request-scoped: it holds only nodes this evaluation read, so a
+    /// structure entering the flow again is walked once.
+    declared_type_reads:
+        std::rc::Rc<std::cell::RefCell<rustc_hash::FxHashMap<SemanticNodeId, SemanticNodeId>>>,
     canonical: &'d str,
     owner: verter_type_expr::TopLevelOwnerId,
     /// The `null` / `undefined` algebra of the function's own project

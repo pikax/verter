@@ -564,6 +564,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             self_slot: None,
             resolving_functions: std::rc::Rc::clone(&self.resolving_functions),
             this_free_values: std::rc::Rc::clone(&self.this_free_values),
+            declared_type_reads: std::rc::Rc::clone(&self.declared_type_reads),
             canonical: self.canonical,
             owner: self.owner,
             nullability: self.nullability,

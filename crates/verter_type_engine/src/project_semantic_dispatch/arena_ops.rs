@@ -29,6 +29,14 @@ impl<'a> ArenaOps<'a> {
     ) -> SemanticNodeId {
         self.graph.intern_node_with_scope(data, scope)
     }
+    /// A rebuilt `origin` under the lexical scope `origin` carries.
+    pub(super) fn intern_preserving_scope(
+        &self,
+        origin: SemanticNodeId,
+        data: SemanticNodeData,
+    ) -> SemanticNodeId {
+        self.graph.intern_preserving_scope(origin, data)
+    }
 }
 
 impl crate::semantic_query::NodeRead for ArenaOps<'_> {
