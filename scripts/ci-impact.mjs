@@ -316,6 +316,7 @@ export const PATH_FILTERS = Object.freeze({
   scripts: [
     "scripts/**",
     ".github/workflows/nightly.yml",
+    ".github/workflows/tsserver-nightly.yml",
     ".github/workflows/release-check.yml",
     ".github/workflows/release-ide.yml",
     ".github/workflows/release-tag.yml",
