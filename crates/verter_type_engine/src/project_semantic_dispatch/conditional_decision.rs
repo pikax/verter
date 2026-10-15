@@ -413,10 +413,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         // selection adopts their exact facts and execution validity as one read.
         let authored_check = check;
         let operand_read = self.observe_read(|| {
+            // An unbound indexed check retains its binder until substitution.
             let check = if matches!(
                 self.graph().node_data(check).as_deref(),
                 Some(SemanticNodeData::IndexedAccess { .. })
-            ) {
+            ) && !self.conditional_is_deferred(check, extends)
+            {
                 let evaluated = self
                     .evaluate_deferred_semantic_node_with_context(
                         check,

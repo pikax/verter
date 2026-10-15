@@ -58,6 +58,21 @@ export function allScenarios() {
     ),
   );
 
+  // Conditional mapped values over a large, concrete source key domain.
+  for (const count of [1000, 3000, 10000]) {
+    out.push(
+      scenario(
+        `mapped-index-tags-${count}`,
+        "mapped-index",
+        `index a conditional mapping over all ${count} source keys`,
+        `interface Big { ${range(count)
+          .map((i) => `k${i}: ${i % 3 === 0 ? i : i % 3 === 1 ? `"s${i}"` : "boolean"};`)
+          .join(" ")} }\n`,
+        '{ [K in keyof Big]: Big[K] extends number ? "n" : Big[K] extends string ? "s" : "b" }[keyof Big]',
+      ),
+    );
+  }
+
   // Relations: object unions related position by position, and reversed.
   for (const m of [200, 600, 1800, 3200]) {
     out.push(
@@ -585,6 +600,9 @@ export const UNCOVERED = [
  * Tiers nest: standard includes quick, stress includes both.
  */
 export const SCENARIO_TIERS = {
+  "mapped-index-tags-1000": "quick",
+  "mapped-index-tags-3000": "standard",
+  "mapped-index-tags-10000": "stress",
   "return-chain-20": "quick",
   "return-chain-100": "standard",
   "return-chain-300": "standard",

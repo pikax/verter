@@ -14,6 +14,14 @@ use crate::semantic_query::{
     SurfaceView,
 };
 
+/// Applicability is decided before a batch runs. A started batch either
+/// completes or returns its typed refusal; it never requests another route.
+pub(super) enum FiniteMappedIndexValues {
+    NotApplicable,
+    Complete(Vec<SemanticNodeId>),
+    Stopped(Box<QueryBuildOutput>),
+}
+
 /// Per-walk maximum frame-stack depth observed by
 /// [`expand_empty_path_shallow_terminal_surface`]. Used by
 /// [`probe_max_walker_frame_depth`] for the
@@ -2607,6 +2615,13 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         index: Option<&crate::semantic_query::SurfaceKeyIndex<'_>>,
         index_read: bool,
     ) -> Option<SemanticNodeId> {
+        let cached_index = (index.is_none()
+            && surface.positive_members().len()
+                > crate::semantic_query_memo::member_index::MEMBER_ORDINAL_INDEX_LINEAR_SCAN_MAX)
+            .then(|| {
+                surface.key_index_from_ordinals(self.graph().member_ordinal_index(object, surface))
+            });
+        let index = index.or(cached_index.as_ref());
         let overloads = match index {
             Some(index) => index.project_known_key_overload_group(key),
             None => surface.project_known_key_overload_group(key),
@@ -2704,35 +2719,49 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         source: SemanticNodeId,
         mapper: &crate::semantic_query::MapperKey,
         keys: &[IndexKey],
-    ) -> Option<Vec<SemanticNodeId>> {
+        index_node: SemanticNodeId,
+    ) -> FiniteMappedIndexValues {
         if mapper.name_remap.is_some()
             || matches!(mapper.kind, crate::semantic_query::MapperKind::Identity)
             || !keys.iter().all(|key| matches!(key, IndexKey::String(_)))
         {
-            return None;
+            return FiniteMappedIndexValues::NotApplicable;
         }
         // A homomorphic primitive/array/tuple is mapped by its container owner.
         if mapper.over_type_variable {
-            let subject = self
-                .dispatch
-                .normalize_node_for_structural_fact_demand(
-                    source,
-                    self.context
-                        .into_structural_transit_with_mode(ProjectionMode::Navigate),
-                )
-                .into_complete_node()?;
+            let subject = match self.dispatch.normalize_node_for_structural_fact_demand(
+                source,
+                self.context
+                    .into_structural_transit_with_mode(ProjectionMode::Navigate),
+            ) {
+                super::evaluate::StructuralFactDemandOutcome::Complete(node) => node,
+                super::evaluate::StructuralFactDemandOutcome::Recovered { reasons, .. }
+                | super::evaluate::StructuralFactDemandOutcome::Partial(reasons) => {
+                    return self.stop_finite_mapped_batch(object, index_node, reasons)
+                }
+            };
             if !matches!(
                 self.graph().node_data(subject).as_deref(),
                 Some(SemanticNodeData::Object(_))
             ) {
-                return None;
+                return FiniteMappedIndexValues::NotApplicable;
             }
         }
         // Prove membership once for the whole finite batch. A dictionary,
         // remapping or open domain retains the ordinary per-key walker.
-        let domain = self.dispatch.key_space_domain(mapper.key_space)?;
+        let domain_read = self
+            .dispatch
+            .observe_read(|| self.dispatch.key_space_domain(mapper.key_space));
+        let completion = domain_read.result_completeness();
+        let domain = match domain_read.adopt(self.dispatch) {
+            Ok(domain) if !completion.is_partial() => domain,
+            _ => return self.stop_finite_mapped_batch(object, index_node, completion.reasons()),
+        };
+        let Some(domain) = domain else {
+            return FiniteMappedIndexValues::NotApplicable;
+        };
         if !domain.is_finite() {
-            return None;
+            return FiniteMappedIndexValues::NotApplicable;
         }
         if !keys.iter().all(|key| match key {
             IndexKey::String(name) => {
@@ -2740,7 +2769,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             }
             _ => false,
         }) {
-            return None;
+            return FiniteMappedIndexValues::NotApplicable;
         }
         self.original_path_non_empty = true;
         self.origin_file = self
@@ -2749,19 +2778,40 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             .and_then(|scope| scope.canonical_file());
         // Every key reads the source's authored modifier; one index over the
         // source surface keeps the whole batch linear in its key count.
-        let source_data = (mapper.optionality != crate::semantic_query::OptionalityMod::Add)
-            .then(|| self.dispatch.mapped_source_object(source))
-            .flatten()
-            .and_then(|object| self.graph().node_data(object));
+        let source_read = self
+            .dispatch
+            .observe_read(|| self.dispatch.mapped_source_object(source));
+        let completion = source_read.result_completeness();
+        let source_object = match source_read.adopt(self.dispatch) {
+            Ok(source) if !completion.is_partial() => source,
+            _ => return self.stop_finite_mapped_batch(object, index_node, completion.reasons()),
+        };
+        let source_data = source_object.and_then(|source| self.graph().node_data(source));
         let source_index = match source_data.as_deref() {
-            Some(SemanticNodeData::Object(surface)) => Some(surface.key_index()),
+            Some(SemanticNodeData::Object(surface)) => Some(
+                surface.key_index_from_ordinals(
+                    self.graph()
+                        .member_ordinal_index(source_object.expect("object view"), surface),
+                ),
+            ),
             _ => None,
+        };
+        let source_reads = if source_index.is_some() {
+            match self.dispatch.mapped_index_source_reads(
+                mapper,
+                source,
+                source_object.expect("source view"),
+            ) {
+                Ok(reads) => reads,
+                Err(reasons) => return self.stop_finite_mapped_batch(object, index_node, reasons),
+            }
+        } else {
+            Vec::new()
         };
         let mut values = Vec::with_capacity(keys.len());
         for key in keys {
             if let Err(reasons) = self.dispatch.charge_connected_work() {
-                self.mark_partial_with(reasons);
-                return None;
+                return self.stop_finite_mapped_batch(object, index_node, reasons);
             }
             let IndexKey::String(name) = key else {
                 unreachable!("finite string keys checked above")
@@ -2774,18 +2824,74 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             let argument = self.graph().intern_node(SemanticNodeData::Literal(
                 crate::semantic_query::LiteralValue::String(name.to_string()),
             ));
-            let value = self
-                .dispatch
-                .materialize_selected_key_mapped_value_with_node(
-                    mapper,
-                    argument,
-                    // Selected values use the same publication context as
-                    // ordinary single-key projection, including its structural
-                    // provenance and authored merge role.
-                    self.context_from_template(
-                        crate::semantic_query::ProjectionReductionContext::published(self.mode()),
-                    ),
+            let mut selected_mapper = mapper.clone();
+            // An accessor read infers its getter's return. That demand
+            // belongs only to a branch that selects the read, so the
+            // ordinary evaluator reads accessors lazily.
+            let accessor_read = source_index
+                .as_ref()
+                .is_some_and(|index| index.project_known_key_accessor(&property).is_some());
+            if !source_reads.is_empty() && !accessor_read {
+                let (Some(SemanticNodeData::Object(surface)), Some(index), Some(source_object)) =
+                    (source_data.as_deref(), source_index.as_ref(), source_object)
+                else {
+                    unreachable!("prepared source reads retain their indexed view")
+                };
+                let Some(read_value) =
+                    self.known_member_read(source_object, surface, &property, Some(index), true)
+                else {
+                    let miss = QueryBuildOutput::from((
+                        QueryResult::Error(QueryError::Miss),
+                        Arc::clone(self.fence),
+                    ));
+                    return self.stop_finite_mapped_with(miss, object, index_node);
+                };
+                // A prepared read carries the same polymorphic receiver as
+                // the ordinary single-member projection.
+                let read_value = if self.dispatch.is_this_receiver(source) {
+                    self.dispatch.bind_callee_receiver(read_value, source)
+                } else {
+                    read_value
+                };
+                self.graph().record_origin_edge(
+                    read_value,
+                    OriginEdgeKind::ProjectIndex,
+                    Arc::from([source, source_object, argument]),
+                    OriginMeta::Index(key.clone()),
+                    Arc::clone(self.fence),
                 );
+                for &read in &source_reads {
+                    selected_mapper.value_expr = self.dispatch.substitute_semantic_type_param(
+                        selected_mapper.value_expr,
+                        read,
+                        read_value,
+                    );
+                }
+            }
+            let value = self.dispatch.materialize_mapped_index_value_outcome(
+                &selected_mapper,
+                argument,
+                // Selected values use the same publication context as
+                // ordinary single-key projection, including its structural
+                // provenance and authored merge role.
+                self.context_from_template(
+                    crate::semantic_query::ProjectionReductionContext::published(self.mode()),
+                ),
+            );
+            let output = value.into_query_build_output(self.dispatch);
+            if output.completeness.is_partial() {
+                self.cache_suppress |= output.cache_suppress;
+                return self.stop_finite_mapped_batch(
+                    object,
+                    index_node,
+                    output.completeness.reasons(),
+                );
+            }
+            self.cache_suppress |= output.cache_suppress;
+            let value = match output.result {
+                QueryResult::Value(value) => value,
+                _ => return self.stop_finite_mapped_with(output, object, index_node),
+            };
             let value = self.mapped_index_read(mapper, value, source, source_optional);
             self.graph().record_origin_edge(
                 value,
@@ -2797,15 +2903,77 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             self.visited_aliases.clear();
             self.visited_nodes.clear();
             let value = self.finish_path_terminal(value);
+            if self.completeness.is_partial() {
+                return self.stop_finite_mapped_batch(
+                    object,
+                    index_node,
+                    self.completeness.reasons(),
+                );
+            }
             if matches!(
                 self.graph().node_data(value).as_deref(),
                 Some(SemanticNodeData::Opaque(QueryError::Miss))
             ) {
-                return None;
+                let miss = QueryBuildOutput::from((
+                    QueryResult::Error(QueryError::Miss),
+                    Arc::clone(self.fence),
+                ));
+                return self.stop_finite_mapped_with(miss, object, index_node);
             }
             values.push(value);
         }
-        Some(values)
+        FiniteMappedIndexValues::Complete(values)
+    }
+
+    /// A batch that stops on a direct result keeps the state earlier keys
+    /// collected: completeness, cache suppression, diagnostics and roots.
+    fn stop_finite_mapped_with(
+        &mut self,
+        output: QueryBuildOutput,
+        object: SemanticNodeId,
+        index: SemanticNodeId,
+    ) -> FiniteMappedIndexValues {
+        let mut output = output.with_observed_self_roots(
+            self.dispatch
+                .observed_self_roots_from_nodes([object, index]),
+        );
+        output.merge_completeness(self.completeness);
+        output.cache_suppress |= self.cache_suppress;
+        output
+            .walker_diagnostics
+            .append(&mut self.walker_diagnostics);
+        FiniteMappedIndexValues::Stopped(Box::new(output))
+    }
+
+    fn stop_finite_mapped_batch(
+        &mut self,
+        object: SemanticNodeId,
+        index: SemanticNodeId,
+        reasons: crate::semantic_query::PartialReasonSet,
+    ) -> FiniteMappedIndexValues {
+        let reasons = if reasons.is_empty() {
+            crate::semantic_query::PartialReasonSet::PROPAGATED
+        } else {
+            reasons
+        };
+        self.mark_partial_with(reasons);
+        let carrier = self.graph().intern_preserving_scope(
+            object,
+            SemanticNodeData::IndexedAccess {
+                object,
+                index: IndexKey::Computed(index),
+            },
+        );
+        let mut output =
+            QueryBuildOutput::from((QueryResult::Value(carrier), Arc::clone(self.fence)))
+                .with_observed_self_roots(
+                    self.dispatch
+                        .observed_self_roots_from_nodes([object, index]),
+                );
+        output.merge_completeness(self.completeness);
+        output.cache_suppress = true;
+        output.walker_diagnostics = std::mem::take(&mut self.walker_diagnostics);
+        FiniteMappedIndexValues::Stopped(Box::new(output))
     }
 
     /// Project a finite key set from an already reduced object in one pass.
@@ -8753,6 +8921,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         // dead and must never be materialised.
         let mut shared_value: Option<SemanticNodeId> = None;
         let mut members: Vec<ShallowSurfaceMember> = Vec::with_capacity(keys.len());
+        let mut produced_by_key = std::collections::HashMap::with_capacity(keys.len());
         let source_member_index = source_members.as_ref().map(|members| {
             let mut index = rustc_hash::FxHashMap::default();
             for member in members {
@@ -8956,11 +9125,9 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 // `{ [K in 1 | "1"]: K }` = `{ 1: 1 | "1" }`). The first
                 // production keeps the member slot (position, modifiers,
                 // and declaration site).
-                if let Some(existing) = members.iter_mut().find(|m| {
-                    m.key
-                        .cloned_known()
-                        .is_some_and(|k| k.element_access_collides(&produced_name))
-                }) {
+                let spelling = crate::semantic_query::property_spelling(produced_name.clone());
+                if let Some(&ordinal) = produced_by_key.get(&spelling) {
+                    let existing: &mut ShallowSurfaceMember = &mut members[ordinal];
                     if existing.value != value {
                         // Canonical construction (same fold as
                         // `build_mapped_type`'s rail — see that site).
@@ -8973,6 +9140,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 }
                 // Rationale on `build::mapped_produced_key_inherits_declaration_site`
                 // — the one shared predicate both rails judge inheritance with.
+                produced_by_key.insert(spelling, members.len());
                 let inherits_declaration_site = has_source_member
                     && crate::project_semantic_dispatch::build::mapped_produced_key_inherits_declaration_site(
                         &produced_name,

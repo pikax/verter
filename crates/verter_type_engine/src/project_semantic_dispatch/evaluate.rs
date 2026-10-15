@@ -370,6 +370,9 @@ pub fn force_partial_closed_operator_evaluation_for_tests() -> impl Drop {
 pub(crate) enum DeferredEvaluationDemand {
     Shell,
     SelectedValue,
+    /// A mapped index consumes the instantiated value, rather than retaining
+    /// a named application for a later member demand or call-return display.
+    MappedIndexValue,
 }
 
 /// Heap-owned continuation for one deferred-operator evaluation entry. A
@@ -2363,9 +2366,84 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         node: SemanticNodeId,
         context: ProjectionReductionContext,
     ) -> SemanticNodeId {
-        self.evaluate_deferred_demand(node, context, DeferredEvaluationDemand::SelectedValue)
+        self.evaluate_selected_value_outcome(node, context)
             .into_complete_active_query_build_node(self)
             .unwrap_or(node)
+    }
+
+    pub(super) fn evaluate_selected_value_outcome(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+    ) -> EvaluateDeferredOutcome {
+        self.evaluate_deferred_demand(node, context, DeferredEvaluationDemand::SelectedValue)
+    }
+
+    pub(super) fn evaluate_mapped_index_value_outcome(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+    ) -> EvaluateDeferredOutcome {
+        self.evaluate_deferred_demand(node, context, DeferredEvaluationDemand::MappedIndexValue)
+    }
+
+    /// A mapped member binds its helper application through the same
+    /// Instantiate query as whole-surface publication. The resulting body's
+    /// operators reduce, while its object interiors remain addressable.
+    pub(super) fn evaluate_mapped_member_value_outcome(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+    ) -> EvaluateDeferredOutcome {
+        let evaluated = self.evaluate_selected_value_outcome(node, context);
+        if evaluated.completeness.is_partial() {
+            return evaluated;
+        }
+        let Some(SemanticNodeData::InstantiationRef { base, args }) =
+            self.graph().node_data(evaluated.node).as_deref().cloned()
+        else {
+            return evaluated;
+        };
+        let slot = self.type_slot_for(
+            Arc::clone(&base.canonical_id),
+            base.owner,
+            Arc::clone(&base.decl_name),
+        );
+        let read = self.execute_read(SemanticQueryKey::Instantiate(
+            crate::semantic_query::InstantiateKey::new(
+                slot,
+                args,
+                self.instantiate_context_for(&base.canonical_id, context),
+            ),
+        ));
+        let evaluated = EvaluateDeferredOutcome {
+            completeness: evaluated
+                .completeness
+                .or_partial_if(read.result_is_partial(), read.partial_reason_classes()),
+            availability: evaluated.availability.join(read.fact_status),
+            cache_suppress: evaluated.cache_suppress | read.cache_suppress,
+            ..evaluated
+        };
+        if evaluated.completeness.is_partial() {
+            return evaluated;
+        }
+        let QueryResult::Value(instantiated) = read.value else {
+            return evaluated;
+        };
+        let body = self.evaluate_deferred_outcome(instantiated, context);
+        EvaluateDeferredOutcome {
+            node: if matches!(
+                self.graph().node_data(body.node).as_deref(),
+                Some(SemanticNodeData::Opaque(_))
+            ) {
+                evaluated.node
+            } else {
+                body.node
+            },
+            completeness: evaluated.completeness.merge(body.completeness),
+            availability: evaluated.availability.join(body.availability),
+            cache_suppress: evaluated.cache_suppress | body.cache_suppress,
+        }
     }
 
     fn evaluate_deferred_demand(
@@ -2579,7 +2657,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         .node;
                     if let Some(data) = self.graph().node_data(current) {
                         match data.as_ref() {
-                            _ if demand == DeferredEvaluationDemand::SelectedValue
+                            _ if demand != DeferredEvaluationDemand::Shell
                                 && self
                                     .selected_value_children(data.as_ref(), context)
                                     .is_some() =>
@@ -2710,6 +2788,31 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                         args: Arc::clone(expressions),
                                         context: self.template_literal_reduce_context(),
                                     });
+                                let frame = frames.last_mut().expect("active evaluator frame");
+                                self.deferred_read_action(frame, read, current)
+                            }
+                            SemanticNodeData::InstantiationRef { base, args }
+                                if demand == DeferredEvaluationDemand::MappedIndexValue
+                                    && !matches!(
+                                        self.prepared_decl_kind(base),
+                                        Some(
+                                            verter_session_query::declarations::TypeDeclKind::Interface
+                                                | verter_session_query::declarations::TypeDeclKind::Class
+                                        )
+                                    ) =>
+                            {
+                                let slot = self.type_slot_for(
+                                    Arc::clone(&base.canonical_id),
+                                    base.owner,
+                                    Arc::clone(&base.decl_name),
+                                );
+                                let read = self.execute_read(SemanticQueryKey::Instantiate(
+                                    crate::semantic_query::InstantiateKey::new(
+                                        slot,
+                                        Arc::clone(args),
+                                        self.instantiate_context_for(&base.canonical_id, context),
+                                    ),
+                                ));
                                 let frame = frames.last_mut().expect("active evaluator frame");
                                 self.deferred_read_action(frame, read, current)
                             }

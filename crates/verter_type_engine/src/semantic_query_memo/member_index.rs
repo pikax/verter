@@ -4,7 +4,7 @@
 //! scan is optimal for the small surfaces that dominate the corpus, but a
 //! wide surface (a TanStack `Table` options object, a theme registry) pays
 //! O(members) string compares per hop, re-paid on every path that crosses
-//! it. This sidecar memoises a name → FIRST-occurrence member ordinal map
+//! it. This sidecar memoises a name → ordered member ordinal group
 //! per interned node so repeated hops into the same wide surface resolve
 //! in O(1).
 //!
@@ -35,12 +35,41 @@ use dashmap::mapref::entry::Entry;
 use super::SemanticGraphStore;
 use crate::semantic_query::{PropertyKey, SemanticNodeId, SurfaceView};
 
-/// Name → FIRST-occurrence member ordinal for one interned `Object`
-/// surface. First occurrence matches the walker's linear
-/// `members.iter().find(..)` semantics exactly — a duplicate name maps to
-/// its earliest ordinal, and any post-lookup filtering (e.g. the public-
-/// visibility gate) applies to that same member the scan would have found.
-pub type MemberOrdinalIndex = HashMap<PropertyKey, u32>;
+/// Ordered collision groups for one interned object. Ordinary reads take
+/// the first ordinal; accessor and overload reads keep the whole group.
+pub struct MemberOrdinalIndex {
+    members: HashMap<PropertyKey, smallvec::SmallVec<[u32; 1]>>,
+}
+
+impl MemberOrdinalIndex {
+    pub(crate) fn from_members(members: &[crate::semantic_query::SurfaceMember]) -> Self {
+        let mut index = Self {
+            members: HashMap::with_capacity(members.len()),
+        };
+        for (ordinal, member) in members.iter().enumerate() {
+            crate::semantic_query::note_key_scan_comparison();
+            if let Some(key) = member.key.cloned_known() {
+                index
+                    .members
+                    .entry(crate::semantic_query::property_spelling(key))
+                    .or_default()
+                    .push(ordinal as u32);
+            }
+        }
+        index
+    }
+
+    pub(crate) fn colliding(&self, key: &PropertyKey) -> &[u32] {
+        self.members
+            .get(&crate::semantic_query::property_spelling(key.clone()))
+            .map_or(&[], |members| members.as_slice())
+    }
+
+    /// The first member addressing this property, in authored order.
+    pub fn get(&self, key: &PropertyKey) -> Option<&u32> {
+        self.colliding(key).first()
+    }
+}
 
 /// FIFO retention cap for the member-ordinal sidecar. Sized for the
 /// working set of wide surfaces a session actually path-hops (hundreds
@@ -52,7 +81,6 @@ pub(super) const MEMBER_ORDINAL_INDEX_RETENTION_CAP: usize = 16_384;
 /// name lookups faster by scanning than through the sidecar (hash + lock
 /// overhead dominates below it). Callers consult the sidecar only ABOVE
 /// this count.
-#[allow(dead_code)]
 pub const MEMBER_ORDINAL_INDEX_LINEAR_SCAN_MAX: usize = 16;
 
 impl SemanticGraphStore {
@@ -75,15 +103,7 @@ impl SemanticGraphStore {
         if let Some(existing) = self.member_ordinal_index_memo.get(&id) {
             return Arc::clone(existing.value());
         }
-        let mut index = MemberOrdinalIndex::with_capacity(view.positive_members().len());
-        for (ordinal, member) in view.positive_members().iter().enumerate() {
-            // First occurrence wins — `or_insert` keeps the earliest
-            // ordinal for a duplicated name, matching linear-scan `find`.
-            if let Some(key) = member.key.cloned_known() {
-                index.entry(key).or_insert(ordinal as u32);
-            }
-        }
-        let built = Arc::new(index);
+        let built = Arc::new(MemberOrdinalIndex::from_members(view.positive_members()));
         match self.member_ordinal_index_memo.entry(id) {
             Entry::Occupied(existing) => Arc::clone(existing.get()),
             Entry::Vacant(slot) => {

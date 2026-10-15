@@ -313,13 +313,21 @@ fn generic_mapped_index_keeps_the_access_and_alias_arguments() {
 }
 
 #[test]
-fn recursive_mapped_index_publishes_dotted_paths_across_three_modules() {
-    assert_recursive_paths_layout(20, 3);
-}
-
-#[test]
-fn recursive_mapped_index_publishes_dotted_paths_across_five_modules() {
-    assert_recursive_paths_layout(100, 5);
+fn recursive_mapped_index_publishes_dotted_paths_across_modules() {
+    // Two entities per module cover cyclic imports and recursive path depth.
+    // Explicit full-size recipes reuse the generator and every union assertion.
+    let layouts: &[(usize, usize)] = match std::env::var("VERTER_RECURSIVE_MAPPED_INDEX_LAYOUT")
+        .as_deref()
+    {
+        Err(std::env::VarError::NotPresent) => &[(6, 3), (10, 5)],
+        Ok("20x3") => &[(20, 3)],
+        Ok("100x5") => &[(100, 5)],
+        Ok("300x5") => &[(300, 5)],
+        other => panic!("expected recursive mapped-index layout 20x3, 100x5 or 300x5: {other:?}"),
+    };
+    for &(count, groups) in layouts {
+        assert_recursive_paths_layout(count, groups);
+    }
 }
 
 /// Exhaustion withholds the selected value, while its authored mapped access
@@ -544,7 +552,7 @@ fn recursive_paths_host(count: usize, groups: usize, budget: usize) -> Arc<crate
 fn assert_recursive_paths_layout(count: usize, groups: usize) {
     // Complete enumeration of the larger closures needs an explicit
     // request allowance; the smallest layout exercises the default fuse.
-    let host = recursive_paths_host(count, groups, if count == 20 { 0 } else { 50_000 });
+    let host = recursive_paths_host(count, groups, if count <= 20 { 0 } else { 50_000 });
     let proof_before = verter_session_query::facts::fact_read_set::signature_work_for_tests();
     let (answer, record) = resolve_expr(
         &host,

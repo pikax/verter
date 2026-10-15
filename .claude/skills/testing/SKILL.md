@@ -171,6 +171,26 @@ A comment may supplement that durable explanation with a GitHub issue only when 
 
 ### Test Economy
 
+The ordinary `recursive_mapped_index_publishes_dotted_paths_across_modules`
+regression uses six entities across three modules and ten across five. Each
+module has two entities; cyclic imports, generic metadata, depth-three dotted
+paths, and exact whole-union assertions remain exercised through the public
+host resolver. Full-size verification reuses the same generator and assertions
+with an explicit layout, one layout per invocation:
+
+```bash
+VERTER_RECURSIVE_MAPPED_INDEX_LAYOUT=20x3 cargo nextest run -p verter_session --lib recursive_mapped_index_publishes_dotted_paths_across_modules --success-output immediate
+VERTER_RECURSIVE_MAPPED_INDEX_LAYOUT=100x5 cargo nextest run -p verter_session --lib recursive_mapped_index_publishes_dotted_paths_across_modules --success-output immediate
+VERTER_RECURSIVE_MAPPED_INDEX_LAYOUT=300x5 cargo nextest run -p verter_session --lib recursive_mapped_index_publishes_dotted_paths_across_modules --success-output immediate
+```
+
+On PowerShell, set `$env:VERTER_RECURSIVE_MAPPED_INDEX_LAYOUT` before each
+command and remove it in `finally` afterward. Unsupported values fail loudly.
+The fixture selector changes only the population, never assertions, projection
+mode, or nextest deadlines. The ordinary regression retains its existing test
+identity and lane; the large-key mapped-value benchmark keeps its separate
+1,000/3,000/10,000-key populations.
+
 The Svelte projection profile gates run one solution build per pinned
 TypeScript engine. Every profile and corruption/publication twin remains a
 separate project with its original checking options, globals, consumer and
