@@ -1323,6 +1323,34 @@ impl FileArtifactStore {
         })
     }
 
+    /// The augmenter set a reader holding `root` observes for `key`: the
+    /// version visible at the root's epoch, or — when the target had no
+    /// version then — the live entry.
+    ///
+    /// The index is populated lazily, and every population is published
+    /// under a fresh membership epoch, so a set first populated after a
+    /// root was captured is never visible at that root. The reader's own
+    /// population ([`Self::ensure_augmentation_index_populated`]) reads
+    /// the live entry in that case, so a value it computed observed the
+    /// live fingerprint, and validating against the live entry accepts
+    /// exactly what recomputing would observe. Without it, every value
+    /// whose read set holds a set populated during the reader's lifetime
+    /// fails validation, and the reader rebuilds it on every read.
+    ///
+    /// A foreign or exhausted root still answers `None`.
+    #[must_use]
+    pub fn augmenter_set_observed_at_root(
+        &self,
+        root: &FileArtifactRoot,
+        key: &AugmentationTargetKey,
+    ) -> Option<Arc<AugmenterSet>> {
+        if !self.owns_root(root) || root.is_exhausted() {
+            return None;
+        }
+        self.augmenter_set_at_root(root, key)
+            .or_else(|| self.get_augmenter_set(key))
+    }
+
     /// The epochs a sweep must keep reachable: every live captured root,
     /// plus the epoch the next capture would take.
     ///
