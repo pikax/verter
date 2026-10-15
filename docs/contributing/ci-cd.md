@@ -565,3 +565,5 @@ native -> lsp -> wasm (bindgen + wasm-opt) -> ts packages
 | `RELEASE_TAG_SSH_KEY` | the deploy key `release-tag.yml` pushes tags with, so the tag push starts a release workflow (a push made with `GITHUB_TOKEN` never does) |
 
 The `GITHUB_TOKEN` is automatically provided for GitHub Release creation, nightly asset management, and PR comments.
+
+<!-- CI selection demo for #907: a docs-only change runs no lane. -->
