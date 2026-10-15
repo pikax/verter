@@ -272,123 +272,162 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
         if let Some(done) = self.declared_type_reads.borrow().get(&node) {
             return *done;
         }
-        let mut read = rustc_hash::FxHashMap::default();
+        // The walk starts from every part this evaluation already read, so
+        // a nest whose every level enters the flow is walked once overall.
+        let mut read = std::mem::take(&mut *self.declared_type_reads.borrow_mut());
         let result = self.declared_read_within(node, &mut read);
-        self.declared_type_reads.borrow_mut().extend(read);
+        let mut shared = self.declared_type_reads.borrow_mut();
+        if shared.is_empty() {
+            *shared = read;
+        } else {
+            shared.extend(read);
+        }
         result
     }
 
-    /// The structural walk behind [`Self::declared_positional_read`],
-    /// memoized per walk: every node is rebuilt at most once, only when a
-    /// part of it reads differently, and a node revisited while in flight
-    /// answers itself.
+    /// The structural walk behind [`Self::declared_positional_read`]:
+    /// post-order over an explicit stack (a nest as deep as its source
+    /// costs heap, never thread stack), memoized per walk — every node is
+    /// rebuilt at most once, only when a part of it reads differently, and
+    /// a node revisited while in flight answers itself.
     fn declared_read_within(
         &mut self,
-        node: SemanticNodeId,
+        root: SemanticNodeId,
         read: &mut rustc_hash::FxHashMap<SemanticNodeId, SemanticNodeId>,
     ) -> SemanticNodeId {
-        if let Some(done) = read.get(&node) {
+        struct Frame {
+            node: SemanticNodeId,
+            data: Option<Arc<SemanticNodeData>>,
+            parts: Vec<SemanticNodeId>,
+            next: usize,
+        }
+        let enter =
+            |this: &Self,
+             node: SemanticNodeId,
+             read: &mut rustc_hash::FxHashMap<SemanticNodeId, SemanticNodeId>| {
+                read.insert(node, node);
+                let data = this.dispatch.graph().node_data(node);
+                let parts = data.as_deref().map_or_else(Vec::new, declared_read_parts);
+                Frame {
+                    node,
+                    data,
+                    parts,
+                    next: 0,
+                }
+            };
+        if let Some(done) = read.get(&root) {
             return *done;
         }
-        read.insert(node, node);
-        let Some(data) = self.dispatch.graph().node_data(node) else {
-            return node;
-        };
-        let result = match &*data {
+        let mut stack = vec![enter(self, root, read)];
+        while let Some(frame) = stack.last_mut() {
+            if let Some(&part) = frame.parts.get(frame.next) {
+                frame.next += 1;
+                if !read.contains_key(&part) {
+                    let entered = enter(self, part, read);
+                    stack.push(entered);
+                }
+                continue;
+            }
+            let Frame { node, data, .. } = stack.pop().expect("a frame on the stack");
+            let result = match data {
+                Some(data) => self.declared_read_rebuild(node, &data, read),
+                None => node,
+            };
+            read.insert(node, result);
+        }
+        read.get(&root).copied().unwrap_or(root)
+    }
+
+    /// One node of [`Self::declared_read_within`], its parts already read.
+    fn declared_read_rebuild(
+        &mut self,
+        node: SemanticNodeId,
+        data: &SemanticNodeData,
+        read: &rustc_hash::FxHashMap<SemanticNodeId, SemanticNodeId>,
+    ) -> SemanticNodeId {
+        let part = |id: SemanticNodeId| read.get(&id).copied().unwrap_or(id);
+        match data {
             SemanticNodeData::IndexedAccess { object, index } => {
-                self.declared_indexed_read(node, *object, index.clone())
+                return self.declared_indexed_read(node, *object, index.clone());
             }
             SemanticNodeData::Union(members) => {
-                let rebuilt: Vec<SemanticNodeId> = members
-                    .iter()
-                    .map(|member| self.declared_read_within(*member, read))
-                    .collect();
-                if rebuilt.as_slice() == members.as_ref() {
+                let rebuilt: Vec<SemanticNodeId> =
+                    members.iter().map(|member| part(*member)).collect();
+                return if rebuilt.as_slice() == members.as_ref() {
                     node
                 } else {
                     self.union(&rebuilt)
-                }
-            }
-            _ => {
-                let mut rebuilt = (*data).clone();
-                let mut changed = false;
-                let mut slot = |this: &mut Self, id: &mut SemanticNodeId, changed: &mut bool| {
-                    let value = this.declared_read_within(*id, read);
-                    *changed |= value != *id;
-                    *id = value;
                 };
-                match &mut rebuilt {
-                    SemanticNodeData::Array { element, .. } => slot(self, element, &mut changed),
-                    SemanticNodeData::Tuple { elements, .. } => {
-                        let mut values = elements.to_vec();
-                        for element in &mut values {
-                            slot(self, &mut element.value, &mut changed);
-                        }
-                        *elements = Arc::from(values.into_boxed_slice());
-                    }
-                    SemanticNodeData::Object(surface) => {
-                        use crate::semantic_query::{SurfaceEntry, SurfaceView};
-                        let mut entries = surface.entries.to_vec();
-                        for entry in &mut entries {
-                            match entry {
-                                SurfaceEntry::Member(member) => {
-                                    slot(self, &mut member.value, &mut changed);
-                                }
-                                SurfaceEntry::CallSignature(signature)
-                                | SurfaceEntry::ConstructSignature(signature) => {
-                                    slot(self, signature, &mut changed);
-                                }
-                                SurfaceEntry::IndexSignature(index) => {
-                                    slot(self, &mut index.value_type, &mut changed);
-                                }
-                            }
-                        }
-                        if changed {
-                            *surface = SurfaceView::from_entries(
-                                entries,
-                                surface.keyspace,
-                                surface.has_known_index_signature(),
-                            );
-                        }
-                    }
-                    SemanticNodeData::Signature {
-                        params,
-                        return_type,
-                        return_carrier,
-                        predicate,
-                        ..
-                    } => {
-                        let mut values = params.to_vec();
-                        for param in &mut values {
-                            slot(self, &mut param.ty, &mut changed);
-                        }
-                        *params = Arc::from(values.into_boxed_slice());
-                        let declared = *return_type;
-                        slot(self, return_type, &mut changed);
-                        // A declared return carrier names the return type
-                        // it seeds; it follows the read.
-                        if let crate::semantic_query::SignatureReturnCarrier::Declared(carried) =
-                            return_carrier
-                        {
-                            if *carried == declared {
-                                *carried = *return_type;
-                            }
-                        }
-                        if let Some(target) = predicate.as_mut().and_then(|p| p.ty.as_mut()) {
-                            slot(self, target, &mut changed);
-                        }
-                    }
-                    _ => {}
+            }
+            _ => {}
+        }
+        let mut rebuilt = data.clone();
+        let mut changed = false;
+        let mut slot = |id: &mut SemanticNodeId| {
+            let value = part(*id);
+            changed |= value != *id;
+            *id = value;
+        };
+        match &mut rebuilt {
+            SemanticNodeData::Array { element, .. } => slot(element),
+            SemanticNodeData::Tuple { elements, .. } => {
+                let mut values = elements.to_vec();
+                for element in &mut values {
+                    slot(&mut element.value);
                 }
-                if changed {
-                    self.dispatch.graph().intern_preserving_scope(node, rebuilt)
-                } else {
-                    node
+                *elements = Arc::from(values.into_boxed_slice());
+            }
+            SemanticNodeData::Object(surface) => {
+                use crate::semantic_query::{SurfaceEntry, SurfaceView};
+                let mut entries = surface.entries.to_vec();
+                for entry in &mut entries {
+                    match entry {
+                        SurfaceEntry::Member(member) => slot(&mut member.value),
+                        SurfaceEntry::CallSignature(signature)
+                        | SurfaceEntry::ConstructSignature(signature) => slot(signature),
+                        SurfaceEntry::IndexSignature(index) => slot(&mut index.value_type),
+                    }
+                }
+                *surface = SurfaceView::from_entries(
+                    entries,
+                    surface.keyspace,
+                    surface.has_known_index_signature(),
+                );
+            }
+            SemanticNodeData::Signature {
+                params,
+                return_type,
+                return_carrier,
+                predicate,
+                ..
+            } => {
+                let mut values = params.to_vec();
+                for param in &mut values {
+                    slot(&mut param.ty);
+                }
+                *params = Arc::from(values.into_boxed_slice());
+                let declared = *return_type;
+                slot(return_type);
+                // A declared return carrier names the return type it
+                // seeds; it follows the read.
+                if let crate::semantic_query::SignatureReturnCarrier::Declared(carried) =
+                    return_carrier
+                {
+                    if *carried == declared {
+                        *carried = *return_type;
+                    }
+                }
+                if let Some(target) = predicate.as_mut().and_then(|p| p.ty.as_mut()) {
+                    slot(target);
                 }
             }
-        };
-        read.insert(node, result);
-        result
+            _ => {}
+        }
+        if changed {
+            self.dispatch.graph().intern_preserving_scope(node, rebuilt)
+        } else {
+            node
+        }
     }
 
     /// One indexed access of a declared type, read as
@@ -808,6 +847,44 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
             return Some(self.primitive(PrimitiveKind::String));
         }
         Some(self.primitive(PrimitiveKind::Any))
+    }
+}
+
+/// The parts of a declared type [`FlowEvaluator::declared_positional_read`]
+/// reads through: a union's members, an array's element, a tuple's element
+/// values, an object's member, signature and index-signature values, a
+/// signature's parameter, return and predicate types. Every other node
+/// (an indexed access included) has none.
+fn declared_read_parts(data: &SemanticNodeData) -> Vec<SemanticNodeId> {
+    use crate::semantic_query::SurfaceEntry;
+    match data {
+        SemanticNodeData::Union(members) => members.to_vec(),
+        SemanticNodeData::Array { element, .. } => vec![*element],
+        SemanticNodeData::Tuple { elements, .. } => {
+            elements.iter().map(|element| element.value).collect()
+        }
+        SemanticNodeData::Object(surface) => surface
+            .entries
+            .iter()
+            .map(|entry| match entry {
+                SurfaceEntry::Member(member) => member.value,
+                SurfaceEntry::CallSignature(signature)
+                | SurfaceEntry::ConstructSignature(signature) => *signature,
+                SurfaceEntry::IndexSignature(index) => index.value_type,
+            })
+            .collect(),
+        SemanticNodeData::Signature {
+            params,
+            return_type,
+            predicate,
+            ..
+        } => params
+            .iter()
+            .map(|param| param.ty)
+            .chain(std::iter::once(*return_type))
+            .chain(predicate.as_ref().and_then(|predicate| predicate.ty))
+            .collect(),
+        _ => Vec::new(),
     }
 }
 
