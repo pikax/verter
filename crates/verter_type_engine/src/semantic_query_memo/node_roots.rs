@@ -40,6 +40,10 @@ pub struct NodeRootSet(Option<Arc<RootOwner>>);
 pub(crate) struct IdentityNodeRoots(pub(crate) NodeRootSet);
 
 impl IdentityNodeRoots {
+    /// Root operands in the innermost construction scope on this thread.
+    /// Only a fixture with no issuing graph to name uses this: a record
+    /// whose graph is known roots there ([`Self::in_graph`]), because the
+    /// innermost scope may belong to another graph's dispatcher.
     pub(crate) fn scoped(ids: impl IntoIterator<Item = SemanticNodeId>) -> Self {
         Self(NodeRootScope::root_current(ids))
     }
@@ -50,7 +54,28 @@ impl IdentityNodeRoots {
         graph: &super::SemanticGraphStore,
         ids: impl IntoIterator<Item = SemanticNodeId>,
     ) -> Self {
-        Self(root_in_arena(Arc::clone(&graph.arena.core), ids))
+        Self::in_arena(&graph.arena.core, ids)
+    }
+
+    /// Root a record's operands in the arena of the graph that issued it.
+    pub(crate) fn in_arena(
+        arena: &Arc<NodeArenaCore>,
+        ids: impl IntoIterator<Item = SemanticNodeId>,
+    ) -> Self {
+        Self(root_in_arena(Arc::clone(arena), ids))
+    }
+
+    /// Root a record derived from `sources` in the graph that issued them:
+    /// the first source holding an attachment names it. A derivation whose
+    /// sources own no graph operand has none to root.
+    pub(crate) fn derived_from<'a>(
+        sources: impl IntoIterator<Item = &'a Self>,
+        ids: impl IntoIterator<Item = SemanticNodeId>,
+    ) -> Self {
+        sources
+            .into_iter()
+            .find_map(|source| source.0.arena())
+            .map_or_else(Self::default, |arena| Self::in_arena(&arena, ids))
     }
 }
 impl PartialEq for IdentityNodeRoots {
@@ -82,6 +107,10 @@ impl NodeRootSet {
     /// Keep a cache hit alive in the active issuing graph construction scope.
     pub fn retain_for_construction(&self) {
         self.capture_in_scope();
+    }
+
+    fn arena(&self) -> Option<Arc<NodeArenaCore>> {
+        self.0.as_ref().map(|owner| Arc::clone(&owner.arena))
     }
 
     pub(crate) fn arena_identity(&self) -> Option<usize> {
@@ -333,7 +362,12 @@ impl ScopeStack {
                     .map(|offset| position + offset)
             });
         if let Some(heir) = heir {
-            self.entries[heir].deliveries.append(&mut owners.deliveries);
+            let heir = &mut self.entries[heir];
+            for lease in owners.deliveries.drain(..) {
+                // A repeat is another handle on an owner the heir keeps.
+                let _ = heir.adopt(lease);
+            }
+            owners.delivered.clear();
         }
         owners
     }
@@ -346,6 +380,27 @@ struct ConstructionOwners {
     dispatchers: usize,
     roots: Vec<NodeRoot>,
     deliveries: Vec<super::delivery_lease::SemanticDeliveryLease>,
+    /// The shared delivery owners `deliveries` already holds. Every clone
+    /// of one delivery names the same owner, so an owner keeps it once
+    /// however often it is read or cloned under this owner.
+    delivered: rustc_hash::FxHashSet<usize>,
+}
+
+impl ConstructionOwners {
+    /// Keep `lease` unless this owner already holds its delivery; a
+    /// repeat is handed back for the caller to drop.
+    fn adopt(
+        &mut self,
+        lease: super::delivery_lease::SemanticDeliveryLease,
+    ) -> Option<super::delivery_lease::SemanticDeliveryLease> {
+        match lease.owner_identity() {
+            Some(owner) if !self.delivered.insert(owner) => Some(lease),
+            _ => {
+                self.deliveries.push(lease);
+                None
+            }
+        }
+    }
 }
 
 /// A construction scope owns every interned intermediate on this thread,
@@ -387,6 +442,7 @@ impl DispatchConstructionScope {
                         dispatchers: 0,
                         roots: Vec::new(),
                         deliveries: Vec::new(),
+                        delivered: Default::default(),
                     }
                 }
             };
@@ -435,6 +491,7 @@ impl NodeRootScope {
                 dispatchers: 0,
                 roots: Vec::new(),
                 deliveries: Vec::new(),
+                delivered: Default::default(),
             });
             token
         });
@@ -507,10 +564,23 @@ impl NodeRootScope {
                     arena.is_none_or(|arena| Arc::as_ptr(&candidate.arena) as usize == arena)
                 })
             {
-                scope.deliveries.push(lease.take().unwrap());
+                lease = scope.adopt(lease.take().unwrap());
             }
         });
         drop(lease);
+    }
+
+    /// Delivery leases the construction owners on this thread hold.
+    #[cfg(test)]
+    pub(crate) fn retained_deliveries_for_tests() -> usize {
+        SCOPES.with(|scopes| {
+            scopes
+                .borrow()
+                .entries
+                .iter()
+                .map(|owners| owners.deliveries.len())
+                .sum()
+        })
     }
 
     /// Whether this thread holds a construction scope of `arena`.

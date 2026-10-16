@@ -3249,3 +3249,21 @@ fn a_retirement_noted_during_a_sweep_survives_its_accounting() {
     super::reconcile_unreclaimed_retirements(&counter, noted_before_walk, 2);
     assert_eq!(counter.load(Ordering::Relaxed), 2);
 }
+
+/// Two overlapping sweeps would subtract the same counter snapshot, so the
+/// later reconciliation could erase a retirement noted during the earlier
+/// walk and leave a retained version no release-time sweep revisits. A
+/// sweep therefore holds its snapshot, walk and reconciliation alone, and a
+/// sweep requested meanwhile waits for it.
+#[test]
+fn a_sweep_runs_alone_from_its_snapshot_to_its_reconciliation() {
+    let store = FileArtifactStore::new();
+    let observed = Arc::new(std::sync::Mutex::new(None));
+    let seen = Arc::clone(&observed);
+    store.run_inside_next_reclaim_sweep(Box::new(move |store| {
+        *seen.lock().unwrap() = Some(store.reclaim_sweep_in_progress());
+    }));
+    store.reclaim_retired_versions();
+    assert_eq!(*observed.lock().unwrap(), Some(true));
+    assert!(!store.reclaim_sweep_in_progress());
+}

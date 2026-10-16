@@ -272,6 +272,7 @@ pub(crate) struct InferPatternInfo {
 
 impl InferPatternInfo {
     fn new(
+        graph: &crate::semantic_query_memo::SemanticGraphStore,
         sites: Vec<InferParamSite>,
         reverse_homomorphic: Option<ReverseHomomorphicSpec>,
     ) -> Self {
@@ -294,6 +295,7 @@ impl InferPatternInfo {
         );
         Self {
             setup: InferenceSessionSetup::new(
+                graph,
                 infos,
                 VariancePhase::Covariant,
                 pass_kind,
@@ -4436,6 +4438,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 _ => return None,
             };
             return Some(InferPatternInfo::new(
+                graph,
                 vec![InferParamSite {
                     node: spec.base_infer,
                     name,
@@ -4446,6 +4449,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
         if let Some(SemanticNodeData::Infer { name, .. }) = graph.node_data(target).as_deref() {
             return Some(InferPatternInfo::new(
+                graph,
                 vec![InferParamSite {
                     node: target,
                     name: Arc::clone(name),
@@ -4468,7 +4472,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 _ => None,
             })
             .collect();
-        (!sites.is_empty()).then(|| InferPatternInfo::new(sites, None))
+        (!sites.is_empty()).then(|| InferPatternInfo::new(graph, sites, None))
     }
 
     /// Recognize only the exact `{ [P in keyof infer T]: X }` descriptor.
@@ -15497,6 +15501,7 @@ pub mod reverse_ownership_tests {
 
     fn reverse_setup(param: SemanticNodeId) -> InferenceSessionSetup {
         InferenceSessionSetup::new(
+            &crate::semantic_query_memo::SemanticGraphStore::default(),
             Arc::from(vec![InferenceInfoSetup::new(param, Arc::from("T"))].into_boxed_slice()),
             VariancePhase::Covariant,
             InferencePassKind::ReverseHomomorphicMapped,

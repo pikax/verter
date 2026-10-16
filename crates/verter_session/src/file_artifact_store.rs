@@ -836,6 +836,10 @@ impl StoredArtifact {
 
 // ── FileArtifactStore ──
 
+/// A test hook run inside one retired-version sweep.
+#[cfg(test)]
+type ReclaimSweepHook = Box<dyn FnOnce(&FileArtifactStore) + Send>;
+
 /// The per-host content-addressed file-artifact cache.
 ///
 /// Replaces the retired `FileArtifactStore` type as the authoritative
@@ -941,6 +945,15 @@ pub struct FileArtifactStore {
     /// saw them, plus retirements since. A released root reclaims only
     /// when this is non-zero (see [`Self::reclaim_after_root_release`]).
     unreclaimed_retirements: AtomicU64,
+    /// Held across one sweep's counter snapshot, walk and reconciliation.
+    /// Two overlapping sweeps would each subtract the same snapshot, so the
+    /// second could drop a retirement noted during the first and leave a
+    /// retained version that no release-time sweep revisits.
+    ///
+    /// **Lock rank: outermost of the sweep.** Taken before the live-root
+    /// registry and every retired/canonical shard, with no shard guard
+    /// held; only [`Self::reclaim_retired_versions`] takes it.
+    reclaim_sweep: parking_lot::Mutex<()>,
     /// Global monotonic access-tick source for the per-entry
     /// [`StoredArtifact::last_access_tick`] stamps consumed by
     /// [`Self::evict_lru_promoted`] under explicit memory pressure.
@@ -1015,6 +1028,10 @@ pub struct FileArtifactStore {
     /// installation open while another workspace swap runs.
     #[cfg(test)]
     freshness_install_hook: parking_lot::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// Test-only hook run once inside the next sweep, after it took
+    /// [`Self::reclaim_sweep`] and before it snapshots the counter.
+    #[cfg(test)]
+    reclaim_sweep_hook: parking_lot::Mutex<Option<ReclaimSweepHook>>,
     /// Test-only host-level audit hook.
     #[cfg(test)]
     test_audit_hook: parking_lot::Mutex<Option<Arc<crate::host_test_audit::HostTestAuditState>>>,
@@ -1079,6 +1096,7 @@ impl FileArtifactStore {
             live_roots: Arc::new(LiveRootRegistry::default()),
             retirements_since_reclaim: AtomicU64::new(0),
             unreclaimed_retirements: AtomicU64::new(0),
+            reclaim_sweep: parking_lot::Mutex::new(()),
             access_tick: AtomicU64::new(0),
             live_counter: live,
             stale_sweeps: stale,
@@ -1091,6 +1109,8 @@ impl FileArtifactStore {
             freshness_readers: parking_lot::RwLock::new(None),
             #[cfg(test)]
             freshness_install_hook: parking_lot::Mutex::new(None),
+            #[cfg(test)]
+            reclaim_sweep_hook: parking_lot::Mutex::new(None),
             #[cfg(test)]
             test_audit_hook: parking_lot::Mutex::new(None),
         }
@@ -1117,6 +1137,17 @@ impl FileArtifactStore {
     #[cfg(test)]
     pub(crate) fn pause_next_freshness_install(&self, hook: Box<dyn FnOnce() + Send>) {
         *self.freshness_install_hook.lock() = Some(hook);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn run_inside_next_reclaim_sweep(&self, hook: ReclaimSweepHook) {
+        *self.reclaim_sweep_hook.lock() = Some(hook);
+    }
+
+    /// Whether a sweep holds [`Self::reclaim_sweep`] now.
+    #[cfg(test)]
+    pub(crate) fn reclaim_sweep_in_progress(&self) -> bool {
+        self.reclaim_sweep.try_lock().is_none()
     }
 
     fn lease_freshness(
@@ -1411,6 +1442,14 @@ impl FileArtifactStore {
     /// Returns the number of physically reclaimed versions across all
     /// three versioned membership domains.
     pub fn reclaim_retired_versions(&self) -> usize {
+        let _sweep = self.reclaim_sweep.lock();
+        #[cfg(test)]
+        {
+            let hook = self.reclaim_sweep_hook.lock().take();
+            if let Some(hook) = hook {
+                hook(self);
+            }
+        }
         let retention = self.retention_epochs();
         let noted_before_walk = self.unreclaimed_retirements.load(Ordering::Relaxed);
         self.retirements_since_reclaim.store(0, Ordering::Relaxed);

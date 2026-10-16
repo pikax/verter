@@ -17,6 +17,8 @@ use std::ops::Deref;
 use super::intern_table::{intern_domain, Interned};
 use crate::semantic_query::{RelateMemoKey, ResolveCallKey};
 
+type IssuingArena = std::sync::Arc<super::arena::NodeArenaCore>;
+
 /// Interned `RelateMemoKey` handle.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct InternedRelateKey(
@@ -35,27 +37,35 @@ intern_domain!(RelateMemoKey);
 intern_domain!(ResolveCallKey);
 
 impl InternedRelateKey {
-    pub(super) fn intern(key: RelateMemoKey) -> Self {
+    /// Intern `key`; its operands are owned in `arena`, the graph that
+    /// issued them, or not at all when `None` (a lookup witness).
+    pub(super) fn intern(arena: Option<&IssuingArena>, key: RelateMemoKey) -> Self {
         let mut handle = Self(Interned::new_scoped(key), Default::default());
         let mut nodes = Vec::new();
         super::family::FamilyKey::Relate {
             key: handle.clone(),
         }
         .for_each_node_id(|node| nodes.push(node));
-        handle.1 = super::node_roots::IdentityNodeRoots::scoped(nodes);
+        handle.1 = arena.map_or_else(Default::default, |arena| {
+            super::node_roots::IdentityNodeRoots::in_arena(arena, nodes)
+        });
         handle
     }
 }
 
 impl InternedResolveCallKey {
-    pub(super) fn intern(key: ResolveCallKey) -> Self {
+    /// Intern `key`; its operands are owned in `arena`, the graph that
+    /// issued them, or not at all when `None` (a lookup witness).
+    pub(super) fn intern(arena: Option<&IssuingArena>, key: ResolveCallKey) -> Self {
         let mut handle = Self(Interned::new_scoped(key), Default::default());
         let mut nodes = Vec::new();
         super::family::FamilyKey::ResolveCall {
             key: handle.clone(),
         }
         .for_each_node_id(|node| nodes.push(node));
-        handle.1 = super::node_roots::IdentityNodeRoots::scoped(nodes);
+        handle.1 = arena.map_or_else(Default::default, |arena| {
+            super::node_roots::IdentityNodeRoots::in_arena(arena, nodes)
+        });
         handle
     }
 }
@@ -103,18 +113,18 @@ mod tests {
     #[test]
     fn interned_relate_keys_reclaim_when_handles_drop() {
         let key = unique_key(0x51);
-        let handle = InternedRelateKey::intern(key.clone());
+        let handle = InternedRelateKey::intern(None, key.clone());
         assert!(
             RelateMemoKey::index().get(&key).is_some(),
             "a live handle keeps the payload"
         );
-        assert!(InternedRelateKey::intern(key.clone()) == handle);
+        assert!(InternedRelateKey::intern(None, key.clone()) == handle);
         drop(handle);
         assert!(
             RelateMemoKey::index().get(&key).is_none(),
             "memo eviction dropping the last handle frees the payload and its index entry"
         );
-        let again = InternedRelateKey::intern(key);
+        let again = InternedRelateKey::intern(None, key);
         assert_eq!(again.source, unique_key(0x51).source);
     }
 }

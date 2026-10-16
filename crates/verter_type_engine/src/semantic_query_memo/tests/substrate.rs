@@ -1871,8 +1871,13 @@ fn walk_origin_chain_releases_derivation_lock_before_visitor() {
         unlaned, 0,
         "a bare ordinal outside a construction lane authorizes no origin read"
     );
+    assert!(
+        store.export_origin_edges_in_scope().is_empty(),
+        "outside a construction lane the edge export names no ordinal"
+    );
 
     let _lane = store.enter_node_root_scope();
+    assert_eq!(store.export_origin_edges_in_scope().len(), 1);
     let mut visited_count = 0usize;
     store.walk_origin_chain(target, |_kind, _edge| {
         // Recursive call back into the store from inside the

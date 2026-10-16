@@ -282,10 +282,16 @@ fn compact_domains(facts: &mut Vec<FactVersionRef>, basis: &AggregateGenerations
 }
 
 /// Inline capacity for the observation accumulator. Empirically most
-/// computes observe between 4 and 12 facts. The inline capacity is
-/// sized to cover those without allocating; longer computes spill to
-/// the heap exactly once.
-const INLINE_CAPACITY: usize = 16;
+/// computes observe between 4 and 12 facts directly, and a fact is large,
+/// so the inline storage covers the common few without making every
+/// tracer — created per computation and moved as it is installed and
+/// sealed — carry room for the widest; longer computes spill to the heap
+/// exactly once.
+const INLINE_CAPACITY: usize = 4;
+
+/// How many of the latest observations, and of the latest absorbed runs,
+/// a repeated read is matched against before it is kept again.
+const RECENT_WINDOW: usize = 16;
 
 /// How a cache-refusal signal propagates through nested cold-compute scopes.
 ///
@@ -525,11 +531,11 @@ impl FactReadSet {
         record_signature_work(compared);
     }
 
-    /// Whether `fact` is among the last [`INLINE_CAPACITY`] observations,
+    /// Whether `fact` is among the last [`RECENT_WINDOW`] observations,
     /// with the number of comparisons that decided it.
     #[inline]
     fn recently_observed(&self, fact: &FactVersionRef) -> (bool, usize) {
-        let window = &self.observations[self.observations.len().saturating_sub(INLINE_CAPACITY)..];
+        let window = &self.observations[self.observations.len().saturating_sub(RECENT_WINDOW)..];
         match window.iter().rposition(|observed| observed == fact) {
             Some(position) => (true, window.len() - position),
             None => (false, window.len()),
@@ -583,13 +589,13 @@ impl FactReadSet {
         }
     }
 
-    /// Whether one of the last [`INLINE_CAPACITY`] absorbed runs is
+    /// Whether one of the last [`RECENT_WINDOW`] absorbed runs is
     /// `signature`. An immutable retained run already proved its canonical
     /// order; replaying it must not grow live storage for each warm read.
     #[inline]
     fn recently_absorbed(&self, signature: &Arc<[FactVersionRef]>) -> bool {
         let recent =
-            &self.canonical_runs[self.canonical_runs.len().saturating_sub(INLINE_CAPACITY)..];
+            &self.canonical_runs[self.canonical_runs.len().saturating_sub(RECENT_WINDOW)..];
         let mut comparisons = 0;
         let mut seen = false;
         for run in recent.iter().rev() {

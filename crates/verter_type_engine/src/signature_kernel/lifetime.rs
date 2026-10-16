@@ -305,28 +305,30 @@ impl SignatureStore {
         self.current.load().record_count()
     }
 
-    /// Note that the graph released `released` for good: its ids are never
-    /// handed out again, so a current-epoch type token naming one strands
-    /// every record reached through it. Each node is released once, so a
-    /// token is counted at most once. Returns how many of `released` the
-    /// current epoch holds a token for.
-    pub fn note_released_nodes(&self, released: impl IntoIterator<Item = SemanticNodeId>) -> usize {
-        let inner = self.current.load();
-        let stranded = released
-            .into_iter()
-            .filter(|node| {
-                let Some(index) = inner.type_tokens.lookup(node) else {
-                    return false;
-                };
-                inner
-                    .graph_roots
-                    .lock()
-                    .remove(&super::records::handle_index(index));
-                true
-            })
-            .count();
-        inner.stranded_tokens.fetch_add(stranded, Ordering::Relaxed);
-        stranded
+    construction_ordinal_seam! {
+        /// Note that the graph released `released` for good: its ids are never
+        /// handed out again, so a current-epoch type token naming one strands
+        /// every record reached through it. Each node is released once, so a
+        /// token is counted at most once. Returns how many of `released` the
+        /// current epoch holds a token for.
+        fn note_released_nodes(&self, released: impl IntoIterator<Item = SemanticNodeId>) -> usize {
+            let inner = self.current.load();
+            let stranded = released
+                .into_iter()
+                .filter(|node| {
+                    let Some(index) = inner.type_tokens.lookup(node) else {
+                        return false;
+                    };
+                    inner
+                        .graph_roots
+                        .lock()
+                        .remove(&super::records::handle_index(index));
+                    true
+                })
+                .count();
+            inner.stranded_tokens.fetch_add(stranded, Ordering::Relaxed);
+            stranded
+        }
     }
 
     /// Type tokens of the current epoch that name a released node
@@ -1309,6 +1311,13 @@ impl SignatureEpochLease {
 impl SignatureStore {
     pub(crate) fn bind_graph(&self, graph: &Arc<crate::semantic_query_memo::arena::NodeArenaCore>) {
         let _ = self.graph.set(Arc::downgrade(graph));
+    }
+    /// The arena of the graph this kernel is bound to, which issues every
+    /// node operand its records name.
+    pub(crate) fn graph_arena(
+        &self,
+    ) -> Option<Arc<crate::semantic_query_memo::arena::NodeArenaCore>> {
+        self.graph.get().and_then(Weak::upgrade)
     }
     pub fn lease_epoch(&self, epoch: GraphEpoch) -> Result<SignatureEpochLease, StoreError> {
         let inner = self.current.load_full();

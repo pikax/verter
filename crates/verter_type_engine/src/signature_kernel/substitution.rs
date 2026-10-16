@@ -182,7 +182,7 @@ pub fn compose_canonical(
             out.push((param, bound));
         }
     }
-    CanonicalTypeSubstitution::new(out)
+    CanonicalTypeSubstitution::derived_from(&[first, second], out)
 }
 
 impl CallSubstitution {

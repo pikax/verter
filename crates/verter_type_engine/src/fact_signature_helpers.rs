@@ -1501,8 +1501,12 @@ impl ReadSetSignatureExt for ReadSetSignature {
         ctx: &dyn crate::resolver_core::fact_validation_port::FactValidation,
         self_root_canonicals: &[Arc<str>],
     ) -> bool {
-        let self_root_refs: Vec<&str> = self_root_canonicals.iter().map(Arc::as_ref).collect();
-        validate_fact_signature_with_self_roots(ctx, &self.facts, &self_root_refs)
+        if self.facts.is_empty() {
+            return true;
+        }
+        let self_root_refs: smallvec::SmallVec<[&str; 4]> =
+            self_root_canonicals.iter().map(Arc::as_ref).collect();
+        ctx.validates_retained_signature_with_self_roots(&self.facts, &self_root_refs)
     }
 
     /// Whether [`Self::validate_with_self_roots`] would actually

@@ -19,6 +19,7 @@ fn setup(
     contextual_inference_mode: ContextualInferenceMode,
 ) -> InferenceSessionSetup {
     InferenceSessionSetup::new(
+        crate::semantic_query_memo::test_support::synthetic_operand_graph(),
         Arc::from(vec![InferenceInfoSetup::new(param_node, Arc::from("T"))].into_boxed_slice()),
         variance_phase,
         pass_kind,
@@ -261,6 +262,7 @@ fn resolve_call_key() -> crate::semantic_query::ResolveCallKey {
 fn repeated_infer_sites_share_one_setup_record_and_one_fixed_binding() {
     let param = SemanticNodeId(501);
     let setup = InferenceSessionSetup::new(
+        crate::semantic_query_memo::test_support::synthetic_operand_graph(),
         Arc::from(
             vec![
                 InferenceInfoSetup::new(param, Arc::from("T")),

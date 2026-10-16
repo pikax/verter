@@ -499,7 +499,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let node_id = self.reduce_graph_node_iterative(node, context, &mut state);
         let result_is_partial = state.result_is_partial;
         ReducedOutputNode {
-            _roots: crate::semantic_query_memo::node_roots::IdentityNodeRoots::scoped([node_id]),
+            _roots: crate::semantic_query_memo::node_roots::IdentityNodeRoots::in_graph(
+                self.graph(),
+                [node_id],
+            ),
             node_id,
             dep_signature: state.into_dep_signature(),
             result_is_partial,

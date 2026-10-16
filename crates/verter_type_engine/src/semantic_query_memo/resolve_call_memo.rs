@@ -26,7 +26,10 @@ impl SemanticGraphStore {
         key: &crate::semantic_query::ResolveCallKey,
     ) -> Option<CacheRead<crate::semantic_query::ResolvedCallResult>> {
         let family = FamilyKey::ResolveCall {
-            key: super::family_intern::InternedResolveCallKey::intern(key.clone()),
+            key: super::family_intern::InternedResolveCallKey::intern(
+                Some(&self.arena.core),
+                key.clone(),
+            ),
         };
         // A call-resolution entry always materialises the modeless
         // identity point, so the §3.4 gate is the modeless identity

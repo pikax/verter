@@ -67,7 +67,15 @@ enclosing scope before releasing intermediates; audit capture is unrelated.
 Prepared query identities own key operands and signature descriptors' epochs.
 Interned relation/call identities, intersection recipes, substitutions,
 inferable parameters, flow and contextual keys attach roots without changing
-semantic equality, hashing, ordering or digests. Node-bearing weak identity
+semantic equality, hashing, ordering or digests. Each roots its operands in
+the graph that issued them: public constructors take that graph
+(`CanonicalTypeSubstitution::new`, `FlowNarrowingKey::new`,
+`ContextualTypingKey::new`, `InferableParamSetId::new`,
+`IntersectionInputRef::from_operands`/`from_steps`), the memo interns relation
+and call family keys with its own arena (`family_and_slot_in`), the signature
+kernel uses the graph it is bound to, and a composed substitution inherits its
+sources' graph. None roots in whichever construction owner is innermost, which
+may be another graph's dispatcher. Node-bearing weak identity
 records are qualified by arena for storage reuse; semantic content remains the
 identity. This prevents an equal recipe in another graph from retaining the
 first graph's nested owners.
@@ -157,7 +165,9 @@ declared last on the dispatcher): an ordinal any of them interns or reads stays
 owned until the graph's last dispatcher on the thread drops, so interleaved
 dispatchers never release one another's operands. A lexical `NodeRootScope`
 releases its roots when it closes and hands its delivery attachments to the
-nearest remaining owner of its graph. Records rooted at mint
+nearest remaining owner of its graph. An owner keeps each delivery once: every
+clone of a delivery shares one owner, so repeated reads and clones of a result
+under a dispatcher do not grow it. Records rooted at mint
 (`SignatureSetValue`, `OneLevelSurface`) root in the graph that produced them,
 never in whichever graph's scope is innermost.
 

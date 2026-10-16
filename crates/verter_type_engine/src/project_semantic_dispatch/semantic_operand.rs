@@ -237,6 +237,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let substitution_runtime =
             (!substitution.is_empty()).then_some((store_identity, generation));
         Ok(SemanticOperand::from_authored_authority(
+            Some(self.graph()),
             locator,
             substitution,
             split_env,
@@ -1322,6 +1323,7 @@ pub fn authored_instantiate_key_fixture(
         split_env_axes;
     let authority = SemanticOperandAuthority::mint_for_forcing_boundary();
     let operand = SemanticOperand::from_authored_authority(
+        None,
         locator,
         Arc::clone(&args),
         OperandSplitEnv::new(

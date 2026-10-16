@@ -8828,8 +8828,16 @@ mod prepared_identity_bijection {
                 },
             ),
             SemanticQueryKeyTag::ReduceIntersection => (
-                SemanticQueryKey::reduce_intersection_operands(nodes(&[1, 2])),
-                SemanticQueryKey::reduce_intersection_operands(nodes(&[1, 3])),
+                SemanticQueryKey::reduce_intersection_operands(
+                    verter_type_engine::semantic_query_memo::test_support::synthetic_operand_graph(
+                    ),
+                    nodes(&[1, 2]),
+                ),
+                SemanticQueryKey::reduce_intersection_operands(
+                    verter_type_engine::semantic_query_memo::test_support::synthetic_operand_graph(
+                    ),
+                    nodes(&[1, 3]),
+                ),
             ),
             SemanticQueryKeyTag::ProjectObjectSpread => {
                 let context =
@@ -9962,7 +9970,7 @@ mod release_embedded_node_family_tests {
                 "FlowReturn.context.type_substitution parameter",
                 Box::new(move |node| {
                     flow_return_key(
-                        CanonicalTypeSubstitution::new(vec![(node, live)]),
+                        CanonicalTypeSubstitution::new(verter_type_engine::semantic_query_memo::test_support::synthetic_operand_graph(), vec![(node, live)]),
                         verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
                     )
                 }),
@@ -9971,7 +9979,7 @@ mod release_embedded_node_family_tests {
                 "FlowReturn.context.type_substitution image",
                 Box::new(move |node| {
                     flow_return_key(
-                        CanonicalTypeSubstitution::new(vec![(live, node)]),
+                        CanonicalTypeSubstitution::new(verter_type_engine::semantic_query_memo::test_support::synthetic_operand_graph(), vec![(live, node)]),
                         verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
                     )
                 }),
@@ -9987,7 +9995,7 @@ mod release_embedded_node_family_tests {
                 Box::new(move |node| {
                     resolve_call_key(
                         live,
-                        CanonicalTypeSubstitution::new(vec![(node, live)]),
+                        CanonicalTypeSubstitution::new(verter_type_engine::semantic_query_memo::test_support::synthetic_operand_graph(), vec![(node, live)]),
                         FlowNarrowingKey::empty(),
                     )
                 }),
@@ -9997,7 +10005,7 @@ mod release_embedded_node_family_tests {
                 Box::new(move |node| {
                     resolve_call_key(
                         live,
-                        CanonicalTypeSubstitution::new(vec![(live, node)]),
+                        CanonicalTypeSubstitution::new(verter_type_engine::semantic_query_memo::test_support::synthetic_operand_graph(), vec![(live, node)]),
                         FlowNarrowingKey::empty(),
                     )
                 }),
@@ -10008,7 +10016,7 @@ mod release_embedded_node_family_tests {
                     resolve_call_key(
                         live,
                         CanonicalTypeSubstitution::empty(),
-                        FlowNarrowingKey::new(Arc::from([node])),
+                        FlowNarrowingKey::new(verter_type_engine::semantic_query_memo::test_support::synthetic_operand_graph(), Arc::from([node])),
                     )
                 }),
             ),
@@ -10027,17 +10035,19 @@ mod release_embedded_node_family_tests {
             ),
             (
                 "Relate.inference_context.inferable_params",
-                Box::new(move |node| SemanticQueryKey::Relate {
+                Box::new(move |node| {
+                    SemanticQueryKey::Relate {
                     source: live,
                     target: live,
                     relation: RelationKind::Assignable,
                     policy: Default::default(),
                     source_freshness: Default::default(),
                     inference_context: Some(InferenceContextKey {
-                        inferable_params: InferableParamSetId::new(Arc::from([node])),
+                        inferable_params: InferableParamSetId::new(verter_type_engine::semantic_query_memo::test_support::synthetic_operand_graph(), Arc::from([node])),
                         ..Default::default()
                     }),
                     context: RelationContext::default(),
+                }
                 }),
             ),
             (
@@ -10048,10 +10058,10 @@ mod release_embedded_node_family_tests {
                         SemanticContextId,
                     };
                     SemanticQueryKey::ReduceIntersection {
-                        input: IntersectionInputRef::from_steps(&[
+                        input: IntersectionInputRef::from_steps(verter_type_engine::semantic_query_memo::test_support::synthetic_operand_graph(), &[
                             IntersectionTerm::Value(live),
                             IntersectionTerm::EvaluateSubgroup {
-                                input: IntersectionInputRef::from_operands(&[live, live, node]),
+                                input: IntersectionInputRef::from_operands(verter_type_engine::semantic_query_memo::test_support::synthetic_operand_graph(), &[live, live, node]),
                                 purpose: IntersectionPurpose::CheckerReduction,
                             },
                         ]),
@@ -10062,18 +10072,22 @@ mod release_embedded_node_family_tests {
             ),
             (
                 "FlowNarrowingAt.flow",
-                Box::new(move |node| SemanticQueryKey::FlowNarrowingAt {
+                Box::new(move |node| {
+                    SemanticQueryKey::FlowNarrowingAt {
                     point: consumer_point(),
-                    flow: FlowNarrowingKey::new(Arc::from([node])),
+                    flow: FlowNarrowingKey::new(verter_type_engine::semantic_query_memo::test_support::synthetic_operand_graph(), Arc::from([node])),
                     context: analysis_context(),
+                }
                 }),
             ),
             (
                 "ContextualTypeAt.contextual",
-                Box::new(move |node| SemanticQueryKey::ContextualTypeAt {
+                Box::new(move |node| {
+                    SemanticQueryKey::ContextualTypeAt {
                     point: consumer_point(),
-                    contextual: ContextualTypingKey::new(Arc::from([node])),
+                    contextual: ContextualTypingKey::new(verter_type_engine::semantic_query_memo::test_support::synthetic_operand_graph(), Arc::from([node])),
                     context: analysis_context(),
+                }
                 }),
             ),
         ]

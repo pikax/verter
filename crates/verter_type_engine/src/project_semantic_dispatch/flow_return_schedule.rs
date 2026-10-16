@@ -1004,7 +1004,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let mut instantiated = demand;
             instantiated.normalized_type_args = Arc::from(arguments.into_boxed_slice());
             instantiated.context.type_substitution =
-                crate::semantic_query::CanonicalTypeSubstitution::new(bindings);
+                crate::semantic_query::CanonicalTypeSubstitution::new(self.graph(), bindings);
             push_unique(out, instantiated);
         }
         true
@@ -1230,6 +1230,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 continue;
             };
             let substitution = crate::semantic_query::CanonicalTypeSubstitution::new(
+                self.graph(),
                 callee
                     .type_parameters
                     .iter()

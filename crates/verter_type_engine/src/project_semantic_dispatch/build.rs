@@ -202,9 +202,10 @@ enum FoldedAugmentation {
     Contributions(AugmentationContributions),
     Plan(AugmentationPlan),
     /// Neither an augmenting block nor another file-scope declaration
-    /// targets the declaration. Decided before the declaration's arguments
-    /// or projection context are consulted, so it answers every
-    /// instantiation of the declaration alike.
+    /// contributes to the declaration. Decided by the augmenter set and the
+    /// contributors' retained declarations alone, never by the declaration's
+    /// arguments or projection context, so it answers every instantiation of
+    /// the declaration alike.
     Absent,
 }
 
@@ -603,7 +604,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> Vec<crate::semantic_query_memo::ObservedGraphSelfRoot> {
         let graph = self.graph();
         let mut roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot> = Vec::new();
-        let mut seen = FxHashSet::default();
+        // Few distinct roots: compared linearly until a set pays.
+        let mut seen: Option<FxHashSet<crate::semantic_query_memo::ObservedGraphSelfRoot>> = None;
         for node in nodes {
             if let Some(NodeScopeId::File {
                 canonical_id,
@@ -612,8 +614,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }) = graph.node_scope(node)
             {
                 let root = (canonical_id, whole_hash);
-                if seen.insert(root.clone()) {
+                let fresh = match &mut seen {
+                    Some(seen) => seen.insert(root.clone()),
+                    None => !roots.contains(&root),
+                };
+                if fresh {
                     roots.push(root);
+                    if seen.is_none() && roots.len() > 16 {
+                        seen = Some(roots.iter().cloned().collect());
+                    }
                 }
             }
         }
@@ -6166,7 +6175,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let txn = self.dispatch_txn.borrow();
         let completed = txn.augmentation.get(key)?;
         let replay = &completed.replay;
-        crate::resolver_core::resolver_context::observe_fan_out_borrowed(&replay.reads.facts);
+        replay.reads.replay();
         crate::fact_tracing::replay_reuse_refusal(&completed.reuse);
         self.deposit_operand_self_roots(&replay.observed_self_roots);
         if replay.canonical_evidence_deposited {
@@ -6189,7 +6198,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return false;
         };
         let replay = &completed.replay;
-        crate::resolver_core::resolver_context::observe_fan_out_borrowed(&replay.reads.facts);
+        replay.reads.replay();
         crate::fact_tracing::replay_reuse_refusal(&completed.reuse);
         self.deposit_operand_self_roots(&replay.observed_self_roots);
         if replay.canonical_evidence_deposited {
@@ -6407,7 +6416,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// already holds as the base body (a global declaration's own file):
     /// it is skipped, never folded twice.
     ///
-    /// Returns `None` when no augmenter contributes.
+    /// Returns [`FoldedAugmentation::Absent`] when no augmenter contributes.
     ///
     /// `contribution` is what each augmenter contributes: a type body, or
     /// the call signatures an augmenting block's function declarations add
@@ -7246,8 +7255,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             //     result warm.
             //   - `source_env_unobservable == false`: genuinely no augmenter
             //     contributes this decl — a real, cacheable no-augmentation
-            //     result. Return `None`; the caller keeps the base body unchanged
-            //     and warms normally.
+            //     result. Whether an augmenter contributes depends on the
+            //     augmenter set and each augmenter's retained declarations,
+            //     never on this instantiation's arguments or projection, so
+            //     it is the same `Absent` answer an empty augmenter set gives:
+            //     the caller keeps the base body unchanged, warms normally, and
+            //     later instantiations in the transaction replay this read.
             if source_env_unobservable {
                 return Some(FoldedAugmentation::Contributions(
                     AugmentationContributions {
@@ -7260,7 +7273,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     },
                 ));
             }
-            return None;
+            return Some(FoldedAugmentation::Absent);
         }
 
         // Fact rail, part 2 — each contributing augmenter's whole-hash
@@ -8407,7 +8420,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         reuse: &verter_session_query::facts::reuse::ReuseClass,
         replay: &super::dispatch_txn::FlowMemberReuse,
     ) {
-        crate::resolver_core::resolver_context::observe_fan_out_borrowed(&replay.reads.facts);
+        replay.reads.replay();
         crate::fact_tracing::replay_reuse_refusal(reuse);
         self.deposit_operand_self_roots(&replay.observed_self_roots);
         if replay.canonical_evidence_deposited {
@@ -18587,6 +18600,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     QueryResult::Value(type_args[0])
                 } else {
                     let read = self.execute_read(SemanticQueryKey::reduce_intersection_operands(
+                        self.graph(),
                         Arc::clone(type_args),
                     ));
                     crate::fact_signature_helpers::merge_dep_signature_into_local_fence(
@@ -18786,6 +18800,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             match self
                 .execute_read(
                     crate::semantic_query::SemanticQueryKey::reduce_intersection_operands(
+                        self.graph(),
                         std::sync::Arc::from(members.to_vec().into_boxed_slice()),
                     ),
                 )

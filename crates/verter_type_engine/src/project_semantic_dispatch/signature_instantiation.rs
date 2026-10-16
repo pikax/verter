@@ -83,6 +83,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             })
             .ok()?;
         let substitution = crate::semantic_query::CanonicalTypeSubstitution::new(
+            self.graph(),
             fixed
                 .iter()
                 .map(|binding| (binding.param, binding.bound))
@@ -106,7 +107,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         // bindings: substituted through the clause, a parameter whose bound
         // names an earlier one would re-intern as another binder, and its
         // occurrences would no longer take their own binding.
-        let substitution = crate::semantic_query::CanonicalTypeSubstitution::new(clamped);
+        let substitution =
+            crate::semantic_query::CanonicalTypeSubstitution::new(self.graph(), clamped);
         Some(self.substitute_canonical(
             self.signature_without_type_parameters(source),
             &substitution,
@@ -133,6 +135,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             })
             .collect();
         let setup = InferenceSessionSetup::new(
+            self.graph(),
             infer_params,
             VariancePhase::Covariant,
             InferencePassKind::CallApplicability,

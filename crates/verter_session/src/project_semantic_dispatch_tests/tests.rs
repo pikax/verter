@@ -4410,7 +4410,7 @@ fn extreme_and_disjoint_folds_record_contributor_origin_edge() {
 
     let members: Arc<[SemanticNodeId]> = Arc::from(vec![string, number].into_boxed_slice());
     let output = dispatch.build_reduce_intersection(
-        verter_type_engine::semantic_query::IntersectionInputRef::from_operands(&members),
+        verter_type_engine::semantic_query::IntersectionInputRef::from_operands(&graph, &members),
         verter_type_engine::semantic_query::IntersectionPurpose::CheckerReduction,
         verter_type_engine::semantic_query::SemanticContextId::production(),
     );
@@ -8839,7 +8839,7 @@ fn normalize_records_sources() {
     let obj_b = simple_object(&graph, &[("b", b)]);
     let int_members: Arc<[SemanticNodeId]> = Arc::from(vec![obj_a, obj_b].into_boxed_slice());
     let int_result = match dispatch.execute_type_node(
-        SemanticQueryKey::reduce_intersection_operands(Arc::clone(&int_members)),
+        SemanticQueryKey::reduce_intersection_operands(&graph, Arc::clone(&int_members)),
     ) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -22420,6 +22420,7 @@ fn resolve_macro_payload_define_props_multi_arg_normalize_intersection() {
 
     let dispatch = ProjectSemanticDispatch::new(&host);
     let direct = dispatch.execute_type_node(SemanticQueryKey::reduce_intersection_operands(
+        &graph,
         Arc::from(vec![a, b].into_boxed_slice()),
     ));
     let direct_node = match direct {

@@ -183,8 +183,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> DiscoveryTypes for GraphType
         let na = if moving.is_empty() {
             na
         } else {
-            self.dispatch
-                .substitute_canonical(na, &CanonicalTypeSubstitution::new(moving))
+            self.dispatch.substitute_canonical(
+                na,
+                &CanonicalTypeSubstitution::new(self.dispatch.graph(), moving),
+            )
         };
         if na == nb {
             return Some(true);
@@ -209,9 +211,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> DiscoveryTypes for GraphType
         map: &[(SemanticNodeId, SemanticNodeId)],
     ) -> Option<TypeToken> {
         let node = self.node(ty)?;
-        let mapped = self
-            .dispatch
-            .substitute_canonical(node, &CanonicalTypeSubstitution::new(map.to_vec()));
+        let mapped = self.dispatch.substitute_canonical(
+            node,
+            &CanonicalTypeSubstitution::new(self.dispatch.graph(), map.to_vec()),
+        );
         self.token(mapped)
     }
 
@@ -1369,7 +1372,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             .copied()
             .filter(|(_, image)| !SignatureStore::is_binder_token(*image))
             .collect();
-        Ok(CanonicalTypeSubstitution::new(kept))
+        Ok(CanonicalTypeSubstitution::new(self.graph(), kept))
     }
 
     fn recipe_return(
@@ -2374,7 +2377,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let call = store.intern_substitution(
             crate::signature_kernel::CallSubstitution::map(
                 desc.residual_binders,
-                CanonicalTypeSubstitution::new(naming),
+                CanonicalTypeSubstitution::new(self.graph(), naming),
             ),
             None,
         )?;

@@ -252,13 +252,28 @@ enum Slot<'a> {
     Live(&'a Arc<SemanticNodeData>, &'a NodeScopeId),
 }
 
-/// Live chunks indexed by `id >> CHUNK_BITS`. Ids are monotonic, so the
-/// table is a vector addressed by chunk number: a lookup is one bounds
-/// check, not a hash probe. A released chunk leaves one empty pointer.
+/// Empty window entries tolerated beyond the window's live chunks before
+/// the window is compacted.
+const CHUNK_WINDOW_SLACK: usize = 16;
+
+/// Live chunks addressed by chunk number (`id >> CHUNK_BITS`).
+///
+/// Ids are monotonic, so recent chunks sit in a dense window addressed by
+/// `chunk - base`: a lookup there is one bounds check, not a hash probe.
+/// The window stays dense: once its empty entries outnumber its live chunks
+/// (plus [`CHUNK_WINDOW_SLACK`]), the leading entries leave it, empty ones
+/// dropped and live ones moved to `older`, an ordered map of the chunks
+/// numbered below the window. The table's own storage therefore follows the
+/// live chunk count, never the number of chunks ever allocated.
 #[derive(Default)]
 struct ChunkTable {
-    chunks: Vec<Option<Box<Chunk>>>,
-    live: usize,
+    /// Live chunks numbered below `base`.
+    older: std::collections::BTreeMap<u64, Box<Chunk>>,
+    /// The chunk number of `window[0]`.
+    base: u64,
+    window: Vec<Option<Box<Chunk>>>,
+    /// Live chunks in `window`.
+    window_live: usize,
 }
 
 impl ChunkTable {
@@ -266,8 +281,10 @@ impl ChunkTable {
     // one indexed match rather than a chain of option adaptors.
     #[inline]
     fn get(&self, key: &u64) -> Option<&Chunk> {
-        let index = usize::try_from(*key).ok()?;
-        match self.chunks.get(index) {
+        let Some(offset) = key.checked_sub(self.base) else {
+            return self.older.get(key).map(Box::as_ref);
+        };
+        match self.window.get(usize::try_from(offset).ok()?) {
             Some(Some(chunk)) => Some(chunk),
             _ => None,
         }
@@ -275,56 +292,106 @@ impl ChunkTable {
 
     #[inline]
     fn get_mut(&mut self, key: &u64) -> Option<&mut Chunk> {
-        let index = usize::try_from(*key).ok()?;
-        match self.chunks.get_mut(index) {
+        let Some(offset) = key.checked_sub(self.base) else {
+            return self.older.get_mut(key).map(Box::as_mut);
+        };
+        match self.window.get_mut(usize::try_from(offset).ok()?) {
             Some(Some(chunk)) => Some(chunk),
             _ => None,
         }
     }
 
     fn get_or_insert_empty(&mut self, key: u64) -> &mut Chunk {
-        let index = usize::try_from(key).expect("chunk number fits the address space");
-        if self.chunks.len() <= index {
-            self.chunks.resize_with(index + 1, || None);
+        let Some(offset) = key.checked_sub(self.base) else {
+            return self
+                .older
+                .entry(key)
+                .or_insert_with(|| Box::new(Chunk::empty()));
+        };
+        let index = usize::try_from(offset).expect("chunk number fits the address space");
+        if self.window.len() <= index {
+            self.window.resize_with(index + 1, || None);
         }
-        let slot = &mut self.chunks[index];
+        let slot = &mut self.window[index];
         if slot.is_none() {
-            self.live += 1;
+            self.window_live += 1;
         }
         slot.get_or_insert_with(|| Box::new(Chunk::empty()))
     }
 
     fn remove(&mut self, key: &u64) {
-        if let Some(slot) = usize::try_from(*key)
+        let Some(offset) = key.checked_sub(self.base) else {
+            self.older.remove(key);
+            return;
+        };
+        let Some(slot) = usize::try_from(offset)
             .ok()
-            .and_then(|index| self.chunks.get_mut(index))
-        {
-            if slot.take().is_some() {
-                self.live -= 1;
-            }
+            .and_then(|index| self.window.get_mut(index))
+        else {
+            return;
+        };
+        if slot.take().is_some() {
+            self.window_live -= 1;
+            self.compact_window();
         }
+    }
+
+    /// Move the window's leading entries out while it is sparse: an empty
+    /// entry is dropped, a live chunk moves to `older`. One drain per
+    /// compaction, and a compaction runs only once the empty entries exceed
+    /// the live ones, so its cost is amortised over the releases that made
+    /// the window sparse.
+    fn compact_window(&mut self) {
+        if self.window.len() <= 2 * self.window_live + CHUNK_WINDOW_SLACK {
+            return;
+        }
+        let len = self.window.len();
+        let mut leading = 0;
+        let mut live_left = self.window_live;
+        while len - leading > 2 * live_left + CHUNK_WINDOW_SLACK / 2 {
+            if let Some(chunk) = self.window[leading].take() {
+                self.older.insert(self.base + leading as u64, chunk);
+                live_left -= 1;
+            }
+            leading += 1;
+        }
+        self.window.drain(..leading);
+        self.base += leading as u64;
+        self.window_live = live_left;
     }
 
     /// Live chunk numbers in ascending order.
     fn keys(&self) -> impl Iterator<Item = u64> + '_ {
-        self.chunks
-            .iter()
-            .enumerate()
-            .filter(|(_, chunk)| chunk.is_some())
-            .map(|(index, _)| index as u64)
+        let base = self.base;
+        self.older.keys().copied().chain(
+            self.window
+                .iter()
+                .enumerate()
+                .filter(|(_, chunk)| chunk.is_some())
+                .map(move |(index, _)| base + index as u64),
+        )
     }
 
     fn values(&self) -> impl Iterator<Item = &Chunk> {
-        self.chunks.iter().filter_map(Option::as_deref)
+        self.older
+            .values()
+            .map(Box::as_ref)
+            .chain(self.window.iter().filter_map(Option::as_deref))
     }
 
     fn len(&self) -> usize {
-        self.live
+        self.older.len() + self.window_live
+    }
+
+    /// Entries the table holds, live or empty: what it costs to keep.
+    #[cfg(test)]
+    fn held_entries(&self) -> usize {
+        self.older.len() + self.window.len()
     }
 
     #[cfg(test)]
     fn is_empty(&self) -> bool {
-        self.live == 0
+        self.len() == 0
     }
 }
 

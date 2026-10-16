@@ -72,7 +72,7 @@ impl SccRootWitness {
     pub fn relate(key: crate::semantic_query::RelateMemoKey, admission_seq: u64) -> Self {
         Self {
             family: FamilyKey::Relate {
-                key: super::family_intern::InternedRelateKey::intern(key),
+                key: super::family_intern::InternedRelateKey::intern(None, key),
             },
             admission_seq,
         }
@@ -93,7 +93,7 @@ impl SccRootWitness {
     ) -> Self {
         Self {
             family: FamilyKey::ResolveCall {
-                key: super::family_intern::InternedResolveCallKey::intern(key),
+                key: super::family_intern::InternedResolveCallKey::intern(None, key),
             },
             admission_seq,
         }
@@ -304,7 +304,10 @@ impl SemanticGraphStore {
                 "an inline relation flight must publish its own exact full key"
             );
             let family = FamilyKey::Relate {
-                key: super::family_intern::InternedRelateKey::intern(member.key),
+                key: super::family_intern::InternedRelateKey::intern(
+                    Some(&self.arena.core),
+                    member.key,
+                ),
             };
             let entry = self.stage_entry(
                 None,
@@ -354,7 +357,10 @@ impl SemanticGraphStore {
                 "an inline ResolveCall flight must publish its own exact full key"
             );
             let family = FamilyKey::ResolveCall {
-                key: super::family_intern::InternedResolveCallKey::intern(member.key),
+                key: super::family_intern::InternedResolveCallKey::intern(
+                    Some(&self.arena.core),
+                    member.key,
+                ),
             };
             let entry = self.stage_entry(
                 None,

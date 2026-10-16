@@ -36,7 +36,7 @@ pub(crate) fn build_origin_graph(
     // Step 9.2 / F6 scoped origin export: when surface_identities are
     // populated, reverse-walk via walk_origin_chain starting from each
     // surface node and collect only the reachable subgraph. Falls back
-    // to export_all_origin_edges when surface_identities is None
+    // to export_origin_edges_in_scope when surface_identities is None
     // (audit-off path or pre-populated state).
     let all_edges = if let Some(ids) = surface_identities {
         let mut roots: Vec<verter_type_engine::semantic_query::SemanticNodeId> = Vec::new();
@@ -92,7 +92,8 @@ pub(crate) fn build_origin_graph(
         }
         collected
     } else {
-        graph.export_all_origin_edges()
+        let _lane = construction.enter_scope();
+        graph.export_origin_edges_in_scope()
     };
 
     if all_edges.is_empty() {

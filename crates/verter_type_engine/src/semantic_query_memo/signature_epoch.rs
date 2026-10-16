@@ -108,23 +108,25 @@ impl SemanticGraphStore {
         self.compact_signature_store_over(self.signatures.record_cap())
     }
 
-    /// Release the signature-kernel records that name `released` graph
-    /// nodes. A releasing holder calls this with every node it released;
-    /// once the kernel's tables hold more tokens naming released nodes than
-    /// live ones the epoch is replaced
-    /// ([`SignatureStore::replace_epoch_if_mostly_stranded`](crate::signature_kernel::SignatureStore::replace_epoch_if_mostly_stranded))
-    /// and the memo families and candidates the retired epoch leaves
-    /// unreachable go with it. Returns the new epoch, or `None` while live
-    /// tokens still dominate. Safe wherever
-    /// [`Self::compact_signature_store_if_over_cap`] is.
-    pub fn release_signature_records_naming(
-        &self,
-        released: impl IntoIterator<Item = SemanticNodeId>,
-    ) -> Option<GraphEpoch> {
-        self.signatures.note_released_nodes(released);
-        let epoch = self.signatures.replace_epoch_if_mostly_stranded()?;
-        self.evict_retired_kernel_candidates(epoch);
-        Some(epoch)
+    construction_ordinal_seam! {
+        /// Release the signature-kernel records that name `released` graph
+        /// nodes. A releasing holder calls this with every node it released;
+        /// once the kernel's tables hold more tokens naming released nodes than
+        /// live ones the epoch is replaced
+        /// ([`SignatureStore::replace_epoch_if_mostly_stranded`](crate::signature_kernel::SignatureStore::replace_epoch_if_mostly_stranded))
+        /// and the memo families and candidates the retired epoch leaves
+        /// unreachable go with it. Returns the new epoch, or `None` while live
+        /// tokens still dominate. Safe wherever
+        /// [`Self::compact_signature_store_if_over_cap`] is.
+        fn release_signature_records_naming(
+            &self,
+            released: impl IntoIterator<Item = SemanticNodeId>,
+        ) -> Option<GraphEpoch> {
+            self.signatures.note_released_nodes(released);
+            let epoch = self.signatures.replace_epoch_if_mostly_stranded()?;
+            self.evict_retired_kernel_candidates(epoch);
+            Some(epoch)
+        }
     }
 
     /// [`Self::compact_signature_store_if_over_cap`] against an explicit

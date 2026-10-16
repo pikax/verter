@@ -62,6 +62,7 @@ fn call_key(
 /// snapshot, so its lifecycle transitions are the only thing under test.
 fn empty_session_setup() -> InferenceSessionSetup {
     InferenceSessionSetup::new(
+        verter_type_engine::semantic_query_memo::test_support::synthetic_operand_graph(),
         Arc::from([]),
         VariancePhase::Covariant,
         InferencePassKind::CallApplicability,

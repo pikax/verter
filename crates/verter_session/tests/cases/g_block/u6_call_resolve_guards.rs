@@ -22,6 +22,7 @@
 //!   this file).
 
 use std::sync::Arc;
+use verter_type_engine::semantic_query_memo::test_support::synthetic_operand_graph;
 
 use verter_session::{HostConfig, VerterHost};
 use verter_session_query::facts::fact_cache::ReadSetSignature;
@@ -356,7 +357,7 @@ fn resolve_call_same_expr_different_flow_or_substitution_does_not_warm_hit() {
     let flow_empty = wrap(base_key());
     let flow_non_empty = wrap({
         let mut k = base_key();
-        k.flow = FlowNarrowingKey::new(node_set(7));
+        k.flow = FlowNarrowingKey::new(synthetic_operand_graph(), node_set(7));
         k
     });
     assert_distinct_identity(&flow_empty, &flow_non_empty);
@@ -370,8 +371,10 @@ fn resolve_call_same_expr_different_flow_or_substitution_does_not_warm_hit() {
     let subst_empty = wrap(base_key());
     let subst_non_empty = wrap({
         let mut k = base_key();
-        k.context.substitution =
-            CanonicalTypeSubstitution::new(vec![(SemanticNodeId(1), SemanticNodeId(2))]);
+        k.context.substitution = CanonicalTypeSubstitution::new(
+            synthetic_operand_graph(),
+            vec![(SemanticNodeId(1), SemanticNodeId(2))],
+        );
         k
     });
     assert_distinct_identity(&subst_empty, &subst_non_empty);

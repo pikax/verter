@@ -36,9 +36,6 @@ use super::{CanonicalToEntries, RegisteredFacts};
 use crate::instant::Instant;
 use crate::semantic_query::DepSignature;
 
-/// One canonical's registrations: `(admission_seq, slot) -> (family, facts)`.
-type CanonicalShard = Mutex<FxHashMap<(u64, ModeSlot), (FamilyKey, RegisteredFacts)>>;
-
 /// One immutable carrier projection, reused by every member of a publication
 /// batch and every populated slot. The facts and their canonical union travel
 /// together so registration cannot accidentally pair different carriers.
@@ -108,6 +105,10 @@ impl<'a> RegisteredCanonicals<'a> {
     fn iter(&self) -> impl Iterator<Item = &'a str> + '_ {
         self.ordered.iter().copied()
     }
+
+    fn is_empty(&self) -> bool {
+        self.ordered.is_empty()
+    }
 }
 
 /// Register the just-published candidate's reverse-index entries.
@@ -132,16 +133,21 @@ pub(super) fn register_reverse_index(
     canonical_to_entries: &CanonicalToEntries,
     family: &FamilyKey,
     populated_slots: &[ModeSlot],
-    inputs: &ReverseIndexInputs,
+    inputs: &ReverseIndexInputs<'_>,
     admission_seq: u64,
 ) {
+    if populated_slots.is_empty() || inputs.canonicals.is_empty() {
+        return;
+    }
     let timing_on = verter_execution::request_context::current_timing_enabled();
+    // Every registration of this candidate names the one family.
+    let family = Arc::new(family.clone());
     for populated in populated_slots {
         for canonical in inputs.canonicals.iter() {
             register_single_canonical(
                 canonical_to_entries,
                 canonical,
-                family,
+                &family,
                 *populated,
                 admission_seq,
                 &inputs.registered_facts,
@@ -193,9 +199,10 @@ pub(super) fn drain_registrations_except(
 /// per-canonical `Mutex` before the outer drop is attempted; the
 /// outer drop is then a single [`dashmap::DashMap::remove_if`] whose
 /// emptiness predicate runs while the shard write lock is held.
-/// A [`register_reverse_index`] inserter takes that same shard write
-/// lock for the whole `entry(canonical).or_insert_with(...)` + inner
-/// `insert`, so the two serialise: either the inserter runs first
+/// A [`register_reverse_index`] inserter holds that shard's lock — read
+/// for an existing shard, write for `entry(canonical).or_insert_with(...)`
+/// — across its inner `insert`, so the two serialise: either the inserter
+/// runs first
 /// and `remove_if`'s predicate observes the inner map non-empty
 /// (drop skipped), or `remove_if` runs first, drops the empty outer
 /// entry, and the inserter's later `or_insert_with` re-creates a
@@ -215,8 +222,10 @@ pub(super) fn prune_reverse_index_registration(
             map.remove(&(seq, slot));
             map.is_empty()
         }
-        None => false,
+        None => return,
     };
+    // Only a shard this removal emptied can be dropped; the drop re-checks
+    // emptiness under the shard write lock.
     if emptied {
         canonical_to_entries.remove_if(canonical, |_, mutex| mutex.lock().is_empty());
     }
@@ -225,49 +234,47 @@ pub(super) fn prune_reverse_index_registration(
 /// Single-shard registration step used by
 /// [`register_reverse_index`]. Inserts one
 /// `(seq, slot) -> (family, registered_facts)` record into the
-/// `canonical_to_entries[canonical]` shard, taking the shard write
-/// lock for the whole `entry(canonical).or_insert_with(...)` + inner
-/// `insert` pair.
-///
-/// An existing shard is reached through a read guard, which excludes the
-/// outer [`dashmap::DashMap::remove_if`] of
-/// [`prune_reverse_index_registration`] for the whole inner insert just as
-/// the write-locked `entry` path does; only a missing shard copies the
-/// canonical into a new key.
+/// `canonical_to_entries[canonical]` shard, holding the shard lock (read
+/// for an existing shard, write to create one) across the inner `insert`.
 #[inline]
 fn register_single_canonical(
     canonical_to_entries: &CanonicalToEntries,
     canonical: &str,
-    family: &FamilyKey,
+    family: &Arc<FamilyKey>,
     populated: ModeSlot,
     admission_seq: u64,
     registered_facts: &RegisteredFacts,
     timing_on: bool,
 ) {
-    let insert = |shard: &CanonicalShard| {
-        let lock_start = if timing_on {
-            Some(Instant::now())
-        } else {
-            None
-        };
-        let mut map = shard.lock();
-        let lock_wait = lock_start
-            .map(|t| t.elapsed())
-            .unwrap_or(std::time::Duration::ZERO);
-        crate::request_observers::record_family_map_lock_acquisition(lock_wait);
-        map.insert(
-            (admission_seq, populated),
-            (family.clone(), Arc::clone(registered_facts)),
-        );
+    let lock_start = if timing_on {
+        Some(Instant::now())
+    } else {
+        None
     };
+    let record = (Arc::clone(family), Arc::clone(registered_facts));
+    // An existing shard takes the registration under its read lock; only a
+    // canonical without one copies its name into a new shard. A shard the
+    // prune drops between the two steps is re-created by the second, as the
+    // single-step path would.
     if let Some(shard) = canonical_to_entries.get(canonical) {
-        insert(shard.value());
+        let mut map = shard.value().lock();
+        record_lock_wait(lock_start);
+        map.insert((admission_seq, populated), record);
         return;
     }
     let shard = canonical_to_entries
         .entry(Arc::from(canonical))
         .or_insert_with(|| Mutex::new(FxHashMap::default()));
-    insert(shard.value());
+    let mut map = shard.value().lock();
+    record_lock_wait(lock_start);
+    map.insert((admission_seq, populated), record);
+}
+
+fn record_lock_wait(lock_start: Option<Instant>) {
+    let lock_wait = lock_start
+        .map(|t| t.elapsed())
+        .unwrap_or(std::time::Duration::ZERO);
+    crate::request_observers::record_family_map_lock_acquisition(lock_wait);
 }
 
 /// Prune every reverse-index registration a REMOVED family's slots hold.
