@@ -296,7 +296,7 @@ impl TypeInfoSurface {
     /// THIN projection: every span comes from the graph payload that already
     /// carries it (stamped once at the OXC lowering site and interned on the
     /// node), paired with the node's canonical origin file from
-    /// [`SemanticGraphStore::node_scope`]. No source text is scanned and no
+    /// [`SemanticGraphStore::node_scope_in_scope`]. No source text is scanned and no
     /// type is re-resolved.
     #[must_use]
     pub fn build(graph: &SemanticGraphStore, view: &SurfaceView) -> Self {
@@ -556,7 +556,7 @@ where
 /// single-declaration-file scope. `None` for `Global` / non-file scopes (a
 /// primitive, a structural composed node).
 fn node_origin_file(graph: &SemanticGraphStore, node: SemanticNodeId) -> Option<Arc<str>> {
-    match graph.node_scope(node) {
+    match graph.node_scope_in_scope(node) {
         Some(NodeScopeId::File { canonical_id, .. }) => Some(canonical_id),
         _ => None,
     }

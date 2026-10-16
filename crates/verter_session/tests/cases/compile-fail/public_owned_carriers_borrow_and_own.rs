@@ -3,7 +3,8 @@
 //! capabilities, delivered values and diagnostics, signature candidates,
 //! owning surface adapters and owning roots — without a detached copy. A
 //! query error copies opaquely: it carries its operands without exposing
-//! them.
+//! them. Origin reads keyed by an ordinal stay callable: they answer only
+//! inside a construction lane the caller holds.
 
 use verter_type_engine::project_semantic_dispatch::one_level_surface::OneLevelSurface;
 use verter_type_engine::project_semantic_dispatch::walk::ShallowDiagnostic;
@@ -80,6 +81,12 @@ fn keep_surface_member(surface: &OneLevelSurface) -> Result<Option<NodeRoot>, Qu
         Some(SurfaceEntry::Member(member)) => surface.node(member.value)?.to_root().map(Some),
         _ => Ok(None),
     }
+}
+
+fn read_origin_in_lane(graph: &SemanticGraphStore, id: SemanticNodeId) -> usize {
+    let mut edges = 0;
+    graph.walk_origin_chain(id, |_, _| edges += 1);
+    edges + usize::from(graph.node_scope_in_scope(id).is_some())
 }
 
 fn keep_error(error: &QueryError) -> QueryError {

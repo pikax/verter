@@ -16781,7 +16781,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let (name, args) = match self.graph().node_data(node).as_deref() {
             Some(SemanticNodeData::Opaque(QueryError::RecursiveRef { name, args })) => (
                 Arc::clone(name),
-                Arc::<[SemanticNodeId]>::from(args.nodes()),
+                Arc::<[SemanticNodeId]>::from(args.operands()),
             ),
             _ => return None,
         };
@@ -17231,7 +17231,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     Some(NodeScopeId::File { canonical_id, owner: edge_owner, .. })
                         if canonical_id == *canonical && edge_owner == owner
                 );
-                (edge == name && declared_here).then(|| Arc::<[SemanticNodeId]>::from(args.nodes()))
+                (edge == name && declared_here)
+                    .then(|| Arc::<[SemanticNodeId]>::from(args.operands()))
             }
             Some(SemanticNodeData::InstantiationRef { base, args }) => {
                 (base.canonical_id == *canonical && base.owner == owner && base.decl_name == *name)

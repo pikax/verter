@@ -101,24 +101,6 @@ pub(super) struct EpochInner {
 }
 
 impl EpochInner {
-    /// The owning root this epoch holds for a graph type token.
-    pub(super) fn graph_root(
-        &self,
-        token: super::records::TypeToken,
-    ) -> Option<crate::semantic_query_memo::node_roots::NodeRoot> {
-        let raw = token.as_u64();
-        if check_epoch(self.epoch, super::records::handle_epoch(raw)).is_err() {
-            return None;
-        }
-        let index = super::records::handle_index(raw);
-        let node = *self.type_tokens.get(index)?;
-        let roots = self.graph_roots.lock().get(&index).cloned()?;
-        roots
-            .operands()
-            .contains(&node)
-            .then(|| crate::semantic_query_memo::node_roots::NodeRoot::from_roots(node, roots))
-    }
-
     fn new(epoch: GraphEpoch, store_live_readers: Arc<AtomicU64>) -> Self {
         Self {
             epoch,
@@ -657,56 +639,49 @@ impl SignatureStore {
         Ok(BodyLocatorId::from_raw(raw))
     }
 
-    /// Mint the kernel token standing for graph node `node`. Tokens live in
-    /// the kernel's own numbering space: the raw value is an epoch-qualified
-    /// intern handle, never a node ordinal.
-    pub fn intern_type_token(
-        &self,
-        node: SemanticNodeId,
-        cancelled: Option<&AtomicBool>,
-    ) -> Result<super::records::TypeToken, StoreError> {
-        let inner = self.inner();
-        let root = self
-            .graph
-            .get()
-            .and_then(Weak::upgrade)
-            .map(|arena| {
-                let nodes =
-                    if Self::is_binder_token(node) || (!arena.counted() && !arena.is_live(node)) {
-                        Vec::new()
-                    } else {
-                        vec![node]
-                    };
-                crate::semantic_query_memo::node_roots::NodeRootSet::acquire(arena, nodes)
-                    .map_err(|_| StoreError::Missing)
-            })
-            .transpose()?;
-        let raw = inner.type_tokens.intern(node, cancelled)?;
-        if let Some(root) = root {
-            inner
-                .graph_roots
-                .lock()
-                .entry(super::records::handle_index(raw))
-                .or_insert(root);
+    construction_ordinal_seam! {
+        /// Mint the kernel token standing for graph node `node`. Tokens live in
+        /// the kernel's own numbering space: the raw value is an epoch-qualified
+        /// intern handle, never a node ordinal. Minting roots `node`, so it
+        /// belongs to signature discovery inside the engine; a bare ordinal
+        /// never mints an owning token from outside it.
+        fn intern_type_token(
+            &self,
+            node: SemanticNodeId,
+            cancelled: Option<&AtomicBool>,
+        ) -> Result<super::records::TypeToken, StoreError> {
+            let inner = self.inner();
+            let root = self
+                .graph
+                .get()
+                .and_then(Weak::upgrade)
+                .map(|arena| {
+                    let nodes =
+                        if Self::is_binder_token(node) || (!arena.counted() && !arena.is_live(node)) {
+                            Vec::new()
+                        } else {
+                            vec![node]
+                        };
+                    crate::semantic_query_memo::node_roots::NodeRootSet::acquire(arena, nodes)
+                        .map_err(|_| StoreError::Missing)
+                })
+                .transpose()?;
+            let raw = inner.type_tokens.intern(node, cancelled)?;
+            if let Some(root) = root {
+                inner
+                    .graph_roots
+                    .lock()
+                    .entry(super::records::handle_index(raw))
+                    .or_insert(root);
+            }
+            Ok(super::records::TypeToken::from_raw(raw))
         }
-        Ok(super::records::TypeToken::from_raw(raw))
-    }
-
-    /// The graph node a token stands for, owned by the live epoch's token
-    /// root. A token from another epoch is stale; a token with no graph root
-    /// (a binder token, an unbound store) is missing.
-    pub fn type_token_root(
-        &self,
-        token: super::records::TypeToken,
-    ) -> Result<crate::semantic_query_memo::node_roots::NodeRoot, StoreError> {
-        let inner = self.inner();
-        check_epoch(inner.epoch, super::records::handle_epoch(token.as_u64()))?;
-        inner.graph_root(token).ok_or(StoreError::Missing)
     }
 
     /// The construction ordinal a token stands for. A token from another
-    /// epoch is stale. Outside the engine a consumer takes
-    /// [`Self::type_token_root`]; test builds expose the ordinal as a seam.
+    /// epoch is stale. Tokens are kernel-internal shape identity: nothing
+    /// outside the engine resolves one, and test builds expose the ordinal
+    /// as a seam.
     #[cfg(any(test, feature = "test-support"))]
     pub fn type_token_node(
         &self,

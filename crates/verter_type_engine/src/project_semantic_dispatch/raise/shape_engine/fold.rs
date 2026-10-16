@@ -338,7 +338,7 @@ pub fn fold_node<A: RaisedShapeAlgebra, C: crate::resolver_core::ResolverCapabil
         SemanticNodeData::Opaque(err) => match err {
             QueryError::RecursiveRef { name, args } => {
                 let raised_args: Vec<A::Out> = args
-                    .nodes()
+                    .operands()
                     .iter()
                     .map(|id| {
                         fold_node(alg, dispatch, *id, active).unwrap_or_else(|| {

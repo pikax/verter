@@ -1287,6 +1287,7 @@ impl VerterHost {
                 .then(|| {
                     build_origin_graph(
                         self.project_type_store.semantic_graph(),
+                        self.project_type_store.construction_grant(),
                         surface_identities_for_export.as_ref(),
                     )
                 })

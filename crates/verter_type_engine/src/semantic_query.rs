@@ -5846,7 +5846,7 @@ pub struct RecursiveRefArgs(Arc<[SemanticNodeId]>);
 
 impl RecursiveRefArgs {
     /// The operands, for engine-internal construction and traversal.
-    pub(crate) fn nodes(&self) -> &[SemanticNodeId] {
+    pub(crate) fn operands(&self) -> &[SemanticNodeId] {
         &self.0
     }
 

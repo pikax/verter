@@ -193,23 +193,9 @@ impl SemanticReadView {
             .ok_or(ReadError::Missing)
     }
 
-    /// The graph node a token stands for, owned by this pinned epoch's token
-    /// root so it outlives the view.
-    pub fn type_token_root(
-        &self,
-        token: TypeToken,
-    ) -> Result<crate::semantic_query_memo::node_roots::NodeRoot, ReadError> {
-        check_epoch(
-            self.inner.epoch,
-            super::records::handle_epoch(token.as_u64()),
-        )
-        .map_err(ReadError::from)?;
-        self.inner.graph_root(token).ok_or(ReadError::Missing)
-    }
-
-    /// The construction ordinal a token stands for. Outside the engine a
-    /// consumer takes [`Self::type_token_root`]; test builds expose the
-    /// ordinal as a seam.
+    /// The construction ordinal a token stands for. Tokens are
+    /// kernel-internal shape identity: nothing outside the engine resolves
+    /// one, and test builds expose the ordinal as a seam.
     #[cfg(any(test, feature = "test-support"))]
     pub fn type_token_node(&self, token: TypeToken) -> Result<SemanticNodeId, ReadError> {
         self.type_token_ordinal(token)

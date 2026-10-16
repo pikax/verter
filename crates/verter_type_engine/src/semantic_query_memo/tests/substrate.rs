@@ -1865,6 +1865,14 @@ fn walk_origin_chain_releases_derivation_lock_before_visitor() {
         dep_sig_for("/w/x.ts", 1),
     );
 
+    let mut unlaned = 0usize;
+    store.walk_origin_chain(target, |_kind, _edge| unlaned += 1);
+    assert_eq!(
+        unlaned, 0,
+        "a bare ordinal outside a construction lane authorizes no origin read"
+    );
+
+    let _lane = store.enter_node_root_scope();
     let mut visited_count = 0usize;
     store.walk_origin_chain(target, |_kind, _edge| {
         // Recursive call back into the store from inside the

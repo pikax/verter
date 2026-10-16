@@ -6972,7 +6972,7 @@ fn memo_admission_or_gate_refuses_partial_without_suppress_in_release() {
         },
     );
     assert!(
-        matches!(first.value, QueryResult::Value(_)),
+        matches!(first.value(), QueryResult::Value(_)),
         "the value still flows back to the caller"
     );
     assert_eq!(

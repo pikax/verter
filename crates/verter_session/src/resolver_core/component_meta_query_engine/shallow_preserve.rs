@@ -61,7 +61,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         let Some(scope_owner) = self
             .dispatch
             .graph()
-            .node_scope(product.hot.node())
+            .node_scope_in_scope(product.hot.node())
             .and_then(|scope| scope.top_level_owner())
         else {
             return true;
@@ -387,7 +387,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         let scope_owner = self
             .dispatch
             .graph()
-            .node_scope(product.hot.node())?
+            .node_scope_in_scope(product.hot.node())?
             .top_level_owner()?;
         let data = self.dispatch.graph().read_in_scope(product.hot.node())?;
         if let verter_type_engine::semantic_query::SemanticNodeData::Object(surface) = data.as_ref()

@@ -189,10 +189,17 @@ impl SemanticGraphStore {
     /// callback fires so visitors that recursively walk the chain
     /// (e.g. transitively via `origins_of_kind`) cannot deadlock against
     /// the same lock.
+    ///
+    /// `node` is a construction ordinal: the walk reads only inside a
+    /// construction lane this thread holds of this graph, and visits nothing
+    /// without one.
     pub fn walk_origin_chain<F>(&self, node: SemanticNodeId, mut visitor: F)
     where
         F: FnMut(OriginEdgeKind, &OriginEdge),
     {
+        if !super::node_roots::NodeRootScope::holds(&self.arena.core) {
+            return;
+        }
         let edges = {
             let store = self.derivation.lock();
             store

@@ -1,41 +1,75 @@
 error[E0616]: field `nodes` of struct `SignatureSetValue` is private
-  --> tests/cases/compile-fail/public_signature_children_cannot_detach.rs:12:23
+  --> tests/cases/compile-fail/public_signature_children_cannot_detach.rs:14:23
    |
-12 |     Arc::clone(&value.nodes)
+14 |     Arc::clone(&value.nodes)
    |                       ^^^^^ private field
 
 error[E0308]: mismatched types
-  --> tests/cases/compile-fail/public_signature_children_cannot_detach.rs:16:5
+  --> tests/cases/compile-fail/public_signature_children_cannot_detach.rs:18:5
    |
-15 | fn detach_candidate(candidate: &SignatureCandidateNodes) -> SignatureCandidateNodes {
+17 | fn detach_candidate(candidate: &SignatureCandidateNodes) -> SignatureCandidateNodes {
    |                                                             ----------------------- expected `SignatureCandidateNodes` because of return type
-16 |     candidate.clone()
+18 |     candidate.clone()
    |     ^^^^^^^^^^^^^^^^^ expected `SignatureCandidateNodes`, found `&SignatureCandidateNodes`
    |
 note: `SignatureCandidateNodes` does not implement `Clone`, so `&SignatureCandidateNodes` was cloned instead
-  --> tests/cases/compile-fail/public_signature_children_cannot_detach.rs:16:5
+  --> tests/cases/compile-fail/public_signature_children_cannot_detach.rs:18:5
    |
-16 |     candidate.clone()
+18 |     candidate.clone()
    |     ^^^^^^^^^
 
 error[E0616]: field `constituents` of struct `SignatureCandidateNodes` is private
-  --> tests/cases/compile-fail/public_signature_children_cannot_detach.rs:20:27
+  --> tests/cases/compile-fail/public_signature_children_cannot_detach.rs:22:27
    |
-20 |     Arc::clone(&candidate.constituents)
+22 |     Arc::clone(&candidate.constituents)
    |                           ^^^^^^^^^^^^ private field
    |
 help: a method `constituents` also exists, call it with parentheses
    |
-20 |     Arc::clone(&candidate.constituents())
+22 |     Arc::clone(&candidate.constituents())
    |                                       ++
 
 error[E0624]: method `type_token_node` is private
-  --> tests/cases/compile-fail/public_signature_children_cannot_detach.rs:24:10
+  --> tests/cases/compile-fail/public_signature_children_cannot_detach.rs:26:10
    |
-24 |     view.type_token_node(token).unwrap()
+26 |     view.type_token_node(token).unwrap()
    |          ^^^^^^^^^^^^^^^ private method
    |
   ::: $WORKSPACE/crates/verter_type_engine/src/signature_kernel/read_view.rs
    |
    |     pub(crate) fn type_token_node(&self, token: TypeToken) -> Result<SemanticNodeId, ReadError> {
    |     ------------------------------------------------------------------------------------------- private method defined here
+
+error[E0624]: method `intern_type_token` is private
+  --> tests/cases/compile-fail/public_signature_children_cannot_detach.rs:30:29
+   |
+30 |     graph.signature_store().intern_type_token(id, None).unwrap()
+   |                             ^^^^^^^^^^^^^^^^^ private method
+   |
+  ::: $WORKSPACE/crates/verter_type_engine/src/lib.rs
+   |
+   |         pub(crate) fn $($item)*
+   |         --- private method defined here
+
+error[E0624]: associated function `from_raw` is private
+  --> tests/cases/compile-fail/public_signature_children_cannot_detach.rs:34:16
+   |
+34 |     TypeToken::from_raw(1)
+   |                ^^^^^^^^ private associated function
+   |
+  ::: $WORKSPACE/crates/verter_type_engine/src/signature_kernel/records.rs
+   |
+   |     pub(crate) const fn from_raw(raw: u64) -> Self {
+   |     ---------------------------------------------- private associated function defined here
+
+error[E0599]: no method named `type_token_root` found for reference `&SignatureStore` in the current scope
+  --> tests/cases/compile-fail/public_signature_children_cannot_detach.rs:38:41
+   |
+38 |     let _root = graph.signature_store().type_token_root(token);
+   |                                         ^^^^^^^^^^^^^^^ method not found in `&SignatureStore`
+
+error[E0599]: no method named `type_token_root` found for reference `&SemanticReadView` in the current scope
+  --> tests/cases/compile-fail/public_signature_children_cannot_detach.rs:42:22
+   |
+42 |     let _root = view.type_token_root(token);
+   |                      ^^^^^^^^^^^^^^^ method not found in `&SemanticReadView`

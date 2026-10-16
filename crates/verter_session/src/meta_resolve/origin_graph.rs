@@ -25,6 +25,7 @@ use super::resolved_state::SurfaceNodeIdentities;
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub(crate) fn build_origin_graph(
     graph: &Arc<verter_type_engine::semantic_query_memo::SemanticGraphStore>,
+    construction: &verter_type_engine::semantic_query_memo::node_roots::NodeConstructionGrant,
     surface_identities: Option<&SurfaceNodeIdentities>,
 ) -> verter_protocol::types::OriginGraphDto {
     use rustc_hash::{FxHashMap, FxHashSet};
@@ -64,6 +65,9 @@ pub(crate) fn build_origin_graph(
         if roots.is_empty() {
             return OriginGraphDto::default();
         }
+        // The surface identities are construction ordinals of this graph;
+        // the walk reads them inside the lane the graph's grant opens.
+        let _lane = construction.enter_scope();
         let mut reached: FxHashSet<verter_type_engine::semantic_query::SemanticNodeId> =
             FxHashSet::default();
         let mut worklist: VecDeque<verter_type_engine::semantic_query::SemanticNodeId> =

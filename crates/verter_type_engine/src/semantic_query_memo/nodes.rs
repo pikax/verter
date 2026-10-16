@@ -184,48 +184,50 @@ impl SemanticGraphStore {
         )
     }
 
-    /// Intern a rebuilt shell `data` while preserving the scope of
-    /// an `origin` shell.
-    ///
-    /// **Invariant.** When a rebuilt SHELL `X'` is derived from `X`
-    /// with substituted sub-expressions,
-    /// `node_scope(X') == node_scope(X)`. Used by
-    /// [`crate::project_semantic_dispatch::ProjectSemanticDispatch::substitute_semantic_type_param`]
-    /// and any other shell-rebuild site that would otherwise call
-    /// the scope-less `intern_node` and drop the origin scope under
-    /// the compound `(payload, scope)` interning.
-    ///
-    /// **Deliberate exception — derived composites.** A substituted
-    /// union (and a provably order-safe substituted intersection) is a
-    /// DERIVED composite: it routes through the canonical authority,
-    /// NOT through this helper, and a multi-arm canonical result
-    /// interns under [`NodeScopeId::Global`] — a derived composite has
-    /// no lexical scope, contributors retain their own scopes, and the
-    /// file dependence rides the canonical evidence / observed
-    /// self-roots rather than `NodeScopeId`. Overload-ordered
-    /// (possibly-callable) substituted intersections still preserve
-    /// scope through this helper. Copying the origin `File` scope onto
-    /// a canonical composite would re-split canonical identity by
-    /// scope, re-creating the cross-scope duplicate class the algebra
-    /// exists to collapse.
-    ///
-    /// Falls back to [`NodeScopeId::Global`] when `origin`'s sidecar
-    /// is empty (`origin` is out of bounds) — these cases are
-    /// already scope-less.
-    #[must_use = "the returned SemanticNodeId is the only way to reach the interned node"]
-    pub fn intern_preserving_scope(
-        &self,
-        origin: SemanticNodeId,
-        data: SemanticNodeData,
-    ) -> SemanticNodeId {
-        self.stats
-            .intern_preserving_scope_calls
-            .fetch_add(1, Ordering::Relaxed);
-        let scope = self.node_scope(origin).unwrap_or(NodeScopeId::Global);
-        self.arena.push_with_scope(
-            crate::semantic_query::DeferredCallable::seal_signature_header(data),
-            scope,
-        )
+    construction_ordinal_seam! {
+        /// Intern a rebuilt shell `data` while preserving the scope of
+        /// an `origin` shell.
+        ///
+        /// **Invariant.** When a rebuilt SHELL `X'` is derived from `X`
+        /// with substituted sub-expressions,
+        /// `node_scope(X') == node_scope(X)`. Used by
+        /// [`crate::project_semantic_dispatch::ProjectSemanticDispatch::substitute_semantic_type_param`]
+        /// and any other shell-rebuild site that would otherwise call
+        /// the scope-less `intern_node` and drop the origin scope under
+        /// the compound `(payload, scope)` interning.
+        ///
+        /// **Deliberate exception — derived composites.** A substituted
+        /// union (and a provably order-safe substituted intersection) is a
+        /// DERIVED composite: it routes through the canonical authority,
+        /// NOT through this helper, and a multi-arm canonical result
+        /// interns under [`NodeScopeId::Global`] — a derived composite has
+        /// no lexical scope, contributors retain their own scopes, and the
+        /// file dependence rides the canonical evidence / observed
+        /// self-roots rather than `NodeScopeId`. Overload-ordered
+        /// (possibly-callable) substituted intersections still preserve
+        /// scope through this helper. Copying the origin `File` scope onto
+        /// a canonical composite would re-split canonical identity by
+        /// scope, re-creating the cross-scope duplicate class the algebra
+        /// exists to collapse.
+        ///
+        /// Falls back to [`NodeScopeId::Global`] when `origin`'s sidecar
+        /// is empty (`origin` is out of bounds) — these cases are
+        /// already scope-less.
+        #[must_use = "the returned SemanticNodeId is the only way to reach the interned node"]
+        fn intern_preserving_scope(
+            &self,
+            origin: SemanticNodeId,
+            data: SemanticNodeData,
+        ) -> SemanticNodeId {
+            self.stats
+                .intern_preserving_scope_calls
+                .fetch_add(1, Ordering::Relaxed);
+            let scope = self.node_scope(origin).unwrap_or(NodeScopeId::Global);
+            self.arena.push_with_scope(
+                crate::semantic_query::DeferredCallable::seal_signature_header(data),
+                scope,
+            )
+        }
     }
 
     /// Test/diagnostic — read the cumulative count of
@@ -241,22 +243,34 @@ impl SemanticGraphStore {
             .load(Ordering::Relaxed)
     }
 
-    /// Return the recorded origin scope for `id`.
-    ///
-    /// Returns:
-    /// - `None` — the id is out of bounds for the arena.
-    /// - `Some(NodeScopeId::Global)` — scope-less structural node
-    ///   (primitive, shared literal-union, helper intermediate).
-    /// - `Some(NodeScopeId::File { .. })` — declaration-bound node whose
-    ///   origin scope is the recorded `(canonical_id, whole_hash,
-    ///   local_scope)` triple.
-    ///
-    /// The sidecar records the scope at the moment of **first intern**; a
-    /// reader that calls `node_scope(id)` from a different scope observes
-    /// the origin scope, not their own.
+    construction_ordinal_seam! {
+        /// Return the recorded origin scope for `id`.
+        ///
+        /// Returns:
+        /// - `None` — the id is out of bounds for the arena.
+        /// - `Some(NodeScopeId::Global)` — scope-less structural node
+        ///   (primitive, shared literal-union, helper intermediate).
+        /// - `Some(NodeScopeId::File { .. })` — declaration-bound node whose
+        ///   origin scope is the recorded `(canonical_id, whole_hash,
+        ///   local_scope)` triple.
+        ///
+        /// The sidecar records the scope at the moment of **first intern**; a
+        /// reader that calls `node_scope(id)` from a different scope observes
+        /// the origin scope, not their own.
+        #[must_use]
+        fn node_scope(&self, id: SemanticNodeId) -> Option<NodeScopeId> {
+            self.arena.scope(id)
+        }
+    }
+
+    /// The recorded origin scope of a construction ordinal, read inside a
+    /// construction lane this thread holds of this graph. Without such a
+    /// lane the ordinal authorizes nothing and the answer is `None`.
     #[must_use]
-    pub fn node_scope(&self, id: SemanticNodeId) -> Option<NodeScopeId> {
-        self.arena.scope(id)
+    pub fn node_scope_in_scope(&self, id: SemanticNodeId) -> Option<NodeScopeId> {
+        node_roots::NodeRootScope::holds(&self.arena.core)
+            .then(|| self.arena.scope(id))
+            .flatten()
     }
 
     /// Read the resolved payload for a construction ordinal. Returns `None`
@@ -297,30 +311,32 @@ pub enum AliasChainEnd {
 }
 
 impl SemanticGraphStore {
-    /// Follow `start`'s transparent `Alias` redirects to where they end,
-    /// however long the chain is; `visit` sees each node on it, the end
-    /// included. A node that is not an alias costs one read and no
-    /// allocation.
-    pub fn alias_chain_end(
-        &self,
-        start: SemanticNodeId,
-        mut visit: impl FnMut(SemanticNodeId),
-    ) -> AliasChainEnd {
-        let mut current = start;
-        let mut passed: Option<rustc_hash::FxHashSet<SemanticNodeId>> = None;
-        loop {
-            visit(current);
-            let Some(data) = self.node_data(current) else {
-                return AliasChainEnd::Dangling(current);
-            };
-            let SemanticNodeData::Alias(next) = &*data else {
-                return AliasChainEnd::Node(current);
-            };
-            let next = *next;
-            if !passed.get_or_insert_with(Default::default).insert(current) {
-                return AliasChainEnd::Cycle;
+    construction_ordinal_seam! {
+        /// Follow `start`'s transparent `Alias` redirects to where they end,
+        /// however long the chain is; `visit` sees each node on it, the end
+        /// included. A node that is not an alias costs one read and no
+        /// allocation.
+        fn alias_chain_end(
+            &self,
+            start: SemanticNodeId,
+            mut visit: impl FnMut(SemanticNodeId),
+        ) -> AliasChainEnd {
+            let mut current = start;
+            let mut passed: Option<rustc_hash::FxHashSet<SemanticNodeId>> = None;
+            loop {
+                visit(current);
+                let Some(data) = self.node_data(current) else {
+                    return AliasChainEnd::Dangling(current);
+                };
+                let SemanticNodeData::Alias(next) = &*data else {
+                    return AliasChainEnd::Node(current);
+                };
+                let next = *next;
+                if !passed.get_or_insert_with(Default::default).insert(current) {
+                    return AliasChainEnd::Cycle;
+                }
+                current = next;
             }
-            current = next;
         }
     }
 }

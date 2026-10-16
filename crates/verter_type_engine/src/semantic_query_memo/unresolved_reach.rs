@@ -44,106 +44,108 @@ pub struct NodeStructureBits {
 }
 
 impl SemanticGraphStore {
-    /// Whether the VALUE `root` denotes REACHES a semantic-miss carrier —
-    /// a node whose own resolution answered "not known".
-    ///
-    /// The bit is a pure INDUCTIVE function of the node id over the
-    /// hash-consed, immutable graph (`self_bit(n) || any(bit(child))`),
-    /// memoized per id, so it is decided ONCE per node for the lifetime of
-    /// the store and is O(1) amortized at every later read. There is no
-    /// budget and no exhaustion arm: a bound whose trip reports
-    /// "unresolved" computes a DIFFERENT function — a 4,100-arm literal
-    /// union with zero misses is fully known, and a factually false
-    /// "unresolved" verdict over it propagates as a permanent warm refusal
-    /// into every enclosing result.
-    ///
-    /// The walk descends the structure a value COMPOSES or lowers inline
-    /// and STOPS at every shallow carrier (`DeclRef`, `InstantiationRef`'s
-    /// base, `BareRef`, `ImportType`, `TypeOf`, `MergedDecl`). Descending a
-    /// carrier would be materialisation, which the shallow-by-default rule
-    /// forbids — and a miss INSIDE a referenced declaration is that
-    /// declaration's own admission problem, gated by its own query.
-    /// Carrier TYPE ARGUMENTS are locally-supplied structure and do
-    /// descend, through the one sanctioned accessor.
-    pub fn node_reaches_unresolved(&self, root: SemanticNodeId) -> bool {
-        if let Some(bit) = self
-            .unresolved_reach
-            .lock()
-            .get(&root)
-            .and_then(|bits| bits.unresolved)
-        {
-            return bit;
-        }
-        struct Frame {
-            node: SemanticNodeId,
-            children: Vec<SemanticNodeId>,
-            next: usize,
-            bit: bool,
-        }
-        let mut local: FxHashMap<SemanticNodeId, bool> = FxHashMap::default();
-        let mut on_path: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
-        // A back edge would make a memoized `false` an assumption rather
-        // than a fact. The interner cannot produce one (a node's children
-        // are interned before it), so this never fires in production — but
-        // if it ever did, the computation answers without POISONING the
-        // store's memo.
-        let mut cycle_seen = false;
-        let (children, bit) = self.node_unresolved_step(root);
-        let mut stack: Vec<Frame> = vec![Frame {
-            node: root,
-            children,
-            next: 0,
-            bit,
-        }];
-        on_path.insert(root);
-        while let Some(frame) = stack.last_mut() {
-            // Short-circuit: a decided-true frame needs no further child.
-            if frame.bit || frame.next >= frame.children.len() {
-                let (node, bit) = (frame.node, frame.bit);
-                stack.pop();
-                on_path.remove(&node);
-                local.insert(node, bit);
-                if !cycle_seen && self.keeps_structure_bits(node) {
-                    self.unresolved_reach
-                        .lock()
-                        .entry(node)
-                        .or_default()
-                        .unresolved = Some(bit);
-                }
-                if let Some(parent) = stack.last_mut() {
-                    parent.bit |= bit;
-                }
-                continue;
-            }
-            let child = frame.children[frame.next];
-            frame.next += 1;
-            if let Some(&known) = local.get(&child) {
-                frame.bit |= known;
-                continue;
-            }
-            let memoized = self
+    construction_ordinal_seam! {
+        /// Whether the VALUE `root` denotes REACHES a semantic-miss carrier —
+        /// a node whose own resolution answered "not known".
+        ///
+        /// The bit is a pure INDUCTIVE function of the node id over the
+        /// hash-consed, immutable graph (`self_bit(n) || any(bit(child))`),
+        /// memoized per id, so it is decided ONCE per node for the lifetime of
+        /// the store and is O(1) amortized at every later read. There is no
+        /// budget and no exhaustion arm: a bound whose trip reports
+        /// "unresolved" computes a DIFFERENT function — a 4,100-arm literal
+        /// union with zero misses is fully known, and a factually false
+        /// "unresolved" verdict over it propagates as a permanent warm refusal
+        /// into every enclosing result.
+        ///
+        /// The walk descends the structure a value COMPOSES or lowers inline
+        /// and STOPS at every shallow carrier (`DeclRef`, `InstantiationRef`'s
+        /// base, `BareRef`, `ImportType`, `TypeOf`, `MergedDecl`). Descending a
+        /// carrier would be materialisation, which the shallow-by-default rule
+        /// forbids — and a miss INSIDE a referenced declaration is that
+        /// declaration's own admission problem, gated by its own query.
+        /// Carrier TYPE ARGUMENTS are locally-supplied structure and do
+        /// descend, through the one sanctioned accessor.
+        fn node_reaches_unresolved(&self, root: SemanticNodeId) -> bool {
+            if let Some(bit) = self
                 .unresolved_reach
                 .lock()
-                .get(&child)
-                .and_then(|bits| bits.unresolved);
-            if let Some(known) = memoized {
-                frame.bit |= known;
-                continue;
+                .get(&root)
+                .and_then(|bits| bits.unresolved)
+            {
+                return bit;
             }
-            if on_path.contains(&child) {
-                cycle_seen = true;
-                continue;
+            struct Frame {
+                node: SemanticNodeId,
+                children: Vec<SemanticNodeId>,
+                next: usize,
+                bit: bool,
             }
-            let (children, bit) = self.node_unresolved_step(child);
-            on_path.insert(child);
-            stack.push(Frame {
-                node: child,
+            let mut local: FxHashMap<SemanticNodeId, bool> = FxHashMap::default();
+            let mut on_path: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+            // A back edge would make a memoized `false` an assumption rather
+            // than a fact. The interner cannot produce one (a node's children
+            // are interned before it), so this never fires in production — but
+            // if it ever did, the computation answers without POISONING the
+            // store's memo.
+            let mut cycle_seen = false;
+            let (children, bit) = self.node_unresolved_step(root);
+            let mut stack: Vec<Frame> = vec![Frame {
+                node: root,
                 children,
                 next: 0,
                 bit,
-            });
+            }];
+            on_path.insert(root);
+            while let Some(frame) = stack.last_mut() {
+                // Short-circuit: a decided-true frame needs no further child.
+                if frame.bit || frame.next >= frame.children.len() {
+                    let (node, bit) = (frame.node, frame.bit);
+                    stack.pop();
+                    on_path.remove(&node);
+                    local.insert(node, bit);
+                    if !cycle_seen && self.keeps_structure_bits(node) {
+                        self.unresolved_reach
+                            .lock()
+                            .entry(node)
+                            .or_default()
+                            .unresolved = Some(bit);
+                    }
+                    if let Some(parent) = stack.last_mut() {
+                        parent.bit |= bit;
+                    }
+                    continue;
+                }
+                let child = frame.children[frame.next];
+                frame.next += 1;
+                if let Some(&known) = local.get(&child) {
+                    frame.bit |= known;
+                    continue;
+                }
+                let memoized = self
+                    .unresolved_reach
+                    .lock()
+                    .get(&child)
+                    .and_then(|bits| bits.unresolved);
+                if let Some(known) = memoized {
+                    frame.bit |= known;
+                    continue;
+                }
+                if on_path.contains(&child) {
+                    cycle_seen = true;
+                    continue;
+                }
+                let (children, bit) = self.node_unresolved_step(child);
+                on_path.insert(child);
+                stack.push(Frame {
+                    node: child,
+                    children,
+                    next: 0,
+                    bit,
+                });
+            }
+            local.get(&root).copied().unwrap_or(true)
         }
-        local.get(&root).copied().unwrap_or(true)
     }
 
     /// One node's own unresolved bit plus the children the reach walk
@@ -312,50 +314,52 @@ impl SemanticGraphStore {
         (children, unresolved)
     }
 
-    /// Whether `root` is an INERT STRUCTURE: a primitive or literal, or an
-    /// array or rest-free tuple whose elements are inert structures.
-    ///
-    /// Nothing in such a node names a declaration, a binder or a deferred
-    /// operator, so the declaration-body projection rebuilds it unchanged
-    /// under every context and need not walk into it. The same inductive,
-    /// per-id memo as [`Self::node_reaches_unresolved`] (`self_bit(n) &&
-    /// all(bit(child))` over the append-only arena), in the same per-node
-    /// entry ([`NodeStructureBits`]), so an argument that a generic
-    /// instantiation grows by one level at every step costs one step to
-    /// classify, not its whole depth.
-    pub fn node_is_inert_structure(&self, root: SemanticNodeId) -> bool {
-        let mut stack: Vec<(SemanticNodeId, bool)> = vec![(root, false)];
-        while let Some((node, expanded)) = stack.pop() {
-            if self.inert_bit(node).is_some() {
-                continue;
-            }
-            let children = match self.node_data(node).as_deref() {
-                Some(SemanticNodeData::Primitive(_) | SemanticNodeData::Literal(_)) => {
-                    Some(Vec::new())
+    construction_ordinal_seam! {
+        /// Whether `root` is an INERT STRUCTURE: a primitive or literal, or an
+        /// array or rest-free tuple whose elements are inert structures.
+        ///
+        /// Nothing in such a node names a declaration, a binder or a deferred
+        /// operator, so the declaration-body projection rebuilds it unchanged
+        /// under every context and need not walk into it. The same inductive,
+        /// per-id memo as [`Self::node_reaches_unresolved`] (`self_bit(n) &&
+        /// all(bit(child))` over the append-only arena), in the same per-node
+        /// entry ([`NodeStructureBits`]), so an argument that a generic
+        /// instantiation grows by one level at every step costs one step to
+        /// classify, not its whole depth.
+        fn node_is_inert_structure(&self, root: SemanticNodeId) -> bool {
+            let mut stack: Vec<(SemanticNodeId, bool)> = vec![(root, false)];
+            while let Some((node, expanded)) = stack.pop() {
+                if self.inert_bit(node).is_some() {
+                    continue;
                 }
-                Some(SemanticNodeData::Array { element, .. }) => Some(vec![*element]),
-                Some(SemanticNodeData::Tuple { elements, .. })
-                    if elements.iter().all(|element| !element.rest) =>
-                {
-                    Some(elements.iter().map(|element| element.value).collect())
+                let children = match self.node_data(node).as_deref() {
+                    Some(SemanticNodeData::Primitive(_) | SemanticNodeData::Literal(_)) => {
+                        Some(Vec::new())
+                    }
+                    Some(SemanticNodeData::Array { element, .. }) => Some(vec![*element]),
+                    Some(SemanticNodeData::Tuple { elements, .. })
+                        if elements.iter().all(|element| !element.rest) =>
+                    {
+                        Some(elements.iter().map(|element| element.value).collect())
+                    }
+                    _ => None,
+                };
+                let Some(children) = children else {
+                    self.set_inert_bit(node, false);
+                    continue;
+                };
+                if expanded {
+                    let bit = children
+                        .iter()
+                        .all(|child| self.inert_bit(*child).unwrap_or(false));
+                    self.set_inert_bit(node, bit);
+                    continue;
                 }
-                _ => None,
-            };
-            let Some(children) = children else {
-                self.set_inert_bit(node, false);
-                continue;
-            };
-            if expanded {
-                let bit = children
-                    .iter()
-                    .all(|child| self.inert_bit(*child).unwrap_or(false));
-                self.set_inert_bit(node, bit);
-                continue;
+                stack.push((node, true));
+                stack.extend(children.into_iter().map(|child| (child, false)));
             }
-            stack.push((node, true));
-            stack.extend(children.into_iter().map(|child| (child, false)));
+            self.inert_bit(root).unwrap_or(false)
         }
-        self.inert_bit(root).unwrap_or(false)
     }
 
     fn inert_bit(&self, node: SemanticNodeId) -> Option<bool> {

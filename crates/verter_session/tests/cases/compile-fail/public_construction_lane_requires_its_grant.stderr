@@ -1,7 +1,7 @@
 error[E0624]: method `enter_node_root_scope` is private
-  --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:12:24
+  --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:14:24
    |
-12 |     let _scope = graph.enter_node_root_scope();
+14 |     let _scope = graph.enter_node_root_scope();
    |                        ^^^^^^^^^^^^^^^^^^^^^ private method
    |
   ::: $WORKSPACE/crates/verter_type_engine/src/semantic_query_memo/nodes.rs
@@ -10,9 +10,9 @@ error[E0624]: method `enter_node_root_scope` is private
    |     ----------------------------------------------------------------------- private method defined here
 
 error[E0624]: method `root_nodes` is private
-  --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:16:24
+  --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:18:24
    |
-16 |       let _roots = graph.root_nodes([id]);
+18 |       let _roots = graph.root_nodes([id]);
    |                          ^^^^^^^^^^ private method
    |
   ::: $WORKSPACE/crates/verter_type_engine/src/semantic_query_memo/nodes.rs
@@ -24,12 +24,89 @@ error[E0624]: method `root_nodes` is private
    | |____________________________________________________- private method defined here
 
 error[E0624]: associated function `mint` is private
-  --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:20:28
+  --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:22:28
    |
-20 |     NodeConstructionGrant::mint(graph)
+22 |     NodeConstructionGrant::mint(graph)
    |                            ^^^^ private associated function
    |
   ::: $WORKSPACE/crates/verter_type_engine/src/semantic_query_memo/node_roots.rs
    |
    |     pub(crate) fn mint(graph: &super::SemanticGraphStore) -> Self {
    |     ------------------------------------------------------------- private associated function defined here
+
+error[E0624]: method `alias_chain_end` is private
+  --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:26:22
+   |
+26 |     let _end = graph.alias_chain_end(id, |_| {});
+   |                      ^^^^^^^^^^^^^^^ private method
+   |
+  ::: $WORKSPACE/crates/verter_type_engine/src/lib.rs
+   |
+   |         pub(crate) fn $($item)*
+   |         --- private method defined here
+
+error[E0624]: method `node_scope` is private
+  --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:30:24
+   |
+30 |     let _scope = graph.node_scope(id);
+   |                        ^^^^^^^^^^ private method
+   |
+  ::: $WORKSPACE/crates/verter_type_engine/src/lib.rs
+   |
+   |         pub(crate) fn $($item)*
+   |         --- private method defined here
+
+error[E0624]: method `intern_preserving_scope` is private
+  --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:34:11
+   |
+34 |     graph.intern_preserving_scope(id, SemanticNodeData::Primitive(PrimitiveKind::String))
+   |           ^^^^^^^^^^^^^^^^^^^^^^^ private method
+   |
+  ::: $WORKSPACE/crates/verter_type_engine/src/lib.rs
+   |
+   |         pub(crate) fn $($item)*
+   |         --- private method defined here
+
+error[E0624]: method `node_reaches_unresolved` is private
+  --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:38:11
+   |
+38 |     graph.node_reaches_unresolved(id) || graph.node_is_inert_structure(id)
+   |           ^^^^^^^^^^^^^^^^^^^^^^^ private method
+   |
+  ::: $WORKSPACE/crates/verter_type_engine/src/lib.rs
+   |
+   |         pub(crate) fn $($item)*
+   |         --- private method defined here
+
+error[E0624]: method `node_is_inert_structure` is private
+  --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:38:48
+   |
+38 |     graph.node_reaches_unresolved(id) || graph.node_is_inert_structure(id)
+   |                                                ^^^^^^^^^^^^^^^^^^^^^^^ private method
+   |
+  ::: $WORKSPACE/crates/verter_type_engine/src/lib.rs
+   |
+   |         pub(crate) fn $($item)*
+   |         --- private method defined here
+
+error[E0624]: method `substitute_memo_get` is private
+  --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:42:22
+   |
+42 |     let _hit = graph.substitute_memo_get(id, id, id);
+   |                      ^^^^^^^^^^^^^^^^^^^ private method
+   |
+  ::: $WORKSPACE/crates/verter_type_engine/src/lib.rs
+   |
+   |         pub(crate) fn $($item)*
+   |         --- private method defined here
+
+error[E0624]: method `substitute_memo_publish` is private
+  --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:43:11
+   |
+43 |     graph.substitute_memo_publish(id, id, id, id);
+   |           ^^^^^^^^^^^^^^^^^^^^^^^ private method
+   |
+  ::: $WORKSPACE/crates/verter_type_engine/src/lib.rs
+   |
+   |         pub(crate) fn $($item)*
+   |         --- private method defined here
