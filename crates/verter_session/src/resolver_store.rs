@@ -3918,7 +3918,15 @@ impl StoreViewManager {
                         // The cached entry's token equals the live host
                         // token under the lock: proven current, safe for
                         // warm-cache validation.
-                        return StoreViewRead::Current(CurrentHostStoreView(view.clone()));
+                        let view = view.clone();
+                        drop(state);
+                        // A view a caller still held when this one was
+                        // published may have released its root since; the
+                        // versions only that root saw are reclaimable now.
+                        host.project_type_store()
+                            .indexed()
+                            .reclaim_after_root_release();
+                        return StoreViewRead::Current(CurrentHostStoreView(view));
                     }
                 }
                 if state.building.is_claimed() {
