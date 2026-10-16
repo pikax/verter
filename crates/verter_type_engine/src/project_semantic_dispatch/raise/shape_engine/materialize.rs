@@ -339,8 +339,19 @@ impl RaisedShapeAlgebra for MaterializeTypeExprAlg {
         // mapping). No raw-string classification reads it back.
         MaterializedTypeExpr::degraded(err.clone())
     }
-    fn recursive_ref(&mut self, name: Arc<str>) -> MaterializedTypeExpr {
-        MaterializedTypeExpr::exact(TypeExpr::recursive_ref(name.as_ref(), Vec::new()))
+    fn recursive_ref(
+        &mut self,
+        name: Arc<str>,
+        type_arguments: Vec<MaterializedTypeExpr>,
+    ) -> MaterializedTypeExpr {
+        fold_compound(
+            type_arguments
+                .into_iter()
+                .enumerate()
+                .map(|(i, arg)| (MaterializePathSegment::ReferenceArgument(i as u32), arg))
+                .collect(),
+            |exprs| TypeExpr::recursive_ref(name.as_ref(), exprs),
+        )
     }
     fn reference(
         &mut self,

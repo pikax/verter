@@ -153,10 +153,21 @@ fn renders_operators_carriers_and_literals_without_precedence_loss() {
                     is_const: false,
                 })),
             }),
-            extends: Arc::new(reference("Expected")),
-            true_type: Arc::new(TypeExpr::Infer {
-                name: "V".into(),
-                constraint: None,
+            extends: Arc::new(TypeExpr::Ref {
+                name: "Expected".into(),
+                type_arguments: Arc::from([TypeExpr::Infer {
+                    name: "V".into(),
+                    constraint: None,
+                }]),
+            }),
+            // The branch references the binder the clause declares, by its
+            // bare name even where a postfix operator applies to it.
+            true_type: Arc::new(TypeExpr::IndexedAccess {
+                object: Arc::new(TypeExpr::Infer {
+                    name: "V".into(),
+                    constraint: None,
+                }),
+                index: Arc::new(TypeExpr::Primitive(PrimitiveName::Number)),
             }),
             false_type: Arc::new(TypeExpr::Primitive(PrimitiveName::Never)),
         }),
@@ -220,7 +231,7 @@ fn renders_operators_carriers_and_literals_without_precedence_loss() {
     let rendered = render_type_expr_display(&expression).expect("the complete union must render");
     assert_eq!(
         rendered.text,
-        "{ readonly [K in keyof Source as `get${K}`]-?: Source[K] extends Expected ? infer V : never } | typeof factory.make<Input> | import('./module\\'s').Nested.Member<Arg> | Tree<Leaf> | readonly [head?: 'it\\'s', ...tail: Array<42n>] | (Custom & Raw)"
+        "{ readonly [K in keyof Source as `get${K}`]-?: Source[K] extends Expected<infer V> ? V[number] : never } | typeof factory.make<Input> | import('./module\\'s').Nested.Member<Arg> | Tree<Leaf> | readonly [head?: 'it\\'s', ...tail: Array<42n>] | (Custom & Raw)"
     );
     assert_eq!(
         rendered
@@ -407,4 +418,52 @@ fn deep_finite_structure_renders_completely_without_a_depth_cap() {
     assert!(rendered.text.ends_with("))))))))"));
     assert!(rendered.text.contains("Leaf"));
     assert!(!rendered.text.contains('\u{2026}'));
+}
+
+#[test]
+fn an_infer_bound_by_an_enclosing_clause_renders_as_a_reference() {
+    let infer = |name: &str| TypeExpr::Infer {
+        name: name.into(),
+        constraint: None,
+    };
+    let object = |name: &str, value: TypeExpr| {
+        TypeExpr::Object(Arc::new(ObjectExpr {
+            properties: vec![ObjectMember::Property(
+                ObjectProperty::synthetic_public_key(name.into(), value, false, false),
+            )],
+        }))
+    };
+    let conditional =
+        |check: TypeExpr, extends: TypeExpr, true_type: TypeExpr, false_type: TypeExpr| {
+            TypeExpr::Conditional {
+                check: Arc::new(check),
+                extends: Arc::new(extends),
+                true_type: Arc::new(true_type),
+                false_type: Arc::new(false_type),
+            }
+        };
+    // The nested clause in the true branch references `U`; the false branch
+    // is outside its scope, so a clause there declares `U` afresh.
+    let expression = conditional(
+        reference("T"),
+        object("a", infer("U")),
+        conditional(
+            reference("T"),
+            object("b", infer("U")),
+            infer("U"),
+            TypeExpr::Literal(LiteralValue::Number(2.0)),
+        ),
+        conditional(
+            reference("T"),
+            object("c", infer("U")),
+            infer("U"),
+            TypeExpr::Primitive(PrimitiveName::Never),
+        ),
+    );
+    assert_eq!(
+        render_type_expr_display(&expression)
+            .expect("the conditional renders")
+            .text,
+        "T extends { a: infer U } ? T extends { b: U } ? U : 2 : T extends { c: infer U } ? U : never"
+    );
 }

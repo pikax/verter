@@ -101,6 +101,7 @@ mod intersection_distribution_tests;
 mod keyof_application_tests;
 mod lib_global_tests;
 mod local_declaration_tests;
+mod mapped_expand_tests;
 mod mapped_key_domain_carrier_tests;
 mod member_accessibility_relation_tests;
 mod merged_declaration_signature_tests;

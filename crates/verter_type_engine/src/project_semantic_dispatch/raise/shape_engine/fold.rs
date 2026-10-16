@@ -336,7 +336,17 @@ pub fn fold_node<A: RaisedShapeAlgebra, C: crate::resolver_core::ResolverCapabil
         }
         SemanticNodeData::InferRef { name, .. } => alg.infer(Arc::clone(name), None),
         SemanticNodeData::Opaque(err) => match err {
-            QueryError::RecursiveRef { name, .. } => alg.recursive_ref(Arc::clone(name)),
+            QueryError::RecursiveRef { name, args } => {
+                let raised_args: Vec<A::Out> = args
+                    .iter()
+                    .map(|id| {
+                        fold_node(alg, dispatch, *id, active).unwrap_or_else(|| {
+                            alg.opaque_sentinel(&QueryError::UnrepresentableSurfaceMember)
+                        })
+                    })
+                    .collect();
+                alg.recursive_ref(Arc::clone(name), raised_args)
+            }
             // The checker's recovered error type raises as the recovery the
             // diagnostic defines.
             QueryError::CheckerRecovery { diagnostic, .. } => match diagnostic.recovery() {

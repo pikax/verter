@@ -1404,6 +1404,16 @@ pub(crate) mod checker_syntax {
         /// matches NOTHING: elided members cannot prove exact set
         /// equality. Reintroduce only with a row + control.
         ElidedMore(usize),
+        /// `[x: K]: T` / `readonly [x: K]: T` — an index signature. Matches
+        /// a live index signature with the recursively equal key type and
+        /// value and the exact `readonly`; the printed parameter name is
+        /// not compared. A live object's index signatures and the printed
+        /// ones are compared as an exact set.
+        Index {
+            readonly: bool,
+            key: CheckerType,
+            ty: CheckerType,
+        },
     }
 
     /// Parse a checker print into its typed form. Strict: trailing
@@ -1721,7 +1731,7 @@ pub(crate) mod checker_syntax {
                     // real only when another name follows it.
                     let after_keyword = self.pos;
                     self.skip_ws();
-                    let name_follows = self.ident().is_ok();
+                    let name_follows = self.rest().starts_with(['[', '"']) || self.ident().is_ok();
                     self.pos = after_keyword;
                     if name_follows {
                         true
@@ -1736,6 +1746,18 @@ pub(crate) mod checker_syntax {
                 // and a parameter list follow; a member NAMED `get`
                 // reads `get: T` instead, so a failed lookahead
                 // backtracks to the keyword as the name.
+                self.skip_ws();
+                if self.eat('[') {
+                    self.ident()?;
+                    self.expect(':')?;
+                    let key = self.union()?;
+                    self.expect(']')?;
+                    self.expect(':')?;
+                    let ty = self.union()?;
+                    members.push(CheckerMember::Index { readonly, key, ty });
+                    self.expect(';')?;
+                    continue;
+                }
                 let before_keyword = self.pos;
                 let accessor = if self.eat_keyword("get") || self.eat_keyword("set") {
                     let get = self.text[self.pos - 3..].starts_with("get");
@@ -1753,7 +1775,16 @@ pub(crate) mod checker_syntax {
                 } else {
                     None
                 };
-                let name = self.ident()?;
+                // A name that is no identifier prints quoted
+                // (`"field-0": 0`).
+                let name = if accessor.is_none() && self.rest().starts_with('"') {
+                    match self.atom()? {
+                        CheckerType::StringLit(name) => name,
+                        _ => unreachable!("a quoted print parses to a string literal"),
+                    }
+                } else {
+                    self.ident()?
+                };
                 let optional = self.eat('?');
                 self.skip_ws();
                 if accessor.is_some() || self.rest().starts_with('(') {
@@ -2327,7 +2358,7 @@ pub(crate) mod checker_syntax {
                     .iter()
                     .map(LiveMember::from_surface_member)
                     .collect();
-                object_members_match(dispatch, &members, exp, depth)
+                object_members_match(dispatch, &members, &surface.index_signatures, exp, depth)
             }
             // A live spread PROGRAM is compared through the same public
             // spread-projection consumer the boundary raises through.
@@ -2575,6 +2606,9 @@ pub(crate) mod checker_syntax {
             CheckerMember::Get { .. }
             | CheckerMember::Set { .. }
             | CheckerMember::ElidedMore(_) => false,
+            // Index signatures are compared beside the members, in
+            // [`object_members_match`].
+            CheckerMember::Index { .. } => false,
         }
     }
 
@@ -2584,16 +2618,39 @@ pub(crate) mod checker_syntax {
     fn object_members_match(
         dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
         members: &[LiveMember<'_>],
+        index_signatures: &[verter_type_engine::semantic_query::IndexSignature],
         exp: &[CheckerMember],
         depth: usize,
     ) -> bool {
-        if members.len() != exp.len() {
+        let (exp_index, exp): (Vec<&CheckerMember>, Vec<&CheckerMember>) = exp
+            .iter()
+            .partition(|member| matches!(member, CheckerMember::Index { .. }));
+        if members.len() != exp.len() || index_signatures.len() != exp_index.len() {
             return false;
+        }
+        let mut index_used = vec![false; index_signatures.len()];
+        for printed in exp_index {
+            let CheckerMember::Index { readonly, key, ty } = printed else {
+                unreachable!("partitioned on index signatures")
+            };
+            let Some(slot) = index_signatures
+                .iter()
+                .enumerate()
+                .position(|(slot, live)| {
+                    !index_used[slot]
+                        && live.readonly == *readonly
+                        && matches_node(dispatch, live.key_type, key, depth + 1)
+                        && matches_node(dispatch, live.value_type, ty, depth + 1)
+                })
+            else {
+                return false;
+            };
+            index_used[slot] = true;
         }
         fn assign(
             dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
             members: &[LiveMember<'_>],
-            exp: &[CheckerMember],
+            exp: &[&CheckerMember],
             used: &mut [bool],
             index: usize,
             depth: usize,
@@ -2602,7 +2659,7 @@ pub(crate) mod checker_syntax {
                 return true;
             }
             for (slot, member) in members.iter().enumerate() {
-                if !used[slot] && member_matches(dispatch, member, &exp[index], depth) {
+                if !used[slot] && member_matches(dispatch, member, exp[index], depth) {
                     used[slot] = true;
                     if assign(dispatch, members, exp, used, index + 1, depth) {
                         return true;
@@ -2613,7 +2670,7 @@ pub(crate) mod checker_syntax {
             false
         }
         let mut used = vec![false; members.len()];
-        assign(dispatch, members, exp, &mut used, 0, depth)
+        assign(dispatch, members, &exp, &mut used, 0, depth)
     }
 
     /// Compare a printed type against a live object-spread program by
@@ -2644,7 +2701,13 @@ pub(crate) mod checker_syntax {
         match expected {
             CheckerType::Object(members) => {
                 arms.len() == 1
-                    && object_members_match(dispatch, &arm_live_members(&arms[0]), members, depth)
+                    && object_members_match(
+                        dispatch,
+                        &arm_live_members(&arms[0]),
+                        &[],
+                        members,
+                        depth,
+                    )
             }
             CheckerType::Union(constituents) => {
                 // Every constituent must be an object print; the
@@ -2676,7 +2739,7 @@ pub(crate) mod checker_syntax {
                     for (slot, arm) in arms.iter().enumerate() {
                         let members = arm_live_members(arm);
                         if !used[slot]
-                            && object_members_match(dispatch, &members, printed[index], depth)
+                            && object_members_match(dispatch, &members, &[], printed[index], depth)
                         {
                             used[slot] = true;
                             if assign(dispatch, arms, printed, used, index + 1, depth) {
