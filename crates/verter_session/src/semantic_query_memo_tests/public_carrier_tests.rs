@@ -447,3 +447,30 @@ fn a_delivered_surface_lease_owns_its_members() {
     );
     assert!(graph.node_is_live(surface.node()));
 }
+
+/// A reduced output node owns the node it reduced to: its capability reads
+/// after the reducing dispatch and the caches are gone.
+#[test]
+fn a_reduced_output_owns_its_node() {
+    use verter_type_engine::semantic_query::ProjectionReductionContext;
+    let host = counted_host();
+    let base = host
+        .resolve_named_symbol(FILE, "Target", Some(ProjectionMode::Navigate))
+        .expect("the interface resolves");
+    let reduced = {
+        let d = host.semantic_dispatch();
+        d.reduce_output_node_with_context(
+            base.id(),
+            ProjectionReductionContext::published(ProjectionMode::Expanded),
+        )
+    };
+    drop(base);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    graph.invalidate_all();
+    let payload = graph.read(reduced.node().unwrap()).unwrap();
+    assert!(
+        matches!(&*payload, SemanticNodeData::Object(_)),
+        "{payload:?}"
+    );
+    assert!(graph.node_is_live(reduced.node_id()));
+}

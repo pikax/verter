@@ -17,9 +17,13 @@ compile-fail fixture; ordinary-constructor and legacy-sweep negative controls
 are arena unit tests.
 
 `ProjectSemanticDispatch::with_ownership_harness` consumes that same fixture
-and binds its counted graph to a test context. It opens no construction scope,
-so session composition tests can exercise the gaps between real dispatches.
-This adapter is also restricted to `test` or `test-support` builds.
+and binds its counted graph to a test context; like every dispatcher it opens
+its own construction scope over the graph it is bound to (see "Public carriers
+and capabilities" below). `VerterHost::new_standalone_with_counted_ownership_for_test`
+composes a whole host over a counted graph (`GraphOwnership::CountedForTests`),
+so a test proves what a host's public delivery keeps alive. Both are restricted
+to `test` or `test-support` builds; `GraphOwnership` has no counted variant in a
+production build.
 
 ## Roots, retained edges and destruction
 
@@ -27,8 +31,8 @@ This adapter is also restricted to `test` or `test-support` builds.
 Clones share one acquisition; independently acquired sets count independently.
 `NodeRoot` qualifies a node with that set. `NodeDataLease` couples an arena read
 with its root. The rooted interning interface validates the operand set's arena
-before accepting children. Raw ordinal carriers are still exposed by existing
-public APIs; sealing those carriers is separate work.
+before accepting children. Public carriers are sealed on top of these roots; see
+"Public carriers and capabilities".
 
 `SemanticNodeData::for_each_retained_child` includes semantic children, opaque
 error operands, derived object indexes, deferred callable parts, pending-frame
@@ -107,6 +111,57 @@ reservations include the root owner, scope vector capacity and arena count slots
 a read view after epoch replacement. `SignatureVersion` travels on signature
 set/result values; delivery uses that version rather than reacquiring whichever
 epoch happens to be current. No permanent list of delivered versions is added.
+
+## Public carriers and capabilities
+
+A `SemanticNodeId` is an ordinal: an identity label that authorizes no read
+outside the engine. A consumer reads graph payload only through `NodeRef<'a>`,
+a `Copy`, lifetime-bound, arena-qualified capability whose fields are private.
+Only an owner mints one: `NodeRoot::node_ref`, `NodeRootSet::node_ref` (an
+operand the set holds), `NodeDataLease::node_ref` / `child` (a retained child of
+the leased payload), `CacheRead::node` / `SemanticDeliveryLease::node_ref` (an
+ordinal the delivery roots), `SignatureSetValue::node`, `ReducedOutputNode::node`,
+`MaterializedOutputTypeExpr::node` and `NodeRootScope::node_ref` (a construction
+ordinal, rooted in that scope). `NodeRef::read` leases the payload under a fresh
+root; `SemanticGraphStore::read` additionally refuses a capability another graph
+minted (`ForeignSemanticOperand`). A slot a legacy close released reads as
+`StaleSemanticOperand`, never as a live payload. `NodeRef::to_root` upgrades to
+an owning `NodeRoot`; two roots are equal when they name the same node of the
+same graph.
+
+Ordinal payload reads (`SemanticGraphStore::node_data`, `node_data_for`, the
+signature `type_token_node` accessors) are crate-private in production and exist
+publicly only as `test`/`test-support` fixture seams. Construction-domain
+producers outside the engine (component-meta projectors, framework surface
+producers, audit miners) read ordinals with `read_in_scope` / `root_in_scope`,
+which answer only while the thread holds a construction scope of that graph and
+return rooted leases; `copy_in_scope` is the sealed builder copy of a member,
+entry, index signature, surface, payload or diagnostic, rooting the copy's
+operands in the active scope. Every `ProjectSemanticDispatch` owns a
+construction scope over its bound graph for its whole lifetime, declared last so
+it closes after the dispatcher's other state, so a producer reading a result
+ordinal after a nested query returns still holds it.
+
+Aggregate payload carriers have no public copy: `SemanticNodeData`,
+`SurfaceView`, `SurfaceMember`, `SurfaceEntry`, `IndexSignature`,
+`ShallowDiagnostic`, `ShallowSurface`/`ShallowSurfaceEntry` and
+`SignatureCandidateNodes` copy only crate-privately (exhaustive field copies,
+so a new field cannot be skipped); test builds add `copy_for_tests`. A
+`SurfaceView` exposes its stream and indexes as borrowed slices, never as shared
+`Arc`s. `CacheRead` fields are crate-private: a consumer borrows `value()` and
+`walker_diagnostics()`; a clone of a read clones its lease. `ShallowDiagnostic`'s
+recorded query failure is a `DiagnosticError` that renders but exposes no
+`QueryError` to copy. `SignatureSetValue` owns its candidate nodes: its candidate
+table and their roots share one `Arc`, so every clone owns them. Public results
+that hand out a surface or a terminal node deliver owning carriers:
+`resolve_typeinfo_surface` returns a `SurfaceLease`, and the host typeinfo entry
+points (`resolve_named_symbol*`, `evaluate_type_expression_with_audit`) return
+`NodeRoot`s that `project_node_to_type_expr_json_bytes` /
+`project_node_to_semantic_type_graph` validate against the host graph before
+projecting. The NAPI and WASM two-call projections carry that root between the
+calls. The task inventory
+[`SKR-OWN-PUBLIC.md`](../../../../crates/verter_type_engine/observe-inventory/SKR-OWN-PUBLIC.md)
+lists every carrier, its route, its rule and its proof.
 
 ## Current counts and observation policy
 
