@@ -202,6 +202,15 @@ fn compact_domains(facts: &mut Vec<FactVersionRef>, basis: &AggregateGenerations
     /// A bucket whose population is `None` is a real bucket — its facts
     /// still group and still survive together — it simply can never mint.
     type BucketKey = (CompactionDomain, Option<AggregatePopulation>);
+    // No bucket can cross the threshold in a set no wider than it, and only
+    // an aggregate already present is lifted otherwise.
+    if facts.len() <= FACT_DOMAIN_PRECISE_MAX
+        && !facts
+            .iter()
+            .any(|fact| matches!(fact, FactVersionRef::DomainGeneration(_)))
+    {
+        return false;
+    }
     let mut precise: rustc_hash::FxHashMap<BucketKey, usize> = rustc_hash::FxHashMap::default();
     let mut already_lifted: rustc_hash::FxHashSet<BucketKey> = rustc_hash::FxHashSet::default();
     for fact in facts.iter() {
@@ -273,10 +282,16 @@ fn compact_domains(facts: &mut Vec<FactVersionRef>, basis: &AggregateGenerations
 }
 
 /// Inline capacity for the observation accumulator. Empirically most
-/// computes observe between 4 and 12 facts. The inline capacity is
-/// sized to cover those without allocating; longer computes spill to
-/// the heap exactly once.
-const INLINE_CAPACITY: usize = 16;
+/// computes observe between 4 and 12 facts directly, and a fact is large,
+/// so the inline storage covers the common few without making every
+/// tracer — created per computation and moved as it is installed and
+/// sealed — carry room for the widest; longer computes spill to the heap
+/// exactly once.
+const INLINE_CAPACITY: usize = 4;
+
+/// How many of the latest observations, and of the latest absorbed runs,
+/// a repeated read is matched against before it is kept again.
+const RECENT_WINDOW: usize = 16;
 
 /// How a cache-refusal signal propagates through nested cold-compute scopes.
 ///
@@ -505,11 +520,11 @@ impl FactReadSet {
         record_signature_work(compared);
     }
 
-    /// Whether `fact` is among the last [`INLINE_CAPACITY`] observations,
+    /// Whether `fact` is among the last [`RECENT_WINDOW`] observations,
     /// with the number of comparisons that decided it.
     #[inline]
     fn recently_observed(&self, fact: &FactVersionRef) -> (bool, usize) {
-        let window = &self.observations[self.observations.len().saturating_sub(INLINE_CAPACITY)..];
+        let window = &self.observations[self.observations.len().saturating_sub(RECENT_WINDOW)..];
         match window.iter().rposition(|observed| observed == fact) {
             Some(position) => (true, window.len() - position),
             None => (false, window.len()),
@@ -541,35 +556,60 @@ impl FactReadSet {
     /// canonical set — there is exactly one canonicaliser.
     #[inline]
     pub fn absorb_canonical_signature(&mut self, signature: &Arc<[FactVersionRef]>) {
-        if signature.is_empty() {
+        self.absorb_canonical_signature_verified_once(signature, &std::cell::OnceCell::new());
+    }
+
+    /// [`Self::absorb_canonical_signature`] sharing one order verification
+    /// across every read set the witness is replayed into. A read set that
+    /// already holds the run returns before the verification is demanded, so
+    /// a repeated warm replay costs no work proportional to its width.
+    #[inline]
+    pub fn absorb_canonical_signature_verified_once<'a>(
+        &mut self,
+        signature: &'a Arc<[FactVersionRef]>,
+        verified: &std::cell::OnceCell<Option<VerifiedCanonicalRun<'a>>>,
+    ) {
+        if signature.is_empty() || self.recently_absorbed(signature) {
             return;
         }
-        // An immutable retained run already proved its canonical order.
-        // Replaying it must not grow live storage for each warm read.
+        match verified.get_or_init(|| VerifiedCanonicalRun::verify(signature)) {
+            Some(run) => self.canonical_runs.push(Arc::clone(run.0)),
+            None => self.observe_borrowed_signature(signature),
+        }
+    }
+
+    /// Whether one of the last [`RECENT_WINDOW`] absorbed runs is
+    /// `signature`. An immutable retained run already proved its canonical
+    /// order; replaying it must not grow live storage for each warm read.
+    #[inline]
+    fn recently_absorbed(&self, signature: &Arc<[FactVersionRef]>) -> bool {
+        let recent =
+            &self.canonical_runs[self.canonical_runs.len().saturating_sub(RECENT_WINDOW)..];
         let mut comparisons = 0;
-        let seen = self
-            .canonical_runs
-            .iter()
-            .rev()
-            .take(INLINE_CAPACITY)
-            .any(|run| {
-                comparisons += 1;
-                Arc::ptr_eq(run, signature)
-                    || (run.len() == signature.len()
-                        && run.iter().zip(signature.iter()).all(|(left, right)| {
-                            comparisons += 1;
-                            left == right
-                        }))
-            });
+        let mut seen = false;
+        for run in recent.iter().rev() {
+            comparisons += 1;
+            if Arc::ptr_eq(run, signature) {
+                seen = true;
+                break;
+            }
+            if run.len() == signature.len() {
+                let mut equal = true;
+                for (left, right) in run.iter().zip(signature.iter()) {
+                    comparisons += 1;
+                    if left != right {
+                        equal = false;
+                        break;
+                    }
+                }
+                if equal {
+                    seen = true;
+                    break;
+                }
+            }
+        }
         record_signature_work(comparisons);
-        if seen {
-            return;
-        }
-        if is_canonical_run(signature) {
-            self.canonical_runs.push(Arc::clone(signature));
-        } else {
-            self.observe_borrowed_signature(signature);
-        }
+        seen
     }
 
     /// The mark of everything observed so far.
@@ -675,6 +715,19 @@ impl FactReadSet {
         verter_audit::attribute_n!(ReadSetSignatureBuild, self.observations.len());
         if self.mutation_unstable {
             return FactReadSetFinalise::MutationUnstable;
+        }
+        // A scope that only replayed one completed witness seals as that
+        // witness: canonicalising it again would rebuild the same facts.
+        if self.observations.is_empty()
+            && self.canonical_runs.len() == 1
+            && seals_unchanged(&self.canonical_runs[0])
+        {
+            let arc = self.canonical_runs.pop().expect("exactly one absorbed run");
+            return if self.non_cacheable_propagation.is_some() {
+                FactReadSetFinalise::NonCacheable(arc)
+            } else {
+                FactReadSetFinalise::Ok(arc)
+            };
         }
         // Canonicalise so two tracers that observed the same set of facts
         // in different orders produce byte-identical signatures: sort +
@@ -783,6 +836,20 @@ impl FactReadSetCell {
         self.0.borrow_mut().absorb_canonical_signature(signature);
     }
 
+    /// Absorb a canonical witness through `&self`, sharing one order
+    /// verification. See
+    /// [`FactReadSet::absorb_canonical_signature_verified_once`].
+    #[inline]
+    pub fn absorb_canonical_signature_verified_once<'a>(
+        &self,
+        signature: &'a Arc<[FactVersionRef]>,
+        verified: &std::cell::OnceCell<Option<VerifiedCanonicalRun<'a>>>,
+    ) {
+        self.0
+            .borrow_mut()
+            .absorb_canonical_signature_verified_once(signature, verified);
+    }
+
     /// The mark of everything observed so far, through `&self`. See
     /// [`FactReadSet::mark`].
     #[inline]
@@ -880,6 +947,21 @@ impl FactReadSetCell {
 /// the first level, the cut points are positions in the canonical order,
 /// and the returned top level is itself canonical, so it absorbs into an
 /// enclosing tracer as a canonical run like any finalised signature.
+/// Whether sealing the canonical `run` alone reproduces it: no receipt in
+/// it can consume another, no domain can lift or already holds an
+/// aggregate, and it is too narrow to page.
+fn seals_unchanged(run: &[FactVersionRef]) -> bool {
+    run.len() <= FACT_PAGE_WIDTH.min(FACT_DOMAIN_PRECISE_MAX)
+        && run
+            .iter()
+            .filter(|fact| matches!(fact, FactVersionRef::Receipt(_)))
+            .nth(1)
+            .is_none()
+        && !run
+            .iter()
+            .any(|fact| matches!(fact, FactVersionRef::DomainGeneration(_)))
+}
+
 fn page_canonical(entries: Vec<FactVersionRef>) -> Vec<FactVersionRef> {
     page_canonical_at_width(entries, FACT_PAGE_WIDTH)
 }
@@ -982,25 +1064,43 @@ fn is_canonical_run(run: &[FactVersionRef]) -> bool {
         .all(|pair| compare_fact_refs(&pair[0], &pair[1]) == std::cmp::Ordering::Less)
 }
 
+/// A signature verified to be a canonical run — strictly increasing under
+/// the canonical fact order — so it can be absorbed as a run by any number
+/// of read sets. The only way to obtain one is [`Self::verify`]: an
+/// `Arc<[FactVersionRef]>` alone carries no proof of order.
+#[derive(Clone, Copy)]
+pub struct VerifiedCanonicalRun<'a>(&'a Arc<[FactVersionRef]>);
+
+impl<'a> VerifiedCanonicalRun<'a> {
+    /// `signature` as a verified run, or `None` when it is not canonical.
+    #[must_use]
+    pub fn verify(signature: &'a Arc<[FactVersionRef]>) -> Option<Self> {
+        is_canonical_run(signature).then_some(Self(signature))
+    }
+}
+
 /// Merge two strictly-increasing runs into one strictly-increasing run,
 /// dropping cross-run duplicates. `O(left.len() + right.len())`
 /// comparisons, one allocation for the output.
-fn merge_canonical_runs(left: &[FactVersionRef], right: &[FactVersionRef]) -> Vec<FactVersionRef> {
+fn merge_canonical_runs<'a>(
+    left: &[&'a FactVersionRef],
+    right: &[&'a FactVersionRef],
+) -> Vec<&'a FactVersionRef> {
     use std::cmp::Ordering;
     let mut out = Vec::with_capacity(left.len() + right.len());
     let (mut i, mut j) = (0usize, 0usize);
     while i < left.len() && j < right.len() {
-        match compare_fact_refs(&left[i], &right[j]) {
+        match compare_fact_refs(left[i], right[j]) {
             Ordering::Less => {
-                out.push(left[i].clone());
+                out.push(left[i]);
                 i += 1;
             }
             Ordering::Greater => {
-                out.push(right[j].clone());
+                out.push(right[j]);
                 j += 1;
             }
             Ordering::Equal => {
-                out.push(left[i].clone());
+                out.push(left[i]);
                 i += 1;
                 j += 1;
             }
@@ -1012,29 +1112,32 @@ fn merge_canonical_runs(left: &[FactVersionRef], right: &[FactVersionRef]) -> Ve
 }
 
 /// Merge in balanced rounds: a run's prefix is copied once per round,
-/// rather than once for every later child witness.
+/// rather than once for every later child witness. The rounds move
+/// references; each surviving fact is cloned once, into the result.
 fn merge_canonical_batch(
     local: &[FactVersionRef],
     runs: &[Arc<[FactVersionRef]>],
 ) -> Vec<FactVersionRef> {
-    use std::borrow::Cow;
-    let mut level: Vec<Cow<'_, [FactVersionRef]>> = Vec::with_capacity(runs.len() + 1);
+    let mut level: Vec<Vec<&FactVersionRef>> = Vec::with_capacity(runs.len() + 1);
     if !local.is_empty() {
-        level.push(Cow::Borrowed(local));
+        level.push(local.iter().collect());
     }
-    level.extend(runs.iter().map(|run| Cow::Borrowed(run.as_ref())));
+    level.extend(runs.iter().map(|run| run.iter().collect()));
     while level.len() > 1 {
         let mut next = Vec::with_capacity(level.len().div_ceil(2));
         let mut pairs = level.into_iter();
         while let Some(left) = pairs.next() {
             next.push(match pairs.next() {
-                Some(right) => Cow::Owned(merge_canonical_runs(&left, &right)),
+                Some(right) => merge_canonical_runs(&left, &right),
                 None => left,
             });
         }
         level = next;
     }
-    level.pop().map(Cow::into_owned).unwrap_or_default()
+    level
+        .pop()
+        .map(|merged| merged.into_iter().cloned().collect())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

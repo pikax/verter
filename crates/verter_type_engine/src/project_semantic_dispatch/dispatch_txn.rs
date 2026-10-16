@@ -2618,6 +2618,55 @@ pub struct CheckerDispatchTransaction {
     pub call: ResolveCallDomainRuntime,
     /// The type-body augmentation folds completed on this transaction.
     pub augmentation: AugmentationPlanTable,
+    /// The declaration kinds read on this transaction.
+    pub decl_kinds: DeclKindTable,
+}
+
+/// A declaration kind this transaction read completely: the kind, how far
+/// the read may travel, and what reusing it replays.
+#[derive(Debug, Clone)]
+pub struct TransactionDeclKind {
+    pub kind: Option<verter_session_query::declarations::TypeDeclKind>,
+    pub reuse: verter_session_query::facts::reuse::ReuseClass,
+    pub replay: FlowMemberReuse,
+}
+
+/// The declaration kinds read on this transaction, keyed by the content
+/// identity that fixes them.
+#[derive(Default)]
+pub struct DeclKindTable {
+    kinds: FxHashMap<crate::semantic_query::DeclIdentity, TransactionDeclKind>,
+}
+
+impl std::fmt::Debug for DeclKindTable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeclKindTable")
+            .field("kinds", &self.kinds.len())
+            .finish()
+    }
+}
+
+impl DeclKindTable {
+    /// The completed read of `identity`'s kind, if any.
+    pub fn get(
+        &self,
+        identity: &crate::semantic_query::DeclIdentity,
+    ) -> Option<&TransactionDeclKind> {
+        self.kinds.get(identity)
+    }
+
+    /// Record a completed read. Only a request-reusable class enters; the
+    /// first completion answers every later demand.
+    pub fn complete(
+        &mut self,
+        identity: crate::semantic_query::DeclIdentity,
+        read: TransactionDeclKind,
+    ) {
+        if !read.reuse.is_request_reusable() {
+            return;
+        }
+        self.kinds.entry(identity).or_insert(read);
+    }
 }
 
 /// The demand a type-body augmentation fold answers: the declaration the
@@ -2632,6 +2681,37 @@ pub struct AugmentationPlanKey {
     pub type_arguments: Arc<[SemanticNodeId]>,
     pub request_canonical: Arc<str>,
     pub excluded_contributor: Option<Arc<str>>,
+}
+
+impl AugmentationPlanKey {
+    /// The demand an absent fold answers. No contributor exists for the
+    /// declaration whatever its arguments, so the arguments are not part
+    /// of it.
+    pub fn absence(&self) -> AugmentationAbsenceKey {
+        AugmentationAbsenceKey {
+            target: self.target.clone(),
+            decl_name: Arc::clone(&self.decl_name),
+            request_canonical: Arc::clone(&self.request_canonical),
+            excluded_contributor: self.excluded_contributor.clone(),
+        }
+    }
+}
+
+/// The declaration a fold read no contributor for: its target and name,
+/// the requesting file and the contributor the caller already holds.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AugmentationAbsenceKey {
+    pub target: verter_session_query::resolution::AugmentationTargetKind,
+    pub decl_name: Arc<str>,
+    pub request_canonical: Arc<str>,
+    pub excluded_contributor: Option<Arc<str>>,
+}
+
+/// A fold this transaction completed that read no contributor: how far
+/// the read may travel and what reusing it replays.
+pub struct TransactionAugmentationAbsence {
+    pub reuse: verter_session_query::facts::reuse::ReuseClass,
+    pub replay: FlowMemberReuse,
 }
 
 /// A type-body fold completed on this transaction: the plan, how far it
@@ -2650,12 +2730,14 @@ pub struct TransactionAugmentationPlan {
 #[derive(Default)]
 pub struct AugmentationPlanTable {
     plans: FxHashMap<AugmentationPlanKey, TransactionAugmentationPlan>,
+    absences: FxHashMap<AugmentationAbsenceKey, TransactionAugmentationAbsence>,
 }
 
 impl std::fmt::Debug for AugmentationPlanTable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AugmentationPlanTable")
             .field("plans", &self.plans.len())
+            .field("absences", &self.absences.len())
             .finish()
     }
 }
@@ -2673,6 +2755,25 @@ impl AugmentationPlanTable {
             return;
         }
         self.plans.entry(key).or_insert(plan);
+    }
+
+    /// The completed absent fold of `key`, if any.
+    pub fn absence(&self, key: &AugmentationAbsenceKey) -> Option<&TransactionAugmentationAbsence> {
+        self.absences.get(key)
+    }
+
+    /// Record that `key`'s fold read no contributor. Only a
+    /// request-reusable class enters; the first completion answers every
+    /// later demand.
+    pub fn complete_absence(
+        &mut self,
+        key: AugmentationAbsenceKey,
+        absence: TransactionAugmentationAbsence,
+    ) {
+        if !absence.reuse.is_request_reusable() {
+            return;
+        }
+        self.absences.entry(key).or_insert(absence);
     }
 }
 

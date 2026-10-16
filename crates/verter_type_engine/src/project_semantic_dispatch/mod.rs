@@ -1853,6 +1853,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let env = self
             .ctx
             .host_view_env_hashes_for(seed.defining_canonical.as_ref());
+        self.finalize_slot_seed_in_env(seed, &env)
+    }
+
+    /// [`Self::finalize_slot_seed`] under the defining file's env hashes a
+    /// caller already read for that file.
+    pub(super) fn finalize_slot_seed_in_env(
+        &self,
+        seed: crate::semantic_query::DeclarationSlotSeed,
+        env: &verter_session_query::resolution::EnvHashes,
+    ) -> crate::semantic_query::ResolvedDeclSlotIdentity {
         let project_identity = self
             .ctx
             .host_view_project_identity_for(seed.defining_canonical.as_ref())
@@ -4599,24 +4609,29 @@ fn finalise_rooted_build_output<T, C: crate::resolver_core::ResolverCapabilities
             // augmentation state (cache poisoning).
             let prelude_facts: &[verter_session_query::facts::fact_cache::FactVersionRef] =
                 carrier_prelude.facts.as_deref().unwrap_or(&[]);
-            let merged_facts: Vec<verter_session_query::facts::fact_cache::FactVersionRef> =
-                if fence_facts.is_empty() && prelude_facts.is_empty() {
-                    traced_facts.iter().cloned().collect()
-                } else {
-                    let mut merged: Vec<verter_session_query::facts::fact_cache::FactVersionRef> =
-                        Vec::with_capacity(
+            // Built once for the carrier; built again only when the entry
+            // cannot be rooted and the facts ride a non-admitted carrier.
+            let merged_facts =
+                || -> Vec<verter_session_query::facts::fact_cache::FactVersionRef> {
+                    if fence_facts.is_empty() && prelude_facts.is_empty() {
+                        traced_facts.iter().cloned().collect()
+                    } else {
+                        let mut merged: Vec<
+                            verter_session_query::facts::fact_cache::FactVersionRef,
+                        > = Vec::with_capacity(
                             traced_facts.len() + fence_facts.len() + prelude_facts.len(),
                         );
-                    merged.extend(traced_facts.iter().cloned());
-                    for fact in fence_facts.into_iter().chain(prelude_facts.iter().cloned()) {
-                        if !merged.iter().any(|existing| existing == &fact) {
-                            merged.push(fact);
+                        merged.extend(traced_facts.iter().cloned());
+                        for fact in fence_facts.iter().chain(prelude_facts.iter()) {
+                            if !merged.iter().any(|existing| existing == fact) {
+                                merged.push(fact.clone());
+                            }
                         }
+                        merged
                     }
-                    merged
                 };
             let completed =
-                ctx.complete_graph_signature(&output.observed_self_roots, &merged_facts);
+                ctx.complete_graph_signature(&output.observed_self_roots, merged_facts());
             match completed {
                 Ok((facts, self_root_canonicals)) => {
                     if finalised_cleanly {
@@ -4674,7 +4689,7 @@ fn finalise_rooted_build_output<T, C: crate::resolver_core::ResolverCapabilities
                     output.graph_carrier = Some(Box::new(
                         verter_session_query::facts::fact_cache::ReadSetSignature::new(
                             verter_session_query::facts::fact_read_set::seal_canonical_signature(
-                                merged_facts,
+                                merged_facts(),
                             ),
                         ),
                     ));

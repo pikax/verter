@@ -1869,7 +1869,7 @@ mod fact_validation_authority {
                 std::sync::Arc<str>,
                 verter_session_query::analysis::types::Hash16,
             )],
-            facts: &[FactVersionRef],
+            facts: Vec<FactVersionRef>,
         ) -> Result<
             verter_type_engine::fact_signature_helpers::StructuralCarrierReadSet,
             verter_audit::NonAdmissionReason,
@@ -1878,9 +1878,7 @@ mod fact_validation_authority {
                 crate::resolver_store::StoreViewRead::Current(current) => current.view().clone(),
                 crate::resolver_store::StoreViewRead::ReturnOnly { view, .. } => view,
             };
-            verter_type_engine::semantic_query_memo::semantic_graph_read_set_signature(
-                &view, roots, facts,
-            )
+            verter_type_engine::semantic_query_memo::semantic_graph_carrier(&view, roots, facts)
         }
         fn tracer_forcing(&self) -> bool {
             self.test_force

@@ -3918,7 +3918,15 @@ impl StoreViewManager {
                         // The cached entry's token equals the live host
                         // token under the lock: proven current, safe for
                         // warm-cache validation.
-                        return StoreViewRead::Current(CurrentHostStoreView(view.clone()));
+                        let view = view.clone();
+                        drop(state);
+                        // A view a caller still held when this one was
+                        // published may have released its root since; the
+                        // versions only that root saw are reclaimable now.
+                        host.project_type_store()
+                            .indexed()
+                            .reclaim_after_root_release();
+                        return StoreViewRead::Current(CurrentHostStoreView(view));
                     }
                 }
                 if state.building.is_claimed() {
@@ -3975,6 +3983,11 @@ impl StoreViewManager {
                     // view.
                     drop(state);
                     drop(claim);
+                    // A published view replaced the previous one: the
+                    // versions only its root still saw are reclaimable.
+                    host.project_type_store()
+                        .indexed()
+                        .reclaim_after_root_release();
                     match outcome {
                         // Published / coalesced onto a live same-token entry:
                         // the view's token equals the live host token, so it
@@ -4121,6 +4134,9 @@ impl StoreViewManager {
                     );
                     drop(state);
                     drop(claim);
+                    host.project_type_store()
+                        .indexed()
+                        .reclaim_after_root_release();
                     match outcome {
                         PublishOutcome::Published { view } => {
                             return StoreViewRead::Current(CurrentHostStoreView(view));

@@ -1,8 +1,14 @@
 {
   "name": "skr-augment-scaleb",
-  "description": "A global interface merged from 2,000 script contributors and a module interface augmented by 2,000 unimported modules, each read through an indexed access over every member: cold release latency and peak memory.",
+  "description": "A global interface merged from 2,000 script contributors and a module interface augmented by 2,000 unimported modules, each read through an indexed access over every member: cold release latency and peak memory, and, for each, the retention proof of one engine answering 500 then 2,000 contributors against a 2,000-only baseline.",
   "tier": "standard",
   "scenarios": ["augment-global-2000", "augment-module-2000"],
+  "sessions": [
+    "augment-global-growth",
+    "augment-global-baseline",
+    "augment-module-growth",
+    "augment-module-baseline"
+  ],
   "settings": ["strict"],
   "arms": ["verter"],
   "modes": ["cold"],

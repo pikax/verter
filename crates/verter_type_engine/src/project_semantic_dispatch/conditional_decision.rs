@@ -1153,6 +1153,25 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         if !is_resolvable_shell {
             return None;
         }
+        // An interface or a class names an object type, never a union:
+        // its reference has nothing to distribute over, so it is not
+        // resolved here.
+        let names_object_declaration = match self.graph().node_data(check).as_deref() {
+            Some(
+                SemanticNodeData::DeclRef { identity }
+                | SemanticNodeData::InstantiationRef { base: identity, .. },
+            ) => matches!(
+                self.prepared_decl_kind(identity),
+                Some(
+                    verter_session_query::declarations::TypeDeclKind::Interface
+                        | verter_session_query::declarations::TypeDeclKind::Class
+                )
+            ),
+            _ => false,
+        };
+        if names_object_declaration {
+            return None;
+        }
         let resolved = self
             .normalize_node_for_structural_fact_demand(
                 check,

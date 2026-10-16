@@ -382,6 +382,17 @@ pub struct RecordedFactReads {
     pub non_cacheable: bool,
 }
 
+impl RecordedFactReads {
+    /// Fan the recorded facts out again into the live tracers, as reusing
+    /// the computation that read them must. They were recorded in canonical
+    /// order, so each live read set retains them as one run instead of
+    /// copying every fact; a set built by hand in another order is copied.
+    #[inline]
+    pub(crate) fn replay(&self) {
+        tracer_stack::observe_fan_out_canonical(&self.facts);
+    }
+}
+
 /// Where the active scopes stood when a computation began, so its
 /// observations can be replaced by its receipt if it completes
 /// ([`complete_with_receipt`]).

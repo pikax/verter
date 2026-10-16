@@ -252,6 +252,147 @@ enum Slot<'a> {
     Live(&'a Arc<SemanticNodeData>, &'a NodeScopeId),
 }
 
+/// Empty window entries tolerated beyond the window's live chunks before
+/// the window is compacted.
+const CHUNK_WINDOW_SLACK: usize = 16;
+
+/// Live chunks addressed by chunk number (`id >> CHUNK_BITS`).
+///
+/// Ids are monotonic, so recent chunks sit in a dense window addressed by
+/// `chunk - base`: a lookup there is one bounds check, not a hash probe.
+/// The window stays dense: once its empty entries outnumber its live chunks
+/// (plus [`CHUNK_WINDOW_SLACK`]), the leading entries leave it, empty ones
+/// dropped and live ones moved to `older`, an ordered map of the chunks
+/// numbered below the window. The table's own storage therefore follows the
+/// live chunk count, never the number of chunks ever allocated.
+#[derive(Default)]
+struct ChunkTable {
+    /// Live chunks numbered below `base`.
+    older: std::collections::BTreeMap<u64, Box<Chunk>>,
+    /// The chunk number of `window[0]`.
+    base: u64,
+    window: Vec<Option<Box<Chunk>>>,
+    /// Live chunks in `window`.
+    window_live: usize,
+}
+
+impl ChunkTable {
+    #[inline]
+    fn get(&self, key: &u64) -> Option<&Chunk> {
+        match key.checked_sub(self.base) {
+            Some(offset) => self
+                .window
+                .get(usize::try_from(offset).ok()?)
+                .and_then(Option::as_deref),
+            None => self.older.get(key).map(Box::as_ref),
+        }
+    }
+
+    #[inline]
+    fn get_mut(&mut self, key: &u64) -> Option<&mut Chunk> {
+        match key.checked_sub(self.base) {
+            Some(offset) => self
+                .window
+                .get_mut(usize::try_from(offset).ok()?)
+                .and_then(Option::as_deref_mut),
+            None => self.older.get_mut(key).map(Box::as_mut),
+        }
+    }
+
+    fn get_or_insert_empty(&mut self, key: u64) -> &mut Chunk {
+        let Some(offset) = key.checked_sub(self.base) else {
+            return self
+                .older
+                .entry(key)
+                .or_insert_with(|| Box::new(Chunk::empty()));
+        };
+        let index = usize::try_from(offset).expect("chunk number fits the address space");
+        if self.window.len() <= index {
+            self.window.resize_with(index + 1, || None);
+        }
+        let slot = &mut self.window[index];
+        if slot.is_none() {
+            self.window_live += 1;
+        }
+        slot.get_or_insert_with(|| Box::new(Chunk::empty()))
+    }
+
+    fn remove(&mut self, key: &u64) {
+        let Some(offset) = key.checked_sub(self.base) else {
+            self.older.remove(key);
+            return;
+        };
+        let Some(slot) = usize::try_from(offset)
+            .ok()
+            .and_then(|index| self.window.get_mut(index))
+        else {
+            return;
+        };
+        if slot.take().is_some() {
+            self.window_live -= 1;
+            self.compact_window();
+        }
+    }
+
+    /// Move the window's leading entries out while it is sparse: an empty
+    /// entry is dropped, a live chunk moves to `older`. One drain per
+    /// compaction, and a compaction runs only once the empty entries exceed
+    /// the live ones, so its cost is amortised over the releases that made
+    /// the window sparse.
+    fn compact_window(&mut self) {
+        if self.window.len() <= 2 * self.window_live + CHUNK_WINDOW_SLACK {
+            return;
+        }
+        let len = self.window.len();
+        let mut leading = 0;
+        let mut live_left = self.window_live;
+        while len - leading > 2 * live_left + CHUNK_WINDOW_SLACK / 2 {
+            if let Some(chunk) = self.window[leading].take() {
+                self.older.insert(self.base + leading as u64, chunk);
+                live_left -= 1;
+            }
+            leading += 1;
+        }
+        self.window.drain(..leading);
+        self.base += leading as u64;
+        self.window_live = live_left;
+    }
+
+    /// Live chunk numbers in ascending order.
+    fn keys(&self) -> impl Iterator<Item = u64> + '_ {
+        let base = self.base;
+        self.older.keys().copied().chain(
+            self.window
+                .iter()
+                .enumerate()
+                .filter(|(_, chunk)| chunk.is_some())
+                .map(move |(index, _)| base + index as u64),
+        )
+    }
+
+    fn values(&self) -> impl Iterator<Item = &Chunk> {
+        self.older
+            .values()
+            .map(Box::as_ref)
+            .chain(self.window.iter().filter_map(Option::as_deref))
+    }
+
+    fn len(&self) -> usize {
+        self.older.len() + self.window_live
+    }
+
+    /// Entries the table holds, live or empty: what it costs to keep.
+    #[cfg(test)]
+    fn held_entries(&self) -> usize {
+        self.older.len() + self.window.len()
+    }
+
+    #[cfg(test)]
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
 /// Interior state of [`NodeArena`]. Held behind an `RwLock` so reads
 /// (non-hot-path) are concurrent while the allocating intern-miss path
 /// serializes on the writer.
@@ -259,7 +400,7 @@ enum Slot<'a> {
 pub(super) struct ArenaInner {
     /// Live chunks keyed by `id >> CHUNK_BITS`. A chunk is created by the first
     /// id allocated into it and dropped by the release of its last live slot.
-    chunks: rustc_hash::FxHashMap<u64, Chunk>,
+    chunks: ChunkTable,
     /// The next id to hand out: every id below it was allocated exactly once.
     next_id: u64,
     /// Live slots across every chunk, maintained on every allocation and
@@ -286,10 +427,7 @@ impl ArenaInner {
     fn allocate(&mut self, payload: Arc<SemanticNodeData>, scope: NodeScopeId) -> SemanticNodeId {
         let id = SemanticNodeId(self.next_id);
         self.next_id += 1;
-        let chunk = self
-            .chunks
-            .entry(id.0 >> CHUNK_BITS)
-            .or_insert_with(Chunk::empty);
+        let chunk = self.chunks.get_or_insert_empty(id.0 >> CHUNK_BITS);
         let index = (id.0 & CHUNK_MASK) as usize;
         chunk.nodes[index] = Some(payload);
         chunk.scopes[index] = Some(scope);
@@ -322,10 +460,9 @@ impl ArenaInner {
 
     /// Every live `(id, payload, scope)` in ascending id order.
     fn live_slots(&self) -> impl Iterator<Item = (u64, &Arc<SemanticNodeData>, &NodeScopeId)> {
-        let mut keys: Vec<u64> = self.chunks.keys().copied().collect();
-        keys.sort_unstable();
+        let keys: Vec<u64> = self.chunks.keys().collect();
         keys.into_iter().flat_map(move |key| {
-            let chunk = &self.chunks[&key];
+            let chunk = self.chunks.get(&key).expect("listed chunk is live");
             chunk
                 .nodes
                 .iter()

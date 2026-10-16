@@ -263,6 +263,15 @@ pub fn current_job_cancellation_token() -> Option<CancellationToken> {
     CURRENT_JOB_CANCELLATION.with(|slot| slot.borrow().clone())
 }
 
+/// Read the aggregate cancellation token of the scheduler job executing on
+/// this thread, if any, without taking a reference to it. A checkpoint that
+/// only asks whether the token is cancelled reads it in place.
+pub fn with_current_job_cancellation_token<R>(
+    read: impl FnOnce(Option<&CancellationToken>) -> R,
+) -> R {
+    CURRENT_JOB_CANCELLATION.with(|slot| read(slot.borrow().as_ref()))
+}
+
 /// Stack-safe TLS guard for one scheduler-owned job cancellation token.
 pub struct JobCancellationGuard {
     previous: Option<CancellationToken>,

@@ -45,12 +45,17 @@ import {
 import {
   classifyMeta,
   requiredStateComparison,
+  retentionProof,
   sessionArmsOf,
   sessionInputs,
   sessionAnswers,
+  sessionRecordProblems,
+  summarizeSessions,
 } from "./session-analyze.mjs";
 import {
   allSessions,
+  GROWTH_FIRST,
+  GROWTH_GROWN,
   INCREMENTAL_FACILITY,
   SESSION_TIERS,
   sessionProblems,
@@ -2075,6 +2080,9 @@ test("the session catalog is well-formed and each workload sits in its tier", ()
   const sessions = allSessions();
   assert.deepEqual(sessions.map((x) => x.family).sort(), [
     "augmentation",
+    "augmentation",
+    "augmentation",
+    "augmentation",
     "concurrent",
     "editor",
     "incremental",
@@ -2086,15 +2094,31 @@ test("the session catalog is well-formed and each workload sits in its tier", ()
       session.family === "augmentation" ? "standard" : "quick",
     );
   }
-  // The growth session demands the 500-contributor interface, then the
-  // 2,000-contributor one, in one engine; the quick tier leaves it out.
-  const growth = sessions.find((x) => x.family === "augmentation");
-  assert.deepEqual(
-    growth.steps.map((x) => x.requests.map((r) => r.expect.split(" | ").length)),
-    [[500], [2000]],
-  );
-  assert.ok(!sessionsFor("quick", TIERS).some((x) => x.id === growth.id));
-  assert.ok(sessionsFor("standard", TIERS).some((x) => x.id === growth.id));
+  // Each augmentation reproduction has a growth session — one engine
+  // answering 500 contributors, edits filling in the other 1,500
+  // contributor files, then the 2,000-contributor answer — and a baseline
+  // session answering 2,000 alone over the same files. The quick tier
+  // leaves them out.
+  for (const kind of ["global", "module"]) {
+    const growth = sessions.find((x) => x.id === `augment-${kind}-growth`);
+    const baseline = sessions.find((x) => x.id === `augment-${kind}-baseline`);
+    assert.deepEqual(growth.retentionProof, { baseline: baseline.id, first: GROWTH_FIRST });
+    const members = (step) => step.requests[0].expect.split(" | ").length;
+    const extra = kind === "module" ? 1 : 0;
+    const [first, ...rest] = growth.steps;
+    const last = rest.pop();
+    assert.equal(members(first), GROWTH_FIRST + extra);
+    assert.equal(members(last), GROWTH_GROWN + extra);
+    assert.equal(rest.length, GROWTH_GROWN - GROWTH_FIRST);
+    assert.ok(rest.every((x) => x.kind === "edit" && growth.files[x.file] !== x.text));
+    assert.deepEqual(Object.keys(growth.files).sort(), Object.keys(baseline.files).sort());
+    for (const edit of rest) assert.equal(baseline.files[edit.file], edit.text);
+    assert.deepEqual(baseline.steps.map(members), [GROWTH_GROWN + extra]);
+    for (const id of [growth.id, baseline.id]) {
+      assert.ok(!sessionsFor("quick", TIERS).some((x) => x.id === id));
+      assert.ok(sessionsFor("standard", TIERS).some((x) => x.id === id));
+    }
+  }
   // The incremental script edits a leaf, an intermediate type and an
   // unrelated file, re-requesting after each; the editor session demands
   // component metadata; the concurrent one issues its demands at once.
@@ -2486,4 +2510,186 @@ test("a session invocation whose supervisor file is unreadable is reported", () 
     invocations: [],
   };
   assert.ok(rawFileProblems(run).some((p) => /cannot read .*absent-supervisor/.test(p)));
+});
+
+/** Per-step retention figures as the Verter session runner records them. */
+const retentionFigures = (overrides = {}) => ({
+  ...RETENTION,
+  semanticMemoCandidates: 2030,
+  liveArtifacts: 2003,
+  retiredVersions: 0,
+  snapshotLeases: 2003,
+  pinnedBytes: 8_000_000,
+  retainedBytes: 3_900_000,
+  ...overrides,
+});
+
+/** A growth record whose first demand added `firstAnswers` candidates beyond its lowerings. */
+function growthRecord(session, grown, { firstAnswers = 28, firstBytes = 3_000_000 } = {}) {
+  const steps = session.steps.map(() => retentionFigures());
+  steps[0] = retentionFigures({
+    semanticMemoCandidates: 2 + GROWTH_FIRST + firstAnswers,
+    retainedBytes: 1000 + firstBytes,
+  });
+  steps[steps.length - 1] = grown;
+  return {
+    initRetention: retentionFigures({ semanticMemoCandidates: 2, retainedBytes: 1000 }),
+    stepRetention: steps,
+  };
+}
+
+test("a growth session's retention proof discriminates retained growth beyond the answers", () => {
+  const session = allSessions().find((x) => x.id === "augment-global-growth");
+  const baseline = { stepRetention: [retentionFigures()] };
+  // The first demand's superseded answers survive: within the allowance.
+  const answersOnly = retentionFigures({ semanticMemoCandidates: 2053, retainedBytes: 6_100_000 });
+  const passed = retentionProof(session, [growthRecord(session, answersOnly)], [baseline]);
+  assert.equal(passed.verdict, "passed", passed.problems.join("; "));
+  assert.equal(passed.pairs, 1);
+  assert.deepEqual(passed.figures.firstAnswers, { memoCandidates: 28, retainedBytes: 3_000_000 });
+  // Planted retention: the 1,500 superseded slot versions stay pinned with
+  // their parse snapshots after the grown answer.
+  const pinned = retentionFigures({
+    retiredVersions: 3000,
+    snapshotLeases: 3503,
+    pinnedBytes: 11_000_000,
+  });
+  const leak = retentionProof(session, [growthRecord(session, pinned)], [baseline]);
+  assert.equal(leak.verdict, "failed");
+  assert.deepEqual(
+    leak.problems.map((p) => p.split(" ")[0]),
+    ["pinnedBytes", "retiredVersions", "snapshotLeases"],
+  );
+  // Planted retention: every first-step contributor's lowering stays cached
+  // beside the grown one.
+  const lowerings = retentionFigures({ semanticMemoCandidates: 2030 + GROWTH_FIRST });
+  assert.match(
+    retentionProof(session, [growthRecord(session, lowerings)], [baseline]).problems.join(),
+    /semanticMemoCandidates 2530 exceeds the baseline's 2030 plus the first answer's 28/,
+  );
+  // Retained bytes beyond the first step's own.
+  const bytes = retentionFigures({ retainedBytes: 3_900_000 + 3_000_001 });
+  assert.match(
+    retentionProof(session, [growthRecord(session, bytes)], [baseline]).problems.join(),
+    /retainedBytes 6900001 exceeds/,
+  );
+  // A reading without its counters is no comparison: otherwise valid,
+  // matching records whose readings are emptied fail rather than pass.
+  const emptied = growthRecord(session, answersOnly);
+  emptied.initRetention = {};
+  emptied.stepRetention = emptied.stepRetention.map(() => ({}));
+  const blank = retentionProof(session, [emptied], [baseline]);
+  assert.equal(blank.verdict, "failed");
+  assert.equal(blank.pairs, 0);
+  assert.match(blank.problems.join(), /the growth's init reading has no numeric retainedBytes/);
+  assert.match(blank.problems.join(), /the growth's last reading has no numeric pinnedBytes/);
+  const unread = { stepRetention: [retentionFigures({ snapshotLeases: undefined })] };
+  assert.match(
+    retentionProof(session, [growthRecord(session, answersOnly)], [unread]).problems.join(),
+    /the baseline's last reading has no numeric snapshotLeases/,
+  );
+  // A completed record that did not answer fails the proof.
+  const unanswered = retentionProof(session, [growthRecord(session, answersOnly)], [baseline], {
+    unanswered: 1,
+  });
+  assert.equal(unanswered.verdict, "failed");
+  assert.match(unanswered.problems.join(), /did not answer every demand/);
+  // Nothing to compare is no verdict, never a pass.
+  assert.equal(retentionProof(session, [], [baseline]).verdict, "n/a");
+  assert.equal(
+    retentionProof(session, [{ initRetention: null, stepRetention: [] }], [baseline]).verdict,
+    "failed",
+  );
+});
+
+/** Retention readings a growth session's records and its baseline's carry, within the proof's bounds. */
+function provableRetention(session) {
+  if (session.retentionProof)
+    return growthRecord(
+      session,
+      retentionFigures({ semanticMemoCandidates: 2053, retainedBytes: 6_100_000 }),
+    );
+  return {
+    initRetention: retentionFigures(),
+    stepRetention: session.steps.map(() => retentionFigures()),
+  };
+}
+
+test("a retention proof compares only records that answered every demand", () => {
+  const sessions = allSessions().filter((x) => x.id.startsWith("augment-"));
+  const summarizeWith = (plant) => {
+    const run = syntheticRun({ arms: ["verter"] });
+    run.meta.options.only = ["synthetic", ...sessions.map((x) => x.id)];
+    addSessions(run, sessions);
+    for (const inv of run.sessionInvocations) {
+      const session = sessions.find((x) => x.id === inv.sessionId);
+      Object.assign(inv.session, provableRetention(session));
+      plant(inv, session);
+    }
+    return summarizeSessions(run, sessions).cells;
+  };
+  const lastDemand = (inv, session) =>
+    inv.session.steps[session.steps.findLastIndex((step) => step.kind === "demand")];
+  for (const cell of summarizeWith(() => {}).filter((c) => c.retentionProof))
+    assert.equal(cell.retentionProof.verdict, "passed", cell.retentionProof.problems.join("; "));
+  const cells = summarizeWith((inv, session) => {
+    if (session.id === "augment-global-growth")
+      lastDemand(inv, session).requests[0].observation = verterObservation("never");
+    if (session.id === "augment-module-baseline")
+      lastDemand(inv, session).requests[0].outcome = {
+        kind: "fault",
+        detail: "the request's projection budget was exceeded",
+      };
+  });
+  for (const key of ["augment-global-growth", "augment-module-growth"]) {
+    const proof = cells.find((c) => c.key === key).retentionProof;
+    assert.equal(proof.verdict, "failed", key);
+    assert.match(proof.problems.join(), /did not answer every demand with its constructed answer/);
+  }
+});
+
+test("a growth session's Verter record must carry every retention reading", () => {
+  const session = allSessions().find((x) => x.id === "augment-module-growth");
+  const record = { ...verterSessionRecord(session), ...provableRetention(session) };
+  assert.deepEqual(sessionRecordProblems(record, session, { tool: "verter" }), []);
+  const bare = verterSessionRecord(session);
+  assert.ok(
+    sessionRecordProblems(bare, session, { tool: "verter" }).includes(
+      "the init retention reading carries no retention counters",
+    ),
+  );
+  const emptied = { ...record, stepRetention: record.stepRetention.map(() => ({})) };
+  assert.ok(
+    sessionRecordProblems(emptied, session, { tool: "verter" }).some((p) =>
+      /step 0's retention reading has no numeric liveArtifacts/.test(p),
+    ),
+  );
+  const baseline = allSessions().find((x) => x.id === "augment-module-baseline");
+  assert.ok(
+    sessionRecordProblems(verterSessionRecord(baseline), baseline, { tool: "verter" }).some((p) =>
+      /retention/.test(p),
+    ),
+  );
+});
+
+test("the session summary carries each growth session's retention proof", () => {
+  const sessions = allSessions().filter((x) => x.id.startsWith("augment-global-"));
+  const run = syntheticRun({ arms: ["verter"] });
+  run.meta.options.only = ["synthetic", ...sessions.map((x) => x.id)];
+  addSessions(run, sessions);
+  for (const inv of run.sessionInvocations) {
+    const session = sessions.find((x) => x.id === inv.sessionId);
+    Object.assign(
+      inv.session,
+      session.retentionProof
+        ? growthRecord(session, retentionFigures({ snapshotLeases: 2004 }))
+        : { initRetention: retentionFigures(), stepRetention: [retentionFigures()] },
+    );
+  }
+  const cells = summarizeSessions(run, sessions).cells;
+  const growth = cells.find((c) => c.key === "augment-global-growth");
+  assert.equal(growth.retentionProof.baseline, "augment-global-baseline");
+  assert.equal(growth.retentionProof.verdict, "failed");
+  assert.match(growth.retentionProof.problems.join(), /snapshotLeases 2004 exceeds/);
+  assert.equal(cells.find((c) => c.key === "augment-global-baseline").retentionProof, undefined);
 });

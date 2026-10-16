@@ -1637,9 +1637,8 @@ impl FamilySlots {
         displaced
     }
 
-    /// Total number of distinct slots that hold at least one
-    /// candidate. Used by the per-store memo size accounting.
-    pub(super) fn populated_count(&self) -> usize {
+    /// Every candidate list of the family, one per mode slot.
+    fn candidate_lists(&self) -> [&CandidateList; 13] {
         [
             &self.single,
             &self.identity,
@@ -1655,9 +1654,21 @@ impl FamilySlots {
             &self.macro_surface_shallow,
             &self.vue_runtime_surface_shallow,
         ]
-        .iter()
-        .filter(|list| !list.is_empty())
-        .count()
+    }
+
+    /// Total number of candidates across every slot: what the family
+    /// retains, superseded variants included.
+    pub(super) fn candidate_count(&self) -> usize {
+        self.candidate_lists().iter().map(|list| list.len()).sum()
+    }
+
+    /// Total number of distinct slots that hold at least one
+    /// candidate. Used by the per-store memo size accounting.
+    pub(super) fn populated_count(&self) -> usize {
+        self.candidate_lists()
+            .iter()
+            .filter(|list| !list.is_empty())
+            .count()
     }
 
     /// Audit-only iterator that yields one `(slot_label, &MemoEntry)`

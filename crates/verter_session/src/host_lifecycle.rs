@@ -914,6 +914,10 @@ impl VerterHost {
                 .semantic_graph()
                 .node_storage_slots(),
             semantic_memo_entries: self.project_type_store.semantic_graph().memo_entry_count(),
+            semantic_memo_candidates: self
+                .project_type_store
+                .semantic_graph()
+                .memo_candidate_count(),
             unresolved_reach: self
                 .project_type_store
                 .semantic_graph()

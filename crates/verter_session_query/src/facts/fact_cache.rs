@@ -432,6 +432,29 @@ impl<'a> Iterator for SignatureEntries<'a> {
     }
 }
 
+/// Distinct canonicals compared linearly while few, through a set once
+/// many: the common signature names a handful of files.
+fn push_unique_canonical<'a>(
+    out: &mut smallvec::SmallVec<[&'a str; 8]>,
+    seen: &mut Option<rustc_hash::FxHashSet<&'a str>>,
+    canonical: &'a str,
+) {
+    const LINEAR: usize = 16;
+    if let Some(set) = seen {
+        if set.insert(canonical) {
+            out.push(canonical);
+        }
+        return;
+    }
+    if out.contains(&canonical) {
+        return;
+    }
+    out.push(canonical);
+    if out.len() > LINEAR {
+        *seen = Some(out.iter().copied().collect());
+    }
+}
+
 /// A computation's complete dependency evidence: every fact it observed,
 /// paged when wide, and the receipts of the results it consumed. Width is
 /// never a refusal reason, so a signature always holds its whole read set;
@@ -479,23 +502,29 @@ impl ReadSetSignature {
     /// its evidence reaches (its summary, not a walk).
     #[must_use]
     pub fn canonical_ids(&self) -> Vec<Arc<str>> {
-        let mut seen = rustc_hash::FxHashSet::<Arc<str>>::default();
-        let mut out = Vec::new();
+        self.canonical_id_refs()
+            .into_iter()
+            .map(Arc::from)
+            .collect()
+    }
+
+    /// [`Self::canonical_ids`] borrowed from the signature: the same
+    /// canonicals in the same order, without an owned copy of each. A
+    /// consumer that only looks canonicals up (the reverse index registering
+    /// or pruning a candidate) needs no allocation per canonical.
+    #[must_use]
+    pub fn canonical_id_refs(&self) -> smallvec::SmallVec<[&str; 8]> {
+        let mut out = smallvec::SmallVec::new();
+        let mut seen = None;
         for fact in self.facts.iter() {
             if let FactVersionRef::Receipt(receipt) = fact {
                 for canonical_id in receipt.canonicals().iter() {
-                    if seen.insert(Arc::clone(canonical_id)) {
-                        out.push(Arc::clone(canonical_id));
-                    }
+                    push_unique_canonical(&mut out, &mut seen, canonical_id.as_ref());
                 }
                 continue;
             }
-            let Some(canonical_id) = fact.canonical_id() else {
-                continue;
-            };
-            let canonical_id: Arc<str> = Arc::from(canonical_id);
-            if seen.insert(Arc::clone(&canonical_id)) {
-                out.push(canonical_id);
+            if let Some(canonical_id) = fact.canonical_id() {
+                push_unique_canonical(&mut out, &mut seen, canonical_id);
             }
         }
         out

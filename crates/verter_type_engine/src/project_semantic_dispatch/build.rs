@@ -195,11 +195,30 @@ enum TransactionFold {
     Plan(Arc<AugmentationPlan>),
 }
 
-/// What an augmentation fold produced: lowered contributions, or the
-/// unprojected plan of a type-body fold.
+/// What an augmentation fold produced: lowered contributions, the
+/// unprojected plan of a type-body fold, or the read that no declaration
+/// beside the base exists for the target.
 enum FoldedAugmentation {
     Contributions(AugmentationContributions),
     Plan(AugmentationPlan),
+    /// Neither an augmenting block nor another file-scope declaration
+    /// contributes to the declaration. Decided by the augmenter set and the
+    /// contributors' retained declarations alone, never by the declaration's
+    /// arguments or projection context, so it answers every instantiation of
+    /// the declaration alike.
+    Absent,
+}
+
+impl FoldedAugmentation {
+    fn into_transaction_fold(self) -> Option<TransactionFold> {
+        match self {
+            Self::Contributions(contributions) => {
+                Some(TransactionFold::Contributions(contributions))
+            }
+            Self::Plan(plan) => Some(TransactionFold::Plan(Arc::new(plan))),
+            Self::Absent => None,
+        }
+    }
 }
 
 /// Shared return shape of the augmenter-fold path
@@ -585,7 +604,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> Vec<crate::semantic_query_memo::ObservedGraphSelfRoot> {
         let graph = self.graph();
         let mut roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot> = Vec::new();
-        let mut seen = FxHashSet::default();
+        // Few distinct roots: compared linearly until a set pays.
+        let mut seen: Option<FxHashSet<crate::semantic_query_memo::ObservedGraphSelfRoot>> = None;
         for node in nodes {
             if let Some(NodeScopeId::File {
                 canonical_id,
@@ -594,8 +614,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }) = graph.node_scope(node)
             {
                 let root = (canonical_id, whole_hash);
-                if seen.insert(root.clone()) {
+                let fresh = match &mut seen {
+                    Some(seen) => seen.insert(root.clone()),
+                    None => !roots.contains(&root),
+                };
+                if fresh {
                     roots.push(root);
+                    if seen.is_none() && roots.len() > 16 {
+                        seen = Some(roots.iter().cloned().collect());
+                    }
                 }
             }
         }
@@ -6074,6 +6101,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         {
             return Some(self.project_augmentation_plan(&plan, type_arguments, context));
         }
+        if key
+            .as_ref()
+            .is_some_and(|key| self.reuse_augmentation_absence(&key.absence()))
+        {
+            return None;
+        }
         let fold = || {
             self.fold_augmentation_contributions(
                 contribution,
@@ -6088,12 +6121,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         };
         let folded = match key {
             Some(key) => self.record_augmentation_plan(key, fold),
-            None => fold().map(|folded| match folded {
-                FoldedAugmentation::Contributions(contributions) => {
-                    TransactionFold::Contributions(contributions)
-                }
-                FoldedAugmentation::Plan(plan) => TransactionFold::Plan(Arc::new(plan)),
-            }),
+            None => fold().and_then(FoldedAugmentation::into_transaction_fold),
         }?;
         Some(match folded {
             TransactionFold::Contributions(contributions) => contributions,
@@ -6114,7 +6142,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let txn = self.dispatch_txn.borrow();
         let completed = txn.augmentation.get(key)?;
         let replay = &completed.replay;
-        crate::resolver_core::resolver_context::observe_fan_out_borrowed(&replay.reads.facts);
+        replay.reads.replay();
         crate::fact_tracing::replay_reuse_refusal(&completed.reuse);
         self.deposit_operand_self_roots(&replay.observed_self_roots);
         if replay.canonical_evidence_deposited {
@@ -6122,6 +6150,29 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .set(self.canonical_evidence_epoch.get().wrapping_add(1));
         }
         Some(Arc::clone(&completed.plan))
+    }
+
+    /// Whether this transaction already read that nothing augments the
+    /// declaration `key` names; a hit replays that read — its facts,
+    /// refusal and file self-roots — into the scopes live now, exactly as
+    /// folding it again would.
+    fn reuse_augmentation_absence(
+        &self,
+        key: &super::dispatch_txn::AugmentationAbsenceKey,
+    ) -> bool {
+        let txn = self.dispatch_txn.borrow();
+        let Some(completed) = txn.augmentation.absence(key) else {
+            return false;
+        };
+        let replay = &completed.replay;
+        replay.reads.replay();
+        crate::fact_tracing::replay_reuse_refusal(&completed.reuse);
+        self.deposit_operand_self_roots(&replay.observed_self_roots);
+        if replay.canonical_evidence_deposited {
+            self.canonical_evidence_epoch
+                .set(self.canonical_evidence_epoch.get().wrapping_add(1));
+        }
+        true
     }
 
     /// Fold a type body, keeping a complete plan for the rest of the
@@ -6134,12 +6185,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         key: super::dispatch_txn::AugmentationPlanKey,
         fold: impl FnOnce() -> Option<FoldedAugmentation>,
     ) -> Option<TransactionFold> {
-        let into_transaction_fold = |folded: FoldedAugmentation| match folded {
-            FoldedAugmentation::Contributions(contributions) => {
-                TransactionFold::Contributions(contributions)
-            }
-            FoldedAugmentation::Plan(plan) => TransactionFold::Plan(Arc::new(plan)),
-        };
         let completeness_scope_active =
             crate::request_context::cold_compute_completeness_scope_active();
         let recordable = crate::resolver_core::resolver_context::fact_tracer_installed()
@@ -6147,7 +6192,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             && !(completeness_scope_active
                 && crate::request_context::current_cold_compute_completeness().is_partial());
         if !recordable {
-            return fold().map(into_transaction_fold);
+            return fold().and_then(FoldedAugmentation::into_transaction_fold);
         }
         let private_completeness = (!completeness_scope_active)
             .then(crate::request_context::ColdComputeCompletenessScope::enter);
@@ -6166,11 +6211,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // The frame's rails reach the enclosing build exactly as if they had
         // folded there directly.
         self.fold_observed_frame_into_top(&observed);
-        let folded = folded.map(into_transaction_fold)?;
-        let TransactionFold::Plan(plan) = &folded else {
-            return Some(folded);
-        };
-        let complete = plan.context_free && !observed.result_is_partial && !folded_partial;
         let refusal = match refused {
             Some(reason) => verter_session_query::facts::reuse::ObservedRefusal::Typed(reason),
             None if reads.non_cacheable || observed.cache_suppress => {
@@ -6178,6 +6218,34 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             None => verter_session_query::facts::reuse::ObservedRefusal::None,
         };
+        let complete_read = !observed.result_is_partial && !folded_partial;
+        let folded = match folded? {
+            FoldedAugmentation::Absent => {
+                let reuse =
+                    verter_session_query::facts::reuse::classify_reuse(refusal, complete_read);
+                self.dispatch_txn
+                    .borrow_mut()
+                    .augmentation
+                    .complete_absence(
+                        key.absence(),
+                        super::dispatch_txn::TransactionAugmentationAbsence {
+                            reuse,
+                            replay: super::dispatch_txn::FlowMemberReuse {
+                                reads,
+                                observed_self_roots: observed.observed_self_roots,
+                                canonical_evidence_deposited: self.canonical_evidence_epoch.get()
+                                    != evidence_epoch,
+                            },
+                        },
+                    );
+                return None;
+            }
+            folded => folded.into_transaction_fold()?,
+        };
+        let TransactionFold::Plan(plan) = &folded else {
+            return Some(folded);
+        };
+        let complete = plan.context_free && complete_read;
         let reuse = verter_session_query::facts::reuse::classify_reuse(refusal, complete);
         if reuse.is_request_reusable() {
             self.dispatch_txn.borrow_mut().augmentation.complete(
@@ -6315,7 +6383,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// already holds as the base body (a global declaration's own file):
     /// it is skipped, never folded twice.
     ///
-    /// Returns `None` when no augmenter contributes.
+    /// Returns [`FoldedAugmentation::Absent`] when no augmenter contributes.
     ///
     /// `contribution` is what each augmenter contributes: a type body, or
     /// the call signatures an augmenting block's function declarations add
@@ -6447,7 +6515,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
         });
         if augmenter_set.entries.is_empty() && !has_file_scope {
-            return None;
+            return Some(FoldedAugmentation::Absent);
         }
 
         let mut contributor_nodes: Vec<SemanticNodeId> = Vec::new();
@@ -7154,8 +7222,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             //     result warm.
             //   - `source_env_unobservable == false`: genuinely no augmenter
             //     contributes this decl — a real, cacheable no-augmentation
-            //     result. Return `None`; the caller keeps the base body unchanged
-            //     and warms normally.
+            //     result. Whether an augmenter contributes depends on the
+            //     augmenter set and each augmenter's retained declarations,
+            //     never on this instantiation's arguments or projection, so
+            //     it is the same `Absent` answer an empty augmenter set gives:
+            //     the caller keeps the base body unchanged, warms normally, and
+            //     later instantiations in the transaction replay this read.
             if source_env_unobservable {
                 return Some(FoldedAugmentation::Contributions(
                     AugmentationContributions {
@@ -7168,7 +7240,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     },
                 ));
             }
-            return None;
+            return Some(FoldedAugmentation::Absent);
         }
 
         // Fact rail, part 2 — each contributing augmenter's whole-hash
@@ -8213,8 +8285,113 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         identity: &crate::semantic_query::DeclIdentity,
     ) -> Option<verter_session_query::declarations::TypeDeclKind> {
-        self.prepared_type_decl(identity)
-            .map(|prepared| prepared.kind)
+        if let Some(completed) = self.dispatch_txn.borrow().decl_kinds.get(identity) {
+            // A declaration identity names one content version, so its
+            // kind cannot change under it.
+            self.replay_transaction_read(&completed.reuse, &completed.replay);
+            return completed.kind;
+        }
+        let (kind, recorded) = self.record_transaction_read(
+            || {
+                self.prepared_type_decl(identity)
+                    .map(|prepared| prepared.kind)
+            },
+            |_| true,
+        );
+        if let Some((reuse, replay)) = recorded {
+            self.dispatch_txn.borrow_mut().decl_kinds.complete(
+                identity.clone(),
+                super::dispatch_txn::TransactionDeclKind {
+                    kind,
+                    reuse,
+                    replay,
+                },
+            );
+        }
+        kind
+    }
+
+    /// Run a read whose value the rest of this transaction may reuse, and
+    /// record what reusing it must replay: its fact reads, refusal, file
+    /// self-roots and canonical evidence. `None` when the read is not
+    /// reusable — it ran where an enclosing build could not observe a
+    /// channel, it was partial, `complete` rejects its value, or its refusal
+    /// is not one a later reader of this transaction may share. Either way
+    /// every rail reaches the enclosing build exactly as if the read had run
+    /// there directly.
+    pub(super) fn record_transaction_read<T>(
+        &self,
+        read: impl FnOnce() -> T,
+        complete: impl FnOnce(&T) -> bool,
+    ) -> (
+        T,
+        Option<(
+            verter_session_query::facts::reuse::ReuseClass,
+            super::dispatch_txn::FlowMemberReuse,
+        )>,
+    ) {
+        // A recording is only replayable when every channel an enclosing
+        // build observes is observable here: a live tracer, a live
+        // build-local frame and a cold-compute completeness that can show
+        // a partial fold (see the flow-member recorder).
+        let completeness_scope_active =
+            crate::request_context::cold_compute_completeness_scope_active();
+        let recordable = crate::resolver_core::resolver_context::fact_tracer_installed()
+            && !self.build_local_taint.borrow().is_empty()
+            && !(completeness_scope_active
+                && crate::request_context::current_cold_compute_completeness().is_partial());
+        if !recordable {
+            return (read(), None);
+        }
+        let private_completeness = (!completeness_scope_active)
+            .then(crate::request_context::ColdComputeCompletenessScope::enter);
+        let evidence_epoch = self.canonical_evidence_epoch.get();
+        let frame = super::BuildLocalTaintGuard::push(&self.build_local_taint);
+        let refusals = crate::fact_tracing::RefusalObservationScope::enter();
+        let (value, reads) = crate::resolver_core::resolver_context::record_fact_reads(read);
+        let refused = refusals.observed();
+        drop(refusals);
+        let observed = frame.finish();
+        let folded_partial =
+            crate::request_context::current_cold_compute_completeness().is_partial();
+        if let Some(scope) = private_completeness {
+            scope.discard();
+        }
+        self.fold_observed_frame_into_top(&observed);
+        let refusal = match refused {
+            Some(reason) => verter_session_query::facts::reuse::ObservedRefusal::Typed(reason),
+            None if reads.non_cacheable || observed.cache_suppress => {
+                verter_session_query::facts::reuse::ObservedRefusal::Unattributed
+            }
+            None => verter_session_query::facts::reuse::ObservedRefusal::None,
+        };
+        let complete = !observed.result_is_partial && !folded_partial && complete(&value);
+        let reuse = verter_session_query::facts::reuse::classify_reuse(refusal, complete);
+        if !reuse.is_request_reusable() {
+            return (value, None);
+        }
+        let replay = super::dispatch_txn::FlowMemberReuse {
+            reads,
+            observed_self_roots: observed.observed_self_roots,
+            canonical_evidence_deposited: self.canonical_evidence_epoch.get() != evidence_epoch,
+        };
+        (value, Some((reuse, replay)))
+    }
+
+    /// Replay a read [`Self::record_transaction_read`] recorded into the
+    /// scopes live now, exactly as running it again would.
+    pub(super) fn replay_transaction_read(
+        &self,
+        reuse: &verter_session_query::facts::reuse::ReuseClass,
+        replay: &super::dispatch_txn::FlowMemberReuse,
+    ) {
+        replay.reads.replay();
+        crate::fact_tracing::replay_reuse_refusal(reuse);
+        self.deposit_operand_self_roots(&replay.observed_self_roots);
+        if replay.canonical_evidence_deposited {
+            self.canonical_evidence_epoch
+                .set(self.canonical_evidence_epoch.get().wrapping_add(1));
+        }
     }
 
     /// Whether the prepared declaration rooted at `identity` declares type

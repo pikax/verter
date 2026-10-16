@@ -32,7 +32,9 @@ edits it. Shipped: `skr-perf0-structural`, `skr-mapped-indexb`, `switch-discrimi
 and peak memory beside whole-program TypeScript wall time),
 `skr-augment-scaleb` (a global interface merged from 2,000 script contributors
 and a module interface augmented by 2,000 unimported modules; cold Verter time
-and peak memory), `skr-scale-answers`, `skr-mapped-expand`.
+and peak memory, and each reproduction's retention proof: one engine answering
+500 then 2,000 contributors against a 2,000-only baseline session),
+`skr-scale-answers`, `skr-mapped-expand`.
 
 `skr-mapped-indexb` demands conditional mapped values through the entire source
 key domain at 1,000, 3,000 and 10,000 keys. The recorded TypeScript 7.0.2 answer
@@ -72,6 +74,7 @@ exactly; its required cells are the largest sizes' cold Verter `coldMs` and
 | `description`                     | what the run is for, in one sentence                                                                                                                                                                     |
 | `tier`                            | `quick`, `standard` or `stress`: default scenario set, deadline and repetition counts                                                                                                                    |
 | `scenarios`                       | scenario ids or prefixes from the catalog (`scenarios.mjs`), as `--only` takes them; omitted means the tier's set                                                                                        |
+| `sessions`                        | exact session ids from the session catalog (`sessions.mjs`), run through `--only`; a growth session's baseline must be listed too; with no `scenarios`, the listed sessions run and no scenario does     |
 | `settings`                        | setting ids (`strict`, `snc-off`, `nia-off`, `both-off`); the harness runs `strict` alone or all four, so any other subset is rejected; omitted means `strict`                                           |
 | `arms`                            | arm ids from `ARMS` in `semantic-perf/analyze.mjs`; unknown ids are rejected                                                                                                                             |
 | `modes`                           | `cold` (fresh-process demands) and `warm` (in-process repeats); a whole-program `tsc -p` arm has only `cold`                                                                                             |
@@ -100,3 +103,9 @@ Each run writes `evidence-summary.json` into its output directory (default
 `harness/`. It holds the manifest name and byte digest, whether it was a dry
 run, the worker record, the per-cell status (measured, skeleton, or
 `unavailable` with a reason) and the harness validation verdict and problems.
+For each session the manifest lists it holds the status (present, missing or
+not run), the Verter answer class and, for a growth session, its retention
+proof (see `docs/contributing/semantic-benchmark.md#session-workloads`). The
+proof's figures are retention-account bytes and object counts, read on every
+worker; a missing session, a failed proof or a proof with nothing to compare
+fails the run.

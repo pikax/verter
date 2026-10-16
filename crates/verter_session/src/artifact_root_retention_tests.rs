@@ -396,3 +396,35 @@ fn project_close_preserves_live_reader_handles_and_final_release_reclaims() {
         "reclaimed artifact is no longer reachable from any root"
     );
 }
+
+/// A view a caller still holds when its replacement is published keeps
+/// that publish from reclaiming the versions only it sees. Once the caller
+/// releases it, the next view acquisition reclaims them: a released root
+/// never leaves superseded versions resident until another edit.
+#[test]
+fn a_view_released_after_its_replacement_is_published_is_reclaimed_on_the_next_read() {
+    let host = host_with_file("export interface R { r: number }\n");
+    host.ensure_indexed_ready(CANONICAL)
+        .expect("v1 artifact must materialise");
+    let held = host.resolver_store_view_read().into_owned_view();
+
+    upsert(&host, "export interface R { r: number; s: string }\n");
+    host.ensure_indexed_ready(CANONICAL)
+        .expect("v2 artifact must materialise");
+    // Publishes the replacement view while the old one is still held.
+    drop(host.resolver_store_view_read());
+    let store = host.project_type_store();
+    assert!(
+        store.indexed().retained_retired_version_count() > 0,
+        "the held view keeps the superseded versions it sees"
+    );
+
+    drop(held);
+    // A warm read of the published view: no edit, no publish.
+    drop(host.resolver_store_view_read());
+    assert_eq!(
+        store.indexed().retained_retired_version_count(),
+        0,
+        "the released root's versions are reclaimed on the next read"
+    );
+}

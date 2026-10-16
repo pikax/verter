@@ -242,6 +242,14 @@ pub struct JobResult {
 pub struct RetentionCounts {
     pub semantic_nodes: usize,
     pub semantic_memo_entries: usize,
+    /// Memo candidates, superseded variants a slot still holds included.
+    pub semantic_memo_candidates: usize,
+    /// Live artifact versions of the indexed store.
+    pub live_artifacts: usize,
+    /// Superseded artifact versions the store still retains.
+    pub retired_versions: usize,
+    /// Live parse-snapshot leases.
+    pub snapshot_leases: usize,
     pub union_views: usize,
     pub shape_cache_entries: usize,
     pub active_bytes: usize,
@@ -648,6 +656,10 @@ fn retention(host: &VerterHost) -> RetentionCounts {
     RetentionCounts {
         semantic_nodes: snapshot.semantic_nodes,
         semantic_memo_entries: snapshot.semantic_memo_entries,
+        semantic_memo_candidates: snapshot.semantic_memo_candidates,
+        live_artifacts: snapshot.live_artifacts,
+        retired_versions: snapshot.retained_retired_versions,
+        snapshot_leases: snapshot.snapshot_leases,
         union_views: snapshot.union_views,
         shape_cache_entries: snapshot.shape_cache_entries,
         active_bytes: snapshot.active_bytes,

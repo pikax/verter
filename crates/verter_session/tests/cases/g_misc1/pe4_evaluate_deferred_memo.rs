@@ -115,6 +115,55 @@ fn repeated_evaluate_with_same_node_and_context_hits_memo() {
     );
 }
 
+/// An operand the evaluator pushes but finishes as itself takes no memo
+/// probe: `DeepSource['alpha']` evaluates its object, a declaration
+/// reference no evaluator step rewrites, inline, so a cold evaluation
+/// misses only for the indexed access itself.
+#[test]
+fn an_operand_finished_as_itself_takes_no_memo_probe() {
+    let host = make_host();
+    let expr = TypeExpr::IndexedAccess {
+        object: Arc::new(TypeExpr::Ref {
+            name: Arc::from("DeepSource"),
+            type_arguments: Arc::from(Vec::new().into_boxed_slice()),
+        }),
+        index: Arc::new(TypeExpr::Literal(LiteralValue::String("alpha".to_string()))),
+    };
+    let carrier = for_tests::dispatch_lower_type_expr_in_scope_with_context_for_tests(
+        &host,
+        "/source.ts",
+        &expr,
+        ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
+    )
+    .expect("lowering must succeed");
+    let store = host.project_type_store().semantic_graph();
+    let Some(SemanticNodeData::IndexedAccess { object, .. }) =
+        store.node_data(carrier).as_deref().cloned()
+    else {
+        panic!("the fixture must be an indexed access");
+    };
+    assert!(
+        matches!(
+            store.node_data(object).as_deref(),
+            Some(SemanticNodeData::DeclRef { .. })
+        ),
+        "the indexed object must be a declaration reference"
+    );
+    let baseline = store.stats_snapshot();
+    let (_, completeness) = for_tests::dispatch_evaluate_deferred_for_tests(
+        &host,
+        carrier,
+        ProjectionReductionContext::published(ProjectionMode::Expanded),
+    );
+    assert!(!completeness.is_partial(), "the evaluation is complete");
+    let after = store.stats_snapshot();
+    assert_eq!(
+        after.evaluate_deferred_memo_misses - baseline.evaluate_deferred_memo_misses,
+        1,
+        "only the indexed access probes the memo"
+    );
+}
+
 #[test]
 fn different_contexts_produce_distinct_memo_keys() {
     let host = make_host();

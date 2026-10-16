@@ -371,8 +371,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         declaration: &crate::semantic_query::DeclIdentity,
         context: ProjectionReductionContext,
     ) -> ProjectionReductionContext {
+        Self::argument_context_for(self.defers_type_arguments(declaration), context)
+    }
+
+    /// [`Self::instantiation_argument_context`] for a declaration whose
+    /// [`Self::defers_type_arguments`] answer the caller already read.
+    pub(super) fn argument_context_for(
+        defers_type_arguments: bool,
+        context: ProjectionReductionContext,
+    ) -> ProjectionReductionContext {
         let context = context.into_structural_provenance();
-        if self.defers_type_arguments(declaration) && may_reduce_operator(context) {
+        if defers_type_arguments && may_reduce_operator(context) {
             context.into_structural_transit_with_mode(ProjectionMode::Navigate)
         } else {
             context

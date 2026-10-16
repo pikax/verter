@@ -289,7 +289,12 @@ pub(crate) fn observe_fan_out_borrowed(sig: &[FactVersionRef]) {
 /// The read set verifies its order and falls back for an unordered witness.
 #[inline]
 pub(crate) fn observe_fan_out_canonical(sig: &std::sync::Arc<[FactVersionRef]>) {
-    observe_signature_consumers(sig, |cell| cell.absorb_canonical_signature(sig));
+    // The witness's order is verified once for every consumer, by the
+    // first that does not already hold it.
+    let verified = std::cell::OnceCell::new();
+    observe_signature_consumers(sig, |cell| {
+        cell.absorb_canonical_signature_verified_once(sig, &verified);
+    });
 }
 
 #[inline]
@@ -448,14 +453,18 @@ mod fan_out_tests {
         );
         let recorder = FactReadRecorder::default();
         let before = signature_work_for_tests();
+        let mut repeat_work = 0;
         let (inner, outer) = crate::resolver_core::resolver_context::with_fact_tracer_cell(
             Default::default(),
             |_| {
                 crate::resolver_core::resolver_context::with_fact_tracer_cell(Default::default(), |_| {
                     let _scope = install_recorder(&recorder);
-                    for _ in 0..4 {
+                    observe_fan_out_canonical(&signature);
+                    let first = signature_work_for_tests();
+                    for _ in 0..3 {
                         observe_fan_out_canonical(&signature);
                     }
+                    repeat_work = signature_work_for_tests() - first;
                     apply_non_cacheable_propagation(
                         verter_session_query::facts::fact_read_set::NonCacheablePropagation::Transitive,
                     );
@@ -479,6 +488,13 @@ mod fan_out_tests {
         assert!(
             work <= 16 * signature.len(),
             "canonical replay proof_work={work}"
+        );
+        // A consumer already holding the witness recognises it before any
+        // order verification: a repeated replay costs no work proportional
+        // to the witness's width.
+        assert!(
+            repeat_work < signature.len(),
+            "repeated canonical replay proof_work={repeat_work}"
         );
     }
 

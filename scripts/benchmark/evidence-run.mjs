@@ -20,6 +20,7 @@ import { fileURLToPath } from "node:url";
 import { ARMS } from "./semantic-perf/analyze.mjs";
 import { harnessFingerprint, resolveTypeScript } from "./semantic-perf/provenance.mjs";
 import { scenariosForTier, selectScenarios, SETTINGS, TIERS } from "./semantic-perf/scenarios.mjs";
+import { allSessions } from "./semantic-perf/sessions.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const ROOT = resolve(HERE, "..", "..");
@@ -41,6 +42,7 @@ const REQUIRED_FIELDS = [
 ];
 const OPTIONAL_FIELDS = [
   "scenarios",
+  "sessions",
   "settings",
   "repeat",
   "warmup",
@@ -166,6 +168,30 @@ export function validateManifest(manifest, file) {
         }
       }
   } else if (TIERS.includes(tier)) scenarios = scenariosForTier(tier);
+  let sessions = [];
+  if ("sessions" in manifest) {
+    const catalog = new Map(allSessions().map((s) => [s.id, s]));
+    if (!stringList(manifest.sessions)) problems.push("sessions must be a non-empty list of ids");
+    else {
+      if (new Set(manifest.sessions).size !== manifest.sessions.length)
+        problems.push("sessions lists a session twice");
+      for (const id of manifest.sessions) {
+        const session = catalog.get(id);
+        if (!session) problems.push(`session ${id} is not a session of the catalog`);
+        else if (!sessions.includes(session)) sessions.push(session);
+      }
+      // A retention proof compares a growth session with its baseline: the
+      // run must measure both.
+      for (const session of sessions)
+        if (session.retentionProof && !manifest.sessions.includes(session.retentionProof.baseline))
+          problems.push(
+            `session ${session.id} is proved against ${session.retentionProof.baseline}, which sessions does not list`,
+          );
+      // A selected session runs only through --only, which then also
+      // selects scenarios by prefix: list them explicitly.
+      if (!("scenarios" in manifest)) scenarios = [];
+    }
+  }
   const scenarioIds = new Set(scenarios.map((s) => s.id));
 
   // The harness runs the strict setting alone or all four.
@@ -280,14 +306,16 @@ export function validateManifest(manifest, file) {
   }
   if (problems.length) return { problems, run: null };
 
+  const only = [...(manifest.scenarios ?? []), ...(manifest.sessions ?? [])];
   const run = {
     scenarios: scenarios.map((s) => s.id),
+    sessions: sessions.map((s) => s.id),
     settings,
     requireAllMatched: manifest.requireAllMatched === true,
     harnessArgs: [
       "--tier",
       tier,
-      ...("scenarios" in manifest ? ["--only", manifest.scenarios.join(",")] : []),
+      ...(only.length ? ["--only", only.join(",")] : []),
       "--settings",
       settings.length === 1 ? "strict" : "all",
       "--arms",
@@ -375,7 +403,32 @@ export function invocationProblems(results, loaded) {
   const ran = [...new Set(Object.values(results?.meta?.scenarios ?? {}).map((s) => s.id))].sort();
   if (!same(ran, [...run.scenarios].sort()))
     problems.push("the run's scenarios are not the manifest's");
+  // Sessions are checked only where the manifest lists them: a tier run
+  // also carries its tier's sessions, which the manifest leaves unnamed.
+  if (run.sessions.length) {
+    const ranSessions = Object.keys(results?.meta?.sessions ?? {}).sort();
+    if (!same(ranSessions, [...run.sessions].sort()))
+      problems.push("the run's sessions are not the manifest's");
+  }
   return problems;
+}
+
+/**
+ * One listed session of the summary, read from the harness's session
+ * summary: its Verter answer class and, for a growth session, its retention
+ * proof. A retention proof's figures are deterministic retention-account
+ * bytes and object counts, so it is read on every worker.
+ */
+export function summarizeSession(id, harnessSummary, { dryRun }) {
+  const cell = harnessSummary?.sessions?.cells?.find((c) => c.key === id);
+  if (dryRun) return { session: id, status: "not run", answerClass: null, retentionProof: null };
+  if (!cell) return { session: id, status: "missing", answerClass: null, retentionProof: null };
+  return {
+    session: id,
+    status: "present",
+    answerClass: cell.arms?.verter?.class ?? null,
+    retentionProof: cell.retentionProof ?? null,
+  };
 }
 
 /** One required cell of the summary, read from the harness's summary (null when not executed). */
@@ -526,6 +579,9 @@ export function buildSummary(loaded, { dryRun, worker, results, harness, validat
   const cells = loaded.manifest.requiredCells.map((cell) =>
     summarizeCell(cell, results?.summary, { dryRun, worker }),
   );
+  const sessions = (loaded.run.sessions ?? []).map((id) =>
+    summarizeSession(id, results?.summary, { dryRun }),
+  );
   const problems = [];
   if (!dryRun) {
     if (harnessFailure) problems.push(harnessFailure);
@@ -535,6 +591,30 @@ export function buildSummary(loaded, { dryRun, worker, results, harness, validat
     problems.push(...(validatorProblems ?? []));
     for (const cell of cells)
       if (cell.status === "missing") problems.push(`required cell ${cellKey(cell)} is missing`);
+    for (const session of sessions) {
+      if (session.status === "missing") problems.push(`session ${session.session} is missing`);
+      const proof = session.retentionProof;
+      const proved = allSessions().find((s) => s.id === session.session)?.retentionProof;
+      if (session.status === "present" && proved) {
+        // The proof compares what answering retains, so every answer of the
+        // growth and of its baseline must be the constructed one.
+        for (const id of [session.session, proved.baseline]) {
+          const answered = sessions.find((s) => s.session === id)?.answerClass;
+          if (answered !== "matched")
+            problems.push(
+              `session ${session.session}: the retention proof needs ${id} to answer every demand, its class is ${answered ?? "missing"}`,
+            );
+        }
+        if (!proof || proof.verdict === "n/a")
+          problems.push(
+            `session ${session.session}: the retention proof has no completed pair to compare`,
+          );
+        else if (proof.verdict !== "passed")
+          problems.push(
+            `session ${session.session}: retained growth beyond the answers against ${proof.baseline}: ${proof.problems.join("; ")}`,
+          );
+      }
+    }
   }
   return {
     schema: SUMMARY_SCHEMA,
@@ -549,6 +629,7 @@ export function buildSummary(loaded, { dryRun, worker, results, harness, validat
     provenance: dryRun ? { harness: harnessFingerprint(ROOT) } : provenanceOf(results),
     prerequisites: dryRun ? dryPrerequisites() : runPrerequisites(results, harnessFailure),
     cells,
+    sessions,
     answerClasses: results?.summary?.verterClassCounts ?? null,
     validation: dryRun
       ? { verdict: "not run", problems: [] }

@@ -531,7 +531,8 @@ and an ordered script of steps, run in ONE live engine per invocation:
 | `incremental-edits` | INCREMENTAL | demand an alias that depends on a leaf through an intermediate generic; edit the leaf, the intermediate type and an unrelated file, re-requesting after each |
 | `editor-session` | EDITOR SESSION | an InputMenu-equivalent Vue component (props composed from a picked base, events from a tuple map, both imported from a types module): hover-like demands on its types and its component metadata, cold, then across an edit to the types and an edit to the file being hovered |
 | `concurrent-demands` | CONCURRENT | eight demands in eight files issued at once (one thread each for Verter; all in flight together through tsc's asynchronous API), cold, then again |
-| `augmentation-growth` | AUGMENTATION GROWTH | indexed access over every member of a global interface merged from 500 script contributors, then of a second one merged from 2,000, in one engine (standard tier): each answer's time, and the engine's retained memory after both, which includes the first registry's answer and caches (so it is not comparable with a cold `augment-global-2000` probe's) |
+| `augment-global-growth`, `augment-module-growth` | AUGMENTATION GROWTH | the `augment-global` and `augment-module` reproductions in one engine (standard tier): the probe answered at 500 contributors, then 1,500 edits each filling in one declaration-free contributor file, then the probe at 2,000; the engine's retention counters after every step feed the retention proof below |
+| `augment-global-baseline`, `augment-module-baseline` | AUGMENTATION GROWTH | the same files with all 2,000 contributors from the start, the probe answered once: the growth session's baseline |
 
 Every demand carries the answer the type system defines at that point of the
 script, derived from the construction: tsc's answer must equal it (a run
@@ -568,7 +569,20 @@ completed entries. Completed steps remain classifiable after a kill; only
 the step named by the phase marker is killed, and unstarted steps are absent.
 Partial sessions contribute completed step timings but no final statistics
 or retention comparison. Reusing an output path clears the previous run.
-The observe
+A Verter session record carries the host's retention counters after the
+init request (`initRetention`) and after every step (`stepRetention`), read
+outside every timer. A growth session's **retention proof** compares, for
+every pair of completed measured Verter invocations, what its engine retains
+after the last answer with what its baseline session's engine retains after
+its only answer: live artifacts, superseded artifact versions, parse-snapshot
+leases and pinned bytes must not exceed the baseline's; memo candidates may
+exceed it only by the candidates the first demand added beyond one lowering
+per first-step contributor (its own answers, kept as superseded candidates),
+and retained bytes only by the bytes the first demand added. Every figure is
+a retention-account byte or an object count, so the verdict
+(`passed`/`failed`, or `n/a` with nothing to compare) is the same on every
+worker. It is a finding in the session summary, never a run-validation
+failure; an evidence run that lists the session gates on it. The observe
 arm's REQUIRED-state identity is enforced: a build that retains differently
 fails validation, and a session where an arm has no completed measured
 invocation reports `n/a` with a warning.

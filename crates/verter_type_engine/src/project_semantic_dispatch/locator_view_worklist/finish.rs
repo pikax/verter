@@ -146,7 +146,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         ancestors: &[ProjectionFrame],
     ) -> ProjectionFinish {
         let graph = self.graph();
-        let argument_context = self.instantiation_argument_context(base, context);
+        let defers_type_arguments = self.defers_type_arguments(base);
+        let argument_context = Self::argument_context_for(defers_type_arguments, context);
         let projected_args: Arc<[SemanticNodeId]> = Arc::from(
             args.iter()
                 .map(|argument| {
@@ -160,8 +161,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .into_boxed_slice(),
         );
         let projected_args = if may_reduce_operator(context) {
-            self.evaluate_carrier_arguments(base, &projected_args, context)
-                .into_active_query_build_arguments(self)
+            self.evaluate_carrier_arguments_deferring(
+                defers_type_arguments,
+                &projected_args,
+                context,
+            )
+            .into_active_query_build_arguments(self)
         } else {
             projected_args
         };
