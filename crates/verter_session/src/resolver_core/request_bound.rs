@@ -768,7 +768,9 @@ where
     }
     fn host_view_env_hashes_for(&self, canonical: &str) -> crate::session_view::EnvHashes {
         verter_type_engine::count_resolver_context_call!("IndexedInputs::host_view_env_hashes_for");
-        self.0.host().host_view_env_hashes_for(canonical)
+        self.0.request_view().project_env_hashes_for(canonical, || {
+            self.0.host().host_view_env_hashes_for(canonical)
+        })
     }
     fn host_view_project_identity(&self) -> crate::file_artifact_store::ProjectIdentity {
         verter_type_engine::count_resolver_context_call!(
@@ -783,7 +785,9 @@ where
         verter_type_engine::count_resolver_context_call!(
             "IndexedInputs::host_view_project_identity_for"
         );
-        self.0.host().host_view_project_identity_for(canonical)
+        self.0.request_view().project_identity_for(canonical, || {
+            self.0.host().host_view_project_identity_for(canonical)
+        })
     }
     fn semantic_compiler_options_for(
         &self,
@@ -792,7 +796,11 @@ where
         verter_type_engine::count_resolver_context_call!(
             "IndexedInputs::semantic_compiler_options_for"
         );
-        self.0.host().semantic_compiler_options_for(canonical)
+        self.0
+            .request_view()
+            .project_compiler_options_for(canonical, || {
+                self.0.host().semantic_compiler_options_for(canonical)
+            })
     }
     fn resolve_project_for_canonical(
         &self,
@@ -1537,6 +1545,18 @@ impl<L: RequestBoundLifecycle> FactValidation for RequestBoundAdapter<L> {
         self.0
             .request_view()
             .validates_fact_signature_with_self_roots(sig, self_root_canonicals)
+    }
+    fn validates_retained_signature_with_self_roots(
+        &self,
+        sig: &Arc<[FactVersionRef]>,
+        self_root_canonicals: &[&str],
+    ) -> bool {
+        verter_type_engine::count_resolver_context_call!(
+            "FactValidation::validates_retained_signature_with_self_roots"
+        );
+        self.0
+            .request_view()
+            .validates_retained_signature(sig, self_root_canonicals)
     }
     fn promote_route_completion(
         &self,

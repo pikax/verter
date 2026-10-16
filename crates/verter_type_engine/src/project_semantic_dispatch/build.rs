@@ -6134,7 +6134,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let txn = self.dispatch_txn.borrow();
         let completed = txn.augmentation.get(key)?;
         let replay = &completed.replay;
-        crate::resolver_core::resolver_context::observe_fan_out_borrowed(&replay.reads.facts);
+        replay.reads.replay();
         crate::fact_tracing::replay_reuse_refusal(&completed.reuse);
         self.deposit_operand_self_roots(&replay.observed_self_roots);
         if replay.canonical_evidence_deposited {
@@ -6157,7 +6157,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return false;
         };
         let replay = &completed.replay;
-        crate::resolver_core::resolver_context::observe_fan_out_borrowed(&replay.reads.facts);
+        replay.reads.replay();
         crate::fact_tracing::replay_reuse_refusal(&completed.reuse);
         self.deposit_operand_self_roots(&replay.observed_self_roots);
         if replay.canonical_evidence_deposited {
@@ -8377,7 +8377,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         reuse: &verter_session_query::facts::reuse::ReuseClass,
         replay: &super::dispatch_txn::FlowMemberReuse,
     ) {
-        crate::resolver_core::resolver_context::observe_fan_out_borrowed(&replay.reads.facts);
+        replay.reads.replay();
         crate::fact_tracing::replay_reuse_refusal(reuse);
         self.deposit_operand_self_roots(&replay.observed_self_roots);
         if replay.canonical_evidence_deposited {

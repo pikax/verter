@@ -2830,7 +2830,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     fn reusable_completed_flow_member(&self, key: &FlowReturnKey) -> Option<FlowReturnResult> {
         let completed = self.dispatch_txn.borrow().flow.results.get(key)?.clone();
         let replay = &completed.replay;
-        crate::resolver_core::resolver_context::observe_fan_out_borrowed(&replay.reads.facts);
+        replay.reads.replay();
         crate::fact_tracing::replay_reuse_refusal(&completed.reuse);
         self.deposit_operand_self_roots(&replay.observed_self_roots);
         if replay.canonical_evidence_deposited {

@@ -136,6 +136,17 @@ pub trait FactValidation {
         sig: &[FactVersionRef],
         self_root_canonicals: &[&str],
     ) -> bool;
+    /// [`Self::validates_fact_signature_with_self_roots`] for a signature a
+    /// cache retains. A request-bound port answers one it already validated
+    /// in this request, under the same strict roots, without walking it
+    /// again.
+    fn validates_retained_signature_with_self_roots(
+        &self,
+        sig: &std::sync::Arc<[FactVersionRef]>,
+        self_root_canonicals: &[&str],
+    ) -> bool {
+        self.validates_fact_signature_with_self_roots(sig, self_root_canonicals)
+    }
     fn promote_route_completion(
         &self,
         canonical: &str,

@@ -1076,22 +1076,25 @@ impl<'a> VerifiedCanonicalRun<'a> {
 /// Merge two strictly-increasing runs into one strictly-increasing run,
 /// dropping cross-run duplicates. `O(left.len() + right.len())`
 /// comparisons, one allocation for the output.
-fn merge_canonical_runs(left: &[FactVersionRef], right: &[FactVersionRef]) -> Vec<FactVersionRef> {
+fn merge_canonical_runs<'a>(
+    left: &[&'a FactVersionRef],
+    right: &[&'a FactVersionRef],
+) -> Vec<&'a FactVersionRef> {
     use std::cmp::Ordering;
     let mut out = Vec::with_capacity(left.len() + right.len());
     let (mut i, mut j) = (0usize, 0usize);
     while i < left.len() && j < right.len() {
-        match compare_fact_refs(&left[i], &right[j]) {
+        match compare_fact_refs(left[i], right[j]) {
             Ordering::Less => {
-                out.push(left[i].clone());
+                out.push(left[i]);
                 i += 1;
             }
             Ordering::Greater => {
-                out.push(right[j].clone());
+                out.push(right[j]);
                 j += 1;
             }
             Ordering::Equal => {
-                out.push(left[i].clone());
+                out.push(left[i]);
                 i += 1;
                 j += 1;
             }
@@ -1103,29 +1106,32 @@ fn merge_canonical_runs(left: &[FactVersionRef], right: &[FactVersionRef]) -> Ve
 }
 
 /// Merge in balanced rounds: a run's prefix is copied once per round,
-/// rather than once for every later child witness.
+/// rather than once for every later child witness. The rounds move
+/// references; each surviving fact is cloned once, into the result.
 fn merge_canonical_batch(
     local: &[FactVersionRef],
     runs: &[Arc<[FactVersionRef]>],
 ) -> Vec<FactVersionRef> {
-    use std::borrow::Cow;
-    let mut level: Vec<Cow<'_, [FactVersionRef]>> = Vec::with_capacity(runs.len() + 1);
+    let mut level: Vec<Vec<&FactVersionRef>> = Vec::with_capacity(runs.len() + 1);
     if !local.is_empty() {
-        level.push(Cow::Borrowed(local));
+        level.push(local.iter().collect());
     }
-    level.extend(runs.iter().map(|run| Cow::Borrowed(run.as_ref())));
+    level.extend(runs.iter().map(|run| run.iter().collect()));
     while level.len() > 1 {
         let mut next = Vec::with_capacity(level.len().div_ceil(2));
         let mut pairs = level.into_iter();
         while let Some(left) = pairs.next() {
             next.push(match pairs.next() {
-                Some(right) => Cow::Owned(merge_canonical_runs(&left, &right)),
+                Some(right) => merge_canonical_runs(&left, &right),
                 None => left,
             });
         }
         level = next;
     }
-    level.pop().map(Cow::into_owned).unwrap_or_default()
+    level
+        .pop()
+        .map(|merged| merged.into_iter().cloned().collect())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
