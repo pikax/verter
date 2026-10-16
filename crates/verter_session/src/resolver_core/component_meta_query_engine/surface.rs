@@ -103,7 +103,7 @@ pub(crate) fn lower_and_project_to_expanded_node(
     scope_owner: verter_type_expr::TopLevelOwnerId,
     expr: &TypeExpr,
 ) -> Option<AdmittedRouteProjectionNode> {
-    let _scope = dispatch.graph().enter_node_root_scope();
+    let _scope = dispatch.enter_construction_scope();
     use verter_type_engine::project_semantic_dispatch::raise::node_raised_shape_for_eq_with_dispatch;
 
     use verter_type_engine::semantic_query::{
@@ -153,7 +153,7 @@ pub(crate) fn project_class_a_terminal_node(
     scope_owner: verter_type_expr::TopLevelOwnerId,
     expr: &TypeExpr,
 ) -> Option<AdmittedRouteProjectionNode> {
-    let _scope = dispatch.graph().enter_node_root_scope();
+    let _scope = dispatch.enter_construction_scope();
     use verter_type_engine::project_semantic_dispatch::raise::node_raised_shape_facts_with_dispatch;
 
     use verter_type_engine::semantic_query::{

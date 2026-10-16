@@ -57,8 +57,9 @@ const STRUCTURAL_HASH_MAX_DEPTH: u32 = 64;
 /// equally-unresolved children collapsing is acceptable; two equal-content
 /// children diverging by ordinal is not).
 pub(crate) fn structural_hash_of(graph: &SemanticGraphStore, data: &SemanticNodeData) -> Hash16 {
-    // A construction reader: the scope owns every ordinal it reads.
-    let _scope = graph.enter_node_root_scope();
+    // A construction reader inside its caller's lane: the nested scope owns
+    // every ordinal it reads.
+    let _scope = graph.enter_nested_scope();
     // TODO(follow-up): a per-mine `FxHashMap<SemanticNodeId, Hash16>` content-hash
     // memo would let `encode_child` reuse a child's already-computed fingerprint
     // instead of re-walking shared subtrees per reference. It is NOT a drop-in:

@@ -7,7 +7,22 @@ use super::*;
 impl SemanticGraphStore {
     /// Retain a multiset of live operands from this arena. Production close
     /// may still revoke their slots under the legacy activity gate.
+    ///
+    /// A bare ordinal is construction identity: outside the engine a producer
+    /// roots it through the construction scope it holds
+    /// ([`node_roots::NodeRootScope::root_nodes`]). Test builds expose this
+    /// as a fixture seam.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn root_nodes(
+        &self,
+        ids: impl IntoIterator<Item = SemanticNodeId>,
+    ) -> Result<node_roots::NodeRootSet, QueryError> {
+        node_roots::NodeRootSet::acquire(Arc::clone(&self.arena.core), ids.into_iter().collect())
+    }
+
+    /// Construction-lane operand rooting; see the test-build variant.
+    #[cfg(not(any(test, feature = "test-support")))]
+    pub(crate) fn root_nodes(
         &self,
         ids: impl IntoIterator<Item = SemanticNodeId>,
     ) -> Result<node_roots::NodeRootSet, QueryError> {
@@ -28,8 +43,36 @@ impl SemanticGraphStore {
     }
 
     /// Open a construction scope even when no observation capture is active.
+    ///
+    /// Holding the graph grants no construction lane: a producer outside the
+    /// engine opens a scope through its [`node_roots::NodeConstructionGrant`].
+    /// Test builds expose this as a fixture seam.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn enter_node_root_scope(&self) -> node_roots::NodeRootScope {
         node_roots::NodeRootScope::enter(&self.arena.core)
+    }
+
+    /// Engine-internal construction scope; see the test-build variant.
+    #[cfg(not(any(test, feature = "test-support")))]
+    pub(crate) fn enter_node_root_scope(&self) -> node_roots::NodeRootScope {
+        node_roots::NodeRootScope::enter(&self.arena.core)
+    }
+
+    /// Open a nested construction scope inside a construction lane this
+    /// thread already holds of this graph, so a reader bounds its own
+    /// intermediates. It grants nothing the held lane does not: without one
+    /// there is no scope.
+    #[must_use]
+    pub fn enter_nested_scope(&self) -> Option<node_roots::NodeRootScope> {
+        node_roots::NodeRootScope::holds(&self.arena.core)
+            .then(|| node_roots::NodeRootScope::enter(&self.arena.core))
+    }
+
+    /// A construction grant for a fixture graph built without an engine.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn construction_grant_for_tests(&self) -> node_roots::NodeConstructionGrant {
+        node_roots::NodeConstructionGrant::mint(self)
     }
 
     /// Intern a node whose retained operands are covered by arena-qualified
@@ -92,15 +135,14 @@ impl SemanticGraphStore {
     }
 
     /// Root a live construction ordinal for delivery beyond the construction
-    /// scope this thread holds of this graph. Without such a scope, or for a
-    /// slot a legacy close already released, there is nothing to root.
-    pub fn root_in_scope(&self, id: SemanticNodeId) -> Option<node_roots::NodeRoot> {
+    /// scope this thread holds of this graph. Without such a scope the
+    /// ordinal is foreign; a slot a legacy close already released is stale.
+    /// Neither is ever delivered as an absent node.
+    pub fn root_in_scope(&self, id: SemanticNodeId) -> Result<node_roots::NodeRoot, QueryError> {
         if !node_roots::NodeRootScope::holds(&self.arena.core) {
-            return None;
+            return Err(QueryError::ForeignSemanticOperand);
         }
-        node_roots::NodeRef::new(id, &self.arena.core)
-            .to_root()
-            .ok()
+        node_roots::NodeRef::new(id, &self.arena.core).to_root()
     }
 
     /// Lease an engine-internal ordinal for delivery to a consumer outside

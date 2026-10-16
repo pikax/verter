@@ -517,7 +517,7 @@ pub(crate) fn resolve_macro_payload(
     expansion_kind: MacroExpansionKind,
     diag_sink: &mut Vec<MacroExpansionDiagnostics>,
 ) -> Option<NodeRoot> {
-    let _scope = dispatch.graph().enter_node_root_scope();
+    let _scope = dispatch.enter_construction_scope();
     let _ = mac.parsed_type_argument.as_ref()?;
     // The macro type-argument graph node is the ONE mode-neutral mirror
     // handle (its macro-T own-body provenance is baked at production time —
@@ -753,7 +753,7 @@ pub(crate) fn resolve_macro_payload(
         }
     }
 
-    dispatch.graph().root_in_scope(payload_node)
+    dispatch.graph().root_in_scope(payload_node).ok()
 }
 
 pub(crate) fn resolve_payload_surface(
@@ -764,7 +764,7 @@ pub(crate) fn resolve_payload_surface(
     provenance: verter_type_engine::semantic_query::SurfaceProvenanceContext,
     diag_sink: &mut Vec<MacroExpansionDiagnostics>,
 ) -> verter_type_engine::semantic_query::surface_resolution::SurfaceResolution<NodeRoot> {
-    let _scope = dispatch.graph().enter_node_root_scope();
+    let _scope = dispatch.enter_construction_scope();
     let claims = dispatch.host_attachment().surface_claims();
     // The empty-path `ProjectPath` carries the macro's surface
     // provenance (by design): for a props payload that

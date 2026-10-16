@@ -108,7 +108,7 @@ pub(in crate::resolver_core::component_meta_query_engine) fn admit_expanded_surf
     witness: &RaisedNodeShapeFacts,
 ) -> Option<AdmittedRouteProjectionNode> {
     (witness.materialized() && witness.expanded_surface())
-        .then(|| graph.root_in_scope(witness.node()))
+        .then(|| graph.root_in_scope(witness.node()).ok())
         .flatten()
         .map(AdmittedRouteProjectionNode::new)
 }
@@ -124,7 +124,7 @@ pub(in crate::resolver_core::component_meta_query_engine) fn admit_expanded_surf
     shape: &NodeShapeEq,
 ) -> Option<AdmittedRouteProjectionNode> {
     (shape.facts().materialized() && shape.facts().expanded_surface() && shape.changed())
-        .then(|| graph.root_in_scope(shape.node()))
+        .then(|| graph.root_in_scope(shape.node()).ok())
         .flatten()
         .map(AdmittedRouteProjectionNode::new)
 }
@@ -142,7 +142,7 @@ pub(in crate::resolver_core::component_meta_query_engine) fn admit_materialized(
 ) -> Option<AdmittedRouteProjectionNode> {
     witness
         .materialized()
-        .then(|| graph.root_in_scope(witness.node()))
+        .then(|| graph.root_in_scope(witness.node()).ok())
         .flatten()
         .map(AdmittedRouteProjectionNode::new)
 }

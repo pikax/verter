@@ -952,6 +952,8 @@ pub struct ProjectTypeStore {
     /// every consumer that resolves a `SemanticQueryKey` through the
     /// shared query API.
     semantic_graph: Arc<SemanticGraphStore>,
+    /// The construction lane of `semantic_graph`, minted with it.
+    construction: verter_type_engine::semantic_query_memo::node_roots::NodeConstructionGrant,
     /// Owner direct-import surface cache. Direct owner imports
     /// resolve exactly once per owner version and every downstream stage
     /// reads the same entry.
@@ -1248,6 +1250,7 @@ impl ProjectTypeStore {
             );
         let verter_type_engine::project_semantic_dispatch::engine_resources::EngineStores {
             graph: semantic_graph,
+            construction,
             flow_slice,
             intrinsics: intrinsic_registry,
             imported_registry: imported_registry_db,
@@ -1269,6 +1272,7 @@ impl ProjectTypeStore {
             routes: Arc::new(RouteDb::new()),
             imported_roots: Arc::new(ImportedRootDb::new()),
             semantic_graph,
+            construction,
             owner_import_surfaces,
             component_meta_results: Arc::new(component_meta_results),
             intrinsic_registry,
@@ -1321,6 +1325,7 @@ impl ProjectTypeStore {
             observers,
             macro_mirrors,
             Arc::clone(&self.semantic_graph),
+            self.construction.clone(),
             Arc::clone(&self.flow_slice),
             Arc::clone(&self.intrinsic_registry),
             Arc::clone(&self.imported_registry_db),
@@ -1481,6 +1486,15 @@ impl ProjectTypeStore {
     /// that dispatches through the semantic-query API.
     pub fn semantic_graph(&self) -> &Arc<SemanticGraphStore> {
         &self.semantic_graph
+    }
+
+    /// The construction lane of [`Self::semantic_graph`]: session producers
+    /// open their construction scopes through it. Holding the graph alone
+    /// grants none.
+    pub(crate) fn construction_grant(
+        &self,
+    ) -> &verter_type_engine::semantic_query_memo::node_roots::NodeConstructionGrant {
+        &self.construction
     }
 
     /// Owner direct-import surface cache. Direct owner imports

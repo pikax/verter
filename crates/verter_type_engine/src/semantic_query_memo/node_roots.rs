@@ -43,6 +43,15 @@ impl IdentityNodeRoots {
     pub(crate) fn scoped(ids: impl IntoIterator<Item = SemanticNodeId>) -> Self {
         Self(NodeRootScope::root_current(ids))
     }
+
+    /// Root a record's operands in the graph that issued it, whatever
+    /// graph's scope is innermost on this thread.
+    pub(crate) fn in_graph(
+        graph: &super::SemanticGraphStore,
+        ids: impl IntoIterator<Item = SemanticNodeId>,
+    ) -> Self {
+        Self(root_in_arena(Arc::clone(&graph.arena.core), ids))
+    }
 }
 impl PartialEq for IdentityNodeRoots {
     fn eq(&self, _: &Self) -> bool {
@@ -222,24 +231,188 @@ impl NodeRoot {
     }
 }
 
+/// The authority to open construction scopes on one graph: the producer
+/// lane in which a bare construction ordinal may be read or rooted.
+///
+/// Non-forgeable: its field is private, it has no public constructor and no
+/// `Default`. Only [`crate::project_semantic_dispatch::engine_resources::EngineStores`]
+/// mints one, together with the graph it is bound to; holding the graph
+/// alone grants no construction lane. Clones are held by the host's store
+/// and by each request binding that composes a dispatcher.
+#[derive(Clone)]
+pub struct NodeConstructionGrant {
+    arena: Arc<NodeArenaCore>,
+}
+
+impl std::fmt::Debug for NodeConstructionGrant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NodeConstructionGrant")
+            .finish_non_exhaustive()
+    }
+}
+
+impl NodeConstructionGrant {
+    pub(crate) fn mint(graph: &super::SemanticGraphStore) -> Self {
+        Self {
+            arena: Arc::clone(&graph.arena.core),
+        }
+    }
+
+    pub(crate) fn arena(&self) -> &Arc<NodeArenaCore> {
+        &self.arena
+    }
+
+    /// Whether this grant authorizes construction on `graph`.
+    #[must_use]
+    pub fn authorizes(&self, graph: &super::SemanticGraphStore) -> bool {
+        Arc::ptr_eq(&self.arena, &graph.arena.core)
+    }
+
+    /// Open a construction scope of the granted graph on this thread.
+    #[must_use]
+    pub fn enter_scope(&self) -> NodeRootScope {
+        NodeRootScope::enter(&self.arena)
+    }
+
+    /// Root construction operands of the granted graph for delivery.
+    pub fn root_nodes(
+        &self,
+        ids: impl IntoIterator<Item = SemanticNodeId>,
+    ) -> Result<NodeRootSet, QueryError> {
+        NodeRootSet::acquire(Arc::clone(&self.arena), ids.into_iter().collect())
+    }
+}
+
 std::thread_local! {
-    static SCOPES: RefCell<Vec<ConstructionOwners>> = const { RefCell::new(Vec::new()) };
+    static SCOPES: RefCell<ScopeStack> = const {
+        RefCell::new(ScopeStack {
+            entries: Vec::new(),
+            next_token: 0,
+        })
+    };
+}
+
+/// The construction owners open on this thread, oldest first. An entry is
+/// addressed by its token, never by its position, so owners may close in any
+/// order.
+struct ScopeStack {
+    entries: Vec<ConstructionOwners>,
+    next_token: u64,
+}
+
+impl ScopeStack {
+    fn mint(&mut self) -> u64 {
+        self.next_token += 1;
+        self.next_token
+    }
+
+    fn position(&self, token: u64) -> usize {
+        self.entries
+            .iter()
+            .position(|entry| entry.token == token)
+            .expect("an open construction owner is registered on its thread")
+    }
+
+    /// Remove a closing owner and hand its delivery attachments to the
+    /// nearest remaining owner of the same arena: the one it was opened
+    /// inside of first, else one opened after it that is still open. A
+    /// nested dispatch's raw value can be consumed by its enclosing builder
+    /// after the inner read envelope drops; the attachments stay owned until
+    /// that builder seals its own delivery.
+    fn close(&mut self, token: u64) -> ConstructionOwners {
+        let position = self.position(token);
+        let mut owners = self.entries.remove(position);
+        let arena = &owners.arena;
+        let heir = self.entries[..position]
+            .iter()
+            .rposition(|candidate| Arc::ptr_eq(&candidate.arena, arena))
+            .or_else(|| {
+                self.entries[position..]
+                    .iter()
+                    .position(|candidate| Arc::ptr_eq(&candidate.arena, arena))
+                    .map(|offset| position + offset)
+            });
+        if let Some(heir) = heir {
+            self.entries[heir].deliveries.append(&mut owners.deliveries);
+        }
+        owners
+    }
 }
 
 struct ConstructionOwners {
+    token: u64,
     arena: Arc<NodeArenaCore>,
+    /// How many dispatchers share this owner; `0` for a lexical scope.
+    dispatchers: usize,
     roots: Vec<NodeRoot>,
     deliveries: Vec<super::delivery_lease::SemanticDeliveryLease>,
 }
 
 /// A construction scope owns every interned intermediate on this thread,
 /// independently of audit capture. Delivery acquires its own roots before
-/// the scope releases its intermediates.
+/// the scope releases its intermediates. Scopes close in any order: each
+/// releases exactly the owners it holds.
 pub struct NodeRootScope {
-    arena: usize,
+    token: u64,
     core: Arc<NodeArenaCore>,
-    depth: usize,
     thread_bound: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+/// The construction owner every live dispatcher of one graph shares on its
+/// thread. A construction ordinal a dispatcher returns stays rooted while
+/// any dispatcher of that graph on the thread is alive, so interleaved
+/// dispatchers never release one another's operands, and they may be
+/// dropped in any order.
+pub(crate) struct DispatchConstructionScope {
+    token: u64,
+    thread_bound: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl DispatchConstructionScope {
+    pub(crate) fn enter(arena: &Arc<NodeArenaCore>) -> Self {
+        let token = SCOPES.with(|scopes| {
+            let mut scopes = scopes.borrow_mut();
+            let shared = scopes
+                .entries
+                .iter()
+                .position(|entry| entry.dispatchers > 0 && Arc::ptr_eq(&entry.arena, arena));
+            // The newest dispatcher's graph is the thread's current one.
+            let mut owners = match shared {
+                Some(position) => scopes.entries.remove(position),
+                None => {
+                    let token = scopes.mint();
+                    ConstructionOwners {
+                        token,
+                        arena: Arc::clone(arena),
+                        dispatchers: 0,
+                        roots: Vec::new(),
+                        deliveries: Vec::new(),
+                    }
+                }
+            };
+            owners.dispatchers += 1;
+            let token = owners.token;
+            scopes.entries.push(owners);
+            token
+        });
+        Self {
+            token,
+            thread_bound: std::marker::PhantomData,
+        }
+    }
+}
+
+impl Drop for DispatchConstructionScope {
+    fn drop(&mut self) {
+        let released = SCOPES.with(|scopes| {
+            let mut scopes = scopes.borrow_mut();
+            let position = scopes.position(self.token);
+            let entry = &mut scopes.entries[position];
+            entry.dispatchers -= 1;
+            (entry.dispatchers == 0).then(|| scopes.close(self.token))
+        });
+        drop(released);
+    }
 }
 
 impl NodeRootScope {
@@ -247,26 +420,27 @@ impl NodeRootScope {
         SCOPES.with(|scopes| {
             scopes
                 .borrow()
+                .entries
                 .last()
                 .map(|scope| Arc::as_ptr(&scope.arena) as usize)
         })
     }
     pub(crate) fn enter(arena: &Arc<NodeArenaCore>) -> Self {
-        let identity = Arc::as_ptr(arena) as usize;
-        let depth = SCOPES.with(|scopes| {
+        let token = SCOPES.with(|scopes| {
             let mut scopes = scopes.borrow_mut();
-            let depth = scopes.len();
-            scopes.push(ConstructionOwners {
+            let token = scopes.mint();
+            scopes.entries.push(ConstructionOwners {
+                token,
                 arena: Arc::clone(arena),
+                dispatchers: 0,
                 roots: Vec::new(),
                 deliveries: Vec::new(),
             });
-            depth
+            token
         });
         Self {
-            arena: identity,
+            token,
             core: Arc::clone(arena),
-            depth,
             thread_bound: std::marker::PhantomData,
         }
     }
@@ -278,7 +452,9 @@ impl NodeRootScope {
         // Root it in THIS scope, not an inner one of the same arena that
         // could close while the borrow is still live.
         SCOPES.with(|scopes| {
-            scopes.borrow_mut()[self.depth]
+            let mut scopes = scopes.borrow_mut();
+            let position = scopes.position(self.token);
+            scopes.entries[position]
                 .roots
                 .push(NodeRoot::from_roots(id, roots));
         });
@@ -286,6 +462,15 @@ impl NodeRootScope {
             id,
             arena: &self.core,
         })
+    }
+
+    /// Root construction operands of this scope's arena for delivery beyond
+    /// the scope.
+    pub fn root_nodes(
+        &self,
+        ids: impl IntoIterator<Item = SemanticNodeId>,
+    ) -> Result<NodeRootSet, QueryError> {
+        NodeRootSet::acquire(Arc::clone(&self.core), ids.into_iter().collect())
     }
 
     pub(crate) fn capture(root: NodeRoot) {
@@ -296,6 +481,7 @@ impl NodeRootScope {
         SCOPES.with(|scopes| {
             if let Some(scope) = scopes
                 .borrow_mut()
+                .entries
                 .iter_mut()
                 .rev()
                 .find(|candidate| Arc::as_ptr(&candidate.arena) as usize == arena)
@@ -312,9 +498,15 @@ impl NodeRootScope {
     ) {
         let mut lease = Some(lease);
         SCOPES.with(|scopes| {
-            if let Some(scope) = scopes.borrow_mut().iter_mut().rev().find(|candidate| {
-                arena.is_none_or(|arena| Arc::as_ptr(&candidate.arena) as usize == arena)
-            }) {
+            if let Some(scope) = scopes
+                .borrow_mut()
+                .entries
+                .iter_mut()
+                .rev()
+                .find(|candidate| {
+                    arena.is_none_or(|arena| Arc::as_ptr(&candidate.arena) as usize == arena)
+                })
+            {
                 scope.deliveries.push(lease.take().unwrap());
             }
         });
@@ -326,6 +518,7 @@ impl NodeRootScope {
         SCOPES.with(|scopes| {
             scopes
                 .borrow()
+                .entries
                 .iter()
                 .any(|scope| Arc::ptr_eq(&scope.arena, arena))
         })
@@ -334,44 +527,37 @@ impl NodeRootScope {
     /// Attach operands to a record minted within its issuing graph scope.
     /// Raw public fixtures outside a scope have no arena authority.
     pub(crate) fn root_current(ids: impl IntoIterator<Item = SemanticNodeId>) -> NodeRootSet {
-        let arena =
-            SCOPES.with(|scopes| scopes.borrow().last().map(|scope| Arc::clone(&scope.arena)));
+        let arena = SCOPES.with(|scopes| {
+            scopes
+                .borrow()
+                .entries
+                .last()
+                .map(|scope| Arc::clone(&scope.arena))
+        });
         let Some(arena) = arena else {
             return NodeRootSet::default();
         };
-        let ids = ids
-            .into_iter()
-            .filter(|node| {
-                node.0 < super::UNALLOCATABLE_ID_FLOOR && (arena.counted() || arena.is_live(*node))
-            })
-            .collect();
-        NodeRootSet::acquire(arena, ids).expect("scoped record operands are live")
+        root_in_arena(arena, ids)
     }
+}
+
+/// Root a record's operands against the arena of the graph that issued it.
+pub(crate) fn root_in_arena(
+    arena: Arc<NodeArenaCore>,
+    ids: impl IntoIterator<Item = SemanticNodeId>,
+) -> NodeRootSet {
+    let ids = ids
+        .into_iter()
+        .filter(|node| {
+            node.0 < super::UNALLOCATABLE_ID_FLOOR && (arena.counted() || arena.is_live(*node))
+        })
+        .collect();
+    NodeRootSet::acquire(arena, ids).expect("scoped record operands are live")
 }
 
 impl Drop for NodeRootScope {
     fn drop(&mut self) {
-        let roots = SCOPES.with(|scopes| {
-            let mut scopes = scopes.borrow_mut();
-            assert_eq!(
-                scopes.len(),
-                self.depth + 1,
-                "construction scopes must close in stack order"
-            );
-            let mut owners = scopes.pop().unwrap();
-            assert_eq!(Arc::as_ptr(&owners.arena) as usize, self.arena);
-            // A nested dispatch's raw value can be consumed by its enclosing
-            // builder after the inner read envelope drops. Carry those
-            // attachments to that builder until it seals its own delivery.
-            if let Some(parent) = scopes
-                .iter_mut()
-                .rev()
-                .find(|candidate| Arc::ptr_eq(&candidate.arena, &owners.arena))
-            {
-                parent.deliveries.append(&mut owners.deliveries);
-            }
-            owners
-        });
-        drop(roots);
+        let owners = SCOPES.with(|scopes| scopes.borrow_mut().close(self.token));
+        drop(owners);
     }
 }

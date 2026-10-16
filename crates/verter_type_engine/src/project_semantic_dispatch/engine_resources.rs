@@ -34,6 +34,8 @@ use crate::semantic_query_memo::{MemoFamilyBound, SemanticGraphStore};
 /// One engine's shared stores, freshly constructed together.
 pub struct EngineStores {
     pub graph: Arc<SemanticGraphStore>,
+    /// The construction lane of [`Self::graph`]; minted only here.
+    pub construction: crate::semantic_query_memo::node_roots::NodeConstructionGrant,
     pub flow_slice: Arc<crate::cache_runtime::flow_slice_node::FlowSliceStores>,
     pub intrinsics: Arc<crate::intrinsic_registry::IntrinsicRegistry>,
     pub imported_registry: Arc<ImportedRegistryDb>,
@@ -100,6 +102,9 @@ impl EngineStores {
             engine: EngineIdentity(Arc::downgrade(&graph)),
         };
         let stores = Self {
+            construction: crate::semantic_query_memo::node_roots::NodeConstructionGrant::mint(
+                &graph,
+            ),
             graph,
             flow_slice: Arc::new(crate::cache_runtime::flow_slice_node::FlowSliceStores::new()),
             intrinsics: Arc::new(crate::intrinsic_registry::IntrinsicRegistry::with_defaults()),

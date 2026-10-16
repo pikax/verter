@@ -424,6 +424,7 @@ impl VerterHost {
                         audit_builder.record_files(files);
                         let footprint = crate::component_meta_audit::mine_footprint(
                             self.project_type_store().semantic_graph(),
+                            self.project_type_store().construction_grant(),
                             state,
                             &ctx,
                             self.config.max_derivation_edges,

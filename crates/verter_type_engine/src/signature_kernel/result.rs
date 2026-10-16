@@ -79,13 +79,17 @@ impl std::ops::Deref for CandidateTable {
 }
 
 impl SignatureSetValue {
-    /// Mint a value owning every candidate node in the issuing graph scope.
+    /// Mint a value owning every candidate node in `graph`, the graph whose
+    /// walk published them — never whichever graph's scope is innermost on
+    /// the thread, which may belong to another engine.
     pub(crate) fn new(
+        graph: &crate::semantic_query_memo::SemanticGraphStore,
         version: SignatureVersion,
         set: SignatureSetRef,
         nodes: Vec<SignatureCandidateNodes>,
     ) -> Self {
-        let roots = crate::semantic_query_memo::node_roots::IdentityNodeRoots::scoped(
+        let roots = crate::semantic_query_memo::node_roots::IdentityNodeRoots::in_graph(
+            graph,
             nodes.iter().flat_map(SignatureCandidateNodes::node_ids),
         );
         Self {

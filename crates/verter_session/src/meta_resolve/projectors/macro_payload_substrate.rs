@@ -259,7 +259,7 @@ pub(crate) fn resolve_payload_surface_with_scope(
     verter_type_engine::semantic_query_memo::node_roots::NodeRoot,
 > {
     use verter_type_engine::semantic_query::surface_resolution::NonEmptyReasons;
-    let _scope = dispatch.graph().enter_node_root_scope();
+    let _scope = dispatch.enter_construction_scope();
     let claims = dispatch.host_attachment().surface_claims();
     if matches!(scope, PayloadSurfaceScope::Default) {
         return super::resolve_payload_surface(

@@ -611,8 +611,9 @@ fn build_member(graph: &SemanticGraphStore, member: &SurfaceMember) -> TypeInfoS
 }
 
 fn build_signature(graph: &SemanticGraphStore, node: SemanticNodeId) -> TypeInfoSurfaceSignature {
-    // A construction reader: the scope owns every ordinal it reads.
-    let _scope = graph.enter_node_root_scope();
+    // A construction reader inside its caller's lane: the nested scope owns
+    // every ordinal it reads.
+    let _scope = graph.enter_nested_scope();
     let canonical = node_origin_file(graph, node);
     let (signature_span, parameter_spans, return_type_span) = match graph.read_in_scope(node) {
         Some(data) => match &*data {

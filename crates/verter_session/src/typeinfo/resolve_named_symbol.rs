@@ -566,11 +566,32 @@ fn resolve_named_symbol_request(
     );
     // Deliver the resolved node under its own root: the caller holds it
     // past this request's construction scope, and a later projection reads
-    // it through that root, never through the bare ordinal.
+    // it through that root, never through the bare ordinal. A resolved node
+    // that cannot be rooted is a typed fault, never an absent symbol.
     (
-        outcome.map(|node| node.and_then(|node| dispatch.graph().root_in_scope(node))),
+        outcome.and_then(|node| {
+            node.map(|node| deliver_resolved_root(dispatch.graph(), node))
+                .transpose()
+        }),
         mode,
     )
+}
+
+/// Root a resolved construction ordinal for delivery past its request. A
+/// slot a concurrent close released, or an ordinal the graph cannot own, is
+/// the typed fault its rooting reports.
+pub(crate) fn deliver_resolved_root(
+    graph: &verter_type_engine::semantic_query_memo::SemanticGraphStore,
+    node: SemanticNodeId,
+) -> Result<verter_type_engine::semantic_query_memo::node_roots::NodeRoot, TypeResolutionRequestError>
+{
+    graph.root_in_scope(node).map_err(|error| {
+        TypeResolutionRequestError::from_query_error(&error).unwrap_or_else(|| {
+            TypeResolutionRequestError::Other(std::sync::Arc::from(
+                "resolved semantic node could not be rooted for delivery",
+            ))
+        })
+    })
 }
 
 /// Resolve `name` under an ALREADY-ACQUIRED view/dispatch — the shared
@@ -774,7 +795,7 @@ pub(crate) fn materialize_through_aliases(
     verter_debug_assert!(!matches!(mode, ProjectionMode::Identity));
     let store = host.project_type_store().semantic_graph();
     // A construction reader: the scope owns every ordinal it reads.
-    let _scope = store.enter_node_root_scope();
+    let _scope = dispatch.enter_construction_scope();
     let mut current = start;
     for _ in 0..16 {
         let data = store.read_in_scope(current);
@@ -1131,8 +1152,9 @@ pub(crate) fn classify_operator_reduction_step(
     result: QueryResult<SemanticNodeId>,
     carrier: SemanticNodeId,
 ) -> Result<MaterializationStep, TypeResolutionRequestError> {
-    // A construction reader: the scope owns every ordinal it reads.
-    let _scope = store.enter_node_root_scope();
+    // A construction reader inside its caller's lane: the nested scope owns
+    // every ordinal it reads.
+    let _scope = store.enter_nested_scope();
     match result {
         QueryResult::Value(next) => {
             if next == carrier {

@@ -427,7 +427,7 @@ pub(crate) fn read_surface_member_candidates(
     >,
     surface: &ResolvedPayloadSurface,
 ) -> Vec<SurfaceMemberCandidate> {
-    let _scope = dispatch.graph().enter_node_root_scope();
+    let _scope = dispatch.enter_construction_scope();
     // An INCOMPLETE member read records its typed reason and enumerates only
     // the usable subset — never a silently truncated candidate set.
     let members =
@@ -439,7 +439,7 @@ pub(crate) fn read_surface_member_candidates(
         .recorded()
         .unwrap_or_default();
     let roots = dispatch
-        .graph()
+        .construction_grant()
         .root_nodes(
             std::iter::once(surface.node.id()).chain(members.iter().map(|member| member.value)),
         )

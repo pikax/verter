@@ -595,8 +595,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     ) -> Option<AdmittedRouteProjectionNode> {
         match route {
             RouteDemand::MemberPath(path) if !path.is_empty() => {
-                let graph = std::sync::Arc::clone(self.semantic_dispatch().graph());
-                let _scope = graph.enter_node_root_scope();
+                let _scope = self.semantic_dispatch().enter_construction_scope();
                 let root =
                     self.dispatch_root_instantiated(scope_canonical_id, scope_owner, root_symbol)?;
                 let query_path: std::sync::Arc<[PathSegment]> = std::sync::Arc::from(
@@ -678,8 +677,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         // Step A: instantiate the route root to a projectable body. Navigate
         // keeps generic carriers intact (the builtin engine re-projects in the
         // caller's mode), mirroring the materialiser's Step A.
-        let graph = std::sync::Arc::clone(self.semantic_dispatch().graph());
-        let _scope = graph.enter_node_root_scope();
+        let _scope = self.semantic_dispatch().enter_construction_scope();
         let body_id =
             self.dispatch_root_instantiated(scope_canonical_id, scope_owner, root_symbol)?;
         let dispatch = self.semantic_dispatch();

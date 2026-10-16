@@ -1020,8 +1020,7 @@ pub(crate) fn project_model(
     diag_sink: &mut Vec<MacroExpansionDiagnostics>,
     cursor: crate::meta_resolve::projection_demand::ProjectionCursor<'_>,
 ) -> Option<ExpandedField> {
-    let graph = std::sync::Arc::clone(query_engine.dispatch.graph());
-    let _scope = graph.enter_node_root_scope();
+    let _scope = query_engine.dispatch.enter_construction_scope();
     if !mac.is_type_based {
         return None;
     }

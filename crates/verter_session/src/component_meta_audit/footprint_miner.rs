@@ -63,13 +63,18 @@ use super::footprint_structural_hash::structural_hash_of;
 /// `state.truncation_counters`).
 pub fn mine_footprint(
     graph: &SemanticGraphStore,
+    construction: &verter_type_engine::semantic_query_memo::node_roots::NodeConstructionGrant,
     state: AccumulatorState,
     ctx: &RequestContext,
     max_edges: usize,
     caps: &AuditCaps,
 ) -> RequestFootprintAudit {
     // A construction reader: the scope owns every ordinal it reads.
-    let _scope = graph.enter_node_root_scope();
+    assert!(
+        construction.authorizes(graph),
+        "a footprint is mined under its own graph's construction lane"
+    );
+    let _scope = construction.enter_scope();
     // ── 1. Collect unique SemanticNodeIds touched by raw edges ──────
     let mut touched: Vec<SemanticNodeId> = Vec::new();
     {

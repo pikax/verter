@@ -124,10 +124,7 @@ impl VerterHost {
         Option<verter_type_engine::semantic_query_memo::node_roots::NodeRoot>,
         TypeResolutionRequestError,
     > {
-        let _node_scope = self
-            .project_type_store
-            .semantic_graph()
-            .enter_node_root_scope();
+        let _node_scope = self.project_type_store.construction_grant().enter_scope();
         let request_id = self.next_request_id();
         verter_type_engine::request_context::increment_requests_created();
 
@@ -292,7 +289,15 @@ fn audited_from_outcome(
     match outcome {
         // Delivered under its own root, so the caller's projection outlives
         // this request's construction scope.
-        Ok(value) => AuditedResult::ok(value.and_then(|node| graph.root_in_scope(node)), audit),
+        // A resolved node that cannot be rooted is a typed fault, never an
+        // absent result.
+        Ok(value) => match value
+            .map(|node| crate::typeinfo::resolve_named_symbol::deliver_resolved_root(graph, node))
+            .transpose()
+        {
+            Ok(root) => AuditedResult::ok(root, audit),
+            Err(error) => AuditedResult::err(error, audit),
+        },
         Err(error) => AuditedResult::err(error, audit),
     }
 }
@@ -532,7 +537,7 @@ fn evaluate_inner(
     if req.cacheable {
         let mut guard = host.scratch_cache().lock();
         let roots = dispatch
-            .graph()
+            .construction_grant()
             .root_nodes([final_node])
             .expect("evaluated scratch node is live");
         let evicted = guard.insert_rooted(scratch_uri.to_string(), final_node, roots);

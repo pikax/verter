@@ -543,11 +543,13 @@ pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabili
     /// The facts the root frame of the running drive traced soundly, left
     /// by its completion for the drive's entry to seal a refusal on.
     driven_root_traced: std::cell::RefCell<Option<TracedFacts>>,
-    /// The dispatch's construction scope: every ordinal this dispatcher
-    /// interns or reads while it lives is owned by its request, so a
-    /// producer reading a construction ordinal after a nested query returns
-    /// still holds it. Declared last so it closes after every other field.
-    _construction: crate::semantic_query_memo::node_roots::NodeRootScope,
+    /// The dispatch's share of its graph's construction owner on this
+    /// thread: every ordinal a live dispatcher of the graph interns or reads
+    /// is owned until the last of them drops, so a producer reading a
+    /// construction ordinal after a nested query returns still holds it, and
+    /// dispatchers may be interleaved and dropped in any order. Declared
+    /// last so it closes after every other field.
+    _construction: crate::semantic_query_memo::node_roots::DispatchConstructionScope,
 }
 
 /// One result a dispatcher's build published ([`ProjectSemanticDispatch`]'s
@@ -846,9 +848,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             crate::resolver_core::fact_validation_port::LiveFactValidation::request_snapshot(ctx);
         let mut binding = ctx.attach_engine();
         if let Some(graph) = graph {
+            binding.construction =
+                crate::semantic_query_memo::node_roots::NodeConstructionGrant::mint(&graph);
             binding.graph = graph;
         }
-        let binding_graph_scope = binding.graph.enter_node_root_scope();
+        let binding_graph_scope =
+            crate::semantic_query_memo::node_roots::DispatchConstructionScope::enter(
+                binding.construction.arena(),
+            );
         Self {
             binding,
             policy: ctx.engine_policy(),
@@ -885,6 +892,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             driven_root_traced: std::cell::RefCell::new(None),
             _construction: binding_graph_scope,
         }
+    }
+
+    /// Open a nested construction scope of this dispatcher's graph: the
+    /// producer lane a builder reads and roots construction ordinals in.
+    #[must_use]
+    pub fn enter_construction_scope(
+        &self,
+    ) -> crate::semantic_query_memo::node_roots::NodeRootScope {
+        self.binding.construction.enter_scope()
+    }
+
+    /// The construction lane of this dispatcher's graph.
+    #[must_use]
+    pub fn construction_grant(
+        &self,
+    ) -> &crate::semantic_query_memo::node_roots::NodeConstructionGrant {
+        &self.binding.construction
     }
 
     /// The operational budget ledger for demands rooted at this dispatcher.

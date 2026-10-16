@@ -100,7 +100,8 @@ pub(crate) fn build_keys_union_node(
     graph: &verter_type_engine::semantic_query_memo::SemanticGraphStore,
     keys: &[verter_type_expr::facts::FactPropertyKey],
 ) -> Option<verter_type_engine::semantic_query_memo::node_roots::NodeRoot> {
-    let _scope = graph.enter_node_root_scope();
+    // Construction lane: the caller's dispatcher holds it.
+    let _scope = graph.enter_nested_scope()?;
     use verter_type_engine::semantic_query::SemanticNodeData;
     use verter_type_expr::LiteralValue;
     use verter_type_expr::PropertyKey;
@@ -135,7 +136,7 @@ pub(crate) fn build_keys_union_node(
         composite.evidence.inspected_file_roots.is_empty() && !composite.evidence.incomplete,
         "key-domain union over freshly interned Global literals must carry no evidence"
     );
-    graph.root_in_scope(composite.node)
+    graph.root_in_scope(composite.node).ok()
 }
 
 /// Extract the package-backed gate's ROOT declaration IDENTITY from a graph
