@@ -2863,7 +2863,7 @@ pub fn semantic_graph_read_set_signature(
 pub fn semantic_graph_carrier(
     view: &dyn verter_session_query::facts::store_view::StoreView,
     observed_self_roots: &[ObservedGraphSelfRoot],
-    mut traced_facts: Vec<verter_session_query::facts::fact_cache::FactVersionRef>,
+    traced_facts: Vec<verter_session_query::facts::fact_cache::FactVersionRef>,
 ) -> Result<
     crate::fact_signature_helpers::StructuralCarrierReadSet,
     crate::cache_runtime::NonAdmissionReason,

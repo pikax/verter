@@ -836,6 +836,10 @@ impl StoredArtifact {
 
 // ── FileArtifactStore ──
 
+/// A test hook run inside one retired-version sweep.
+#[cfg(test)]
+type ReclaimSweepHook = Box<dyn FnOnce(&FileArtifactStore) + Send>;
+
 /// The per-host content-addressed file-artifact cache.
 ///
 /// Replaces the retired `FileArtifactStore` type as the authoritative
@@ -1027,7 +1031,7 @@ pub struct FileArtifactStore {
     /// Test-only hook run once inside the next sweep, after it took
     /// [`Self::reclaim_sweep`] and before it snapshots the counter.
     #[cfg(test)]
-    reclaim_sweep_hook: parking_lot::Mutex<Option<Box<dyn FnOnce(&Self) + Send>>>,
+    reclaim_sweep_hook: parking_lot::Mutex<Option<ReclaimSweepHook>>,
     /// Test-only host-level audit hook.
     #[cfg(test)]
     test_audit_hook: parking_lot::Mutex<Option<Arc<crate::host_test_audit::HostTestAuditState>>>,
@@ -1136,7 +1140,7 @@ impl FileArtifactStore {
     }
 
     #[cfg(test)]
-    pub(crate) fn run_inside_next_reclaim_sweep(&self, hook: Box<dyn FnOnce(&Self) + Send>) {
+    pub(crate) fn run_inside_next_reclaim_sweep(&self, hook: ReclaimSweepHook) {
         *self.reclaim_sweep_hook.lock() = Some(hook);
     }
 
