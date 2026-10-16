@@ -2707,7 +2707,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 (
                     QueryResult::Value(self.opaque(QueryError::RecursiveRef {
                         name: Arc::from("default"),
-                        args: Arc::from([]),
+                        args: Default::default(),
                     })),
                     empty_signature(),
                 )
@@ -5236,7 +5236,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput<_> = (
                 QueryResult::Value(self.opaque(QueryError::RecursiveRef {
                     name: Arc::clone(decl_name),
-                    args: Arc::clone(args),
+                    args: Arc::clone(args).into(),
                 })),
                 empty_signature(),
             )
@@ -16105,7 +16105,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> Option<SemanticNodeId> {
         let (name, args) = match self.graph().node_data(node).as_deref() {
             Some(SemanticNodeData::Opaque(QueryError::RecursiveRef { name, args })) => {
-                (Arc::clone(name), Arc::clone(args))
+                (Arc::clone(name), Arc::<[SemanticNodeId]>::from(args.nodes()))
             }
             _ => return None,
         };
@@ -16555,7 +16555,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     Some(NodeScopeId::File { canonical_id, owner: edge_owner, .. })
                         if canonical_id == *canonical && edge_owner == owner
                 );
-                (edge == name && declared_here).then(|| Arc::clone(args))
+                (edge == name && declared_here).then(|| Arc::<[SemanticNodeId]>::from(args.nodes()))
             }
             Some(SemanticNodeData::InstantiationRef { base, args }) => {
                 (base.canonical_id == *canonical && base.owner == owner && base.decl_name == *name)

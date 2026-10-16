@@ -5837,6 +5837,69 @@ pub struct SemanticGraphStats {
 /// Structured query-level failure. Distinct from panics — callers decide
 /// whether an error maps to a top-level public failure or to an opaque
 /// semantic node in the result.
+/// The type arguments a recursive reference names. Every copy of the
+/// error carries them, but no public accessor hands the operands out: the
+/// node that carries the error owns them, and a reader reaches them only
+/// through that node's lease.
+#[derive(Clone, PartialEq, Eq, Hash, Default)]
+pub struct RecursiveRefArgs(Arc<[SemanticNodeId]>);
+
+impl RecursiveRefArgs {
+    /// The operands, for engine-internal construction and traversal.
+    pub(crate) fn nodes(&self) -> &[SemanticNodeId] {
+        &self.0
+    }
+
+    /// The operands of a fixture error.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn nodes_for_tests(&self) -> &[SemanticNodeId] {
+        &self.0
+    }
+
+    /// How many type arguments the reference names.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Whether the reference names no type argument.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl std::fmt::Debug for RecursiveRefArgs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl From<Arc<[SemanticNodeId]>> for RecursiveRefArgs {
+    fn from(nodes: Arc<[SemanticNodeId]>) -> Self {
+        Self(nodes)
+    }
+}
+
+impl From<Vec<SemanticNodeId>> for RecursiveRefArgs {
+    fn from(nodes: Vec<SemanticNodeId>) -> Self {
+        Self(Arc::from(nodes))
+    }
+}
+
+impl From<&[SemanticNodeId]> for RecursiveRefArgs {
+    fn from(nodes: &[SemanticNodeId]) -> Self {
+        Self(Arc::from(nodes))
+    }
+}
+
+impl<const N: usize> From<[SemanticNodeId; N]> for RecursiveRefArgs {
+    fn from(nodes: [SemanticNodeId; N]) -> Self {
+        Self(Arc::from(Vec::from(nodes)))
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum QueryError {
     /// Execution validity refused delivery, independently of semantic quality.
@@ -5875,7 +5938,7 @@ pub enum QueryError {
     /// `[[string]]`); empty for a reference without type arguments.
     RecursiveRef {
         name: Arc<str>,
-        args: Arc<[SemanticNodeId]>,
+        args: RecursiveRefArgs,
     },
     /// Catch-all for text-bearing failures surfaced to the caller.
     Other(Arc<str>),
@@ -11660,7 +11723,7 @@ mod tests {
             },
             QueryError::RecursiveRef {
                 name: Arc::from("R"),
-                args: std::sync::Arc::from([]),
+                args: Default::default(),
             },
             QueryError::Other(Arc::from("x")),
             QueryError::DeclPlaceholder {

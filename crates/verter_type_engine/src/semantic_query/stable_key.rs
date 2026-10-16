@@ -1184,7 +1184,7 @@ fn encode_data(graph: &SemanticGraphStore, id: SemanticNodeId, data: &SemanticNo
             match err {
                 QueryError::RecursiveRef { args, .. } => {
                     enc.u16(args.len() as u16);
-                    for arg in args.iter() {
+                    for arg in args.nodes().iter() {
                         enc.child(*arg);
                     }
                 }

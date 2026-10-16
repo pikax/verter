@@ -581,7 +581,7 @@ mod request_error_classification_tests {
     fn recursive_ref_is_not_a_request_fault() {
         let err = QueryError::RecursiveRef {
             name: Arc::from("Tree"),
-            args: std::sync::Arc::from([]),
+            args: Default::default(),
         };
         assert!(TypeResolutionRequestError::from_query_error(&err).is_none());
     }

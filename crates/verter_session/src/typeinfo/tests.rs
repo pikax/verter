@@ -1177,7 +1177,7 @@ fn classify_dispatch_error_routes_miss_to_ok_fallback() {
         classify_dispatch_error(
             &QueryError::RecursiveRef {
                 name: Arc::from("Tree"),
-                args: std::sync::Arc::from([]),
+                args: Default::default(),
             },
             None
         ),
@@ -1321,7 +1321,7 @@ fn operator_reduction_step_propagates_fault_opaque_not_masked_as_carrier() {
     // The operator carrier the step preserves on a non-fault.
     let carrier = graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
         name: Arc::from("Carrier"),
-        args: std::sync::Arc::from([]),
+        args: Default::default(),
     }));
 
     // (a) FAULT opaque as a Value → MUST propagate as `Err`, never mask.

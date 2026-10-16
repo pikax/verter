@@ -14889,7 +14889,7 @@ fn watched_red_reverse_homomorphic_recursive_ref_is_publishable() {
     let never = primitive(&graph, PrimitiveKind::Never);
     let recursive = graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
         name: Arc::from("Tree"),
-        args: std::sync::Arc::from([]),
+        args: Default::default(),
     }));
     let source =
         intern_object_with_members(&graph, vec![surface_member("a", recursive, false, false)]);
@@ -22769,7 +22769,7 @@ fn resolve_macro_payload_self_reference_does_not_loop() {
     let graph = host.project_type_store().semantic_graph();
     let recursive_ref = graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
         name: Arc::from("R"),
-        args: std::sync::Arc::from([]),
+        args: Default::default(),
     }));
 
     let dispatch = ProjectSemanticDispatch::new(&host);

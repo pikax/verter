@@ -1851,7 +1851,7 @@ fn the_retention_walk_visits_every_retained_id() {
     let argument = prim(&graph, PrimitiveKind::Number);
     let back_edge = SemanticNodeData::Opaque(QueryError::RecursiveRef {
         name: Arc::from("Tree"),
-        args: Arc::from([argument]),
+        args: [argument].into(),
     });
     let mut semantic = Vec::new();
     let _ = back_edge.for_each_child(|child| semantic.push(child));
@@ -1911,7 +1911,7 @@ fn the_retention_walk_visits_every_retained_id() {
 
     let forward = graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
         name: Arc::from("Tree"),
-        args: Arc::from([SemanticNodeId(graph.node_count() as u64 + 3)]),
+        args: [SemanticNodeId(graph.node_count() as u64 + 3)].into(),
     }));
     assert!(
         matches!(

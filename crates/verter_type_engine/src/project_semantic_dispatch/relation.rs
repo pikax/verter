@@ -10067,7 +10067,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             whole_hash,
                             decl_name: Arc::clone(name),
                         },
-                        Arc::clone(args),
+                        Arc::from(args.nodes()),
                     )
                 }
                 SemanticNodeData::DeclRef { identity } => (

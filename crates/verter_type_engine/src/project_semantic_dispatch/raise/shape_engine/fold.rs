@@ -669,7 +669,7 @@ fn fold_object_spread_program<
         }
         QueryResult::Recursive(_) => alg.opaque_sentinel(&QueryError::RecursiveRef {
             name: Arc::from("object-spread-projection"),
-            args: Arc::from([]),
+            args: Default::default(),
         }),
         QueryResult::Error(error) => alg.opaque_sentinel(&error),
     }

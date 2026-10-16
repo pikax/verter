@@ -3525,7 +3525,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             if cap_active && index >= budget {
                 results.push(self.dispatch.opaque(QueryError::RecursiveRef {
                     name: Arc::from("depth-budget-exceeded"),
-                    args: Arc::from([]),
+                    args: Default::default(),
                 }));
                 return;
             }

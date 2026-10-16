@@ -382,7 +382,7 @@ fn materialize_recursive_ref_back_edge_round_trips() {
         &host,
         SemanticNodeData::Opaque(QueryError::RecursiveRef {
             name: Arc::from("Tree"),
-            args: std::sync::Arc::from([]),
+            args: Default::default(),
         }),
     );
     match &expr {

@@ -5,7 +5,7 @@ use super::*;
 impl QueryError {
     pub(crate) fn for_each_retained_node(&self, visit: impl FnMut(SemanticNodeId)) {
         match self {
-            Self::RecursiveRef { name: _, args } => args.iter().copied().for_each(visit),
+            Self::RecursiveRef { name: _, args } => args.nodes().iter().copied().for_each(visit),
             Self::CheckerRecovery {
                 diagnostic: _,
                 basis: _,

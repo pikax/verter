@@ -836,7 +836,7 @@ fn recursive_runtime_carrier_is_typed_partial_and_return_only() {
     let subject = graph.intern_node_with_scope(
         SemanticNodeData::Opaque(QueryError::RecursiveRef {
             name: Arc::from("RuntimeRecursive"),
-            args: std::sync::Arc::from([]),
+            args: Default::default(),
         }),
         file_scope(&dispatch, "/recursive-runtime.ts"),
     );

@@ -1317,7 +1317,7 @@ mod arena_intern_tests {
         let recursive_over = |arg: SemanticNodeId| {
             arena.push(SemanticNodeData::Opaque(QueryError::RecursiveRef {
                 name: Arc::from("Tree"),
-                args: Arc::from([arg]),
+                args: [arg].into(),
             }))
         };
         let over_closed = recursive_over(closed);

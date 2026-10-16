@@ -920,7 +920,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         whole_hash,
                         decl_name: Arc::clone(name),
                     },
-                    Arc::clone(args),
+                    Arc::from(args.nodes()),
                 ))
             }
             _ => None,

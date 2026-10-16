@@ -305,7 +305,7 @@ fn parity_opaque_errors_and_raw_fallback() {
     // (a materialized leaf, not a sentinel).
     let recursive = graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
         name: Arc::from("Tree"),
-        args: std::sync::Arc::from([]),
+        args: Default::default(),
     }));
     assert_classifier_parity(&host, recursive, "opaque-recursive-ref");
     assert!(
@@ -2483,7 +2483,7 @@ fn node_improvement_verdict_matches_type_expr_improvement_over_raise() {
     // non-structural).
     let rr = graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
         name: Arc::from("Loop"),
-        args: std::sync::Arc::from([]),
+        args: Default::default(),
     }));
 
     // (candidate, current) pairs. Each verdict is asserted equal to the verdict
@@ -2755,7 +2755,7 @@ fn publication_score_corpus(
             "opaque_recursive_ref",
             graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
                 name: Arc::from("Loop"),
-                args: std::sync::Arc::from([]),
+                args: Default::default(),
             })),
         ),
         (

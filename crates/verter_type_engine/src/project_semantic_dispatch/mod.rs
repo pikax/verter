@@ -2451,7 +2451,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         self.graph().intern_node_with_scope(
             SemanticNodeData::Opaque(QueryError::RecursiveRef {
                 name: Arc::clone(&identity.decl_name),
-                args,
+                args: args.into(),
             }),
             NodeScopeId::File {
                 canonical_id: Arc::clone(&identity.canonical_id),
@@ -3944,7 +3944,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 if let SemanticQueryKey::Instantiate(k) = &sentinel_key {
                     return graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
                         name: Arc::clone(&k.base().merged_symbol_name),
-                        args: Arc::clone(k.args()),
+                        args: Arc::clone(k.args()).into(),
                     }));
                 }
                 graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss))
