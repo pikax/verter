@@ -2618,6 +2618,55 @@ pub struct CheckerDispatchTransaction {
     pub call: ResolveCallDomainRuntime,
     /// The type-body augmentation folds completed on this transaction.
     pub augmentation: AugmentationPlanTable,
+    /// The declaration kinds read on this transaction.
+    pub decl_kinds: DeclKindTable,
+}
+
+/// A declaration kind this transaction read completely: the kind, how far
+/// the read may travel, and what reusing it replays.
+#[derive(Debug, Clone)]
+pub struct TransactionDeclKind {
+    pub kind: Option<verter_session_query::declarations::TypeDeclKind>,
+    pub reuse: verter_session_query::facts::reuse::ReuseClass,
+    pub replay: FlowMemberReuse,
+}
+
+/// The declaration kinds read on this transaction, keyed by the content
+/// identity that fixes them.
+#[derive(Default)]
+pub struct DeclKindTable {
+    kinds: FxHashMap<crate::semantic_query::DeclIdentity, TransactionDeclKind>,
+}
+
+impl std::fmt::Debug for DeclKindTable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeclKindTable")
+            .field("kinds", &self.kinds.len())
+            .finish()
+    }
+}
+
+impl DeclKindTable {
+    /// The completed read of `identity`'s kind, if any.
+    pub fn get(
+        &self,
+        identity: &crate::semantic_query::DeclIdentity,
+    ) -> Option<&TransactionDeclKind> {
+        self.kinds.get(identity)
+    }
+
+    /// Record a completed read. Only a request-reusable class enters; the
+    /// first completion answers every later demand.
+    pub fn complete(
+        &mut self,
+        identity: crate::semantic_query::DeclIdentity,
+        read: TransactionDeclKind,
+    ) {
+        if !read.reuse.is_request_reusable() {
+            return;
+        }
+        self.kinds.entry(identity).or_insert(read);
+    }
 }
 
 /// The demand a type-body augmentation fold answers: the declaration the

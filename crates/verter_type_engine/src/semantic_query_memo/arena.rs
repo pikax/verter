@@ -252,6 +252,76 @@ enum Slot<'a> {
     Live(&'a Arc<SemanticNodeData>, &'a NodeScopeId),
 }
 
+/// Live chunks indexed by `id >> CHUNK_BITS`. Ids are monotonic, so the
+/// table is a vector addressed by chunk number: a lookup is one bounds
+/// check, not a hash probe. A released chunk leaves one empty pointer.
+#[derive(Default)]
+struct ChunkTable {
+    chunks: Vec<Option<Box<Chunk>>>,
+    live: usize,
+}
+
+impl ChunkTable {
+    #[inline]
+    fn get(&self, key: &u64) -> Option<&Chunk> {
+        self.chunks
+            .get(usize::try_from(*key).ok()?)
+            .and_then(Option::as_deref)
+    }
+
+    #[inline]
+    fn get_mut(&mut self, key: &u64) -> Option<&mut Chunk> {
+        self.chunks
+            .get_mut(usize::try_from(*key).ok()?)
+            .and_then(Option::as_deref_mut)
+    }
+
+    fn get_or_insert_empty(&mut self, key: u64) -> &mut Chunk {
+        let index = usize::try_from(key).expect("chunk number fits the address space");
+        if self.chunks.len() <= index {
+            self.chunks.resize_with(index + 1, || None);
+        }
+        let slot = &mut self.chunks[index];
+        if slot.is_none() {
+            self.live += 1;
+        }
+        slot.get_or_insert_with(|| Box::new(Chunk::empty()))
+    }
+
+    fn remove(&mut self, key: &u64) {
+        if let Some(slot) = usize::try_from(*key)
+            .ok()
+            .and_then(|index| self.chunks.get_mut(index))
+        {
+            if slot.take().is_some() {
+                self.live -= 1;
+            }
+        }
+    }
+
+    /// Live chunk numbers in ascending order.
+    fn keys(&self) -> impl Iterator<Item = u64> + '_ {
+        self.chunks
+            .iter()
+            .enumerate()
+            .filter(|(_, chunk)| chunk.is_some())
+            .map(|(index, _)| index as u64)
+    }
+
+    fn values(&self) -> impl Iterator<Item = &Chunk> {
+        self.chunks.iter().filter_map(Option::as_deref)
+    }
+
+    fn len(&self) -> usize {
+        self.live
+    }
+
+    #[cfg(test)]
+    fn is_empty(&self) -> bool {
+        self.live == 0
+    }
+}
+
 /// Interior state of [`NodeArena`]. Held behind an `RwLock` so reads
 /// (non-hot-path) are concurrent while the allocating intern-miss path
 /// serializes on the writer.
@@ -259,7 +329,7 @@ enum Slot<'a> {
 pub(super) struct ArenaInner {
     /// Live chunks keyed by `id >> CHUNK_BITS`. A chunk is created by the first
     /// id allocated into it and dropped by the release of its last live slot.
-    chunks: rustc_hash::FxHashMap<u64, Chunk>,
+    chunks: ChunkTable,
     /// The next id to hand out: every id below it was allocated exactly once.
     next_id: u64,
     /// Live slots across every chunk, maintained on every allocation and
@@ -286,10 +356,7 @@ impl ArenaInner {
     fn allocate(&mut self, payload: Arc<SemanticNodeData>, scope: NodeScopeId) -> SemanticNodeId {
         let id = SemanticNodeId(self.next_id);
         self.next_id += 1;
-        let chunk = self
-            .chunks
-            .entry(id.0 >> CHUNK_BITS)
-            .or_insert_with(Chunk::empty);
+        let chunk = self.chunks.get_or_insert_empty(id.0 >> CHUNK_BITS);
         let index = (id.0 & CHUNK_MASK) as usize;
         chunk.nodes[index] = Some(payload);
         chunk.scopes[index] = Some(scope);
@@ -322,10 +389,9 @@ impl ArenaInner {
 
     /// Every live `(id, payload, scope)` in ascending id order.
     fn live_slots(&self) -> impl Iterator<Item = (u64, &Arc<SemanticNodeData>, &NodeScopeId)> {
-        let mut keys: Vec<u64> = self.chunks.keys().copied().collect();
-        keys.sort_unstable();
+        let keys: Vec<u64> = self.chunks.keys().collect();
         keys.into_iter().flat_map(move |key| {
-            let chunk = &self.chunks[&key];
+            let chunk = self.chunks.get(&key).expect("listed chunk is live");
             chunk
                 .nodes
                 .iter()

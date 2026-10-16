@@ -158,7 +158,7 @@ impl SemanticQueryKeyDigest {
         let mut hasher = rustc_hash::FxHasher::default();
         canonical.hash(&mut hasher);
         Self {
-            variant: std::mem::discriminant(&canonical),
+            variant: std::mem::discriminant(canonical.as_ref()),
             hash: hasher.finish(),
         }
     }
@@ -167,43 +167,32 @@ impl SemanticQueryKeyDigest {
 #[cfg(any(test, feature = "test-support"))]
 fn canonicalise_for_digest(
     key: &crate::semantic_query::SemanticQueryKey,
-) -> crate::semantic_query::SemanticQueryKey {
+) -> std::borrow::Cow<'_, crate::semantic_query::SemanticQueryKey> {
+    use std::borrow::Cow;
     use std::sync::Arc;
 
     use crate::semantic_query::{PathSegment, SemanticQueryKey};
     match key {
-        SemanticQueryKey::ProjectMember { base, member, mode } => SemanticQueryKey::ProjectPath {
-            base: *base,
-            path: Arc::from(
-                vec![PathSegment::Member(
-                    crate::semantic_query::PropertyKey::identifier(Arc::clone(member)),
-                )]
-                .into_boxed_slice(),
-            ),
-            context: crate::semantic_query::ProjectionReductionContext::published(*mode),
-        },
-        SemanticQueryKey::IndexedAccess { base, index, mode } => SemanticQueryKey::ProjectPath {
-            base: *base,
-            path: Arc::from(vec![PathSegment::Index(index.clone())].into_boxed_slice()),
-            context: crate::semantic_query::ProjectionReductionContext::published(*mode),
-        },
-        SemanticQueryKey::ReduceUnion {
-            members,
-            nullability,
-        } => SemanticQueryKey::ReduceUnion {
-            members: Arc::clone(members),
-            nullability: *nullability,
-        },
-        SemanticQueryKey::ReduceIntersection {
-            input,
-            purpose,
-            context,
-        } => SemanticQueryKey::ReduceIntersection {
-            input: input.clone(),
-            purpose: *purpose,
-            context: context.clone(),
-        },
-        other => other.clone(),
+        SemanticQueryKey::ProjectMember { base, member, mode } => {
+            Cow::Owned(SemanticQueryKey::ProjectPath {
+                base: *base,
+                path: Arc::from(
+                    vec![PathSegment::Member(
+                        crate::semantic_query::PropertyKey::identifier(Arc::clone(member)),
+                    )]
+                    .into_boxed_slice(),
+                ),
+                context: crate::semantic_query::ProjectionReductionContext::published(*mode),
+            })
+        }
+        SemanticQueryKey::IndexedAccess { base, index, mode } => {
+            Cow::Owned(SemanticQueryKey::ProjectPath {
+                base: *base,
+                path: Arc::from(vec![PathSegment::Index(index.clone())].into_boxed_slice()),
+                context: crate::semantic_query::ProjectionReductionContext::published(*mode),
+            })
+        }
+        other => Cow::Borrowed(other),
     }
 }
 

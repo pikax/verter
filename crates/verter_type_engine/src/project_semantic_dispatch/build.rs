@@ -8123,8 +8123,113 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         identity: &crate::semantic_query::DeclIdentity,
     ) -> Option<verter_session_query::declarations::TypeDeclKind> {
-        self.prepared_type_decl(identity)
-            .map(|prepared| prepared.kind)
+        if let Some(completed) = self.dispatch_txn.borrow().decl_kinds.get(identity) {
+            // A declaration identity names one content version, so its
+            // kind cannot change under it.
+            self.replay_transaction_read(&completed.reuse, &completed.replay);
+            return completed.kind;
+        }
+        let (kind, recorded) = self.record_transaction_read(
+            || {
+                self.prepared_type_decl(identity)
+                    .map(|prepared| prepared.kind)
+            },
+            |_| true,
+        );
+        if let Some((reuse, replay)) = recorded {
+            self.dispatch_txn.borrow_mut().decl_kinds.complete(
+                identity.clone(),
+                super::dispatch_txn::TransactionDeclKind {
+                    kind,
+                    reuse,
+                    replay,
+                },
+            );
+        }
+        kind
+    }
+
+    /// Run a read whose value the rest of this transaction may reuse, and
+    /// record what reusing it must replay: its fact reads, refusal, file
+    /// self-roots and canonical evidence. `None` when the read is not
+    /// reusable — it ran where an enclosing build could not observe a
+    /// channel, it was partial, `complete` rejects its value, or its refusal
+    /// is not one a later reader of this transaction may share. Either way
+    /// every rail reaches the enclosing build exactly as if the read had run
+    /// there directly.
+    pub(super) fn record_transaction_read<T>(
+        &self,
+        read: impl FnOnce() -> T,
+        complete: impl FnOnce(&T) -> bool,
+    ) -> (
+        T,
+        Option<(
+            verter_session_query::facts::reuse::ReuseClass,
+            super::dispatch_txn::FlowMemberReuse,
+        )>,
+    ) {
+        // A recording is only replayable when every channel an enclosing
+        // build observes is observable here: a live tracer, a live
+        // build-local frame and a cold-compute completeness that can show
+        // a partial fold (see the flow-member recorder).
+        let completeness_scope_active =
+            crate::request_context::cold_compute_completeness_scope_active();
+        let recordable = crate::resolver_core::resolver_context::fact_tracer_installed()
+            && !self.build_local_taint.borrow().is_empty()
+            && !(completeness_scope_active
+                && crate::request_context::current_cold_compute_completeness().is_partial());
+        if !recordable {
+            return (read(), None);
+        }
+        let private_completeness = (!completeness_scope_active)
+            .then(crate::request_context::ColdComputeCompletenessScope::enter);
+        let evidence_epoch = self.canonical_evidence_epoch.get();
+        let frame = super::BuildLocalTaintGuard::push(&self.build_local_taint);
+        let refusals = crate::fact_tracing::RefusalObservationScope::enter();
+        let (value, reads) = crate::resolver_core::resolver_context::record_fact_reads(read);
+        let refused = refusals.observed();
+        drop(refusals);
+        let observed = frame.finish();
+        let folded_partial =
+            crate::request_context::current_cold_compute_completeness().is_partial();
+        if let Some(scope) = private_completeness {
+            scope.discard();
+        }
+        self.fold_observed_frame_into_top(&observed);
+        let refusal = match refused {
+            Some(reason) => verter_session_query::facts::reuse::ObservedRefusal::Typed(reason),
+            None if reads.non_cacheable || observed.cache_suppress => {
+                verter_session_query::facts::reuse::ObservedRefusal::Unattributed
+            }
+            None => verter_session_query::facts::reuse::ObservedRefusal::None,
+        };
+        let complete = !observed.result_is_partial && !folded_partial && complete(&value);
+        let reuse = verter_session_query::facts::reuse::classify_reuse(refusal, complete);
+        if !reuse.is_request_reusable() {
+            return (value, None);
+        }
+        let replay = super::dispatch_txn::FlowMemberReuse {
+            reads,
+            observed_self_roots: observed.observed_self_roots,
+            canonical_evidence_deposited: self.canonical_evidence_epoch.get() != evidence_epoch,
+        };
+        (value, Some((reuse, replay)))
+    }
+
+    /// Replay a read [`Self::record_transaction_read`] recorded into the
+    /// scopes live now, exactly as running it again would.
+    pub(super) fn replay_transaction_read(
+        &self,
+        reuse: &verter_session_query::facts::reuse::ReuseClass,
+        replay: &super::dispatch_txn::FlowMemberReuse,
+    ) {
+        crate::resolver_core::resolver_context::observe_fan_out_borrowed(&replay.reads.facts);
+        crate::fact_tracing::replay_reuse_refusal(reuse);
+        self.deposit_operand_self_roots(&replay.observed_self_roots);
+        if replay.canonical_evidence_deposited {
+            self.canonical_evidence_epoch
+                .set(self.canonical_evidence_epoch.get().wrapping_add(1));
+        }
     }
 
     /// Whether the prepared declaration rooted at `identity` declares type
