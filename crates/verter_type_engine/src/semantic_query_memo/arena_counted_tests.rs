@@ -289,3 +289,44 @@ fn production_constructor_keeps_sweeps_authoritative_and_old_drops_safe() {
 fn planted_counted_activation_with_legacy_sweep_is_rejected() {
     NodeArena::counted_for_tests().release_canonical("/closed.ts", u64::MAX);
 }
+
+/// Ids are never reused, so a long session allocates ever higher chunk
+/// numbers. With one early node pinning its chunk, the chunk table must still
+/// hold entries for the live chunks only, not for every chunk the session
+/// ever allocated and released.
+#[test]
+fn chunk_table_storage_follows_live_chunks_not_allocation_history() {
+    let arena = NodeArena::counted_for_tests();
+    let pinned = arena.intern_owned(
+        SemanticNodeData::Literal(LiteralValue::String("pinned".into())),
+        NodeScopeId::Global,
+    );
+    let churned_chunks = 64;
+    for index in 0..churned_chunks * CHUNK_LEN {
+        drop(arena.intern_owned(
+            SemanticNodeData::Literal(LiteralValue::String(format!("churn{index}"))),
+            NodeScopeId::Global,
+        ));
+    }
+    assert!(arena.is_live(pinned.id()));
+    let inner = arena.inner.read();
+    let live_chunks = inner.chunks.len();
+    assert!(live_chunks <= 2, "{live_chunks} chunks stayed live");
+    assert!(
+        inner.chunks.held_entries() <= 2 * live_chunks + CHUNK_WINDOW_SLACK,
+        "{} table entries held for {live_chunks} live chunks after {churned_chunks} released ones",
+        inner.chunks.held_entries()
+    );
+    assert_eq!(
+        inner.chunks.keys().next(),
+        Some(0),
+        "the pinned chunk stays addressable"
+    );
+    drop(inner);
+    assert_eq!(
+        arena.get(pinned.id()).as_deref(),
+        Some(&SemanticNodeData::Literal(LiteralValue::String(
+            "pinned".into()
+        )))
+    );
+}

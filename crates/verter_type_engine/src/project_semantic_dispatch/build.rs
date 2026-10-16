@@ -202,9 +202,10 @@ enum FoldedAugmentation {
     Contributions(AugmentationContributions),
     Plan(AugmentationPlan),
     /// Neither an augmenting block nor another file-scope declaration
-    /// targets the declaration. Decided before the declaration's arguments
-    /// or projection context are consulted, so it answers every
-    /// instantiation of the declaration alike.
+    /// contributes to the declaration. Decided by the augmenter set and the
+    /// contributors' retained declarations alone, never by the declaration's
+    /// arguments or projection context, so it answers every instantiation of
+    /// the declaration alike.
     Absent,
 }
 
@@ -6374,7 +6375,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// already holds as the base body (a global declaration's own file):
     /// it is skipped, never folded twice.
     ///
-    /// Returns `None` when no augmenter contributes.
+    /// Returns [`FoldedAugmentation::Absent`] when no augmenter contributes.
     ///
     /// `contribution` is what each augmenter contributes: a type body, or
     /// the call signatures an augmenting block's function declarations add
@@ -7213,8 +7214,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             //     result warm.
             //   - `source_env_unobservable == false`: genuinely no augmenter
             //     contributes this decl — a real, cacheable no-augmentation
-            //     result. Return `None`; the caller keeps the base body unchanged
-            //     and warms normally.
+            //     result. Whether an augmenter contributes depends on the
+            //     augmenter set and each augmenter's retained declarations,
+            //     never on this instantiation's arguments or projection, so
+            //     it is the same `Absent` answer an empty augmenter set gives:
+            //     the caller keeps the base body unchanged, warms normally, and
+            //     later instantiations in the transaction replay this read.
             if source_env_unobservable {
                 return Some(FoldedAugmentation::Contributions(
                     AugmentationContributions {
@@ -7227,7 +7232,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     },
                 ));
             }
-            return None;
+            return Some(FoldedAugmentation::Absent);
         }
 
         // Fact rail, part 2 — each contributing augmenter's whole-hash
