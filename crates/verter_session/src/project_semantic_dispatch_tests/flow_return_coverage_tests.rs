@@ -6539,18 +6539,27 @@ fn thenable_chain(steps: &str) -> String {
         } else {
             "number".to_owned()
         };
-        let callback = match kind {
-            't' => format!("onfulfilled: (v: {next}) => void"),
-            'n' => format!("onfulfilled?: ((v: {next}) => void) | null"),
-            'u' => format!("onfulfilled: (v: {next} | string) => void"),
-            _ => format!("onfulfilled?: ((v: {next} | string) => void) | null"),
-        };
-        source.push_str(&format!(
-            "interface C{index} {{ then({callback}): void }}\n"
-        ));
+        source.push_str(&thenable_link(&format!("C{index}"), kind, &next));
     }
-    source.push_str("export function probe() { const x: Awaited<C0> = null as any; return x; }\n");
+    source.push_str(&awaited_probe("probe", "C0"));
     source
+}
+
+/// One thenable `name` whose `then` continues to `next` in the
+/// [`thenable_chain`] step shape `kind`.
+fn thenable_link(name: &str, kind: char, next: &str) -> String {
+    let callback = match kind {
+        't' => format!("onfulfilled: (v: {next}) => void"),
+        'n' => format!("onfulfilled?: ((v: {next}) => void) | null"),
+        'u' => format!("onfulfilled: (v: {next} | string) => void"),
+        _ => format!("onfulfilled?: ((v: {next} | string) => void) | null"),
+    };
+    format!("interface {name} {{ then({callback}): void }}\n")
+}
+
+/// An exported function `name` whose annotation reads `Awaited<operand>`.
+fn awaited_probe(name: &str, operand: &str) -> String {
+    format!("export function {name}() {{ const x: Awaited<{operand}> = null as any; return x; }}\n")
 }
 
 /// The lib conditional's reduction of `probe` in `source`.
@@ -6573,7 +6582,7 @@ fn is_ts2589(data: &SemanticNodeData) -> bool {
 /// value, and stop with the checker's TS2589 at Verter's tail budget —
 /// counted as the checker counts, a run entered through a callback union
 /// starting with one step counted. A far lower budget than production's
-/// stands in for it on the same path, so the chains stay short.
+/// stands in for it on the same path, so the budget's runs stay short.
 ///
 /// tsc 7.0.2 (`Awaited<C0>` through the tuple wrapper, `--strict`) over
 /// chains of distinct thenables: 999 tail steps are `number` and 1000 are
@@ -6581,32 +6590,49 @@ fn is_ts2589(data: &SemanticNodeData) -> bool {
 /// answer is `number`. A run entered through a callback union starts with
 /// one step counted: one nested step then 998 tail steps are `number`, then
 /// 999 are `any` under TS2589, where Verter's full answer is `number`.
+///
+/// Every run is a suffix of ONE 1000-step chain `C0 → … → C999 → number`
+/// in one file: entering it at `Ck` is a run of `1000 - k` tail steps, and
+/// a callback-union thenable `Nk` continuing to `Ck` is one nested step
+/// then those tail steps. Each `Awaited` reference is its own evaluation
+/// that counts every step of its run; the chain's declarations are read,
+/// not re-authored, by the runs after the first.
 #[test]
 fn lib_awaited_tail_runs_answer_past_the_checker_limit_and_stop_at_verters_budget() {
+    const CHAIN: &str = "/ws/cov/thenable_chain.ts";
+    const LINKS: usize = 1000;
     const BUDGET: usize = 120;
-    let tails = |count: usize| "t".repeat(count);
+    let link = |tail_steps: usize| format!("C{}", LINKS - tail_steps);
+    let mut source = thenable_chain(&"t".repeat(LINKS));
+    let mut probe_run = |name: &str, nested_entry: bool, tail_steps: usize| {
+        let operand = if nested_entry {
+            let entry = format!("N{}", LINKS - tail_steps);
+            source.push_str(&thenable_link(&entry, 'n', &link(tail_steps)));
+            entry
+        } else {
+            link(tail_steps)
+        };
+        source.push_str(&awaited_probe(name, &operand));
+    };
+    probe_run("nested_then_999_tails", true, LINKS - 1);
+    probe_run("tails_below_budget", false, BUDGET - 1);
+    probe_run("tails_at_budget", false, BUDGET);
+    probe_run("nested_tails_below_budget", true, BUDGET - 2);
+    probe_run("nested_tails_at_budget", true, BUDGET - 1);
+    let host = host_with(&[(CHAIN, source.as_str())]);
+    let probe = |name: &str| reduced_annotation_in(&host, CHAIN, name).0;
     let number = || SemanticNodeData::Primitive(PrimitiveKind::Number);
-    assert_eq!(lib_awaited_probe(&thenable_chain(&tails(1000))), number());
+    assert_eq!(probe("probe"), number(), "1000 tail steps");
     assert_eq!(
-        lib_awaited_probe(&thenable_chain(&format!("n{}", tails(999)))),
-        number()
+        probe("nested_then_999_tails"),
+        number(),
+        "one nested step then 999 tail steps"
     );
     let _budget = super::connected_demand::TailBudgetForTests::install(BUDGET as u32);
-    assert_eq!(
-        lib_awaited_probe(&thenable_chain(&tails(BUDGET - 1))),
-        number()
-    );
-    assert!(is_ts2589(&lib_awaited_probe(&thenable_chain(&tails(
-        BUDGET
-    )))));
-    assert_eq!(
-        lib_awaited_probe(&thenable_chain(&format!("n{}", tails(BUDGET - 2)))),
-        number()
-    );
-    assert!(is_ts2589(&lib_awaited_probe(&thenable_chain(&format!(
-        "n{}",
-        tails(BUDGET - 1)
-    )))));
+    assert_eq!(probe("tails_below_budget"), number());
+    assert!(is_ts2589(&probe("tails_at_budget")));
+    assert_eq!(probe("nested_tails_below_budget"), number());
+    assert!(is_ts2589(&probe("nested_tails_at_budget")));
 }
 
 /// The lib conditional's NESTED steps stop where the checker's instantiation
