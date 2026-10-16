@@ -76,6 +76,16 @@ impl MemoRetention {
     }
 }
 
+/// The bytes one memo family keeps beside its candidates: its key and slot
+/// lists in the family map (with the map's control byte) and its record in
+/// the retention budget's ledger. The candidates themselves are charged
+/// with each candidate.
+pub(super) fn family_container_bytes() -> usize {
+    std::mem::size_of::<(super::family::FamilyKey, super::family::FamilySlots)>()
+        + 1
+        + std::mem::size_of::<(u64, super::family::FamilyKey)>()
+}
+
 /// The address an `Arc` names: the key of its registered charge.
 pub(super) fn allocation_key<T: ?Sized>(allocation: &Arc<T>) -> usize {
     Arc::as_ptr(allocation).cast::<()>() as usize
@@ -158,10 +168,7 @@ impl SemanticGraphStore {
         retention_account: StoreAccount,
         ownership: super::GraphOwnership,
     ) -> Self {
-        Self {
-            retention_account,
-            ..Self::with_ownership(ownership)
-        }
+        Self::with_ownership_and_account(ownership, retention_account)
     }
 
     /// Bind this store's producers to `task_registry`: the one cycle
@@ -338,6 +345,75 @@ impl SemanticGraphStore {
             | SemanticQueryValue::DiagnosticAnalysis(_) => return Ok(None),
         };
         Ok(value_allocation_key(result).map(|key| (key, hold)))
+    }
+
+    /// The slots of `family`, keyed under the held `entries` lock: an
+    /// existing family's, or a newly keyed family's empty slots holding its
+    /// container charge. `None` when the account refuses to key a new
+    /// family: the publish is skipped and its complete value returned
+    /// uncached. The `bool` is whether the family was newly keyed.
+    pub(super) fn family_slots_locked<'a>(
+        &self,
+        entries: &'a mut rustc_hash::FxHashMap<
+            super::family::FamilyKey,
+            super::family::FamilySlots,
+        >,
+        family: &super::family::FamilyKey,
+    ) -> Option<(&'a mut super::family::FamilySlots, bool)> {
+        self.family_slots_prepaid_locked(entries, family, None)
+    }
+
+    /// [`Self::family_slots_locked`] with a container charge `prepaid`
+    /// before the lock — taken by a batch that must not be refused halfway.
+    /// An already keyed family releases the unused prepayment.
+    pub(super) fn family_slots_prepaid_locked<'a>(
+        &self,
+        entries: &'a mut rustc_hash::FxHashMap<
+            super::family::FamilyKey,
+            super::family::FamilySlots,
+        >,
+        family: &super::family::FamilyKey,
+        prepaid: Option<RetentionCharge>,
+    ) -> Option<(&'a mut super::family::FamilySlots, bool)> {
+        use std::collections::hash_map::Entry;
+        match entries.entry(family.clone()) {
+            Entry::Occupied(slots) => Some((slots.into_mut(), false)),
+            Entry::Vacant(slot) if prepaid.is_some() => Some((
+                slot.insert(super::family::FamilySlots::charged(
+                    prepaid.expect("matched a prepayment"),
+                )),
+                true,
+            )),
+            Entry::Vacant(slot) => match self.retention_account().reserve(
+                verter_session_query::retention::ChargeClass::Retained,
+                family_container_bytes(),
+            ) {
+                RetentionAdmission::Admitted(charge) => Some((
+                    slot.insert(super::family::FamilySlots::charged(charge)),
+                    true,
+                )),
+                RetentionAdmission::Refused(refusal) => {
+                    crate::cache_runtime::admission::propagate_non_admission(
+                        refusal.non_admission_reason(),
+                    );
+                    None
+                }
+            },
+        }
+    }
+
+    /// Bytes the store's graph storage — its arena and its current
+    /// signature epoch — is pinned for against the retention account. A
+    /// required current count: a retired epoch a reader still holds is
+    /// charged until it drops but is not counted here.
+    pub fn graph_storage_charge_bytes(&self) -> usize {
+        self.arena.core.storage_charge_bytes() + self.signatures.current_epoch_storage_charge()
+    }
+
+    /// Bytes the store's arena storage is pinned for.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn graph_storage_charge_for_tests(&self) -> usize {
+        self.arena.core.storage_charge_bytes()
     }
 
     /// The registry of shared allocation charges this store's candidates

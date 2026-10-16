@@ -86,6 +86,7 @@
 //! imprecise estimate costs hit rate, never correctness.
 
 pub mod allocation;
+pub mod granular;
 pub(crate) mod resident;
 pub mod resolution_charge;
 pub mod shared;

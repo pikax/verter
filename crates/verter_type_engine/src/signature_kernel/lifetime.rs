@@ -22,7 +22,7 @@ use super::records::{
     SignatureResultRecipeId, SignatureSet, SignatureSetId, SignatureSetRef, SignatureTemplate,
     SignatureTemplateId, SpellingId,
 };
-use super::storage::{AppendInterner, InternError};
+use super::storage::{AppendInterner, EpochStorage, InternError};
 use super::substitution::{
     compose_canonical, CallSubstitution, SubstError, SubstTerm, MAX_SUBSTITUTION_CHAIN_DEPTH,
 };
@@ -64,6 +64,9 @@ impl From<SubstError> for StoreError {
 
 pub(super) struct EpochInner {
     pub epoch: GraphEpoch,
+    /// Every table's and side map's storage, pinned until the epoch's last
+    /// holder drops (see [`EpochStorage`]).
+    pub storage: Arc<EpochStorage>,
     pub shapes: AppendInterner<SignatureInputShape>,
     pub templates: AppendInterner<SignatureTemplate>,
     pub descriptors: AppendInterner<SignatureDescriptor>,
@@ -101,25 +104,31 @@ pub(super) struct EpochInner {
 }
 
 impl EpochInner {
-    fn new(epoch: GraphEpoch, store_live_readers: Arc<AtomicU64>) -> Self {
+    fn new(
+        epoch: GraphEpoch,
+        store_live_readers: Arc<AtomicU64>,
+        account: &Arc<OnceLock<Arc<verter_session_query::retention::SemanticRetentionAccount>>>,
+    ) -> Self {
+        let storage = EpochStorage::new(Arc::clone(account));
         Self {
             epoch,
-            shapes: AppendInterner::new(epoch),
-            templates: AppendInterner::new(epoch),
-            descriptors: AppendInterner::new(epoch),
-            recipes: AppendInterner::new(epoch),
-            provenances: AppendInterner::new(epoch),
-            substitutions: AppendInterner::new(epoch),
-            layouts: AppendInterner::new(epoch),
-            slots: AppendInterner::new(epoch),
-            spaces: AppendInterner::new(epoch),
-            sets: AppendInterner::new(epoch),
-            results: AppendInterner::new(epoch),
-            strings: AppendInterner::new(epoch),
-            sequences: AppendInterner::new(epoch),
-            environments: AppendInterner::new(epoch),
-            locators: AppendInterner::new(epoch),
-            type_tokens: AppendInterner::new(epoch),
+            shapes: AppendInterner::charged(epoch, &storage),
+            templates: AppendInterner::charged(epoch, &storage),
+            descriptors: AppendInterner::charged(epoch, &storage),
+            recipes: AppendInterner::charged(epoch, &storage),
+            provenances: AppendInterner::charged(epoch, &storage),
+            substitutions: AppendInterner::charged(epoch, &storage),
+            layouts: AppendInterner::charged(epoch, &storage),
+            slots: AppendInterner::charged(epoch, &storage),
+            spaces: AppendInterner::charged(epoch, &storage),
+            sets: AppendInterner::charged(epoch, &storage),
+            results: AppendInterner::charged(epoch, &storage),
+            strings: AppendInterner::charged(epoch, &storage),
+            sequences: AppendInterner::charged(epoch, &storage),
+            environments: AppendInterner::charged(epoch, &storage),
+            locators: AppendInterner::charged(epoch, &storage),
+            type_tokens: AppendInterner::charged(epoch, &storage),
+            storage,
             graph_roots: Mutex::new(rustc_hash::FxHashMap::default()),
             space_key_owners: Mutex::new(rustc_hash::FxHashMap::default()),
             descriptor_sources: Mutex::new(rustc_hash::FxHashMap::default()),
@@ -211,6 +220,10 @@ const MAX_BINDER_SPACE_KEY: u64 = (1 << 31) - 1;
 /// `ArcSwap` slot is the live-project-state root.
 pub struct SignatureStore {
     graph: OnceLock<Weak<crate::semantic_query_memo::arena::NodeArenaCore>>,
+    /// The account every epoch's storage is pinned against: the owning
+    /// store's, bound before the first record is interned
+    /// ([`Self::bind_retention_account`]), or the process-local one.
+    account: Arc<OnceLock<Arc<verter_session_query::retention::SemanticRetentionAccount>>>,
     current: ArcSwap<EpochInner>,
     retained_results: Mutex<Vec<RetainedRoot>>,
     next_epoch: AtomicU64,
@@ -224,12 +237,15 @@ pub struct SignatureStore {
 impl SignatureStore {
     #[must_use]
     pub fn new() -> Self {
+        let account = Arc::new(OnceLock::new());
         let inner = Arc::new(EpochInner::new(
             GraphEpoch::FIRST,
             Arc::new(AtomicU64::new(0)),
+            &account,
         ));
         Self {
             graph: OnceLock::new(),
+            account,
             current: ArcSwap::from(inner),
             retained_results: Mutex::new(Vec::new()),
             next_epoch: AtomicU64::new(GraphEpoch::FIRST.as_u32() as u64 + 1),
@@ -319,10 +335,13 @@ impl SignatureStore {
                     let Some(index) = inner.type_tokens.lookup(node) else {
                         return false;
                     };
-                    inner
+                    let freed = inner
                         .graph_roots
                         .lock()
                         .remove(&super::records::handle_index(index));
+                    if let Some(roots) = freed {
+                        inner.storage.sub(roots.heap_bytes());
+                    }
                     true
                 })
                 .count();
@@ -396,8 +415,11 @@ impl SignatureStore {
         }
         let epoch = GraphEpoch::from_raw(next);
         let store_live_readers = Arc::clone(&self.current.load().store_live_readers);
-        self.current
-            .store(Arc::new(EpochInner::new(epoch, store_live_readers)));
+        self.current.store(Arc::new(EpochInner::new(
+            epoch,
+            store_live_readers,
+            &self.account,
+        )));
         Ok(epoch)
     }
 
@@ -670,11 +692,19 @@ impl SignatureStore {
                 .transpose()?;
             let raw = inner.type_tokens.intern(node, cancelled)?;
             if let Some(root) = root {
-                inner
-                    .graph_roots
-                    .lock()
-                    .entry(super::records::handle_index(raw))
-                    .or_insert(root);
+                let mut roots = inner.graph_roots.lock();
+                let before = roots.capacity();
+                if let std::collections::hash_map::Entry::Vacant(slot) =
+                    roots.entry(super::records::handle_index(raw))
+                {
+                    inner.storage.add(root.heap_bytes());
+                    slot.insert(root);
+                }
+                inner.storage.map_growth(
+                    before,
+                    roots.capacity(),
+                    std::mem::size_of::<(u32, crate::semantic_query_memo::node_roots::NodeRootSet)>(),
+                );
             }
             Ok(super::records::TypeToken::from_raw(raw))
         }
@@ -736,11 +766,14 @@ impl SignatureStore {
             super::records::handle_index(raw),
             &inner.type_tokens,
         )?;
-        inner
-            .descriptor_sources
-            .lock()
-            .entry(descriptor.index())
-            .or_insert(source);
+        let mut sources = inner.descriptor_sources.lock();
+        let before = sources.capacity();
+        sources.entry(descriptor.index()).or_insert(source);
+        inner.storage.map_growth(
+            before,
+            sources.capacity(),
+            std::mem::size_of::<(u32, super::records::TypeToken)>(),
+        );
         Ok(())
     }
 
@@ -810,7 +843,14 @@ impl SignatureStore {
     pub fn claim_space_key(&self, key: u64, identity: u128) -> Result<(), StoreError> {
         let inner = self.inner();
         let mut owners = inner.space_key_owners.lock();
-        match *owners.entry(key).or_insert(identity) {
+        let before = owners.capacity();
+        let owner = *owners.entry(key).or_insert(identity);
+        inner.storage.map_growth(
+            before,
+            owners.capacity(),
+            std::mem::size_of::<(u64, u128)>(),
+        );
+        match owner {
             owner if owner == identity => Ok(()),
             _ => Err(StoreError::BinderKeyCollision),
         }
@@ -1311,6 +1351,22 @@ impl SignatureEpochLease {
 impl SignatureStore {
     pub(crate) fn bind_graph(&self, graph: &Arc<crate::semantic_query_memo::arena::NodeArenaCore>) {
         let _ = self.graph.set(Arc::downgrade(graph));
+    }
+
+    /// Pin every epoch's storage against `account` — the owning store's.
+    /// Bound once, before the first record is interned; a later binding is
+    /// ignored, so a charge is never moved between accounts.
+    pub(crate) fn bind_retention_account(
+        &self,
+        account: &Arc<verter_session_query::retention::SemanticRetentionAccount>,
+    ) {
+        let _ = self.account.set(Arc::clone(account));
+    }
+
+    /// Bytes the current epoch's storage is charged for.
+    #[must_use]
+    pub fn current_epoch_storage_charge(&self) -> usize {
+        self.current.load().storage.charged()
     }
     /// The arena of the graph this kernel is bound to, which issues every
     /// node operand its records name.

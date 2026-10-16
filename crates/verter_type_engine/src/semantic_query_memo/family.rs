@@ -1326,8 +1326,12 @@ pub(super) struct FamilyPublishOutcome {
 /// `cached_satisfies` the narrower slot's requested point — directional
 /// AND gated, never by enum rank (see [`FamilySlots::publish`] and
 /// [`slot_domain_siblings`]).
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub(crate) struct FamilySlots {
+    /// The family's own container charge: its key and slot lists in the
+    /// family map and its record in the retention budget's ledger, held for
+    /// as long as the family is keyed ([`super::retention::family_container_bytes`]).
+    _retention: Arc<verter_session_query::retention::RetentionCharge>,
     single: CandidateList,
     identity: CandidateList,
     navigate: CandidateList,
@@ -1378,6 +1382,26 @@ fn candidate_same_discriminant(a: &MemoEntry, b: &MemoEntry) -> bool {
 }
 
 impl FamilySlots {
+    /// Empty slots for a newly keyed family, holding its container charge.
+    pub(super) fn charged(retention: verter_session_query::retention::RetentionCharge) -> Self {
+        Self {
+            _retention: Arc::new(retention),
+            single: Default::default(),
+            identity: Default::default(),
+            navigate: Default::default(),
+            shallow: Default::default(),
+            expanded: Default::default(),
+            skeleton: Default::default(),
+            transit_identity: Default::default(),
+            transit_navigate: Default::default(),
+            transit_shallow: Default::default(),
+            transit_expanded: Default::default(),
+            transit_skeleton: Default::default(),
+            macro_surface_shallow: Default::default(),
+            vue_runtime_surface_shallow: Default::default(),
+        }
+    }
+
     fn slot_list(&self, slot: ModeSlot) -> &CandidateList {
         match slot {
             ModeSlot::Single => &self.single,

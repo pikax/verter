@@ -7,7 +7,8 @@
 
 use std::hash::{Hash, Hasher};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use parking_lot::Mutex;
 use rustc_hash::FxHasher;
@@ -22,6 +23,105 @@ pub enum InternError {
     Cancelled,
     Overflow,
     Panicked,
+}
+
+/// The heap one interned record owns beyond its slot.
+pub trait RecordHeap {
+    /// Bytes the record keeps reachable beyond its inline slot.
+    fn record_heap_bytes(&self) -> usize {
+        0
+    }
+}
+
+/// The granule an epoch's storage is charged in.
+const EPOCH_STORAGE_GRANULE: usize = 64 * 1024;
+
+/// Boxcar skips its first buckets: index `i` lives at position `i + 32`,
+/// and a bucket starts at every power-of-two position.
+const BOXCAR_FIRST_POSITION: usize = 32;
+
+/// One epoch's storage charge: every table's slot buckets, the records'
+/// own heap and the dedup indexes, pinned against the store's account from
+/// the moment they are allocated until the epoch's last holder drops — the
+/// epoch's retirement releases them. Append-only tables only grow; the
+/// epoch's side maps also shrink.
+pub struct EpochStorage {
+    account: Arc<OnceLock<Arc<verter_session_query::retention::SemanticRetentionAccount>>>,
+    used: AtomicUsize,
+    charged: AtomicUsize,
+    pin: Mutex<Option<verter_session_query::retention::granular::GranularPin>>,
+}
+
+impl EpochStorage {
+    /// Storage charged to the account `account` binds (the process-local
+    /// one when the store never binds one).
+    #[must_use]
+    pub fn new(
+        account: Arc<OnceLock<Arc<verter_session_query::retention::SemanticRetentionAccount>>>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            account,
+            used: AtomicUsize::new(0),
+            charged: AtomicUsize::new(0),
+            pin: Mutex::new(None),
+        })
+    }
+
+    /// `bytes` more storage. The account's lock is taken only when the total
+    /// crosses the charged granule.
+    pub fn add(&self, bytes: usize) {
+        if bytes == 0 {
+            return;
+        }
+        let used = self.used.fetch_add(bytes, Ordering::AcqRel) + bytes;
+        if used <= self.charged.load(Ordering::Acquire) {
+            return;
+        }
+        self.settle();
+    }
+
+    /// `bytes` of storage freed.
+    pub fn sub(&self, bytes: usize) {
+        if bytes == 0 {
+            return;
+        }
+        self.used.fetch_sub(bytes, Ordering::AcqRel);
+        self.settle();
+    }
+
+    fn settle(&self) {
+        let mut pin = self.pin.lock();
+        let pin = pin.get_or_insert_with(|| {
+            let account = self.account.get_or_init(
+                verter_session_query::retention::SemanticRetentionAccount::process_local,
+            );
+            verter_session_query::retention::granular::GranularPin::new(
+                account,
+                EPOCH_STORAGE_GRANULE,
+            )
+        });
+        let used = self.used.load(Ordering::Acquire);
+        if used > pin.used() {
+            pin.add(used - pin.used());
+        } else {
+            pin.sub(pin.used() - used);
+        }
+        self.charged.store(pin.charged(), Ordering::Release);
+    }
+
+    /// Bytes currently charged for the epoch's storage.
+    #[must_use]
+    pub fn charged(&self) -> usize {
+        self.charged.load(Ordering::Acquire)
+    }
+
+    /// Charge the growth of a side map from `before` to `after` buckets of
+    /// `entry` bytes each (with each bucket's control byte).
+    pub fn map_growth(&self, before: usize, after: usize, entry: usize) {
+        if after > before {
+            self.add((after - before) * (entry + 1));
+        }
+    }
 }
 
 struct DedupShard {
@@ -39,8 +139,18 @@ impl DedupShard {
         self.by_hash.get(&hash).map(Vec::as_slice).unwrap_or(&[])
     }
 
-    fn insert(&mut self, hash: u64, index: u32) {
-        self.by_hash.entry(hash).or_default().push(index);
+    /// Record `index` under `hash`; the storage bytes the index grew by.
+    fn insert(&mut self, hash: u64, index: u32) -> usize {
+        use verter_session_query::retention::allocation::heap_block_bytes;
+        let table_before = self.by_hash.capacity();
+        let ids = self.by_hash.entry(hash).or_default();
+        let ids_before = ids.capacity();
+        ids.push(index);
+        let ids_growth = heap_block_bytes(ids.capacity() * std::mem::size_of::<u32>())
+            - heap_block_bytes(ids_before * std::mem::size_of::<u32>());
+        let table_growth = self.by_hash.capacity().saturating_sub(table_before)
+            * (std::mem::size_of::<(u64, Vec<u32>)>() + 1);
+        ids_growth + table_growth
     }
 }
 
@@ -55,9 +165,22 @@ pub struct AppendInterner<T> {
     /// Reservations that passed the overflow check. Incremented before
     /// `push` so a racy loser never plants an unpublished boxcar slot.
     claimed_slots: AtomicU64,
+    /// The epoch storage charge this table's growth is added to; `None`
+    /// for a fixture table outside any store.
+    storage: Option<Arc<EpochStorage>>,
 }
 
 impl<T> AppendInterner<T> {
+    /// A table whose every allocation is charged to `storage`.
+    #[must_use]
+    pub fn charged(epoch: GraphEpoch, storage: &Arc<EpochStorage>) -> Self {
+        let mut table = Self::with_max_index(epoch, u32::MAX);
+        table.storage = Some(Arc::clone(storage));
+        table
+    }
+
+    /// A fixture table charging no account.
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn new(epoch: GraphEpoch) -> Self {
         Self::with_max_index(epoch, u32::MAX)
@@ -72,6 +195,22 @@ impl<T> AppendInterner<T> {
             shard_lock_acquires: AtomicU64::new(0),
             max_index,
             claimed_slots: AtomicU64::new(0),
+            storage: None,
+        }
+    }
+
+    /// The bucket a push at `index` allocated, when it opened one: boxcar
+    /// allocates a bucket of `position` entries — each a record and its
+    /// presence flag — the first time a position that is a power of two
+    /// is written.
+    fn opened_bucket_bytes(index: usize) -> usize {
+        let position = index + BOXCAR_FIRST_POSITION;
+        if position.is_power_of_two() {
+            verter_session_query::retention::allocation::heap_block_bytes(
+                position * std::mem::size_of::<(T, AtomicBool)>(),
+            )
+        } else {
+            0
         }
     }
 
@@ -122,7 +261,7 @@ impl<T> AppendInterner<T> {
     /// cancelled or panicking producer publishes nothing.
     pub fn intern(&self, value: T, cancelled: Option<&AtomicBool>) -> Result<u64, InternError>
     where
-        T: Eq + Hash,
+        T: Eq + Hash + RecordHeap,
     {
         if cancelled.is_some_and(|c| c.load(Ordering::Acquire)) {
             return Err(InternError::Cancelled);
@@ -146,12 +285,18 @@ impl<T> AppendInterner<T> {
             }
             return Err(InternError::Overflow);
         }
+        let heap = value.record_heap_bytes();
         let index = self.slots.push(value);
+        // The stored record — even one a racing duplicate makes redundant —
+        // is retained storage from here on.
+        if let Some(storage) = &self.storage {
+            storage.add(heap + Self::opened_bucket_bytes(index));
+        }
         let index_u32 = match u32::try_from(index) {
             Ok(i) if i <= self.max_index => i,
             _ => return Err(InternError::Overflow),
         };
-        {
+        let index_growth = {
             let mut shard = self.lock_shard(shard_idx);
             if let Some(ids) = shard.by_hash.get(&hash) {
                 if let Some(mine) = self.slots.get(index) {
@@ -164,7 +309,10 @@ impl<T> AppendInterner<T> {
                     }
                 }
             }
-            shard.insert(hash, index_u32);
+            shard.insert(hash, index_u32)
+        };
+        if let Some(storage) = &self.storage {
+            storage.add(index_growth);
         }
         Ok(pack_handle(self.epoch, index_u32))
     }
@@ -188,7 +336,7 @@ impl<T> AppendInterner<T> {
         build: F,
     ) -> Result<u64, InternError>
     where
-        T: Eq + Hash,
+        T: Eq + Hash + RecordHeap,
         F: FnOnce() -> T,
     {
         if cancelled.is_some_and(|c| c.load(Ordering::Acquire)) {
@@ -210,5 +358,79 @@ impl<T> AppendInterner<T> {
                 .get(id as usize)
                 .is_some_and(|stored| stored == value)
         })
+    }
+}
+
+/// Records whose every byte is inline in their slot.
+macro_rules! inline_records {
+    ($($t:ty),* $(,)?) => {
+        $(impl RecordHeap for $t {})*
+    };
+}
+
+inline_records!(
+    u64,
+    crate::semantic_query::SemanticNodeId,
+    super::records::SignatureInputShape,
+    super::records::SignatureTemplate,
+    super::records::SignatureDescriptor,
+    super::records::SignatureResultRecipe,
+    super::records::ParameterSlot,
+    super::records::AppliedResult,
+    super::provenance::SignatureProvenance,
+);
+
+impl RecordHeap for Arc<str> {
+    fn record_heap_bytes(&self) -> usize {
+        verter_session_query::retention::allocation::arc_block_bytes(self.len())
+    }
+}
+
+/// A boxed slice's backing.
+fn boxed_slice_bytes<T>(slice: &[T]) -> usize {
+    verter_session_query::retention::allocation::heap_block_bytes(std::mem::size_of_val(slice))
+}
+
+impl RecordHeap for super::records::ParameterLayout {
+    fn record_heap_bytes(&self) -> usize {
+        boxed_slice_bytes(&self.parameters)
+            + self
+                .rest
+                .as_ref()
+                .map_or(0, |rest| boxed_slice_bytes(&rest.tail))
+    }
+}
+
+impl RecordHeap for super::records::BinderSpace {
+    fn record_heap_bytes(&self) -> usize {
+        boxed_slice_bytes(&self.binders)
+    }
+}
+
+impl RecordHeap for super::records::SignatureSet {
+    fn record_heap_bytes(&self) -> usize {
+        boxed_slice_bytes(&self.candidates)
+    }
+}
+
+impl RecordHeap for super::provenance::ConstituentSequence {
+    fn record_heap_bytes(&self) -> usize {
+        boxed_slice_bytes(&self.edges)
+    }
+}
+
+impl RecordHeap for crate::semantic_query::CanonicalTypeSubstitution {
+    /// The substitution's pair list and its root attachment.
+    fn record_heap_bytes(&self) -> usize {
+        self.retained_heap_bytes()
+    }
+}
+
+impl RecordHeap for super::substitution::CallSubstitution {
+    fn record_heap_bytes(&self) -> usize {
+        match self {
+            Self::Map { map, .. } => map.record_heap_bytes(),
+            _ => 0,
+        }
     }
 }

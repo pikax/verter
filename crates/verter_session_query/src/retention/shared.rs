@@ -175,8 +175,9 @@ impl CacheHold {
     /// [`CallerHold::adopt`], which decides the adoption refusably.
     #[must_use]
     pub fn from_retained(charge: RetentionCharge) -> Self {
-        debug_assert_ne!(
-            charge.class(),
+        let class = charge.class();
+        verter_debug_assert::verter_debug_assert_ne!(
+            class,
             ChargeClass::Pinned,
             "a cache hold is minted from a granted refusable charge"
         );

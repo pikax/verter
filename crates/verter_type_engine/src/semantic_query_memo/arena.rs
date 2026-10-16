@@ -88,6 +88,14 @@
 //! stays while any one of its slots is live (a long-lived node interned
 //! alongside churned ones pins its chunk), so the retained storage is bounded
 //! by the live set times the chunk size, never by history.
+//!
+//! **Storage is charged.** The arena's backing is a liveness obligation of
+//! the graph — refusing it would refuse the computation — so it is pinned
+//! against the store's retention account through
+//! [`GranularPin`](verter_session_query::retention::granular::GranularPin)s:
+//! every live chunk's slot storage and table entry, every live payload's
+//! `Arc` block, and each dedup shard's table and spilled buckets, charged
+//! from the moment they are allocated until they are freed.
 
 use std::collections::hash_map::RandomState;
 use std::collections::HashMap;
@@ -185,9 +193,115 @@ type NodeCandidate = (Weak<SemanticNodeData>, NodeScopeId, SemanticNodeId);
 #[derive(Default)]
 pub(super) struct ShardIndex {
     index: HashMap<u64, SmallVec<[NodeCandidate; 1]>>,
+    /// The shard's table and spilled buckets, pinned while they live.
+    storage: Option<verter_session_query::retention::granular::GranularPin>,
+    /// The table bytes [`Self::storage`] currently counts.
+    table_bytes: usize,
+}
+
+/// Granule a shard's index storage is charged in.
+const SHARD_STORAGE_GRANULE: usize = 4 * 1024;
+
+/// Granule the slot storage and payloads are charged in.
+const ARENA_STORAGE_GRANULE: usize = 64 * 1024;
+
+/// The heap one fingerprint bucket holds once it spills past its one inline
+/// candidate.
+fn bucket_heap_bytes(bucket: &SmallVec<[NodeCandidate; 1]>) -> usize {
+    if bucket.spilled() {
+        verter_session_query::retention::allocation::heap_block_bytes(
+            bucket.capacity() * std::mem::size_of::<NodeCandidate>(),
+        )
+    } else {
+        0
+    }
+}
+
+/// The bytes one live chunk costs: its box, its four slot arrays and its
+/// entry in the chunk table.
+fn chunk_storage_bytes() -> usize {
+    use verter_session_query::retention::allocation::{box_bytes, heap_block_bytes};
+    box_bytes::<Chunk>()
+        + heap_block_bytes(CHUNK_LEN * std::mem::size_of::<Option<Arc<SemanticNodeData>>>())
+        + heap_block_bytes(CHUNK_LEN * std::mem::size_of::<Option<NodeScopeId>>())
+        + heap_block_bytes(CHUNK_LEN * std::mem::size_of::<usize>())
+        + heap_block_bytes(CHUNK_LEN * std::mem::size_of::<bool>())
+        + std::mem::size_of::<Option<Box<Chunk>>>()
+}
+
+/// The bytes one live payload's `Arc` block costs. What the payload owns
+/// beyond its inline record — its member arrays and text — is shared
+/// between payloads (`PayloadArray::share`) and is not charged here.
+fn payload_block_bytes() -> usize {
+    verter_session_query::retention::allocation::arc_block_bytes(std::mem::size_of::<
+        SemanticNodeData,
+    >())
 }
 
 impl ShardIndex {
+    /// Settle the shard's charge after its table or a bucket changed:
+    /// `bucket_delta` is the change in spilled-bucket heap.
+    fn settle(
+        &mut self,
+        account: &Arc<verter_session_query::retention::SemanticRetentionAccount>,
+        bucket_delta: isize,
+    ) {
+        let table = self.index.capacity()
+            * (std::mem::size_of::<(u64, SmallVec<[NodeCandidate; 1]>)>() + 1);
+        let storage = self.storage.get_or_insert_with(|| {
+            verter_session_query::retention::granular::GranularPin::new(
+                account,
+                SHARD_STORAGE_GRANULE,
+            )
+        });
+        if table > self.table_bytes {
+            storage.add(table - self.table_bytes);
+        } else {
+            storage.sub(self.table_bytes - table);
+        }
+        self.table_bytes = table;
+        match bucket_delta {
+            delta if delta > 0 => storage.add(delta.unsigned_abs()),
+            delta => storage.sub(delta.unsigned_abs()),
+        }
+    }
+
+    /// Remove `id` from the bucket `fingerprint` names, dropping the bucket
+    /// once empty, and settle the shard's charge.
+    fn remove_candidate(
+        &mut self,
+        account: &Arc<verter_session_query::retention::SemanticRetentionAccount>,
+        fingerprint: u64,
+        id: SemanticNodeId,
+    ) {
+        let Some(bucket) = self.index.get_mut(&fingerprint) else {
+            return;
+        };
+        let before = bucket_heap_bytes(bucket);
+        bucket.retain(|(_, _, candidate)| *candidate != id);
+        let after = if bucket.is_empty() {
+            self.index.remove(&fingerprint);
+            0
+        } else {
+            bucket_heap_bytes(bucket)
+        };
+        self.settle(account, after as isize - before as isize);
+    }
+
+    /// Record a freshly interned candidate and settle the shard's charge.
+    fn insert_candidate(
+        &mut self,
+        account: &Arc<verter_session_query::retention::SemanticRetentionAccount>,
+        fingerprint: u64,
+        candidate: NodeCandidate,
+    ) {
+        let bucket = self.index.entry(fingerprint).or_default();
+        let before = bucket_heap_bytes(bucket);
+        bucket.push(candidate);
+        let after = bucket_heap_bytes(bucket);
+        self.settle(account, after as isize - before as isize);
+    }
+
     /// Return the interned id for the node structurally + scope equal to
     /// `(data, scope)` within this shard, or `None`. The `fingerprint`
     /// already selected the bucket; the per-candidate content `Eq` is the
@@ -408,6 +522,9 @@ pub(super) struct ArenaInner {
     /// Live slots across every chunk, maintained on every allocation and
     /// release so the live count is O(1).
     live: usize,
+    /// The live chunks' slot storage and the live payloads' blocks, pinned
+    /// while they live.
+    storage: Option<verter_session_query::retention::granular::GranularPin>,
 }
 
 impl ArenaInner {
@@ -425,10 +542,26 @@ impl ArenaInner {
         }
     }
 
-    /// Hand out the next id for `(payload, scope)`.
-    fn allocate(&mut self, payload: Arc<SemanticNodeData>, scope: NodeScopeId) -> SemanticNodeId {
+    /// Hand out the next id for `(payload, scope)`, charging its storage
+    /// to `account`.
+    fn allocate(
+        &mut self,
+        payload: Arc<SemanticNodeData>,
+        scope: NodeScopeId,
+        account: &Arc<verter_session_query::retention::SemanticRetentionAccount>,
+    ) -> SemanticNodeId {
         let id = SemanticNodeId(self.next_id);
         self.next_id += 1;
+        let storage = self.storage.get_or_insert_with(|| {
+            verter_session_query::retention::granular::GranularPin::new(
+                account,
+                ARENA_STORAGE_GRANULE,
+            )
+        });
+        if self.chunks.get(&(id.0 >> CHUNK_BITS)).is_none() {
+            storage.add(chunk_storage_bytes());
+        }
+        storage.add(payload_block_bytes());
         let chunk = self.chunks.get_or_insert_empty(id.0 >> CHUNK_BITS);
         let index = (id.0 & CHUNK_MASK) as usize;
         chunk.nodes[index] = Some(payload);
@@ -454,8 +587,14 @@ impl ArenaInner {
         chunk.permanent[index] = false;
         chunk.live -= 1;
         self.live -= 1;
-        if chunk.live == 0 {
+        let freed = if chunk.live == 0 {
             self.chunks.remove(&key);
+            payload_block_bytes() + chunk_storage_bytes()
+        } else {
+            payload_block_bytes()
+        };
+        if let Some(storage) = self.storage.as_mut() {
+            storage.sub(freed);
         }
         true
     }
@@ -677,6 +816,9 @@ pub(crate) struct NodeArenaCore {
     /// `SemanticGraphRead::node_data` fabrication for an unknown id, so a
     /// consumer still holding a released id reads an unresolved value.
     released_placeholder: Arc<SemanticNodeData>,
+    /// The account the arena's storage is pinned against: the owning
+    /// store's, bound before the first allocation, or the process-local one.
+    retention: OnceLock<Arc<verter_session_query::retention::SemanticRetentionAccount>>,
 }
 
 #[cfg(test)]
@@ -705,6 +847,7 @@ impl Default for NodeArena {
                 released_placeholder: Arc::new(SemanticNodeData::Opaque(
                     crate::semantic_query::QueryError::Miss,
                 )),
+                retention: OnceLock::new(),
             }),
             provenance: None,
         }
@@ -719,6 +862,53 @@ impl std::ops::Deref for NodeArena {
 }
 
 impl NodeArenaCore {
+    /// Charge the arena's storage to `account` — the owning store's. Bound
+    /// once, before the first allocation; a later binding is ignored, so a
+    /// charge is never moved between accounts.
+    pub(super) fn bind_retention_account(
+        &self,
+        account: &Arc<verter_session_query::retention::SemanticRetentionAccount>,
+    ) {
+        let _ = self.retention.set(Arc::clone(account));
+    }
+
+    /// The account the arena's storage is charged to.
+    fn retention_account(&self) -> &Arc<verter_session_query::retention::SemanticRetentionAccount> {
+        self.retention
+            .get_or_init(verter_session_query::retention::SemanticRetentionAccount::process_local)
+    }
+
+    /// Bytes the arena's storage — its live chunks and payload blocks and
+    /// its dedup shards — is charged.
+    pub(super) fn storage_charge_bytes(&self) -> usize {
+        self.inner
+            .read()
+            .storage
+            .as_ref()
+            .map_or(0, |storage| storage.charged())
+            + self
+                .shards
+                .iter()
+                .map(|shard| {
+                    shard
+                        .lock()
+                        .storage
+                        .as_ref()
+                        .map_or(0, |storage| storage.charged())
+                })
+                .sum::<usize>()
+    }
+
+    /// Bytes the slot storage and payload blocks alone are charged.
+    #[cfg(test)]
+    pub(super) fn slot_storage_charge_bytes(&self) -> usize {
+        self.inner
+            .read()
+            .storage
+            .as_ref()
+            .map_or(0, |storage| storage.charged())
+    }
+
     #[cfg(test)]
     fn race_event(&self, event: ArenaRaceEvent) {
         let hook = self.race_hook.lock().clone();
@@ -833,13 +1023,9 @@ impl NodeArenaCore {
         // Intern always confirms slot liveness under `inner` after a weak
         // upgrade. Removing the index after the tombstone cannot resurrect it.
         for (id, fingerprint) in retired {
-            let mut shard = self.shards[(fingerprint & SHARD_MASK) as usize].lock();
-            if let Some(bucket) = shard.index.get_mut(&fingerprint) {
-                bucket.retain(|(_, _, candidate)| *candidate != id);
-                if bucket.is_empty() {
-                    shard.index.remove(&fingerprint);
-                }
-            }
+            self.shards[(fingerprint & SHARD_MASK) as usize]
+                .lock()
+                .remove_candidate(self.retention_account(), fingerprint, id);
         }
     }
 }
@@ -1011,18 +1197,22 @@ impl NodeArena {
                             .unwrap()
                             .owners[(child.0 & CHUNK_MASK) as usize] += 1;
                     }
-                    let id = inner.allocate(Arc::clone(&payload), scope.clone());
+                    let id = inner.allocate(
+                        Arc::clone(&payload),
+                        scope.clone(),
+                        self.retention_account(),
+                    );
                     let chunk = inner.chunks.get_mut(&(id.0 >> CHUNK_BITS)).unwrap();
                     let index = (id.0 & CHUNK_MASK) as usize;
                     chunk.owners[index] = 1;
                     chunk.permanent[index] = scope == NodeScopeId::Global
                         && matches!(&*payload, SemanticNodeData::Primitive(_));
                     drop(inner);
-                    shard.index.entry(fingerprint).or_default().push((
-                        Arc::downgrade(&payload),
-                        scope,
-                        id,
-                    ));
+                    shard.insert_candidate(
+                        self.retention_account(),
+                        fingerprint,
+                        (Arc::downgrade(&payload), scope, id),
+                    );
                     (id, true)
                 }
             }
@@ -1267,13 +1457,7 @@ impl NodeArena {
                 .unwrap_or(std::time::Duration::ZERO);
             crate::request_observers::record_node_arena_lock_acquisition(lock_wait);
             for (fingerprint, id) in victims {
-                let Some(bucket) = shard.index.get_mut(&fingerprint) else {
-                    continue;
-                };
-                bucket.retain(|(_, _, cand_id)| *cand_id != id);
-                if bucket.is_empty() {
-                    shard.index.remove(&fingerprint);
-                }
+                shard.remove_candidate(self.retention_account(), fingerprint, id);
             }
         }
         // Now drop the payloads (and any chunk that empties). A slot already
@@ -1332,7 +1516,9 @@ impl NodeArena {
                 .map(|t| t.elapsed())
                 .unwrap_or(std::time::Duration::ZERO);
             crate::request_observers::record_node_arena_lock_acquisition(lock_wait);
+            let mut bucket_delta = 0isize;
             shard.index.retain(|_fingerprint, bucket| {
+                let before = bucket_heap_bytes(bucket);
                 bucket.retain(|(_, scope, _)| match scope {
                     // Invariant: Global scope is never dropped on invalidation.
                     NodeScopeId::Global => true,
@@ -1340,9 +1526,18 @@ impl NodeArena {
                         canonical_id: c, ..
                     } => c.as_ref() != canonical_id,
                 });
+                let after = if bucket.is_empty() {
+                    0
+                } else {
+                    bucket_heap_bytes(bucket)
+                };
+                bucket_delta += after as isize - before as isize;
                 // Drop now-empty buckets so the fingerprint index stays dense.
                 !bucket.is_empty()
             });
+            if shard.storage.is_some() {
+                shard.settle(self.retention_account(), bucket_delta);
+            }
         }
     }
 

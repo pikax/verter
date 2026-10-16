@@ -120,6 +120,11 @@ fn registrations(harness: &CountedOwnershipHarness) -> usize {
     harness.run(|store| store.shared_allocation_registrations_for_tests())
 }
 
+/// Pinned bytes beyond the graph's own storage pin: what callers hold.
+fn caller_pinned(harness: &CountedOwnershipHarness, account: &SemanticRetentionAccount) -> usize {
+    account.snapshot().pinned_bytes - harness.run(|store| store.graph_storage_charge_bytes())
+}
+
 /// Cache first: the candidate drains while a warm read still holds the
 /// diagnostics. Exactly the rail stays charged, now pinned to that read —
 /// the candidate's own bookkeeping and its carrier are released with it —
@@ -137,14 +142,14 @@ fn a_read_outliving_its_candidate_keeps_exactly_the_delivered_rail_charged() {
         retained.retained_bytes >= rail_charge(),
         "the retained candidate is charged for the diagnostic text it delivers: {retained:?}"
     );
-    assert_eq!(retained.pinned_bytes, 0);
+    assert_eq!(caller_pinned(&harness, &account), 0);
     drop(cold);
 
     harness.run(|store| store.invalidate_all());
     assert_eq!(harness.run(|store| store.memo_entry_count()), 0);
     let held: RetentionAccountSnapshot = account.snapshot();
     assert_eq!(
-        held.pinned_bytes,
+        caller_pinned(&harness, &account),
         rail_charge(),
         "the delivered rail moves to the read that holds it, whole and once; nothing \
          the cache alone kept stays charged"
@@ -155,14 +160,21 @@ fn a_read_outliving_its_candidate_keeps_exactly_the_delivered_rail_charged() {
         "only the held rail stays registered"
     );
     assert!(
-        held.total_bytes() < retained.total_bytes(),
+        held.retained_bytes + caller_pinned(&harness, &account) < retained.retained_bytes,
         "the candidate's bookkeeping and carrier were released with it"
     );
 
     drop(warm);
-    assert_eq!(account.snapshot().total_bytes(), 0, "baseline restored");
+    assert_eq!(account.snapshot().retained_bytes, 0);
+    assert_eq!(caller_pinned(&harness, &account), 0);
     assert_eq!(registrations(&harness), 0);
     assert_eq!(harness.live_nodes(), 0);
+    drop(harness);
+    assert_eq!(
+        account.snapshot().total_bytes(),
+        0,
+        "the isolated owner's teardown restores the baseline"
+    );
 }
 
 /// Caller first: reads drop while the candidate lives, which keeps the
@@ -189,8 +201,11 @@ fn reads_dropped_first_leave_one_retained_charge_until_the_candidate_drains() {
 
     harness.run(|store| store.invalidate_all());
     let drained = account.snapshot();
-    assert_eq!(drained.total_bytes(), 0, "baseline restored: {drained:?}");
+    assert_eq!(drained.retained_bytes, 0, "nothing retained: {drained:?}");
+    assert_eq!(caller_pinned(&harness, &account), 0);
     assert_eq!(registrations(&harness), 0);
+    drop(harness);
+    assert_eq!(account.snapshot().total_bytes(), 0);
 }
 
 /// Zero headroom: the complete value is returned uncached, nothing is
@@ -208,7 +223,12 @@ fn a_refused_admission_returns_the_complete_value_with_nothing_charged() {
     assert!(!delivered.result_is_partial());
     assert_eq!(delivered.walker_diagnostics().len(), 1);
     assert_eq!(harness.run(|store| store.memo_entry_count()), 0);
-    assert_eq!(account.snapshot().total_bytes(), 0);
+    assert_eq!(account.snapshot().retained_bytes, 0);
+    assert_eq!(
+        caller_pinned(&harness, &account),
+        0,
+        "only the graph's storage is pinned"
+    );
     assert_eq!(registrations(&harness), 0);
     drop(delivered);
     assert_eq!(harness.live_nodes(), 0);
@@ -232,5 +252,77 @@ fn a_substitution_answer_is_charged_while_its_memo_keeps_it() {
     });
     assert!(account.snapshot().retained_bytes > 0);
     harness.run(|store| store.invalidate_all());
+    assert_eq!(account.snapshot().retained_bytes, 0);
+    drop(harness);
+    assert_eq!(account.snapshot().total_bytes(), 0);
+}
+
+/// A sealed refusal — a failed evaluation's summary — charges the rail its
+/// read delivers by the rail's size, and once the table drops the summary a
+/// read still holding that rail keeps it charged until it drops.
+#[test]
+fn a_sealed_refusal_hands_its_delivered_rail_to_a_surviving_read() {
+    use verter_type_engine::project_semantic_dispatch::cost_receipt::{
+        BudgetProfile, BudgetProfileSpec, COST_MODEL_REVISION,
+    };
+    let host = host();
+    let account = unbounded();
+    let harness = CountedOwnershipHarness::with_account(StoreAccount::new(Arc::clone(&account)));
+    let read = harness.run(|store| {
+        store.execute_cooperative(
+            &host,
+            key(),
+            || panic!("no recursion"),
+            || {
+                let mut output = build(store);
+                output.cache_suppress = true;
+                output
+            },
+        )
+    });
+    assert_eq!(harness.run(|store| store.memo_entry_count()), 0);
+    assert_eq!(account.snapshot().retained_bytes, 0);
+    let read = read.map_value(|result| match result {
+        QueryResult::Value(node) => QueryResult::Value(SemanticQueryValue::TypeNode(node)),
+        _ => panic!("the build answered a value"),
+    });
+    let held = read.clone();
+    let profile = BudgetProfile::intern(BudgetProfileSpec {
+        work: 1,
+        bytes: 1024,
+        query_depth: 2,
+        instantiation_depth: 2,
+        tail_steps: 2,
+        request_operations: 0,
+        relation_comparisons: 2,
+        cost_model_revision: COST_MODEL_REVISION,
+    });
+    harness.run(|store| {
+        assert!(store.seal_refusal_for_tests(
+            &host,
+            key(),
+            profile,
+            store.refusal_entry_for_tests(&host),
+            read,
+            verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from([])),
+        ));
+    });
+    let sealed = account.snapshot();
+    assert!(
+        sealed.retained_bytes >= rail_charge(),
+        "the summary is charged for the diagnostic text its read keeps: {sealed:?}"
+    );
+
+    harness.run(|store| store.invalidate_all());
+    assert_eq!(
+        caller_pinned(&harness, &account),
+        rail_charge(),
+        "the held read keeps exactly the rail charged once the summary is gone"
+    );
+    drop(held);
+    assert_eq!(account.snapshot().retained_bytes, 0);
+    assert_eq!(caller_pinned(&harness, &account), 0);
+    assert_eq!(registrations(&harness), 0);
+    drop(harness);
     assert_eq!(account.snapshot().total_bytes(), 0);
 }

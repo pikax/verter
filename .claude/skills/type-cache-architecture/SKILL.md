@@ -163,6 +163,50 @@ component's co-resident members). A charge stored beside a cache entry
 outlives an eviction for as long as a reader snapshot holds the entry —
 which is correct, because the bytes are still resident.
 
+**What a charge measures.** A charge covers the allocations its owner
+keeps reachable, by CAPACITY, under the declared conventions of
+`retention/allocation.rs` (heap block = payload rounded to 16 B plus a
+16 B header; `Arc` blocks include their counters; inline field bytes ride
+the block that embeds them) — never a fixed per-item proxy. Fact rails are
+measured by `allocation::fact_slice_bytes` (every fact's owned canonical
+`String` and leaf names), engine carriers (diagnostics and their errors,
+materialised points, dependency rails, query values, request prefixes,
+cost identities) by `semantic_query/allocation_footprint.rs`'s
+`OwnedHeap`. Each distinct `Arc` counts once per charge (`AliasSet`); an
+allocation that carries its own charge (an evidence page, a cost receipt,
+a pooled identity string, a graph node) is never charged by a holder.
+
+**Shared allocations and transfer to callers** (`retention/shared.rs`).
+An allocation several independently charged owners alias — a build's fact
+carrier shared by its root, prefix backfills and SCC members; the
+interned dependency rail; the diagnostics and value a warm read hands its
+caller — is charged ONCE through the store's `AliasCharges` registry,
+keyed by allocation address (the registered charge co-owns the
+allocation, so the address cannot be reused while it lives). Cache owners
+hold `CacheHold`s; deliveries hold `CallerHold`s, attached to the
+delivery lease (`SemanticDeliveryLease::attach_retention`) so every clone
+of a read carries them. When the last cache hold drops while callers
+remain, the charge moves `Retained → Pinned` in one step at the account's
+linearization point (`RetentionCharge::transfer_to_pinned`) — never
+uncharged, never charged twice, never refused; a cache retaining the
+allocation again adopts the pin back refusably
+(`RetentionCharge::try_adopt_retained`). A memo candidate's charges are
+`MemoRetention { own, carrier, delivered }`: `own` is cache-only
+bookkeeping (its entry in every slot it may populate, its point record,
+its lease metadata, its reverse-index registrations) and is released the
+moment the candidate drains; a refusal summary uses the same split.
+
+**Graph storage is pinned** (`retention/granular.rs`). The arena's live
+chunks, payload blocks and dedup tables, every signature epoch's tables
+(boxcar buckets, record heap, dedup indexes, side maps), and every flight
+cell are liveness obligations of the graph: `Pinned`, charged through
+`GranularPin`s settled in whole granules (never below the live total, by
+less than two granules), released with the storage — a retired epoch with
+its last holder. `HostRetentionSnapshot::semantic_graph_storage_bytes`
+reports the arena's and current epoch's part of `pinned_bytes`. A memo
+family's container (key, slot lists, budget-ledger record) is charged when
+the family is keyed and released with it.
+
 **Refusal routing.** `RetentionRefusal::{Oversized, Pressure,
 ActiveExhausted}` all map to `NonAdmissionReason::RetentionPressure`,
 whose propagation is `LocalOnly`: the value is complete and correct, so
@@ -172,13 +216,17 @@ from `BudgetExceeded`, which means the compute stopped early and its
 value may be partial.
 
 **Participants** (each charges the account, none keeps a parallel byte
-quota): `IdentityInterner` (exact payload bytes; sheds pool-only entries
+quota): `IdentityInterner` (each pooled `Arc` block and map slot,
+`pooled_entry_bytes`; sheds pool-only entries
 and retries once on refusal, else returns the string un-pooled),
 `ComponentMetaResultDb` via `BoundedCandidateMap` (the charge rides the
-`RetentionCandidate`), the `SemanticGraphStore` family memo (the charge
-rides `MemoEntry`; `warm_publish_one` refusal returns
-`WarmPublishOutcome::Skipped`, and an SCC batch is charged once as a
-whole so a component can never publish torn), `DeclLoweringService`/`SnapshotShard` (one `Pinned` charge per retained
+`RetentionCandidate`), the `SemanticGraphStore` family memo (the charges
+ride `MemoEntry::retention`; `warm_publish_one` refusal returns
+`WarmPublishOutcome::Skipped`, and an SCC batch is reserved all or
+nothing — members' own shares, their shared holds and every newly keyed
+family's container — so a component can never publish torn), the
+substitution and deferred-evaluation memos, refusal summaries, the arena,
+the signature kernel and flight cells (see above), `DeclLoweringService`/`SnapshotShard` (one `Pinned` charge per retained
 snapshot, owned by the `ShardEntry` so a second lease on the same
 snapshot never charges twice), and — outside `verter_session` —
 `verter_lsp`'s `ProviderSurfaceStore` (one `Pinned` charge per synced

@@ -22,10 +22,10 @@ impl CountedOwnershipHarness {
     /// constructor's reclamation mode.
     pub fn with_account(retention_account: verter_session_query::retention::StoreAccount) -> Self {
         Self {
-            graph: SemanticGraphStore {
+            graph: SemanticGraphStore::with_arena(
+                NodeArena::counted_for_tests(),
                 retention_account,
-                ..SemanticGraphStore::with_arena(NodeArena::counted_for_tests())
-            },
+            ),
         }
     }
 

@@ -162,6 +162,10 @@ struct PreparedMember {
 /// `entries` lock, so the batch's single hold does no planning work.
 struct StagedMember {
     family: FamilyKey,
+    /// The family's container charge, reserved before the batch lock when
+    /// the family was not keyed at staging, so keying it never refuses a
+    /// member halfway through the batch.
+    family_charge: Option<verter_session_query::retention::RetentionCharge>,
     entry: MemoEntry,
     eviction: family::EvictionVictim,
     /// The value a waiting joiner receives when the flight completes.
@@ -391,6 +395,14 @@ impl SemanticGraphStore {
             member.entry.retention = Some(retention);
             staged.push(self.stage_member(member.family, member.entry, member.flight, ctx));
         }
+        // Key every family the batch would newly key before taking the
+        // batch lock, all or nothing, like the members' own charges.
+        if self.prepay_member_families(&mut staged).is_err() {
+            for member in &staged {
+                self.abort_inline_member_flight(&member.flight);
+            }
+            return false;
+        }
 
         // Test-only injection point — parked immediately before the
         // batch's single `entries` acquisition, so a race test can
@@ -458,6 +470,7 @@ impl SemanticGraphStore {
             let NewlyKeyedFamily(is_new) = self.publish_staged_locked(
                 &mut entries,
                 &member.family,
+                member.family_charge,
                 member.entry,
                 member.eviction,
                 &reverse_index_inputs,
@@ -597,6 +610,42 @@ impl SemanticGraphStore {
             .collect())
     }
 
+    /// Reserve the container charge of every staged member's family that
+    /// is not keyed yet. `Err` is the account's refusal: the batch keeps
+    /// nothing. A family keyed meanwhile releases its unused prepayment at
+    /// publication; one dropped meanwhile is keyed under the batch lock.
+    fn prepay_member_families(
+        &self,
+        staged: &mut [StagedMember],
+    ) -> Result<(), verter_session_query::retention::RetentionRefusal> {
+        use verter_session_query::retention::{ChargeClass, RetentionAdmission};
+        let unkeyed: Vec<bool> = {
+            let entries = self.entries_lock_diagnosed();
+            staged
+                .iter()
+                .map(|member| !entries.contains_key(&member.family))
+                .collect()
+        };
+        for (member, unkeyed) in staged.iter_mut().zip(unkeyed) {
+            if !unkeyed {
+                continue;
+            }
+            match self.retention_account().reserve(
+                ChargeClass::Retained,
+                super::retention::family_container_bytes(),
+            ) {
+                RetentionAdmission::Admitted(charge) => member.family_charge = Some(charge),
+                RetentionAdmission::Refused(refusal) => {
+                    crate::cache_runtime::admission::propagate_non_admission(
+                        refusal.non_admission_reason(),
+                    );
+                    return Err(refusal);
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Finish staging one member: allocate its admission token and plan
     /// its per-family bounded-retention eviction against the publishing
     /// caller's stable store view. Both run OUTSIDE the batch's `entries`
@@ -634,6 +683,7 @@ impl SemanticGraphStore {
         };
         StagedMember {
             family,
+            family_charge: None,
             entry,
             eviction,
             completed,
@@ -651,10 +701,12 @@ impl SemanticGraphStore {
     /// step that could select the batch's own root as its FIFO victim, so
     /// the answer is returned and the caller settles every newly-keyed
     /// family in one exempting step.
+    #[allow(clippy::too_many_arguments)]
     fn publish_staged_locked(
         &self,
         entries: &mut FxHashMap<FamilyKey, FamilySlots>,
         family: &FamilyKey,
+        family_charge: Option<verter_session_query::retention::RetentionCharge>,
         entry: MemoEntry,
         eviction: family::EvictionVictim,
         reverse_index_inputs: &reverse_index::ReverseIndexInputs,
@@ -667,8 +719,12 @@ impl SemanticGraphStore {
             return NewlyKeyedFamily(false);
         }
         let cap = family.candidate_cap();
-        let family_was_new = !entries.contains_key(family);
-        let outcome = entries.entry(family.clone()).or_default().publish(
+        let Some((slots, family_was_new)) =
+            self.family_slots_prepaid_locked(entries, family, family_charge)
+        else {
+            return NewlyKeyedFamily(false);
+        };
+        let outcome = slots.publish(
             ModeSlot::Single,
             entry,
             &ProjectionPath::empty(),
@@ -745,6 +801,7 @@ impl SemanticGraphStore {
         let NewlyKeyedFamily(is_new) = self.publish_staged_locked(
             &mut entries,
             &family,
+            None,
             entry,
             eviction,
             &reverse_index_inputs,

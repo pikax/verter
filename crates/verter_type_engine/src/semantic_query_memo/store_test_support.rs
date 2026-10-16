@@ -304,14 +304,10 @@ impl SemanticGraphStore {
             None => family::EvictionVictim::LruFront,
         };
         let mut entries = self.entries_lock_diagnosed();
-        let family_was_new = !entries.contains_key(&family);
-        let outcome = entries.entry(family.clone()).or_default().publish(
-            slot,
-            entry,
-            &requested_path,
-            cap,
-            eviction,
-        );
+        let Some((slots, family_was_new)) = self.family_slots_locked(&mut entries, &family) else {
+            return 0;
+        };
+        let outcome = slots.publish(slot, entry, &requested_path, cap, eviction);
         let populated_slots = outcome.populated;
         for (displaced_slot, displaced_entry) in &outcome.displaced {
             reverse_index::drain_candidate_reverse_index_registrations(

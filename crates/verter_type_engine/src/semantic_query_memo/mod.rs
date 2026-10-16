@@ -758,25 +758,39 @@ pub enum GraphOwnership {
 
 impl Default for SemanticGraphStore {
     fn default() -> Self {
-        Self::with_arena(Default::default())
+        Self::with_arena(Default::default(), Default::default())
     }
 }
 
 impl SemanticGraphStore {
-    /// Bind signature-token ownership to the final arena before publishing
-    /// the store, including the controlled counted fixture constructor.
-    /// A graph in `ownership`'s reclamation regime.
-    pub(crate) fn with_ownership(ownership: GraphOwnership) -> Self {
+    /// A store in `ownership`'s reclamation regime charging
+    /// `retention_account`.
+    pub(crate) fn with_ownership_and_account(
+        ownership: GraphOwnership,
+        retention_account: verter_session_query::retention::StoreAccount,
+    ) -> Self {
         match ownership {
-            GraphOwnership::Legacy => Self::default(),
+            GraphOwnership::Legacy => Self::with_arena(Default::default(), retention_account),
             #[cfg(any(test, feature = "test-support"))]
-            GraphOwnership::CountedForTests => Self::with_arena(NodeArena::counted_for_tests()),
+            GraphOwnership::CountedForTests => {
+                Self::with_arena(NodeArena::counted_for_tests(), retention_account)
+            }
         }
     }
 
-    fn with_arena(arena: NodeArena) -> Self {
+    /// The one store constructor: the store and its graph storage charge
+    /// the same account, bound before the first node is interned. Binds
+    /// signature-token ownership to the final arena before publishing the
+    /// store, including the controlled counted fixture constructor.
+    pub(super) fn with_arena(
+        storage: NodeArena,
+        retention_account: verter_session_query::retention::StoreAccount,
+    ) -> Self {
+        let arena = storage;
+        arena.core.bind_retention_account(retention_account.get());
         let signatures = crate::signature_kernel::SignatureStore::default();
         signatures.bind_graph(&arena.core);
+        signatures.bind_retention_account(retention_account.get());
         Self {
             operand_identity: Default::default(),
             arena,
@@ -788,7 +802,7 @@ impl SemanticGraphStore {
             derivation: Default::default(),
             stats: Default::default(),
             provenance: Default::default(),
-            retention_account: Default::default(),
+            retention_account,
             alias_charges: Default::default(),
             force_cold_abort_sweep: Default::default(),
             unresolved_reach: Default::default(),
@@ -2501,15 +2515,13 @@ impl SemanticGraphStore {
             return WarmPublishOutcome::Aborted;
         }
         // Record whether this family is newly entering the memo so the
-        // retention budget tracks one ledger record per family.
-        let family_was_new = !entries.contains_key(family);
-        let outcome = entries.entry(family.clone()).or_default().publish(
-            slot,
-            entry,
-            requested_path,
-            cap,
-            eviction,
-        );
+        // retention budget tracks one ledger record per family. A family the
+        // account refuses to key is not published.
+        let Some((slots, family_was_new)) = self.family_slots_locked(&mut entries, family) else {
+            drop(entries);
+            return WarmPublishOutcome::Skipped;
+        };
+        let outcome = slots.publish(slot, entry, requested_path, cap, eviction);
         let populated_slots = outcome.populated;
         // Per-request memo-insertion attribution. Each populated slot
         // (primary plus any backfilled narrower slots) counts as one
@@ -2761,14 +2773,11 @@ impl SemanticGraphStore {
             record_cold_abort_swept(&self.stats);
             return false;
         }
-        let family_was_new = !entries.contains_key(family);
-        let outcome = entries.entry(family.clone()).or_default().publish(
-            slot,
-            entry,
-            requested_path,
-            cap,
-            eviction,
-        );
+        let Some((slots, family_was_new)) = self.family_slots_locked(&mut entries, family) else {
+            drop(entries);
+            return false;
+        };
+        let outcome = slots.publish(slot, entry, requested_path, cap, eviction);
         let populated_slots = outcome.populated;
         // Per-request memo-insertion attribution — see
         // `warm_publish_one` for the full rationale; the prefix-backfill
@@ -3064,3 +3073,5 @@ mod tests;
 
 #[cfg(test)]
 mod scc_publish_tests;
+#[cfg(test)]
+mod storage_charge_tests;

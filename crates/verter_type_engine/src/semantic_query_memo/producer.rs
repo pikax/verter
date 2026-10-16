@@ -517,7 +517,7 @@ impl SemanticGraphStore {
 
         // 3. Become the producer, or subscribe to the one another task owns.
         if attempt.independent {
-            let inflight = Arc::new(FlightCell::new());
+            let inflight = Arc::new(FlightCell::charged(self.retention_account()));
             {
                 let mut state = inflight.state.lock();
                 state.claimed = true;
@@ -534,7 +534,7 @@ impl SemanticGraphStore {
             let mut table = self.inflight.lock();
             table
                 .entry(prepared.clone())
-                .or_insert_with(|| Arc::new(FlightCell::new()))
+                .or_insert_with(|| Arc::new(FlightCell::charged(self.retention_account())))
                 .clone()
         };
         {

@@ -1685,6 +1685,15 @@ pub struct CanonicalTypeSubstitution(
 );
 
 impl CanonicalTypeSubstitution {
+    /// The heap the substitution keeps: its pair list's block and its root
+    /// attachment's owner.
+    pub(crate) fn retained_heap_bytes(&self) -> usize {
+        verter_session_query::retention::allocation::arc_block_bytes(std::mem::size_of_val::<
+            [(SemanticNodeId, SemanticNodeId)],
+        >(&self.0))
+            + self.1 .0.heap_bytes()
+    }
+
     /// The empty substitution.
     #[must_use]
     pub fn empty() -> Self {
