@@ -310,7 +310,6 @@ impl SemanticGraphStore {
                 ),
             };
             let entry = self.stage_entry(
-                None,
                 SemanticQueryValue::Relation(member.payload),
                 relation_satisfied_projection(),
                 carrier,
@@ -336,7 +335,6 @@ impl SemanticGraphStore {
             // The published payload is extracted from the proof token —
             // the member's value is admissible only as the proven one.
             let entry = self.stage_entry(
-                None,
                 SemanticQueryValue::FlowReturn(Arc::new(member.result.value().clone())),
                 member.materialized,
                 carrier,
@@ -363,7 +361,6 @@ impl SemanticGraphStore {
                 ),
             };
             let entry = self.stage_entry(
-                None,
                 SemanticQueryValue::ResolveCall(Arc::new(member.result.into_inner())),
                 resolve_call_satisfied_projection(),
                 carrier,
@@ -380,9 +377,8 @@ impl SemanticGraphStore {
         }
 
         let staged_entries: Vec<_> = prepared.iter().map(|member| &member.entry).collect();
-        let batch_charge = self.reserve_scc_batch(&staged_entries);
-        let batch_charge = match batch_charge {
-            Ok(charge) => Some(std::sync::Arc::new(charge)),
+        let retentions = match self.reserve_scc_batch(&staged_entries) {
+            Ok(retentions) => retentions,
             Err(_) => {
                 for member in &prepared {
                     self.abort_inline_member_flight(&member.flight);
@@ -391,8 +387,8 @@ impl SemanticGraphStore {
             }
         };
         let mut staged: Vec<StagedMember> = Vec::with_capacity(prepared.len());
-        for mut member in prepared {
-            member.entry.retention_charge = batch_charge.clone();
+        for (mut member, retention) in prepared.into_iter().zip(retentions) {
+            member.entry.retention = Some(retention);
             staged.push(self.stage_member(member.family, member.entry, member.flight, ctx));
         }
 
@@ -510,7 +506,6 @@ impl SemanticGraphStore {
     /// no eviction planning.
     pub(super) fn stage_entry(
         &self,
-        retention_charge: Option<Arc<verter_session_query::retention::RetentionCharge>>,
         value: SemanticQueryValue,
         satisfied_projection: MaterializedSet,
         carrier: &verter_session_query::facts::fact_cache::ReadSetSignature,
@@ -530,64 +525,76 @@ impl SemanticGraphStore {
             self_root_canonicals: Arc::clone(self_root_canonicals),
             walker_diagnostics: Arc::from([]),
             satisfied_projection,
-            retention_charge,
+            retention: None,
             validated_at_generation,
             admission_seq: 0,
             cost_receipt: Arc::clone(cost_receipt),
         }
     }
 
-    /// Reserve ONE aggregate charge covering a whole staged component.
+    /// Reserve the charges of a whole staged component, all or nothing.
     ///
     /// `Err` means the process declined to retain the component, and the
     /// caller must refuse the WHOLE batch — a component that published
     /// only the members that fit would be exactly the torn component the
     /// root-witness fence forbids. There is no uncharged arm: every store
     /// owns an account.
+    ///
+    /// Each member gets its own charges: its own bookkeeping as its share
+    /// of one batch reservation (so an evicted member releases its share
+    /// while the rest stay), and holds on the carrier, self-root list and
+    /// delivered allocations it shares with the published root and its
+    /// siblings — one shared charge per allocation, whoever holds it last.
     pub(super) fn reserve_scc_batch(
         &self,
         members: &[&MemoEntry],
     ) -> Result<
-        verter_session_query::retention::RetentionCharge,
+        Vec<Arc<super::retention::MemoRetention>>,
         verter_session_query::retention::RetentionRefusal,
     > {
         use verter_session_query::retention::RetentionAdmission;
         let account = self.retention_account();
+        let refuse = |refusal: verter_session_query::retention::RetentionRefusal| {
+            crate::cache_runtime::admission::propagate_non_admission(
+                refusal.non_admission_reason(),
+            );
+            refusal
+        };
         // Each member's receipt is charged once, for as long as it lives.
         for entry in members {
-            if let Err(refusal) = entry.cost_receipt.reserve_retention(account) {
-                crate::cache_runtime::admission::propagate_non_admission(
-                    refusal.non_admission_reason(),
-                );
-                return Err(refusal);
-            }
+            entry
+                .cost_receipt
+                .reserve_retention(account)
+                .map_err(refuse)?;
         }
-        // The published root already owns the SCC carrier and self-root
-        // allocations. The member batch therefore reserves only each
-        // member's distinct allocation; including the first member's
-        // shared portion here would charge the root-owned allocations a
-        // second time and create a spurious pressure refusal.
-        let bytes = members
+        let shared = members
             .iter()
-            .map(|entry| entry.unique_retained_footprint_bytes())
-            .sum();
+            .map(|entry| self.hold_shared_allocations(super::retention::SharedParts::of(entry)))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(refuse)?;
+        let own: Vec<usize> = members
+            .iter()
+            .map(|entry| super::retention::own_reservation_bytes(entry, 1))
+            .collect();
         // A shared carrier's evidence pages were claimed with the root; a
         // page only a member's carrier holds is claimed here.
         let carriers: Vec<&[verter_session_query::facts::fact_cache::FactVersionRef]> = members
             .iter()
             .map(|entry| &*entry.read_set_signature.facts)
             .collect();
-        match verter_session_query::facts::receipt::reserve_retained_with_evidence(
-            account, bytes, &carriers,
+        let mut batch = match verter_session_query::facts::receipt::reserve_retained_with_evidence(
+            account,
+            own.iter().sum(),
+            &carriers,
         ) {
-            RetentionAdmission::Admitted(charge) => Ok(charge),
-            RetentionAdmission::Refused(refusal) => {
-                crate::cache_runtime::admission::propagate_non_admission(
-                    refusal.non_admission_reason(),
-                );
-                Err(refusal)
-            }
-        }
+            RetentionAdmission::Admitted(charge) => charge,
+            RetentionAdmission::Refused(refusal) => return Err(refuse(refusal)),
+        };
+        Ok(shared
+            .into_iter()
+            .zip(own)
+            .map(|(holds, bytes)| Arc::new(holds.with_own(batch.split_off(bytes))))
+            .collect())
     }
 
     /// Finish staging one member: allocate its admission token and plan
@@ -604,6 +611,9 @@ impl SemanticGraphStore {
         entry.lease = self
             .lease_candidate(&family, &entry.result, &entry.walker_diagnostics)
             .expect("component candidate operands are live");
+        if let Some(retention) = &entry.retention {
+            entry.lease.attach_retention(|| retention.callers());
+        }
         let admission_seq = self.alloc_candidate_admission_seq();
         entry.admission_seq = admission_seq;
         let QueryResult::Value(value) = &entry.result else {
@@ -699,7 +709,6 @@ impl SemanticGraphStore {
     ) {
         let dispatch_dep_signature = self.dep_signature_interner.intern(&empty_signature());
         let entry = self.stage_entry(
-            None,
             value,
             satisfied_projection,
             &carrier,
@@ -723,6 +732,13 @@ impl SemanticGraphStore {
         };
         let mut entry = entry;
         entry.admission_seq = admission_seq;
+        // A seed is charged like every published candidate; one the account
+        // refuses is not seeded.
+        let Ok(retention) = self.reserve_memo_candidate(&entry, 1) else {
+            return;
+        };
+        entry.lease.attach_retention(|| retention.callers());
+        entry.retention = Some(retention);
         let reverse_index_inputs =
             reverse_index::ReverseIndexInputs::new(&carrier, &dispatch_dep_signature);
         let mut entries = self.entries_lock_diagnosed();

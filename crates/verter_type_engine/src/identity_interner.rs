@@ -17,8 +17,9 @@
 //! derives delegate to `str`); no pointer identity or intern ordinal ever
 //! enters a cache key.
 //!
-//! Bounding: the pool holds NO private byte quota. Every pooled entry's
-//! payload is reserved against the one shared
+//! Bounding: the pool holds NO private byte quota. Every pooled entry —
+//! its `Arc` block and its map slot ([`pooled_entry_bytes`]) — is reserved
+//! against the one shared
 //! [`SemanticRetentionAccount`](verter_session_query::retention::SemanticRetentionAccount),
 //! so the pool's growth competes with every other host-owned store for
 //! the same ratified aggregate ceiling instead of carrying a parallel
@@ -64,9 +65,19 @@ struct InternerShard {
     /// exactly-once: a removal drops both together, and there is no
     /// separate bookkeeping step a shed path could skip.
     entries: HashMap<Arc<str>, RetentionCharge>,
-    /// Summed payload (`str`) lengths of pooled entries — diagnostics
-    /// only. The authoritative bound is the shared account.
+    /// Summed charges of pooled entries ([`pooled_entry_bytes`]) —
+    /// diagnostics only. The authoritative bound is the shared account.
     retained_bytes: usize,
+}
+
+/// The bytes one pooled string costs: its `Arc` block (the text and its
+/// counters) and its slot in the pool's map (the key, the charge beside it
+/// and the table's control byte).
+#[must_use]
+pub fn pooled_entry_bytes(text_len: usize) -> usize {
+    verter_session_query::retention::allocation::arc_block_bytes(text_len)
+        + std::mem::size_of::<(Arc<str>, RetentionCharge)>()
+        + 1
 }
 
 impl IdentityInterner {
@@ -112,7 +123,7 @@ impl IdentityInterner {
         Arc::clone(s)
     }
 
-    /// Currently retained payload bytes (always ≤ the budget).
+    /// Currently charged bytes of the pooled entries (always ≤ the budget).
     #[must_use]
     pub fn retained_bytes(&self) -> usize {
         self.inner.lock().retained_bytes
@@ -138,7 +149,7 @@ impl IdentityInterner {
     /// stores an entry whose bytes it did not reserve, so its charged
     /// total always equals its retained payload.
     fn admit_locked(&self, inner: &mut InternerShard, value: &Arc<str>) {
-        let len = value.len();
+        let len = pooled_entry_bytes(value.len());
         let charge = match self.account.reserve(ChargeClass::Retained, len) {
             RetentionAdmission::Admitted(charge) => charge,
             RetentionAdmission::Refused(_) => {
@@ -168,7 +179,7 @@ impl IdentityInterner {
         let mut shed = 0usize;
         inner.entries.retain(|value, _charge| {
             if Arc::strong_count(value) == 1 {
-                shed += value.len();
+                shed += pooled_entry_bytes(value.len());
                 false
             } else {
                 true
@@ -254,8 +265,12 @@ mod tests {
         let held = pool.intern("/src/components/Charged.vue");
         assert_eq!(
             account.snapshot().retained_bytes - before,
-            held.len(),
-            "the pooled payload must be charged to the shared account"
+            pooled_entry_bytes(held.len()),
+            "the pooled allocation and its slot must be charged to the shared account"
+        );
+        assert!(
+            pooled_entry_bytes(held.len()) > held.len(),
+            "the charge covers the allocation, not only its text"
         );
         drop(pool);
         assert_eq!(
@@ -268,7 +283,8 @@ mod tests {
     #[test]
     fn retained_bytes_never_exceed_the_account_ceiling_and_extant_arcs_survive() {
         // Ceiling fits roughly three of the ~32-byte strings below.
-        let pool = pool_with_ceiling(100);
+        let ceiling = 3 * pooled_entry_bytes(32) + 16;
+        let pool = pool_with_ceiling(ceiling);
         let strings: Vec<String> = (0..8)
             .map(|i| format!("/src/components/Component{i:02}.vue"))
             .collect();
@@ -276,7 +292,7 @@ mod tests {
         for s in &strings {
             held.push(pool.intern(s));
             assert!(
-                pool.retained_bytes() <= 100,
+                pool.retained_bytes() <= ceiling,
                 "retained bytes {} exceeded the account ceiling after interning {s}",
                 pool.retained_bytes()
             );
@@ -294,7 +310,7 @@ mod tests {
 
     #[test]
     fn shedding_drops_pool_only_entries_before_externally_held_ones() {
-        let pool = pool_with_ceiling(100);
+        let pool = pool_with_ceiling(3 * pooled_entry_bytes(32) + 16);
         // Externally held entry: the pool + this test both hold it.
         let kept = pool.intern("/src/components/HeldAlive000.vue");
         // Pool-only entries: dropped by the test immediately.

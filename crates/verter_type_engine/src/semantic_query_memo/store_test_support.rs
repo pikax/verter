@@ -274,7 +274,7 @@ impl SemanticGraphStore {
         let lease = self
             .lease_candidate(&family, &result, &[])
             .expect("fixture candidate operands are live");
-        let entry = MemoEntry {
+        let mut entry = MemoEntry {
             lease,
             result,
             read_set_signature: read_set_signature.clone(),
@@ -282,14 +282,20 @@ impl SemanticGraphStore {
             self_root_canonicals,
             walker_diagnostics: Arc::from([]),
             satisfied_projection,
-            // Test-support seeding runs against fixture stores that own
-            // no retention account; production publication always goes
-            // through a charged path.
-            retention_charge: None,
+            retention: None,
             validated_at_generation,
             admission_seq,
             cost_receipt: super::scc_publish::fixture_receipt(&family),
         };
+        // A seed is charged like every published candidate; one the account
+        // refuses is not seeded.
+        let populated_slots =
+            family::publication_slot_bound(slot, &entry.satisfied_projection, &requested_path);
+        let Ok(retention) = self.reserve_memo_candidate(&entry, populated_slots) else {
+            return 0;
+        };
+        entry.lease.attach_retention(|| retention.callers());
+        entry.retention = Some(retention);
         let cap = family.candidate_cap();
         let eviction = match view {
             Some(ctx) => {
@@ -516,6 +522,7 @@ impl SemanticGraphStore {
             satisfied_projection,
             &super::scc_publish::fixture_receipt(prepared.family()),
             inflight,
+            &Default::default(),
         )
     }
 

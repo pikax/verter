@@ -94,6 +94,29 @@ impl CostIdentity {
 }
 
 impl CostIdentity {
+    /// What the identity keeps reachable, once per `aliases`: its operand
+    /// roots and its producer key's block, with an encoded key's bytes. A
+    /// typed key is inline in its block; a prepared query identity is
+    /// counted by its block, its key operands being graph ordinals.
+    pub(crate) fn owned_heap_bytes(
+        &self,
+        aliases: &mut verter_session_query::retention::allocation::AliasSet,
+    ) -> usize {
+        use verter_session_query::retention::allocation::{arc_block_bytes, arc_slice_block_bytes};
+        let key = if aliases.first(&self.key) {
+            arc_block_bytes(std::mem::size_of_val::<dyn ProducerIdentity>(
+                self.key.as_ref(),
+            )) + self
+                .key
+                .downcast_ref::<EncodedIdentity>()
+                .and_then(|encoded| arc_slice_block_bytes(&encoded.key, aliases))
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        key + self.roots.owned_heap_bytes(aliases)
+    }
+
     /// The identity's hash: equal identities hash equal.
     pub(crate) fn hash_value(&self) -> u64 {
         self.hash
@@ -280,10 +303,6 @@ pub struct DemandCostReceipt {
     retention: OnceLock<RetentionCharge>,
 }
 
-/// The estimated bytes one prerequisite's identity keeps alive beside the
-/// receipt that names it.
-const IDENTITY_BYTES: usize = 64;
-
 impl DemandCostReceipt {
     /// A receipt for `identity` with `exclusive` usage over
     /// `prerequisites`, its own tail runs taking no step.
@@ -388,12 +407,18 @@ impl DemandCostReceipt {
         self.footprint
     }
 
-    /// The bytes this receipt keeps alive of its own: itself, its
-    /// prerequisite list and the identities it names.
+    /// The bytes this receipt keeps alive of its own: its block, its
+    /// prerequisite list's backing and its own identity. A prerequisite's
+    /// identity lives in the prerequisite's receipt, which charges it.
     fn retained_bytes(&self) -> usize {
-        std::mem::size_of::<Self>()
-            + self.prerequisites.len() * (std::mem::size_of::<CostDependency>() + IDENTITY_BYTES)
-            + IDENTITY_BYTES
+        use verter_session_query::retention::allocation::{
+            arc_block_bytes, heap_block_bytes, AliasSet,
+        };
+        arc_block_bytes(std::mem::size_of::<Self>())
+            + heap_block_bytes(std::mem::size_of_val::<[CostDependency]>(
+                &self.prerequisites,
+            ))
+            + self.identity.owned_heap_bytes(&mut AliasSet::new())
     }
 
     /// Reserve this receipt, and every receipt of its closure not yet

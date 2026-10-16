@@ -142,17 +142,20 @@ pub mod footprint {
     /// A resolved type-registry analysis, which carries an expanded
     /// member list and is the heaviest per-record family.
     pub const TYPE_RECORD_BYTES: usize = 1024;
-    /// One observed dependency fact on the entry's validity rail.
-    pub const FACT_BYTES: usize = 64;
 }
 
 impl<P> verter_session_query::retention::RetainedFootprint for ComponentMetaResultEntry<P>
 where
     P: verter_session_query::retention::RetainedFootprint,
 {
+    /// The payload, the entry's validity rail — its fact slice with every
+    /// fact's owned text — and the entry's slot.
     fn retained_footprint_bytes(&self) -> usize {
         self.payload.retained_footprint_bytes()
-            + self.read_set_signature.facts.len() * footprint::FACT_BYTES
+            + verter_session_query::retention::allocation::fact_signature_bytes(
+                &self.read_set_signature,
+                &mut verter_session_query::retention::allocation::AliasSet::new(),
+            )
             + verter_session_query::retention::ENTRY_OVERHEAD_BYTES
     }
 }
@@ -872,15 +875,17 @@ impl<P> ComponentMetaResultDb<P> {
             Ok(value) => value,
             Err(shared) => (*shared).clone(),
         };
-        // One retained paid identity is the same 64 bytes the refusal
-        // summary reserves (`refusal_summary::IDENTITY_BYTES`).
-        const REQUEST_IDENTITY_BYTES: usize = 64;
-        let request_bytes = effects.request.as_ref().map_or(0, |spent| {
-            spent.identities().saturating_mul(REQUEST_IDENTITY_BYTES)
-        });
+        let mut aliases = verter_session_query::retention::allocation::AliasSet::new();
+        let request_bytes = effects
+            .request
+            .as_ref()
+            .map_or(0, |spent| spent.owned_heap_bytes(&mut aliases));
         let bytes =
             verter_session_query::retention::RetainedFootprint::retained_footprint_bytes(&recovery)
-                + read_set_signature.facts.len() * footprint::FACT_BYTES
+                + verter_session_query::retention::allocation::fact_signature_bytes(
+                    &read_set_signature,
+                    &mut aliases,
+                )
                 + verter_session_query::retention::ENTRY_OVERHEAD_BYTES
                 + request_bytes;
         let charge = match verter_session_query::facts::receipt::reserve_retained_with_evidence(
@@ -1417,7 +1422,7 @@ mod refusal_ledger_tests {
         let account = SemanticRetentionAccount::new(RetentionLimits {
             aggregate_ceiling_bytes: 10_000_000,
             active_ceiling_bytes: 10_000_000,
-            max_entry_bytes: 512,
+            max_entry_bytes: 2_048,
             pin_threshold_bytes: 10_000_000,
         });
         let db: ComponentMetaResultDb<u32> =
@@ -1441,23 +1446,31 @@ mod refusal_ledger_tests {
                 effects,
             )
         };
-        let identities = |n: usize| ComponentMetaRefusalEffects {
+        let keyed = |keys: Vec<String>| ComponentMetaRefusalEffects {
             request: Some(RequestSpent::from_identities_for_test(
-                (0..n)
-                    .map(|index| CostIdentity::new(format!("paid-{index}").into_bytes()))
+                keys.into_iter()
+                    .map(|key| CostIdentity::new(key.into_bytes()))
                     .collect(),
                 Vec::new(),
             )),
             ..ComponentMetaRefusalEffects::default()
         };
+        let identities = |n: usize| keyed((0..n).map(|index| format!("paid-{index}")).collect());
 
         assert!(seal("none", ComponentMetaRefusalEffects::default()).is_some());
         let empty_prefix = account.snapshot().retained_bytes;
         assert!(seal("one", identities(1)).is_some());
-        assert_eq!(
-            account.snapshot().retained_bytes - empty_prefix,
-            empty_prefix + 64,
-            "one retained paid identity adds the summary's 64-byte charge"
+        let one_identity = account.snapshot().retained_bytes - 2 * empty_prefix;
+        assert!(
+            one_identity > 0,
+            "a retained paid identity grows the reservation"
+        );
+        assert!(seal("long", keyed(vec!["k".repeat(600)])).is_some());
+        let long_identity = account.snapshot().retained_bytes - 3 * empty_prefix - one_identity;
+        assert!(
+            long_identity >= one_identity + 590,
+            "a paid identity is charged for the key it keeps reachable, not a fixed proxy: \
+             {long_identity} vs {one_identity}"
         );
         let charged = account.snapshot().retained_bytes;
         assert!(

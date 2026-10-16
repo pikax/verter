@@ -78,6 +78,32 @@ impl std::ops::Deref for CandidateTable {
     }
 }
 
+impl crate::semantic_query::allocation_footprint::OwnedHeap for SignatureSetValue {
+    /// The shared candidate table: its block, the candidate slice, each
+    /// composite's constituent list and the table's root owner. The
+    /// signature records live in the epoch's tables.
+    fn owned_heap_bytes(
+        &self,
+        aliases: &mut verter_session_query::retention::allocation::AliasSet,
+    ) -> usize {
+        use verter_session_query::retention::allocation::{arc_block_bytes, heap_block_bytes};
+        if !aliases.first(&self.nodes) {
+            return 0;
+        }
+        arc_block_bytes(std::mem::size_of::<CandidateTable>())
+            + heap_block_bytes(std::mem::size_of_val::<[SignatureCandidateNodes]>(
+                &self.nodes.candidates,
+            ))
+            + self
+                .nodes
+                .candidates
+                .iter()
+                .map(|candidate| candidate.constituents.owned_heap_bytes(aliases))
+                .sum::<usize>()
+            + self.nodes.roots.0.owned_heap_bytes(aliases)
+    }
+}
+
 impl SignatureSetValue {
     /// Mint a value owning every candidate node in `graph`, the graph whose
     /// walk published them — never whichever graph's scope is innermost on

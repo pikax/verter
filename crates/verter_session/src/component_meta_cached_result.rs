@@ -31,8 +31,10 @@ impl verter_session_query::retention::RetainedFootprint for CachedComponentMetaR
         surfaces * crate::component_meta_result_db::footprint::SURFACE_RECORD_BYTES
             + structural * crate::component_meta_result_db::footprint::STRUCTURAL_RECORD_BYTES
             + types * crate::component_meta_result_db::footprint::TYPE_RECORD_BYTES
-            + self.resolution_template.fact_versions.len()
-                * crate::component_meta_result_db::footprint::FACT_BYTES
+            + verter_session_query::retention::allocation::fact_vec_bytes(
+                &self.resolution_template.fact_versions,
+                &mut verter_session_query::retention::allocation::AliasSet::new(),
+            )
             + self.canonical_id.len()
             + std::mem::size_of::<Self>()
     }

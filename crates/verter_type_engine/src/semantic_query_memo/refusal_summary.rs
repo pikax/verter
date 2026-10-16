@@ -29,7 +29,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
-use verter_session_query::retention::{RetentionAdmission, RetentionCharge};
+use verter_session_query::retention::RetentionAdmission;
 
 use crate::fact_signature_helpers::ReadSetSignatureExt as _;
 use crate::project_semantic_dispatch::cost_receipt::{BudgetProfile, BudgetProfileSpec};
@@ -42,12 +42,6 @@ use super::SemanticGraphStore;
 
 /// Refusals the store keeps at once; the oldest is dropped first.
 pub const REFUSAL_SUMMARY_CAP: usize = 256;
-
-/// The estimated bytes one observed fact, one named computation and one
-/// replayed diagnostic of a summary keep alive.
-const FACT_BYTES: usize = 64;
-const IDENTITY_BYTES: usize = 64;
-const DIAGNOSTIC_BYTES: usize = 256;
 
 /// The charges a failed evaluation made before it tripped: what applying
 /// its summary leaves on the repeat's demand and request, exactly as the
@@ -76,9 +70,12 @@ pub struct RefusalSummary {
     pub self_root_canonicals: Arc<[Arc<str>]>,
     /// The charges made before the trip.
     pub prefix: RefusalPrefix,
-    /// The summary's reservation against the process retention account,
-    /// held for as long as the summary lives.
-    retention: Option<RetentionCharge>,
+    /// The summary's charges against the process retention account, held
+    /// for as long as the summary lives: its own bookkeeping, and shared
+    /// holds on the carrier and on the allocations its read delivers
+    /// (whose caller holds ride that read, so a delivery that outlives the
+    /// summary keeps them charged). See [`super::retention::MemoRetention`].
+    retention: Option<super::retention::MemoRetention>,
 }
 
 impl RefusalSummary {
@@ -98,27 +95,36 @@ impl RefusalSummary {
         }
     }
 
-    /// The bytes the summary keeps alive of its own. A wide carrier's
-    /// evidence pages are not counted here: sealing the summary claims the
-    /// pages no earlier admission claimed into the same reservation, and a
-    /// page is charged once however many summaries and candidates share it
+    /// The bytes of the summary's own bookkeeping: its block, its table
+    /// slot and eviction-order record, its read's delivery metadata, its
+    /// request prefix's paid lists and the counters of its empty shared
+    /// slices. Its carrier, self-roots and delivered allocations are shared
+    /// allocations, held once through the store's registry; a wide
+    /// carrier's evidence pages are claimed into this reservation, a page
+    /// being charged once however many summaries and candidates share it
     /// ([`verter_session_query::facts::receipt::reserve_retained_with_evidence`]).
-    fn retained_bytes(&self) -> usize {
-        let self_roots: usize = self
-            .self_root_canonicals
-            .iter()
-            .map(|canonical| canonical.len() + std::mem::size_of::<Arc<str>>())
-            .sum();
-        std::mem::size_of::<Self>()
+    fn own_retained_bytes(&self) -> usize {
+        use verter_session_query::retention::allocation::{arc_block_bytes, AliasSet};
+        let mut aliases = AliasSet::new();
+        arc_block_bytes(std::mem::size_of::<Self>())
             + verter_session_query::retention::ENTRY_OVERHEAD_BYTES
-            + (self.carrier.facts.len() + self.read.dep_signature.len()) * FACT_BYTES
-            + self.read.walker_diagnostics.len() * DIAGNOSTIC_BYTES
-            + self_roots
+            + self.read.lease.owned_heap_bytes(&mut aliases)
             + self
                 .prefix
                 .request
                 .as_ref()
-                .map_or(0, |spent| spent.identities() * IDENTITY_BYTES)
+                .map_or(0, |spent| spent.owned_heap_bytes(&mut aliases))
+            + self.shared_parts().empty_slice_bytes()
+    }
+
+    fn shared_parts(&self) -> super::retention::SharedParts<'_> {
+        super::retention::SharedParts {
+            facts: &self.carrier.facts,
+            self_roots: &self.self_root_canonicals,
+            diagnostics: &self.read.walker_diagnostics,
+            dep_signature: &self.read.dep_signature,
+            result: &self.read.value,
+        }
     }
 }
 
@@ -216,18 +222,27 @@ impl SemanticGraphStore {
         entered: RefusalEntryState,
         mut summary: RefusalSummary,
     ) -> bool {
+        let refuse = |refusal: verter_session_query::retention::RetentionRefusal| {
+            crate::cache_runtime::admission::propagate_non_admission(
+                refusal.non_admission_reason(),
+            );
+            false
+        };
+        let shared = match self.hold_shared_allocations(summary.shared_parts()) {
+            Ok(shared) => shared,
+            Err(refusal) => return refuse(refusal),
+        };
         match verter_session_query::facts::receipt::reserve_retained_with_evidence(
             self.retention_account(),
-            summary.retained_bytes(),
+            summary.own_retained_bytes(),
             &[&summary.carrier.facts],
         ) {
-            RetentionAdmission::Admitted(charge) => summary.retention = Some(charge),
-            RetentionAdmission::Refused(refusal) => {
-                crate::cache_runtime::admission::propagate_non_admission(
-                    refusal.non_admission_reason(),
-                );
-                return false;
+            RetentionAdmission::Admitted(own) => {
+                let retention = shared.with_own(own);
+                summary.read.lease.attach_retention(|| retention.callers());
+                summary.retention = Some(retention);
             }
+            RetentionAdmission::Refused(refusal) => return refuse(refusal),
         }
         let key = (self.prepare_rooted_key(key), profile);
         let flags = ctx.request_flags();

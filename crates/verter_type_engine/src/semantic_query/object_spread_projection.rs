@@ -572,6 +572,12 @@ pub struct ObjectProjectionFormula {
 }
 
 impl ObjectProjectionFormula {
+    /// The alternatives' allocation: the key of the formula's retained
+    /// charge.
+    pub(crate) fn alternatives_arc(&self) -> &Arc<[ObjectProjectionAlternative]> {
+        &self.alternatives
+    }
+
     pub(crate) fn for_each_retained_node(&self, mut visit: impl FnMut(SemanticNodeId)) {
         for alternative in self.alternatives.iter() {
             for fact in alternative.positive.iter() {
@@ -977,6 +983,64 @@ impl<'a> ClosedObjectProjectionFormula<'a> {
         self,
     ) -> impl ExactSizeIterator<Item = ClosedObjectProjectionAlternative<'a>> {
         self.alternatives()
+    }
+}
+
+impl super::allocation_footprint::OwnedHeap for ObjectProjectionFormula {
+    /// Every alternative's fact, key and witness arrays with their key text
+    /// and declaration origins. Proven values are graph ordinals.
+    fn owned_heap_bytes(
+        &self,
+        aliases: &mut verter_session_query::retention::allocation::AliasSet,
+    ) -> usize {
+        use verter_session_query::retention::allocation::arc_slice_block_bytes;
+        fn keys(
+            keys: &Arc<[PropertyKey]>,
+            aliases: &mut verter_session_query::retention::allocation::AliasSet,
+        ) -> usize {
+            keys.owned_heap_bytes(aliases)
+        }
+        let Some(mut bytes) = arc_slice_block_bytes(&self.alternatives, aliases) else {
+            return 0;
+        };
+        for alternative in self.alternatives.iter() {
+            if let Some(block) = arc_slice_block_bytes(&alternative.positive, aliases) {
+                bytes += block;
+                for fact in alternative.positive.iter() {
+                    bytes += fact.key.owned_heap_bytes(aliases);
+                    if let ProjectionEvidence::Proven(facets) = &fact.facets {
+                        bytes += facets.declaration_origin.owned_heap_bytes(aliases);
+                    }
+                }
+            }
+            bytes += match &alternative.selected {
+                SelectedProjection::Key(key) => key.owned_heap_bytes(aliases),
+                SelectedProjection::RelationShape(shape) => keys(shape, aliases),
+                SelectedProjection::Surface
+                | SelectedProjection::IndexDomain(_)
+                | SelectedProjection::Signature(_)
+                | SelectedProjection::EnumerableValueEnvelope(_)
+                | SelectedProjection::ExcessEligibility => 0,
+            };
+            bytes += match &alternative.domain {
+                AlternativeDomain::Closed(closed) => keys(&closed.complete_keys, aliases),
+                AlternativeDomain::Open(open) => {
+                    open.residual_operands.owned_heap_bytes(aliases)
+                        + keys(&open.indeterminate_possible_writes, aliases)
+                }
+            };
+            if let Some(block) = arc_slice_block_bytes(&alternative.indices, aliases) {
+                bytes += block;
+                for index in alternative.indices.iter() {
+                    bytes += index.declaration_origin.owned_heap_bytes(aliases);
+                }
+            }
+            bytes += arc_slice_block_bytes(&alternative.signatures, aliases).unwrap_or(0);
+        }
+        if let Some(closed) = &self.closed_keyof {
+            bytes += keys(closed, aliases);
+        }
+        bytes
     }
 }
 

@@ -195,9 +195,25 @@ pub struct RequestSpent {
 }
 
 impl RequestSpent {
-    /// The computations it names, entered at and paid.
-    pub(crate) fn identities(&self) -> usize {
-        self.entry_paid.len() + self.paid.len()
+    /// The bytes a retained copy of this spend keeps: both paid lists'
+    /// backings and every identity they name, once per `aliases`. A paid
+    /// identity can outlive the receipt that minted it, so a retained
+    /// spend counts what it keeps reachable.
+    pub(crate) fn owned_heap_bytes(
+        &self,
+        aliases: &mut verter_session_query::retention::allocation::AliasSet,
+    ) -> usize {
+        use verter_session_query::retention::allocation::heap_block_bytes;
+        let list =
+            |identities: &[CostIdentity],
+             aliases: &mut verter_session_query::retention::allocation::AliasSet| {
+                heap_block_bytes(std::mem::size_of_val(identities))
+                    + identities
+                        .iter()
+                        .map(|identity| identity.owned_heap_bytes(aliases))
+                        .sum::<usize>()
+            };
+        list(&self.entry_paid, aliases) + list(&self.paid, aliases)
     }
 
     /// A spend that names these identities and nothing else. Retention tests

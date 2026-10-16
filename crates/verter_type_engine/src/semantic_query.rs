@@ -107,6 +107,7 @@ mod outcome_tests;
 #[cfg(test)]
 mod semantic_context_tests;
 
+pub(crate) mod allocation_footprint;
 /// Selector-aware projection facts for authored object-spread programs.
 ///
 /// The result is an opaque correlated formula. Exact absence, emptiness,
@@ -5892,6 +5893,11 @@ impl RecursiveRefArgs {
         &self.0
     }
 
+    /// The operand allocation, for its retained footprint.
+    pub(crate) fn operands_arc(&self) -> &Arc<[SemanticNodeId]> {
+        &self.0
+    }
+
     /// The operands of a fixture error.
     #[cfg(any(test, feature = "test-support"))]
     #[must_use]
@@ -6603,6 +6609,11 @@ pub struct BroadRuntimeClassification {
 }
 
 impl BroadRuntimeClassification {
+    /// The kind allocation, for its retained footprint.
+    pub(crate) fn kinds_arc(&self) -> &Arc<[BroadRuntimeKind]> {
+        &self.kinds
+    }
+
     #[must_use]
     pub fn new(kinds: impl IntoIterator<Item = BroadRuntimeKind>) -> Self {
         let mut seen = 0u16;

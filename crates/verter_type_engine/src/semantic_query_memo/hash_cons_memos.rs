@@ -24,6 +24,25 @@ use crate::semantic_query::{ProjectionReductionContext, SemanticNodeId};
 /// Entry cap for the substitution and deferred-evaluation FIFO stores.
 pub(super) const HASH_CONS_MEMO_RETENTION_CAP: usize = 100_000;
 
+/// One substitution answer: the result, the roots owning the key's and
+/// result's nodes, and the reservation of the entry's storage.
+pub(crate) struct SubstituteMemoEntry {
+    result: SemanticNodeId,
+    roots: super::node_roots::NodeRootSet,
+    _retention: verter_session_query::retention::RetentionCharge,
+}
+
+/// The bytes one memo entry keeps: its map slot and FIFO record, its value
+/// inline, and the root owner it keeps.
+fn hash_cons_entry_bytes<V>(
+    roots: &super::node_roots::NodeRootSet,
+    aliases: &mut verter_session_query::retention::allocation::AliasSet,
+) -> usize {
+    std::mem::size_of::<V>()
+        + verter_session_query::retention::ENTRY_OVERHEAD_BYTES
+        + roots.owned_heap_bytes(aliases)
+}
+
 pub(crate) struct DeferredEvaluationMemoEntry {
     result: SemanticNodeId,
     receipt: Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
@@ -48,7 +67,7 @@ impl SemanticGraphStore {
                 self.substitute_memo
                     .get(&(value_expr, parameter_node, arg))
                     .map(|entry| {
-                        let (result, roots) = entry.value();
+                        let SubstituteMemoEntry { result, roots, .. } = entry.value();
                         super::node_roots::NodeRootScope::capture(
                             super::node_roots::NodeRoot::from_roots(*result, roots.clone()),
                         );
@@ -93,7 +112,28 @@ impl SemanticGraphStore {
                     else {
                         return;
                     };
-                    slot.insert((result, roots));
+                    // Charged like every retained answer; one the account
+                    // refuses is computed again on demand.
+                    let bytes = hash_cons_entry_bytes::<(
+                        (SemanticNodeId, SemanticNodeId, SemanticNodeId),
+                        SubstituteMemoEntry,
+                    )>(
+                        &roots,
+                        &mut verter_session_query::retention::allocation::AliasSet::new(),
+                    );
+                    let verter_session_query::retention::RetentionAdmission::Admitted(retention) =
+                        self.retention_account().reserve(
+                            verter_session_query::retention::ChargeClass::Retained,
+                            bytes,
+                        )
+                    else {
+                        return;
+                    };
+                    slot.insert(SubstituteMemoEntry {
+                        result,
+                        roots,
+                        _retention: retention,
+                    });
                     let mut fifo = self.substitute_memo_fifo.lock();
                     fifo.push_back(key);
                     while fifo.len() > HASH_CONS_MEMO_RETENTION_CAP {
@@ -195,15 +235,25 @@ impl SemanticGraphStore {
         if receipt.reserve_retention(self.retention_account()).is_err() {
             return;
         }
-        let own_bytes = std::mem::size_of::<DeferredEvaluationMemoEntry>()
-            + verter_session_query::retention::ENTRY_OVERHEAD_BYTES
-            + evidence.0.len()
-                * std::mem::size_of::<verter_session_query::facts::fact_cache::FactVersionRef>()
-            + evidence
-                .1
-                .iter()
-                .map(|root| root.len() + std::mem::size_of::<Arc<str>>())
-                .sum::<usize>();
+        let Ok(roots) = self.root_existing_nodes(vec![node, result]) else {
+            return;
+        };
+        let lease = super::delivery_lease::SemanticDeliveryLease::from_roots(roots);
+        // The entry's block, slot and FIFO record, its delivery metadata, and
+        // its proof: the fact slice with every fact's owned text and the
+        // self-root list. A page of a wide proof is claimed into the same
+        // reservation and charged once wherever it is shared.
+        let own_bytes = {
+            use verter_session_query::retention::allocation::{
+                arc_block_bytes, arc_str_list_bytes, fact_slice_bytes, AliasSet,
+            };
+            let mut aliases = AliasSet::new();
+            arc_block_bytes(std::mem::size_of::<DeferredEvaluationMemoEntry>())
+                + verter_session_query::retention::ENTRY_OVERHEAD_BYTES
+                + lease.owned_heap_bytes(&mut aliases)
+                + fact_slice_bytes(&evidence.0, &mut aliases)
+                + arc_str_list_bytes(&evidence.1, &mut aliases)
+        };
         let retention = match verter_session_query::facts::receipt::reserve_retained_with_evidence(
             self.retention_account(),
             own_bytes,
@@ -212,14 +262,11 @@ impl SemanticGraphStore {
             verter_session_query::retention::RetentionAdmission::Admitted(charge) => charge,
             verter_session_query::retention::RetentionAdmission::Refused(_) => return,
         };
-        let Ok(roots) = self.root_existing_nodes(vec![node, result]) else {
-            return;
-        };
         let entry = Arc::new(DeferredEvaluationMemoEntry {
             result,
             receipt,
             evidence,
-            lease: super::delivery_lease::SemanticDeliveryLease::from_roots(roots),
+            lease,
             _retention: retention,
         });
         let key = (node, context, demand);

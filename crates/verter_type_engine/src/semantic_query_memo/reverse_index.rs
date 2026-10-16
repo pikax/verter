@@ -111,6 +111,29 @@ impl<'a> RegisteredCanonicals<'a> {
     }
 }
 
+/// Bytes the reverse-index registrations of one candidate keep: one record
+/// per `(populated slot × registered canonical)` in the canonical's shard
+/// map — its key, its value and its control byte, with the map's growth
+/// slack (a shard table is at most seven-eighths full) — and the one
+/// `Arc<FamilyKey>` every record of the candidate shares. A canonical's
+/// shard itself is the index's container, created with its first record
+/// and dropped with its last.
+pub(super) fn registration_bytes(
+    read_set_signature: &verter_session_query::facts::fact_cache::ReadSetSignature,
+    dispatch_dep_signature: &DepSignature,
+    populated_slots: usize,
+) -> usize {
+    use verter_session_query::retention::allocation::arc_block_bytes;
+    type Record = ((u64, ModeSlot), (Arc<FamilyKey>, RegisteredFacts));
+    let canonicals = RegisteredCanonicals::of(read_set_signature, dispatch_dep_signature);
+    if canonicals.is_empty() || populated_slots == 0 {
+        return 0;
+    }
+    let records = canonicals.ordered.len() * populated_slots;
+    (records * (std::mem::size_of::<Record>() + 1)).div_ceil(7) * 8
+        + arc_block_bytes(std::mem::size_of::<FamilyKey>())
+}
+
 /// Register the just-published candidate's reverse-index entries.
 ///
 /// Inserts one `(admission_seq, slot) -> (family, registered_facts)`

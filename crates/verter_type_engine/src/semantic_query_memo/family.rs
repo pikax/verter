@@ -82,19 +82,20 @@ pub(super) struct MemoEntry {
     /// a recorded point dominates that sibling's requested point — never by
     /// enum rank.
     pub(super) satisfied_projection: MaterializedSet,
-    /// This candidate's reservation against the project's aggregate
-    /// retained-byte account, held for exactly as long as the candidate
-    /// is reachable.
+    /// This candidate's charges against the aggregate retention account
+    /// (see [`super::retention::MemoRetention`]): its own cache-only
+    /// bookkeeping, and one shared charge per carrier or delivered
+    /// allocation it keeps reachable.
     ///
-    /// `Arc`, not a bare charge, because a same-payload BACKFILL clones
-    /// this entry into a sibling slot: the clone shares the payload's
-    /// allocations, so it must share ONE reservation rather than charge
-    /// the same bytes twice. The bytes become reclaimable when the last
-    /// clone — including any reader snapshot that outlived an eviction —
-    /// drops, which is the moment they are actually free.
+    /// `Arc` because the slot clones this entry into backfilled sibling
+    /// slots and readers snapshot it: every clone is the same candidate and
+    /// shares its charges. Declared after [`Self::lease`], so a dropped
+    /// candidate releases its delivery lease — and with it this candidate's
+    /// caller holds — before its own cache holds.
     ///
-    /// `None` for a fixture store that owns no account.
-    pub(super) retention_charge: Option<Arc<verter_session_query::retention::RetentionCharge>>,
+    /// `None` only while a candidate is staged; every published candidate
+    /// carries its charges.
+    pub(super) retention: Option<Arc<super::retention::MemoRetention>>,
     /// LRU eviction-recency metadata for the multi-candidate slot
     /// vector — NOT a semantic-validity oracle. Validity is decided
     /// exclusively by `read_set_signature.validate_with_self_roots`
@@ -118,48 +119,26 @@ pub(super) struct MemoEntry {
 }
 
 impl MemoEntry {
-    /// The portion of this candidate's footprint owned by the shared
-    /// carrier and self-root allocations.
-    fn shared_retained_footprint_bytes(&self) -> usize {
-        /// One observed dependency fact on the validity rail.
-        const FACT_BYTES: usize = 64;
-        let self_roots: usize = self
-            .self_root_canonicals
-            .iter()
-            .map(|canonical| canonical.len() + std::mem::size_of::<Arc<str>>())
-            .sum();
-        self.read_set_signature.facts.len() * FACT_BYTES + self_roots
-    }
-
-    /// The portion of this candidate's footprint that remains distinct
-    /// when an SCC component shares its carrier and self-root list.
-    pub(super) fn unique_retained_footprint_bytes(&self) -> usize {
-        /// One observed dependency fact on the dispatch-return rail.
-        const FACT_BYTES: usize = 64;
-        /// One recorded materialised `(path, point)` record.
-        const POINT_BYTES: usize = 96;
-        /// One replayed walker diagnostic.
-        const DIAGNOSTIC_BYTES: usize = 256;
-        std::mem::size_of::<Self>()
-            + self.dispatch_dep_signature.len() * FACT_BYTES
-            + self.walker_diagnostics.len() * DIAGNOSTIC_BYTES
-            + self.satisfied_projection.points().len() * POINT_BYTES
-            + verter_session_query::retention::ENTRY_OVERHEAD_BYTES
-    }
-}
-
-impl verter_session_query::retention::RetainedFootprint for MemoEntry {
-    /// Estimated resident bytes for one memo candidate.
-    ///
-    /// Counted from the candidate's own carriers — its validity rail,
-    /// self-root list, walker diagnostics and materialised-point record.
-    /// The interned result node is deliberately NOT counted here: the
-    /// node arena is shared across every candidate that references it,
-    /// so charging it per candidate would multiply one allocation by its
-    /// reference count. This is an ACCOUNTING estimate and never a
-    /// validity input.
-    fn retained_footprint_bytes(&self) -> usize {
-        self.shared_retained_footprint_bytes() + self.unique_retained_footprint_bytes()
+    /// The bytes of this candidate's cache-only bookkeeping, held for exactly
+    /// as long as the candidate: its entry in every slot its publication may
+    /// populate (with each slot's container convention), its materialised
+    /// point record, its delivery lease's ownership metadata, and its
+    /// reverse-index registrations. None of these is handed to a caller, so
+    /// none outlives the candidate. The carrier, the delivered rails and the
+    /// value are shared allocations, charged once through
+    /// [`super::retention::MemoRetention`]'s shared holds.
+    pub(super) fn own_retained_footprint_bytes(&self, populated_slots: usize) -> usize {
+        use crate::semantic_query::allocation_footprint::OwnedHeap as _;
+        let mut aliases = verter_session_query::retention::allocation::AliasSet::new();
+        populated_slots
+            * (std::mem::size_of::<Self>() + verter_session_query::retention::ENTRY_OVERHEAD_BYTES)
+            + self.satisfied_projection.owned_heap_bytes(&mut aliases)
+            + self.lease.owned_heap_bytes(&mut aliases)
+            + super::reverse_index::registration_bytes(
+                &self.read_set_signature,
+                &self.dispatch_dep_signature,
+                populated_slots,
+            )
     }
 }
 
@@ -1828,6 +1807,27 @@ pub struct AuditEagerKeyRow {
     pub key_repr: String,
     pub result_hash: String,
     pub dep_signature: String,
+}
+
+/// The slots one publication into `slot` may populate: the slot itself and
+/// every same-domain sibling one of the candidate's recorded points
+/// satisfies ([`FamilySlots::publish`] backfills each such sibling that is
+/// empty). The candidate is charged for this bound, since whether a sibling
+/// is empty is decided only under the publish lock.
+pub(super) fn publication_slot_bound(
+    slot: ModeSlot,
+    satisfied_projection: &MaterializedSet,
+    requested_path: &ProjectionPath,
+) -> usize {
+    1 + slot_domain_siblings(slot)
+        .iter()
+        .filter(|target| {
+            cached_satisfies(
+                satisfied_projection,
+                &MaterializedPoint::new(point_for_slot(**target, requested_path)),
+            )
+        })
+        .count()
 }
 
 /// The candidate backfill TARGET slots a publish into `slot` may fill —

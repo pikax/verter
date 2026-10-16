@@ -25,6 +25,7 @@ use verter_type_engine::semantic_query_memo::test_support::test_trigger_inflight
 #[allow(unused_imports)]
 use verter_type_engine::semantic_query_memo::*;
 
+mod allocation_ownership_tests;
 mod cancellation_tests;
 mod object_spread_projection_tests;
 mod producer_tests;

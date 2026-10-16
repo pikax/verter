@@ -1,75 +1,151 @@
-//! SCC batch retention accounting: a staged member reserves only its own
-//! allocations, never the carrier its witnessed root already owns.
+//! Retention accounting of candidates that share a build's carrier: the
+//! carrier is charged once whichever candidates hold it, and the last
+//! surviving holder still pays for it.
 
 use super::*;
 use crate::semantic_query::RelationOutcome;
-use verter_session_query::retention::{
-    RetainedFootprint, RetentionLimits, SemanticRetentionAccount,
-};
+use verter_session_query::facts::fact_cache::{FactVersionRef, ReadSetSignature};
+use verter_session_query::retention::allocation::{arc_str_list_bytes, fact_slice_bytes, AliasSet};
+use verter_session_query::retention::shared::registration_bytes;
+use verter_session_query::retention::{RetentionLimits, SemanticRetentionAccount, StoreAccount};
 
-#[test]
-fn scc_member_reservation_excludes_the_roots_shared_carrier() {
-    use verter_session_query::facts::fact_cache::FactVersionRef;
+const CANONICAL_LEN: usize = 12_000;
 
-    let carrier = verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(vec![
-        FactVersionRef::FileWholeHash {
-            canonical_id: "/ws/scc-accounting.ts".to_string(),
-            hash: [7; 16],
-        },
-    ]));
-    let roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from("/ws/scc-accounting.ts")]);
-    let limits = RetentionLimits {
+fn unbounded_account() -> Arc<SemanticRetentionAccount> {
+    SemanticRetentionAccount::new(RetentionLimits {
         aggregate_ceiling_bytes: usize::MAX,
         active_ceiling_bytes: usize::MAX,
         max_entry_bytes: usize::MAX,
         pin_threshold_bytes: usize::MAX,
-    };
-    let account = SemanticRetentionAccount::new(limits);
-    let store = SemanticGraphStore::with_account(
-        verter_session_query::retention::StoreAccount::new(Arc::clone(&account)),
-    );
+    })
+}
+
+/// A carrier whose one fact names a deliberately oversized canonical: a
+/// per-fact proxy would charge it like any short one.
+fn oversized_carrier() -> (ReadSetSignature, Arc<[Arc<str>]>) {
+    let canonical = format!("/ws/{}.ts", "c".repeat(CANONICAL_LEN));
+    let carrier = ReadSetSignature::new(Arc::from(vec![FactVersionRef::FileWholeHash {
+        canonical_id: canonical.clone(),
+        hash: [7; 16],
+    }]));
+    let roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from(canonical)]);
+    (carrier, roots)
+}
+
+/// The charges the carrier and self-root list cost, computed from their
+/// allocations: each is held once, under one registration.
+fn carrier_charge(carrier: &ReadSetSignature, roots: &Arc<[Arc<str>]>) -> usize {
+    fact_slice_bytes(&carrier.facts, &mut AliasSet::new())
+        + registration_bytes()
+        + arc_str_list_bytes(roots, &mut AliasSet::new())
+        + registration_bytes()
+}
+
+fn stage_relation(
+    store: &SemanticGraphStore,
+    carrier: &ReadSetSignature,
+    roots: &Arc<[Arc<str>]>,
+    receipt: &Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
+) -> MemoEntry {
+    store.stage_entry(
+        SemanticQueryValue::Relation(store.relation_payload_for_tests(RelationOutcome::Assignable)),
+        super::relation_memo::relation_satisfied_projection(),
+        carrier,
+        roots,
+        &empty_signature(),
+        0,
+        receipt,
+    )
+}
+
+#[test]
+fn an_scc_member_shares_the_carrier_charge_and_keeps_it_after_the_root_drains() {
+    let (carrier, roots) = oversized_carrier();
+    let account = unbounded_account();
+    let store = SemanticGraphStore::with_account(StoreAccount::new(Arc::clone(&account)));
     let receipt = crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt::new(
         crate::project_semantic_dispatch::cost_receipt::CostIdentity::new(b"scc-root".to_vec()),
         Default::default(),
         Vec::new(),
     );
-    let root = store.stage_entry(
-        None,
-        SemanticQueryValue::Relation(store.relation_payload_for_tests(RelationOutcome::Assignable)),
-        super::relation_memo::relation_satisfied_projection(),
-        &carrier,
-        &roots,
-        &empty_signature(),
-        0,
-        &receipt,
-    );
-    let member = store.stage_entry(
-        None,
-        SemanticQueryValue::Relation(store.relation_payload_for_tests(RelationOutcome::Assignable)),
-        super::relation_memo::relation_satisfied_projection(),
-        &carrier,
-        &roots,
-        &empty_signature(),
-        0,
-        &receipt,
-    );
-    // The root is admitted as every memo candidate is: its entry and its
-    // receipt, which the component's members share.
-    let root_charge = store
-        .reserve_memo_candidate(&root)
+    let root = stage_relation(&store, &carrier, &roots, &receipt);
+    let member = stage_relation(&store, &carrier, &roots, &receipt);
+
+    let root_retention = store
+        .reserve_memo_candidate(&root, 1)
         .expect("the root is admitted");
-    assert!(root_charge.bytes() >= root.retained_footprint_bytes());
+    let carrier_bytes = carrier_charge(&carrier, &roots);
+    assert!(
+        carrier_bytes > 2 * CANONICAL_LEN,
+        "the oversized canonical is charged in full in the fact rail and the self-root list"
+    );
     let after_root = account.snapshot().retained_bytes;
-    let member_unique = member.unique_retained_footprint_bytes();
-    let batch = store
+    assert!(after_root >= carrier_bytes + root_retention.own_bytes());
+
+    let members = store
         .reserve_scc_batch(&[&member])
         .expect("the member's incremental footprint is admitted");
+    let member_own = super::retention::own_reservation_bytes(&member, 1);
+    assert_eq!(
+        account.snapshot().retained_bytes - after_root,
+        member_own
+            + members[0]
+                .shared_holds()
+                .filter(|hold| !root_retention
+                    .shared_holds()
+                    .any(|root_hold| root_hold.shares_charge_with(hold)))
+                .map(|hold| hold.bytes())
+                .sum::<usize>(),
+        "the member pays its own bookkeeping and only the allocations the root \
+         does not already charge — never the shared carrier a second time"
+    );
+    assert!(
+        account.snapshot().retained_bytes - after_root < carrier_bytes,
+        "a second charge of the shared carrier would cost at least its size"
+    );
 
+    drop(root_retention);
+    let survivor = account.snapshot().retained_bytes;
+    assert!(
+        survivor >= carrier_bytes + member_own,
+        "the surviving member still pays for the carrier it keeps reachable: \
+         {survivor} < {carrier_bytes} + {member_own}"
+    );
+
+    drop(members);
+    drop((root, member));
+    drop(receipt);
+    assert_eq!(account.snapshot().total_bytes(), 0, "every charge released");
+    assert_eq!(store.shared_allocation_registrations_for_tests(), 0);
+}
+
+#[test]
+fn a_refused_candidate_keeps_no_charge_and_no_registration() {
+    let (carrier, roots) = oversized_carrier();
+    let account = SemanticRetentionAccount::new(RetentionLimits {
+        aggregate_ceiling_bytes: CANONICAL_LEN,
+        active_ceiling_bytes: CANONICAL_LEN,
+        max_entry_bytes: CANONICAL_LEN,
+        pin_threshold_bytes: CANONICAL_LEN,
+    });
+    let store = SemanticGraphStore::with_account(StoreAccount::new(Arc::clone(&account)));
+    let receipt = crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt::new(
+        crate::project_semantic_dispatch::cost_receipt::CostIdentity::new(b"refused".to_vec()),
+        Default::default(),
+        Vec::new(),
+    );
+    let root = stage_relation(&store, &carrier, &roots, &receipt);
+    receipt
+        .reserve_retention(&account)
+        .expect("the receipt alone fits");
+    let before = account.snapshot().retained_bytes;
+    store
+        .reserve_memo_candidate(&root, 1)
+        .expect_err("the oversized carrier does not fit, whatever the entry's own size");
     assert_eq!(
         account.snapshot().retained_bytes,
-        after_root + member_unique,
-        "the root already owns the shared carrier, self-root and receipt allocations"
+        before,
+        "a refusal leaves nothing charged and nothing registered"
     );
-    drop(batch);
-    drop(root_charge);
+    assert_eq!(store.shared_allocation_registrations_for_tests(), 0);
 }

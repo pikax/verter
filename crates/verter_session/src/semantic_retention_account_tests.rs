@@ -513,8 +513,8 @@ fn the_project_store_charges_its_interned_identities() {
         .intern("/src/components/Accounted.vue");
     assert_eq!(
         account.snapshot().retained_bytes - before,
-        interned.len(),
-        "an interned identity's payload must be charged to the store's account"
+        verter_type_engine::identity_interner::pooled_entry_bytes(interned.len()),
+        "an interned identity's allocation and pool slot must be charged to the store's account"
     );
     drop(store);
     assert_eq!(

@@ -20,6 +20,13 @@ struct DeliveryOwner {
     roots: NodeRootSet,
     signature: Option<SignatureEpochLease>,
     key_roots: NodeRootSet,
+    /// The caller holds on the cached allocations this delivery aliases —
+    /// its diagnostics, dependency rail and value — attached once the
+    /// candidate that retains them is charged. A cache that drains while
+    /// this delivery lives hands those charges to it rather than leaving
+    /// the allocations uncharged
+    /// ([`verter_session_query::retention::shared`]).
+    retention: std::sync::OnceLock<Box<[verter_session_query::retention::shared::CallerHold]>>,
 }
 
 impl SemanticDeliveryLease {
@@ -64,6 +71,42 @@ impl SemanticDeliveryLease {
             .as_ref()
             .map(|owner| std::sync::Arc::as_ptr(owner) as usize)
     }
+    /// Attach the caller holds of the cached allocations this delivery
+    /// aliases. A delivery is attached once; a later attachment (the same
+    /// candidate's) is ignored.
+    pub(super) fn attach_retention(
+        &self,
+        holds: impl FnOnce() -> Box<[verter_session_query::retention::shared::CallerHold]>,
+    ) {
+        if let Some(owner) = self.0.as_ref() {
+            owner.retention.get_or_init(holds);
+        }
+    }
+
+    /// The delivery owner's block and root-owner metadata, once per
+    /// `aliases`, with room for the caller holds a candidate attaches. The
+    /// rooted nodes are the arena's; the signature epoch is its owner's.
+    pub(super) fn owned_heap_bytes(
+        &self,
+        aliases: &mut verter_session_query::retention::allocation::AliasSet,
+    ) -> usize {
+        use verter_session_query::retention::allocation::{arc_block_bytes, heap_block_bytes};
+        match self.0.as_ref() {
+            Some(owner) if aliases.first(owner) => {
+                arc_block_bytes(std::mem::size_of::<DeliveryOwner>())
+                    + owner.roots.owned_heap_bytes(aliases)
+                    + owner.key_roots.owned_heap_bytes(aliases)
+                    + heap_block_bytes(
+                        super::retention::DELIVERED_ALLOCATIONS
+                            * std::mem::size_of::<
+                                verter_session_query::retention::shared::CallerHold,
+                            >(),
+                    )
+            }
+            _ => 0,
+        }
+    }
+
     pub(crate) fn from_roots(roots: NodeRootSet) -> Self {
         Self(Some(std::sync::Arc::new(DeliveryOwner {
             roots,
@@ -106,7 +149,7 @@ impl SemanticGraphStore {
         let lease = SemanticDeliveryLease(Some(std::sync::Arc::new(DeliveryOwner {
             roots,
             signature,
-            key_roots: Default::default(),
+            ..Default::default()
         })));
         lease.capture();
         Ok(lease)

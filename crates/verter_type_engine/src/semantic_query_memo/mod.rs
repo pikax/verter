@@ -354,6 +354,13 @@ pub struct SemanticGraphStore {
     /// host-built store does, instead of retaining candidates that consume
     /// no aggregate headroom.
     retention_account: verter_session_query::retention::StoreAccount,
+    /// The shared charges of the allocations this store's candidates and
+    /// their readers alias — fact carriers, self-root lists, delivered
+    /// rails and values — keyed by allocation, so sibling candidates share
+    /// one charge per allocation and a reader that outlives its candidate
+    /// keeps that allocation charged. Holds one registration per allocation
+    /// still held, nothing more.
+    alias_charges: verter_session_query::retention::shared::AliasCharges,
     /// Per-store test trigger for the cold-abort sweep path. When a test
     /// sets this (via [`Self::test_force_cold_abort_sweep`]), the
     /// cold-winner re-check in [`Self::warm_publish_one`] marks its own
@@ -675,7 +682,7 @@ pub struct SemanticGraphStore {
         parking_lot::Mutex<std::collections::VecDeque<SemanticNodeId>>,
     pub(super) substitute_memo: DashMap<
         (SemanticNodeId, SemanticNodeId, SemanticNodeId),
-        (SemanticNodeId, node_roots::NodeRootSet),
+        hash_cons_memos::SubstituteMemoEntry,
         rustc_hash::FxBuildHasher,
     >,
     pub(super) substitute_memo_fifo: parking_lot::Mutex<
@@ -782,6 +789,7 @@ impl SemanticGraphStore {
             stats: Default::default(),
             provenance: Default::default(),
             retention_account: Default::default(),
+            alias_charges: Default::default(),
             force_cold_abort_sweep: Default::default(),
             unresolved_reach: Default::default(),
             released_any: Default::default(),
@@ -2391,6 +2399,7 @@ impl SemanticGraphStore {
         satisfied_projection: &MaterializedSet,
         cost_receipt: &Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
         inflight: &Arc<FlightCell>,
+        delivery: &delivery_lease::SemanticDeliveryLease,
     ) -> WarmPublishOutcome {
         let publishable = matches!(result, QueryResult::Value(_));
         if !publishable {
@@ -2424,6 +2433,7 @@ impl SemanticGraphStore {
         // the traced cross-file fact set. `warm_publish_one` records it
         // verbatim; it never reconstructs facts from the legacy fence.
         let read_set_signature = read_set_signature.clone();
+        let winner_dep_signature = retention::allocation_key(dispatch_dep_signature);
         let dispatch_dep_signature = self.dep_signature_interner.intern(dispatch_dep_signature);
         let validated_at_generation = flags.current_project_generation();
         let admission_seq = self.alloc_candidate_admission_seq();
@@ -2438,7 +2448,7 @@ impl SemanticGraphStore {
             self_root_canonicals: Arc::clone(self_root_canonicals),
             walker_diagnostics: Arc::clone(walker_diagnostics),
             satisfied_projection: satisfied_projection.clone(),
-            retention_charge: None,
+            retention: None,
             validated_at_generation,
             admission_seq,
             cost_receipt: Arc::clone(cost_receipt),
@@ -2448,10 +2458,14 @@ impl SemanticGraphStore {
         // for an entry the process then declines to keep. The refusal is
         // `Skipped`, which returns this winner's COMPLETE value to its
         // caller uncached — never a stale candidate, never a partial.
-        match self.reserve_memo_candidate(&entry) {
-            Ok(charge) => entry.retention_charge = Some(Arc::new(charge)),
+        let populated_slots =
+            family::publication_slot_bound(slot, satisfied_projection, requested_path);
+        let retention = match self.reserve_memo_candidate(&entry, populated_slots) {
+            Ok(retention) => retention,
             Err(_) => return WarmPublishOutcome::Skipped,
-        }
+        };
+        entry.lease.attach_retention(|| retention.callers());
+        entry.retention = Some(Arc::clone(&retention));
         // Per-family bounded retention: plan the cap eviction against the
         // publishing caller's stable view BEFORE the publish lock (the
         // plan releases `entries` before validating fact rails; the
@@ -2562,6 +2576,16 @@ impl SemanticGraphStore {
             cost_receipt: Arc::clone(cost_receipt),
         };
         drop(entries);
+        // The winner's own delivery aliases the candidate's diagnostics and
+        // value (its dependency rail only when interning returned the same
+        // allocation): it carries their caller holds, so a winner's read that
+        // outlives the candidate keeps them charged.
+        let mut aliased = vec![
+            retention::allocation_key(walker_diagnostics),
+            winner_dep_signature,
+        ];
+        aliased.extend(retention::value_allocation_key(result));
+        delivery.attach_retention(|| retention.callers_for(&aliased));
         // Published cleanly under a non-aborted in-flight entry — the
         // winner's id epoch is consistent, so the caller may proceed to
         // publish its narrower prefix-backfills.
@@ -2684,7 +2708,7 @@ impl SemanticGraphStore {
             self_root_canonicals,
             walker_diagnostics: Arc::from([]),
             satisfied_projection,
-            retention_charge: None,
+            retention: None,
             validated_at_generation,
             admission_seq,
             cost_receipt,
@@ -2693,13 +2717,19 @@ impl SemanticGraphStore {
             Ok(lease) => lease,
             Err(_) => return false,
         };
-        // A narrower sibling slot is a fresh candidate with its own
-        // carriers, so it is charged like any other publish. Under
-        // pressure the backfill is simply declined — the broader entry
-        // it would have been cloned from stays warm and a later narrow
-        // request recomputes.
-        match self.reserve_memo_candidate(&entry) {
-            Ok(charge) => entry.retention_charge = Some(Arc::new(charge)),
+        // A narrower sibling slot is a fresh candidate: its own bookkeeping
+        // is charged like any other publish, while the carrier it shares
+        // with the broader entry is held through the same shared charge.
+        // Under pressure the backfill is simply declined — the broader
+        // entry it would have been cloned from stays warm and a later
+        // narrow request recomputes.
+        let populated_slots =
+            family::publication_slot_bound(slot, &entry.satisfied_projection, requested_path);
+        match self.reserve_memo_candidate(&entry, populated_slots) {
+            Ok(retention) => {
+                entry.lease.attach_retention(|| retention.callers());
+                entry.retention = Some(retention);
+            }
             Err(_) => return false,
         }
         // Per-family bounded retention: plan the cap eviction against the

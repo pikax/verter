@@ -1052,6 +1052,7 @@ impl SettledProducer<'_> {
                 &self.satisfied_projection,
                 &cost_receipt,
                 &self.inflight,
+                &self.lease,
             );
             let published = match outcome {
                 WarmPublishOutcome::Published(candidate) => {

@@ -62,6 +62,21 @@
 //! payload's allocations, so a second charge would double-count bytes
 //! that exist once).
 //!
+//! An allocation a cache retains and a caller also holds is charged once
+//! through [`shared`]: the cache's [`shared::CacheHold`] keeps it
+//! [`ChargeClass::Retained`], and when the last cache hold drops while a
+//! [`shared::CallerHold`] remains, the same bytes move to
+//! [`ChargeClass::Pinned`] in one step ([`RetentionCharge::transfer_to_pinned`]) —
+//! never uncharged, never charged twice, never refused. Independently
+//! charged owners of one allocation share its charge through
+//! [`shared::AliasCharges`].
+//!
+//! ## What a charge measures
+//!
+//! A charge covers the allocations its owner keeps reachable, by capacity,
+//! under the declared conventions of [`allocation`] — never a fixed
+//! per-item proxy standing in for a variable payload.
+//!
 //! ## The byte figures are ESTIMATES, never a validity oracle
 //!
 //! [`RetainedFootprint`] estimates a payload's retained bytes. Nothing
@@ -70,8 +85,10 @@
 //! decides whether the process may retain the entry at all, so an
 //! imprecise estimate costs hit rate, never correctness.
 
+pub mod allocation;
 pub(crate) mod resident;
 pub mod resolution_charge;
+pub mod shared;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -303,10 +320,14 @@ macro_rules! impl_inline_footprint {
 
 impl_inline_footprint!((), u8, u16, u32, u64, usize);
 
-/// Per-entry constant covering the entry header, its map slot, and the
-/// index/ledger records that travel with it. Applied by callers on top
-/// of their own payload estimate so a cache of many tiny entries is not
-/// accounted as free.
+/// The declared container-slot convention: the fixed bytes one cache slot
+/// costs its container — the map bucket (key hash, control byte, the
+/// slot's share of the table's growth slack) and the eviction-order record
+/// (FIFO / recency slot) that travel with one entry. A slot is fixed-size,
+/// so a fixed figure is its exact convention; everything variable an entry
+/// keeps — its payload, its fact rail, its reverse-index registrations —
+/// is charged on top from its allocations
+/// ([`allocation`]), never folded into this constant.
 pub const ENTRY_OVERHEAD_BYTES: usize = 128;
 
 // ──────────────────────────────────────────────────────────────────────
@@ -579,6 +600,67 @@ impl SemanticRetentionAccount {
         self.releases.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Move `bytes` from `from` to `to` without releasing them: the single
+    /// transition both classes observe at once. Reached only from
+    /// [`RetentionCharge::transfer_to_pinned`], whose target never refuses.
+    fn reclassify(&self, from: ChargeClass, to: ChargeClass, bytes: usize) {
+        let _admission_lock = self.lock_aggregate_state();
+        if bytes == 0 || from == to {
+            return;
+        }
+        let refusable = self.refusable_bytes.load(Ordering::Relaxed);
+        let pinned = self.pinned_bytes.load(Ordering::Relaxed);
+        let active = self.active_bytes.load(Ordering::Relaxed);
+        let (refusable, pinned, active) = match (from, to) {
+            (ChargeClass::Active, ChargeClass::Pinned) => {
+                (refusable - bytes, pinned + bytes, active - bytes)
+            }
+            (ChargeClass::Retained, ChargeClass::Pinned) => {
+                (refusable - bytes, pinned + bytes, active)
+            }
+            _ => unreachable!("only refusable charges are handed to callers"),
+        };
+        self.refusable_bytes.store(refusable, Ordering::Relaxed);
+        self.pinned_bytes.store(pinned, Ordering::Relaxed);
+        self.active_bytes.store(active, Ordering::Relaxed);
+    }
+
+    /// Re-admit `bytes` already pinned as retained, under the admission
+    /// rules a fresh retained reservation of them meets. The pinned bytes
+    /// are this very allocation, so they are not counted against their own
+    /// adoption.
+    fn adopt_pinned(&self, bytes: usize) -> Result<(), RetentionRefusal> {
+        if bytes > self.limits.max_entry_bytes {
+            self.refusals_oversized.fetch_add(1, Ordering::Relaxed);
+            verter_audit::attribute!(RetentionAdmitRefused);
+            return Err(RetentionRefusal::Oversized {
+                requested: bytes,
+                max_entry_bytes: self.limits.max_entry_bytes,
+            });
+        }
+        let _admission_lock = self.lock_aggregate_state();
+        let refusable = self.refusable_bytes.load(Ordering::Relaxed);
+        let pinned = self.pinned_bytes.load(Ordering::Relaxed);
+        let headroom = self
+            .limits
+            .aggregate_ceiling_bytes
+            .saturating_sub(refusable)
+            .saturating_sub(pinned - bytes);
+        if bytes > headroom {
+            self.refusals_pressure.fetch_add(1, Ordering::Relaxed);
+            verter_audit::attribute!(RetentionAdmitRefused);
+            return Err(RetentionRefusal::Pressure {
+                requested: bytes,
+                headroom,
+            });
+        }
+        self.pinned_bytes.store(pinned - bytes, Ordering::Relaxed);
+        self.refusable_bytes
+            .store(refusable + bytes, Ordering::Relaxed);
+        self.admissions.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
     fn lock_aggregate_state(&self) -> parking_lot::MutexGuard<'_, ()> {
         self.admission_lock.lock()
     }
@@ -702,6 +784,49 @@ impl RetentionCharge {
             class: self.class,
             bytes,
         }
+    }
+
+    /// Hand this charge from cache retention to the callers still holding
+    /// its allocation: a refusable charge becomes [`ChargeClass::Pinned`].
+    ///
+    /// Infallible and gap-free: the bytes stay charged throughout, under the
+    /// account's linearization point, so no reservation can observe them
+    /// uncharged and none can observe them twice. A pin is never refused —
+    /// the data is held, and pressure cannot revoke it. A pinned charge is
+    /// unchanged.
+    pub fn transfer_to_pinned(&mut self) {
+        if self.class == ChargeClass::Pinned {
+            return;
+        }
+        if let Some(account) = self.account.as_ref() {
+            account.reclassify(self.class, ChargeClass::Pinned, self.bytes);
+        }
+        self.class = ChargeClass::Pinned;
+    }
+
+    /// Adopt a pinned charge into cache retention: a cache is about to
+    /// retain an allocation callers already hold, so its bytes become a
+    /// refusable [`ChargeClass::Retained`] charge again.
+    ///
+    /// Decided at the same linearization point as [`SemanticRetentionAccount::reserve`],
+    /// counting the bytes once (they leave the pinned total as they join the
+    /// refusable one). On refusal nothing changes: the allocation stays
+    /// pinned by the callers holding it and the cache keeps nothing. A
+    /// charge already refusable is unchanged and admitted.
+    ///
+    /// # Errors
+    ///
+    /// The account's refusal, exactly as a fresh reservation of these bytes
+    /// would be refused.
+    pub fn try_adopt_retained(&mut self) -> Result<(), RetentionRefusal> {
+        if self.class != ChargeClass::Pinned {
+            return Ok(());
+        }
+        if let Some(account) = self.account.as_ref() {
+            account.adopt_pinned(self.bytes)?;
+        }
+        self.class = ChargeClass::Retained;
+        Ok(())
     }
 
     /// Reclassify an [`ChargeClass::Active`] charge as

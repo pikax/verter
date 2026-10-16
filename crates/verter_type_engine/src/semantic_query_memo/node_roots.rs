@@ -104,6 +104,22 @@ impl std::fmt::Debug for NodeRootSet {
 }
 
 impl NodeRootSet {
+    /// The root owner's block and operand list, once per `aliases`: the
+    /// ownership metadata a retained holder of this set keeps alive. The
+    /// rooted nodes themselves are the arena's.
+    pub(crate) fn owned_heap_bytes(
+        &self,
+        aliases: &mut verter_session_query::retention::allocation::AliasSet,
+    ) -> usize {
+        use verter_session_query::retention::allocation::{arc_block_bytes, vec_bytes};
+        match &self.0 {
+            Some(owner) if aliases.first(owner) => {
+                arc_block_bytes(std::mem::size_of::<RootOwner>()) + vec_bytes(&owner.ids)
+            }
+            _ => 0,
+        }
+    }
+
     /// Keep a cache hit alive in the active issuing graph construction scope.
     pub fn retain_for_construction(&self) {
         self.capture_in_scope();
