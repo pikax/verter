@@ -514,13 +514,13 @@ fn lowers_type_literal_construct_signature_as_object_not_constructor_type() {
         SemanticNodeData::Object(view) => {
             assert!(view.positive_members().is_empty(), "no plain members");
             assert_eq!(
-                view.construct_signatures.len(),
+                view.construct_signatures().len(),
                 1,
                 "the construct signature is preserved on the Object surface"
             );
             assert!(
                 matches!(
-                    &*node(&graph, view.construct_signatures[0]),
+                    &*node(&graph, view.construct_signatures()[0]),
                     SemanticNodeData::Signature { .. }
                 ),
                 "the construct signature lowers to a Function node"
@@ -1206,7 +1206,7 @@ fn lowers_interface_heritage_preserving_ref_args_and_member_provenance() {
     let handle = lower_type_expr_structural_for_tests(&graph, &expr, fixture_scope(), &ctx)
         .expect("structural lowering should succeed");
     let arms: Arc<[SemanticNodeId]> = match &*node(&graph, handle.node()) {
-        SemanticNodeData::Intersection(arms) => arms.members_arc(),
+        SemanticNodeData::Intersection(arms) => Arc::from(&arms[..]),
         other => panic!("expected Intersection, got {other:?}"),
     };
     assert_eq!(arms.len(), 2, "heritage ref arm + own-body object arm");
@@ -1574,7 +1574,7 @@ fn structural_infer_predeclaration_does_not_capture_ordinary_sibling_ref() {
         other => panic!("expected conditional, got {other:?}"),
     };
     let elements = match graph.node_data(extends).as_deref() {
-        Some(SemanticNodeData::Tuple { elements, .. }) => Arc::clone(elements),
+        Some(SemanticNodeData::Tuple { elements, .. }) => elements.share_for_tests(),
         other => panic!("expected tuple pattern, got {other:?}"),
     };
     assert!(matches!(

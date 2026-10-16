@@ -72,6 +72,16 @@ impl ReducedOutputNode {
     pub fn result_is_partial(&self) -> bool {
         self.result_is_partial
     }
+
+    /// Borrow the reduced node this output owns.
+    pub fn node(
+        &self,
+    ) -> Result<
+        crate::semantic_query_memo::node_roots::NodeRef<'_>,
+        crate::semantic_query::QueryError,
+    > {
+        self._roots.0.node_ref(self.node_id)
+    }
 }
 
 // Dispatch-wide re-export of the shape engine's failed-query-carrier
@@ -489,7 +499,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let node_id = self.reduce_graph_node_iterative(node, context, &mut state);
         let result_is_partial = state.result_is_partial;
         ReducedOutputNode {
-            _roots: crate::semantic_query_memo::node_roots::IdentityNodeRoots::scoped([node_id]),
+            _roots: crate::semantic_query_memo::node_roots::IdentityNodeRoots::in_graph(
+                self.graph(),
+                [node_id],
+            ),
             node_id,
             dep_signature: state.into_dep_signature(),
             result_is_partial,
@@ -1235,7 +1248,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         false_branch_ref: d_false,
                         distributive: d_dist,
                         pending: d_pending,
-                    }) = self.graph().node_data(reduced).as_deref().cloned()
+                    }) = self.graph().node_data(reduced).as_deref().map(crate::semantic_query::SemanticNodeData::clone)
                     {
                         let demanded_true = self.apply_conditional_branch_pending(
                             d_true,
@@ -1559,7 +1572,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
             SemanticNodeData::Tuple { elements, readonly } => {
-                rebuild_tuple(self, node, elements, *readonly, &state.mapping, context)
+                rebuild_tuple(self, node, elements.as_arc(), *readonly, &state.mapping, context)
                     .unwrap_or(node)
             }
             SemanticNodeData::DeferredCallable(_) => {
@@ -1598,8 +1611,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             source.identity().anchor.canonical_id.as_ref(), source.identity().anchor.owner,
                             &names, &arguments).unwrap_or(returned);
                         let demanded = self.graph().intern_preserving_scope(node, SemanticNodeData::Signature {
-                            kind: *kind, params: Arc::clone(params), return_type: returned,
-                            type_parameters: Arc::clone(type_parameters), occurrence: occurrence.clone(),
+                            kind: *kind, params: params.share(), return_type: returned,
+                            type_parameters: type_parameters.share(), occurrence: occurrence.clone(),
                             return_carrier: crate::semantic_query::SignatureReturnCarrier::Function(source.source().clone()),
                             signature_span: *signature_span, return_type_span: *return_type_span,
                             predicate: predicate.or(inferred), is_abstract: *is_abstract,
@@ -1905,7 +1918,9 @@ fn rebuild_object<C: crate::resolver_core::ResolverCapabilities>(
     if !changed {
         return Some(node);
     }
-    let mut members = new_members.iter().cloned();
+    let mut members = new_members
+        .iter()
+        .map(crate::semantic_query::SurfaceMember::clone);
     let mut calls = new_calls.iter().copied();
     let mut constructs = new_constructs.iter().copied();
     let entries = view
@@ -2002,7 +2017,7 @@ fn rebuild_tuple<C: crate::resolver_core::ResolverCapabilities>(
             }
             TupleElement {
                 value: new_value,
-                ..el.clone()
+                ..el.copy()
             }
         })
         .collect();
@@ -2012,7 +2027,7 @@ fn rebuild_tuple<C: crate::resolver_core::ResolverCapabilities>(
     Some(dispatch.graph().intern_preserving_scope(
         node,
         SemanticNodeData::Tuple {
-            elements: Arc::from(new_elements.into_boxed_slice()),
+            elements: crate::semantic_query::PayloadArray::from(new_elements.into_boxed_slice()),
             readonly,
         },
     ))
@@ -2023,9 +2038,9 @@ fn rebuild_function<C: crate::resolver_core::ResolverCapabilities>(
     dispatch: &ProjectSemanticDispatch<'_, C>,
     node: SemanticNodeId,
     kind: crate::semantic_query::SignatureKind,
-    params: &Arc<[crate::semantic_query::FunctionParam]>,
+    params: &crate::semantic_query::PayloadArray<crate::semantic_query::FunctionParam>,
     return_type: SemanticNodeId,
-    type_parameters: &Arc<[crate::semantic_query::TypeParamDecl]>,
+    type_parameters: &crate::semantic_query::PayloadArray<crate::semantic_query::TypeParamDecl>,
     occurrence: Option<crate::semantic_query::SignatureNodeOccurrence>,
     return_carrier: crate::semantic_query::SignatureReturnCarrier,
     signature_span: Option<verter_span::Span>,
@@ -2051,7 +2066,7 @@ fn rebuild_function<C: crate::resolver_core::ResolverCapabilities>(
             }
             crate::semantic_query::FunctionParam {
                 ty: new_ty,
-                ..p.clone()
+                ..p.copy()
             }
         })
         .collect();
@@ -2077,7 +2092,7 @@ fn rebuild_function<C: crate::resolver_core::ResolverCapabilities>(
             crate::semantic_query::TypeParamDecl {
                 constraint: new_constraint,
                 default: new_default,
-                ..tp.clone()
+                ..tp.copy()
             }
         })
         .collect();
@@ -2089,9 +2104,11 @@ fn rebuild_function<C: crate::resolver_core::ResolverCapabilities>(
         SemanticNodeData::Signature {
             kind,
             is_abstract: dispatch.signature_is_abstract(node),
-            params: Arc::from(new_params.into_boxed_slice()),
+            params: crate::semantic_query::PayloadArray::from(new_params.into_boxed_slice()),
             return_type: new_return,
-            type_parameters: Arc::from(new_type_params.into_boxed_slice()),
+            type_parameters: crate::semantic_query::PayloadArray::from(
+                new_type_params.into_boxed_slice(),
+            ),
             // Node remapping preserves source provenance — the occurrence
             // verbatim, the declared carrier retargeted at the remapped
             // return.

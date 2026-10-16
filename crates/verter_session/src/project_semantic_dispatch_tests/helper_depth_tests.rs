@@ -70,19 +70,26 @@ fn tuple_spreads_splice_at_any_depth() {
         let graph = dispatch.graph();
         let (one, two) = (literal(dispatch, "1"), literal(dispatch, "2"));
         let mut tuple = graph.intern_node(SemanticNodeData::Tuple {
-            elements: Arc::from([element(one, false), element(two, false)]),
+            elements: verter_type_engine::semantic_query::PayloadArray::from([
+                element(one, false),
+                element(two, false),
+            ]),
             readonly: false,
         });
         // bounded-loop: a fixed DEPTH-level fixture constructor.
         for _ in 0..DEPTH {
             let alias = graph.intern_node(SemanticNodeData::Alias(tuple));
             tuple = graph.intern_node(SemanticNodeData::Tuple {
-                elements: Arc::from([element(alias, true)]),
+                elements: verter_type_engine::semantic_query::PayloadArray::from([element(
+                    alias, true,
+                )]),
                 readonly: false,
             });
         }
-        let Some(SemanticNodeData::Tuple { elements, .. }) =
-            graph.node_data(tuple).as_deref().cloned()
+        let Some(SemanticNodeData::Tuple { elements, .. }) = graph
+            .node_data(tuple)
+            .as_deref()
+            .map(verter_type_engine::semantic_query::SemanticNodeData::copy_for_tests)
         else {
             unreachable!("a tuple was interned");
         };

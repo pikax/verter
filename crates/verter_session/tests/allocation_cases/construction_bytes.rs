@@ -72,7 +72,7 @@ fn repeated_callbacks_allocate_in_the_linear_class() {
         let bytes = super::alloc_bytes();
         let peak = peak_live_bytes();
         let answer = answer.unwrap().expect("the callback result resolves");
-        let json = host.project_node_to_type_expr_json_bytes(answer).unwrap();
+        let json = host.project_node_to_type_expr_json_bytes(&answer).unwrap();
         let value: serde_json::Value = serde_json::from_slice(&json).unwrap();
         let expression = verter_type_expr::type_expr_from_json(&value).unwrap();
         assert_eq!(

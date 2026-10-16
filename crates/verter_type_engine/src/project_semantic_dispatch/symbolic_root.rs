@@ -179,7 +179,7 @@ fn slot_param_root_step<C: crate::resolver_core::ResolverCapabilities>(
                     base.owner,
                     Arc::clone(&base.decl_name),
                 ),
-                Arc::clone(args),
+                Arc::clone(args.as_arc()),
                 dispatch.instantiate_context_for(
                     &base.canonical_id,
                     crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(

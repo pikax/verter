@@ -131,7 +131,7 @@ fn only_call_signature(
     node: SemanticNodeId,
 ) -> SemanticNodeId {
     match dispatch.graph().node_data(node).as_deref() {
-        Some(SemanticNodeData::Object(surface)) => match surface.call_signatures.as_ref() {
+        Some(SemanticNodeData::Object(surface)) => match surface.call_signatures() {
             [signature] => *signature,
             other => panic!("expected one call signature, got {other:?}"),
         },
@@ -293,7 +293,7 @@ fn kernel_effects_read_the_declared_predicate_under_the_call_map() {
     let signature = |name: &str, type_parameters: Vec<TypeParamDecl>, ret, predicate| {
         graph.intern_node(SemanticNodeData::Signature {
             kind: SignatureKind::Call,
-            params: Arc::from(
+            params: verter_type_engine::semantic_query::PayloadArray::from(
                 vec![FunctionParam::synthetic(
                     Some(Arc::from("x")),
                     unknown,
@@ -303,7 +303,9 @@ fn kernel_effects_read_the_declared_predicate_under_the_call_map() {
                 .into_boxed_slice(),
             ),
             return_type: ret,
-            type_parameters: Arc::from(type_parameters.into_boxed_slice()),
+            type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+                type_parameters.into_boxed_slice(),
+            ),
             occurrence: Some(occurrence(name, 0)),
             return_carrier: SignatureReturnCarrier::Declared(ret),
             signature_span: None,
@@ -351,9 +353,10 @@ fn kernel_effects_read_the_declared_predicate_under_the_call_map() {
         .intern_substitution(
             CallSubstitution::map(
                 space,
-                verter_type_engine::semantic_query::CanonicalTypeSubstitution::new(vec![(
-                    token, number,
-                )]),
+                verter_type_engine::semantic_query::CanonicalTypeSubstitution::new(
+                    graph,
+                    vec![(token, number)],
+                ),
             ),
             None,
         )
@@ -546,7 +549,7 @@ fn predicates_participate_in_identity_ordering_and_display() {
     let signature = |ret, predicate| {
         graph.intern_node(SemanticNodeData::Signature {
             kind: SignatureKind::Call,
-            params: Arc::from(
+            params: verter_type_engine::semantic_query::PayloadArray::from(
                 vec![FunctionParam::synthetic(
                     Some(Arc::from("x")),
                     unknown,
@@ -556,7 +559,9 @@ fn predicates_participate_in_identity_ordering_and_display() {
                 .into_boxed_slice(),
             ),
             return_type: ret,
-            type_parameters: Arc::from(Vec::new().into_boxed_slice()),
+            type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+                Vec::new().into_boxed_slice(),
+            ),
             occurrence: None,
             return_carrier: SignatureReturnCarrier::Declared(ret),
             signature_span: None,
@@ -906,7 +911,9 @@ export function multi(x: unknown) { if (x) return typeof x === \"string\"; retur
                     effect
                         .ty
                         .and_then(|token| store.type_token_node(token).ok())
-                        .and_then(|target| dispatch.graph().node_data(target).as_deref().cloned()),
+                        .and_then(|target| dispatch.graph().node_data(target).as_deref().map(
+                            verter_type_engine::semantic_query::SemanticNodeData::copy_for_tests
+                        )),
                     Some(SemanticNodeData::Primitive(PrimitiveKind::String))
                 );
             } else {

@@ -137,11 +137,11 @@ fn an_operand_finished_as_itself_takes_no_memo_probe() {
     )
     .expect("lowering must succeed");
     let store = host.project_type_store().semantic_graph();
-    let Some(SemanticNodeData::IndexedAccess { object, .. }) =
-        store.node_data(carrier).as_deref().cloned()
-    else {
+    let data = store.node_data(carrier);
+    let Some(SemanticNodeData::IndexedAccess { object, .. }) = data.as_deref() else {
         panic!("the fixture must be an indexed access");
     };
+    let object = *object;
     assert!(
         matches!(
             store.node_data(object).as_deref(),

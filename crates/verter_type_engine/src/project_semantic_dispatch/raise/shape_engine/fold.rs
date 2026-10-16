@@ -338,6 +338,7 @@ pub fn fold_node<A: RaisedShapeAlgebra, C: crate::resolver_core::ResolverCapabil
         SemanticNodeData::Opaque(err) => match err {
             QueryError::RecursiveRef { name, args } => {
                 let raised_args: Vec<A::Out> = args
+                    .operands()
                     .iter()
                     .map(|id| {
                         fold_node(alg, dispatch, *id, active).unwrap_or_else(|| {
@@ -679,7 +680,7 @@ fn fold_object_spread_program<
         }
         QueryResult::Recursive(_) => alg.opaque_sentinel(&QueryError::RecursiveRef {
             name: Arc::from("object-spread-projection"),
-            args: Arc::from([]),
+            args: Default::default(),
         }),
         QueryResult::Error(error) => alg.opaque_sentinel(&error),
     }

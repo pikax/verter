@@ -223,7 +223,7 @@ fn proof_reference_map(root: SemanticNodeId, ctx: &PolicyCtx<'_, '_>) -> Option<
                         member.value,
                     );
                 }
-                for (index, signature) in surface.call_signatures.iter().enumerate() {
+                for (index, signature) in surface.call_signatures().iter().enumerate() {
                     push_proof_child(
                         &mut stack,
                         &path,
@@ -231,7 +231,7 @@ fn proof_reference_map(root: SemanticNodeId, ctx: &PolicyCtx<'_, '_>) -> Option<
                         *signature,
                     );
                 }
-                for (index, signature) in surface.construct_signatures.iter().enumerate() {
+                for (index, signature) in surface.construct_signatures().iter().enumerate() {
                     push_proof_child(
                         &mut stack,
                         &path,
@@ -239,7 +239,7 @@ fn proof_reference_map(root: SemanticNodeId, ctx: &PolicyCtx<'_, '_>) -> Option<
                         *signature,
                     );
                 }
-                for (index, signature) in surface.index_signatures.iter().enumerate() {
+                for (index, signature) in surface.index_signatures().iter().enumerate() {
                     push_proof_child(
                         &mut stack,
                         &path,
@@ -253,7 +253,7 @@ fn proof_reference_map(root: SemanticNodeId, ctx: &PolicyCtx<'_, '_>) -> Option<
                         signature.value_type,
                     );
                 }
-                if let Some(keyspace) = surface.keyspace {
+                if let Some(keyspace) = surface.keyspace() {
                     push_proof_child(&mut stack, &path, ProofPathStep::ObjectKeyspace, keyspace);
                 }
             }
@@ -537,11 +537,11 @@ fn normalized_projection_shape_equivalent(
         match (left_data.as_ref(), right_data.as_ref()) {
             (SemanticNodeData::Object(left), SemanticNodeData::Object(right)) => {
                 if left.positive_members().len() != right.positive_members().len()
-                    || left.call_signatures.len() != right.call_signatures.len()
-                    || left.construct_signatures.len() != right.construct_signatures.len()
-                    || left.index_signatures.len() != right.index_signatures.len()
+                    || left.call_signatures().len() != right.call_signatures().len()
+                    || left.construct_signatures().len() != right.construct_signatures().len()
+                    || left.index_signatures().len() != right.index_signatures().len()
                     || left.has_known_index_signature() != right.has_known_index_signature()
-                    || !push_optional_proof_pair(&mut stack, left.keyspace, right.keyspace)
+                    || !push_optional_proof_pair(&mut stack, left.keyspace(), right.keyspace())
                 {
                     return Some(false);
                 }
@@ -561,21 +561,21 @@ fn normalized_projection_shape_equivalent(
                     stack.push((left.value, right.value));
                 }
                 stack.extend(
-                    left.call_signatures
+                    left.call_signatures()
                         .iter()
                         .copied()
-                        .zip(right.call_signatures.iter().copied()),
+                        .zip(right.call_signatures().iter().copied()),
                 );
                 stack.extend(
-                    left.construct_signatures
+                    left.construct_signatures()
                         .iter()
                         .copied()
-                        .zip(right.construct_signatures.iter().copied()),
+                        .zip(right.construct_signatures().iter().copied()),
                 );
                 for (left, right) in left
-                    .index_signatures
+                    .index_signatures()
                     .iter()
-                    .zip(right.index_signatures.iter())
+                    .zip(right.index_signatures().iter())
                 {
                     if left.readonly != right.readonly {
                         return Some(false);
@@ -1324,9 +1324,9 @@ fn node_contains_imported_ref(root: SemanticNodeId, ctx: &mut PolicyCtx<'_, '_>)
             }
             SemanticNodeData::Object(surface) => {
                 worklist.extend(surface.positive_members().iter().map(|member| member.value));
-                worklist.extend(surface.call_signatures.iter().copied());
-                worklist.extend(surface.construct_signatures.iter().copied());
-                for signature in surface.index_signatures.iter() {
+                worklist.extend(surface.call_signatures().iter().copied());
+                worklist.extend(surface.construct_signatures().iter().copied());
+                for signature in surface.index_signatures().iter() {
                     worklist.push(signature.key_type);
                     worklist.push(signature.value_type);
                 }

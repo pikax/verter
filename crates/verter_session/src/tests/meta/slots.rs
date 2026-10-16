@@ -586,7 +586,7 @@ defineSlots<OpenMappedSlots<T>>()
                 ),
             ),
         ))
-        .value
+        .value().clone()
     {
         verter_type_engine::semantic_query::QueryResult::Value(node) => node,
         other => panic!("OpenMappedSlots<T> must resolve to a Value carrier, got {other:?}"),

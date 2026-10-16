@@ -215,7 +215,7 @@ fn object_surface(
 ) -> verter_type_engine::semantic_query::SurfaceView {
     let graph = host.project_type_store().semantic_graph();
     match graph.node_data(node).as_deref() {
-        Some(SemanticNodeData::Object(surface)) => surface.clone(),
+        Some(SemanticNodeData::Object(surface)) => surface.copy_for_tests(),
         other => panic!("expected an Object surface, got {other:?}"),
     }
 }
@@ -887,7 +887,7 @@ fn locator_shape_infer_predeclaration_does_not_capture_ordinary_sibling_ref() {
         other => panic!("expected conditional, got {other:?}"),
     };
     let elements = match graph.node_data(extends).as_deref() {
-        Some(SemanticNodeData::Tuple { elements, .. }) => Arc::clone(elements),
+        Some(SemanticNodeData::Tuple { elements, .. }) => elements.share_for_tests(),
         other => panic!("expected tuple pattern, got {other:?}"),
     };
     assert!(matches!(
@@ -1321,12 +1321,12 @@ fn broken_lease_lower_locator_suppresses_parent_admission() {
     // `build_lower_locator`, whose deref now lease-misses.
     let read = dispatch.execute_read(SemanticQueryKey::LowerLocator { key });
     assert!(
-        matches!(read.value, QueryResult::Error(QueryError::Miss)),
+        matches!(read.value().clone(), QueryResult::Error(QueryError::Miss)),
         "a broken-lease deref must fail closed to an Error(Miss), got {:?}",
-        read.value
+        read.value().clone()
     );
     assert!(
-        read.cache_suppress,
+        read.cache_suppress(),
         "a broken-lease LowerLocator child must SUPPRESS memo admission so the \
          enclosing Instantiate/LowerLocator query does not warm-publish the \
          derived Opaque(Miss) as a false body; cache_suppress == false means the \

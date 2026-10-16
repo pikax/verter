@@ -190,7 +190,7 @@ fn named_probe(source: &str, probe: &str, operations: usize) -> (BTreeSet<Litera
     let stats = host.project_type_store().semantic_graph().stats_snapshot();
     let dispatches = DISPATCH_TRACE.with(|trace| trace.borrow().len()) as u64;
     let bytes = host
-        .project_node_to_type_expr_json_bytes(node)
+        .project_node_to_type_expr_json_bytes(&node)
         .expect("the answer projects");
     let answer: TypeExpr = serde_json::from_slice(&bytes).expect("a wire answer");
     let TypeExpr::Union(arms) = &answer else {

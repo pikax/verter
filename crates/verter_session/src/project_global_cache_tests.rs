@@ -1532,7 +1532,7 @@ fn semantic_query_unrelated_edit_keeps_memo_warm_slice11() {
         .semantic_graph()
         .get_unvalidated(&SemanticQueryKey::ResolveDecl(a_key.clone()))
         .expect("unrelated edit must not invalidate a.ts entry");
-    match (warm_before.value, warm_after.value) {
+    match (warm_before.value().clone(), warm_after.value().clone()) {
         (QueryResult::Value(x), QueryResult::Value(y)) => assert_eq!(x, y, "same node id"),
         other => panic!("expected two warm values, got {other:?}"),
     }
@@ -1574,12 +1574,12 @@ fn semantic_query_warm_entry_has_non_empty_dep_signature_slice11() {
         .get_unvalidated(&SemanticQueryKey::ResolveDecl(key))
         .expect("warm entry must exist");
     assert!(
-        !warm.dep_signature.is_empty(),
+        !warm.dep_signature().is_empty(),
         "warm hit must carry a non-empty dep signature"
     );
     let mut has_whole_hash = false;
     let mut has_project_gen = false;
-    for (_, dv) in warm.dep_signature.iter() {
+    for (_, dv) in warm.dep_signature().iter() {
         match dv {
             DepVersion::WholeHash(_) => has_whole_hash = true,
             DepVersion::ProjectGeneration(_) => has_project_gen = true,
@@ -1636,7 +1636,7 @@ fn derived_semantic_query_records_project_generation_anchor_slice11() {
         .get_unvalidated(&lookup_key)
         .expect("warm entry must exist");
     let mut has_project_gen = false;
-    for (_, dv) in warm.dep_signature.iter() {
+    for (_, dv) in warm.dep_signature().iter() {
         if matches!(dv, DepVersion::ProjectGeneration(_)) {
             has_project_gen = true;
             break;
@@ -1647,5 +1647,5 @@ fn derived_semantic_query_records_project_generation_anchor_slice11() {
         "derived semantic query must anchor to the project generation"
     );
     // Sanity: the query returned a warm union (not a miss).
-    assert!(matches!(warm.value, QueryResult::Value(_)));
+    assert!(matches!(warm.value().clone(), QueryResult::Value(_)));
 }

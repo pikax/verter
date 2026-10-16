@@ -188,7 +188,7 @@ fn extract_mapper_inputs(
                 let key = verter_session::for_tests::instantiate_key_for_tests(
                     host,
                     base.to_type_slot_unscoped(),
-                    Arc::clone(args),
+                    Arc::from(&args[..]),
                     ProjectionReductionContext::structural_transit_with_mode(
                         ProjectionMode::Navigate,
                     ),

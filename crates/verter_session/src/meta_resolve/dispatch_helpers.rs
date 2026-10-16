@@ -434,14 +434,11 @@ fn resolved_instantiation_head<C: verter_type_engine::resolver_core::ResolverCap
     // Bounded: alias chains are short; the cap only guards pathological
     // graph shapes.
     for _ in 0..16 {
-        let data = verter_type_engine::project_semantic_dispatch::node_data_for(
-            dispatch.graph(),
-            current,
-        )?;
+        let data = dispatch.graph().read_in_scope(current)?;
         match &*data {
             SemanticNodeData::Alias(inner) => current = *inner,
             SemanticNodeData::InstantiationRef { base, args } => {
-                return (!args.is_empty()).then(|| (base.clone(), std::sync::Arc::clone(args)));
+                return (!args.is_empty()).then(|| (base.clone(), std::sync::Arc::from(&args[..])));
             }
             SemanticNodeData::BareRef(_) | SemanticNodeData::ImportType(_)
                 if !data.carrier_type_args().is_empty() =>

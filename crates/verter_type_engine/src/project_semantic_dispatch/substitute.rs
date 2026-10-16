@@ -799,7 +799,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         node,
                         SemanticNodeData::ClassExpressionInstance {
                             identity: Arc::clone(identity),
-                            type_arguments: Arc::from(new_arguments.into_boxed_slice()),
+                            type_arguments: crate::semantic_query::PayloadArray::from(
+                                new_arguments.into_boxed_slice(),
+                            ),
                             surface: sub,
                         },
                     ),
@@ -900,7 +902,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     self.graph().intern_preserving_scope(
                         node,
                         SemanticNodeData::MergedDecl {
-                            contributors: Arc::from(new_contributors.into_boxed_slice()),
+                            contributors: crate::semantic_query::PayloadArray::from(
+                                new_contributors.into_boxed_slice(),
+                            ),
                         },
                     ),
                     true,
@@ -957,7 +961,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         self.graph().intern_preserving_scope(
                             node,
                             SemanticNodeData::Tuple {
-                                elements: Arc::from(normalized.into_boxed_slice()),
+                                elements: crate::semantic_query::PayloadArray::from(
+                                    normalized.into_boxed_slice(),
+                                ),
                                 readonly: *readonly,
                             },
                         ),
@@ -1184,7 +1190,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         node,
                         SemanticNodeData::TemplateLiteral {
                             quasis: Arc::clone(quasis),
-                            expressions: Arc::from(new_expressions.into_boxed_slice()),
+                            expressions: crate::semantic_query::PayloadArray::from(
+                                new_expressions.into_boxed_slice(),
+                            ),
                         },
                     ),
                     true,
@@ -1481,7 +1489,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         node,
                         SemanticNodeData::InstantiationRef {
                             base: base.clone(),
-                            args: Arc::from(new_args.into_boxed_slice()),
+                            args: crate::semantic_query::PayloadArray::from(
+                                new_args.into_boxed_slice(),
+                            ),
                         },
                     ),
                     true,
@@ -1626,9 +1636,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         node,
                         SemanticNodeData::Signature {
                             kind: *kind,
-                            params: Arc::from(new_params.into_boxed_slice()),
+                            params: crate::semantic_query::PayloadArray::from(new_params.into_boxed_slice()),
                             return_type: sub_return,
-                            type_parameters: Arc::from(new_type_parameters.into_boxed_slice()),
+                            type_parameters: crate::semantic_query::PayloadArray::from(new_type_parameters.into_boxed_slice()),
                             // Instantiation PRESERVES the occurrence — an
                             // instantiated candidate is the same occurrence.
                             occurrence: occurrence.clone(),
@@ -1804,7 +1814,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let Some(SemanticNodeData::Infer {
             binder: target_binder,
             ..
-        }) = self.graph().node_data(binder).as_deref().cloned()
+        }) = self
+            .graph()
+            .node_data(binder)
+            .as_deref()
+            .map(crate::semantic_query::SemanticNodeData::clone)
         else {
             return false;
         };

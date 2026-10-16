@@ -229,9 +229,13 @@ fn a_substituted_heritage_body_stays_a_declaration() {
     let returning = |return_type| {
         graph.intern_node(SemanticNodeData::Signature {
             kind: SignatureKind::Call,
-            params: std::sync::Arc::from(Vec::new().into_boxed_slice()),
+            params: verter_type_engine::semantic_query::PayloadArray::from(std::sync::Arc::from(
+                Vec::new().into_boxed_slice(),
+            )),
             return_type,
-            type_parameters: std::sync::Arc::from(Vec::new().into_boxed_slice()),
+            type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+                std::sync::Arc::from(Vec::new().into_boxed_slice()),
+            ),
             occurrence: None,
             return_carrier: SignatureReturnCarrier::Declared(return_type),
             signature_span: None,

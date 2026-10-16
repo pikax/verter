@@ -69,10 +69,7 @@ pub(crate) fn collect_define_props_root_names(
         let Some(product) = dispatch.macro_type_arg_hot_ref(owner_canonical, macro_index) else {
             continue;
         };
-        let Some(data) = verter_type_engine::project_semantic_dispatch::node_data_for(
-            dispatch.graph(),
-            product.hot.node(),
-        ) else {
+        let Some(data) = dispatch.graph().read_in_scope(product.hot.node()) else {
             continue;
         };
         if let Some((name, _)) = data.bare_ref_head() {
@@ -157,20 +154,13 @@ pub(crate) fn slot_binding_targets_define_props_root(
     // carrier classifies through its SAME-GENERATION value-node seed (the
     // carrier's value-side provenance): the seed IS the lowered binding value
     // (`Props['avatar']`), exactly the node the root extraction below walks.
-    let subject = match verter_type_engine::project_semantic_dispatch::node_data_for(
-        dispatch.graph(),
-        raised.node(),
-    )
-    .as_deref()
-    {
+    let subject = match dispatch.graph().read_in_scope(raised.node()).as_deref() {
         Some(SemanticNodeData::SyntheticBinding { value_node, .. }) => {
             verter_type_engine::semantic_query::SemanticNodeId(*value_node)
         }
         _ => raised.node(),
     };
-    let Some(data) =
-        verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), subject)
-    else {
+    let Some(data) = dispatch.graph().read_in_scope(subject) else {
         return false;
     };
 
@@ -189,8 +179,7 @@ pub(crate) fn slot_binding_targets_define_props_root(
     // projection rooted at a single reference. Parens are structurally
     // transparent in the graph.
     let root_name = |node: verter_type_engine::semantic_query::SemanticNodeId| -> Option<String> {
-        let data =
-            verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), node)?;
+        let data = dispatch.graph().read_in_scope(node)?;
         // A builtin object-filter utility application (`Pick<Props, …>` /
         // `Omit<Props, …>`): the root is the SOURCE argument's reference head.
         if let Some((name, _)) = data.bare_ref_head() {
@@ -200,10 +189,7 @@ pub(crate) fn slot_binding_targets_define_props_root(
             )
             .is_some();
             if is_utility && !args.is_empty() {
-                let source = verter_type_engine::project_semantic_dispatch::node_data_for(
-                    dispatch.graph(),
-                    args[0],
-                )?;
+                let source = dispatch.graph().read_in_scope(args[0])?;
                 let (source_name, _) = source.bare_ref_head()?;
                 return Some(source_name.as_ref().to_string());
             }
@@ -215,10 +201,7 @@ pub(crate) fn slot_binding_targets_define_props_root(
         |node: verter_type_engine::semantic_query::SemanticNodeId| -> Option<String> {
             let mut current = node;
             loop {
-                let data = verter_type_engine::project_semantic_dispatch::node_data_for(
-                    dispatch.graph(),
-                    current,
-                )?;
+                let data = dispatch.graph().read_in_scope(current)?;
                 match data.as_ref() {
                     SemanticNodeData::IndexedAccess { object, index } => {
                         if !matches!(index, IndexKey::String(_) | IndexKey::Number(_)) {

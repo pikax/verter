@@ -10,6 +10,7 @@ pub struct EngineBinding<M> {
     pub(super) macro_mirrors: M,
     pub(super) observers: EngineObservers,
     pub(super) graph: Arc<crate::semantic_query_memo::SemanticGraphStore>,
+    pub(super) construction: crate::semantic_query_memo::node_roots::NodeConstructionGrant,
     pub(super) flow_slice: Arc<crate::cache_runtime::flow_slice_node::FlowSliceStores>,
     pub(super) intrinsics: Arc<crate::intrinsic_registry::IntrinsicRegistry>,
     pub(super) imported_registry: Arc<ImportedRegistryDb>,
@@ -27,6 +28,7 @@ impl<M> EngineBinding<M> {
         observers: EngineObservers,
         macro_mirrors: M,
         graph: Arc<crate::semantic_query_memo::SemanticGraphStore>,
+        construction: crate::semantic_query_memo::node_roots::NodeConstructionGrant,
         flow_slice: Arc<crate::cache_runtime::flow_slice_node::FlowSliceStores>,
         intrinsics: Arc<crate::intrinsic_registry::IntrinsicRegistry>,
         imported_registry: Arc<ImportedRegistryDb>,
@@ -37,10 +39,17 @@ impl<M> EngineBinding<M> {
         identities: Arc<crate::identity_interner::IdentityInterner>,
         mapper_binders: Arc<crate::mapper_binder_registry::MapperBinderRegistry>,
     ) -> Self {
+        // A grant for another graph is a composition defect: the dispatcher
+        // would hold a construction lane its own graph never answers.
+        assert!(
+            construction.authorizes(&graph),
+            "an engine binding's construction grant must belong to its graph"
+        );
         Self {
             observers,
             macro_mirrors,
             graph,
+            construction,
             flow_slice,
             intrinsics,
             imported_registry,

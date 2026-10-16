@@ -189,11 +189,11 @@ impl<'a, 'h> PolicyCtx<'a, 'h> {
     }
 
     /// Node data reader (the shared dispatch-owned arena read).
-    pub(super) fn node_data(&self, node: SemanticNodeId) -> Option<Arc<SemanticNodeData>> {
-        verter_type_engine::project_semantic_dispatch::node_data_for(
-            self.engine.dispatch.graph(),
-            node,
-        )
+    pub(super) fn node_data(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<verter_type_engine::semantic_query_memo::node_data_lease::NodeDataLease> {
+        self.engine.dispatch.graph().read_in_scope(node)
     }
 
     /// The node's reference HEAD: `(name, type-argument nodes)` for the

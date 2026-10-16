@@ -43,8 +43,26 @@ impl SemanticDeliveryLease {
     pub fn roots(&self) -> &[crate::semantic_query::SemanticNodeId] {
         self.0.as_ref().map_or(&[], |owner| owner.roots.operands())
     }
+    /// Borrow one node this delivery roots.
+    pub fn node_ref(
+        &self,
+        id: crate::semantic_query::SemanticNodeId,
+    ) -> Result<super::node_roots::NodeRef<'_>, QueryError> {
+        self.0
+            .as_ref()
+            .ok_or(QueryError::ForeignSemanticOperand)?
+            .roots
+            .node_ref(id)
+    }
     pub fn signature(&self) -> Option<&SignatureEpochLease> {
         self.0.as_ref().and_then(|owner| owner.signature.as_ref())
+    }
+    /// The shared owner every clone of this delivery names, or `None` for
+    /// an empty delivery.
+    pub(super) fn owner_identity(&self) -> Option<usize> {
+        self.0
+            .as_ref()
+            .map(|owner| std::sync::Arc::as_ptr(owner) as usize)
     }
     pub(crate) fn from_roots(roots: NodeRootSet) -> Self {
         Self(Some(std::sync::Arc::new(DeliveryOwner {

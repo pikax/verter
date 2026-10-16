@@ -1,8 +1,6 @@
 //! The family memo's retired-kernel-epoch predicates, over real kernel
 //! handles.
 
-use std::sync::Arc;
-
 use super::*;
 use crate::semantic_query::{SemanticContextId, SignatureKind, CONTEXT_FREE_EVALUATION};
 use crate::signature_kernel::test_support::intern_one_call;
@@ -15,7 +13,7 @@ fn set_value(set: SignatureSetRef) -> QueryResult<SemanticQueryValue> {
     QueryResult::Value(SemanticQueryValue::SignatureSet(SignatureSetValue {
         version: Default::default(),
         set,
-        nodes: Arc::from([]),
+        nodes: Default::default(),
     }))
 }
 

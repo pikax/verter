@@ -183,8 +183,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> DiscoveryTypes for GraphType
         let na = if moving.is_empty() {
             na
         } else {
-            self.dispatch
-                .substitute_canonical(na, &CanonicalTypeSubstitution::new(moving))
+            self.dispatch.substitute_canonical(
+                na,
+                &CanonicalTypeSubstitution::new(self.dispatch.graph(), moving),
+            )
         };
         if na == nb {
             return Some(true);
@@ -209,9 +211,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> DiscoveryTypes for GraphType
         map: &[(SemanticNodeId, SemanticNodeId)],
     ) -> Option<TypeToken> {
         let node = self.node(ty)?;
-        let mapped = self
-            .dispatch
-            .substitute_canonical(node, &CanonicalTypeSubstitution::new(map.to_vec()));
+        let mapped = self.dispatch.substitute_canonical(
+            node,
+            &CanonicalTypeSubstitution::new(self.dispatch.graph(), map.to_vec()),
+        );
         self.token(mapped)
     }
 
@@ -404,7 +407,7 @@ impl<'w, 'a, 'd, C: crate::resolver_core::ResolverCapabilities> Walk<'w, 'a, 'd,
                 self.discover(surface)
             }
             SemanticNodeData::MergedDecl { contributors } => {
-                let contributors = Arc::clone(contributors);
+                let contributors = Arc::clone(contributors.as_arc());
                 drop(data);
                 self.discover_merged_declaration(&contributors)
             }
@@ -738,8 +741,8 @@ impl<'w, 'a, 'd, C: crate::resolver_core::ResolverCapabilities> Walk<'w, 'a, 'd,
                 ..
             } => (
                 *kind,
-                Arc::clone(params),
-                Arc::clone(type_parameters),
+                Arc::clone(params.as_arc()),
+                Arc::clone(type_parameters.as_arc()),
                 occurrence.clone(),
                 return_carrier.clone(),
                 *signature_span,
@@ -998,11 +1001,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         });
         match published {
             Ok((set, nodes_of, version)) => QueryOutcome::Ready(Ready {
-                value: crate::signature_kernel::SignatureSetValue {
+                value: crate::signature_kernel::SignatureSetValue::new(
+                    self.graph(),
                     version,
                     set,
-                    nodes: Arc::from(nodes_of.into_boxed_slice()),
-                },
+                    nodes_of,
+                ),
                 evidence: CONTEXT_FREE_EVIDENCE,
             }),
             Err(error) => QueryOutcome::Incomplete(error.incomplete_reason()),
@@ -1368,7 +1372,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             .copied()
             .filter(|(_, image)| !SignatureStore::is_binder_token(*image))
             .collect();
-        Ok(CanonicalTypeSubstitution::new(kept))
+        Ok(CanonicalTypeSubstitution::new(self.graph(), kept))
     }
 
     fn recipe_return(
@@ -2299,7 +2303,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 params,
                 type_parameters,
                 ..
-            }) => Some((Arc::clone(params), Arc::clone(type_parameters))),
+            }) => Some((
+                Arc::clone(params.as_arc()),
+                Arc::clone(type_parameters.as_arc()),
+            )),
             Some(SemanticNodeData::DeferredCallable(callable)) => {
                 let parts = callable.parts(&ResolveOverloadSetConsumer::witness());
                 Some((Arc::clone(parts.params), Arc::clone(parts.type_parameters)))
@@ -2370,7 +2377,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let call = store.intern_substitution(
             crate::signature_kernel::CallSubstitution::map(
                 desc.residual_binders,
-                CanonicalTypeSubstitution::new(naming),
+                CanonicalTypeSubstitution::new(self.graph(), naming),
             ),
             None,
         )?;
@@ -2405,9 +2412,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         };
         Ok(self.graph().intern_node(SemanticNodeData::Signature {
             kind,
-            params,
+            params: crate::semantic_query::PayloadArray::from(params),
             return_type,
-            type_parameters,
+            type_parameters: crate::semantic_query::PayloadArray::from(type_parameters),
             occurrence: None,
             return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(return_type),
             signature_span: None,

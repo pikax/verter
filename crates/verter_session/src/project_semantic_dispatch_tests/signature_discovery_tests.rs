@@ -514,7 +514,7 @@ fn optionality_and_tuple_rest_flatten_under_the_active_context() {
     let string = prim(&d, PrimitiveKind::String);
     let number = prim(&d, PrimitiveKind::Number);
     let tuple = d.graph().intern_node(SemanticNodeData::Tuple {
-        elements: Arc::from(
+        elements: verter_type_engine::semantic_query::PayloadArray::from(
             vec![
                 TupleElement {
                     label: Some(Arc::from("a")),
@@ -583,9 +583,13 @@ fn enumeration_forces_no_body_and_an_unrecoverable_body_effect_forces_none() {
     let string = prim(&d, PrimitiveKind::String);
     let node = d.graph().intern_node(SemanticNodeData::Signature {
         kind: SignatureKind::Call,
-        params: Arc::from(vec![param(string)].into_boxed_slice()),
+        params: verter_type_engine::semantic_query::PayloadArray::from(
+            vec![param(string)].into_boxed_slice(),
+        ),
         return_type: string,
-        type_parameters: Arc::from(Vec::new().into_boxed_slice()),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+            Vec::new().into_boxed_slice(),
+        ),
         occurrence: Some(occurrence("body", 0)),
         return_carrier: SignatureReturnCarrier::Function(
             verter_type_expr::facts::FunctionReturnSource::Absent,
@@ -678,7 +682,10 @@ fn declared_result_applies_the_call_map_once_and_leaks_no_binder_token() {
 
     let mapped = store
         .intern_substitution(
-            CallSubstitution::map(space, CanonicalTypeSubstitution::new(vec![(token, number)])),
+            CallSubstitution::map(
+                space,
+                CanonicalTypeSubstitution::new(d.graph(), vec![(token, number)]),
+            ),
             None,
         )
         .unwrap();
@@ -1017,7 +1024,10 @@ fn mixin_construct_intersections_follow_the_checker_mixin_rule() {
             );
         } else {
             let elements = match d.graph().node_data(parameters).as_deref() {
-                Some(SemanticNodeData::Tuple { elements, .. }) => elements.to_vec(),
+                Some(SemanticNodeData::Tuple { elements, .. }) => elements
+                    .iter()
+                    .map(verter_type_engine::semantic_query::TupleElement::copy_for_tests)
+                    .collect::<Vec<_>>(),
                 other => panic!("{label}: expected a parameter tuple, got {other:?}"),
             };
             assert_eq!(
@@ -1097,7 +1107,7 @@ fn signature_set_of(
         context,
     }) {
         QueryResult::Value(output) => match output.value {
-            SemanticQueryValue::SignatureSet(value) => value.set,
+            SemanticQueryValue::SignatureSet(value) => value.set(),
             other => panic!("expected a signature set, got {other:?}"),
         },
         other => panic!("expected a value, got {other:?}"),
@@ -1499,9 +1509,13 @@ fn untyped_javascript_signatures_publish_the_untyped_flag() {
         let identity = occ.function.clone();
         let node = d.graph().intern_node(SemanticNodeData::Signature {
             kind: SignatureKind::Call,
-            params: Arc::from(vec![param(param_ty)].into_boxed_slice()),
+            params: verter_type_engine::semantic_query::PayloadArray::from(
+                vec![param(param_ty)].into_boxed_slice(),
+            ),
             return_type: any,
-            type_parameters: Arc::from(Vec::new().into_boxed_slice()),
+            type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+                Vec::new().into_boxed_slice(),
+            ),
             occurrence: Some(occ),
             return_carrier: SignatureReturnCarrier::Function(
                 verter_type_expr::facts::FunctionReturnSource::Flow(identity),
@@ -1540,9 +1554,13 @@ fn each_read_reports_the_authored_node_its_own_subject_carries() {
     let authored_at = |return_type_span: Option<verter_span::Span>, return_type| {
         d.graph().intern_node(SemanticNodeData::Signature {
             kind: SignatureKind::Call,
-            params: Arc::from(vec![param(string)].into_boxed_slice()),
+            params: verter_type_engine::semantic_query::PayloadArray::from(
+                vec![param(string)].into_boxed_slice(),
+            ),
             return_type,
-            type_parameters: Arc::from(Vec::new().into_boxed_slice()),
+            type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+                Vec::new().into_boxed_slice(),
+            ),
             occurrence: Some(occurrence("f", 0)),
             return_carrier: SignatureReturnCarrier::Declared(return_type),
             signature_span: None,
@@ -1568,15 +1586,15 @@ fn each_read_reports_the_authored_node_its_own_subject_carries() {
     let from_first = read(first);
     let from_second = read(second);
     assert_eq!(
-        candidates(from_first.set, store)[0].signature,
-        candidates(from_second.set, store)[0].signature,
+        candidates(from_first.set(), store)[0].signature,
+        candidates(from_second.set(), store)[0].signature,
         "premise: both subjects publish the one content-interned descriptor"
     );
     let authored = |value: &verter_type_engine::signature_kernel::SignatureSetValue| {
         value
-            .nodes
+            .candidate_nodes()
             .iter()
-            .map(|nodes| nodes.authored)
+            .map(|nodes| nodes.authored())
             .collect::<Vec<_>>()
     };
     assert_eq!(authored(&from_first), [Some(first)]);
@@ -1594,7 +1612,7 @@ fn each_read_reports_the_authored_node_its_own_subject_carries() {
     let union = d.intern_normalized_union_or_intersection(&[first, other], true);
     let composite = read(union);
     assert!(matches!(
-        recipe_of(store, candidates(composite.set, store)[0]),
+        recipe_of(store, candidates(composite.set(), store)[0]),
         SignatureResultRecipe::UnionCommon { .. }
     ));
     assert_eq!(authored(&composite), [None]);
@@ -1607,7 +1625,7 @@ fn each_read_reports_the_authored_node_its_own_subject_carries() {
         "premise: the union keeps both authored arms, got {arms:?}"
     );
     assert_eq!(
-        &*composite.nodes[0].constituents,
+        composite.candidate_nodes()[0].constituents(),
         arms.as_slice(),
         "a composite names the authored node of every constituent, in arm order"
     );

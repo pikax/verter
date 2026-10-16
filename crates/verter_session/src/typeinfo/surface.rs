@@ -296,32 +296,31 @@ impl TypeInfoSurface {
     /// THIN projection: every span comes from the graph payload that already
     /// carries it (stamped once at the OXC lowering site and interned on the
     /// node), paired with the node's canonical origin file from
-    /// [`SemanticGraphStore::node_scope`]. No source text is scanned and no
+    /// [`SemanticGraphStore::node_scope_in_scope`]. No source text is scanned and no
     /// type is re-resolved.
     #[must_use]
     pub fn build(graph: &SemanticGraphStore, view: &SurfaceView) -> Self {
         let entries = view
-            .entries
+            .entries()
             .iter()
-            .cloned()
             .map(|entry| match entry {
                 verter_type_engine::semantic_query::SurfaceEntry::Member(member) => {
-                    TypeInfoSurfaceEntry::Member(build_member(graph, &member))
+                    TypeInfoSurfaceEntry::Member(build_member(graph, member))
                 }
                 verter_type_engine::semantic_query::SurfaceEntry::CallSignature(node) => {
-                    TypeInfoSurfaceEntry::CallSignature(build_signature(graph, node))
+                    TypeInfoSurfaceEntry::CallSignature(build_signature(graph, *node))
                 }
                 verter_type_engine::semantic_query::SurfaceEntry::ConstructSignature(node) => {
-                    TypeInfoSurfaceEntry::ConstructSignature(build_signature(graph, node))
+                    TypeInfoSurfaceEntry::ConstructSignature(build_signature(graph, *node))
                 }
                 verter_type_engine::semantic_query::SurfaceEntry::IndexSignature(signature) => {
-                    TypeInfoSurfaceEntry::IndexSignature(build_index_signature(graph, &signature))
+                    TypeInfoSurfaceEntry::IndexSignature(build_index_signature(graph, signature))
                 }
             })
             .collect();
         Self::from_ordered_entries(
             entries,
-            view.keyspace,
+            view.keyspace(),
             view.has_known_index_signature(),
             None,
         )
@@ -557,7 +556,7 @@ where
 /// single-declaration-file scope. `None` for `Global` / non-file scopes (a
 /// primitive, a structural composed node).
 fn node_origin_file(graph: &SemanticGraphStore, node: SemanticNodeId) -> Option<Arc<str>> {
-    match graph.node_scope(node) {
+    match graph.node_scope_in_scope(node) {
         Some(NodeScopeId::File { canonical_id, .. }) => Some(canonical_id),
         _ => None,
     }
@@ -612,8 +611,11 @@ fn build_member(graph: &SemanticGraphStore, member: &SurfaceMember) -> TypeInfoS
 }
 
 fn build_signature(graph: &SemanticGraphStore, node: SemanticNodeId) -> TypeInfoSurfaceSignature {
+    // A construction reader inside its caller's lane: the nested scope owns
+    // every ordinal it reads.
+    let _scope = graph.enter_nested_scope();
     let canonical = node_origin_file(graph, node);
-    let (signature_span, parameter_spans, return_type_span) = match graph.node_data(node) {
+    let (signature_span, parameter_spans, return_type_span) = match graph.read_in_scope(node) {
         Some(data) => match &*data {
             SemanticNodeData::Signature {
                 params,

@@ -305,28 +305,30 @@ impl SignatureStore {
         self.current.load().record_count()
     }
 
-    /// Note that the graph released `released` for good: its ids are never
-    /// handed out again, so a current-epoch type token naming one strands
-    /// every record reached through it. Each node is released once, so a
-    /// token is counted at most once. Returns how many of `released` the
-    /// current epoch holds a token for.
-    pub fn note_released_nodes(&self, released: impl IntoIterator<Item = SemanticNodeId>) -> usize {
-        let inner = self.current.load();
-        let stranded = released
-            .into_iter()
-            .filter(|node| {
-                let Some(index) = inner.type_tokens.lookup(node) else {
-                    return false;
-                };
-                inner
-                    .graph_roots
-                    .lock()
-                    .remove(&super::records::handle_index(index));
-                true
-            })
-            .count();
-        inner.stranded_tokens.fetch_add(stranded, Ordering::Relaxed);
-        stranded
+    construction_ordinal_seam! {
+        /// Note that the graph released `released` for good: its ids are never
+        /// handed out again, so a current-epoch type token naming one strands
+        /// every record reached through it. Each node is released once, so a
+        /// token is counted at most once. Returns how many of `released` the
+        /// current epoch holds a token for.
+        fn note_released_nodes(&self, released: impl IntoIterator<Item = SemanticNodeId>) -> usize {
+            let inner = self.current.load();
+            let stranded = released
+                .into_iter()
+                .filter(|node| {
+                    let Some(index) = inner.type_tokens.lookup(node) else {
+                        return false;
+                    };
+                    inner
+                        .graph_roots
+                        .lock()
+                        .remove(&super::records::handle_index(index));
+                    true
+                })
+                .count();
+            inner.stranded_tokens.fetch_add(stranded, Ordering::Relaxed);
+            stranded
+        }
     }
 
     /// Type tokens of the current epoch that name a released node
@@ -639,44 +641,67 @@ impl SignatureStore {
         Ok(BodyLocatorId::from_raw(raw))
     }
 
-    /// Mint the kernel token standing for graph node `node`. Tokens live in
-    /// the kernel's own numbering space: the raw value is an epoch-qualified
-    /// intern handle, never a node ordinal.
-    pub fn intern_type_token(
-        &self,
-        node: SemanticNodeId,
-        cancelled: Option<&AtomicBool>,
-    ) -> Result<super::records::TypeToken, StoreError> {
-        let inner = self.inner();
-        let root = self
-            .graph
-            .get()
-            .and_then(Weak::upgrade)
-            .map(|arena| {
-                let nodes =
-                    if Self::is_binder_token(node) || (!arena.counted() && !arena.is_live(node)) {
-                        Vec::new()
-                    } else {
-                        vec![node]
-                    };
-                crate::semantic_query_memo::node_roots::NodeRootSet::acquire(arena, nodes)
-                    .map_err(|_| StoreError::Missing)
-            })
-            .transpose()?;
-        let raw = inner.type_tokens.intern(node, cancelled)?;
-        if let Some(root) = root {
-            inner
-                .graph_roots
-                .lock()
-                .entry(super::records::handle_index(raw))
-                .or_insert(root);
+    construction_ordinal_seam! {
+        /// Mint the kernel token standing for graph node `node`. Tokens live in
+        /// the kernel's own numbering space: the raw value is an epoch-qualified
+        /// intern handle, never a node ordinal. Minting roots `node`, so it
+        /// belongs to signature discovery inside the engine; a bare ordinal
+        /// never mints an owning token from outside it.
+        fn intern_type_token(
+            &self,
+            node: SemanticNodeId,
+            cancelled: Option<&AtomicBool>,
+        ) -> Result<super::records::TypeToken, StoreError> {
+            let inner = self.inner();
+            let root = self
+                .graph
+                .get()
+                .and_then(Weak::upgrade)
+                .map(|arena| {
+                    let nodes =
+                        if Self::is_binder_token(node) || (!arena.counted() && !arena.is_live(node)) {
+                            Vec::new()
+                        } else {
+                            vec![node]
+                        };
+                    crate::semantic_query_memo::node_roots::NodeRootSet::acquire(arena, nodes)
+                        .map_err(|_| StoreError::Missing)
+                })
+                .transpose()?;
+            let raw = inner.type_tokens.intern(node, cancelled)?;
+            if let Some(root) = root {
+                inner
+                    .graph_roots
+                    .lock()
+                    .entry(super::records::handle_index(raw))
+                    .or_insert(root);
+            }
+            Ok(super::records::TypeToken::from_raw(raw))
         }
-        Ok(super::records::TypeToken::from_raw(raw))
     }
 
-    /// The graph node a token stands for. A token from another epoch is
-    /// stale.
+    /// The construction ordinal a token stands for. A token from another
+    /// epoch is stale. Tokens are kernel-internal shape identity: nothing
+    /// outside the engine resolves one, and test builds expose the ordinal
+    /// as a seam.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn type_token_node(
+        &self,
+        token: super::records::TypeToken,
+    ) -> Result<SemanticNodeId, StoreError> {
+        self.type_token_ordinal(token)
+    }
+
+    /// See the test-build variant.
+    #[cfg(not(any(test, feature = "test-support")))]
+    pub(crate) fn type_token_node(
+        &self,
+        token: super::records::TypeToken,
+    ) -> Result<SemanticNodeId, StoreError> {
+        self.type_token_ordinal(token)
+    }
+
+    fn type_token_ordinal(
         &self,
         token: super::records::TypeToken,
     ) -> Result<SemanticNodeId, StoreError> {
@@ -1286,6 +1311,13 @@ impl SignatureEpochLease {
 impl SignatureStore {
     pub(crate) fn bind_graph(&self, graph: &Arc<crate::semantic_query_memo::arena::NodeArenaCore>) {
         let _ = self.graph.set(Arc::downgrade(graph));
+    }
+    /// The arena of the graph this kernel is bound to, which issues every
+    /// node operand its records name.
+    pub(crate) fn graph_arena(
+        &self,
+    ) -> Option<Arc<crate::semantic_query_memo::arena::NodeArenaCore>> {
+        self.graph.get().and_then(Weak::upgrade)
     }
     pub fn lease_epoch(&self, epoch: GraphEpoch) -> Result<SignatureEpochLease, StoreError> {
         let inner = self.current.load_full();

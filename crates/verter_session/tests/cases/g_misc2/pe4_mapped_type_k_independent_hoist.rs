@@ -127,7 +127,7 @@ fn surface_member_value_ids(
         .node_data(surface_node)
         .expect("surface node must have semantic data");
     let view = match data.as_ref() {
-        SemanticNodeData::Object(view) => view.clone(),
+        SemanticNodeData::Object(view) => view.copy_for_tests(),
         other => panic!("surface must be an Object, got: {other:?}"),
     };
     view.positive_members()

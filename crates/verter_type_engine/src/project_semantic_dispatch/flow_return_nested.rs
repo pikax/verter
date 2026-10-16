@@ -952,9 +952,13 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 && (constructive_return == Some(return_type) || independently_typed_return);
             graph.intern_node(SemanticNodeData::Signature {
                 kind: crate::semantic_query::SignatureKind::Call,
-                params: Arc::from(signature_params.into_boxed_slice()),
+                params: crate::semantic_query::PayloadArray::from(
+                    signature_params.into_boxed_slice(),
+                ),
                 return_type,
-                type_parameters: Arc::from(type_param_decls.into_boxed_slice()),
+                type_parameters: crate::semantic_query::PayloadArray::from(
+                    type_param_decls.into_boxed_slice(),
+                ),
                 signature_span: None,
                 return_type_span: None,
                 // A nested function value's synthesized signature has no

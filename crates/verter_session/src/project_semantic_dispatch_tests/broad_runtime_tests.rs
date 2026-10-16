@@ -184,11 +184,11 @@ fn broad_runtime_classifies_container_callable_and_object_without_member_descent
     });
     let callable = graph.intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Call,
-        params: Arc::from([]),
+        params: verter_type_engine::semantic_query::PayloadArray::from([]),
         return_type: leaf,
         occurrence: None,
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(leaf),
-        type_parameters: Arc::from([]),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from([]),
         signature_span: None,
         return_type_span: None,
         predicate: None,
@@ -218,11 +218,11 @@ fn broad_runtime_classifies_container_callable_and_object_without_member_descent
     // dangling, because classification must never descend into them.
     let constructor = graph.intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Construct,
-        params: Arc::from([]),
+        params: verter_type_engine::semantic_query::PayloadArray::from([]),
         return_type: leaf,
         occurrence: None,
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(leaf),
-        type_parameters: Arc::from([]),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from([]),
         signature_span: None,
         return_type_span: None,
         predicate: None,
@@ -836,7 +836,7 @@ fn recursive_runtime_carrier_is_typed_partial_and_return_only() {
     let subject = graph.intern_node_with_scope(
         SemanticNodeData::Opaque(QueryError::RecursiveRef {
             name: Arc::from("RuntimeRecursive"),
-            args: std::sync::Arc::from([]),
+            args: Default::default(),
         }),
         file_scope(&dispatch, "/recursive-runtime.ts"),
     );

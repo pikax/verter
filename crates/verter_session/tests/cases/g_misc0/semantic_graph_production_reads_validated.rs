@@ -165,10 +165,12 @@ fn semantic_graph_store_exposes_renamed_unvalidated_read() {
          is explicit at every call site.",
     );
     // The validated read must still exist — it is the production
-    // warm-read entry point every seal-scope caller routes through.
+    // warm-read entry point every seal-scope caller routes through. It is
+    // engine-internal in production (a query key names bare ordinals), so
+    // its declaration carries no `pub` of its own.
     assert!(
-        src.contains("pub fn get_validated<"),
-        "SemanticGraphStore must expose `get_validated` — the production \
+        src.contains("fn get_validated<"),
+        "SemanticGraphStore must define `get_validated` — the production \
          warm-read entry point that validates `ReadSetSignature` before \
          bubbling.",
     );

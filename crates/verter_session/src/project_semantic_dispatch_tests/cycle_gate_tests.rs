@@ -81,12 +81,12 @@ fn assert_decided(
     row: &str,
 ) {
     assert_eq!(
-        read.value,
+        read.value().clone(),
         MaterializationCycleGateOutcome::Decided(expected),
         "{row}: the complete walk must surface Decided({expected:?})"
     );
     assert!(
-        !read.cache_suppress,
+        !read.cache_suppress(),
         "{row}: a Decided outcome must not suppress family admission"
     );
     assert!(
@@ -260,11 +260,11 @@ fn cycle_gate_hop_cap_plain_is_continue_return_only_not_partial() {
     project.upsert_base("/cg_plain_chain.ts", &fixture).unwrap();
     let read = gate_read(project.host(), "/cg_plain_chain.ts", "A_0");
     let reasons = read
-        .value
+        .value()
         .fallback_reasons()
         .expect("hop-cap walk must demote to LegacyFallback");
     assert_eq!(
-        read.value.verdict(),
+        read.value().verdict(),
         MaterializationCycleGateVerdict::Continue,
         "plain path at the hop cap returns the carried (plain) signal"
     );
@@ -273,7 +273,7 @@ fn cycle_gate_hop_cap_plain_is_continue_return_only_not_partial() {
         "the hop-limit exhaustion must be recorded as HopLimit"
     );
     assert!(
-        read.cache_suppress,
+        read.cache_suppress(),
         "a LegacyFallback always suppresses family admission"
     );
     assert!(
@@ -295,11 +295,11 @@ fn cycle_gate_hop_cap_complex_is_stop_return_only_not_partial() {
     project.upsert_base("/cg_keyof_chain.ts", &fixture).unwrap();
     let read = gate_read(project.host(), "/cg_keyof_chain.ts", "K_0");
     let reasons = read
-        .value
+        .value()
         .fallback_reasons()
         .expect("hop-cap walk must demote to LegacyFallback");
     assert_eq!(
-        read.value.verdict(),
+        read.value().verdict(),
         MaterializationCycleGateVerdict::Stop,
         "complex path at the hop cap returns the carried (complex) signal"
     );
@@ -307,7 +307,7 @@ fn cycle_gate_hop_cap_complex_is_stop_return_only_not_partial() {
         reasons.contains(MaterializationCycleGateFallbackReason::HopLimit),
         "the hop-limit exhaustion must be recorded as HopLimit"
     );
-    assert!(read.cache_suppress, "a LegacyFallback always suppresses");
+    assert!(read.cache_suppress(), "a LegacyFallback always suppresses");
     assert!(
         !read.result_is_partial(),
         "HopLimit is ReturnOnly, NOT partial"
@@ -331,7 +331,7 @@ fn cycle_gate_missing_body_is_decided_continue() {
         .unwrap();
     let read = gate_read(project.host(), "/cg_present.ts", "NotHere");
     assert_eq!(
-        read.value,
+        read.value().clone(),
         MaterializationCycleGateOutcome::Decided(MaterializationCycleGateVerdict::Continue),
         "a missing body is an ordinary empty body — the walk continues and decides Continue"
     );
@@ -339,10 +339,10 @@ fn cycle_gate_missing_body_is_decided_continue() {
     // finalizer refuses the OUTER entry (`cache_suppress`, NOT partial):
     // the verdict flows, admission follows the generic rails.
     assert!(
-        read.cache_suppress && !read.result_is_partial(),
+        read.cache_suppress() && !read.result_is_partial(),
         "the non-cacheable missing-decl hop must refuse outer admission \
          without going partial (cache_suppress={}, result_is_partial={})",
-        read.cache_suppress,
+        read.cache_suppress(),
         read.result_is_partial()
     );
 }
@@ -372,7 +372,8 @@ fn cycle_gate_decided_outcome_warm_admits_without_recompute() {
         "a warm family read must not re-run the producer"
     );
     assert_eq!(
-        second.value, first.value,
+        second.value().clone(),
+        first.value().clone(),
         "warm read serves the same outcome"
     );
 }
@@ -392,7 +393,7 @@ fn cycle_gate_legacy_fallback_never_admits() {
     let host = project.host();
     let first = gate_read(host, "/cg_noadmit.ts", "K_0");
     assert!(
-        !first.value.is_decided(),
+        !first.value().is_decided(),
         "fixture: the hop-cap read is a LegacyFallback"
     );
 
@@ -634,11 +635,11 @@ fn cycle_gate_cold_and_warm_reads_return_family_dep_signature() {
     let cold = gate_read(host, "/cg_sig_root.ts", "Probe");
     assert_decided(&cold, MaterializationCycleGateVerdict::Stop, "sig prime");
     assert!(
-        signature_covers(&cold.dep_signature, "/cg_sig_root.ts"),
+        signature_covers(cold.dep_signature(), "/cg_sig_root.ts"),
         "cold read: dep signature must cover the root canonical"
     );
     assert!(
-        signature_covers(&cold.dep_signature, "/cg_sig_helper.ts"),
+        signature_covers(cold.dep_signature(), "/cg_sig_helper.ts"),
         "cold read: dep signature must cover the visited helper canonical"
     );
 
@@ -650,8 +651,8 @@ fn cycle_gate_cold_and_warm_reads_return_family_dep_signature() {
         "fixture: the second read is warm"
     );
     assert!(
-        signature_covers(&warm.dep_signature, "/cg_sig_root.ts")
-            && signature_covers(&warm.dep_signature, "/cg_sig_helper.ts"),
+        signature_covers(warm.dep_signature(), "/cg_sig_root.ts")
+            && signature_covers(warm.dep_signature(), "/cg_sig_helper.ts"),
         "warm read: dep signature must cover root and visited helper — \
          the consumer merges it into its local fence on BOTH read paths"
     );
@@ -837,7 +838,7 @@ fn cycle_gate_content_only_revision_admits_new_candidate_under_same_key() {
         0,
         "the NEW candidate must validate and warm-serve (no stale reuse, no thrash)"
     );
-    assert_eq!(warm.value, revised.value);
+    assert_eq!(warm.value().clone(), revised.value().clone());
 }
 
 /// Cross-domain isolation: the classifier contributes NO checker frame
@@ -883,7 +884,7 @@ fn cycle_gate_classifier_invoked_around_relate_leaves_relation_frames_untouched(
                 ProjectionReductionContext::published(ProjectionMode::Expanded),
             ),
         ));
-        match dispatch.execute_read(key).value {
+        match dispatch.execute_read(key).value().clone() {
             QueryResult::Value(node) => node,
             other => panic!("Instantiate({name}) must produce a value, got {other:?}"),
         }
@@ -1033,7 +1034,9 @@ mod carrier_descent_tests {
         let inst_base = decl_identity("/dep.ts", "Box");
         let inst_ref = graph.intern_node(SemanticNodeData::InstantiationRef {
             base: inst_base.clone(),
-            args: Arc::from(Vec::new().into_boxed_slice()),
+            args: verter_type_engine::semantic_query::PayloadArray::from(
+                Vec::new().into_boxed_slice(),
+            ),
         });
         for carrier in carriers_wrapping(&graph, inst_ref) {
             let mut out: Vec<(DeclIdentity, bool)> = Vec::new();
@@ -1055,7 +1058,7 @@ mod carrier_descent_tests {
         let target: Arc<str> = Arc::from("SelfRef");
         let rec = graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
             name: Arc::clone(&target),
-            args: std::sync::Arc::from([]),
+            args: Default::default(),
         }));
 
         for carrier in carriers_wrapping(&graph, rec) {
@@ -1071,7 +1074,7 @@ mod carrier_descent_tests {
         // the actual name, not a blanket true).
         let other = graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
             name: Arc::from("OtherName"),
-            args: std::sync::Arc::from([]),
+            args: Default::default(),
         }));
         for carrier in carriers_wrapping(&graph, other) {
             let mut reasons = Vec::new();

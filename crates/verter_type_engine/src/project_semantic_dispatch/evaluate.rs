@@ -1239,7 +1239,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 match data.as_ref() {
                     SemanticNodeData::DeclRef { identity } => Some((identity.clone(), None)),
                     SemanticNodeData::InstantiationRef { base, args } => {
-                        Some((base.clone(), Some(Arc::clone(args))))
+                        Some((base.clone(), Some(Arc::clone(args.as_arc()))))
                     }
                     _ => None,
                 }
@@ -1750,7 +1750,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 return DeclarationPrinting::Reference(target.clone(), Arc::from([]));
             }
             Some(SemanticNodeData::InstantiationRef { base: target, args }) => {
-                return DeclarationPrinting::Reference(target.clone(), Arc::clone(args));
+                return DeclarationPrinting::Reference(target.clone(), Arc::clone(args.as_arc()));
             }
             _ => PrintedDeclaration::AliasTransparent,
         }))
@@ -2043,7 +2043,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> SemanticNodeId {
         let (base, args) = match self.graph().node_data(application).as_deref() {
             Some(SemanticNodeData::InstantiationRef { base, args }) => {
-                (base.clone(), Arc::clone(args))
+                (base.clone(), Arc::clone(args.as_arc()))
             }
             _ => return application,
         };
@@ -2063,7 +2063,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             application,
             SemanticNodeData::InstantiationRef {
                 base,
-                args: Arc::from(printed.into_boxed_slice()),
+                args: crate::semantic_query::PayloadArray::from(printed.into_boxed_slice()),
             },
         )
     }
@@ -2084,7 +2084,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 carrier,
                 SemanticNodeData::InstantiationRef {
                     base: identity.clone(),
-                    args: complete,
+                    args: crate::semantic_query::PayloadArray::from(complete),
                 },
             ),
             _ => carrier,
@@ -2412,8 +2412,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if evaluated.completeness.is_partial() {
             return evaluated;
         }
-        let Some(SemanticNodeData::InstantiationRef { base, args }) =
-            self.graph().node_data(evaluated.node).as_deref().cloned()
+        let Some(SemanticNodeData::InstantiationRef { base, args }) = self
+            .graph()
+            .node_data(evaluated.node)
+            .as_deref()
+            .map(crate::semantic_query::SemanticNodeData::clone)
         else {
             return evaluated;
         };
@@ -2425,7 +2428,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let read = self.execute_read(SemanticQueryKey::Instantiate(
             crate::semantic_query::InstantiateKey::new(
                 slot,
-                args,
+                args.as_arc().clone(),
                 self.instantiate_context_for(&base.canonical_id, context),
             ),
         ));
@@ -2798,7 +2801,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 let read =
                                     self.execute_read(SemanticQueryKey::TemplateLiteralReduce {
                                         pattern: Arc::clone(quasis),
-                                        args: Arc::clone(expressions),
+                                        args: Arc::clone(expressions.as_arc()),
                                         context: self.template_literal_reduce_context(),
                                     });
                                 let frame = frames.last_mut().expect("active evaluator frame");
@@ -2822,7 +2825,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 let read = self.execute_read(SemanticQueryKey::Instantiate(
                                     crate::semantic_query::InstantiateKey::new(
                                         slot,
-                                        Arc::clone(args),
+                                        Arc::clone(args.as_arc()),
                                         self.instantiate_context_for(&base.canonical_id, context),
                                     ),
                                 ));
@@ -3086,7 +3089,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 let elements = elements
                     .iter()
                     .zip(values)
-                    .map(|(e, &value)| crate::semantic_query::TupleElement { value, ..e.clone() })
+                    .map(|(e, &value)| crate::semantic_query::TupleElement { value, ..e.copy() })
                     .collect();
                 SemanticNodeData::Tuple {
                     elements,
@@ -3134,14 +3137,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 let params = params
                     .iter()
                     .zip(values)
-                    .map(|(p, &ty)| crate::semantic_query::FunctionParam { ty, ..p.clone() })
+                    .map(|(p, &ty)| crate::semantic_query::FunctionParam { ty, ..p.copy() })
                     .collect();
                 let return_type = values[values.len() - 1];
                 SemanticNodeData::Signature {
                     kind: *kind,
                     params,
                     return_type,
-                    type_parameters: Arc::clone(type_parameters),
+                    type_parameters: type_parameters.share(),
                     occurrence: occurrence.clone(),
                     return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(
                         return_type,
@@ -3604,7 +3607,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }) => {
                     let read = self.execute_read(SemanticQueryKey::TemplateLiteralReduce {
                         pattern: Arc::clone(quasis),
-                        args: Arc::clone(expressions),
+                        args: Arc::clone(expressions.as_arc()),
                         context: self.template_literal_reduce_context(),
                     });
                     match read.value {

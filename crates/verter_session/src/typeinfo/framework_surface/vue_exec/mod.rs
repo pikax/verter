@@ -624,8 +624,7 @@ pub(crate) fn navigate_param_to_object_surface<
     if let Some(reasons) =
         verter_type_engine::semantic_query::surface_resolution::stable_member_carrier_partiality(
             ctx,
-            verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), base)
-                .as_deref(),
+            dispatch.graph().read_in_scope(base).as_deref(),
         )
     {
         return claims.incomplete(reasons);

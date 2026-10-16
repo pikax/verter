@@ -955,7 +955,7 @@ fn execute_cooperative_fast_path_validates_self_root() {
         "execute_cooperative's fast path MUST validate the entry's carrier before serving \
          it warm — an entry self-rooted on an untracked canonical must miss and re-run cold",
     );
-    match read.value {
+    match read.value().clone() {
         verter_type_engine::semantic_query::QueryResult::Value(node) => assert_eq!(
             node, recompute_node,
             "the recomputed node must surface, not the stale entry",
@@ -1010,7 +1010,7 @@ fn relation_memo_warm_read_validates_self_root() {
     assert!(
         store
             .get_relation_payload(ctx, &key)
-            .map(|served| served.value)
+            .map(|served| served.value().clone())
             .is_none(),
         "the relation memo's warm read MUST validate the stored entry's self-version-rooted \
          carrier strictly — an entry self-rooted on an untracked canonical must miss",
@@ -1049,7 +1049,7 @@ fn relation_memo_warm_read_serves_validated_entry() {
 
     let cached = store
         .get_relation_payload(ctx, &key)
-        .map(|served| served.value);
+        .map(|served| served.value().clone());
     assert!(
         matches!(
             cached.as_ref().map(|payload| &payload.outcome),
@@ -1226,7 +1226,7 @@ fn structural_node_kind_publishes_no_file_self_root() {
              with NO file self-root FileWholeHash",
         );
         // A carrier with no self-roots validates vacuously.
-        let entry = graph.get_validated(&key, ctx).map(|r| r.value);
+        let entry = graph.get_validated(&key, ctx).map(|r| r.value().clone());
         assert!(
             entry.is_some(),
             "a structural KeyOf entry (no file self-root) must warm-validate vacuously",
@@ -1401,8 +1401,12 @@ fn key_of_over_cross_file_merged_decl_rejects_warm_entry_on_augmenter_edit() {
     // base_scope)`), with contributor nodes spanning two files.
     let contributors: Arc<[SemanticNodeId]> =
         Arc::from(vec![base_node, aug_node].into_boxed_slice());
-    let merged =
-        graph.intern_node_with_scope(SemanticNodeData::MergedDecl { contributors }, base_scope);
+    let merged = graph.intern_node_with_scope(
+        SemanticNodeData::MergedDecl {
+            contributors: verter_type_engine::semantic_query::PayloadArray::from(contributors),
+        },
+        base_scope,
+    );
 
     let dispatch = host.semantic_dispatch();
     let key = SemanticQueryKey::KeyOf {
@@ -2159,7 +2163,7 @@ fn session_overlay_warm_validation_matrix() {
                     )
                 },
             );
-            (cold_ran, read.value, recompute_node)
+            (cold_ran, read.value().clone(), recompute_node)
         };
 
     // --- Case 1: overlay-current → warm HIT ------------------------
@@ -2497,7 +2501,7 @@ fn session_overlay_parse_fact_carrier_warm_validation() {
                     )
                 },
             );
-            (cold_ran, read.value, recompute_node)
+            (cold_ran, read.value().clone(), recompute_node)
         };
 
     // --- Case 1: overlay-current (Parse fact) → warm HIT -----------
@@ -2760,7 +2764,7 @@ fn session_tombstone_rejects_base_rooted_warm_entry() {
                     )
                 },
             );
-            (cold_ran, read.value, recompute_node)
+            (cold_ran, read.value().clone(), recompute_node)
         };
 
     // --- Case 1: deleted (FileWholeHash self-root) → MISS ----------
@@ -3026,7 +3030,7 @@ fn session_tombstone_rejects_cross_file_dependency_whole_hash() {
                     )
                 },
             );
-            (cold_ran, read.value, recompute_node)
+            (cold_ran, read.value().clone(), recompute_node)
         };
 
     let overlays: FxHashMap<String, Arc<str>> = FxHashMap::default();

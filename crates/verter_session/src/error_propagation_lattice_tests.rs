@@ -168,7 +168,7 @@ fn error_any_never_propagation_lattice() {
         "boom",
     ))));
 
-    let kind = |id: SemanticNodeId| graph.node_data(id).map(|d| (*d).clone());
+    let kind = |id: SemanticNodeId| graph.node_data(id).map(|d| d.copy_for_tests());
 
     // The union / intersection lattice laws now live INSIDE the canonical
     // algebra; every construction routes through the one canonical
@@ -250,7 +250,7 @@ fn error_any_never_propagation_lattice() {
         Some(SemanticNodeData::Union(members)) => {
             let mut kinds: Vec<PrimitiveKind> = members
                 .iter()
-                .filter_map(|m| match graph.node_data(*m).map(|d| (*d).clone()) {
+                .filter_map(|m| match graph.node_data(*m).map(|d| d.copy_for_tests()) {
                     Some(SemanticNodeData::Primitive(p)) => Some(p),
                     _ => None,
                 })
@@ -410,7 +410,7 @@ fn conditional_any_check_unions_both_branches() {
                 })
                 .expect("any-check must absorb to a union of both branches"),
         );
-        match graph.node_data(node).map(|d| (*d).clone()) {
+        match graph.node_data(node).map(|d| d.copy_for_tests()) {
             Some(SemanticNodeData::Union(members)) => {
                 assert!(
                     members.contains(&t_branch) && members.contains(&f_branch),
@@ -436,7 +436,7 @@ fn conditional_any_check_unions_both_branches() {
             .expect("any-check absorbs"),
     );
     assert_eq!(
-        graph.node_data(folded).map(|d| (*d).clone()),
+        graph.node_data(folded).map(|d| d.copy_for_tests()),
         Some(SemanticNodeData::Primitive(PrimitiveKind::Boolean)),
         "any extends T ? B : B folds to B (X|X = X)"
     );
@@ -489,7 +489,9 @@ fn conditional_any_check_detects_nested_infer_patterns() {
     //     `any extends Wrapper<infer U> ? U : Y`.
     let wrapper = graph.intern_node(SemanticNodeData::InstantiationRef {
         base: DeclIdentity::synthetic("Wrapper"),
-        args: Arc::from(vec![infer_u].into_boxed_slice()),
+        args: verter_type_engine::semantic_query::PayloadArray::from(
+            vec![infer_u].into_boxed_slice(),
+        ),
     });
     assert!(
         dispatch
@@ -557,7 +559,7 @@ fn conditional_any_check_detects_nested_infer_patterns() {
             })
             .expect("any extends string ? T : Y must union both branches"),
     );
-    match graph.node_data(node).map(|d| (*d).clone()) {
+    match graph.node_data(node).map(|d| d.copy_for_tests()) {
         Some(SemanticNodeData::Union(members)) => assert!(
             members.contains(&t_branch) && members.contains(&y_branch),
             "any extends string ? T : Y = T | Y, got {members:?}"
@@ -595,7 +597,7 @@ fn conditional_never_check_is_distributive_gated() {
             .expect("distributive never-check must absorb to never"),
     );
     assert_eq!(
-        graph.node_data(collapsed).map(|d| (*d).clone()),
+        graph.node_data(collapsed).map(|d| d.copy_for_tests()),
         Some(SemanticNodeData::Primitive(PrimitiveKind::Never)),
         "distributive never extends T ? X : Y = never (empty distribution)"
     );
@@ -750,7 +752,7 @@ fn error_type_is_returnonly_prone_any_is_cacheable() {
     // control flow is preserved — never Assignable.
     let recursive = graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
         name: Arc::from("Self"),
-        args: std::sync::Arc::from([]),
+        args: Default::default(),
     }));
     assert!(
         !is_assignable(recursive, string),

@@ -329,21 +329,21 @@ fn typeof_default_construct_return_node(
     let SemanticNodeData::Object(view) = graph
         .node_data(typeof_node)
         .as_deref()
-        .cloned()
+        .map(verter_type_engine::semantic_query::SemanticNodeData::copy_for_tests)
         .unwrap_or_else(|| panic!("TypeOf(default) for {canonical_id} must be an Object surface"))
     else {
         panic!("TypeOf(default) for {canonical_id} must be a constructor-like Object surface");
     };
     assert_eq!(
-        view.construct_signatures.len(),
+        view.construct_signatures().len(),
         1,
         "the synthesized .vue default's typeof carries exactly one construct signature"
     );
-    let ctor_fn = view.construct_signatures[0];
+    let ctor_fn = view.construct_signatures()[0];
     let SemanticNodeData::Signature { return_type, .. } = graph
         .node_data(ctor_fn)
         .as_deref()
-        .cloned()
+        .map(verter_type_engine::semantic_query::SemanticNodeData::copy_for_tests)
         .unwrap_or_else(|| panic!("construct signature of {canonical_id} must be a Function node"))
     else {
         panic!("construct signature of {canonical_id} must be a Function node");

@@ -1339,7 +1339,7 @@ impl WasmVerterHost {
             // the WASM adapter only decodes the bytes to a `String`.
             let type_expr_json = match resolved {
                 Some(node_id) => host
-                    .project_node_to_type_expr_json_bytes(node_id)
+                    .project_node_to_type_expr_json_bytes(&node_id)
                     .map(|bytes| {
                         String::from_utf8(bytes).map_err(|e| {
                             JsValue::from_str(&format!("type-expr utf-8 decode error: {e}"))
@@ -1378,7 +1378,7 @@ impl WasmVerterHost {
             // the WASM adapter only decodes the bytes to a `String`.
             let type_expr_json = match resolved {
                 Some(node_id) => host
-                    .project_node_to_type_expr_json_bytes(node_id)
+                    .project_node_to_type_expr_json_bytes(&node_id)
                     .map(|bytes| {
                         String::from_utf8(bytes).map_err(|e| {
                             JsValue::from_str(&format!("type-expr utf-8 decode error: {e}"))

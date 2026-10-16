@@ -37,7 +37,7 @@ fn peel_alias_root(
     mut depth: u32,
 ) -> SemanticNodeId {
     while depth < 256 {
-        match graph.node_data(node).as_deref() {
+        match graph.read_in_scope(node).as_deref() {
             Some(SemanticNodeData::Alias(inner)) => {
                 node = *inner;
                 depth += 1;
@@ -65,7 +65,7 @@ pub(crate) fn classify_node_reduction_gates(
     // Peel a single `Alias` chain so the root classification reads the underlying
     // carrier kind (the reverse boundary unwraps an `Alias` before raising).
     let root = peel_alias_root(graph, node, 0);
-    let generic_instantiation_ref = match graph.node_data(root).as_deref() {
+    let generic_instantiation_ref = match graph.read_in_scope(root).as_deref() {
         // `raise(InstantiationRef)` is `Ref` with NON-EMPTY type arguments.
         Some(SemanticNodeData::InstantiationRef { .. }) => true,
         // An unresolved `BareRef` raises to `Ref { name, type_args }`: a generic
@@ -91,7 +91,7 @@ pub(crate) fn node_contains_reducible_operator(
     if depth > 256 {
         return false;
     }
-    let Some(data) = graph.node_data(node) else {
+    let Some(data) = graph.read_in_scope(node) else {
         return false;
     };
     let recur = |n: SemanticNodeId| node_contains_reducible_operator(graph, n, depth + 1);
@@ -140,11 +140,11 @@ pub(crate) fn node_contains_reducible_operator(
         SemanticNodeData::Object(surface) => {
             surface.positive_members().iter().any(|m| recur(m.value))
                 || surface
-                    .index_signatures
+                    .index_signatures()
                     .iter()
                     .any(|sig| recur(sig.key_type) || recur(sig.value_type))
-                || surface.call_signatures.iter().any(|&c| recur(c))
-                || surface.construct_signatures.iter().any(|&c| recur(c))
+                || surface.call_signatures().iter().any(|&c| recur(c))
+                || surface.construct_signatures().iter().any(|&c| recur(c))
         }
         SemanticNodeData::Signature {
             params,

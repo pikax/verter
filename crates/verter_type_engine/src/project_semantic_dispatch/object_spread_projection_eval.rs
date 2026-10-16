@@ -233,7 +233,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let SemanticNodeData::ObjectSpreadProgram(program) = data.as_ref() else {
             return self.object_projection_failure(QueryError::Miss);
         };
-        let program = program.clone();
+        let program = program.share();
         drop(data);
 
         let start = selector_live_start(&program, selector);
@@ -710,7 +710,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if policy == ExactOptionalPropertyPolicy::Enabled {
             return value;
         }
-        let Some(SemanticNodeData::Union(arms)) = self.graph().node_data(value).as_deref().cloned()
+        let Some(SemanticNodeData::Union(arms)) = self
+            .graph()
+            .node_data(value)
+            .as_deref()
+            .map(crate::semantic_query::SemanticNodeData::clone)
         else {
             return value;
         };
@@ -1000,7 +1004,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             if !visited.insert(operand) {
                 return Err(EvalFailure::Recursive(operand));
             }
-            programs.push(program.clone());
+            programs.push(program.share());
             operand = *base;
         }
         Ok((!programs.is_empty()).then_some(PropertySpreadChain {

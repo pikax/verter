@@ -502,13 +502,13 @@ fn render_type(
                 .collect();
             parts.extend(
                 surface
-                    .call_signatures
+                    .call_signatures()
                     .iter()
                     .map(|signature| format!("call {}", child(*signature))),
             );
             parts.extend(
                 surface
-                    .construct_signatures
+                    .construct_signatures()
                     .iter()
                     .map(|signature| format!("new {}", child(*signature))),
             );

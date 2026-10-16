@@ -5835,8 +5835,7 @@ fn reduced_annotation_in(
             .graph()
             .node_data(node)
             .unwrap_or_else(|| panic!("{name}: the reduced node exists"))
-            .as_ref()
-            .clone();
+            .copy_for_tests();
         let raised = host
             .project_node_to_type_expr_for_test(node)
             .unwrap_or_else(|| panic!("{name}: the reduced node raises"));

@@ -107,7 +107,7 @@ fn shallow_walker_enumerates_declref_source_via_source_surface_helper() {
         .expect("surface node must have semantic data");
 
     let view = match surface_data.as_ref() {
-        SemanticNodeData::Object(view) => view.clone(),
+        SemanticNodeData::Object(view) => view.copy_for_tests(),
         other => panic!(
             "Transit-Shallow Publication contract — synthesise_mapped_surface MUST \
              produce a `SemanticNodeData::Object` for a Mapped with a DeclRef source under \

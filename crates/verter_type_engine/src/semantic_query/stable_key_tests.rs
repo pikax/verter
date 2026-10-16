@@ -1,6 +1,7 @@
 //! Discriminating tests for `VerterStableV1` keys, carrier-qualified
 //! unions, ReduceIntersection grouping, and identity-vs-relation-vs-display.
 
+use crate::semantic_query_memo::test_support::synthetic_operand_graph;
 use std::sync::Arc;
 
 use crate::project_semantic_dispatch::canonical_algebra::{
@@ -124,7 +125,7 @@ fn binary_reduce_intersection_allocates_no_recipe() {
     let input = IntersectionInputRef::binary(a, b);
     assert!(!input.is_recipe());
     assert_eq!(
-        IntersectionInputRef::from_operands(&[a, b]),
+        IntersectionInputRef::from_operands(synthetic_operand_graph(), &[a, b]),
         IntersectionInputRef::Binary(a, b)
     );
 }
@@ -135,22 +136,31 @@ fn two_term_list_with_subgroup_does_not_collapse_to_binary() {
     let b = SemanticNodeId(2);
     let c = SemanticNodeId(3);
     let nested = IntersectionInputRef::binary(b, c);
-    let grouped = IntersectionInputRef::from_steps(&[
-        IntersectionTerm::Value(a),
-        IntersectionTerm::EvaluateSubgroup {
-            input: nested,
-            purpose: IntersectionPurpose::CheckerReduction,
-        },
-    ]);
+    let grouped = IntersectionInputRef::from_steps(
+        synthetic_operand_graph(),
+        &[
+            IntersectionTerm::Value(a),
+            IntersectionTerm::EvaluateSubgroup {
+                input: nested,
+                purpose: IntersectionPurpose::CheckerReduction,
+            },
+        ],
+    );
     assert!(grouped.is_recipe());
-    assert_ne!(grouped, IntersectionInputRef::from_operands(&[a, b, c]));
-    let left_assoc = IntersectionInputRef::from_steps(&[
-        IntersectionTerm::EvaluateSubgroup {
-            input: IntersectionInputRef::binary(a, b),
-            purpose: IntersectionPurpose::CheckerReduction,
-        },
-        IntersectionTerm::Value(c),
-    ]);
+    assert_ne!(
+        grouped,
+        IntersectionInputRef::from_operands(synthetic_operand_graph(), &[a, b, c])
+    );
+    let left_assoc = IntersectionInputRef::from_steps(
+        synthetic_operand_graph(),
+        &[
+            IntersectionTerm::EvaluateSubgroup {
+                input: IntersectionInputRef::binary(a, b),
+                purpose: IntersectionPurpose::CheckerReduction,
+            },
+            IntersectionTerm::Value(c),
+        ],
+    );
     assert_ne!(grouped, left_assoc);
 }
 
@@ -162,7 +172,10 @@ fn fingerprint_is_fnv_of_exact_bytes() {
 
 #[test]
 fn reduce_intersection_key_carries_context() {
-    let key = SemanticQueryKey::reduce_intersection_operands(Arc::from([SemanticNodeId(1)]));
+    let key = SemanticQueryKey::reduce_intersection_operands(
+        synthetic_operand_graph(),
+        Arc::from([SemanticNodeId(1)]),
+    );
     match key {
         SemanticQueryKey::ReduceIntersection { context, .. } => {
             assert_eq!(context, SemanticContextId::production());
@@ -1035,14 +1048,14 @@ fn generic_signature(
     };
     graph.intern_node(SemanticNodeData::Signature {
         kind: SignatureKind::Call,
-        params: Arc::from([FunctionParam::synthetic(
+        params: crate::semantic_query::PayloadArray::from([FunctionParam::synthetic(
             Some(Arc::from("x")),
             binder,
             false,
             false,
         )]),
         return_type: binder,
-        type_parameters: Arc::from([TypeParamDecl {
+        type_parameters: crate::semantic_query::PayloadArray::from([TypeParamDecl {
             name: Arc::from("T"),
             param: binder,
             constraint,
@@ -1314,12 +1327,12 @@ fn literal_param_signature(
     let zero = graph.intern_node(SemanticNodeData::Literal(LiteralValue::Number(0.0)));
     graph.intern_node(SemanticNodeData::Signature {
         kind: SignatureKind::Call,
-        params: Arc::from([FunctionParam {
+        params: crate::semantic_query::PayloadArray::from([FunctionParam {
             declared_literal,
             ..FunctionParam::synthetic(Some(Arc::from("x")), param, false, false)
         }]),
         return_type: zero,
-        type_parameters: Arc::from(Vec::new()),
+        type_parameters: crate::semantic_query::PayloadArray::from(Vec::new()),
         occurrence: None,
         return_carrier: SignatureReturnCarrier::Declared(zero),
         signature_span: None,
@@ -1432,9 +1445,9 @@ fn nullary_signature(
     use crate::semantic_query::{SignatureKind, SignatureReturnCarrier};
     graph.intern_node(SemanticNodeData::Signature {
         kind: SignatureKind::Call,
-        params: Arc::from(Vec::new()),
+        params: crate::semantic_query::PayloadArray::from(Vec::new()),
         return_type,
-        type_parameters: Arc::from(Vec::new()),
+        type_parameters: crate::semantic_query::PayloadArray::from(Vec::new()),
         occurrence: None,
         return_carrier: SignatureReturnCarrier::Declared(carrier),
         signature_span: None,
@@ -1643,7 +1656,7 @@ fn classification_visits_each_node_once() {
             rest: false,
         };
         next = graph.intern_node(SemanticNodeData::Tuple {
-            elements: Arc::from([element(b), element(c)]),
+            elements: crate::semantic_query::PayloadArray::from([element(b), element(c)]),
             readonly: false,
         });
     }
@@ -1788,7 +1801,7 @@ fn a_folded_fingerprint_is_the_hash_of_the_written_key() {
         rest: false,
     };
     let shared = graph.intern_node(SemanticNodeData::Tuple {
-        elements: Arc::from([element(deep), element(deep)]),
+        elements: crate::semantic_query::PayloadArray::from([element(deep), element(deep)]),
         readonly: false,
     });
     let key = stable_key_for_node(&graph, shared);
@@ -1851,7 +1864,7 @@ fn the_retention_walk_visits_every_retained_id() {
     let argument = prim(&graph, PrimitiveKind::Number);
     let back_edge = SemanticNodeData::Opaque(QueryError::RecursiveRef {
         name: Arc::from("Tree"),
-        args: Arc::from([argument]),
+        args: [argument].into(),
     });
     let mut semantic = Vec::new();
     let _ = back_edge.for_each_child(|child| semantic.push(child));
@@ -1881,7 +1894,7 @@ fn the_retention_walk_visits_every_retained_id() {
             prototype: Some(prototype),
             object_literal: false,
         }),
-        type_arguments: Arc::from([]),
+        type_arguments: crate::semantic_query::PayloadArray::from([]),
         surface,
     };
     let mut retained = Vec::new();
@@ -1911,7 +1924,7 @@ fn the_retention_walk_visits_every_retained_id() {
 
     let forward = graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
         name: Arc::from("Tree"),
-        args: Arc::from([SemanticNodeId(graph.node_count() as u64 + 3)]),
+        args: [SemanticNodeId(graph.node_count() as u64 + 3)].into(),
     }));
     assert!(
         matches!(
@@ -2056,7 +2069,7 @@ fn closing_a_document_releases_its_key_classes() {
         );
         node = graph.intern_node_with_scope(
             SemanticNodeData::Tuple {
-                elements: Arc::from([
+                elements: crate::semantic_query::PayloadArray::from([
                     crate::semantic_query::TupleElement {
                         label: None,
                         value: node,

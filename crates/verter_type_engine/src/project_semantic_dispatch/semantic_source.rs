@@ -960,7 +960,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         }
         let node = self.graph().intern_node_with_scope(
             SemanticNodeData::Tuple {
-                elements: Arc::from(elements.into_boxed_slice()),
+                elements: crate::semantic_query::PayloadArray::from(elements.into_boxed_slice()),
                 readonly: false,
             },
             scope,

@@ -931,32 +931,49 @@ pub(crate) fn object_arms_conflict_on_a_literal_property(
     false
 }
 
-/// Canonical union construction over `members` under `nullability`.
-pub fn intern_ordered_union(
+construction_ordinal_seam! {
+    /// Canonical union construction over `members` under `nullability`.
+    fn intern_ordered_union(
+        graph: &SemanticGraphStore,
+        members: &[SemanticNodeId],
+        nullability: NullabilityPolicy,
+    ) -> CanonicalComposite {
+        canonicalize(graph, members, /* is_union */ true, nullability)
+    }
+}
+
+/// [`intern_ordered_union`] inside a construction lane this thread holds of
+/// `graph`. Without such a lane the members' bare ordinals authorize nothing
+/// and there is no union.
+pub fn intern_ordered_union_in_scope(
     graph: &SemanticGraphStore,
     members: &[SemanticNodeId],
     nullability: NullabilityPolicy,
-) -> CanonicalComposite {
-    canonicalize(graph, members, /* is_union */ true, nullability)
+) -> Option<CanonicalComposite> {
+    graph
+        .holds_construction_lane()
+        .then(|| intern_ordered_union(graph, members, nullability))
 }
 
-/// Private ordered-intersection intern. Operand order is preserved. An
-/// intersection runs the strict-null algebra. The intersection is one the
-/// construction derives (an instantiation, a merge), so every redundant
-/// supertype drops: the written `string & {}` the checker keeps is an
-/// authored shell, reduced by [`reduced_authored_intersection`].
-pub fn intern_ordered_intersection(
-    graph: &SemanticGraphStore,
-    members: &[SemanticNodeId],
-) -> CanonicalComposite {
-    canonicalize_with(
-        graph,
-        members,
-        /* is_union */ false,
-        NullabilityPolicy::Strict,
-        SupertypeReduction::Always,
-        DistributionOrigin::KeepWrittenIntersection,
-    )
+construction_ordinal_seam! {
+    /// Private ordered-intersection intern. Operand order is preserved. An
+    /// intersection runs the strict-null algebra. The intersection is one the
+    /// construction derives (an instantiation, a merge), so every redundant
+    /// supertype drops: the written `string & {}` the checker keeps is an
+    /// authored shell, reduced by [`reduced_authored_intersection`].
+    fn intern_ordered_intersection(
+        graph: &SemanticGraphStore,
+        members: &[SemanticNodeId],
+    ) -> CanonicalComposite {
+        canonicalize_with(
+            graph,
+            members,
+            /* is_union */ false,
+            NullabilityPolicy::Strict,
+            SupertypeReduction::Always,
+            DistributionOrigin::KeepWrittenIntersection,
+        )
+    }
 }
 
 fn canonicalize(
@@ -1755,18 +1772,20 @@ fn reduce_authored_intersection(
     (!kept_as_written).then_some(reduced)
 }
 
-/// The type the checker constructs from an AUTHORED intersection shell
-/// (`getIntersectionType`), when it differs from the shell as written:
-/// `string & ("a" | 1)` is `"a"` and `number & string` is `never`. `None`
-/// for any other node and for a shell the canonical intersection keeps as
-/// written (`QA & QB`). The shell itself stays the authored display form;
-/// a consumer that DECIDES on the type reads this.
-pub fn reduced_authored_intersection(
-    graph: &SemanticGraphStore,
-    node: SemanticNodeId,
-    nullability: NullabilityPolicy,
-) -> Option<SemanticNodeId> {
-    reduce_authored_intersection(graph, node, nullability).map(|reduced| reduced.node)
+construction_ordinal_seam! {
+    /// The type the checker constructs from an AUTHORED intersection shell
+    /// (`getIntersectionType`), when it differs from the shell as written:
+    /// `string & ("a" | 1)` is `"a"` and `number & string` is `never`. `None`
+    /// for any other node and for a shell the canonical intersection keeps as
+    /// written (`QA & QB`). The shell itself stays the authored display form;
+    /// a consumer that DECIDES on the type reads this.
+    fn reduced_authored_intersection(
+        graph: &SemanticGraphStore,
+        node: SemanticNodeId,
+        nullability: NullabilityPolicy,
+    ) -> Option<SemanticNodeId> {
+        reduce_authored_intersection(graph, node, nullability).map(|reduced| reduced.node)
+    }
 }
 
 /// Whether a distributed intersection keeps its written form as the
@@ -2124,7 +2143,10 @@ fn intersect_unions_of_primitive_types(
     // false`.
     let primitive_union_members =
         |arm: SemanticNodeId| -> Option<Vec<SemanticNodeId>> {
-            let Some(SemanticNodeData::Union(members)) = graph.node_data(arm).as_deref().cloned()
+            let Some(SemanticNodeData::Union(members)) = graph
+                .node_data(arm)
+                .as_deref()
+                .map(crate::semantic_query::SemanticNodeData::clone)
             else {
                 return None;
             };
@@ -3929,7 +3951,7 @@ fn classify_node(
             expressions,
         }) => {
             let quasis = Arc::clone(quasis);
-            let expressions = Arc::clone(expressions);
+            let expressions = Arc::clone(expressions.as_arc());
             classify_template(walk, &quasis, &expressions)
         }
         Some(SemanticNodeData::Union(members)) => {
@@ -4101,7 +4123,7 @@ fn render_domain(walk: &mut TruthinessWalk<'_>, node: SemanticNodeId) -> RenderD
             expressions,
         }) => {
             let quasis = Arc::clone(quasis);
-            let expressions = Arc::clone(expressions);
+            let expressions = Arc::clone(expressions.as_arc());
             let nested = classify_template(walk, &quasis, &expressions);
             // A template denotes strings, so its render domain IS its
             // truthiness domain: the one falsy string is `""`.

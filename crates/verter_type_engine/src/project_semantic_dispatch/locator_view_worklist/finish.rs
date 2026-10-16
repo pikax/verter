@@ -120,7 +120,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         ancestors: &[ProjectionFrame],
     ) -> ProjectionFinish {
         if let SemanticNodeData::InstantiationRef { base, args } = data {
-            return self.finish_application_projection(node, context, base, args, memo, ancestors);
+            return self.finish_application_projection(
+                node,
+                context,
+                base,
+                args.as_arc(),
+                memo,
+                ancestors,
+            );
         }
         ProjectionFinish::Node(self.finish_projection_structure(
             node,
@@ -178,7 +185,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     node,
                     SemanticNodeData::InstantiationRef {
                         base: base.clone(),
-                        args: projected_args,
+                        args: crate::semantic_query::PayloadArray::from(projected_args),
                     },
                 )
             }
@@ -309,7 +316,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         node,
                         SemanticNodeData::ClassExpressionInstance {
                             identity: Arc::clone(identity),
-                            type_arguments: Arc::from(projected_arguments.into_boxed_slice()),
+                            type_arguments: crate::semantic_query::PayloadArray::from(projected_arguments.into_boxed_slice()),
                             surface: projected_surface,
                         },
                     )
@@ -417,7 +424,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 graph.intern_preserving_scope(
                     node,
                     SemanticNodeData::MergedDecl {
-                        contributors: Arc::from(ids.into_boxed_slice()),
+                        contributors: crate::semantic_query::PayloadArray::from(ids.into_boxed_slice()),
                     },
                 )
             }
@@ -451,7 +458,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         .intern_preserving_scope(
                             node,
                             SemanticNodeData::Tuple {
-                                elements: Arc::from(normalized.into_boxed_slice()),
+                                elements: crate::semantic_query::PayloadArray::from(normalized.into_boxed_slice()),
                                 readonly: *readonly,
                             },
                         ),
@@ -469,7 +476,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     node,
                     SemanticNodeData::TemplateLiteral {
                         quasis: Arc::clone(quasis),
-                        expressions: Arc::from(expressions.into_boxed_slice()),
+                        expressions: crate::semantic_query::PayloadArray::from(expressions.into_boxed_slice()),
                     },
                 )
             }
@@ -637,9 +644,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     node,
                     SemanticNodeData::Signature {
                         kind: *kind,
-                        params: Arc::from(params.into_boxed_slice()),
+                        params: crate::semantic_query::PayloadArray::from(params.into_boxed_slice()),
                         return_type: projected(memo, *return_type, context),
-                        type_parameters: Arc::from(type_parameters.into_boxed_slice()),
+                        type_parameters: crate::semantic_query::PayloadArray::from(type_parameters.into_boxed_slice()),
                         // Projection preserves the occurrence; a declared
                         // carrier retargets the projected return.
                         occurrence: occurrence.clone(),

@@ -193,7 +193,21 @@ impl SemanticReadView {
             .ok_or(ReadError::Missing)
     }
 
+    /// The construction ordinal a token stands for. Tokens are
+    /// kernel-internal shape identity: nothing outside the engine resolves
+    /// one, and test builds expose the ordinal as a seam.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn type_token_node(&self, token: TypeToken) -> Result<SemanticNodeId, ReadError> {
+        self.type_token_ordinal(token)
+    }
+
+    /// See the test-build variant.
+    #[cfg(not(any(test, feature = "test-support")))]
+    pub(crate) fn type_token_node(&self, token: TypeToken) -> Result<SemanticNodeId, ReadError> {
+        self.type_token_ordinal(token)
+    }
+
+    fn type_token_ordinal(&self, token: TypeToken) -> Result<SemanticNodeId, ReadError> {
         let raw = token.as_u64();
         check_epoch(self.inner.epoch, super::records::handle_epoch(raw))
             .map_err(ReadError::from)?;

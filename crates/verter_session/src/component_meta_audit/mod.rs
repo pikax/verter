@@ -913,8 +913,11 @@ pub fn audit_key_for_node(
     graph: &verter_type_engine::semantic_query_memo::SemanticGraphStore,
     id: verter_type_engine::semantic_query::SemanticNodeId,
 ) -> Arc<str> {
+    // A construction reader inside its caller's lane: the nested scope owns
+    // every ordinal it reads.
+    let _scope = graph.enter_nested_scope();
     use verter_type_engine::semantic_query::{IndexKey, LiteralValue, SemanticNodeData};
-    let Some(data) = graph.node_data(id) else {
+    let Some(data) = graph.read_in_scope(id) else {
         return Arc::from(format!("<unknown:{}>", id.0));
     };
     let label = match data.as_ref() {

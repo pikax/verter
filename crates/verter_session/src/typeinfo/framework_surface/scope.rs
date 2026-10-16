@@ -40,7 +40,7 @@ pub(crate) fn member_value_expr_scope<
 ) -> TypeExprScope {
     dispatch
         .graph()
-        .node_scope(member.value)
+        .node_scope_in_scope(member.value)
         .and_then(|scope| scope.canonical_file())
         .map(|canonical| TypeExprScope::new(canonical.as_ref()))
         .or_else(|| {

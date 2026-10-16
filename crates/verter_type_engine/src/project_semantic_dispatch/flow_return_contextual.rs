@@ -31,7 +31,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::super::ProjectSemanti
                     base.owner,
                     std::sync::Arc::clone(&base.decl_name),
                 ),
-                std::sync::Arc::clone(args),
+                std::sync::Arc::clone(args.as_arc()),
                 self.instantiate_context_for(&base.canonical_id, context),
             ),
         )) {

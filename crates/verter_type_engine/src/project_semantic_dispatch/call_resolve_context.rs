@@ -23,7 +23,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             default,
             display_name,
             constraint: None,
-        }) = graph.node_data(param).as_deref().cloned()
+        }) = graph
+            .node_data(param)
+            .as_deref()
+            .map(crate::semantic_query::SemanticNodeData::clone)
         else {
             return param;
         };
@@ -57,9 +60,18 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             Some(SemanticNodeData::Object(view)),
             Some(SemanticNodeData::Object(target_view)),
         ) = (
-            graph.node_data(argument).as_deref().cloned(),
-            graph.node_data(const_view).as_deref().cloned(),
-            graph.node_data(target).as_deref().cloned(),
+            graph
+                .node_data(argument)
+                .as_deref()
+                .map(crate::semantic_query::SemanticNodeData::clone),
+            graph
+                .node_data(const_view)
+                .as_deref()
+                .map(crate::semantic_query::SemanticNodeData::clone),
+            graph
+                .node_data(target)
+                .as_deref()
+                .map(crate::semantic_query::SemanticNodeData::clone),
         )
         else {
             return argument;

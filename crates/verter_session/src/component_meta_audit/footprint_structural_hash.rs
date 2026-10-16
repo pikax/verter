@@ -57,6 +57,9 @@ const STRUCTURAL_HASH_MAX_DEPTH: u32 = 64;
 /// equally-unresolved children collapsing is acceptable; two equal-content
 /// children diverging by ordinal is not).
 pub(crate) fn structural_hash_of(graph: &SemanticGraphStore, data: &SemanticNodeData) -> Hash16 {
+    // A construction reader inside its caller's lane: the nested scope owns
+    // every ordinal it reads.
+    let _scope = graph.enter_nested_scope();
     // TODO(follow-up): a per-mine `FxHashMap<SemanticNodeId, Hash16>` content-hash
     // memo would let `encode_child` reuse a child's already-computed fingerprint
     // instead of re-walking shared subtrees per reference. It is NOT a drop-in:
@@ -129,7 +132,7 @@ impl StructuralEncoder<'_> {
             self.buf.push(TAG_DEPTH_CEILING);
             return;
         }
-        match self.graph.node_data(id) {
+        match self.graph.read_in_scope(id) {
             Some(child) => {
                 self.visited.push(id);
                 self.encode_node_data(&child, depth + 1);
@@ -384,14 +387,14 @@ impl StructuralEncoder<'_> {
                 for m in surface.positive_members().iter() {
                     self.encode_surface_member(m, depth);
                 }
-                self.encode_child_slice(&surface.call_signatures, depth);
-                self.encode_child_slice(&surface.construct_signatures, depth);
+                self.encode_child_slice(surface.call_signatures(), depth);
+                self.encode_child_slice(surface.construct_signatures(), depth);
                 self.buf
-                    .extend_from_slice(&(surface.index_signatures.len() as u64).to_le_bytes());
-                for sig in surface.index_signatures.iter() {
+                    .extend_from_slice(&(surface.index_signatures().len() as u64).to_le_bytes());
+                for sig in surface.index_signatures().iter() {
                     self.encode_index_signature(sig, depth);
                 }
-                self.encode_child_opt(surface.keyspace, depth);
+                self.encode_child_opt(surface.keyspace(), depth);
                 self.buf.push(u8::from(surface.has_known_index_signature()));
                 self.push_present(false);
             }

@@ -34,7 +34,7 @@ use verter_type_expr::TypeExpr;
 
 use super::ComponentMetaQueryEngine;
 use verter_type_engine::project_semantic_dispatch::semantic_source::SourceRaiseContext;
-use verter_type_engine::project_semantic_dispatch::{node_data_for, ProjectSemanticDispatch};
+use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
 
 use verter_type_engine::semantic_query::{
     ProjectionMode, ProjectionReductionContext, SemanticNodeData, SemanticNodeId,
@@ -87,7 +87,7 @@ impl ComponentMetaQueryEngine<'_> {
             scope_owner,
             &named,
         )?;
-        let view = self.dispatch.resolve_typeinfo_surface_view(
+        let view = self.dispatch.resolve_typeinfo_surface(
             node.node(),
             ProjectionReductionContext::macro_object_surface(
                 ProjectionMode::Shallow,
@@ -134,7 +134,7 @@ impl ComponentMetaQueryEngine<'_> {
                 },
             )
             .at_optional_boundary()?;
-        let view = dispatch.resolve_typeinfo_surface_view(
+        let view = dispatch.resolve_typeinfo_surface(
             raised.node(),
             ProjectionReductionContext::macro_object_surface(
                 ProjectionMode::Shallow,
@@ -168,7 +168,7 @@ impl ComponentMetaQueryEngine<'_> {
         let parent = self.intrinsic_root_parent_source(scope_canonical_id, scope_owner, type_name);
 
         let dispatch = self.dispatch;
-        let view = dispatch.resolve_typeinfo_surface_view(
+        let view = dispatch.resolve_typeinfo_surface(
             node,
             ProjectionReductionContext::published(ProjectionMode::Shallow),
         )?;
@@ -279,9 +279,9 @@ fn expanded_shape_from_surface_view(
     // object-shape extraction (the established round-trip convention). A
     // signature node that is not `Function`-shaped contributes nothing.
     let call_signatures = surface
-        .call_signatures
+        .call_signatures()
         .iter()
-        .chain(surface.construct_signatures.iter())
+        .chain(surface.construct_signatures().iter())
         .filter_map(|signature| expanded_call_signature_from_node(dispatch, *signature))
         .collect::<Vec<_>>();
 
@@ -291,7 +291,7 @@ fn expanded_shape_from_surface_view(
     // never a failure state.
     let mut index_signatures =
         surface
-            .index_signatures
+            .index_signatures()
             .iter()
             .map(|signature| ExpandedIndexSignature {
                 key_type: verter_type_expr::facts::SourcePosition::Present(
@@ -305,7 +305,7 @@ fn expanded_shape_from_surface_view(
             .collect::<Vec<_>>();
     // Genuinely-open surface (flag set, no concrete payload) → open placeholder
     // (string keyspace, typed-degraded value).
-    if surface.has_known_index_signature() && surface.index_signatures.is_empty() {
+    if surface.has_known_index_signature() && surface.index_signatures().is_empty() {
         index_signatures.push(ExpandedIndexSignature {
             key_type: verter_type_expr::facts::SourcePosition::Present(SemanticTypeSource::Closed(
                 ClosedTypeFact::Leaf(LeafTypeFact::Primitive(
@@ -377,7 +377,7 @@ fn expanded_call_signature_from_node(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: SemanticNodeId,
 ) -> Option<ExpandedCallSignature> {
-    let data = node_data_for(dispatch.graph(), node)?;
+    let data = dispatch.graph().read_in_scope(node)?;
     let SemanticNodeData::Signature {
         params,
         return_type,

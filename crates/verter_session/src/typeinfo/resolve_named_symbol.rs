@@ -22,7 +22,7 @@
 //!     canonical_id: &str,
 //!     name: &str,
 //!     mode: ProjectionMode,
-//! ) -> AuditedResult<Option<SemanticNodeId>, TypeResolutionRequestError>;
+//! ) -> AuditedResult<Option<NodeRoot>, TypeResolutionRequestError>;
 //!
 //! pub fn resolve_named_symbol_wire_with_audit(
 //!     host: &VerterHost,
@@ -30,10 +30,15 @@
 //!     name: &str,
 //!     wire_type_args: &[Arc<TypeExpr>], // symbolic; lowered inside the request
 //!     mode: ProjectionMode,
-//! ) -> AuditedResult<Option<SemanticNodeId>, TypeResolutionRequestError>;
+//! ) -> AuditedResult<Option<NodeRoot>, TypeResolutionRequestError>;
 //!
-//! pub fn resolve_named_symbol(...)  -> Option<SemanticNodeId>;
+//! pub fn resolve_named_symbol(...)  -> Option<NodeRoot>;
 //! ```
+//!
+//! A resolved node is delivered as an owning
+//! [`NodeRoot`](verter_type_engine::semantic_query_memo::node_roots::NodeRoot): the caller holds
+//! it across later requests and projects it through that root, never
+//! through a bare ordinal.
 //!
 //! Default-mode policy:
 //! - Generic carrier (declaration-site type parameters) → `Navigate`.
@@ -119,7 +124,10 @@ impl VerterHost {
         canonical_id: &str,
         name: &str,
         mode: ResolveMode,
-    ) -> AuditedResult<Option<SemanticNodeId>, TypeResolutionRequestError> {
+    ) -> AuditedResult<
+        Option<verter_type_engine::semantic_query_memo::node_roots::NodeRoot>,
+        TypeResolutionRequestError,
+    > {
         // Bare-named-symbol resolution: no type arguments. Generic
         // instantiation is wire-only (see the module doc / the
         // `resolve_named_symbol_wire_with_audit` foot-gun note), so this
@@ -161,7 +169,10 @@ impl VerterHost {
         name: &str,
         wire_type_args: &[Arc<TypeExpr>],
         mode: ResolveMode,
-    ) -> AuditedResult<Option<SemanticNodeId>, TypeResolutionRequestError> {
+    ) -> AuditedResult<
+        Option<verter_type_engine::semantic_query_memo::node_roots::NodeRoot>,
+        TypeResolutionRequestError,
+    > {
         self.resolve_named_symbol_audited(
             canonical_id,
             name,
@@ -182,7 +193,10 @@ impl VerterHost {
         name: &str,
         type_args: NamedSymbolTypeArgs<'_>,
         mode: ResolveMode,
-    ) -> AuditedResult<Option<SemanticNodeId>, TypeResolutionRequestError> {
+    ) -> AuditedResult<
+        Option<verter_type_engine::semantic_query_memo::node_roots::NodeRoot>,
+        TypeResolutionRequestError,
+    > {
         // Registration / context setup mirrors
         // `resolve_type_with_audit`. We construct the registration
         // BEFORE installing the TLS guard so the `Noop` arm can
@@ -353,7 +367,7 @@ impl VerterHost {
         canonical_id: &str,
         name: &str,
         mode: ResolveMode,
-    ) -> Option<SemanticNodeId> {
+    ) -> Option<verter_type_engine::semantic_query_memo::node_roots::NodeRoot> {
         // Bare-named-symbol resolution (no type arguments) — the non-audit
         // sibling MUST drop its type-arg parameter too: it forwards to the
         // now-bare audited entry, so it cannot carry caller-pre-lowered ids
@@ -423,9 +437,15 @@ fn compute_effective_mode(
 /// Package a resolve-named-symbol outcome and its audit record into the
 /// [`AuditedResult`] carrier.
 fn audited_from_outcome(
-    outcome: Result<Option<SemanticNodeId>, TypeResolutionRequestError>,
+    outcome: Result<
+        Option<verter_type_engine::semantic_query_memo::node_roots::NodeRoot>,
+        TypeResolutionRequestError,
+    >,
     audit: RequestAuditRecord,
-) -> AuditedResult<Option<SemanticNodeId>, TypeResolutionRequestError> {
+) -> AuditedResult<
+    Option<verter_type_engine::semantic_query_memo::node_roots::NodeRoot>,
+    TypeResolutionRequestError,
+> {
     match outcome {
         Ok(value) => AuditedResult::ok(value, audit),
         Err(error) => AuditedResult::err(error, audit),
@@ -479,7 +499,10 @@ fn resolve_named_symbol_request(
     type_args: NamedSymbolTypeArgs<'_>,
     requested_mode: ResolveMode,
 ) -> (
-    Result<Option<SemanticNodeId>, TypeResolutionRequestError>,
+    Result<
+        Option<verter_type_engine::semantic_query_memo::node_roots::NodeRoot>,
+        TypeResolutionRequestError,
+    >,
     ProjectionMode,
 ) {
     // This is a query-RETURNER, not a fenced publisher: it builds a
@@ -533,14 +556,42 @@ fn resolve_named_symbol_request(
         }
     };
 
-    resolve_named_symbol_in_current_view(
+    let (outcome, mode) = resolve_named_symbol_in_current_view(
         host,
         &dispatch,
         canonical_id,
         name,
         type_args,
         effective_mode,
+    );
+    // Deliver the resolved node under its own root: the caller holds it
+    // past this request's construction scope, and a later projection reads
+    // it through that root, never through the bare ordinal. A resolved node
+    // that cannot be rooted is a typed fault, never an absent symbol.
+    (
+        outcome.and_then(|node| {
+            node.map(|node| deliver_resolved_root(dispatch.graph(), node))
+                .transpose()
+        }),
+        mode,
     )
+}
+
+/// Root a resolved construction ordinal for delivery past its request. A
+/// slot a concurrent close released, or an ordinal the graph cannot own, is
+/// the typed fault its rooting reports.
+pub(crate) fn deliver_resolved_root(
+    graph: &verter_type_engine::semantic_query_memo::SemanticGraphStore,
+    node: SemanticNodeId,
+) -> Result<verter_type_engine::semantic_query_memo::node_roots::NodeRoot, TypeResolutionRequestError>
+{
+    graph.root_in_scope(node).map_err(|error| {
+        TypeResolutionRequestError::from_query_error(&error).unwrap_or_else(|| {
+            TypeResolutionRequestError::Other(std::sync::Arc::from(
+                "resolved semantic node could not be rooted for delivery",
+            ))
+        })
+    })
 }
 
 /// Resolve `name` under an ALREADY-ACQUIRED view/dispatch — the shared
@@ -743,9 +794,11 @@ pub(crate) fn materialize_through_aliases(
 ) -> Result<SemanticNodeId, TypeResolutionRequestError> {
     verter_debug_assert!(!matches!(mode, ProjectionMode::Identity));
     let store = host.project_type_store().semantic_graph();
+    // A construction reader: the scope owns every ordinal it reads.
+    let _scope = dispatch.enter_construction_scope();
     let mut current = start;
     for _ in 0..16 {
-        let data = store.node_data(current);
+        let data = store.read_in_scope(current);
         match data.as_deref() {
             Some(SemanticNodeData::Alias(inner)) => {
                 current = *inner;
@@ -866,7 +919,7 @@ pub(crate) fn materialize_through_aliases(
                 // the resolved node to the surfacing. A non-fault resolution
                 // miss falls back to the carrier (the reducer round-trips it
                 // deferred); a genuine fault propagates.
-                let reference_resolved = match store.node_data(*base).as_deref() {
+                let reference_resolved = match store.read_in_scope(*base).as_deref() {
                     Some(SemanticNodeData::DeclRef { identity }) => {
                         let resolve_result = match dispatch.execute_type_node(
                             SemanticQueryKey::ResolveDecl(ResolveDeclKey {
@@ -903,7 +956,7 @@ pub(crate) fn materialize_through_aliases(
                             .execute_type_node(SemanticQueryKey::Instantiate(
                             verter_type_engine::semantic_query::InstantiateKey::new(
                                 inst_base,
-                                Arc::clone(args),
+                                Arc::from(&args[..]),
                                 dispatch.instantiate_context_for(
                                     &ref_base.canonical_id,
                                     verter_type_engine::semantic_query::ProjectionReductionContext::published(
@@ -977,7 +1030,7 @@ pub(crate) fn materialize_through_aliases(
             {
                 let key = SemanticQueryKey::TemplateLiteralReduce {
                     pattern: Arc::clone(quasis),
-                    args: Arc::clone(expressions),
+                    args: Arc::from(&expressions[..]),
                     context: dispatch.template_literal_reduce_context(),
                 };
                 let step_result = match dispatch.execute_type_node(key) {
@@ -1099,6 +1152,9 @@ pub(crate) fn classify_operator_reduction_step(
     result: QueryResult<SemanticNodeId>,
     carrier: SemanticNodeId,
 ) -> Result<MaterializationStep, TypeResolutionRequestError> {
+    // A construction reader inside its caller's lane: the nested scope owns
+    // every ordinal it reads.
+    let _scope = store.enter_nested_scope();
     match result {
         QueryResult::Value(next) => {
             if next == carrier {
@@ -1110,7 +1166,7 @@ pub(crate) fn classify_operator_reduction_step(
             // FAULT propagates (never masked behind the operator shell); a
             // non-fault miss preserves the carrier (never degrades to a
             // `semanticMiss` terminal).
-            if let Some(SemanticNodeData::Opaque(err)) = store.node_data(next).as_deref() {
+            if let Some(SemanticNodeData::Opaque(err)) = store.read_in_scope(next).as_deref() {
                 return match classify_dispatch_error(err, Some(carrier)) {
                     Ok(_) => Ok(MaterializationStep::Stop(carrier)),
                     Err(fault) => Err(fault),

@@ -161,7 +161,9 @@ fn instantiation_ref(
                 whole_hash: HashValue::default(),
                 decl_name: Arc::from(name),
             },
-            args: Arc::from(args.to_vec().into_boxed_slice()),
+            args: verter_type_engine::semantic_query::PayloadArray::from(
+                args.to_vec().into_boxed_slice(),
+            ),
         })
 }
 
@@ -876,13 +878,17 @@ fn nullary_function(
 ) -> SemanticNodeId {
     dispatch.graph().intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Call,
-        params: Arc::from(Vec::new().into_boxed_slice()),
+        params: verter_type_engine::semantic_query::PayloadArray::from(
+            Vec::new().into_boxed_slice(),
+        ),
         return_type,
         occurrence: None,
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
             return_type,
         ),
-        type_parameters: Arc::from(Vec::new().into_boxed_slice()),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+            Vec::new().into_boxed_slice(),
+        ),
         signature_span: None,
         return_type_span: None,
         predicate: None,

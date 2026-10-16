@@ -1,0 +1,13 @@
+error[E0603]: module `sealed` is private
+ --> tests/cases/compile-fail/public_construction_copy_is_store_only.rs:9:82
+  |
+9 |     member.copy_with(verter_type_engine::semantic_query_memo::construction_copy::sealed::CopyToken(()))
+  |                                                                                  ^^^^^^  --------- tuple struct `CopyToken` is not publicly re-exported
+  |                                                                                  |
+  |                                                                                  private module
+  |
+note: the module `sealed` is defined here
+ --> $WORKSPACE/crates/verter_type_engine/src/semantic_query_memo/construction_copy.rs
+  |
+  | mod sealed {
+  | ^^^^^^^^^^

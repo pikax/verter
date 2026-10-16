@@ -1075,7 +1075,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
             Some(SemanticNodeData::Tuple { elements, readonly }) => {
-                let mut rebuilt = elements.to_vec();
+                let mut rebuilt = elements
+                    .iter()
+                    .map(crate::semantic_query::TupleElement::copy)
+                    .collect::<Vec<_>>();
                 let mut changed = false;
                 for element in &mut rebuilt {
                     let value =
@@ -1087,7 +1090,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     graph.intern_preserving_scope(
                         node,
                         SemanticNodeData::Tuple {
-                            elements: Arc::from(rebuilt.into_boxed_slice()),
+                            elements: crate::semantic_query::PayloadArray::from(
+                                rebuilt.into_boxed_slice(),
+                            ),
                             readonly: *readonly,
                         },
                     )
@@ -1159,7 +1164,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 predicate,
                 is_abstract,
             }) => {
-                let mut rebuilt_params = params.to_vec();
+                let mut rebuilt_params = params
+                    .iter()
+                    .map(crate::semantic_query::FunctionParam::copy)
+                    .collect::<Vec<_>>();
                 let mut changed = false;
                 for param in &mut rebuilt_params {
                     let ty = self.erase_nullable_members_within(param.ty, nullability, erased);
@@ -1193,9 +1201,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         node,
                         SemanticNodeData::Signature {
                             kind: *kind,
-                            params: Arc::from(rebuilt_params.into_boxed_slice()),
+                            params: crate::semantic_query::PayloadArray::from(
+                                rebuilt_params.into_boxed_slice(),
+                            ),
                             return_type: rebuilt_return,
-                            type_parameters: Arc::clone(type_parameters),
+                            type_parameters: type_parameters.share(),
                             occurrence: occurrence.clone(),
                             return_carrier,
                             signature_span: *signature_span,
@@ -1220,7 +1230,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         node,
                         SemanticNodeData::InstantiationRef {
                             base: base.clone(),
-                            args: Arc::from(rebuilt.into_boxed_slice()),
+                            args: crate::semantic_query::PayloadArray::from(
+                                rebuilt.into_boxed_slice(),
+                            ),
                         },
                     )
                 };
@@ -2408,7 +2420,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     base.owner,
                     Arc::clone(&base.decl_name),
                 ),
-                Arc::clone(args),
+                Arc::clone(args.as_arc()),
                 self.instantiate_context_for(&base.canonical_id, context),
             ),
         )) {
@@ -3813,7 +3825,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         whole_hash: crate::semantic_query::HashValue::default(),
                         decl_name: Arc::from("Promise"),
                     },
-                    args: Arc::from(vec![payload].into_boxed_slice()),
+                    args: crate::semantic_query::PayloadArray::from(
+                        vec![payload].into_boxed_slice(),
+                    ),
                 })
             }
             FunctionBodyKind::Generator | FunctionBodyKind::AsyncGenerator => {
@@ -3871,7 +3885,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 };
                 graph.intern_node(SemanticNodeData::InstantiationRef {
                     base,
-                    args: Arc::from(vec![yield_join, body, next].into_boxed_slice()),
+                    args: crate::semantic_query::PayloadArray::from(
+                        vec![yield_join, body, next].into_boxed_slice(),
+                    ),
                 })
             }
         };
@@ -7711,7 +7727,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     }
                     SemanticNodeData::DeclRef { identity } => (identity.clone(), Arc::from([])),
                     SemanticNodeData::InstantiationRef { base, args } => {
-                        (base.clone(), Arc::clone(args))
+                        (base.clone(), Arc::clone(args.as_arc()))
                     }
                     _ => return None,
                 };
@@ -13364,9 +13380,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         if let Some((_, width)) = effect_position {
                             // Replace every effect of a const-context spread too.
                             let difference = effects.len() as isize - width as isize;
-                            frame
-                                .effects
-                                .splice(position..position + width, effects.iter().cloned());
+                            frame.effects.splice(
+                                position..position + width,
+                                effects
+                                    .iter()
+                                    .map(crate::semantic_query::ObjectConstructionEffect::copy),
+                            );
                             frame.effect_ordinals.splice(
                                 position..position + width,
                                 std::iter::repeat_n(ordinal, effects.len()),
@@ -14173,7 +14192,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             }
             return Positional::Value(self.dispatch.graph().intern_node_with_scope(
                 SemanticNodeData::ObjectSpreadProgram(crate::semantic_query::ObjectSpreadProgram {
-                    effects: Arc::from(effects.into_boxed_slice()),
+                    effects: crate::semantic_query::PayloadArray::from(effects.into_boxed_slice()),
                 }),
                 self.binder_env.scope.clone(),
             ));
@@ -14185,7 +14204,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         // selection reads the unwidened one.
         let index_signatures: Arc<[crate::semantic_query::IndexSignature]> = if late_bound.any() {
             let mut side = class_expression::MemberSide {
-                members: surface_members.clone(),
+                members: surface_members
+                    .iter()
+                    .map(crate::semantic_query::SurfaceMember::clone)
+                    .collect(),
                 index_signatures: Vec::new(),
                 computed: late_bound,
             };
@@ -14225,7 +14247,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         prototype: None,
                         object_literal: true,
                     }),
-                    type_arguments: Arc::from([]),
+                    type_arguments: crate::semantic_query::PayloadArray::from([]),
                     surface,
                 },
                 self.binder_env.scope.clone(),
@@ -14320,9 +14342,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     ..
                 }) => SemanticNodeData::Signature {
                     kind: *kind,
-                    params: Arc::clone(params),
+                    params: params.share(),
                     return_type: property,
-                    type_parameters: Arc::clone(type_parameters),
+                    type_parameters: type_parameters.share(),
                     signature_span: *signature_span,
                     return_type_span: *return_type_span,
                     occurrence: occurrence.clone(),
@@ -14813,7 +14835,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                             } else {
                                 self.literal_view(value, node).unwrap_or(node)
                             },
-                            ..element.clone()
+                            ..element.copy()
                         });
                         frame.tuple.push(element);
                     } else if widening_nullish {
@@ -14843,7 +14865,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         };
                         frame.tuple_view.push(crate::semantic_query::TupleElement {
                             value: undefined,
-                            ..element.clone()
+                            ..element.copy()
                         });
                         frame.tuple.push(element);
                     } else {
@@ -14874,16 +14896,16 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                                     optional: false,
                                     rest: true,
                                 };
-                                frame.tuple_view.push(element.clone());
+                                frame.tuple_view.push(element.copy());
                                 frame.tuple.push(element);
                             }
                             Some(SemanticNodeData::Tuple { elements, .. }) => {
                                 for element in elements.iter() {
-                                    let mut element = element.clone();
+                                    let mut element = element.copy();
                                     if element.optional && self.nullability.is_strict() {
                                         element.value = self.union(&[element.value, undefined]);
                                     }
-                                    frame.tuple_view.push(element.clone());
+                                    frame.tuple_view.push(element.copy());
                                     frame.tuple.push(element);
                                 }
                             }
@@ -14925,7 +14947,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 super::build::NormalizedTupleShape::Array(array) => array,
                 super::build::NormalizedTupleShape::Tuple(elements) => {
                     graph.intern_node(SemanticNodeData::Tuple {
-                        elements: Arc::from(elements.into_boxed_slice()),
+                        elements: crate::semantic_query::PayloadArray::from(
+                            elements.into_boxed_slice(),
+                        ),
                         readonly: const_asserted,
                     })
                 }
@@ -25444,7 +25468,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             params,
             type_parameters,
             ..
-        }) = graph.node_data(signature).as_deref().cloned()
+        }) = graph
+            .node_data(signature)
+            .as_deref()
+            .map(crate::semantic_query::SemanticNodeData::clone)
         else {
             return signature;
         };
@@ -25577,7 +25604,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         // entrance: a shadowed slot carries the marker at ITS ordinal and
         // degrades the enclosing result; every other slot of the same
         // signature keeps its modelled value.
-        let mut type_param_decls = binder_env.type_param_decls.clone();
+        let mut type_param_decls: Vec<_> = binder_env
+            .type_param_decls
+            .iter()
+            .map(crate::semantic_query::TypeParamDecl::copy)
+            .collect();
         for (ordinal, clause_param) in type_parameters.iter().enumerate() {
             if !clause_param
                 .constraint
@@ -25707,9 +25738,13 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             });
             return NestedSignatureStep::Done(graph.intern_node(SemanticNodeData::Signature {
                 kind: crate::semantic_query::SignatureKind::Call,
-                params: Arc::from(signature_params.into_boxed_slice()),
+                params: crate::semantic_query::PayloadArray::from(
+                    signature_params.into_boxed_slice(),
+                ),
                 return_type,
-                type_parameters: Arc::from(type_param_decls.into_boxed_slice()),
+                type_parameters: crate::semantic_query::PayloadArray::from(
+                    type_param_decls.into_boxed_slice(),
+                ),
                 signature_span: None,
                 return_type_span: None,
                 // A nested function value's synthesized signature has no
@@ -25727,9 +25762,13 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             let any = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
             return NestedSignatureStep::Done(graph.intern_node(SemanticNodeData::Signature {
                 kind: crate::semantic_query::SignatureKind::Call,
-                params: Arc::from(signature_params.into_boxed_slice()),
+                params: crate::semantic_query::PayloadArray::from(
+                    signature_params.into_boxed_slice(),
+                ),
                 return_type: any,
-                type_parameters: Arc::from(type_param_decls.into_boxed_slice()),
+                type_parameters: crate::semantic_query::PayloadArray::from(
+                    type_param_decls.into_boxed_slice(),
+                ),
                 signature_span: None,
                 return_type_span: None,
                 occurrence: None,

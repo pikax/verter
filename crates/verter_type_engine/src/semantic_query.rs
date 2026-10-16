@@ -256,15 +256,15 @@ mod object_spread_program_contract_tests {
         let spread = SemanticNodeId(22);
         let construct = SemanticNodeId(33);
         let program = ObjectSpreadProgram {
-            effects: Arc::from([
+            effects: crate::semantic_query::PayloadArray::from([
                 ObjectConstructionEffect::DirectCall(call),
                 ObjectConstructionEffect::Spread(spread),
                 ObjectConstructionEffect::DirectConstruct(construct),
             ]),
         };
-        let node = SemanticNodeData::ObjectSpreadProgram(program.clone());
+        let node = SemanticNodeData::ObjectSpreadProgram(program.share());
         let reordered = SemanticNodeData::ObjectSpreadProgram(ObjectSpreadProgram {
-            effects: Arc::from([
+            effects: crate::semantic_query::PayloadArray::from([
                 ObjectConstructionEffect::Spread(spread),
                 ObjectConstructionEffect::DirectCall(call),
                 ObjectConstructionEffect::DirectConstruct(construct),
@@ -337,7 +337,7 @@ mod object_spread_program_contract_tests {
             member_path: Arc::from([]),
         };
         let program = ObjectSpreadProgram {
-            effects: Arc::from([
+            effects: crate::semantic_query::PayloadArray::from([
                 ObjectConstructionEffect::DirectProperty(property),
                 ObjectConstructionEffect::DirectMethod(method),
                 ObjectConstructionEffect::DirectGet(accessor(
@@ -1169,39 +1169,41 @@ pub enum PrintedUnionArm {
     Enum(DeclIdentity),
 }
 
-/// A union's constituents as the checker prints them: a union holding
-/// every member of an enum prints the enum's name in place of them, where
-/// its first member stands (`E.A | E.B` over a two-member `E` prints `E`;
-/// `E3.A | E3.B` over a three-member `E3` prints both members).
-pub fn printed_union_arms(
-    graph: &crate::semantic_query_memo::SemanticGraphStore,
-    members: &[SemanticNodeId],
-) -> Vec<PrintedUnionArm> {
-    let literals: Vec<Option<EnumLiteralType>> = members
-        .iter()
-        .map(|member| match graph.node_data(*member).as_deref() {
-            Some(SemanticNodeData::EnumLiteral(literal)) => Some(literal.clone()),
-            _ => None,
-        })
-        .collect();
-    let mut present: std::collections::HashMap<&DeclIdentity, u32> =
-        std::collections::HashMap::new();
-    for literal in literals.iter().flatten() {
-        *present.entry(&literal.enum_decl).or_default() += 1;
-    }
-    let mut printed: std::collections::HashSet<&DeclIdentity> = std::collections::HashSet::new();
-    let mut arms = Vec::with_capacity(members.len());
-    for (member, literal) in members.iter().zip(literals.iter()) {
-        match literal {
-            Some(literal) if present.get(&literal.enum_decl) == Some(&literal.member_count) => {
-                if printed.insert(&literal.enum_decl) {
-                    arms.push(PrintedUnionArm::Enum(literal.enum_decl.clone()));
-                }
-            }
-            _ => arms.push(PrintedUnionArm::Node(*member)),
+construction_ordinal_seam! {
+    /// A union's constituents as the checker prints them: a union holding
+    /// every member of an enum prints the enum's name in place of them, where
+    /// its first member stands (`E.A | E.B` over a two-member `E` prints `E`;
+    /// `E3.A | E3.B` over a three-member `E3` prints both members).
+    fn printed_union_arms(
+        graph: &crate::semantic_query_memo::SemanticGraphStore,
+        members: &[SemanticNodeId],
+    ) -> Vec<PrintedUnionArm> {
+        let literals: Vec<Option<EnumLiteralType>> = members
+            .iter()
+            .map(|member| match graph.node_data(*member).as_deref() {
+                Some(SemanticNodeData::EnumLiteral(literal)) => Some(literal.clone()),
+                _ => None,
+            })
+            .collect();
+        let mut present: std::collections::HashMap<&DeclIdentity, u32> =
+            std::collections::HashMap::new();
+        for literal in literals.iter().flatten() {
+            *present.entry(&literal.enum_decl).or_default() += 1;
         }
+        let mut printed: std::collections::HashSet<&DeclIdentity> = std::collections::HashSet::new();
+        let mut arms = Vec::with_capacity(members.len());
+        for (member, literal) in members.iter().zip(literals.iter()) {
+            match literal {
+                Some(literal) if present.get(&literal.enum_decl) == Some(&literal.member_count) => {
+                    if printed.insert(&literal.enum_decl) {
+                        arms.push(PrintedUnionArm::Enum(literal.enum_decl.clone()));
+                    }
+                }
+                _ => arms.push(PrintedUnionArm::Node(*member)),
+            }
+        }
+        arms
     }
-    arms
 }
 
 /// Identity of one class EXPRESSION — the payload of
@@ -1293,21 +1295,23 @@ impl ClassExpressionIdentity {
         printed
     }
 
-    /// [`Self::printed_name`] over `store`: an argument is its clause's
-    /// parameter when it is the type parameter of that name.
-    #[must_use]
-    pub fn printed_name_in(
-        &self,
-        store: &crate::semantic_query_memo::SemanticGraphStore,
-        type_arguments: &[SemanticNodeId],
-    ) -> String {
-        self.printed_name(type_arguments, |argument, name| {
-            matches!(
-                store.node_data(argument).as_deref(),
-                Some(SemanticNodeData::TypeParam { display_name, .. })
-                    if display_name.as_ref() == name
-            )
-        })
+    construction_ordinal_seam! {
+        /// [`Self::printed_name`] over `store`: an argument is its clause's
+        /// parameter when it is the type parameter of that name.
+        #[must_use]
+        fn printed_name_in(
+            &self,
+            store: &crate::semantic_query_memo::SemanticGraphStore,
+            type_arguments: &[SemanticNodeId],
+        ) -> String {
+            self.printed_name(type_arguments, |argument, name| {
+                matches!(
+                    store.node_data(argument).as_deref(),
+                    Some(SemanticNodeData::TypeParam { display_name, .. })
+                        if display_name.as_ref() == name
+                )
+            })
+        }
     }
 
     /// The arguments a reference passes to the class's OWN type
@@ -1690,14 +1694,56 @@ impl CanonicalTypeSubstitution {
         Self(Arc::from(Vec::new().into_boxed_slice()), Default::default())
     }
 
-    /// Canonicalize `(type_parameter, bound)` pairs: sorted and
-    /// deduplicated by the parameter node (first binding wins).
+    /// Canonicalize `(type_parameter, bound)` pairs of `graph`: sorted and
+    /// deduplicated by the parameter node (first binding wins). The
+    /// substitution owns its operands in `graph`.
     #[must_use]
-    pub fn new(mut bindings: Vec<(SemanticNodeId, SemanticNodeId)>) -> Self {
+    pub fn new(
+        graph: &crate::semantic_query_memo::SemanticGraphStore,
+        bindings: Vec<(SemanticNodeId, SemanticNodeId)>,
+    ) -> Self {
+        Self::rooted(bindings, |operands| {
+            crate::semantic_query_memo::node_roots::IdentityNodeRoots::in_graph(graph, operands)
+        })
+    }
+
+    /// [`Self::new`] for the graph whose arena is `arena`; `None` when the
+    /// issuer is bound to no graph and so owns no graph operand.
+    pub(crate) fn new_in_arena(
+        arena: Option<&Arc<crate::semantic_query_memo::arena::NodeArenaCore>>,
+        bindings: Vec<(SemanticNodeId, SemanticNodeId)>,
+    ) -> Self {
+        Self::rooted(bindings, |operands| {
+            arena.map_or_else(Default::default, |arena| {
+                crate::semantic_query_memo::node_roots::IdentityNodeRoots::in_arena(arena, operands)
+            })
+        })
+    }
+
+    /// [`Self::new`] for bindings derived from `sources`, owned in the graph
+    /// that issued them.
+    pub(crate) fn derived_from(
+        sources: &[&Self],
+        bindings: Vec<(SemanticNodeId, SemanticNodeId)>,
+    ) -> Self {
+        Self::rooted(bindings, |operands| {
+            crate::semantic_query_memo::node_roots::IdentityNodeRoots::derived_from(
+                sources.iter().map(|source| &source.1),
+                operands,
+            )
+        })
+    }
+
+    fn rooted(
+        mut bindings: Vec<(SemanticNodeId, SemanticNodeId)>,
+        root: impl FnOnce(
+            &mut dyn Iterator<Item = SemanticNodeId>,
+        ) -> crate::semantic_query_memo::node_roots::IdentityNodeRoots,
+    ) -> Self {
         bindings.sort_by_key(|(param, _)| param.0);
         bindings.dedup_by_key(|(param, _)| param.0);
-        let roots = crate::semantic_query_memo::node_roots::IdentityNodeRoots::scoped(
-            bindings
+        let roots = root(
+            &mut bindings
                 .iter()
                 .flat_map(|&(parameter, value)| [parameter, value]),
         );
@@ -2669,72 +2715,76 @@ pub enum MapperKind {
 }
 
 impl MapperKind {
-    /// Classify `value_expr` against `source` and `mapper_param` by
-    /// checking whether it is structurally the identity projection
-    /// `source[mapper_param]`. Used by the lowering path to tag each
-    /// `MapperKey` at construction time.
-    ///
-    /// Matches two shapes after unwrapping a single `Alias`:
-    /// - `IndexedAccess { object = source, index = TypeNode(id) }` where
-    ///   `id` resolves (possibly through one `Alias`) to a
-    ///   `TypeParam` node with the same name as `mapper_param`.
-    /// - Anything else → [`MapperKind::Computed`].
-    ///
-    /// `mapper_param_node` is the mapper's binder node id (the
-    /// `TypeParam` introduced by the enclosing `[K in ...]`
-    /// binding). Classification checks that the indexed-access
-    /// `index`'s type node equals this binder by `SemanticNodeId`,
-    /// not by `display_name` string — two binders that share a
-    /// display name but are semantically distinct must not conflate.
-    #[must_use]
-    pub fn classify_value_expr(
-        graph: &crate::semantic_query_memo::SemanticGraphStore,
-        value_expr: SemanticNodeId,
-        source: SemanticNodeId,
-        mapper_param_node: SemanticNodeId,
-    ) -> Self {
-        let mut value_id = value_expr;
-        if let Some(SemanticNodeData::Alias(inner)) = graph.node_data(value_id).as_deref() {
-            value_id = *inner;
-        }
-        let (object, index) = match graph.node_data(value_id).as_deref() {
-            Some(SemanticNodeData::IndexedAccess { object, index }) => (*object, index.clone()),
-            _ => return MapperKind::Computed,
-        };
-        if object != source {
-            return MapperKind::Computed;
-        }
-        let mut index_id = match index {
-            IndexKey::Computed(id) => id,
-            _ => return MapperKind::Computed,
-        };
-        if let Some(SemanticNodeData::Alias(inner)) = graph.node_data(index_id).as_deref() {
-            index_id = *inner;
-        }
-        if index_id == mapper_param_node {
-            MapperKind::Identity
-        } else {
-            MapperKind::Computed
+    construction_ordinal_seam! {
+        /// Classify `value_expr` against `source` and `mapper_param` by
+        /// checking whether it is structurally the identity projection
+        /// `source[mapper_param]`. Used by the lowering path to tag each
+        /// `MapperKey` at construction time.
+        ///
+        /// Matches two shapes after unwrapping a single `Alias`:
+        /// - `IndexedAccess { object = source, index = TypeNode(id) }` where
+        ///   `id` resolves (possibly through one `Alias`) to a
+        ///   `TypeParam` node with the same name as `mapper_param`.
+        /// - Anything else → [`MapperKind::Computed`].
+        ///
+        /// `mapper_param_node` is the mapper's binder node id (the
+        /// `TypeParam` introduced by the enclosing `[K in ...]`
+        /// binding). Classification checks that the indexed-access
+        /// `index`'s type node equals this binder by `SemanticNodeId`,
+        /// not by `display_name` string — two binders that share a
+        /// display name but are semantically distinct must not conflate.
+        #[must_use]
+        fn classify_value_expr(
+            graph: &crate::semantic_query_memo::SemanticGraphStore,
+            value_expr: SemanticNodeId,
+            source: SemanticNodeId,
+            mapper_param_node: SemanticNodeId,
+        ) -> Self {
+            let mut value_id = value_expr;
+            if let Some(SemanticNodeData::Alias(inner)) = graph.node_data(value_id).as_deref() {
+                value_id = *inner;
+            }
+            let (object, index) = match graph.node_data(value_id).as_deref() {
+                Some(SemanticNodeData::IndexedAccess { object, index }) => (*object, index.clone()),
+                _ => return MapperKind::Computed,
+            };
+            if object != source {
+                return MapperKind::Computed;
+            }
+            let mut index_id = match index {
+                IndexKey::Computed(id) => id,
+                _ => return MapperKind::Computed,
+            };
+            if let Some(SemanticNodeData::Alias(inner)) = graph.node_data(index_id).as_deref() {
+                index_id = *inner;
+            }
+            if index_id == mapper_param_node {
+                MapperKind::Identity
+            } else {
+                MapperKind::Computed
+            }
         }
     }
 }
 
-/// Whether a mapped type's lowered `keyof` operand is a TYPE VARIABLE — a
-/// type parameter binder or an `infer` declaration or reference — so the
-/// mapping is homomorphic over it ([`MapperKey::over_type_variable`]).
-#[must_use]
-pub fn keyof_operand_is_type_variable(
-    graph: &crate::semantic_query_memo::SemanticGraphStore,
-    operand: SemanticNodeId,
-) -> bool {
-    matches!(
-        graph.node_data(operand).as_deref(),
-        Some(
-            SemanticNodeData::TypeParam { .. }
-                | SemanticNodeData::Infer { .. }
-                | SemanticNodeData::InferRef { .. }
+construction_ordinal_seam! {
+    /// Whether a mapped type's lowered `keyof` operand is a TYPE VARIABLE — a
+    /// type parameter binder or an `infer` declaration or reference — so the
+    /// mapping is homomorphic over it ([`MapperKey::over_type_variable`]).
+    #[must_use]
+    fn keyof_operand_is_type_variable(
+        graph: &crate::semantic_query_memo::SemanticGraphStore,
+        operand: SemanticNodeId,
+    ) -> bool {
+        matches!(
+            graph.node_data(operand).as_deref(),
+            Some(
+                SemanticNodeData::TypeParam { .. }
+                    | SemanticNodeData::Infer { .. }
+                    | SemanticNodeData::InferRef { .. }
+            )
         )
-    )
+    }
 }
 
 /// Mapper identity for mapped-type queries. Separates the key space from the
@@ -4094,7 +4144,7 @@ pub enum HopDecision {
 /// owning surface is interned. A walker that needs the body issues
 /// [`SemanticQueryApi::execute`] with a [`SemanticQueryKey::ProjectPath`]
 /// rooted at `value`; the family memo dedups across distinct entry paths.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct SurfaceMember {
     pub key: AuthoredPropertyKey,
     pub value: SemanticNodeId,
@@ -4191,6 +4241,38 @@ pub struct SurfaceMember {
 }
 
 impl SurfaceMember {
+    /// A fixture copy. Test builds only: production consumers borrow the
+    /// carrier from the lease that owns its operands.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn copy_for_tests(&self) -> Self {
+        self.clone()
+    }
+
+    /// Copy inside the owning crate. A consumer borrows this carrier from the lease that owns its graph operands; there is no public detached copy.
+    #[allow(
+        clippy::clone_on_copy,
+        reason = "an exhaustive field copy, so a new field cannot be skipped"
+    )]
+    pub(crate) fn clone(&self) -> Self {
+        Self {
+            key: self.key.clone(),
+            value: self.value.clone(),
+            optional: self.optional.clone(),
+            readonly: self.readonly.clone(),
+            method_kind: self.method_kind.clone(),
+            has_implementation_body: self.has_implementation_body.clone(),
+            visibility: self.visibility.clone(),
+            spans: self.spans.clone(),
+            declaration_origin: self.declaration_origin.clone(),
+            declared_in_macro_type_arg: self.declared_in_macro_type_arg.clone(),
+            merge_role: self.merge_role.clone(),
+            excess_origin: self.excess_origin.clone(),
+        }
+    }
+}
+
+impl SurfaceMember {
     /// Ordinary string key for publication surfaces whose external schema is
     /// string-only. Other key classes remain on the semantic member and must
     /// be rejected or handled by the caller.
@@ -4215,7 +4297,7 @@ impl SurfaceMember {
 /// on a surface. Carried as structured metadata rather than an opaque
 /// [`SemanticNodeId`] so consumers downstream of dispatch can read the
 /// declared `key_type` / `value_type` shape directly.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct IndexSignature {
     pub key_type: SemanticNodeId,
     pub value_type: SemanticNodeId,
@@ -4235,11 +4317,36 @@ pub struct IndexSignature {
     pub declaration_origin: Option<Arc<str>>,
 }
 
+impl IndexSignature {
+    /// A fixture copy. Test builds only: production consumers borrow the
+    /// carrier from the lease that owns its operands.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn copy_for_tests(&self) -> Self {
+        self.clone()
+    }
+
+    /// Copy inside the owning crate. A consumer borrows this carrier from the lease that owns its graph operands; there is no public detached copy.
+    #[allow(
+        clippy::clone_on_copy,
+        reason = "an exhaustive field copy, so a new field cannot be skipped"
+    )]
+    pub(crate) fn clone(&self) -> Self {
+        Self {
+            key_type: self.key_type.clone(),
+            value_type: self.value_type.clone(),
+            readonly: self.readonly.clone(),
+            spans: self.spans.clone(),
+            declaration_origin: self.declaration_origin.clone(),
+        }
+    }
+}
+
 /// One canonical entry in a resolved declaration surface.
 ///
 /// This stream is the ordering authority. Kind-specific collections on
 /// [`SurfaceView`] are lookup indexes and must not be joined positionally.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub enum SurfaceEntry {
     /// Named property or method member.
     Member(SurfaceMember),
@@ -4251,6 +4358,30 @@ pub enum SurfaceEntry {
     IndexSignature(IndexSignature),
 }
 
+impl SurfaceEntry {
+    /// A fixture copy. Test builds only: production consumers borrow the
+    /// carrier from the lease that owns its operands.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn copy_for_tests(&self) -> Self {
+        self.clone()
+    }
+
+    /// Copy inside the owning crate. A consumer borrows this carrier from the lease that owns its graph operands; there is no public detached copy.
+    #[allow(
+        clippy::clone_on_copy,
+        reason = "an exhaustive field copy, so a new field cannot be skipped"
+    )]
+    pub(crate) fn clone(&self) -> Self {
+        match self {
+            Self::Member(v0) => Self::Member(v0.clone()),
+            Self::CallSignature(v0) => Self::CallSignature(v0.clone()),
+            Self::ConstructSignature(v0) => Self::ConstructSignature(v0.clone()),
+            Self::IndexSignature(v0) => Self::IndexSignature(v0.clone()),
+        }
+    }
+}
+
 /// One-level surface view of a semantic node. The entry stream is ordered to
 /// keep declaration semantics and hashing stable.
 ///
@@ -4259,17 +4390,49 @@ pub enum SurfaceEntry {
 /// require either a [`ClosedSurfaceView`] witness or [`SurfaceKeyProjection`].
 /// The one registry publication materialisation happens at the query-engine
 /// terminal sink (`surface_view_to_registry_type_expr`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// A consumer borrows the stream and its indexes from the payload lease
+/// that owns them. The nested arrays are never handed out as shared
+/// `Arc`s and the view has no public copy, so no surface, member, entry or
+/// index signature outlives the read that owns its graph operands.
+#[derive(Debug, PartialEq, Eq)]
 pub struct SurfaceView {
     /// Canonical resolver-produced declaration stream. This is the primary
     /// stored surface; all kind-specific collections below are derived indexes.
-    pub entries: Arc<[SurfaceEntry]>,
+    pub(crate) entries: Arc<[SurfaceEntry]>,
     members: Arc<[SurfaceMember]>,
-    pub call_signatures: Arc<[SemanticNodeId]>,
-    pub construct_signatures: Arc<[SemanticNodeId]>,
-    pub index_signatures: Arc<[IndexSignature]>,
-    pub keyspace: Option<SemanticNodeId>,
+    pub(crate) call_signatures: Arc<[SemanticNodeId]>,
+    pub(crate) construct_signatures: Arc<[SemanticNodeId]>,
+    pub(crate) index_signatures: Arc<[IndexSignature]>,
+    pub(crate) keyspace: Option<SemanticNodeId>,
     has_index_signature: bool,
+}
+
+impl SurfaceView {
+    /// A fixture copy. Test builds only: production consumers borrow the
+    /// carrier from the lease that owns its operands.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn copy_for_tests(&self) -> Self {
+        self.clone()
+    }
+
+    /// Copy inside the owning crate. A consumer borrows this carrier from the lease that owns its graph operands; there is no public detached copy.
+    #[allow(
+        clippy::clone_on_copy,
+        reason = "an exhaustive field copy, so a new field cannot be skipped"
+    )]
+    pub(crate) fn clone(&self) -> Self {
+        Self {
+            entries: self.entries.clone(),
+            members: self.members.clone(),
+            call_signatures: self.call_signatures.clone(),
+            construct_signatures: self.construct_signatures.clone(),
+            index_signatures: self.index_signatures.clone(),
+            keyspace: self.keyspace.clone(),
+            has_index_signature: self.has_index_signature.clone(),
+        }
+    }
 }
 
 /// Construction-only carrier for [`SurfaceView`]. Semantic consumers receive
@@ -4523,7 +4686,7 @@ impl SurfaceView {
         // index order so `entries`-keyed hashing agrees with `from_entries`.
         let entries: Arc<[SurfaceEntry]> = members
             .iter()
-            .cloned()
+            .map(SurfaceMember::clone)
             .map(SurfaceEntry::Member)
             .chain(
                 call_signatures
@@ -4540,7 +4703,7 @@ impl SurfaceView {
             .chain(
                 index_signatures
                     .iter()
-                    .cloned()
+                    .map(IndexSignature::clone)
                     .map(SurfaceEntry::IndexSignature),
             )
             .collect();
@@ -4617,6 +4780,36 @@ impl SurfaceView {
     /// absence unless [`Self::closed`] succeeds.
     pub fn positive_members(&self) -> &[SurfaceMember] {
         &self.members
+    }
+
+    /// The canonical ordered declaration stream, borrowed.
+    #[must_use]
+    pub fn entries(&self) -> &[SurfaceEntry] {
+        &self.entries
+    }
+
+    /// Root call signatures, borrowed.
+    #[must_use]
+    pub fn call_signatures(&self) -> &[SemanticNodeId] {
+        &self.call_signatures
+    }
+
+    /// Root construct signatures, borrowed.
+    #[must_use]
+    pub fn construct_signatures(&self) -> &[SemanticNodeId] {
+        &self.construct_signatures
+    }
+
+    /// Index signatures, borrowed.
+    #[must_use]
+    pub fn index_signatures(&self) -> &[IndexSignature] {
+        &self.index_signatures
+    }
+
+    /// The surface's key-space node, if any.
+    #[must_use]
+    pub fn keyspace(&self) -> Option<SemanticNodeId> {
+        self.keyspace
     }
 
     /// The complete-domain witness. Total: every surface is closed by
@@ -4842,34 +5035,14 @@ macro_rules! test_surface_view {
         keyspace: $keyspace:expr,
         has_index_signature: $has_index_signature:expr $(,)?
     ) => {{
-        let members: std::sync::Arc<[$crate::semantic_query::SurfaceMember]> = $members;
-        let calls: std::sync::Arc<[$crate::semantic_query::SemanticNodeId]> = $calls;
-        let constructs: std::sync::Arc<[$crate::semantic_query::SemanticNodeId]> = $constructs;
-        let indexes: std::sync::Arc<[$crate::semantic_query::IndexSignature]> = $indexes;
-        let entries = members
-            .iter()
-            .cloned()
-            .map($crate::semantic_query::SurfaceEntry::Member)
-            .chain(
-                calls
-                    .iter()
-                    .copied()
-                    .map($crate::semantic_query::SurfaceEntry::CallSignature),
-            )
-            .chain(
-                constructs
-                    .iter()
-                    .copied()
-                    .map($crate::semantic_query::SurfaceEntry::ConstructSignature),
-            )
-            .chain(
-                indexes
-                    .iter()
-                    .cloned()
-                    .map($crate::semantic_query::SurfaceEntry::IndexSignature),
-            )
-            .collect();
-        $crate::semantic_query::SurfaceView::from_entries(entries, $keyspace, $has_index_signature)
+        $crate::semantic_query::SurfaceView::new(
+            $members,
+            $calls,
+            $constructs,
+            $indexes,
+            $keyspace,
+            $has_index_signature,
+        )
     }};
 }
 
@@ -5344,13 +5517,13 @@ pub use crate::project_semantic_dispatch::cost_receipt::ReadReceipt;
 pub struct CacheRead<T> {
     /// Internal graph and signature-version ownership, independent of cache
     /// admission. Production canonical close can still revoke graph slots.
-    pub lease: crate::semantic_query_memo::delivery_lease::SemanticDeliveryLease,
-    pub value: T,
-    pub dep_signature: DepSignature,
+    pub(crate) lease: crate::semantic_query_memo::delivery_lease::SemanticDeliveryLease,
+    pub(crate) value: T,
+    pub(crate) dep_signature: DepSignature,
     /// Walker diagnostics produced during this query's computation.
     /// Stored on the memo entry; warm reads replay transparently. Empty
     /// for queries that don't run the walker.
-    pub walker_diagnostics: Arc<[crate::project_semantic_dispatch::walk::ShallowDiagnostic]>,
+    pub(crate) walker_diagnostics: Arc<[crate::project_semantic_dispatch::walk::ShallowDiagnostic]>,
     /// **Inner-memo non-cacheability.** `true` when THIS query's memo
     /// entry must not be admitted/shared — either because the build hit a
     /// fatal `QueryError` / pathological-input cap, OR because a perfectly
@@ -5360,20 +5533,97 @@ pub struct CacheRead<T> {
     /// queries. The memo refuses insertion when this is true; the value
     /// still flows back to the caller. This is NOT the partial-result
     /// signal — see [`Self::result_is_partial`].
-    pub cache_suppress: bool,
+    pub(crate) cache_suppress: bool,
     /// The adopted producer fact. Compatibility summaries are projections of
     /// this disposition; an unavailable read cannot offer its candidate value.
-    pub fact_status: FactStatus,
+    pub(crate) fact_status: FactStatus,
     /// **The value's cost receipt.** A stored, joined or freshly built
     /// result is [`ReadReceipt::Priced`] with what computing it cost: the
     /// consumer replays it into its connected demand before using the
     /// value and records it as a prerequisite. Reads that carry no
     /// computation (recursion carriers, cancellation, typed refusals) are
     /// [`ReadReceipt::Unpriced`].
-    pub receipt: ReadReceipt,
+    pub(crate) receipt: ReadReceipt,
 }
 
 impl<T> CacheRead<T> {
+    /// The delivered value, borrowed from the read that owns its operands.
+    #[must_use]
+    pub fn value(&self) -> &T {
+        &self.value
+    }
+
+    /// The delivery's graph and signature-version ownership.
+    #[must_use]
+    pub fn lease(&self) -> &crate::semantic_query_memo::delivery_lease::SemanticDeliveryLease {
+        &self.lease
+    }
+
+    /// Borrow a node this delivery owns: its value or a diagnostic operand.
+    /// An ordinal the delivery does not own is foreign.
+    pub fn node(
+        &self,
+        id: SemanticNodeId,
+    ) -> Result<crate::semantic_query_memo::node_roots::NodeRef<'_>, QueryError> {
+        self.lease.node_ref(id)
+    }
+
+    /// The dependency facts the value was computed from: file versions,
+    /// never graph operands.
+    #[must_use]
+    pub fn dep_signature(&self) -> &DepSignature {
+        &self.dep_signature
+    }
+
+    /// The walker diagnostics, borrowed from the read that owns their
+    /// operands.
+    #[must_use]
+    pub fn walker_diagnostics(
+        &self,
+    ) -> &[crate::project_semantic_dispatch::walk::ShallowDiagnostic] {
+        &self.walker_diagnostics
+    }
+
+    /// Whether this read's memo entry must not be admitted or shared.
+    #[must_use]
+    pub fn cache_suppress(&self) -> bool {
+        self.cache_suppress
+    }
+
+    /// The adopted producer fact.
+    #[must_use]
+    pub fn fact_status(&self) -> &FactStatus {
+        &self.fact_status
+    }
+
+    /// The value's cost receipt.
+    #[must_use]
+    pub fn receipt(&self) -> &ReadReceipt {
+        &self.receipt
+    }
+
+    /// A fixture read that owns no graph operands. Test builds only.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn unleased_for_tests(
+        value: T,
+        dep_signature: DepSignature,
+        walker_diagnostics: Arc<[crate::project_semantic_dispatch::walk::ShallowDiagnostic]>,
+        cache_suppress: bool,
+        fact_status: FactStatus,
+        receipt: ReadReceipt,
+    ) -> Self {
+        Self {
+            lease: Default::default(),
+            value,
+            dep_signature,
+            walker_diagnostics,
+            cache_suppress,
+            fact_status,
+            receipt,
+        }
+    }
+
     /// Convert a `(value, dep_signature)` pair into a `CacheRead` with
     /// no walker diagnostics and `cache_suppress = false`. Used by
     /// build closures for queries that do not run the shallow-mode
@@ -5637,6 +5887,69 @@ pub struct SemanticGraphStats {
 /// Structured query-level failure. Distinct from panics — callers decide
 /// whether an error maps to a top-level public failure or to an opaque
 /// semantic node in the result.
+/// The type arguments a recursive reference names. Every copy of the
+/// error carries them, but no public accessor hands the operands out: the
+/// node that carries the error owns them, and a reader reaches them only
+/// through that node's lease.
+#[derive(Clone, PartialEq, Eq, Hash, Default)]
+pub struct RecursiveRefArgs(Arc<[SemanticNodeId]>);
+
+impl RecursiveRefArgs {
+    /// The operands, for engine-internal construction and traversal.
+    pub(crate) fn operands(&self) -> &[SemanticNodeId] {
+        &self.0
+    }
+
+    /// The operands of a fixture error.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn nodes_for_tests(&self) -> &[SemanticNodeId] {
+        &self.0
+    }
+
+    /// How many type arguments the reference names.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Whether the reference names no type argument.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl std::fmt::Debug for RecursiveRefArgs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl From<Arc<[SemanticNodeId]>> for RecursiveRefArgs {
+    fn from(nodes: Arc<[SemanticNodeId]>) -> Self {
+        Self(nodes)
+    }
+}
+
+impl From<Vec<SemanticNodeId>> for RecursiveRefArgs {
+    fn from(nodes: Vec<SemanticNodeId>) -> Self {
+        Self(Arc::from(nodes))
+    }
+}
+
+impl From<&[SemanticNodeId]> for RecursiveRefArgs {
+    fn from(nodes: &[SemanticNodeId]) -> Self {
+        Self(Arc::from(nodes))
+    }
+}
+
+impl<const N: usize> From<[SemanticNodeId; N]> for RecursiveRefArgs {
+    fn from(nodes: [SemanticNodeId; N]) -> Self {
+        Self(Arc::from(Vec::from(nodes)))
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum QueryError {
     /// Execution validity refused delivery, independently of semantic quality.
@@ -5675,7 +5988,7 @@ pub enum QueryError {
     /// `[[string]]`); empty for a reference without type arguments.
     RecursiveRef {
         name: Arc<str>,
-        args: Arc<[SemanticNodeId]>,
+        args: RecursiveRefArgs,
     },
     /// Catch-all for text-bearing failures surfaced to the caller.
     Other(Arc<str>),
@@ -7423,9 +7736,13 @@ impl FlowNarrowingKey {
     /// this the order-sensitive `Arc` derive would over-key equivalent flow
     /// axes.
     #[must_use]
-    pub fn new(facts: Arc<[SemanticNodeId]>) -> Self {
+    pub fn new(
+        graph: &crate::semantic_query_memo::SemanticGraphStore,
+        facts: Arc<[SemanticNodeId]>,
+    ) -> Self {
         let facts = canonical_node_set(facts);
-        let roots = crate::semantic_query_memo::node_roots::IdentityNodeRoots::scoped(
+        let roots = crate::semantic_query_memo::node_roots::IdentityNodeRoots::in_graph(
+            graph,
             facts.iter().copied(),
         );
         Self(facts, roots)
@@ -7482,9 +7799,13 @@ impl ContextualTypingKey {
     /// constructions of the same set (`[a, b]` / `[b, a]`) are the SAME key
     /// (the §2.58 "canonicalize before key construction" contract).
     #[must_use]
-    pub fn new(targets: Arc<[SemanticNodeId]>) -> Self {
+    pub fn new(
+        graph: &crate::semantic_query_memo::SemanticGraphStore,
+        targets: Arc<[SemanticNodeId]>,
+    ) -> Self {
         let targets = canonical_node_set(targets);
-        let roots = crate::semantic_query_memo::node_roots::IdentityNodeRoots::scoped(
+        let roots = crate::semantic_query_memo::node_roots::IdentityNodeRoots::in_graph(
+            graph,
             targets.iter().copied(),
         );
         Self(targets, roots)
@@ -7737,9 +8058,13 @@ impl InferableParamSetId {
     /// constructions of the same open-parameter set are the SAME key (the
     /// §2.58 "canonicalize before key construction" contract).
     #[must_use]
-    pub fn new(params: Arc<[SemanticNodeId]>) -> Self {
+    pub fn new(
+        graph: &crate::semantic_query_memo::SemanticGraphStore,
+        params: Arc<[SemanticNodeId]>,
+    ) -> Self {
         let params = canonical_node_set(params);
-        let roots = crate::semantic_query_memo::node_roots::IdentityNodeRoots::scoped(
+        let roots = crate::semantic_query_memo::node_roots::IdentityNodeRoots::in_graph(
+            graph,
             params.iter().copied(),
         );
         Self(params, roots)
@@ -9203,9 +9528,12 @@ impl SemanticQueryKey {
     /// Checker-reduction `ReduceIntersection` over a flat operand list.
     /// Binary/unary/empty lists allocate no recipe.
     #[must_use]
-    pub fn reduce_intersection_operands(members: Arc<[SemanticNodeId]>) -> Self {
+    pub fn reduce_intersection_operands(
+        graph: &crate::semantic_query_memo::SemanticGraphStore,
+        members: Arc<[SemanticNodeId]>,
+    ) -> Self {
         Self::ReduceIntersection {
-            input: IntersectionInputRef::from_operands(&members),
+            input: IntersectionInputRef::from_operands(graph, &members),
             purpose: IntersectionPurpose::CheckerReduction,
             context: SemanticContextId::production(),
         }
@@ -9447,6 +9775,118 @@ pub enum UndecidedReason {
     OpenAssumption,
 }
 
+/// A nested array of a graph payload: tuple elements, signature parameters
+/// and type parameters, intrinsic / instantiation / class-expression
+/// arguments, template expressions and merged contributors.
+///
+/// It is borrowed through the read that owns its payload (`Deref` to a
+/// slice) and has no public copy, and its member records have none either,
+/// so neither the array nor a member can be carried away from that owner.
+/// Construction shares the allocation inside the engine.
+pub struct PayloadArray<T>(Arc<[T]>);
+
+impl<T> PayloadArray<T> {
+    /// Share the allocation with a payload the engine is building.
+    pub(crate) fn share(&self) -> Self {
+        Self(Arc::clone(&self.0))
+    }
+
+    /// The shared allocation, for engine-internal construction.
+    pub(crate) fn as_arc(&self) -> &Arc<[T]> {
+        &self.0
+    }
+
+    /// Share the allocation with a fixture payload.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn share_for_tests(&self) -> Self {
+        self.share()
+    }
+}
+
+impl<T> std::ops::Deref for PayloadArray<T> {
+    type Target = [T];
+    fn deref(&self) -> &[T] {
+        &self.0
+    }
+}
+
+impl<T> AsRef<[T]> for PayloadArray<T> {
+    fn as_ref(&self) -> &[T] {
+        &self.0
+    }
+}
+
+impl<'a, T> IntoIterator for &'a PayloadArray<T> {
+    type Item = &'a T;
+    type IntoIter = std::slice::Iter<'a, T>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+impl<T: std::fmt::Debug> std::fmt::Debug for PayloadArray<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl<T: PartialEq> PartialEq for PayloadArray<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl<T: Eq> Eq for PayloadArray<T> {}
+
+impl<T: std::hash::Hash> std::hash::Hash for PayloadArray<T> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.hash(state);
+    }
+}
+
+impl<T> Default for PayloadArray<T> {
+    fn default() -> Self {
+        Self(Arc::from(Vec::new()))
+    }
+}
+
+impl<T> From<Arc<[T]>> for PayloadArray<T> {
+    fn from(items: Arc<[T]>) -> Self {
+        Self(items)
+    }
+}
+
+impl<T> From<Vec<T>> for PayloadArray<T> {
+    fn from(items: Vec<T>) -> Self {
+        Self(Arc::from(items))
+    }
+}
+
+impl<T> From<Box<[T]>> for PayloadArray<T> {
+    fn from(items: Box<[T]>) -> Self {
+        Self(Arc::from(items))
+    }
+}
+
+impl<T, const N: usize> From<[T; N]> for PayloadArray<T> {
+    fn from(items: [T; N]) -> Self {
+        Self(Arc::from(Vec::from(items)))
+    }
+}
+
+impl<T: Copy> From<&[T]> for PayloadArray<T> {
+    fn from(items: &[T]) -> Self {
+        Self(Arc::from(items))
+    }
+}
+
+impl<T> FromIterator<T> for PayloadArray<T> {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        Self(iter.into_iter().collect())
+    }
+}
+
 /// One element of a [`SemanticNodeData::Tuple`] shell.
 ///
 /// Preserves the declaration-site metadata the dispatcher needs to render
@@ -9455,12 +9895,31 @@ pub enum UndecidedReason {
 /// regular [`SemanticNodeId`] under the lazy-materialisation rule — the
 /// element's body is not eagerly recursed into when the owning tuple shell
 /// is interned.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct TupleElement {
     pub label: Option<Arc<str>>,
     pub value: SemanticNodeId,
     pub optional: bool,
     pub rest: bool,
+}
+
+impl TupleElement {
+    /// A fixture copy of a payload member record.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn copy_for_tests(&self) -> Self {
+        self.copy()
+    }
+
+    /// An engine-internal copy for a payload the engine is building.
+    pub(crate) fn copy(&self) -> Self {
+        Self {
+            label: self.label.clone(),
+            value: self.value,
+            optional: self.optional,
+            rest: self.rest,
+        }
+    }
 }
 
 /// Immutable semantic-node payload. Storage for this enum is owned by the
@@ -9500,7 +9959,7 @@ pub(crate) fn authored_property_key_child(key: &AuthoredPropertyKey) -> Option<S
 }
 
 /// Lossless authored property write in an object construction.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct AuthoredPropertyEffect {
     pub key: AuthoredPropertyKey,
     pub value: SemanticNodeId,
@@ -9515,7 +9974,7 @@ pub struct AuthoredPropertyEffect {
 }
 
 /// Lossless authored method write in an object construction.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct AuthoredMethodEffect {
     pub key: AuthoredPropertyKey,
     pub signature: SemanticNodeId,
@@ -9531,7 +9990,7 @@ pub struct AuthoredMethodEffect {
 
 /// Lossless authored getter or setter write in an object construction. The
 /// enclosing effect variant carries the accessor kind.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct AuthoredAccessorEffect {
     pub key: AuthoredPropertyKey,
     pub signature: SemanticNodeId,
@@ -9546,7 +10005,7 @@ pub struct AuthoredAccessorEffect {
 }
 
 /// Lossless authored index signature in an object construction.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct AuthoredIndexEffect {
     pub key_type: SemanticNodeId,
     pub value_type: SemanticNodeId,
@@ -9556,7 +10015,7 @@ pub struct AuthoredIndexEffect {
 }
 
 /// One source-ordered effect in a spread-bearing object construction.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub enum ObjectConstructionEffect {
     DirectProperty(AuthoredPropertyEffect),
     DirectMethod(AuthoredMethodEffect),
@@ -9566,6 +10025,101 @@ pub enum ObjectConstructionEffect {
     DirectCall(SemanticNodeId),
     DirectConstruct(SemanticNodeId),
     Spread(SemanticNodeId),
+}
+
+impl AuthoredPropertyEffect {
+    pub(crate) fn copy(&self) -> Self {
+        Self {
+            key: self.key.clone(),
+            value: self.value,
+            optional: self.optional,
+            readonly: self.readonly,
+            visibility: self.visibility,
+            spans: self.spans,
+            declaration_origin: self.declaration_origin.clone(),
+            declared_in_macro_type_arg: self.declared_in_macro_type_arg,
+            merge_role: self.merge_role,
+            excess_origin: self.excess_origin,
+        }
+    }
+}
+
+impl AuthoredMethodEffect {
+    pub(crate) fn copy(&self) -> Self {
+        Self {
+            key: self.key.clone(),
+            signature: self.signature,
+            optional: self.optional,
+            has_implementation_body: self.has_implementation_body,
+            visibility: self.visibility,
+            spans: self.spans,
+            declaration_origin: self.declaration_origin.clone(),
+            declared_in_macro_type_arg: self.declared_in_macro_type_arg,
+            merge_role: self.merge_role,
+            excess_origin: self.excess_origin,
+        }
+    }
+}
+
+impl AuthoredAccessorEffect {
+    pub(crate) fn copy(&self) -> Self {
+        Self {
+            key: self.key.clone(),
+            signature: self.signature,
+            optional: self.optional,
+            has_implementation_body: self.has_implementation_body,
+            visibility: self.visibility,
+            spans: self.spans,
+            declaration_origin: self.declaration_origin.clone(),
+            declared_in_macro_type_arg: self.declared_in_macro_type_arg,
+            merge_role: self.merge_role,
+            excess_origin: self.excess_origin,
+        }
+    }
+}
+
+impl AuthoredIndexEffect {
+    pub(crate) fn copy(&self) -> Self {
+        Self {
+            key_type: self.key_type,
+            value_type: self.value_type,
+            readonly: self.readonly,
+            spans: self.spans,
+            declaration_origin: self.declaration_origin.clone(),
+        }
+    }
+}
+
+impl ObjectConstructionEffect {
+    /// A fixture copy of a program effect.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn copy_for_tests(&self) -> Self {
+        self.copy()
+    }
+
+    /// An engine-internal copy for a program the engine is building.
+    pub(crate) fn copy(&self) -> Self {
+        match self {
+            Self::DirectProperty(effect) => Self::DirectProperty(effect.copy()),
+            Self::DirectMethod(effect) => Self::DirectMethod(effect.copy()),
+            Self::DirectGet(effect) => Self::DirectGet(effect.copy()),
+            Self::DirectSet(effect) => Self::DirectSet(effect.copy()),
+            Self::DirectIndex(effect) => Self::DirectIndex(effect.copy()),
+            Self::DirectCall(node) => Self::DirectCall(*node),
+            Self::DirectConstruct(node) => Self::DirectConstruct(*node),
+            Self::Spread(node) => Self::Spread(*node),
+        }
+    }
+}
+
+impl ObjectSpreadProgram {
+    /// Share the program's effects with a payload the engine is building.
+    pub(crate) fn share(&self) -> Self {
+        Self {
+            effects: self.effects.share(),
+        }
+    }
 }
 
 impl ObjectConstructionEffect {
@@ -9601,9 +10155,9 @@ impl ObjectConstructionEffect {
 }
 
 /// Immutable source-ordered authority for a spread-bearing object.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct ObjectSpreadProgram {
-    pub effects: Arc<[ObjectConstructionEffect]>,
+    pub effects: PayloadArray<ObjectConstructionEffect>,
 }
 
 impl ObjectSpreadProgram {
@@ -9628,7 +10182,7 @@ impl ObjectSpreadProgram {
             .iter()
             .map(|effect| match effect {
                 ObjectConstructionEffect::DirectProperty(effect) => {
-                    let mut effect = effect.clone();
+                    let mut effect = effect.copy();
                     if let AuthoredPropertyKey::Computed(node) = &mut effect.key {
                         *node = map(*node);
                     }
@@ -9636,7 +10190,7 @@ impl ObjectSpreadProgram {
                     ObjectConstructionEffect::DirectProperty(effect)
                 }
                 ObjectConstructionEffect::DirectMethod(effect) => {
-                    let mut effect = effect.clone();
+                    let mut effect = effect.copy();
                     if let AuthoredPropertyKey::Computed(node) = &mut effect.key {
                         *node = map(*node);
                     }
@@ -9644,7 +10198,7 @@ impl ObjectSpreadProgram {
                     ObjectConstructionEffect::DirectMethod(effect)
                 }
                 ObjectConstructionEffect::DirectGet(effect) => {
-                    let mut effect = effect.clone();
+                    let mut effect = effect.copy();
                     if let AuthoredPropertyKey::Computed(node) = &mut effect.key {
                         *node = map(*node);
                     }
@@ -9652,7 +10206,7 @@ impl ObjectSpreadProgram {
                     ObjectConstructionEffect::DirectGet(effect)
                 }
                 ObjectConstructionEffect::DirectSet(effect) => {
-                    let mut effect = effect.clone();
+                    let mut effect = effect.copy();
                     if let AuthoredPropertyKey::Computed(node) = &mut effect.key {
                         *node = map(*node);
                     }
@@ -9660,7 +10214,7 @@ impl ObjectSpreadProgram {
                     ObjectConstructionEffect::DirectSet(effect)
                 }
                 ObjectConstructionEffect::DirectIndex(effect) => {
-                    let mut effect = effect.clone();
+                    let mut effect = effect.copy();
                     effect.key_type = map(effect.key_type);
                     effect.value_type = map(effect.value_type);
                     ObjectConstructionEffect::DirectIndex(effect)
@@ -9677,12 +10231,12 @@ impl ObjectSpreadProgram {
             })
             .collect::<Vec<_>>();
         Self {
-            effects: Arc::from(effects.into_boxed_slice()),
+            effects: effects.into(),
         }
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum SemanticNodeData {
     /// A compiler-native intrinsic operation applied to its operands, kept
     /// DEFERRED because the answer depends on a binder the substitution has
@@ -9695,7 +10249,7 @@ pub enum SemanticNodeData {
     /// [`Self::InstantiationRef`] of a lib alias (a declaration application).
     IntrinsicApplication {
         op: CompilerIntrinsicTypeOp,
-        args: Arc<[SemanticNodeId]>,
+        args: PayloadArray<SemanticNodeId>,
     },
     Alias(SemanticNodeId),
     Object(SurfaceView),
@@ -9751,7 +10305,7 @@ pub enum SemanticNodeData {
     /// going through a side channel. Each element's `value` is a regular
     /// [`SemanticNodeId`] under the lazy-materialisation rule.
     Tuple {
-        elements: Arc<[TupleElement]>,
+        elements: PayloadArray<TupleElement>,
         readonly: bool,
     },
     /// Template-literal shell. Carries the
@@ -9762,7 +10316,7 @@ pub enum SemanticNodeData {
     /// deferred.
     TemplateLiteral {
         quasis: Arc<[Arc<str>]>,
-        expressions: Arc<[SemanticNodeId]>,
+        expressions: PayloadArray<SemanticNodeId>,
     },
     /// Deferred `keyof` shell used when the operand still carries open
     /// type-parameter structure and cannot be collapsed to a concrete key
@@ -9932,9 +10486,9 @@ pub enum SemanticNodeData {
     /// [`TypeExpr::ConstructorType`](verter_type_expr::TypeExpr::ConstructorType).
     Signature {
         kind: SignatureKind,
-        params: Arc<[FunctionParam]>,
+        params: PayloadArray<FunctionParam>,
         return_type: SemanticNodeId,
-        type_parameters: Arc<[TypeParamDecl]>,
+        type_parameters: PayloadArray<TypeParamDecl>,
         /// The authored position this signature was lowered from, when the
         /// lowering carried occurrence-grade provenance (the locator-driven
         /// rails). `None` for a signature without recoverable occurrence
@@ -10007,7 +10561,7 @@ pub enum SemanticNodeData {
     /// Raises to `TypeExpr::Ref { name: base.decl_name, type_arguments: [...raised args] }`.
     InstantiationRef {
         base: DeclIdentity,
-        args: Arc<[SemanticNodeId]>,
+        args: PayloadArray<SemanticNodeId>,
     },
 
     /// The INSTANCE type of a class expression (`return class extends
@@ -10034,7 +10588,7 @@ pub enum SemanticNodeData {
         /// [`ClassExpressionIdentity::outer_clauses`] order), then one per
         /// own type parameter. Where the class is authored each is its
         /// parameter itself.
-        type_arguments: Arc<[SemanticNodeId]>,
+        type_arguments: PayloadArray<SemanticNodeId>,
         surface: SemanticNodeId,
     },
 
@@ -10047,7 +10601,7 @@ pub enum SemanticNodeData {
     /// single declaration.
     MergedDecl {
         /// Lowered contributor bodies, in source order.
-        contributors: Arc<[SemanticNodeId]>,
+        contributors: PayloadArray<SemanticNodeId>,
     },
 
     /// Unresolved bare-name reference carrier.
@@ -10126,6 +10680,158 @@ pub enum SemanticNodeData {
 }
 
 impl SemanticNodeData {
+    /// A fixture copy. Test builds only: production consumers borrow the
+    /// carrier from the lease that owns its operands.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn copy_for_tests(&self) -> Self {
+        self.clone()
+    }
+
+    /// Copy inside the owning crate. A consumer borrows this carrier from the lease that owns its graph operands; there is no public detached copy.
+    #[allow(
+        clippy::clone_on_copy,
+        reason = "an exhaustive field copy, so a new field cannot be skipped"
+    )]
+    pub(crate) fn clone(&self) -> Self {
+        match self {
+            Self::IntrinsicApplication { op, args } => Self::IntrinsicApplication {
+                op: op.clone(),
+                args: args.share(),
+            },
+            Self::Alias(v0) => Self::Alias(v0.clone()),
+            Self::Object(v0) => Self::Object(v0.clone()),
+            Self::ObjectSpreadProgram(v0) => Self::ObjectSpreadProgram(v0.share()),
+            Self::Union(v0) => Self::Union(v0.share()),
+            Self::Intersection(v0) => Self::Intersection(v0.share()),
+            Self::Primitive(v0) => Self::Primitive(v0.clone()),
+            Self::Literal(v0) => Self::Literal(v0.clone()),
+            Self::EnumLiteral(v0) => Self::EnumLiteral(v0.clone()),
+            Self::Opaque(v0) => Self::Opaque(v0.clone()),
+            Self::Array { element, readonly } => Self::Array {
+                element: element.clone(),
+                readonly: readonly.clone(),
+            },
+            Self::Tuple { elements, readonly } => Self::Tuple {
+                elements: elements.share(),
+                readonly: readonly.clone(),
+            },
+            Self::TemplateLiteral {
+                quasis,
+                expressions,
+            } => Self::TemplateLiteral {
+                quasis: quasis.clone(),
+                expressions: expressions.share(),
+            },
+            Self::KeyOf { base } => Self::KeyOf { base: base.clone() },
+            Self::IndexedAccess { object, index } => Self::IndexedAccess {
+                object: object.clone(),
+                index: index.clone(),
+            },
+            Self::Mapped { source, mapper } => Self::Mapped {
+                source: source.clone(),
+                mapper: mapper.clone(),
+            },
+            Self::TypeOf(v0) => Self::TypeOf(v0.clone()),
+            Self::TypeOfNominal(v0) => Self::TypeOfNominal(v0.clone()),
+            Self::TypeParam {
+                decl,
+                param_index,
+                constraint,
+                default,
+                display_name,
+            } => Self::TypeParam {
+                decl: decl.clone(),
+                param_index: param_index.clone(),
+                constraint: constraint.clone(),
+                default: default.clone(),
+                display_name: display_name.clone(),
+            },
+            Self::Infer {
+                name,
+                binder,
+                constraint,
+            } => Self::Infer {
+                name: name.clone(),
+                binder: binder.clone(),
+                constraint: constraint.clone(),
+            },
+            Self::InferRef { name, binder } => Self::InferRef {
+                name: name.clone(),
+                binder: binder.clone(),
+            },
+            Self::Conditional {
+                check,
+                extends,
+                true_branch_ref,
+                false_branch_ref,
+                distributive,
+                pending,
+            } => Self::Conditional {
+                check: check.clone(),
+                extends: extends.clone(),
+                true_branch_ref: true_branch_ref.clone(),
+                false_branch_ref: false_branch_ref.clone(),
+                distributive: distributive.clone(),
+                pending: pending.clone(),
+            },
+            Self::Signature {
+                kind,
+                params,
+                return_type,
+                type_parameters,
+                occurrence,
+                return_carrier,
+                signature_span,
+                return_type_span,
+                predicate,
+                is_abstract,
+            } => Self::Signature {
+                kind: kind.clone(),
+                params: params.share(),
+                return_type: return_type.clone(),
+                type_parameters: type_parameters.share(),
+                occurrence: occurrence.clone(),
+                return_carrier: return_carrier.clone(),
+                signature_span: signature_span.clone(),
+                return_type_span: return_type_span.clone(),
+                predicate: predicate.clone(),
+                is_abstract: is_abstract.clone(),
+            },
+            Self::DeferredCallable(v0) => Self::DeferredCallable(v0.clone()),
+            Self::DeclRef { identity } => Self::DeclRef {
+                identity: identity.clone(),
+            },
+            Self::InstantiationRef { base, args } => Self::InstantiationRef {
+                base: base.clone(),
+                args: args.share(),
+            },
+            Self::ClassExpressionInstance {
+                identity,
+                type_arguments,
+                surface,
+            } => Self::ClassExpressionInstance {
+                identity: identity.clone(),
+                type_arguments: type_arguments.share(),
+                surface: surface.clone(),
+            },
+            Self::MergedDecl { contributors } => Self::MergedDecl {
+                contributors: contributors.share(),
+            },
+            Self::BareRef(v0) => Self::BareRef(v0.clone()),
+            Self::ImportType(v0) => Self::ImportType(v0.clone()),
+            Self::RawFallback { value } => Self::RawFallback {
+                value: value.clone(),
+            },
+            Self::SyntheticBinding { id, value_node } => Self::SyntheticBinding {
+                id: id.clone(),
+                value_node: value_node.clone(),
+            },
+        }
+    }
+}
+
+impl SemanticNodeData {
     /// The ONE constructor for [`Self::SyntheticBinding`]: the carrier for
     /// `key`, or the typed [`QueryError::StaleSemanticOperand`] refusal when
     /// the carrier's backing value is a node the arena could still allocate
@@ -10160,7 +10866,10 @@ impl SemanticNodeData {
         op: CompilerIntrinsicTypeOp,
         args: Arc<[SemanticNodeId]>,
     ) -> Option<Self> {
-        (args.len() == op.arity()).then_some(Self::IntrinsicApplication { op, args })
+        (args.len() == op.arity()).then_some(Self::IntrinsicApplication {
+            op,
+            args: PayloadArray::from(args),
+        })
     }
 
     /// The kind-erased composite payload of a [`Self::Union`] /
@@ -10649,7 +11358,7 @@ pub enum SignatureKind {
 }
 
 /// Parameter of a [`SemanticNodeData::Signature`].
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct FunctionParam {
     pub name: Option<Arc<str>>,
     pub ty: SemanticNodeId,
@@ -10666,6 +11375,27 @@ pub struct FunctionParam {
     /// `HasLiteralTypes`). A declaration fact: an instantiation keeps it, so
     /// `(x: T)` instantiated at `'a'` is not literal-declared.
     pub declared_literal: bool,
+}
+
+impl FunctionParam {
+    /// A fixture copy of a payload member record.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn copy_for_tests(&self) -> Self {
+        self.copy()
+    }
+
+    /// An engine-internal copy for a payload the engine is building.
+    pub(crate) fn copy(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            ty: self.ty,
+            optional: self.optional,
+            rest: self.rest,
+            span: self.span,
+            declared_literal: self.declared_literal,
+        }
+    }
 }
 
 /// Whether a declared parameter type is a literal type in TypeScript's
@@ -10767,7 +11497,7 @@ pub fn split_this_receiver(params: &[FunctionParam]) -> (Option<&FunctionParam>,
 }
 
 /// Type-parameter declaration on a [`SemanticNodeData::Signature`].
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct TypeParamDecl {
     pub name: Arc<str>,
     /// The exact interned [`SemanticNodeData::TypeParam`] node for this
@@ -10779,6 +11509,26 @@ pub struct TypeParamDecl {
     /// The authored `<const T>` modifier. PER-PARAMETER (`<const T, U>`
     /// is valid) — never a session-wide flag.
     pub is_const: bool,
+}
+
+impl TypeParamDecl {
+    /// A fixture copy of a payload member record.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn copy_for_tests(&self) -> Self {
+        self.copy()
+    }
+
+    /// An engine-internal copy for a payload the engine is building.
+    pub(crate) fn copy(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            param: self.param,
+            constraint: self.constraint,
+            default: self.default,
+            is_const: self.is_const,
+        }
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -10805,10 +11555,10 @@ pub trait TypeNavigator {
     fn choose_next_hop(&self, path: &[PathSegment], at: SemanticNodeId) -> HopDecision;
 }
 
-/// Read access to the shared semantic graph. Callers that hold a
-/// [`SemanticNodeId`] use this trait to inspect the resolved node data
-/// without spawning private side channels.
-pub trait SemanticGraphRead {
+/// Read access to the shared semantic graph by construction ordinal; the
+/// missing-id fabrication fixture reads through it.
+#[cfg(test)]
+pub(crate) trait SemanticGraphRead {
     fn node_data(&self, node: SemanticNodeId) -> Arc<SemanticNodeData>;
 }
 
@@ -11035,7 +11785,7 @@ mod tests {
             },
             QueryError::RecursiveRef {
                 name: Arc::from("R"),
-                args: std::sync::Arc::from([]),
+                args: Default::default(),
             },
             QueryError::Other(Arc::from("x")),
             QueryError::DeclPlaceholder {

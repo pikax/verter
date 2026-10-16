@@ -96,7 +96,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         match self.graph().node_data(node).as_deref() {
             Some(SemanticNodeData::Union(list)) => self
                 .graph()
-                .intern_node_with_scope(SemanticNodeData::Union(list.clone()), scope.clone()),
+                .intern_node_with_scope(SemanticNodeData::Union(list.share()), scope.clone()),
             _ => node,
         }
     }
@@ -494,8 +494,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     members: Arc::from(std::mem::take(run).into_boxed_slice()),
                 };
                 let node = self.compose_object_fact_node(&run_fact, ctx).node();
-                let Some(SemanticNodeData::Object(surface)) =
-                    self.graph().node_data(node).as_deref().cloned()
+                let Some(SemanticNodeData::Object(surface)) = self
+                    .graph()
+                    .node_data(node)
+                    .as_deref()
+                    .map(crate::semantic_query::SemanticNodeData::clone)
                 else {
                     return;
                 };
@@ -526,7 +529,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         flush_run(&mut run, &mut effects);
         HotTypeRef::new(self.graph().intern_node_with_scope(
             SemanticNodeData::ObjectSpreadProgram(crate::semantic_query::ObjectSpreadProgram {
-                effects: Arc::from(effects),
+                effects: crate::semantic_query::PayloadArray::from(effects),
             }),
             scope.clone(),
         ))
@@ -899,9 +902,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         HotTypeRef::new(self.graph().intern_node_with_scope(
             SemanticNodeData::Signature {
                 kind,
-                params: Arc::from(params.into_boxed_slice()),
+                params: crate::semantic_query::PayloadArray::from(params.into_boxed_slice()),
                 return_type,
-                type_parameters: Arc::from(type_parameters.into_boxed_slice()),
+                type_parameters: crate::semantic_query::PayloadArray::from(
+                    type_parameters.into_boxed_slice(),
+                ),
                 // The fact-composition path does not carry occurrence-grade
                 // provenance today; the overload-set producer treats an
                 // occurrence-less candidate as an honest `Miss`.
@@ -946,7 +951,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             .collect();
         HotTypeRef::new(self.graph().intern_node_with_scope(
             SemanticNodeData::Tuple {
-                elements: Arc::from(elements.into_boxed_slice()),
+                elements: crate::semantic_query::PayloadArray::from(elements.into_boxed_slice()),
                 readonly: tuple.readonly,
             },
             scope,

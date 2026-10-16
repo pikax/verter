@@ -952,6 +952,8 @@ pub struct ProjectTypeStore {
     /// every consumer that resolves a `SemanticQueryKey` through the
     /// shared query API.
     semantic_graph: Arc<SemanticGraphStore>,
+    /// The construction lane of `semantic_graph`, minted with it.
+    construction: verter_type_engine::semantic_query_memo::node_roots::NodeConstructionGrant,
     /// Owner direct-import surface cache. Direct owner imports
     /// resolve exactly once per owner version and every downstream stage
     /// reads the same entry.
@@ -1139,6 +1141,7 @@ impl ProjectTypeStore {
             verter_session_query::retention::StoreAccount::default(),
             verter_execution::tasks::TaskRegistry::default(),
             verter_type_engine::semantic_query_memo::MemoFamilyBound::Production,
+            Default::default(),
         )
         .0
     }
@@ -1157,6 +1160,7 @@ impl ProjectTypeStore {
             verter_session_query::retention::StoreAccount::new(retention_account),
             verter_execution::tasks::TaskRegistry::default(),
             verter_type_engine::semantic_query_memo::MemoFamilyBound::Production,
+            Default::default(),
         )
         .0
     }
@@ -1194,12 +1198,14 @@ impl ProjectTypeStore {
         provenance: Arc<crate::meta_provenance::MetaProvenance>,
         task_registry: verter_execution::tasks::TaskRegistry,
         memo_family_bound: verter_type_engine::semantic_query_memo::MemoFamilyBound,
+        ownership: verter_type_engine::semantic_query_memo::GraphOwnership,
     ) -> (Self, EngineGrants) {
         Self::build(
             Some(provenance),
             verter_session_query::retention::StoreAccount::default(),
             task_registry,
             memo_family_bound,
+            ownership,
         )
     }
 
@@ -1208,6 +1214,7 @@ impl ProjectTypeStore {
         store_account: verter_session_query::retention::StoreAccount,
         task_registry: verter_execution::tasks::TaskRegistry,
         memo_family_bound: verter_type_engine::semantic_query_memo::MemoFamilyBound,
+        ownership: verter_type_engine::semantic_query_memo::GraphOwnership,
     ) -> (Self, EngineGrants) {
         let retention_account = store_account.clone();
         let counters = ProjectTypeStoreCounters::default();
@@ -1239,9 +1246,11 @@ impl ProjectTypeStore {
                 &counters.component_meta_cache_live,
                 task_registry,
                 memo_family_bound,
+                ownership,
             );
         let verter_type_engine::project_semantic_dispatch::engine_resources::EngineStores {
             graph: semantic_graph,
+            construction,
             flow_slice,
             intrinsics: intrinsic_registry,
             imported_registry: imported_registry_db,
@@ -1263,6 +1272,7 @@ impl ProjectTypeStore {
             routes: Arc::new(RouteDb::new()),
             imported_roots: Arc::new(ImportedRootDb::new()),
             semantic_graph,
+            construction,
             owner_import_surfaces,
             component_meta_results: Arc::new(component_meta_results),
             intrinsic_registry,
@@ -1315,6 +1325,7 @@ impl ProjectTypeStore {
             observers,
             macro_mirrors,
             Arc::clone(&self.semantic_graph),
+            self.construction.clone(),
             Arc::clone(&self.flow_slice),
             Arc::clone(&self.intrinsic_registry),
             Arc::clone(&self.imported_registry_db),
@@ -1475,6 +1486,15 @@ impl ProjectTypeStore {
     /// that dispatches through the semantic-query API.
     pub fn semantic_graph(&self) -> &Arc<SemanticGraphStore> {
         &self.semantic_graph
+    }
+
+    /// The construction lane of [`Self::semantic_graph`]: session producers
+    /// open their construction scopes through it. Holding the graph alone
+    /// grants none.
+    pub(crate) fn construction_grant(
+        &self,
+    ) -> &verter_type_engine::semantic_query_memo::node_roots::NodeConstructionGrant {
+        &self.construction
     }
 
     /// Owner direct-import surface cache. Direct owner imports

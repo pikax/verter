@@ -1762,7 +1762,7 @@ defineProps<Copy<ImportedProps>>()
             .node_data(resolved)
             .expect("resolved carrier node must remain addressable");
         let (base, args) = match resolved_data.as_ref() {
-        SemanticNodeData::InstantiationRef { base, args } => (base.clone(), Arc::clone(args)),
+        SemanticNodeData::InstantiationRef { base, args } => (base.clone(), Arc::<[_]>::from(&args[..])),
         other => panic!(
             "setup `Copy<Source>` must resolve to an exact InstantiationRef before projection; got {other:?}"
         ),
@@ -1812,8 +1812,8 @@ defineProps<Copy<ImportedProps>>()
             !read.result_is_partial(),
             "exact mapped body must be complete"
         );
-        assert!(!read.cache_suppress, "exact mapped body must be reusable");
-        let body = match read.value {
+        assert!(!read.cache_suppress(), "exact mapped body must be reusable");
+        let body = match read.value().clone() {
             QueryResult::Value(body) => body,
             other => panic!("exact mapped Instantiate must produce a node: {other:?}"),
         };
@@ -1840,8 +1840,8 @@ defineProps<Copy<ImportedProps>>()
             ),
         });
         assert!(!navigate_read.result_is_partial());
-        assert!(!navigate_read.cache_suppress);
-        let navigate_node = match navigate_read.value {
+        assert!(!navigate_read.cache_suppress());
+        let navigate_node = match navigate_read.value().clone() {
             QueryResult::Value(node) => node,
             other => panic!("Navigate carrier projection must resolve identity: {other:?}"),
         };
@@ -1868,8 +1868,8 @@ defineProps<Copy<ImportedProps>>()
             context: dispatch.macro_payload_context_for(canonical, ProjectionMode::Navigate),
         });
         assert!(!payload_read.result_is_partial());
-        assert!(!payload_read.cache_suppress);
-        let payload = match payload_read.value {
+        assert!(!payload_read.cache_suppress());
+        let payload = match payload_read.value().clone() {
             QueryResult::Value(node) => node,
             other => panic!("macro payload must preserve the hot carrier: {other:?}"),
         };
@@ -1879,8 +1879,8 @@ defineProps<Copy<ImportedProps>>()
             context: runtime_context,
         });
         assert!(!payload_surface_read.result_is_partial());
-        assert!(!payload_surface_read.cache_suppress);
-        let payload_surface = match payload_surface_read.value {
+        assert!(!payload_surface_read.cache_suppress());
+        let payload_surface = match payload_surface_read.value().clone() {
             QueryResult::Value(node) => node,
             other => panic!("resolved macro payload must materialize: {other:?}"),
         };
@@ -1945,10 +1945,10 @@ defineProps<{ setupOnly: string }>()
         context,
     });
     assert!(
-        !parent_read.result_is_partial() && !parent_read.cache_suppress,
+        !parent_read.result_is_partial() && !parent_read.cache_suppress(),
         "the validated Instance-to-Module lexical parent remains a complete fallback"
     );
-    let parent_surface = match parent_read.value {
+    let parent_surface = match parent_read.value().clone() {
         QueryResult::Value(node) => dispatch
             .graph()
             .node_data(node)
@@ -1975,7 +1975,7 @@ defineProps<{ setupOnly: string }>()
         "an unresolved exact head is partial"
     );
     assert!(
-        read.cache_suppress,
+        read.cache_suppress(),
         "an unresolved exact head is ReturnOnly"
     );
     assert!(

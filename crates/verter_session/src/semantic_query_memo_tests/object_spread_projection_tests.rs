@@ -259,11 +259,11 @@ fn equal_selector_and_context_share_one_singleflight() {
     let owner_read = join_within(owner, "projection owner");
     let joiner_read = join_within(joiner, "projection joiner");
     assert!(matches!(
-        owner_read.value,
+        owner_read.value().clone(),
         QueryResult::Value(SemanticQueryValue::ObjectProjection(_))
     ));
     assert!(matches!(
-        joiner_read.value,
+        joiner_read.value().clone(),
         QueryResult::Value(SemanticQueryValue::ObjectProjection(_))
     ));
     assert_eq!(builds.load(Ordering::SeqCst), 1);
@@ -352,11 +352,11 @@ fn same_path_projection_recursion_never_publishes_a_placeholder() {
                     (QueryResult::Error(QueryError::Miss), empty_dep())
                 },
             );
-            (nested.value, empty_dep())
+            (nested.value().clone(), empty_dep())
         },
     );
     assert!(matches!(
-        read.value,
+        read.value().clone(),
         QueryResult::Recursive(SemanticNodeId(906))
     ));
     assert_eq!(nested_builds.load(Ordering::SeqCst), 0);
@@ -387,7 +387,7 @@ fn projection_family_rejects_and_does_not_publish_a_type_node_payload() {
         },
     );
     assert!(matches!(
-        read.value,
+        read.value().clone(),
         QueryResult::Error(QueryError::ValueDomainMismatch {
             expected: SemanticQueryValueTag::ObjectProjection,
             actual: SemanticQueryValueTag::TypeNode,
@@ -549,7 +549,7 @@ fn cross_view_projection_joiner_forks_when_winner_carrier_fails_follower_validat
                 )
             },
         );
-        read.value
+        read.value().clone()
     });
 
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -582,7 +582,7 @@ fn cross_view_projection_joiner_forks_when_winner_carrier_fails_follower_validat
         other => panic!("expected an object projection, got {other:?}"),
     };
     assert!(matches!(
-        key_fact(&winner_read.value),
+        key_fact(winner_read.value()),
         verter_type_engine::semantic_query::ProjectionEvidence::Proven(node) if node == base_value
     ));
     assert!(matches!(

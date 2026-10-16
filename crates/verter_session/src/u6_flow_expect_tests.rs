@@ -516,9 +516,9 @@ pub(crate) fn render_node(
                 })
                 .chain(
                     surface
-                        .call_signatures
+                        .call_signatures()
                         .iter()
-                        .chain(surface.construct_signatures.iter())
+                        .chain(surface.construct_signatures().iter())
                         .map(|signature| render_node(dispatch, *signature, depth + 1)),
                 )
                 .collect();
@@ -920,7 +920,7 @@ pub(crate) fn drive_expect_boundary_with_lib(
     let (degradation, json, node, error, error_kind) = match first.as_result() {
         Ok(result) => (
             Some(degr_of(result.degradation())),
-            host.project_node_to_type_expr_json_bytes(result.return_type())
+            host.project_ordinal_to_type_expr_json_bytes_for_test(result.return_type())
                 .map(|bytes| String::from_utf8(bytes).expect("TypeExpr JSON is UTF-8")),
             Some(result.return_type()),
             None,
@@ -962,7 +962,7 @@ pub(crate) fn drive_expect_boundary_with_lib(
         match second.as_result() {
             Ok(result) => (
                 Some(degr_of(result.degradation())),
-                host.project_node_to_type_expr_json_bytes(result.return_type())
+                host.project_ordinal_to_type_expr_json_bytes_for_test(result.return_type())
                     .map(|bytes| String::from_utf8(bytes).expect("TypeExpr JSON is UTF-8")),
                 None,
                 None,
@@ -2358,7 +2358,7 @@ pub(crate) mod checker_syntax {
                     .iter()
                     .map(LiveMember::from_surface_member)
                     .collect();
-                object_members_match(dispatch, &members, &surface.index_signatures, exp, depth)
+                object_members_match(dispatch, &members, surface.index_signatures(), exp, depth)
             }
             // A live spread PROGRAM is compared through the same public
             // spread-projection consumer the boundary raises through.
@@ -2395,17 +2395,17 @@ pub(crate) mod checker_syntax {
                 expected @ CheckerType::Function { construct, .. },
                 SemanticNodeData::Object(surface),
             ) if surface.positive_members().is_empty()
-                && surface.index_signatures.is_empty()
+                && surface.index_signatures().is_empty()
                 && if *construct {
-                    surface.call_signatures.is_empty()
+                    surface.call_signatures().is_empty()
                 } else {
-                    surface.construct_signatures.is_empty()
+                    surface.construct_signatures().is_empty()
                 } =>
             {
                 let lone = if *construct {
-                    surface.construct_signatures.as_ref()
+                    surface.construct_signatures()
                 } else {
-                    surface.call_signatures.as_ref()
+                    surface.call_signatures()
                 };
                 match lone {
                     [signature] => matches_node(dispatch, *signature, expected, depth + 1),

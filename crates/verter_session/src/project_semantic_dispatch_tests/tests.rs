@@ -34,12 +34,15 @@ fn an_unsupported_typeof_expression_has_no_positional_value() {
     let read = dispatch.execute_read(key.clone());
     assert!(
         matches!(
-            read.fact_status,
+            read.fact_status(),
             verter_type_engine::semantic_query::FactStatus::Unavailable(_)
         ),
         "{read:?}"
     );
-    assert!(matches!(read.value, QueryResult::Error(_)), "{read:?}");
+    assert!(
+        matches!(read.value().clone(), QueryResult::Error(_)),
+        "{read:?}"
+    );
     assert_eq!(dispatch.graph().slot_candidate_count_for_tests(&key), 0);
 }
 
@@ -61,7 +64,7 @@ fn presence_projection_keeps_its_subset_without_offering_exact_values() {
         );
         ProjectSemanticDispatch::new(&host).execute_read(key.clone())
     };
-    assert!(matches!(read.fact_status, FactStatus::Approximate(_, _)));
+    assert!(matches!(read.fact_status(), FactStatus::Approximate(_, _)));
     let FactResult::Approximate { value, .. } = read.into_fact().unwrap() else {
         panic!("a proven presence subset must remain usable")
     };
@@ -92,29 +95,29 @@ fn unsupported_unfinished_projection_withholds_its_value_at_dispatch() {
         ProjectSemanticDispatch::new(&host).execute_read(key.clone())
     };
     assert!(matches!(
-        read.fact_status,
+        read.fact_status(),
         verter_type_engine::semantic_query::FactStatus::Unavailable(_)
     ));
     assert!(
         matches!(
-            read.value,
+            read.value().clone(),
             QueryResult::Error(QueryError::IncompleteSemanticOperand { .. })
         ),
         "unsupported unfinished values cannot escape: {read:?}"
     );
     assert_eq!(graph.slot_candidate_count_for_tests(&key), 0);
     let clean = ProjectSemanticDispatch::new(&host).execute_read(key.clone());
-    assert!(matches!(clean.value, QueryResult::Value(node) if node == base));
+    assert!(matches!(clean.value().clone(), QueryResult::Value(node) if node == base));
     assert!(!clean.result_is_partial());
     assert_eq!(
-        clean.fact_status,
+        clean.fact_status().clone(),
         verter_type_engine::semantic_query::FactStatus::Complete
     );
     assert_eq!(graph.slot_candidate_count_for_tests(&key), 1);
     let hits = graph.stats_snapshot().hits;
     let retained = ProjectSemanticDispatch::new(&host).execute_read(key);
-    assert_eq!(retained.fact_status, clean.fact_status);
-    assert!(matches!(retained.value, QueryResult::Value(node) if node == base));
+    assert_eq!(retained.fact_status(), clean.fact_status());
+    assert!(matches!(retained.value().clone(), QueryResult::Value(node) if node == base));
     assert!(
         graph.stats_snapshot().hits > hits,
         "the complete fact must repeat from retention"
@@ -218,7 +221,7 @@ fn expanded_open_conditional_applies_branch_only_pending_substitution() {
         path: Arc::from([]),
         context: ProjectionReductionContext::published(ProjectionMode::Expanded),
     });
-    let QueryResult::Value(result) = read.value else {
+    let QueryResult::Value(result) = read.value().clone() else {
         panic!("expanded root must resolve")
     };
     assert!(
@@ -367,8 +370,8 @@ fn conditional_pending_frame_is_family_identity_and_reuses_relation_selection() 
     let mut selection_receipt = None;
     for (key, expected) in [(&string_key, string), (&number_key, number)] {
         let cold = dispatch.execute_read(key.clone());
-        assert!(matches!(cold.value, QueryResult::Value(node) if node == expected));
-        assert!(!cold.result_is_partial() && !cold.cache_suppress);
+        assert!(matches!(cold.value().clone(), QueryResult::Value(node) if node == expected));
+        assert!(!cold.result_is_partial() && !cold.cache_suppress());
         let receipt = graph
             .relation_published_carrier(&relation_key)
             .expect("the decided relation is published")
@@ -384,7 +387,7 @@ fn conditional_pending_frame_is_family_identity_and_reuses_relation_selection() 
         assert_eq!(count, 1);
         for _ in 0..3 {
             let warm = dispatch.execute_read(key.clone());
-            assert!(matches!(warm.value, QueryResult::Value(node) if node == expected));
+            assert!(matches!(warm.value().clone(), QueryResult::Value(node) if node == expected));
             assert_eq!(graph.slot_candidate_count_for_tests(key), count);
         }
     }
@@ -452,9 +455,9 @@ fn pending_conditional_keeps_argument_roots_and_cancelled_work_cold() {
     {
         let _guard = verter_type_engine::request_context::RequestContextGuard::install(cancelled);
         let read = ProjectSemanticDispatch::new(&host).execute_read(key.clone());
-        assert!(read.cache_suppress && read.result_is_partial());
+        assert!(read.cache_suppress() && read.result_is_partial());
         assert!(matches!(
-            read.value,
+            read.value().clone(),
             QueryResult::Error(QueryError::Cancelled)
         ));
         assert_eq!(graph.slot_candidate_count_for_tests(&key), 0);
@@ -462,8 +465,8 @@ fn pending_conditional_keeps_argument_roots_and_cancelled_work_cold() {
     }
     for _ in 0..2 {
         let (read, evidence) = dispatch.execute_read_with_operand_evidence(key.clone());
-        assert!(!read.cache_suppress && !read.result_is_partial());
-        let QueryResult::Value(result) = read.value else {
+        assert!(!read.cache_suppress() && !read.result_is_partial());
+        let QueryResult::Value(result) = read.value().clone() else {
             panic!("clean retry must resolve")
         };
         assert!(
@@ -607,7 +610,7 @@ fn duplicate_pending_conditionals_retain_argument_roots_cold_warm_and_after_edit
                 ConditionalPendingSubstitution::empty().append_both(parameter, argument),
             )),
         };
-        let first = graph.intern_node_with_scope(shell.clone(), scope("first"));
+        let first = graph.intern_node_with_scope(shell.copy_for_tests(), scope("first"));
         let second = graph.intern_node_with_scope(shell, scope("second"));
         let key = SemanticQueryKey::ReduceUnion {
             members: Arc::from([first, second]),
@@ -616,8 +619,8 @@ fn duplicate_pending_conditionals_retain_argument_roots_cold_warm_and_after_edit
         for _ in 0..2 {
             let (read, evidence) =
                 ProjectSemanticDispatch::new(&host).execute_read_with_operand_evidence(key.clone());
-            assert!(matches!(read.value, QueryResult::Value(node) if node == first));
-            assert!(!read.result_is_partial() && !read.cache_suppress);
+            assert!(matches!(read.value().clone(), QueryResult::Value(node) if node == first));
+            assert!(!read.result_is_partial() && !read.cache_suppress());
             assert!(evidence.expect("canonical normalization carries roots").self_roots().iter().any(|(file, hash)| file.as_ref() == "/w/argument.ts" && *hash == expected_hash), "discarding a duplicate conditional retains its frame-only argument root");
             assert_eq!(graph.slot_candidate_count_for_tests(&key), 1);
             assert_eq!(
@@ -664,7 +667,7 @@ fn pending_conditional_arguments_remain_visible_to_mapped_value_demand() {
         },
         context: ProjectionReductionContext::published(ProjectionMode::Expanded),
     });
-    let QueryResult::Value(result) = read.value else {
+    let QueryResult::Value(result) = read.value().clone() else {
         panic!("mapped value must resolve")
     };
     let surface = require_object_surface(graph, result, "key-dependent pending value");
@@ -712,11 +715,11 @@ fn conditional_edits_match_fresh_results_at_both_forcing_sites() {
                     .flatten()
                     .expect("conditional resolves after an edit");
                 let graph = host.project_type_store().semantic_graph();
-                assert!(matches!(graph.node_data(node).as_deref(),
+                assert!(matches!(graph.node_data(node.id()).as_deref(),
                     Some(SemanticNodeData::Literal(LiteralValue::String(value))) if value == expected));
                 verter_type_engine::semantic_query::display::display(
                     graph,
-                    &SemanticQueryValue::TypeNode(node),
+                    &SemanticQueryValue::TypeNode(node.id()),
                     DisplayNeeds::empty(),
                 )
                 .0
@@ -1073,7 +1076,7 @@ fn conditional_infer_reaches_object_index_call_and_construct_positions() {
     let signature = |kind, value| {
         graph.intern_node(SemanticNodeData::Signature {
             kind,
-            params: Arc::from(
+            params: verter_type_engine::semantic_query::PayloadArray::from(
                 vec![FunctionParam::synthetic(
                     Some(Arc::from("value")),
                     string,
@@ -1087,7 +1090,9 @@ fn conditional_infer_reaches_object_index_call_and_construct_positions() {
             return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
                 value,
             ),
-            type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+            type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+                Vec::<TypeParamDecl>::new().into_boxed_slice(),
+            ),
             signature_span: None,
             return_type_span: None,
             predicate: None,
@@ -1351,7 +1356,7 @@ fn macro_hot_script_setup_infer_bounds_share_eager_authored_identities() {
                 .hot
                 .node();
         let surface = match graph.node_data(root).as_deref() {
-            Some(SemanticNodeData::Object(surface)) => surface.clone(),
+            Some(SemanticNodeData::Object(surface)) => surface.copy_for_tests(),
             other => panic!("defineProps object must lower structurally, got {other:?}"),
         };
         ["constraint", "fallback"].map(|name| {
@@ -1766,7 +1771,7 @@ fn scc_member_drain_keeps_the_exact_root_candidate_across_sibling_warm_promotion
         assert_eq!(exact_root.validated_at_generation, root_generation);
         let warmed = graph
             .get_relation_payload(&warm_host, &root_key)
-            .map(|served| served.value)
+            .map(|served| served.value().clone())
             .expect("the sibling must validate in the warm reader's generation");
         assert_eq!(warmed.outcome, RelationOutcome::NotAssignable);
         barrier.wait();
@@ -1831,7 +1836,7 @@ fn production_nested_same_name_conditional_infers_have_distinct_identity() {
         2,
         "same-name nested declarations must carry distinct collision-free binder tokens"
     );
-    match graph.node_data(result).as_deref() {
+    match graph.node_data(result.id()).as_deref() {
         Some(SemanticNodeData::Tuple { elements, .. }) => {
             assert_eq!(elements.len(), 2);
             assert!(matches!(
@@ -1870,7 +1875,7 @@ fn production_nested_same_name_conditional_does_not_bind_outer_reverse_session()
         .ok()
         .flatten()
         .expect("the nested reverse-infer shadow fixture must resolve");
-    let (outer_infer, nested_template) = match graph.node_data(result).as_deref() {
+    let (outer_infer, nested_template) = match graph.node_data(result.id()).as_deref() {
         Some(SemanticNodeData::Conditional { extends, .. }) => {
             match graph.node_data(*extends).as_deref() {
                 Some(SemanticNodeData::Mapped { source, mapper }) => (*source, mapper.value_expr),
@@ -1890,7 +1895,7 @@ fn production_nested_same_name_conditional_does_not_bind_outer_reverse_session()
     );
     assert!(
         matches!(
-            graph.node_data(result).as_deref(),
+            graph.node_data(result.id()).as_deref(),
             Some(SemanticNodeData::Conditional { .. })
         ),
         "the inner `infer T` shadows the reverse mapper's outer `infer T`; it cannot become T[P]"
@@ -1941,7 +1946,7 @@ fn reverse_projection_rejects_nested_materialized_opaque_candidates() {
                 readonly: true,
             }),
             graph.intern_node(SemanticNodeData::Tuple {
-                elements: Arc::from(
+                elements: verter_type_engine::semantic_query::PayloadArray::from(
                     vec![TupleElement {
                         label: None,
                         value: opaque,
@@ -2028,7 +2033,7 @@ fn mutable_container_nested_projection_subtrees_use_only_the_binding_direction()
 
     let tuple = |value| {
         graph.intern_node(SemanticNodeData::Tuple {
-            elements: Arc::from(
+            elements: verter_type_engine::semantic_query::PayloadArray::from(
                 vec![TupleElement {
                     label: None,
                     value,
@@ -2094,7 +2099,7 @@ fn tuple_rest_inference_decides_covariant_and_contravariant_single_rest_patterns
     let void = primitive(&graph, PrimitiveKind::Void);
     let never = primitive(&graph, PrimitiveKind::Never);
     let concrete = graph.intern_node(SemanticNodeData::Tuple {
-        elements: Arc::from(
+        elements: verter_type_engine::semantic_query::PayloadArray::from(
             vec![
                 TupleElement {
                     label: None,
@@ -2119,7 +2124,7 @@ fn tuple_rest_inference_decides_covariant_and_contravariant_single_rest_patterns
         constraint: None,
     });
     let rest_pattern = graph.intern_node(SemanticNodeData::Tuple {
-        elements: Arc::from(
+        elements: verter_type_engine::semantic_query::PayloadArray::from(
             vec![TupleElement {
                 label: None,
                 value: infer,
@@ -2139,7 +2144,7 @@ fn tuple_rest_inference_decides_covariant_and_contravariant_single_rest_patterns
     let signature = |param_ty| {
         graph.intern_node(SemanticNodeData::Signature {
             kind: SignatureKind::Call,
-            params: Arc::from(
+            params: verter_type_engine::semantic_query::PayloadArray::from(
                 vec![FunctionParam::synthetic(
                     Some(Arc::from("value")),
                     param_ty,
@@ -2153,7 +2158,9 @@ fn tuple_rest_inference_decides_covariant_and_contravariant_single_rest_patterns
             return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
                 void,
             ),
-            type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+            type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+                Vec::<TypeParamDecl>::new().into_boxed_slice(),
+            ),
             signature_span: None,
             return_type_span: None,
             predicate: None,
@@ -2193,7 +2200,7 @@ fn tuple_rest_capture_preserves_exact_metadata_in_both_variances() {
         readonly: true,
     });
     let concrete = graph.intern_node(SemanticNodeData::Tuple {
-        elements: Arc::from(
+        elements: verter_type_engine::semantic_query::PayloadArray::from(
             vec![
                 TupleElement {
                     label: Some(Arc::from("head")),
@@ -2218,7 +2225,7 @@ fn tuple_rest_capture_preserves_exact_metadata_in_both_variances() {
         constraint: None,
     });
     let pattern = graph.intern_node(SemanticNodeData::Tuple {
-        elements: Arc::from(
+        elements: verter_type_engine::semantic_query::PayloadArray::from(
             vec![TupleElement {
                 label: Some(Arc::from("captured")),
                 value: infer,
@@ -2235,7 +2242,7 @@ fn tuple_rest_capture_preserves_exact_metadata_in_both_variances() {
     // string, ...tail: number[]]`).
     let captured = graph.intern_node(SemanticNodeData::Tuple {
         elements: match graph.node_data(concrete).as_deref() {
-            Some(SemanticNodeData::Tuple { elements, .. }) => Arc::clone(elements),
+            Some(SemanticNodeData::Tuple { elements, .. }) => elements.share_for_tests(),
             _ => unreachable!("a tuple"),
         },
         readonly: false,
@@ -2249,7 +2256,7 @@ fn tuple_rest_capture_preserves_exact_metadata_in_both_variances() {
     let signature = |param_ty| {
         graph.intern_node(SemanticNodeData::Signature {
             kind: SignatureKind::Call,
-            params: Arc::from(
+            params: verter_type_engine::semantic_query::PayloadArray::from(
                 vec![FunctionParam::synthetic(
                     Some(Arc::from("value")),
                     param_ty,
@@ -2263,7 +2270,9 @@ fn tuple_rest_capture_preserves_exact_metadata_in_both_variances() {
             return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
                 void,
             ),
-            type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+            type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+                Vec::<TypeParamDecl>::new().into_boxed_slice(),
+            ),
             signature_span: None,
             return_type_span: None,
             predicate: None,
@@ -2293,7 +2302,7 @@ fn tuple_rest_does_not_bypass_required_prefix_validation() {
     let string = primitive(&graph, PrimitiveKind::String);
     let never = primitive(&graph, PrimitiveKind::Never);
     let source = graph.intern_node(SemanticNodeData::Tuple {
-        elements: Arc::from(
+        elements: verter_type_engine::semantic_query::PayloadArray::from(
             vec![TupleElement {
                 label: Some(Arc::from("maybe")),
                 value: string,
@@ -2310,7 +2319,7 @@ fn tuple_rest_does_not_bypass_required_prefix_validation() {
         constraint: None,
     });
     let target = graph.intern_node(SemanticNodeData::Tuple {
-        elements: Arc::from(
+        elements: verter_type_engine::semantic_query::PayloadArray::from(
             vec![
                 TupleElement {
                     label: Some(Arc::from("required")),
@@ -2386,7 +2395,7 @@ fn reverse_homomorphic_nonterminal_tuple_rest_uses_the_broad_number_key() {
         readonly: false,
     });
     let source = graph.intern_node(SemanticNodeData::Tuple {
-        elements: Arc::from(
+        elements: verter_type_engine::semantic_query::PayloadArray::from(
             vec![
                 TupleElement {
                     label: None,
@@ -2467,15 +2476,15 @@ fn conditional_applications_reuse_demanded_arguments_and_keep_origins() {
         });
         let application = graph.intern_node(SemanticNodeData::InstantiationRef {
             base: identity.clone(),
-            args: Arc::from([argument]),
+            args: verter_type_engine::semantic_query::PayloadArray::from([argument]),
         });
         let read = dispatch.execute_read(SemanticQueryKey::TemplateLiteralReduce {
             pattern: Arc::from([Arc::from("prefix:"), Arc::from("")]),
             args: Arc::from([application]),
             context: dispatch.template_literal_reduce_context(),
         });
-        assert!(!read.result_is_partial() && !read.cache_suppress);
-        let QueryResult::Value(result) = read.value else {
+        assert!(!read.result_is_partial() && !read.cache_suppress());
+        let QueryResult::Value(result) = read.value().clone() else {
             panic!("template must reduce")
         };
         assert!(matches!(graph.node_data(result).as_deref(),
@@ -2532,9 +2541,9 @@ fn demanded_imported_arguments_share_their_defining_scope() {
         ),
     ));
     assert!(
-        matches!(warm.value, QueryResult::Value(_))
+        matches!(warm.value().clone(), QueryResult::Value(_))
             && !warm.result_is_partial()
-            && !warm.cache_suppress
+            && !warm.cache_suppress()
     );
     let mut after_first = None;
     for (path, nested, named) in [
@@ -2591,15 +2600,15 @@ fn demanded_imported_arguments_share_their_defining_scope() {
                 decl_name: Arc::from("Tag"),
                 ..identity.clone()
             },
-            args: Arc::from([argument]),
+            args: verter_type_engine::semantic_query::PayloadArray::from([argument]),
         });
         let read = dispatch.execute_read(SemanticQueryKey::TemplateLiteralReduce {
             pattern: Arc::from([Arc::from("prefix:"), Arc::from("")]),
             args: Arc::from([application]),
             context: dispatch.template_literal_reduce_context(),
         });
-        assert!(!read.result_is_partial() && !read.cache_suppress);
-        let QueryResult::Value(result) = read.value else {
+        assert!(!read.result_is_partial() && !read.cache_suppress());
+        let QueryResult::Value(result) = read.value().clone() else {
             panic!("template must reduce")
         };
         assert!(matches!(graph.node_data(result).as_deref(),
@@ -2679,7 +2688,7 @@ fn finite_mapped_index_matches_single_key_publication_context() {
                 whole_hash,
                 decl_name: Arc::from("Box"),
             },
-            args: Arc::from([parameter]),
+            args: verter_type_engine::semantic_query::PayloadArray::from([parameter]),
         });
         let mapped = graph.intern_node(SemanticNodeData::Mapped {
             source: simple_object(&graph, &[]),
@@ -2700,8 +2709,8 @@ fn finite_mapped_index_matches_single_key_publication_context() {
                 path: Arc::from([PathSegment::Index(index)]),
                 context,
             });
-            assert!(!read.result_is_partial() && !read.cache_suppress);
-            let QueryResult::Value(value) = read.value else {
+            assert!(!read.result_is_partial() && !read.cache_suppress());
+            let QueryResult::Value(value) = read.value().clone() else {
                 panic!("mapped key must project");
             };
             value
@@ -2724,7 +2733,7 @@ fn finite_mapped_index_matches_single_key_publication_context() {
             members: Arc::from(singles),
             nullability: verter_session_query::flow::policy::NullabilityPolicy::Strict,
         });
-        let QueryResult::Value(expected) = expected.value else {
+        let QueryResult::Value(expected) = expected.value().clone() else {
             panic!("single projections reduce");
         };
         let batched = project(IndexKey::Computed(key_space));
@@ -2770,15 +2779,15 @@ fn conditional_branch_keeps_an_argument_cached_by_a_closed_demand() {
         )))
     };
     let outer = instantiate("Outer");
-    assert!(!outer.result_is_partial() && !outer.cache_suppress);
-    let QueryResult::Value(value) = outer.value else {
+    assert!(!outer.result_is_partial() && !outer.cache_suppress());
+    let QueryResult::Value(value) = outer.value().clone() else {
         panic!("the outer application must resolve");
     };
     assert!(matches!(graph.node_data(value).as_deref(),
         Some(SemanticNodeData::Literal(LiteralValue::String(text))) if text == "yes"));
     let before = graph.stats_snapshot().instantiate_count;
     let inner = instantiate("Ignore");
-    assert!(!inner.result_is_partial() && !inner.cache_suppress);
+    assert!(!inner.result_is_partial() && !inner.cache_suppress());
     assert_eq!(
         graph.stats_snapshot().instantiate_count,
         before,
@@ -2838,7 +2847,7 @@ fn residual_template_application_does_not_force_unused_mapped_argument() {
             whole_hash,
             decl_name: Arc::from("Ignore"),
         },
-        args: Arc::from([mapped]),
+        args: verter_type_engine::semantic_query::PayloadArray::from([mapped]),
     });
     let before = graph.stats_snapshot().mapped_per_k_materializations;
     let normalized = dispatch
@@ -2860,8 +2869,8 @@ fn residual_template_application_does_not_force_unused_mapped_argument() {
         args: Arc::from([application]),
         context: dispatch.template_literal_reduce_context(),
     });
-    assert!(!read.result_is_partial() && !read.cache_suppress);
-    let QueryResult::Value(result) = read.value else {
+    assert!(!read.result_is_partial() && !read.cache_suppress());
+    let QueryResult::Value(result) = read.value().clone() else {
         panic!("closed interpolation must reduce");
     };
     assert!(matches!(graph.node_data(result).as_deref(),
@@ -2876,7 +2885,9 @@ fn residual_template_application_does_not_force_unused_mapped_argument() {
         mapper,
         context: ProjectionReductionContext::published(ProjectionMode::Expanded),
     });
-    assert!(matches!(control.value, QueryResult::Value(_)) && !control.result_is_partial());
+    assert!(
+        matches!(control.value().clone(), QueryResult::Value(_)) && !control.result_is_partial()
+    );
     assert_eq!(
         graph.stats_snapshot().mapped_per_k_materializations - before,
         2,
@@ -3129,10 +3140,10 @@ fn cancelled_dispatch_is_typed_return_only_and_cold_retry_succeeds() {
             verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
         let read = ProjectSemanticDispatch::new(&host).execute_read(key.clone());
         assert!(matches!(
-            read.value,
+            read.value().clone(),
             QueryResult::Error(QueryError::Cancelled)
         ));
-        assert!(read.cache_suppress, "cancelled reads are ReturnOnly");
+        assert!(read.cache_suppress(), "cancelled reads are ReturnOnly");
         assert!(
             read.result_is_partial(),
             "cancelled reads are structurally partial"
@@ -3153,9 +3164,9 @@ fn cancelled_dispatch_is_typed_return_only_and_cold_retry_succeeds() {
     );
     let _guard = verter_type_engine::request_context::RequestContextGuard::install(retry);
     let first = ProjectSemanticDispatch::new(&host).execute_read(key.clone());
-    assert!(matches!(first.value, QueryResult::Value(_)));
+    assert!(matches!(first.value().clone(), QueryResult::Value(_)));
     let warm = ProjectSemanticDispatch::new(&host).execute_read(key);
-    assert!(matches!(warm.value, QueryResult::Value(_)));
+    assert!(matches!(warm.value().clone(), QueryResult::Value(_)));
 }
 
 /// A dispatch `ResolveDecl` for an ambient rune name (`$state`) RESOLVES in a
@@ -3256,7 +3267,7 @@ fn resolve_decl_warm_node_survives_between_execute_calls() {
         .semantic_graph()
         .get_unvalidated(&SemanticQueryKey::ResolveDecl(key.clone()))
         .expect("warm memo entry must exist after first query");
-    match warm.value {
+    match warm.value().clone() {
         QueryResult::Value(id) => assert_eq!(id, first_id),
         other => panic!("expected warm value, got {other:?}"),
     }
@@ -3316,7 +3327,7 @@ fn resolve_decl_dep_signature_captures_file_hash_and_project_gen() {
         .expect("warm entry must exist");
     let mut has_whole_hash = false;
     let mut has_project_gen = false;
-    for (_, dv) in warm.dep_signature.iter() {
+    for (_, dv) in warm.dep_signature().iter() {
         match dv {
             DepVersion::WholeHash(_) => has_whole_hash = true,
             DepVersion::ProjectGeneration(_) => has_project_gen = true,
@@ -3462,7 +3473,7 @@ fn member_value(
 ) -> SemanticNodeId {
     let data = graph.node_data(node).expect("node interned");
     let view = match data.as_ref() {
-        SemanticNodeData::Object(v) => v.clone(),
+        SemanticNodeData::Object(v) => v.copy_for_tests(),
         other => panic!("expected Object node, got {other:?}"),
     };
     view.positive_members()
@@ -3540,7 +3551,7 @@ fn reduce_union_dedups_cross_scope_duplicates_and_roots_discarded_arm() {
     let lit = SemanticNodeData::Literal(verter_type_engine::semantic_query::LiteralValue::String(
         "dup".to_string(),
     ));
-    let kept = graph.intern_node_with_scope(lit.clone(), file_scope("/w/dup_kept.ts", 3));
+    let kept = graph.intern_node_with_scope(lit.copy_for_tests(), file_scope("/w/dup_kept.ts", 3));
     let discarded = graph.intern_node_with_scope(lit, file_scope("/w/dup_discarded.ts", 5));
     assert_ne!(
         kept, discarded,
@@ -3696,13 +3707,13 @@ fn reduce_union_incomplete_comparison_is_return_only_with_zero_warm_candidates()
         };
         let first = ProjectSemanticDispatch::new(&host).execute_read(key.clone());
         assert!(
-            first.cache_suppress,
+            first.cache_suppress(),
             "{what}: an Incomplete comparison must report cache_suppress (ReturnOnly)"
         );
-        let QueryResult::Value(node) = first.value else {
+        let QueryResult::Value(node) = first.value().clone() else {
             panic!(
                 "{what}: the value still flows to the caller, got {:?}",
-                first.value
+                first.value().clone()
             );
         };
         assert!(
@@ -3716,7 +3727,7 @@ fn reduce_union_incomplete_comparison_is_return_only_with_zero_warm_candidates()
         );
         let second = ProjectSemanticDispatch::new(&host).execute_read(key.clone());
         assert!(
-            second.cache_suppress,
+            second.cache_suppress(),
             "{what}: the second demand also reports cache_suppress — with zero \
              stored candidates there is nothing to serve warm, so it recomputed"
         );
@@ -3955,7 +3966,7 @@ fn span_only_distinct_arms_collapse_in_derived_composites_yet_intern_distinct() 
     let signature_node = |span_start: u32| -> SemanticNodeId {
         graph.intern_node(SemanticNodeData::Signature {
             kind: verter_type_engine::semantic_query::SignatureKind::Call,
-            params: Arc::from(
+            params: verter_type_engine::semantic_query::PayloadArray::from(
                 vec![verter_type_engine::semantic_query::FunctionParam {
                     name: Some("p".into()),
                     ty: string,
@@ -3967,7 +3978,7 @@ fn span_only_distinct_arms_collapse_in_derived_composites_yet_intern_distinct() 
                 .into_boxed_slice(),
             ),
             return_type: string,
-            type_parameters: Arc::from(
+            type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
                 Vec::<verter_type_engine::semantic_query::TypeParamDecl>::new().into_boxed_slice(),
             ),
             occurrence: None,
@@ -4296,7 +4307,7 @@ fn tier1_payload_equal_discard_roots_descendant_files() {
         file_scope("/w/file_b.ts", 7),
     );
     let g = simple_object(&graph, &[("v", c)]);
-    let payload = graph.node_data(g).expect("payload").as_ref().clone();
+    let payload = graph.node_data(g).expect("payload").copy_for_tests();
     let f = graph.intern_node_with_scope(payload, file_scope("/w/file_a.ts", 9));
     assert_ne!(g, f, "scope is arena identity — the fixture needs two ids");
 
@@ -4399,7 +4410,7 @@ fn extreme_and_disjoint_folds_record_contributor_origin_edge() {
 
     let members: Arc<[SemanticNodeId]> = Arc::from(vec![string, number].into_boxed_slice());
     let output = dispatch.build_reduce_intersection(
-        verter_type_engine::semantic_query::IntersectionInputRef::from_operands(&members),
+        verter_type_engine::semantic_query::IntersectionInputRef::from_operands(&graph, &members),
         verter_type_engine::semantic_query::IntersectionPurpose::CheckerReduction,
         verter_type_engine::semantic_query::SemanticContextId::production(),
     );
@@ -4462,12 +4473,16 @@ fn comparator_object_arm_discriminates_diverged_positive_members() {
     };
     // Mimic `call_shape_transform`: transformed positive members (readonly
     // flipped) while `entries` keeps the originals.
-    let mut transformed = base_view.positive_members().to_vec();
+    let mut transformed = base_view
+        .positive_members()
+        .iter()
+        .map(verter_type_engine::semantic_query::SurfaceMember::copy_for_tests)
+        .collect::<Vec<_>>();
     for member in &mut transformed {
         member.readonly = true;
     }
     let diverged_view = base_view
-        .clone()
+        .copy_for_tests()
         .with_positive_members(Arc::from(transformed.into_boxed_slice()));
     let diverged = graph.intern_node(SemanticNodeData::Object(diverged_view));
     assert_ne!(
@@ -4813,7 +4828,7 @@ fn path_projection_through_intersection_keeps_callable_member_order() {
             ProjectionMode::Navigate,
         ),
     });
-    let QueryResult::Value(joined) = read.value else {
+    let QueryResult::Value(joined) = read.value().clone() else {
         panic!("member projection through the intersection produces a value");
     };
     match graph.node_data(joined).as_deref() {
@@ -5294,7 +5309,7 @@ fn project_path_of_length_one_dedups_with_project_member_at_memo() {
     let warm = graph
         .get_unvalidated(&canonical_key)
         .expect("canonical ProjectPath must be warm");
-    match &warm.value {
+    match &warm.value() {
         QueryResult::Value(id) => assert_eq!(*id, sugar_id),
         other => panic!("warm entry value mismatch: {other:?}"),
     }
@@ -5849,8 +5864,8 @@ fn surface_view_carries_call_signatures_and_construct_signatures() {
     let data = graph.node_data(obj).expect("interned");
     match &*data {
         SemanticNodeData::Object(s) => {
-            assert_eq!(s.call_signatures.as_ref(), &[string_id]);
-            assert_eq!(s.construct_signatures.as_ref(), &[num_id]);
+            assert_eq!(s.call_signatures(), &[string_id]);
+            assert_eq!(s.construct_signatures(), &[num_id]);
         }
         other => panic!("expected Object, got {other:?}"),
     }
@@ -6025,7 +6040,7 @@ fn concurrent_sugar_and_canonical_requests_share_in_flight_entry() {
     let warm = graph
         .get_unvalidated(&canonical_key)
         .expect("canonical ProjectPath warm after concurrent dispatch");
-    match &warm.value {
+    match &warm.value() {
         QueryResult::Value(id) => assert_eq!(*id, id1),
         other => panic!("warm entry value mismatch: {other:?}"),
     }
@@ -6419,23 +6434,26 @@ fn instantiate_scopes_unresolved_owner_debt_by_demanded_body_role() {
     };
 
     let member = read("MemberOnly");
-    assert!(matches!(member.value, QueryResult::Value(_)));
+    assert!(matches!(member.value().clone(), QueryResult::Value(_)));
     assert!(
-        !member.result_is_partial() && !member.cache_suppress,
+        !member.result_is_partial() && !member.cache_suppress(),
         "a member-value miss must stay locally classifiable; got partial={}, suppress={}",
         member.result_is_partial(),
-        member.cache_suppress,
+        member.cache_suppress(),
     );
 
     for name in ["RootAlias", "Heritage", "IntersectionArm", "UnionArm"] {
         let structural = read(name);
-        assert!(matches!(structural.value, QueryResult::Value(_)), "{name}");
         assert!(
-            structural.result_is_partial() && structural.cache_suppress,
+            matches!(structural.value().clone(), QueryResult::Value(_)),
+            "{name}"
+        );
+        assert!(
+            structural.result_is_partial() && structural.cache_suppress(),
             "{name} loses an authoritative root/surface arm and must remain Partial + ReturnOnly; \
              got partial={}, suppress={}",
             structural.result_is_partial(),
-            structural.cache_suppress,
+            structural.cache_suppress(),
         );
     }
 }
@@ -6493,7 +6511,7 @@ fn instantiate_is_mode_free_one_entry_across_depth_requests() {
     let warm = graph
         .get_unvalidated(&key)
         .expect("Instantiate entry must be warm after execute");
-    match warm.value {
+    match warm.value().clone() {
         QueryResult::Value(_) => {}
         other => panic!("expected warm Value, got {other:?}"),
     }
@@ -6625,7 +6643,7 @@ fn shallow_instantiate_does_not_materialise_member_bodies() {
 
     let data = graph.node_data(result).expect("result node");
     let view = match &*data {
-        SemanticNodeData::Object(v) => v.clone(),
+        SemanticNodeData::Object(v) => v.copy_for_tests(),
         other => panic!("expected Object shell after Instantiate, got {other:?}"),
     };
     // Member `y` must not be recursively lowered into an `Object`
@@ -7258,10 +7276,10 @@ fn distributed_conditional_dependencies_follow_member_selections() {
                     );
                 }
                 assert!(
-                    !read.cache_suppress && !read.result_is_partial(),
+                    !read.cache_suppress() && !read.result_is_partial(),
                     "{case}: {read:?}"
                 );
-                let QueryResult::Value(result) = read.value else {
+                let QueryResult::Value(result) = read.value().clone() else {
                     panic!("{case}: expected a complete distributed value");
                 };
                 match case {
@@ -7693,11 +7711,15 @@ fn substituted_possibly_callable_intersection_preserves_authored_arm_order() {
     // form first so it sorts lower than the first's.
     let a_substituted = graph.intern_node(SemanticNodeData::InstantiationRef {
         base: verter_type_engine::semantic_query::DeclIdentity::synthetic("A"),
-        args: Arc::from(vec![string].into_boxed_slice()),
+        args: verter_type_engine::semantic_query::PayloadArray::from(
+            vec![string].into_boxed_slice(),
+        ),
     });
     let b_substituted = graph.intern_node(SemanticNodeData::InstantiationRef {
         base: verter_type_engine::semantic_query::DeclIdentity::synthetic("B"),
-        args: Arc::from(vec![string].into_boxed_slice()),
+        args: verter_type_engine::semantic_query::PayloadArray::from(
+            vec![string].into_boxed_slice(),
+        ),
     });
     assert!(
         a_substituted.0 < b_substituted.0,
@@ -7711,11 +7733,15 @@ fn substituted_possibly_callable_intersection_preserves_authored_arm_order() {
     // possibly-callable, so it takes the order-preserving leg.
     let a_ref = graph.intern_node(SemanticNodeData::InstantiationRef {
         base: verter_type_engine::semantic_query::DeclIdentity::synthetic("A"),
-        args: Arc::from(vec![parameter_node].into_boxed_slice()),
+        args: verter_type_engine::semantic_query::PayloadArray::from(
+            vec![parameter_node].into_boxed_slice(),
+        ),
     });
     let b_ref = graph.intern_node(SemanticNodeData::InstantiationRef {
         base: verter_type_engine::semantic_query::DeclIdentity::synthetic("B"),
-        args: Arc::from(vec![parameter_node].into_boxed_slice()),
+        args: verter_type_engine::semantic_query::PayloadArray::from(
+            vec![parameter_node].into_boxed_slice(),
+        ),
     });
     // Authored order is `B<T> & A<T>`.
     let intersection_node = graph.intern_node(SemanticNodeData::Intersection(
@@ -7885,11 +7911,11 @@ fn an_infer_selected_nested_conditional_reduces_to_its_final_value() {
         pending: None,
     });
     assert_eq!(
-        read.fact_status,
+        read.fact_status().clone(),
         verter_type_engine::semantic_query::FactStatus::Complete
     );
     assert!(
-        matches!(read.value, QueryResult::Value(node) if node == one),
+        matches!(read.value().clone(), QueryResult::Value(node) if node == one),
         "every selected conditional must reduce: {read:?}"
     );
 }
@@ -8813,7 +8839,7 @@ fn normalize_records_sources() {
     let obj_b = simple_object(&graph, &[("b", b)]);
     let int_members: Arc<[SemanticNodeId]> = Arc::from(vec![obj_a, obj_b].into_boxed_slice());
     let int_result = match dispatch.execute_type_node(
-        SemanticQueryKey::reduce_intersection_operands(Arc::clone(&int_members)),
+        SemanticQueryKey::reduce_intersection_operands(&graph, Arc::clone(&int_members)),
     ) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -8940,8 +8966,11 @@ fn homomorphic_mapped_over_resolved_empty_source_publishes_empty_object() {
             verter_type_engine::semantic_query::ProjectionMode::Expanded,
         ),
     });
-    let QueryResult::Value(id) = read.value else {
-        panic!("Partial<{{}}> produces a value, got {:?}", read.value);
+    let QueryResult::Value(id) = read.value().clone() else {
+        panic!(
+            "Partial<{{}}> produces a value, got {:?}",
+            read.value().clone()
+        );
     };
     match graph.node_data(id).as_deref() {
         Some(SemanticNodeData::Object(view)) => {
@@ -9321,7 +9350,7 @@ fn instantiate_ref_with_args_produces_sub_instantiate_shell_with_edge() {
 
     let data = graph.node_data(result).expect("result data");
     let view = match &*data {
-        SemanticNodeData::Object(v) => v.clone(),
+        SemanticNodeData::Object(v) => v.copy_for_tests(),
         other => panic!("expected Object shell, got {other:?}"),
     };
     let y_member = view
@@ -9386,7 +9415,7 @@ fn mapped_type_uses_source_member_names_when_object_source() {
     };
     let data = graph.node_data(result).expect("mapped result");
     let view = match &*data {
-        SemanticNodeData::Object(v) => v.clone(),
+        SemanticNodeData::Object(v) => v.copy_for_tests(),
         other => panic!("expected Object, got {other:?}"),
     };
     let names: Vec<String> = view
@@ -9459,7 +9488,7 @@ fn partial_routes_through_mapped_type_dispatch() {
     // optional because Partial adds the `?` modifier.
     let data = graph.node_data(result).expect("result data");
     let view = match &*data {
-        SemanticNodeData::Object(v) => v.clone(),
+        SemanticNodeData::Object(v) => v.copy_for_tests(),
         other => panic!("expected Object, got {other:?}"),
     };
     assert!(
@@ -9504,7 +9533,7 @@ fn required_routes_through_mapped_type_dispatch() {
     };
     let data = graph.node_data(result).expect("result data");
     let view = match &*data {
-        SemanticNodeData::Object(v) => v.clone(),
+        SemanticNodeData::Object(v) => v.copy_for_tests(),
         other => panic!("expected Object, got {other:?}"),
     };
     for member in view.positive_members().iter() {
@@ -9545,7 +9574,7 @@ fn readonly_routes_through_mapped_type_dispatch() {
     };
     let data = graph.node_data(result).expect("result data");
     let view = match &*data {
-        SemanticNodeData::Object(v) => v.clone(),
+        SemanticNodeData::Object(v) => v.copy_for_tests(),
         other => panic!("expected Object, got {other:?}"),
     };
     for member in view.positive_members().iter() {
@@ -9950,7 +9979,9 @@ fn partial_produces_structurally_equivalent_mapped_shape_to_userland() {
     let u_data = graph.node_data(userland).expect("userland data");
     let b_data = graph.node_data(utility_result).expect("utility data");
     let (u_view, b_view) = match (&*u_data, &*b_data) {
-        (SemanticNodeData::Object(u), SemanticNodeData::Object(b)) => (u.clone(), b.clone()),
+        (SemanticNodeData::Object(u), SemanticNodeData::Object(b)) => {
+            (u.copy_for_tests(), b.copy_for_tests())
+        }
         other => panic!("expected both sides to be Objects, got {other:?}"),
     };
     let u_names: Vec<String> = u_view
@@ -10174,17 +10205,20 @@ fn object_filter_and_mapper_utilities_over_any_materialize_tsgo_shapes() {
                     surface.positive_members().is_empty(),
                     "{label}: no named members"
                 );
-                assert!(surface.call_signatures.is_empty(), "{label}: no call sigs");
                 assert!(
-                    surface.construct_signatures.is_empty(),
+                    surface.call_signatures().is_empty(),
+                    "{label}: no call sigs"
+                );
+                assert!(
+                    surface.construct_signatures().is_empty(),
                     "{label}: no construct sigs"
                 );
                 assert_eq!(
-                    surface.index_signatures.len(),
+                    surface.index_signatures().len(),
                     1,
                     "{label}: exactly the string index signature"
                 );
-                let sig = &surface.index_signatures[0];
+                let sig = &surface.index_signatures()[0];
                 assert_node_primitive(&graph, sig.key_type, PrimitiveKind::String, label);
                 assert_node_primitive(&graph, sig.value_type, PrimitiveKind::Any, label);
                 assert!(!sig.readonly, "{label}: index signature is not readonly");
@@ -10216,7 +10250,7 @@ fn object_filter_and_mapper_utilities_over_any_materialize_tsgo_shapes() {
             assert!(!member.optional, "Pick<any, \"x\">: member is required");
             assert_node_primitive(&graph, member.value, PrimitiveKind::Any, "Pick<any, \"x\">");
             assert!(
-                surface.index_signatures.is_empty() && !surface.has_known_index_signature(),
+                surface.index_signatures().is_empty() && !surface.has_known_index_signature(),
                 "Pick<any, \"x\">: closed surface, no index signatures"
             );
         }
@@ -10263,11 +10297,11 @@ fn object_filter_and_mapper_utilities_over_any_materialize_tsgo_shapes() {
                 "Omit<any, \"x\">: no named members"
             );
             assert_eq!(
-                surface.index_signatures.len(),
+                surface.index_signatures().len(),
                 3,
                 "Omit<any, \"x\">: string + number + symbol index signatures"
             );
-            for (sig, expected_key) in surface.index_signatures.iter().zip([
+            for (sig, expected_key) in surface.index_signatures().iter().zip([
                 PrimitiveKind::String,
                 PrimitiveKind::Number,
                 PrimitiveKind::Symbol,
@@ -10310,7 +10344,7 @@ fn object_filter_and_mapper_utilities_over_any_materialize_tsgo_shapes() {
             assert!(!member.optional, "Pick<any, 1>: member is required");
             assert_node_primitive(&graph, member.value, PrimitiveKind::Any, "Pick<any, 1>");
             assert!(
-                surface.index_signatures.is_empty() && !surface.has_known_index_signature(),
+                surface.index_signatures().is_empty() && !surface.has_known_index_signature(),
                 "Pick<any, 1>: closed surface, no index signatures"
             );
         }
@@ -10376,7 +10410,7 @@ fn object_filter_and_mapper_utilities_over_any_materialize_tsgo_shapes() {
                 "Omit<any, 1>: no named members"
             );
             assert_eq!(
-                surface.index_signatures.len(),
+                surface.index_signatures().len(),
                 3,
                 "Omit<any, 1>: string + number + symbol index signatures"
             );
@@ -10667,7 +10701,7 @@ fn mapped_k_dependent_values_keep_key_literal_kind() {
     // `{ [K in 1]: [K] }` = `{ 1: [1] }`.
     let param = key_param();
     let tuple_of_k = graph.intern_node(SemanticNodeData::Tuple {
-        elements: Arc::from(
+        elements: verter_type_engine::semantic_query::PayloadArray::from(
             vec![verter_type_engine::semantic_query::TupleElement {
                 label: None,
                 value: param,
@@ -11964,7 +11998,7 @@ fn project_path_tuple_numeric_index_projects_positions_and_broad_union() {
     let string_node = primitive(&graph, PrimitiveKind::String);
     let boolean_node = primitive(&graph, PrimitiveKind::Boolean);
     let tuple = graph.intern_node(SemanticNodeData::Tuple {
-        elements: Arc::from(
+        elements: verter_type_engine::semantic_query::PayloadArray::from(
             vec![
                 TupleElement {
                     label: Some(Arc::from("name")),
@@ -12054,7 +12088,7 @@ fn project_path_tuple_numeric_index_projects_positions_and_broad_union() {
         "a negative key of a single tuple without a rest element stays unread"
     );
     let single = graph.intern_node(SemanticNodeData::Tuple {
-        elements: Arc::from(
+        elements: verter_type_engine::semantic_query::PayloadArray::from(
             vec![TupleElement {
                 label: None,
                 value: number_node,
@@ -12111,7 +12145,9 @@ fn project_path_tuple_string_index_requires_canonical_digits() {
         rest: false,
     };
     let tuple = graph.intern_node(SemanticNodeData::Tuple {
-        elements: Arc::from(vec![plain(string_node), plain(number_node)].into_boxed_slice()),
+        elements: verter_type_engine::semantic_query::PayloadArray::from(
+            vec![plain(string_node), plain(number_node)].into_boxed_slice(),
+        ),
         readonly: false,
     });
     let project = |key: &str| -> SemanticNodeId {
@@ -12168,7 +12204,7 @@ fn project_path_tuple_numeric_index_resolves_fixed_prefix_before_rest() {
     });
     // `[x: string, n?: number, ...rest: boolean[]]`
     let tuple = graph.intern_node(SemanticNodeData::Tuple {
-        elements: Arc::from(
+        elements: verter_type_engine::semantic_query::PayloadArray::from(
             vec![
                 TupleElement {
                     label: Some(Arc::from("x")),
@@ -12250,7 +12286,7 @@ fn parameters_tuple_widens_optional_slot_and_keeps_label() {
     let void_node = primitive(&graph, PrimitiveKind::Void);
     let function = graph.intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Call,
-        params: Arc::from(
+        params: verter_type_engine::semantic_query::PayloadArray::from(
             vec![
                 FunctionParam {
                     name: Some(Arc::from("name")),
@@ -12276,7 +12312,9 @@ fn parameters_tuple_widens_optional_slot_and_keeps_label() {
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
             void_node,
         ),
-        type_parameters: Arc::from(Vec::new().into_boxed_slice()),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+            Vec::new().into_boxed_slice(),
+        ),
         signature_span: None,
         return_type_span: None,
         predicate: None,
@@ -12334,7 +12372,7 @@ fn tuple_spread_normalization_splices_collapses_and_preserves_carriers() {
 
     // Settled rest-of-tuple splices, preserving the inner optional marker.
     let inner = graph.intern_node(SemanticNodeData::Tuple {
-        elements: Arc::from(
+        elements: verter_type_engine::semantic_query::PayloadArray::from(
             vec![
                 plain(lit(2.0)),
                 TupleElement {
@@ -12582,7 +12620,7 @@ fn tuple_spread_non_trailing_optional_converts_to_required_undefined_union() {
     // `[...[a?: number, b?: string], boolean]` — both spliced optionals
     // sit before a required element: convert to required `T | undefined`.
     let inner = graph.intern_node(SemanticNodeData::Tuple {
-        elements: Arc::from(
+        elements: verter_type_engine::semantic_query::PayloadArray::from(
             vec![optional("a", num), optional("b", string_node)].into_boxed_slice(),
         ),
         readonly: false,
@@ -12643,7 +12681,9 @@ fn promise_carrier(
             whole_hash: verter_type_engine::semantic_query::HashValue::default(),
             decl_name: Arc::from("Promise"),
         },
-        args: Arc::from(vec![payload].into_boxed_slice()),
+        args: verter_type_engine::semantic_query::PayloadArray::from(
+            vec![payload].into_boxed_slice(),
+        ),
     })
 }
 
@@ -12968,11 +13008,11 @@ fn return_type_of_typeof_local_fn_resolves_via_dispatch() {
                 "typeof of pure function has no user members"
             );
             assert_eq!(
-                surface.call_signatures.len(),
+                surface.call_signatures().len(),
                 1,
                 "typeof of pure function has one call signature"
             );
-            let sig_id = surface.call_signatures[0];
+            let sig_id = surface.call_signatures()[0];
             match &*graph.node_data(sig_id).expect("call sig data") {
                 SemanticNodeData::Signature {
                     params,
@@ -13107,7 +13147,7 @@ fn signature_utilities_distribute_over_union_subjects() {
     };
     let union_members = |node: SemanticNodeId, what: &str| -> Vec<SemanticNodeId> {
         match graph.node_data(node).as_deref() {
-            Some(SemanticNodeData::Union(members)) => members.members_arc().to_vec(),
+            Some(SemanticNodeData::Union(members)) => members.to_vec(),
             other => panic!("{what} must be a union, got {other:?}"),
         }
     };
@@ -13532,14 +13572,14 @@ fn function_surface_publishes_as_object_with_call_signatures() {
                 v.positive_members().is_empty(),
                 "pure function has no ordinary members"
             );
-            assert_eq!(v.call_signatures.len(), 2, "two overload signatures");
-            assert_eq!(v.call_signatures[0], sig_a, "first signature preserved");
-            assert_eq!(v.call_signatures[1], sig_b, "second signature preserved");
-            assert_eq!(v.construct_signatures.len(), 1, "one construct signature");
-            assert_eq!(v.construct_signatures[0], ctor_sig);
-            assert!(v.index_signatures.is_empty());
+            assert_eq!(v.call_signatures().len(), 2, "two overload signatures");
+            assert_eq!(v.call_signatures()[0], sig_a, "first signature preserved");
+            assert_eq!(v.call_signatures()[1], sig_b, "second signature preserved");
+            assert_eq!(v.construct_signatures().len(), 1, "one construct signature");
+            assert_eq!(v.construct_signatures()[0], ctor_sig);
+            assert!(v.index_signatures().is_empty());
             assert!(!v.has_known_index_signature());
-            assert!(v.keyspace.is_none());
+            assert!(v.keyspace().is_none());
         }
         other => panic!("function must publish as Object, got {other:?}"),
     }
@@ -14089,7 +14129,7 @@ fn unresolved_typeparameter_references_alias_by_name_within_same_file() {
     };
 
     let view = match graph.node_data(inst).as_deref() {
-        Some(SemanticNodeData::Object(v)) => v.clone(),
+        Some(SemanticNodeData::Object(v)) => v.copy_for_tests(),
         other => panic!("expected Object, got {other:?}"),
     };
     let a_value = view
@@ -14237,7 +14277,7 @@ fn nested_function_infer_binds_per_position_to_check_signature() {
     });
     let extends = graph.intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Call,
-        params: Arc::from(
+        params: verter_type_engine::semantic_query::PayloadArray::from(
             vec![FunctionParam::synthetic(
                 Some(Arc::from("x")),
                 infer_p,
@@ -14251,7 +14291,9 @@ fn nested_function_infer_binds_per_position_to_check_signature() {
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
             any_node,
         ),
-        type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+            Vec::<TypeParamDecl>::new().into_boxed_slice(),
+        ),
         signature_span: None,
         return_type_span: None,
         predicate: None,
@@ -14260,7 +14302,7 @@ fn nested_function_infer_binds_per_position_to_check_signature() {
     // check = `(x: string) => any` — concrete Function.
     let check = graph.intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Call,
-        params: Arc::from(
+        params: verter_type_engine::semantic_query::PayloadArray::from(
             vec![FunctionParam::synthetic(
                 Some(Arc::from("x")),
                 string_node,
@@ -14274,7 +14316,9 @@ fn nested_function_infer_binds_per_position_to_check_signature() {
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
             any_node,
         ),
-        type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+            Vec::<TypeParamDecl>::new().into_boxed_slice(),
+        ),
         signature_span: None,
         return_type_span: None,
         predicate: None,
@@ -14326,7 +14370,7 @@ fn losing_overload_alternative_deposits_do_not_reach_fixation() {
     let call_sig = |a: SemanticNodeId, b: SemanticNodeId| {
         graph.intern_node(SemanticNodeData::Signature {
             kind: SignatureKind::Call,
-            params: Arc::from(
+            params: verter_type_engine::semantic_query::PayloadArray::from(
                 vec![
                     FunctionParam::synthetic(Some(Arc::from("a")), a, false, false),
                     FunctionParam::synthetic(Some(Arc::from("b")), b, false, false),
@@ -14338,7 +14382,9 @@ fn losing_overload_alternative_deposits_do_not_reach_fixation() {
             return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
                 void_node,
             ),
-            type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+            type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+                Vec::<TypeParamDecl>::new().into_boxed_slice(),
+            ),
             signature_span: None,
             return_type_span: None,
             predicate: None,
@@ -14497,7 +14543,7 @@ fn production_lowering_seeds_the_selected_infer_before_the_mapped_template() {
 
     let recovered = require_object_surface(
         &graph,
-        result,
+        result.id(),
         "production-lowered reverse homomorphic conditional",
     );
     assert_eq!(recovered.positive_members().len(), 1);
@@ -14543,7 +14589,7 @@ fn production_lowering_keeps_an_inner_same_name_binder_innermost() {
         .expect("the production-lowered shadow fixture must resolve");
     assert!(
         matches!(
-            graph.node_data(result).as_deref(),
+            graph.node_data(result.id()).as_deref(),
             Some(SemanticNodeData::Conditional { .. })
         ),
         "the signature's own `<T>` must shadow the outer selected `infer T`; the reverse relation stays deferred"
@@ -14565,13 +14611,17 @@ fn reverse_homomorphic_raw_fallback_projection_candidate_stays_deferred() {
     });
     let signature = graph.intern_node(SemanticNodeData::Signature {
         kind: SignatureKind::Call,
-        params: Arc::from(Vec::<FunctionParam>::new().into_boxed_slice()),
+        params: verter_type_engine::semantic_query::PayloadArray::from(
+            Vec::<FunctionParam>::new().into_boxed_slice(),
+        ),
         return_type: raw_fallback,
         occurrence: None,
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
             raw_fallback,
         ),
-        type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+            Vec::<TypeParamDecl>::new().into_boxed_slice(),
+        ),
         signature_span: None,
         return_type_span: None,
         predicate: None,
@@ -14667,7 +14717,7 @@ fn reverse_homomorphic_nested_signature_parameter_bare_ref_stays_deferred() {
     ));
     let signature = graph.intern_node(SemanticNodeData::Signature {
         kind: SignatureKind::Call,
-        params: Arc::from(
+        params: verter_type_engine::semantic_query::PayloadArray::from(
             vec![FunctionParam::synthetic(
                 Some(Arc::from("x")),
                 missing,
@@ -14679,7 +14729,9 @@ fn reverse_homomorphic_nested_signature_parameter_bare_ref_stays_deferred() {
         return_type: void,
         occurrence: None,
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(void),
-        type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+            Vec::<TypeParamDecl>::new().into_boxed_slice(),
+        ),
         signature_span: None,
         return_type_span: None,
         predicate: None,
@@ -14869,7 +14921,7 @@ fn watched_red_reverse_homomorphic_recursive_ref_is_publishable() {
     let never = primitive(&graph, PrimitiveKind::Never);
     let recursive = graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
         name: Arc::from("Tree"),
-        args: std::sync::Arc::from([]),
+        args: Default::default(),
     }));
     let source =
         intern_object_with_members(&graph, vec![surface_member("a", recursive, false, false)]);
@@ -14915,7 +14967,7 @@ fn watched_red_reverse_homomorphic_discards_noncontributing_call_signature_poiso
     });
     let call_signature = graph.intern_node(SemanticNodeData::Signature {
         kind: SignatureKind::Call,
-        params: Arc::from(
+        params: verter_type_engine::semantic_query::PayloadArray::from(
             vec![FunctionParam::synthetic(
                 Some(Arc::from("x")),
                 unknown,
@@ -14929,7 +14981,9 @@ fn watched_red_reverse_homomorphic_discards_noncontributing_call_signature_poiso
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
             raw_fallback,
         ),
-        type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+            Vec::<TypeParamDecl>::new().into_boxed_slice(),
+        ),
         signature_span: None,
         return_type_span: None,
         predicate: None,
@@ -15022,7 +15076,7 @@ fn production_reverse_homomorphic_recovers_named_and_instantiated_sources() {
             .ok()
             .flatten()
             .unwrap_or_else(|| panic!("{name} must resolve"));
-        let recovered = require_object_surface(&graph, result, name);
+        let recovered = require_object_surface(&graph, result.id(), name);
         assert!(
             matches!(
                 graph
@@ -15163,14 +15217,17 @@ fn raw_relate_rejects_forged_inference_context_when_target_has_no_pattern() {
     // The rejection supplies no relation, so its read must report the same
     // Unavailable fact the fact API adopts, not a Complete status.
     let read = dispatch.execute_read(forged.to_query_key());
-    assert!(matches!(read.value, QueryResult::Error(QueryError::Miss)));
+    assert!(matches!(
+        read.value().clone(),
+        QueryResult::Error(QueryError::Miss)
+    ));
     assert!(
         matches!(
-            read.fact_status,
+            read.fact_status(),
             verter_type_engine::semantic_query::FactStatus::Unavailable(_)
         ),
         "a rejected raw relation read must report Unavailable, got {:?}",
-        read.fact_status
+        read.fact_status()
     );
     assert!(read.result_is_partial());
     assert!(!read.partial_reason_classes().is_empty());
@@ -15178,7 +15235,7 @@ fn raw_relate_rejects_forged_inference_context_when_target_has_no_pattern() {
         .execute_fact(forged.to_query_key())
         .expect("a rejected raw relation is not an execution abort");
     assert_eq!(
-        read.fact_status,
+        read.fact_status().clone(),
         fact.status(),
         "the raw read and the fact API must carry one adopted disposition"
     );
@@ -15375,11 +15432,15 @@ fn relate_function_rest_never_exempts_uncallable_source_arity() {
     let signature = |params: Vec<FunctionParam>| {
         graph.intern_node(SemanticNodeData::Signature {
             kind: SignatureKind::Call,
-            params: Arc::from(params.into_boxed_slice()),
+            params: verter_type_engine::semantic_query::PayloadArray::from(
+                params.into_boxed_slice(),
+            ),
             return_type: ret,
             occurrence: None,
             return_carrier: SignatureReturnCarrier::Declared(ret),
-            type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+            type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+                Vec::<TypeParamDecl>::new().into_boxed_slice(),
+            ),
             signature_span: None,
             return_type_span: None,
             predicate: None,
@@ -15606,7 +15667,7 @@ fn reverse_homomorphic_reduces_key_conditionals_through_array_tuple_and_function
     let signature = |parameter: SemanticNodeId, return_type: SemanticNodeId| {
         graph.intern_node(SemanticNodeData::Signature {
             kind: SignatureKind::Call,
-            params: Arc::from(
+            params: verter_type_engine::semantic_query::PayloadArray::from(
                 vec![FunctionParam::synthetic(
                     Some(Arc::from("value")),
                     parameter,
@@ -15620,7 +15681,9 @@ fn reverse_homomorphic_reduces_key_conditionals_through_array_tuple_and_function
             return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
                 return_type,
             ),
-            type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+            type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+                Vec::<TypeParamDecl>::new().into_boxed_slice(),
+            ),
             signature_span: None,
             return_type_span: None,
             predicate: None,
@@ -15656,7 +15719,7 @@ fn reverse_homomorphic_reduces_key_conditionals_through_array_tuple_and_function
             ),
             "tuple" => (
                 graph.intern_node(SemanticNodeData::Tuple {
-                    elements: Arc::from(
+                    elements: verter_type_engine::semantic_query::PayloadArray::from(
                         vec![TupleElement {
                             label: Some(Arc::from("value")),
                             value: conditional,
@@ -15668,7 +15731,7 @@ fn reverse_homomorphic_reduces_key_conditionals_through_array_tuple_and_function
                     readonly: true,
                 }),
                 graph.intern_node(SemanticNodeData::Tuple {
-                    elements: Arc::from(
+                    elements: verter_type_engine::semantic_query::PayloadArray::from(
                         vec![TupleElement {
                             label: Some(Arc::from("value")),
                             value: string,
@@ -15770,7 +15833,7 @@ fn reverse_homomorphic_array_and_tuple_containers_preserve_source_readonly_acros
                 modifier,
             );
             let tuple_source = graph.intern_node(SemanticNodeData::Tuple {
-                elements: Arc::from(
+                elements: verter_type_engine::semantic_query::PayloadArray::from(
                     vec![TupleElement {
                         label: Some(Arc::from("item")),
                         value: string,
@@ -15849,7 +15912,7 @@ fn binding_relation_cold_publish_obeys_store_owned_abort_fence() {
     assert!(
         graph
             .get_relation_payload(&host, &key)
-            .map(|served| served.value)
+            .map(|served| served.value().clone())
             .is_none(),
         "an aborted cold binding owner must not resurrect a warm relation entry"
     );
@@ -15913,7 +15976,7 @@ fn reverse_homomorphic_preserves_array_tuple_and_index_shapes_and_inverts_add_mo
         ReadonlyMod::Keep,
     );
     let tuple_source = graph.intern_node(SemanticNodeData::Tuple {
-        elements: Arc::from(
+        elements: verter_type_engine::semantic_query::PayloadArray::from(
             vec![
                 TupleElement {
                     label: Some(Arc::from("first")),
@@ -15988,10 +16051,10 @@ fn reverse_homomorphic_preserves_array_tuple_and_index_shapes_and_inverts_add_mo
     let named = surface_get_member(&object_view, "named");
     assert_eq!(named.value, string);
     assert!(!named.optional && !named.readonly);
-    assert_eq!(object_view.index_signatures.len(), 1);
-    assert_eq!(object_view.index_signatures[0].value_type, boolean);
+    assert_eq!(object_view.index_signatures().len(), 1);
+    assert_eq!(object_view.index_signatures()[0].value_type, boolean);
     assert!(
-        !object_view.index_signatures[0].readonly,
+        !object_view.index_signatures()[0].readonly,
         "a mapped `+readonly` is synthetic on the recovered index signature"
     );
 }
@@ -16258,7 +16321,9 @@ fn reverse_homomorphic_normalizes_declref_and_instantiationref_sources() {
             242,
             graph.intern_node(SemanticNodeData::InstantiationRef {
                 base: decl_identity_value(&host, "/w/reverse-carriers.ts", "Generic"),
-                args: Arc::from(vec![number].into_boxed_slice()),
+                args: verter_type_engine::semantic_query::PayloadArray::from(
+                    vec![number].into_boxed_slice(),
+                ),
             }),
             PrimitiveKind::Number,
         ),
@@ -16441,7 +16506,7 @@ fn reverse_homomorphic_remove_modifiers_reject_incompatible_metadata() {
         "readonly index modifier removal",
     );
     assert!(
-        readonly_index_view.index_signatures[0].readonly,
+        readonly_index_view.index_signatures()[0].readonly,
         "TypeScript reverse construction preserves a readonly source index signature through `-readonly`"
     );
     let readonly_array = graph.intern_node(SemanticNodeData::Array {
@@ -16467,7 +16532,7 @@ fn reverse_homomorphic_remove_modifiers_reject_incompatible_metadata() {
          readonly container bit independently of member modifier inversion"
     );
     let optional_tuple = graph.intern_node(SemanticNodeData::Tuple {
-        elements: Arc::from(
+        elements: verter_type_engine::semantic_query::PayloadArray::from(
             vec![TupleElement {
                 label: Some(Arc::from("head")),
                 value: string,
@@ -16490,7 +16555,7 @@ fn reverse_homomorphic_remove_modifiers_reject_incompatible_metadata() {
         "an optional tuple slot cannot satisfy mapped `-?`"
     );
     let readonly_tuple = graph.intern_node(SemanticNodeData::Tuple {
-        elements: Arc::from(
+        elements: verter_type_engine::semantic_query::PayloadArray::from(
             vec![TupleElement {
                 label: None,
                 value: string,
@@ -16557,7 +16622,7 @@ fn reverse_homomorphic_remove_modifiers_reject_incompatible_metadata() {
     );
 
     let mutable_required_tuple = graph.intern_node(SemanticNodeData::Tuple {
-        elements: Arc::from(
+        elements: verter_type_engine::semantic_query::PayloadArray::from(
             vec![TupleElement {
                 label: Some(Arc::from("head")),
                 value: string,
@@ -16637,7 +16702,7 @@ fn reverse_homomorphic_tuple_uses_string_fixed_keys_and_number_rest_keys() {
         readonly: true,
     });
     let source = graph.intern_node(SemanticNodeData::Tuple {
-        elements: Arc::from(
+        elements: verter_type_engine::semantic_query::PayloadArray::from(
             vec![
                 TupleElement {
                     label: Some(Arc::from("fixed")),
@@ -16698,7 +16763,7 @@ fn reverse_projection_candidates_from_a_losing_signature_alternative_roll_back()
     let signature = |first: SemanticNodeId, second: SemanticNodeId| {
         graph.intern_node(SemanticNodeData::Signature {
             kind: SignatureKind::Call,
-            params: Arc::from(
+            params: verter_type_engine::semantic_query::PayloadArray::from(
                 vec![
                     FunctionParam::synthetic(Some(Arc::from("first")), first, false, false),
                     FunctionParam::synthetic(Some(Arc::from("second")), second, false, false),
@@ -16710,7 +16775,9 @@ fn reverse_projection_candidates_from_a_losing_signature_alternative_roll_back()
             return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
                 void,
             ),
-            type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+            type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+                Vec::<TypeParamDecl>::new().into_boxed_slice(),
+            ),
             signature_span: None,
             return_type_span: None,
             predicate: None,
@@ -16897,7 +16964,7 @@ fn reverse_projection_preserves_contravariance_through_object_array_and_tuple_ne
     let signature = |params: Vec<SemanticNodeId>| {
         graph.intern_node(SemanticNodeData::Signature {
             kind: SignatureKind::Call,
-            params: Arc::from(
+            params: verter_type_engine::semantic_query::PayloadArray::from(
                 params
                     .into_iter()
                     .enumerate()
@@ -16917,7 +16984,9 @@ fn reverse_projection_preserves_contravariance_through_object_array_and_tuple_ne
             return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
                 void,
             ),
-            type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+            type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+                Vec::<TypeParamDecl>::new().into_boxed_slice(),
+            ),
             signature_span: None,
             return_type_span: None,
             predicate: None,
@@ -16942,7 +17011,7 @@ fn reverse_projection_preserves_contravariance_through_object_array_and_tuple_ne
                 readonly: false,
             }),
             "tuple" => graph.intern_node(SemanticNodeData::Tuple {
-                elements: Arc::from(
+                elements: verter_type_engine::semantic_query::PayloadArray::from(
                     vec![TupleElement {
                         label: Some(Arc::from("value")),
                         value,
@@ -17100,7 +17169,7 @@ fn reverse_projection_association_accepts_scoped_infer_refs_but_rejects_bare_ref
     });
     let shadow_template = graph.intern_node(SemanticNodeData::Signature {
         kind: SignatureKind::Call,
-        params: Arc::from(
+        params: verter_type_engine::semantic_query::PayloadArray::from(
             vec![FunctionParam::synthetic(
                 Some(Arc::from("value")),
                 shadow_projection,
@@ -17112,7 +17181,7 @@ fn reverse_projection_association_accepts_scoped_infer_refs_but_rejects_bare_ref
         return_type: void,
         occurrence: None,
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(void),
-        type_parameters: Arc::from(
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
             vec![TypeParamDecl {
                 name: Arc::from("ShadowT"),
                 param: shadow_parameter,
@@ -17129,7 +17198,7 @@ fn reverse_projection_association_accepts_scoped_infer_refs_but_rejects_bare_ref
     });
     let shadow_source_value = graph.intern_node(SemanticNodeData::Signature {
         kind: SignatureKind::Call,
-        params: Arc::from(
+        params: verter_type_engine::semantic_query::PayloadArray::from(
             vec![FunctionParam::synthetic(
                 Some(Arc::from("value")),
                 string,
@@ -17141,7 +17210,9 @@ fn reverse_projection_association_accepts_scoped_infer_refs_but_rejects_bare_ref
         return_type: void,
         occurrence: None,
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(void),
-        type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+            Vec::<TypeParamDecl>::new().into_boxed_slice(),
+        ),
         signature_span: None,
         return_type_span: None,
         predicate: None,
@@ -17252,7 +17323,7 @@ fn substitute_recurses_into_function_params_and_return_type() {
     // `(x: T) => T` — both param and return reference T.
     let fn_node = graph.intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Call,
-        params: Arc::from(
+        params: verter_type_engine::semantic_query::PayloadArray::from(
             vec![FunctionParam::synthetic(
                 Some(Arc::from("x")),
                 t_param,
@@ -17266,7 +17337,9 @@ fn substitute_recurses_into_function_params_and_return_type() {
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
             t_param,
         ),
-        type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+            Vec::<TypeParamDecl>::new().into_boxed_slice(),
+        ),
         signature_span: None,
         return_type_span: None,
         predicate: None,
@@ -17507,7 +17580,11 @@ fn navigate_lowering_pick_omit_preserve_carrier_other_utilities_unchanged() {
     let graph = host.project_type_store().semantic_graph();
     let wrap_data = graph.node_data(wrap_body).expect("Wrap body data");
     let members = match wrap_data.as_ref() {
-        SemanticNodeData::Object(view) => view.positive_members().to_vec(),
+        SemanticNodeData::Object(view) => view
+            .positive_members()
+            .iter()
+            .map(verter_type_engine::semantic_query::SurfaceMember::copy_for_tests)
+            .collect::<Vec<_>>(),
         other => panic!("Wrap skeleton body must be an Object surface, got {other:?}"),
     };
     for (member_name, util_name) in [("v", "NonNullable"), ("p", "Partial")] {
@@ -17873,7 +17950,7 @@ fn unary_function(
     use verter_type_engine::semantic_query::FunctionParam;
     graph.intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Call,
-        params: Arc::from(
+        params: verter_type_engine::semantic_query::PayloadArray::from(
             vec![FunctionParam {
                 name: Some(Arc::from("p")),
                 ty: param_ty,
@@ -17889,7 +17966,9 @@ fn unary_function(
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
             return_ty,
         ),
-        type_parameters: Arc::from(Vec::new().into_boxed_slice()),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+            Vec::new().into_boxed_slice(),
+        ),
         signature_span: None,
         return_type_span: None,
         predicate: None,
@@ -17955,7 +18034,9 @@ fn open_mapped_value_body_carrier_stops_in_expanded_and_macro_object_surface() {
     // functions/objects AND inspects conditional branches finds it.
     let base_inst = graph.intern_node(SemanticNodeData::InstantiationRef {
         base: DeclIdentity::synthetic("Base"),
-        args: Arc::from(vec![t_param].into_boxed_slice()),
+        args: verter_type_engine::semantic_query::PayloadArray::from(
+            vec![t_param].into_boxed_slice(),
+        ),
     });
     let inner_obj = simple_object(&graph, &[("m", base_inst)]);
     let true_fn = unary_function(&graph, inner_obj, string_ty);
@@ -18151,7 +18232,9 @@ fn mapped_binder_bound_outer_generic_open_value_discrimination() {
     });
     let foo_of_t = graph.intern_node(SemanticNodeData::InstantiationRef {
         base: DeclIdentity::synthetic("Foo"),
-        args: Arc::from(vec![t_param].into_boxed_slice()),
+        args: verter_type_engine::semantic_query::PayloadArray::from(
+            vec![t_param].into_boxed_slice(),
+        ),
     });
 
     let make_mapper = |value_expr| MapperKey {
@@ -18250,7 +18333,9 @@ fn mapped_predicate_each_dimension_opens_independently_with_k_only_controls() {
             quasis: Arc::from(
                 vec![Arc::<str>::from("on"), Arc::<str>::from("")].into_boxed_slice(),
             ),
-            expressions: Arc::from(vec![interpolant].into_boxed_slice()),
+            expressions: verter_type_engine::semantic_query::PayloadArray::from(
+                vec![interpolant].into_boxed_slice(),
+            ),
         })
     };
 
@@ -18418,7 +18503,9 @@ fn mapped_key_domain_judges_instantiations_per_argument_not_by_arg_openness() {
             whole_hash: HashValue::default(),
             decl_name: Arc::from("Foo"),
         },
-        args: Arc::from(vec![t_param].into_boxed_slice()),
+        args: verter_type_engine::semantic_query::PayloadArray::from(
+            vec![t_param].into_boxed_slice(),
+        ),
     });
     let keyof_foo_of_t = graph.intern_node(SemanticNodeData::KeyOf { base: foo_of_t });
 
@@ -18516,7 +18603,9 @@ fn intrinsic_application_is_known_symbolic_and_not_terminal() {
     let t_param = outer_type_param(&graph, "T");
     let awaited_t = graph.intern_node(SemanticNodeData::IntrinsicApplication {
         op: CompilerIntrinsicTypeOp::Awaited,
-        args: Arc::from(vec![t_param].into_boxed_slice()),
+        args: verter_type_engine::semantic_query::PayloadArray::from(
+            vec![t_param].into_boxed_slice(),
+        ),
     });
     let settled = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let key_lit = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
@@ -18597,7 +18686,9 @@ fn repeated_open_type_param_argument_stays_open_on_revisit() {
             whole_hash: HashValue::default(),
             decl_name: Arc::from("Foo"),
         },
-        args: Arc::from(vec![t_param, t_param].into_boxed_slice()),
+        args: verter_type_engine::semantic_query::PayloadArray::from(
+            vec![t_param, t_param].into_boxed_slice(),
+        ),
     });
     let key_lit = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
         "x".to_string(),
@@ -18671,7 +18762,9 @@ fn key_domain_classifier_ignores_mapped_value_positions_and_binds_mapper_binder(
     // fixed-key mapped body keeps the key domain CLOSED.
     let key_fixed_of_t = graph.intern_node(SemanticNodeData::InstantiationRef {
         base: decl("KeyFixed"),
-        args: Arc::from(vec![t_param].into_boxed_slice()),
+        args: verter_type_engine::semantic_query::PayloadArray::from(
+            vec![t_param].into_boxed_slice(),
+        ),
     });
     assert!(
         !super::raise::utility_enumeration_domain_is_open_or_unknown(
@@ -18690,7 +18783,9 @@ fn key_domain_classifier_ignores_mapped_value_positions_and_binds_mapper_binder(
     });
     let my_partial_concrete = graph.intern_node(SemanticNodeData::InstantiationRef {
         base: decl("MyPartial"),
-        args: Arc::from(vec![concrete_ref].into_boxed_slice()),
+        args: verter_type_engine::semantic_query::PayloadArray::from(
+            vec![concrete_ref].into_boxed_slice(),
+        ),
     });
     assert!(
         !super::raise::utility_enumeration_domain_is_open_or_unknown(
@@ -18826,7 +18921,9 @@ fn nested_instantiation_wrappers_apply_per_argument_key_domain_rule() {
                 whole_hash: HashValue::default(),
                 decl_name: Arc::from(name),
             },
-            args: Arc::from(vec![t_param].into_boxed_slice()),
+            args: verter_type_engine::semantic_query::PayloadArray::from(
+                vec![t_param].into_boxed_slice(),
+            ),
         })
     };
 
@@ -18982,7 +19079,9 @@ fn k_only_remapped_mapped_alias_closes_on_prepared_decl_route() {
             whole_hash: HashValue::default(),
             decl_name: Arc::from("RemappedOuter"),
         },
-        args: Arc::from(vec![t_param].into_boxed_slice()),
+        args: verter_type_engine::semantic_query::PayloadArray::from(
+            vec![t_param].into_boxed_slice(),
+        ),
     });
     assert!(
         super::raise::utility_enumeration_domain_is_open_or_unknown(
@@ -19109,7 +19208,9 @@ fn capitalize_remap_closes_but_returntype_source_opens_on_prepared_decl_route() 
             whole_hash: HashValue::default(),
             decl_name: Arc::from("RetSource"),
         },
-        args: Arc::from(vec![t_param].into_boxed_slice()),
+        args: verter_type_engine::semantic_query::PayloadArray::from(
+            vec![t_param].into_boxed_slice(),
+        ),
     });
     assert!(
         super::raise::utility_enumeration_domain_is_open_or_unknown(
@@ -19171,7 +19272,7 @@ fn import_type_source_closes_on_prepared_decl_route_matching_node_route() {
             whole_hash: HashValue::default(),
             decl_name: Arc::from("Use"),
         },
-        args: Arc::from(vec![t].into_boxed_slice()),
+        args: verter_type_engine::semantic_query::PayloadArray::from(vec![t].into_boxed_slice()),
     });
     assert!(
         !super::raise::utility_enumeration_domain_is_open_or_unknown(
@@ -19232,7 +19333,9 @@ fn self_referential_import_type_source_terminates_on_prepared_decl_route() {
                     whole_hash: HashValue::default(),
                     decl_name: Arc::from("SelfRec"),
                 },
-                args: Arc::from(vec![t].into_boxed_slice()),
+                args: verter_type_engine::semantic_query::PayloadArray::from(
+                    vec![t].into_boxed_slice(),
+                ),
             });
             // The verdict is question-correct: a self-referential recursive
             // import-type source key domain is undecidable ⇒ OPEN (carrier-stop),
@@ -19603,7 +19706,7 @@ fn nested_builtin_object_filter_key_domain_judged_by_family_semantics() {
     let nested = |base_name: &str, args: Vec<SemanticNodeId>| {
         graph.intern_node(SemanticNodeData::InstantiationRef {
             base: builtin(base_name),
-            args: Arc::from(args.into_boxed_slice()),
+            args: verter_type_engine::semantic_query::PayloadArray::from(args.into_boxed_slice()),
         })
     };
 
@@ -19705,7 +19808,9 @@ fn conditional_key_domain_classifies_only_the_oracle_selected_branch() {
                 whole_hash: HashValue::default(),
                 decl_name: Arc::from(name),
             },
-            args: Arc::from(vec![t_param].into_boxed_slice()),
+            args: verter_type_engine::semantic_query::PayloadArray::from(
+                vec![t_param].into_boxed_slice(),
+            ),
         })
     };
 
@@ -19880,7 +19985,7 @@ fn value_sensitive_operands_judge_instantiations_by_any_open_argument() {
     let inst = |name: &str, args: Vec<SemanticNodeId>| {
         graph.intern_node(SemanticNodeData::InstantiationRef {
             base: decl(name),
-            args: Arc::from(args.into_boxed_slice()),
+            args: verter_type_engine::semantic_query::PayloadArray::from(args.into_boxed_slice()),
         })
     };
 
@@ -20053,7 +20158,9 @@ fn builtin_key_domain_verdict_is_route_independent() {
                     whole_hash: HashValue::default(),
                     decl_name: Arc::from("Partial"),
                 },
-                args: Arc::from(vec![source].into_boxed_slice()),
+                args: verter_type_engine::semantic_query::PayloadArray::from(
+                    vec![source].into_boxed_slice(),
+                ),
             }),
             lit_a,
         ],
@@ -20101,7 +20208,9 @@ fn builtin_key_domain_verdict_is_route_independent() {
                         whole_hash: HashValue::default(),
                         decl_name: Arc::from("Partial"),
                     },
-                    args: Arc::from(vec![t_param].into_boxed_slice()),
+                    args: verter_type_engine::semantic_query::PayloadArray::from(
+                        vec![t_param].into_boxed_slice()
+                    ),
                 }),
                 lit_a,
             ],
@@ -20116,7 +20225,9 @@ fn builtin_key_domain_verdict_is_route_independent() {
             &[
                 graph.intern_node(SemanticNodeData::InstantiationRef {
                     base: decl("PartialOpen"),
-                    args: Arc::from(vec![t_param].into_boxed_slice()),
+                    args: verter_type_engine::semantic_query::PayloadArray::from(
+                        vec![t_param].into_boxed_slice()
+                    ),
                 }),
                 lit_a,
             ],
@@ -20182,7 +20293,9 @@ fn bare_infer_extends_defers_over_a_generic_check_through_the_shared_oracle() {
                 whole_hash: HashValue::default(),
                 decl_name: Arc::from(name),
             },
-            args: Arc::from(vec![arg].into_boxed_slice()),
+            args: verter_type_engine::semantic_query::PayloadArray::from(
+                vec![arg].into_boxed_slice(),
+            ),
         })
     };
 
@@ -20372,7 +20485,7 @@ fn value_sensitive_operands_descend_compound_value_surfaces() {
     let inst = |name: &str, args: Vec<SemanticNodeId>| {
         graph.intern_node(SemanticNodeData::InstantiationRef {
             base: decl(name),
-            args: Arc::from(args.into_boxed_slice()),
+            args: verter_type_engine::semantic_query::PayloadArray::from(args.into_boxed_slice()),
         })
     };
 
@@ -20465,13 +20578,15 @@ fn value_sensitive_operands_descend_compound_value_surfaces() {
     // the `() => string` twin CLOSED.
     let fn_open = graph.intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Call,
-        params: Arc::from(Vec::<FunctionParam>::new().into_boxed_slice()),
+        params: verter_type_engine::semantic_query::PayloadArray::from(
+            Vec::<FunctionParam>::new().into_boxed_slice(),
+        ),
         return_type: t_param,
         occurrence: None,
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
             t_param,
         ),
-        type_parameters: Arc::from(
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
             Vec::<verter_type_engine::semantic_query::TypeParamDecl>::new().into_boxed_slice(),
         ),
         signature_span: None,
@@ -20494,13 +20609,15 @@ fn value_sensitive_operands_descend_compound_value_surfaces() {
     );
     let fn_closed = graph.intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Call,
-        params: Arc::from(Vec::<FunctionParam>::new().into_boxed_slice()),
+        params: verter_type_engine::semantic_query::PayloadArray::from(
+            Vec::<FunctionParam>::new().into_boxed_slice(),
+        ),
         return_type: string_ty,
         occurrence: None,
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
             string_ty,
         ),
-        type_parameters: Arc::from(
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
             Vec::<verter_type_engine::semantic_query::TypeParamDecl>::new().into_boxed_slice(),
         ),
         signature_span: None,
@@ -20573,7 +20690,7 @@ fn defaulted_type_parameters_bind_their_default_identity() {
                 whole_hash: HashValue::default(),
                 decl_name: Arc::from(name),
             },
-            args: Arc::from(args.into_boxed_slice()),
+            args: verter_type_engine::semantic_query::PayloadArray::from(args.into_boxed_slice()),
         })
     };
 
@@ -20699,7 +20816,7 @@ fn closed_named_ref_operands_select_through_the_shared_oracle() {
     let inst = |name: &str, args: Vec<SemanticNodeId>| {
         graph.intern_node(SemanticNodeData::InstantiationRef {
             base: decl(name),
-            args: Arc::from(args.into_boxed_slice()),
+            args: verter_type_engine::semantic_query::PayloadArray::from(args.into_boxed_slice()),
         })
     };
 
@@ -20834,7 +20951,9 @@ fn mapped_name_remap_is_judged_by_key_domain_policy() {
             whole_hash: HashValue::default(),
             decl_name: Arc::from("FooFix"),
         },
-        args: Arc::from(vec![t_param].into_boxed_slice()),
+        args: verter_type_engine::semantic_query::PayloadArray::from(
+            vec![t_param].into_boxed_slice(),
+        ),
     });
 
     // `as keyof Foo<T>` — Foo's key set is fixed (T value-confined) ⇒
@@ -20895,7 +21014,9 @@ fn mapped_name_remap_is_judged_by_key_domain_policy() {
             whole_hash: HashValue::default(),
             decl_name: Arc::from("RemapDecl"),
         },
-        args: Arc::from(vec![t_param].into_boxed_slice()),
+        args: verter_type_engine::semantic_query::PayloadArray::from(
+            vec![t_param].into_boxed_slice(),
+        ),
     });
     assert!(
         !super::raise::utility_enumeration_domain_is_open_or_unknown(
@@ -20956,7 +21077,9 @@ fn tuple_and_array_elements_are_value_positions_on_both_routes() {
                 whole_hash: HashValue::default(),
                 decl_name: Arc::from(name),
             },
-            args: Arc::from(vec![t_param].into_boxed_slice()),
+            args: verter_type_engine::semantic_query::PayloadArray::from(
+                vec![t_param].into_boxed_slice(),
+            ),
         })
     };
 
@@ -20985,7 +21108,7 @@ fn tuple_and_array_elements_are_value_positions_on_both_routes() {
     // Node route parity: the interned tuple node is CLOSED at KeyDomain
     // (the node walk's existing leaf rule) — both routes must agree.
     let tuple_node = graph.intern_node(SemanticNodeData::Tuple {
-        elements: Arc::from(
+        elements: verter_type_engine::semantic_query::PayloadArray::from(
             vec![TupleElement {
                 label: None,
                 value: t_param,
@@ -21077,7 +21200,7 @@ fn binding_identity_selects_conditionals_through_concrete_arguments() {
                 whole_hash: HashValue::default(),
                 decl_name: Arc::from(name),
             },
-            args: Arc::from(args.into_boxed_slice()),
+            args: verter_type_engine::semantic_query::PayloadArray::from(args.into_boxed_slice()),
         })
     };
 
@@ -21196,7 +21319,9 @@ fn node_keyof_operand_resets_to_key_domain_position() {
     let keyof_foo = graph.intern_node(SemanticNodeData::KeyOf {
         base: graph.intern_node(SemanticNodeData::InstantiationRef {
             base: decl("FooFix2"),
-            args: Arc::from(vec![t_param].into_boxed_slice()),
+            args: verter_type_engine::semantic_query::PayloadArray::from(
+                vec![t_param].into_boxed_slice(),
+            ),
         }),
     });
     let cond = graph.intern_node(SemanticNodeData::Conditional {
@@ -21280,7 +21405,9 @@ fn value_sensitive_all_closed_instantiation_requires_resolvable_base() {
     // operand is undecidable ⇒ OPEN.
     let ghost_check = graph.intern_node(SemanticNodeData::InstantiationRef {
         base: decl("GhostFix"),
-        args: Arc::from(vec![string_ty].into_boxed_slice()),
+        args: verter_type_engine::semantic_query::PayloadArray::from(
+            vec![string_ty].into_boxed_slice(),
+        ),
     });
     assert!(
         super::raise::utility_enumeration_domain_is_open_or_unknown(
@@ -21295,7 +21422,9 @@ fn value_sensitive_all_closed_instantiation_requires_resolvable_base() {
     // Control: a RESOLVABLE base with all-closed args stays CLOSED.
     let real_check = graph.intern_node(SemanticNodeData::InstantiationRef {
         base: decl("FooFix3"),
-        args: Arc::from(vec![string_ty].into_boxed_slice()),
+        args: verter_type_engine::semantic_query::PayloadArray::from(
+            vec![string_ty].into_boxed_slice(),
+        ),
     });
     assert!(
         !super::raise::utility_enumeration_domain_is_open_or_unknown(
@@ -21362,7 +21491,7 @@ fn builtin_key_domain_is_judged_per_utility_output_key_semantics() {
     let inst = |base: DeclIdentity, args: Vec<SemanticNodeId>| {
         graph.intern_node(SemanticNodeData::InstantiationRef {
             base,
-            args: Arc::from(args.into_boxed_slice()),
+            args: verter_type_engine::semantic_query::PayloadArray::from(args.into_boxed_slice()),
         })
     };
 
@@ -21404,13 +21533,17 @@ fn builtin_key_domain_is_judged_per_utility_output_key_semantics() {
     // key domain (the open `T`!) closed.
     let fn_to_t = graph.intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Call,
-        params: Arc::from(Vec::<FunctionParam>::new().into_boxed_slice()),
+        params: verter_type_engine::semantic_query::PayloadArray::from(
+            Vec::<FunctionParam>::new().into_boxed_slice(),
+        ),
         return_type: t_param,
         occurrence: None,
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
             t_param,
         ),
-        type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+            Vec::<TypeParamDecl>::new().into_boxed_slice(),
+        ),
         signature_span: None,
         return_type_span: None,
         predicate: None,
@@ -21432,13 +21565,17 @@ fn builtin_key_domain_is_judged_per_utility_output_key_semantics() {
     // finite object surface `{ a: string }`, whose key domain is exact.
     let fn_to_obj = graph.intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Call,
-        params: Arc::from(Vec::<FunctionParam>::new().into_boxed_slice()),
+        params: verter_type_engine::semantic_query::PayloadArray::from(
+            Vec::<FunctionParam>::new().into_boxed_slice(),
+        ),
         return_type: simple_object(&graph, &[("a", string_ty)]),
         occurrence: None,
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
             simple_object(&graph, &[("a", string_ty)]),
         ),
-        type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+            Vec::<TypeParamDecl>::new().into_boxed_slice(),
+        ),
         signature_span: None,
         return_type_span: None,
         predicate: None,
@@ -21574,7 +21711,9 @@ fn mapped_role_split_pins_key_production_and_walks_value_bodies() {
     let inst_of_t = |name: &str| {
         graph.intern_node(SemanticNodeData::InstantiationRef {
             base: decl(name),
-            args: Arc::from(vec![t_param].into_boxed_slice()),
+            args: verter_type_engine::semantic_query::PayloadArray::from(
+                vec![t_param].into_boxed_slice(),
+            ),
         })
     };
 
@@ -21697,7 +21836,9 @@ fn variadic_tuple_rest_elements_open_the_key_domain_on_both_routes() {
                 whole_hash: HashValue::default(),
                 decl_name: Arc::from(name),
             },
-            args: Arc::from(vec![t_param].into_boxed_slice()),
+            args: verter_type_engine::semantic_query::PayloadArray::from(
+                vec![t_param].into_boxed_slice(),
+            ),
         })
     };
 
@@ -21741,7 +21882,7 @@ fn variadic_tuple_rest_elements_open_the_key_domain_on_both_routes() {
         rest,
     };
     let variadic_tuple = graph.intern_node(SemanticNodeData::Tuple {
-        elements: Arc::from(
+        elements: verter_type_engine::semantic_query::PayloadArray::from(
             vec![tuple_el(string_ty, false), tuple_el(t_param, true)].into_boxed_slice(),
         ),
         readonly: false,
@@ -21756,7 +21897,7 @@ fn variadic_tuple_rest_elements_open_the_key_domain_on_both_routes() {
          judged at KeyDomain"
     );
     let no_rest_tuple = graph.intern_node(SemanticNodeData::Tuple {
-        elements: Arc::from(
+        elements: verter_type_engine::semantic_query::PayloadArray::from(
             vec![tuple_el(string_ty, false), tuple_el(t_param, false)].into_boxed_slice(),
         ),
         readonly: false,
@@ -21904,7 +22045,9 @@ fn mapped_type_self_roots_and_origin_edges_include_name_remap() {
                 ]
                 .into_boxed_slice(),
             ),
-            expressions: Arc::from(vec![k_param].into_boxed_slice()),
+            expressions: verter_type_engine::semantic_query::PayloadArray::from(
+                vec![k_param].into_boxed_slice(),
+            ),
         },
         NodeScopeId::File {
             canonical_id: Arc::clone(&remap_origin),
@@ -22138,7 +22281,7 @@ fn project_path_prefix_peek_short_circuits_sibling_walk() {
     let warm_prefix = graph
         .get_unvalidated(&prefix_key)
         .expect("prefix key must be warm after first dispatch — backfill should have published it");
-    match warm_prefix.value {
+    match warm_prefix.value().clone() {
         QueryResult::Value(id) => assert_eq!(
             id, variants_obj,
             "warm prefix must point at the variants_obj (the node reached after consuming `variants`)"
@@ -22277,6 +22420,7 @@ fn resolve_macro_payload_define_props_multi_arg_normalize_intersection() {
 
     let dispatch = ProjectSemanticDispatch::new(&host);
     let direct = dispatch.execute_type_node(SemanticQueryKey::reduce_intersection_operands(
+        &graph,
         Arc::from(vec![a, b].into_boxed_slice()),
     ));
     let direct_node = match direct {
@@ -22396,7 +22540,7 @@ fn budget_early_exit_folds_partial_into_enclosing_build_local_frame_and_request_
         "the early-exit return MUST carry result_is_partial=true",
     );
     assert!(
-        read.cache_suppress,
+        read.cache_suppress(),
         "the early-exit return MUST carry cache_suppress=true",
     );
 
@@ -22708,7 +22852,7 @@ fn resolve_macro_payload_self_reference_does_not_loop() {
     let graph = host.project_type_store().semantic_graph();
     let recursive_ref = graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
         name: Arc::from("R"),
-        args: std::sync::Arc::from([]),
+        args: Default::default(),
     }));
 
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -23432,7 +23576,7 @@ fn intern_string_literal_union_single_uniformly_union() {
         .node_data(node)
         .unwrap();
     let arms = match &*data {
-        SemanticNodeData::Union(arms) => arms.clone(),
+        SemanticNodeData::Union(arms) => arms.to_vec(),
         other => panic!("single-element input must produce Union; got {other:?}"),
     };
     assert_eq!(
@@ -23472,7 +23616,7 @@ fn intern_string_literal_union_multi_preserves_members() {
         .node_data(node)
         .unwrap();
     let arms = match &*data {
-        SemanticNodeData::Union(arms) => arms.clone(),
+        SemanticNodeData::Union(arms) => arms.to_vec(),
         other => panic!("multi-element input must produce Union; got {other:?}"),
     };
     assert_eq!(arms.len(), 3, "Union must have arity 3 for 3 inputs");
@@ -23548,11 +23692,11 @@ fn execute_read_preserves_dep_signature_on_success() {
     // entry. A lossy return shape would discard the signature; here the
     // signature flows through to the caller intact.
     assert!(
-        !read.dep_signature.is_empty(),
+        !read.dep_signature().is_empty(),
         "execute_read must preserve dep_signature; got empty"
     );
     let names: Vec<String> = read
-        .dep_signature
+        .dep_signature()
         .iter()
         .map(|(c, _)| c.to_string())
         .collect();
@@ -23760,7 +23904,7 @@ fn require_object_surface(
          walker did not run terminal-surface synthesis)",
     );
     match &*data {
-        SemanticNodeData::Object(view) => view.clone(),
+        SemanticNodeData::Object(view) => view.copy_for_tests(),
         _ => unreachable!("guarded by assert! above"),
     }
 }
@@ -23818,7 +23962,9 @@ fn shallow_intersection_object_and_instantiation_ref_merges_members() {
     let _ = resolve_decl_anchor(&dispatch, "/w/inst.ts", "Foo");
     let inst_ref = graph.intern_node(SemanticNodeData::InstantiationRef {
         base: decl_identity_value(&host, "/w/inst.ts", "Foo"),
-        args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        args: verter_type_engine::semantic_query::PayloadArray::from(
+            Vec::<SemanticNodeId>::new().into_boxed_slice(),
+        ),
     });
     let base = graph.intern_node(SemanticNodeData::Intersection(
         verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
@@ -23929,7 +24075,9 @@ fn shallow_instantiation_ref_substitutes_via_navigate() {
     let str_arg = primitive(&graph, PrimitiveKind::String);
     let inst_ref = graph.intern_node(SemanticNodeData::InstantiationRef {
         base: decl_identity_value(&host, "/w/wrap.ts", "Foo"),
-        args: Arc::from(vec![str_arg].into_boxed_slice()),
+        args: verter_type_engine::semantic_query::PayloadArray::from(
+            vec![str_arg].into_boxed_slice(),
+        ),
     });
 
     let result = run_empty_path_shallow(&dispatch, inst_ref);
@@ -23974,7 +24122,9 @@ fn shallow_instantiation_ref_warm_pass_o1() {
     let str_arg = primitive(&graph, PrimitiveKind::String);
     let inst_ref = graph.intern_node(SemanticNodeData::InstantiationRef {
         base: decl_identity_value(&host, "/w/wrap_warm.ts", "Foo"),
-        args: Arc::from(vec![str_arg].into_boxed_slice()),
+        args: verter_type_engine::semantic_query::PayloadArray::from(
+            vec![str_arg].into_boxed_slice(),
+        ),
     });
 
     // Cold pass populates the warm cache: the empty-path `ProjectPath`
@@ -24180,7 +24330,9 @@ fn shallow_cycle_propagates_via_diagnostic_not_panic() {
     let str_arg = primitive(&graph, PrimitiveKind::String);
     let inst_ref = graph.intern_node(SemanticNodeData::InstantiationRef {
         base: decl_identity_value(&host, "/w/cycle.ts", "Foo"),
-        args: Arc::from(vec![str_arg].into_boxed_slice()),
+        args: verter_type_engine::semantic_query::PayloadArray::from(
+            vec![str_arg].into_boxed_slice(),
+        ),
     });
 
     // The query must terminate without panic and produce a merged
@@ -24357,7 +24509,9 @@ fn shallow_conditional_closed_recurses_on_branch() {
     let _ = resolve_decl_anchor(&dispatch, "/w/cond_branch.ts", "Wrap");
     let true_branch = graph.intern_node(SemanticNodeData::InstantiationRef {
         base: decl_identity_value(&host, "/w/cond_branch.ts", "Wrap"),
-        args: Arc::from(vec![str_id].into_boxed_slice()),
+        args: verter_type_engine::semantic_query::PayloadArray::from(
+            vec![str_id].into_boxed_slice(),
+        ),
     });
 
     // Closed conditional: `string extends string ? Wrap<string> : {other}`.
@@ -24523,13 +24677,13 @@ fn cacheread_carries_walker_diagnostics_for_shallow_with_open_conditional() {
 
     let cache_read = read_shallow_metadata(&host, cond_id);
     assert!(
-        cache_read.walker_diagnostics.iter().any(|d| matches!(
+        cache_read.walker_diagnostics().iter().any(|d| matches!(
             d,
             verter_type_engine::project_semantic_dispatch::walk::ShallowDiagnostic::OpenConditional { .. }
         )),
         "warm-read walker_diagnostics must carry the OpenConditional variant emitted \
          during shallow-mode terminal-surface synthesis; observed diagnostics={:?}",
-        cache_read.walker_diagnostics,
+        cache_read.walker_diagnostics(),
     );
 }
 
@@ -24573,12 +24727,12 @@ fn cacheread_warm_replays_walker_diagnostics_after_memo_hit() {
 
     // First dispatch — cold build runs the walker and emits diagnostics.
     let first = read_shallow_metadata(&host, cond_id);
-    let first_count = first.walker_diagnostics.len();
+    let first_count = first.walker_diagnostics().len();
     assert!(
         first_count > 0,
         "cold build over an OpenConditional must produce at least one walker \
          diagnostic; observed count=0, diagnostics={:?}",
-        first.walker_diagnostics,
+        first.walker_diagnostics(),
     );
 
     // Second dispatch — warm replay must produce equal diagnostics
@@ -24587,15 +24741,16 @@ fn cacheread_warm_replays_walker_diagnostics_after_memo_hit() {
     // equality without re-allocating.
     let second = read_shallow_metadata(&host, cond_id);
     assert_eq!(
-        second.walker_diagnostics.len(),
+        second.walker_diagnostics().len(),
         first_count,
         "warm-replay walker_diagnostics count must match cold-build count; \
          observed warm={}, cold={}",
-        second.walker_diagnostics.len(),
+        second.walker_diagnostics().len(),
         first_count,
     );
     assert_eq!(
-        &*second.walker_diagnostics, &*first.walker_diagnostics,
+        second.walker_diagnostics(),
+        first.walker_diagnostics(),
         "warm-replay walker_diagnostics contents must match cold-build contents \
          (no-poison invariant: warm reads replay verbatim)"
     );
@@ -24643,7 +24798,7 @@ fn memo_refuses_insertion_on_cache_suppress_true_via_pathological_input() {
     );
     let warm = warm.expect("guarded above");
     assert!(
-        !warm.cache_suppress,
+        !warm.cache_suppress(),
         "warm-read cache_suppress must always be false (suppressed builds never reach memo)",
     );
 }
@@ -25282,7 +25437,7 @@ fn cross_file_omit_heritage_carrier_preserves_construct_and_index_signatures() {
     };
 
     let surface = dispatch
-        .resolve_typeinfo_surface_view(
+        .resolve_typeinfo_surface(
             derived,
             verter_type_engine::semantic_query::ProjectionReductionContext::published(
                 ProjectionMode::Shallow,
@@ -25312,7 +25467,7 @@ fn cross_file_omit_heritage_carrier_preserves_construct_and_index_signatures() {
     // through `Base`'s construct + index signatures into `Derived`'s surface.
     // The retired `MacroSurfaceView` reader dropped both for the carrier source.
     assert_eq!(
-        surface.construct_signatures.len(),
+        surface.construct_signatures().len(),
         1,
         "Derived must inherit Base's construct signature through `extends Omit<Base, 'a'>` \
          (the retired MacroSurfaceView reader dropped it on the carrier path)"
@@ -25322,7 +25477,7 @@ fn cross_file_omit_heritage_carrier_preserves_construct_and_index_signatures() {
         "Derived must inherit Base's index-signature flag through `extends Omit<Base, 'a'>`"
     );
     assert_eq!(
-        surface.index_signatures.len(),
+        surface.index_signatures().len(),
         1,
         "Derived must inherit Base's index signature through `extends Omit<Base, 'a'>` \
          (the retired MacroSurfaceView reader dropped it on the carrier path)"
@@ -25371,7 +25526,7 @@ fn omit_over_union_source_is_common_keys_minus_k_not_distributive() {
                 other => panic!("ResolveDecl({name}) failed: {other:?}"),
             };
         dispatch
-            .resolve_typeinfo_surface_view(
+            .resolve_typeinfo_surface(
                 node,
                 verter_type_engine::semantic_query::ProjectionReductionContext::published(
                     ProjectionMode::Shallow,
@@ -25478,7 +25633,7 @@ fn multi_level_omit_heritage_carriers_compose_through_all_levels() {
     };
 
     let surface = dispatch
-        .resolve_typeinfo_surface_view(
+        .resolve_typeinfo_surface(
             a,
             verter_type_engine::semantic_query::ProjectionReductionContext::published(
                 ProjectionMode::Shallow,
@@ -25937,7 +26092,7 @@ fn identity_utility_shallow_empty_path_surface_publishes_source_member_values_no
         other => panic!("expected Shallow ProjectPath Value, got {other:?}"),
     };
     let view = match graph.node_data(surface).as_deref() {
-        Some(SemanticNodeData::Object(view)) => view.clone(),
+        Some(SemanticNodeData::Object(view)) => view.copy_for_tests(),
         other => {
             panic!("Shallow surface over the Identity carrier must be an Object, got {other:?}")
         }
@@ -26032,7 +26187,7 @@ fn identity_mapped_build_without_projectable_source_publishes_addressable_carrie
         other => panic!("expected MappedType Value, got {other:?}"),
     };
     let view = match graph.node_data(result).as_deref() {
-        Some(SemanticNodeData::Object(view)) => view.clone(),
+        Some(SemanticNodeData::Object(view)) => view.copy_for_tests(),
         other => panic!("keyspace-enumerated mapped type must build an Object, got {other:?}"),
     };
     assert_eq!(
@@ -26251,7 +26406,7 @@ fn resolve_class_mech(host: &VerterHost, name: &str) -> verter_type_expr::TypeEx
         .ok()
         .flatten()
         .unwrap_or_else(|| panic!("{name} must resolve"));
-    host.project_node_to_type_expr_for_test(node)
+    host.project_node_to_type_expr_for_test(node.id())
         .unwrap_or_else(|| panic!("{name} resolved node must project to TypeExpr"))
 }
 
@@ -27046,7 +27201,7 @@ fn resolve_named_in(host: &VerterHost, canonical: &str, name: &str) -> verter_ty
         .ok()
         .flatten()
         .unwrap_or_else(|| panic!("{name} must resolve"));
-    host.project_node_to_type_expr_for_test(node)
+    host.project_node_to_type_expr_for_test(node.id())
         .unwrap_or_else(|| panic!("{name} resolved node must project to TypeExpr"))
 }
 
@@ -27280,7 +27435,7 @@ fn signature_return_data(
     let ret = graph
         .node_data(*return_type)
         .expect("signature return node");
-    (*ret).clone()
+    ret.copy_for_tests()
 }
 
 /// Multi-overload function: the set carries the ordered VISIBLE group only —
@@ -27457,9 +27612,13 @@ fn resolve_overload_set_occurrence_less_candidate_is_rootless_not_a_node_keyed_o
     let anonymous = || {
         graph.intern_node(SemanticNodeData::Signature {
             kind: verter_type_engine::semantic_query::SignatureKind::Call,
-            params: Arc::from(Vec::new().into_boxed_slice()),
+            params: verter_type_engine::semantic_query::PayloadArray::from(
+                Vec::new().into_boxed_slice(),
+            ),
             return_type: void,
-            type_parameters: Arc::from(Vec::new().into_boxed_slice()),
+            type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+                Vec::new().into_boxed_slice(),
+            ),
             occurrence: None,
             return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
                 void,
@@ -27751,7 +27910,9 @@ fn resolve_overload_set_settles_instantiation_ref_carrier_callee() {
     ));
     let callee = graph.intern_node(SemanticNodeData::InstantiationRef {
         base: decl_identity_value(&host, "/w/class_mech.ts", "GenLookup"),
-        args: Arc::from(vec![number_node].into_boxed_slice()),
+        args: verter_type_engine::semantic_query::PayloadArray::from(
+            vec![number_node].into_boxed_slice(),
+        ),
     });
     let key = overload_set_key_for(&host, "/w/class_mech.ts", callee, Vec::new());
     let refs = execute_overload_set(&dispatch, key).unwrap_or_else(|err| {
@@ -27794,11 +27955,15 @@ fn generic_fn_with_carrier_return(host: &VerterHost) -> (SemanticNodeId, Semanti
     });
     let carrier_return = graph.intern_node(SemanticNodeData::InstantiationRef {
         base: decl_identity_value(host, "/w/class_mech.ts", "Boxed"),
-        args: Arc::from(vec![t_param].into_boxed_slice()),
+        args: verter_type_engine::semantic_query::PayloadArray::from(
+            vec![t_param].into_boxed_slice(),
+        ),
     });
     let func = graph.intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Call,
-        params: Arc::from(Vec::new().into_boxed_slice()),
+        params: verter_type_engine::semantic_query::PayloadArray::from(
+            Vec::new().into_boxed_slice(),
+        ),
         return_type: carrier_return,
         occurrence: Some(
             verter_type_engine::semantic_query::SignatureNodeOccurrence {
@@ -27818,7 +27983,7 @@ fn generic_fn_with_carrier_return(host: &VerterHost) -> (SemanticNodeId, Semanti
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
             carrier_return,
         ),
-        type_parameters: Arc::from(
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
             vec![verter_type_engine::semantic_query::TypeParamDecl {
                 name: Arc::from("T"),
                 param: t_param,
@@ -27939,7 +28104,9 @@ fn subtree_references_node_descends_merged_decl_contributors() {
         display_name: Arc::from("T"),
     });
     let merged = graph.intern_node(SemanticNodeData::MergedDecl {
-        contributors: Arc::from(vec![binder].into_boxed_slice()),
+        contributors: verter_type_engine::semantic_query::PayloadArray::from(
+            vec![binder].into_boxed_slice(),
+        ),
     });
     assert!(
         dispatch.subtree_references_node(merged, binder),
@@ -27977,7 +28144,7 @@ fn subtree_references_node_descends_object_spread_program_effects() {
     });
     let program = graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
         verter_type_engine::semantic_query::ObjectSpreadProgram {
-            effects: Arc::from(
+            effects: verter_type_engine::semantic_query::PayloadArray::from(
                 vec![
                     verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
                         verter_type_engine::semantic_query::AuthoredPropertyEffect {
@@ -28029,7 +28196,7 @@ fn extends_pattern_declares_infer_descends_object_spread_program() {
     let program_with = |value: SemanticNodeId| {
         graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
             verter_type_engine::semantic_query::ObjectSpreadProgram {
-                effects: Arc::from(
+                effects: verter_type_engine::semantic_query::PayloadArray::from(
                     vec![
                         verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
                             verter_type_engine::semantic_query::AuthoredPropertyEffect {
@@ -28097,7 +28264,7 @@ fn mapped_type_does_not_hoist_k_dependent_program_value_expr() {
     });
     let value_expr = graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
         verter_type_engine::semantic_query::ObjectSpreadProgram {
-            effects: Arc::from(
+            effects: verter_type_engine::semantic_query::PayloadArray::from(
                 vec![
                     verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
                         verter_type_engine::semantic_query::AuthoredPropertyEffect {
@@ -28184,7 +28351,7 @@ fn record_shape_classification_sees_binder_inside_program_value() {
     });
     let value_expr = graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
         verter_type_engine::semantic_query::ObjectSpreadProgram {
-            effects: Arc::from(
+            effects: verter_type_engine::semantic_query::PayloadArray::from(
                 vec![
                     verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
                         verter_type_engine::semantic_query::AuthoredPropertyEffect {
@@ -28295,14 +28462,16 @@ fn source_members_for_program_source_is_positive_evidence_with_partial_flag() {
         |effects: Vec<verter_type_engine::semantic_query::ObjectConstructionEffect>| {
             graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
                 verter_type_engine::semantic_query::ObjectSpreadProgram {
-                    effects: Arc::from(effects.into_boxed_slice()),
+                    effects: verter_type_engine::semantic_query::PayloadArray::from(
+                        effects.into_boxed_slice(),
+                    ),
                 },
             ))
         };
 
     // Open source `{ a: number, ...T }`: positive member `a`, partial.
     let open_source = program_of(vec![
-        direct_a.clone(),
+        direct_a.copy_for_tests(),
         verter_type_engine::semantic_query::ObjectConstructionEffect::Spread(type_param),
     ]);
     let (members, partial_classes) = dispatch
@@ -28382,7 +28551,7 @@ fn mapped_type_over_open_program_source_defers() {
     });
     let open_source = graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
         verter_type_engine::semantic_query::ObjectSpreadProgram {
-            effects: Arc::from(
+            effects: verter_type_engine::semantic_query::PayloadArray::from(
                 vec![
                     verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
                         verter_type_engine::semantic_query::AuthoredPropertyEffect {
@@ -28518,7 +28687,9 @@ fn keyof_intersection_with_open_program_arm_stays_open() {
         |effects: Vec<verter_type_engine::semantic_query::ObjectConstructionEffect>| {
             graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
                 verter_type_engine::semantic_query::ObjectSpreadProgram {
-                    effects: Arc::from(effects.into_boxed_slice()),
+                    effects: verter_type_engine::semantic_query::PayloadArray::from(
+                        effects.into_boxed_slice(),
+                    ),
                 },
             ))
         };
@@ -28615,7 +28786,7 @@ fn keyof_intersection_poisons_through_union_nesting() {
     });
     let open_program = graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
         verter_type_engine::semantic_query::ObjectSpreadProgram {
-            effects: Arc::from(
+            effects: verter_type_engine::semantic_query::PayloadArray::from(
                 vec![
                     verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
                         verter_type_engine::semantic_query::AuthoredPropertyEffect {
@@ -28690,7 +28861,9 @@ fn excess_arm_knows_property_reads_program_targets() {
         |effects: Vec<verter_type_engine::semantic_query::ObjectConstructionEffect>| {
             graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
                 verter_type_engine::semantic_query::ObjectSpreadProgram {
-                    effects: Arc::from(effects.into_boxed_slice()),
+                    effects: verter_type_engine::semantic_query::PayloadArray::from(
+                        effects.into_boxed_slice(),
+                    ),
                 },
             ))
         };
@@ -28698,7 +28871,7 @@ fn excess_arm_knows_property_reads_program_targets() {
 
     // Closed program `{a, ...{b}}`: presence AND absence are proven.
     let closed_program = program_of(vec![
-        direct_a.clone(),
+        direct_a.copy_for_tests(),
         verter_type_engine::semantic_query::ObjectConstructionEffect::Spread(simple_object(
             &graph,
             &[("b", string)],
@@ -29080,7 +29253,9 @@ fn typeparam_binder_substitution_preserves_same_name_infer_declaration() {
     });
     let extends = graph.intern_node(SemanticNodeData::InstantiationRef {
         base: decl_identity_value(&host, "/w/infer_collision.ts", "Boxed"),
-        args: Arc::from(vec![infer_t].into_boxed_slice()),
+        args: verter_type_engine::semantic_query::PayloadArray::from(
+            vec![infer_t].into_boxed_slice(),
+        ),
     });
     let cond = graph.intern_node(SemanticNodeData::Conditional {
         check: t_param,
@@ -29396,7 +29571,9 @@ fn keyof_over_merged_decl_enumerates_peer_merged_keyspace() {
     let c1 = simple_object(&graph, &[("a", num)]);
     let c2 = simple_object(&graph, &[("b", str_)]);
     let contributors: Arc<[SemanticNodeId]> = Arc::from(vec![c1, c2].into_boxed_slice());
-    let merged = graph.intern_node(SemanticNodeData::MergedDecl { contributors });
+    let merged = graph.intern_node(SemanticNodeData::MergedDecl {
+        contributors: verter_type_engine::semantic_query::PayloadArray::from(contributors),
+    });
 
     let keyof = dispatch.execute_type_node(SemanticQueryKey::KeyOf {
         base: merged,
@@ -29448,7 +29625,7 @@ fn nested_uppercase_keyof_merged_interface_resolves_to_transformed_keyspace() {
     let k = host
         .resolve_named_symbol("/w/f8.ts", "K", Some(ProjectionMode::Expanded))
         .expect("K resolves");
-    let data = graph.node_data(k).unwrap();
+    let data = graph.node_data(k.id()).unwrap();
     // Negative: must NOT widen to the broad `string` primitive (the fail-closed
     // result of the string intrinsic over an `Opaque(Miss)` keyspace).
     assert!(
@@ -29459,7 +29636,7 @@ fn nested_uppercase_keyof_merged_interface_resolves_to_transformed_keyspace() {
     // {"A", "B"} — no widened `string` arm hiding behind the lenient
     // filter (the strict helper returns `None` if any non-string-literal
     // arm is present).
-    let mut keys = exact_keyspace_string_literals(&graph, k).unwrap_or_else(|| {
+    let mut keys = exact_keyspace_string_literals(&graph, k.id()).unwrap_or_else(|| {
         panic!("Uppercase<keyof I> must be a PURE union of string literals, got {data:?}")
     });
     keys.sort();
@@ -29556,7 +29733,9 @@ fn keyof_over_merged_decl_with_conflicting_and_overload_keys_unions_keyspace() {
     let c2 = contributor(&[("shared", str_), ("only2", bigint_)], str_);
     let contributors: Arc<[SemanticNodeId]> = Arc::from(vec![c1, c2].into_boxed_slice());
     let merged = graph.intern_node(SemanticNodeData::MergedDecl {
-        contributors: Arc::clone(&contributors),
+        contributors: verter_type_engine::semantic_query::PayloadArray::from(Arc::clone(
+            &contributors,
+        )),
     });
 
     // (a) keyof EXACTLY unions+dedups the keyspace: `shared` and `f` appear
@@ -29947,7 +30126,7 @@ fn evaluate_deferred_memo_withholds_partial_without_request_context() {
     let expressions: Arc<[SemanticNodeId]> = Arc::from(vec![a, b].into_boxed_slice());
     let template = graph.intern_node(SemanticNodeData::TemplateLiteral {
         quasis,
-        expressions,
+        expressions: verter_type_engine::semantic_query::PayloadArray::from(expressions),
     });
     let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
 
@@ -30229,7 +30408,9 @@ fn grow_string_demand(
     // Precondition: the raw node is an uninstantiated `InstantiationRef`
     // carrier, so the demand exercises the instantiation path.
     let (base, args) = match graph.node_data(carrier).as_deref() {
-        Some(SemanticNodeData::InstantiationRef { base, args }) => (base.clone(), Arc::clone(args)),
+        Some(SemanticNodeData::InstantiationRef { base, args }) => {
+            (base.clone(), Arc::from(&args[..]))
+        }
         other => panic!("FIXTURE INVALID: expected InstantiationRef carrier, got {other:?}"),
     };
     let (work, depth) = match work {
@@ -30257,7 +30438,10 @@ fn grow_string_demand(
         QueryResult::Value(verter_type_engine::semantic_query::SemanticQueryOutput {
             value,
             ..
-        }) => graph.node_data(value).as_deref().cloned(),
+        }) => graph
+            .node_data(value)
+            .as_deref()
+            .map(verter_type_engine::semantic_query::SemanticNodeData::copy_for_tests),
         _ => None,
     };
     (
@@ -30430,10 +30614,10 @@ fn real_query_deep_finite_nested_demand_completes_and_warms() {
         "a 10,000-deep finite structural value must resolve Complete"
     );
     assert!(
-        !read.cache_suppress,
+        !read.cache_suppress(),
         "finite structural depth must not suppress the enclosing query's admission"
     );
-    assert!(read.walker_diagnostics.is_empty());
+    assert!(read.walker_diagnostics().is_empty());
 
     assert!(
         graph
@@ -30449,8 +30633,8 @@ fn real_query_deep_finite_nested_demand_completes_and_warms() {
         context,
     });
     let stats_after_repeat = graph.stats_snapshot();
-    assert!(!repeat.result_is_partial() && !repeat.cache_suppress);
-    assert!(repeat.walker_diagnostics.is_empty());
+    assert!(!repeat.result_is_partial() && !repeat.cache_suppress());
+    assert!(repeat.walker_diagnostics().is_empty());
     assert!(
         stats_after_repeat.hits > stats_before_repeat.hits,
         "the complete repeated mapped-type demand must warm-hit"
@@ -30512,7 +30696,7 @@ fn carrier_subject_normalization_fenced_serve_suppresses_caching() {
     // CONTROL (knob OFF): an ordinary carrier-subject read is NOT suppressed.
     let clean_read = dispatch.execute_read(make_key());
     assert!(
-        !clean_read.cache_suppress,
+        !clean_read.cache_suppress(),
         "control (no fence): an ordinary carrier-subject read must NOT be cache-suppressed;          a false-positive here would make the fence assertion meaningless"
     );
 
@@ -30528,7 +30712,7 @@ fn carrier_subject_normalization_fenced_serve_suppresses_caching() {
         .store(false, std::sync::atomic::Ordering::Relaxed);
 
     assert!(
-        fenced_read.cache_suppress,
+        fenced_read.cache_suppress(),
         "a fenced serve observed by the traced carrier-normalization prelude MUST set          cache_suppress on the returned CacheRead (the rewrite computed from a          served-without-publication artifact must refuse warm admission). Pre-fix the untraced          normalization could not observe the fence and this read would NOT be suppressed."
     );
 }
@@ -31395,13 +31579,17 @@ fn shallow_intersection_signature_entries_are_the_discovery_authoritys() {
     let num_id = primitive(&graph, PrimitiveKind::Number);
     let call = graph.intern_node(SemanticNodeData::Signature {
         kind: SignatureKind::Call,
-        params: Arc::from(Vec::<FunctionParam>::new().into_boxed_slice()),
+        params: verter_type_engine::semantic_query::PayloadArray::from(
+            Vec::<FunctionParam>::new().into_boxed_slice(),
+        ),
         return_type: num_id,
         occurrence: None,
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
             num_id,
         ),
-        type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+            Vec::<TypeParamDecl>::new().into_boxed_slice(),
+        ),
         signature_span: None,
         return_type_span: None,
         predicate: None,
@@ -31435,7 +31623,7 @@ fn shallow_intersection_signature_entries_are_the_discovery_authoritys() {
         "shallow_intersection_signature_entries_are_the_discovery_authoritys",
     );
     assert_eq!(
-        view.call_signatures.as_ref(),
+        view.call_signatures(),
         discovered.as_slice(),
         "the merged object's call signatures are exactly what discovery answers"
     );
@@ -31948,7 +32136,10 @@ fn union_surface_merges_match_reference_semantics_across_arm_permutations() {
         [2, 1, 0],
     ];
     for perm in perms {
-        let permuted: Vec<Option<ShallowSurface>> = perm.iter().map(|&i| arms[i].clone()).collect();
+        let permuted: Vec<Option<ShallowSurface>> = perm
+            .iter()
+            .map(|&i| arms[i].as_ref().map(ShallowSurface::copy_for_tests))
+            .collect();
         // Plain permutation.
         let actual = merge_union_surfaces(&graph, &permuted, &mut test_canonical_evidence())
             .expect("non-empty arm vector yields a surface");
@@ -31968,7 +32159,10 @@ fn union_surface_merges_match_reference_semantics_across_arm_permutations() {
         );
 
         // With a trailing non-Object arm.
-        let mut with_none = permuted.clone();
+        let mut with_none: Vec<Option<ShallowSurface>> = permuted
+            .iter()
+            .map(|arm| arm.as_ref().map(ShallowSurface::copy_for_tests))
+            .collect();
         with_none.push(None);
         let actual_none = merge_union_surfaces(&graph, &with_none, &mut test_canonical_evidence())
             .expect("non-empty arm vector yields a surface");
@@ -32003,7 +32197,7 @@ fn union_surface_merges_match_reference_semantics_across_arm_permutations() {
     // Degenerate inputs stay pinned.
     assert!(merge_union_surfaces(&graph, &[], &mut test_canonical_evidence()).is_none());
     assert!(merge_union_surfaces_for_macro(&graph, &[], &mut test_canonical_evidence()).is_none());
-    let single = vec![arms[0].clone()];
+    let single = vec![arms[0].as_ref().map(ShallowSurface::copy_for_tests)];
     let actual_single = merge_union_surfaces(&graph, &single, &mut test_canonical_evidence())
         .expect("single arm yields");
     let expected_single = oracle_merge_union_surfaces(&graph, &single).expect("oracle yields");
@@ -32360,7 +32554,7 @@ fn mapped_type_over_flow_return_heritage_enumerates_the_composed_key_domain() {
         ),
         context: ProjectionReductionContext::published(ProjectionMode::Shallow),
     });
-    let shallow_node = match shallow.value {
+    let shallow_node = match shallow.value().clone() {
         QueryResult::Value(id) => id,
         other => panic!("expected Value, got {other:?}"),
     };
@@ -32463,7 +32657,7 @@ fn mapped_type_over_degraded_flow_return_heritage_preserves_the_typed_partiality
         ),
         context: ProjectionReductionContext::published(ProjectionMode::Shallow),
     });
-    let node = match read.value {
+    let node = match read.value().clone() {
         QueryResult::Value(id) => id,
         other => panic!("expected Value, got {other:?}"),
     };
@@ -32702,7 +32896,7 @@ fn expanded_projection_of_alias_twin_union_collapses_to_the_shared_object() {
     let shared_object = outcome.ok().flatten().expect("A must resolve");
     assert!(
         matches!(
-            graph.node_data(shared_object).as_deref(),
+            graph.node_data(shared_object.id()).as_deref(),
             Some(SemanticNodeData::Object(_))
         ),
         "the fixture needs A's materialised object"
@@ -32721,7 +32915,7 @@ fn expanded_projection_of_alias_twin_union_collapses_to_the_shared_object() {
     ));
     let base = graph.intern_node(SemanticNodeData::Union(
         verter_type_engine::semantic_query::composite::CompositeList::authored_shell_for_tests(
-            Arc::from(vec![placeholder, shared_object].into_boxed_slice()),
+            Arc::from(vec![placeholder, shared_object.id()].into_boxed_slice()),
         ),
     ));
     let projected = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
@@ -32736,7 +32930,7 @@ fn expanded_projection_of_alias_twin_union_collapses_to_the_shared_object() {
     };
     assert_eq!(
         result,
-        shared_object,
+        shared_object.id(),
         "the reference arm expands onto the sibling's object — the derived \
          rebuild must collapse `obj | obj` to the one object, got {:?}",
         graph.node_data(result)
@@ -32774,7 +32968,7 @@ fn instantiation_of_duplicate_projection_union_collapses_to_the_shared_arm() {
             Some(ProjectionMode::Expanded),
         )
         .into_parts();
-    let src_node = outcome.ok().flatten().expect("Src must resolve");
+    let src_node = outcome.ok().flatten().expect("Src must resolve").id();
 
     let read = dispatch.execute_read(SemanticQueryKey::Instantiate(InstantiateKey::new(
         verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
@@ -32789,10 +32983,10 @@ fn instantiation_of_duplicate_projection_union_collapses_to_the_shared_arm() {
             BodySourceWitness::mint_for_unit_tests(),
         ),
     )));
-    let QueryResult::Value(result) = read.value else {
+    let QueryResult::Value(result) = read.value().clone() else {
         panic!(
             "`Both<Src>` must instantiate to a value, got {:?}",
-            read.value
+            read.value().clone()
         );
     };
     let data = graph.node_data(result);
@@ -32866,11 +33060,13 @@ fn substituted_union_interns_global_while_callable_intersection_preserves_scope(
     // shell's File scope.
     let callable = graph.intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Call,
-        params: Arc::from(
+        params: verter_type_engine::semantic_query::PayloadArray::from(
             Vec::<verter_type_engine::semantic_query::FunctionParam>::new().into_boxed_slice(),
         ),
         return_type: string_node,
-        type_parameters: Arc::from(Vec::new().into_boxed_slice()),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+            Vec::new().into_boxed_slice(),
+        ),
         occurrence: None,
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
             string_node,
@@ -33003,7 +33199,7 @@ fn expanded_projection_preserves_ordered_carrier_arm_order() {
             Some(ProjectionMode::Expanded),
         )
         .into_parts();
-    let obj_b = outcome.ok().flatten().expect("B must resolve");
+    let obj_b = outcome.ok().flatten().expect("B must resolve").id();
     let (outcome, _) = host
         .resolve_named_symbol_with_audit(
             "/w/ordered-preserve.ts",
@@ -33011,7 +33207,7 @@ fn expanded_projection_preserves_ordered_carrier_arm_order() {
             Some(ProjectionMode::Expanded),
         )
         .into_parts();
-    let obj_a = outcome.ok().flatten().expect("A must resolve");
+    let obj_a = outcome.ok().flatten().expect("A must resolve").id();
     assert!(
         obj_a.0 > obj_b.0,
         "fixture guard: the preserved order must be descending by id so a \
@@ -33082,11 +33278,13 @@ fn composite_rebuild_re_decision_is_per_category_with_callable_fail_closed() {
     let plain = [string_node, number_node];
     let callable = graph.intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Call,
-        params: Arc::from(
+        params: verter_type_engine::semantic_query::PayloadArray::from(
             Vec::<verter_type_engine::semantic_query::FunctionParam>::new().into_boxed_slice(),
         ),
         return_type: string_node,
-        type_parameters: Arc::from(Vec::new().into_boxed_slice()),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+            Vec::new().into_boxed_slice(),
+        ),
         occurrence: None,
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
             string_node,
@@ -33464,13 +33662,13 @@ fn budget_recovery_root_reprojection_remains_approximate_and_unretained() {
         for _ in 0..2 {
             let read = dispatch.execute_read(key.clone());
             assert!(
-                matches!(read.value, QueryResult::Value(node) if node == recovery),
+                matches!(read.value().clone(), QueryResult::Value(node) if node == recovery),
                 "{read:?}"
             );
             if basis == RecoveryBasis::Budget {
                 assert!(
                     matches!(
-                        read.fact_status,
+                        read.fact_status(),
                         FactStatus::Approximate(_, Some(FactInterpretation::CheckerRecovery))
                     ),
                     "{read:?}"
@@ -33478,14 +33676,18 @@ fn budget_recovery_root_reprojection_remains_approximate_and_unretained() {
                 assert!(read.partial_reasons().contains(
                     verter_type_engine::semantic_query::PartialReasonSet::OPERATION_BUDGET
                 ));
-                assert!(read.cache_suppress);
+                assert!(read.cache_suppress());
                 assert!(graph.get_validated(&key, dispatch.ctx).is_none());
                 assert_eq!(graph.slot_candidate_count_for_tests(&key), 0);
             } else {
-                assert_eq!(read.fact_status, FactStatus::Complete);
-                assert!(!read.cache_suppress);
+                assert_eq!(read.fact_status().clone(), FactStatus::Complete);
+                assert!(!read.cache_suppress());
                 assert_eq!(
-                    graph.get_validated(&key, dispatch.ctx).unwrap().fact_status,
+                    graph
+                        .get_validated(&key, dispatch.ctx)
+                        .unwrap()
+                        .fact_status()
+                        .clone(),
                     FactStatus::Complete
                 );
                 assert_eq!(graph.slot_candidate_count_for_tests(&key), 1);
@@ -33542,8 +33744,12 @@ fn carrier_normalization_preserves_recovery_interpretation_when_forwarded() {
         };
         let read = dispatch.execute_read(key.clone());
         if name.starts_with("Good") {
-            assert_eq!(read.fact_status, FactStatus::Complete, "{name}: {read:?}");
-            let QueryResult::Value(node) = read.value else {
+            assert_eq!(
+                read.fact_status().clone(),
+                FactStatus::Complete,
+                "{name}: {read:?}"
+            );
+            let QueryResult::Value(node) = read.value().clone() else {
                 panic!("{name}: {read:?}")
             };
             let expected = if name == "Good" {
@@ -33555,12 +33761,12 @@ fn carrier_normalization_preserves_recovery_interpretation_when_forwarded() {
         } else {
             assert!(
                 matches!(
-                    read.fact_status,
+                    read.fact_status(),
                     FactStatus::Approximate(_, Some(FactInterpretation::CheckerRecovery))
                 ),
                 "{name}: {read:?}"
             );
-            let QueryResult::Value(node) = read.value else {
+            let QueryResult::Value(node) = read.value().clone() else {
                 panic!("{name}: {read:?}")
             };
             assert!(matches!(
@@ -33575,19 +33781,19 @@ fn carrier_normalization_preserves_recovery_interpretation_when_forwarded() {
                 path: Arc::from([]),
                 context,
             };
-            assert!(read.cache_suppress);
+            assert!(read.cache_suppress());
             assert!(dispatch.graph().get_validated(&key, dispatch.ctx).is_none());
             assert_eq!(dispatch.graph().slot_candidate_count_for_tests(&key), 0);
             let root = dispatch.execute_read(root_key.clone());
             assert!(
                 matches!(
-                    root.fact_status,
+                    root.fact_status(),
                     FactStatus::Approximate(_, Some(FactInterpretation::CheckerRecovery))
                 ),
                 "{root:?}"
             );
             assert!(read.partial_reasons().contains(root.partial_reasons()));
-            assert!(root.cache_suppress);
+            assert!(root.cache_suppress());
             assert!(dispatch
                 .graph()
                 .get_validated(&root_key, dispatch.ctx)

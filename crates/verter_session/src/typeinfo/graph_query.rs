@@ -284,7 +284,7 @@ impl VerterHost {
             .resolve_named_symbol_with_audit(&resolve.canonical_id, &resolve.name, Some(mode))
             .into_parts();
         let graph = match outcome {
-            Ok(Some(node)) => match self.project_node_to_semantic_type_graph(node, &budgets) {
+            Ok(Some(node)) => match self.project_node_to_semantic_type_graph(&node, &budgets) {
                 Some(mut graph) => {
                     graph.query = Some(query);
                     graph

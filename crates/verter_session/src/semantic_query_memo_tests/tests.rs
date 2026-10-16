@@ -194,7 +194,7 @@ fn execute_cooperative_memoizes_winner_result() {
         },
     );
 
-    match second.value {
+    match second.value().clone() {
         QueryResult::Value(id) => {
             let data = store.node_data(id).unwrap();
             assert!(matches!(
@@ -234,10 +234,10 @@ fn same_path_recursion_returns_sentinel_not_deadlock() {
                     panic!("inner build must not run during same-path recursion");
                 },
             );
-            match inner.value {
+            match inner.value().clone() {
                 QueryResult::Recursive(_) => {
                     assert!(
-                        !inner.cache_suppress,
+                        !inner.cache_suppress(),
                         "same-thread recursion keeps its established sentinel rail; \
                          only a cross-thread wait cycle is forced ReturnOnly"
                     );
@@ -249,7 +249,7 @@ fn same_path_recursion_returns_sentinel_not_deadlock() {
             }
         },
     );
-    assert!(matches!(result.value, QueryResult::Value(_)));
+    assert!(matches!(result.value().clone(), QueryResult::Value(_)));
     assert_eq!(store.wait_graph_counts_for_tests(), (0, 0));
 }
 
@@ -268,7 +268,7 @@ fn errors_do_not_warm_shared_memo() {
         || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
         || (QueryResult::Error(QueryError::Miss), empty_signature()),
     );
-    assert!(matches!(first.value, QueryResult::Error(_)));
+    assert!(matches!(first.value().clone(), QueryResult::Error(_)));
     assert_eq!(
         store.memo_entry_count(),
         0,
@@ -287,7 +287,7 @@ fn errors_do_not_warm_shared_memo() {
         },
     );
     assert!(re_ran, "failed-result keys must not become warm");
-    assert!(matches!(second.value, QueryResult::Value(_)));
+    assert!(matches!(second.value().clone(), QueryResult::Value(_)));
 }
 
 #[test]
@@ -315,8 +315,8 @@ fn dep_signature_is_returned_with_warm_hits() {
         },
     );
     let warm = store.get_unvalidated(&key).unwrap();
-    assert_eq!(warm.dep_signature.len(), 1);
-    assert_eq!(warm.dep_signature[0].0.as_ref(), "/w/a.ts");
+    assert_eq!(warm.dep_signature().len(), 1);
+    assert_eq!(warm.dep_signature()[0].0.as_ref(), "/w/a.ts");
 }
 
 /// A panic inside the cold build must not leave the in-flight entry
@@ -377,7 +377,7 @@ fn panic_in_cold_build_does_not_deadlock_future_callers() {
         re_ran,
         "post-panic call must run a fresh cold build, not wait on the retired entry"
     );
-    assert!(matches!(second.value, QueryResult::Value(_)));
+    assert!(matches!(second.value().clone(), QueryResult::Value(_)));
     assert_eq!(
         store.wait_graph_counts_for_tests(),
         (0, 0),
@@ -549,7 +549,7 @@ fn warm_publish_one_inserts_warm_map_and_registers_reverse_index() {
     let hit = store
         .get_unvalidated(&key)
         .expect("warm map must contain the published key after warm_publish_one");
-    match hit.value {
+    match hit.value().clone() {
         QueryResult::Value(id) => assert_eq!(
             id, value,
             "the published value must round-trip through the warm map"
@@ -1702,7 +1702,7 @@ fn relation_family_dedups_full_identity_cold_insert_then_warm_hit() {
         matches!(
             store
                 .get_relation_payload(ctx, &key)
-                .map(|served| served.value)
+                .map(|served| served.value().clone())
                 .map(|p| p.outcome),
             Some(verter_type_engine::semantic_query::RelationOutcome::NotAssignable)
         ),
@@ -1772,7 +1772,7 @@ fn relation_modeless_warm_hit_bumps_unified_hit_counter() {
     assert!(
         store
             .get_relation_payload(ctx, &key)
-            .map(|served| served.value)
+            .map(|served| served.value().clone())
             .is_some(),
         "seeded relation entry must warm-hit"
     );
@@ -1828,7 +1828,7 @@ fn relation_modeless_probe_miss_leaves_single_miss_to_cold_build() {
     assert!(
         store
             .get_relation_payload(ctx, &key)
-            .map(|served| served.value)
+            .map(|served| served.value().clone())
             .is_none(),
         "empty store must probe-miss"
     );
@@ -1872,7 +1872,7 @@ fn relation_modeless_probe_miss_leaves_single_miss_to_cold_build() {
     assert!(
         store
             .get_relation_payload(ctx, &key)
-            .map(|served| served.value)
+            .map(|served| served.value().clone())
             .is_some(),
         "cold-published entry must probe-hit"
     );
@@ -1934,7 +1934,7 @@ fn relation_modeless_probe_rejects_entry_after_generation_bump() {
     assert!(
         store
             .get_relation_payload(ctx, &key)
-            .map(|served| served.value)
+            .map(|served| served.value().clone())
             .is_some(),
         "seeded entry must warm-hit before the bump"
     );
@@ -1942,7 +1942,7 @@ fn relation_modeless_probe_rejects_entry_after_generation_bump() {
     assert!(
         store
             .get_relation_payload(ctx, &key)
-            .map(|served| served.value)
+            .map(|served| served.value().clone())
             .is_none(),
         "post-bump entry is stale: the modeless probe must reject it, never promote it as complete"
     );
@@ -2080,7 +2080,7 @@ fn binding_relate_cold_owners_do_not_join_but_share_store_admission_fences() {
     for (index, owner) in owners.into_iter().enumerate() {
         let read = join_within(owner, &format!("binding owner {index}"));
         assert!(matches!(
-            read.value,
+            read.value().clone(),
             QueryResult::Value(SemanticQueryValue::Relation(_))
         ));
     }
@@ -2162,7 +2162,7 @@ fn inline_nonbinding_relation_flight_wakes_concurrent_top_level_joiner() {
     );
     let read = join_within(joiner, "inline relation joiner");
     assert!(matches!(
-        read.value,
+        read.value().clone(),
         QueryResult::Value(SemanticQueryValue::Relation(payload))
             if payload.outcome == verter_type_engine::semantic_query::RelationOutcome::NotAssignable
     ));
@@ -2434,7 +2434,7 @@ fn relation_admission_is_decided_only_and_unknown_never_enters() {
         matches!(
             store
                 .get_relation_payload(ctx, &admit_key)
-                .map(|served| served.value)
+                .map(|served| served.value().clone())
                 .map(|p| p.outcome),
             Some(verter_type_engine::semantic_query::RelationOutcome::NotAssignable)
         ),
@@ -2528,7 +2528,7 @@ fn relation_admission_is_decided_only_and_unknown_never_enters() {
     assert!(
         store
             .get_relation_payload(ctx, &refuse_key)
-            .map(|served| served.value)
+            .map(|served| served.value().clone())
             .is_none(),
         "REFUSE: the refused key has no warm entry to serve",
     );
@@ -2583,7 +2583,7 @@ fn relation_admission_is_decided_only_and_unknown_never_enters() {
     assert!(
         store
             .get_relation_payload(ctx, &flight_key)
-            .map(|served| served.value)
+            .map(|served| served.value().clone())
             .is_none(),
         "REFUSE: the refused member key has no warm entry to serve",
     );
@@ -3349,7 +3349,7 @@ fn recursive_sentinel_does_not_promote_to_warm_memo() {
         || id,
         || (QueryResult::Recursive(id), empty_signature()),
     );
-    assert!(matches!(res.value, QueryResult::Recursive(_)));
+    assert!(matches!(res.value().clone(), QueryResult::Recursive(_)));
     assert_eq!(
         store.memo_entry_count(),
         0,
@@ -3435,7 +3435,7 @@ fn cross_thread_joiner_waits_on_winner_publish() {
     let joiner_result = join_within(joiner, "joiner");
 
     // Both must see the winner's node id.
-    match (winner_result.value, joiner_result.value) {
+    match (winner_result.value().clone(), joiner_result.value().clone()) {
         (QueryResult::Value(w), QueryResult::Value(j)) => assert_eq!(w, j),
         other => panic!("unexpected combined result: {other:?}"),
     }
@@ -3488,7 +3488,7 @@ fn warm_family_slot(
         || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
         || (QueryResult::Value(value_id), family_test_dep_signature()),
     );
-    match read.value {
+    match read.value().clone() {
         QueryResult::Value(id) => id,
         other => panic!("expected Value, got {other:?}"),
     }
@@ -3503,12 +3503,12 @@ fn assert_warm_at(
     let warm = store
         .get_unvalidated(&family_test_key(base, mode))
         .unwrap_or_else(|| panic!("expected warm hit at mode {mode:?}"));
-    match warm.value {
+    match warm.value().clone() {
         QueryResult::Value(id) => assert_eq!(id, expected_id, "wrong node id at {mode:?}"),
         other => panic!("expected Value at {mode:?}, got {other:?}"),
     }
     assert_eq!(
-        warm.dep_signature.as_ref(),
+        warm.dep_signature().as_ref(),
         family_test_dep_signature().as_ref(),
         "narrower-slot dep_signature must match the broader compute's at {mode:?}",
     );
@@ -3685,11 +3685,11 @@ fn family_concurrent_navigate_and_expanded_both_complete_independently() {
     let nav_read = t_nav.join().unwrap();
     let exp_read = t_exp.join().unwrap();
 
-    let nav_id = match nav_read.value {
+    let nav_id = match nav_read.value().clone() {
         QueryResult::Value(id) => id,
         other => panic!("nav: {other:?}"),
     };
-    let exp_id = match exp_read.value {
+    let exp_id = match exp_read.value().clone() {
         QueryResult::Value(id) => id,
         other => panic!("exp: {other:?}"),
     };
@@ -3753,7 +3753,7 @@ fn family_cancelled_does_not_backfill_any_slot() {
         || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
         || (QueryResult::Error(QueryError::Miss), empty_signature()),
     );
-    assert!(matches!(read.value, QueryResult::Error(_)));
+    assert!(matches!(read.value().clone(), QueryResult::Error(_)));
 
     // Every slot — Expanded itself + the would-be backfilled narrower
     // slots — must stay cold. Errors never warm, ever.
@@ -4036,7 +4036,7 @@ fn semantic_graph_stats_joined_waits_increments_on_cooperative_join() {
     let _ = join_within(winner, "winner");
     let joiner_result = join_within(joiner, "joiner");
     assert!(
-        matches!(joiner_result.value, QueryResult::Value(_)),
+        matches!(joiner_result.value().clone(), QueryResult::Value(_)),
         "joiner must observe the winner's published result"
     );
 
@@ -4132,9 +4132,9 @@ fn semantic_graph_stats_inflight_aborted_retries_increments_on_retry_loop() {
     // joiner ran its own cold build (also Value). Either way the
     // retry path was taken at least once.
     assert!(
-        matches!(joiner_result.value, QueryResult::Value(_)),
+        matches!(joiner_result.value().clone(), QueryResult::Value(_)),
         "joiner must resolve after retry, got {:?}",
-        joiner_result.value,
+        joiner_result.value().clone(),
     );
 
     let stats = store.stats_snapshot();
@@ -4176,7 +4176,7 @@ fn semantic_graph_stats_cold_aborts_swept_increments_when_forced() {
 
     assert!(
         matches!(
-            result.value,
+            result.value().clone(),
             QueryResult::Error(QueryError::ExecutionAborted(
                 verter_type_engine::semantic_query::ExecutionAbort::Superseded
             ))
@@ -4267,7 +4267,7 @@ fn cold_abort_trigger_is_scoped_to_its_store_not_process_global() {
     tx_release.send(()).expect("release store_b");
     let b_result = b_thread.join().expect("store_b joined");
     assert!(
-        matches!(b_result.value, QueryResult::Value(_)),
+        matches!(b_result.value().clone(), QueryResult::Value(_)),
         "store_b's cold winner still returns its computed result",
     );
 
@@ -4299,7 +4299,7 @@ fn cold_abort_trigger_is_scoped_to_its_store_not_process_global() {
         },
     );
     assert!(matches!(
-        a_result.value,
+        a_result.value().clone(),
         QueryResult::Error(QueryError::ExecutionAborted(
             verter_type_engine::semantic_query::ExecutionAbort::Superseded
         ))
@@ -4778,7 +4778,7 @@ fn cold_abort_sweep_global_counter_increments_without_request_context() {
         },
     );
     assert!(matches!(
-        result.value,
+        result.value().clone(),
         QueryResult::Error(QueryError::ExecutionAborted(
             verter_type_engine::semantic_query::ExecutionAbort::Superseded
         ))
@@ -4837,7 +4837,7 @@ fn cold_abort_sweep_attributes_to_per_request_context() {
         },
     );
     assert!(matches!(
-        result.value,
+        result.value().clone(),
         QueryResult::Error(QueryError::ExecutionAborted(
             verter_type_engine::semantic_query::ExecutionAbort::Superseded
         ))
@@ -5061,7 +5061,7 @@ fn joiner_outer_tracer_contains_winner_carrier_fact() {
                         )
                     },
                 );
-                let _value = cache_read.value;
+                let _value = cache_read.value().clone();
             },
         );
         finalise
@@ -5280,7 +5280,7 @@ fn joiner_of_cache_suppress_winner_inherits_carrier_and_suppression() {
                             )
                         },
                     );
-                    cache_read.cache_suppress
+                    cache_read.cache_suppress()
                 },
             );
         (joiner_suppress, finalise)
@@ -5562,7 +5562,7 @@ fn cross_view_joiner_forks_when_winner_carrier_fails_follower_validation() {
                 )
             },
         );
-        (cache_read.value, recompute_id)
+        (cache_read.value().clone(), recompute_id)
     });
 
     // Block until the follower has been admitted onto the winner's
@@ -5611,7 +5611,7 @@ fn cross_view_joiner_forks_when_winner_carrier_fails_follower_validation() {
 
     // The winner's own read is unaffected — it ran under the base view
     // and returns its own node.
-    match winner_read.value {
+    match winner_read.value().clone() {
         QueryResult::Value(_) => {}
         other => panic!("winner: expected a Value result, got {other:?}"),
     }
@@ -5745,7 +5745,7 @@ fn same_view_joiner_still_coalesces_onto_winner() {
                 )
             },
         );
-        cache_read.value
+        cache_read.value().clone()
     });
 
     // Block until the follower has joined the winner's in-flight entry
@@ -5974,7 +5974,7 @@ fn cross_view_joiner_of_suppressed_overflow_winner_forks() {
                 )
             },
         );
-        (cache_read.value, recompute_id)
+        (cache_read.value().clone(), recompute_id)
     });
 
     // Block until the follower has joined the winner's in-flight entry
@@ -6039,7 +6039,7 @@ fn cross_view_joiner_of_suppressed_overflow_winner_forks() {
     // the discriminating negative is that the cached node is the
     // follower's recompute, NOT the winner's suppressed node.
     if let Some(cached) = store.get_unvalidated(&key) {
-        match cached.value {
+        match cached.value().clone() {
             QueryResult::Value(node) => assert_ne!(
                 node, winner_node,
                 "the suppressed winner's view-specific node must never \
@@ -6249,7 +6249,7 @@ fn cross_view_joiner_of_suppressed_unrootable_winner_forks() {
                 )
             },
         );
-        (cache_read.value, recompute_id)
+        (cache_read.value().clone(), recompute_id)
     });
 
     // Block until the follower has joined the winner's in-flight entry
@@ -6315,7 +6315,7 @@ fn cross_view_joiner_of_suppressed_unrootable_winner_forks() {
     // the discriminating negative is that the cached node is the
     // follower's recompute, NOT the winner's suppressed node.
     if let Some(cached) = store.get_unvalidated(&key) {
-        match cached.value {
+        match cached.value().clone() {
             QueryResult::Value(node) => assert_ne!(
                 node, winner_node,
                 "the suppressed winner's view-specific node must never \
@@ -6545,7 +6545,7 @@ fn cross_view_joiner_of_nonsuppressed_miss_winner_without_self_root_forks() {
                 )
             },
         );
-        (cache_read.value, recompute_id)
+        (cache_read.value().clone(), recompute_id)
     });
 
     // Block until the follower has joined the winner's in-flight entry
@@ -6561,14 +6561,17 @@ fn cross_view_joiner_of_nonsuppressed_miss_winner_without_self_root_forks() {
     // — without this the test does not exercise the non-suppressed
     // missing-declaration shape at all.
     assert!(
-        matches!(winner_read.value, QueryResult::Error(QueryError::Miss)),
+        matches!(
+            winner_read.value().clone(),
+            QueryResult::Error(QueryError::Miss)
+        ),
         "fixture invariant: the winner must complete with \
          QueryResult::Error(Miss); got {:?}",
-        winner_read.value,
+        winner_read.value().clone(),
     );
     assert!(
         matches!(
-            winner_read.fact_status,
+            winner_read.fact_status(),
             verter_type_engine::semantic_query::FactStatus::Unavailable(_)
         ),
         "an unresolved declaration supplies no usable value",
@@ -6630,7 +6633,7 @@ fn cross_view_joiner_of_nonsuppressed_miss_winner_without_self_root_forks() {
     // follower's Value, NOT the winner's `Error(Miss)`.
     if let Some(cached) = store.get_unvalidated(&key) {
         assert!(
-            !matches!(cached.value, QueryResult::Error(QueryError::Miss)),
+            !matches!(cached.value().clone(), QueryResult::Error(QueryError::Miss)),
             "the winner's view-specific QueryResult::Error(Miss) must \
              never be promoted to a warm cache entry the follower's \
              view would read back — the follower's fork publishes its \
@@ -6871,7 +6874,7 @@ fn partial_value_leaves_no_memo_entry_and_fresh_request_cold_rebuilds() {
     assert!(first_ran, "first request must cold-build");
     assert!(
         matches!(
-            first.value,
+            first.value().clone(),
             QueryResult::Error(QueryError::IncompleteSemanticOperand { .. })
         ),
         "an unfinished value without a producer guarantee is withheld"
@@ -6906,7 +6909,7 @@ fn partial_value_leaves_no_memo_entry_and_fresh_request_cold_rebuilds() {
         second_ran,
         "fresh request MUST cold-rebuild — the partial was not laundered into a warm-complete entry"
     );
-    match second.value {
+    match second.value().clone() {
         QueryResult::Value(id) => {
             let data = store.node_data(id).unwrap();
             assert!(
@@ -6969,7 +6972,7 @@ fn memo_admission_or_gate_refuses_partial_without_suppress_in_release() {
         },
     );
     assert!(
-        matches!(first.value, QueryResult::Value(_)),
+        matches!(first.value(), QueryResult::Value(_)),
         "the value still flows back to the caller"
     );
     assert_eq!(
@@ -7038,7 +7041,7 @@ fn memo_admission_or_gate_refuses_benign_cache_suppress() {
         },
     );
     assert!(
-        matches!(first.value, QueryResult::Value(_)),
+        matches!(first.value().clone(), QueryResult::Value(_)),
         "the complete value still flows back to the caller"
     );
     assert!(
@@ -7639,7 +7642,7 @@ mod env_scoped_key_identity_guards {
                 )
             },
         );
-        assert_value_node(first.value, structural_result);
+        assert_value_node(first.value().clone(), structural_result);
 
         let mut second_build_ran = false;
         let second = store.execute_cooperative(
@@ -7656,7 +7659,7 @@ mod env_scoped_key_identity_guards {
             second_build_ran,
             "a KeyOf query with different provenance must cold-build, not warm-hit a prior context"
         );
-        assert_value_node(second.value, macro_result);
+        assert_value_node(second.value().clone(), macro_result);
     }
 
     #[test]
@@ -7697,7 +7700,7 @@ mod env_scoped_key_identity_guards {
                 )
             },
         );
-        assert_value_node(first.value, authored_result);
+        assert_value_node(first.value().clone(), authored_result);
 
         let mut second_build_ran = false;
         let second = store.execute_cooperative(
@@ -7717,7 +7720,7 @@ mod env_scoped_key_identity_guards {
             second_build_ran,
             "a MappedType query with different merge_role must cold-build, not warm-hit a prior context"
         );
-        assert_value_node(second.value, heritage_result);
+        assert_value_node(second.value().clone(), heritage_result);
     }
 
     fn typeof_key(
@@ -7868,7 +7871,7 @@ mod env_scoped_key_identity_guards {
                 )
             },
         );
-        assert_value_node(first.value, unfiltered_value);
+        assert_value_node(first.value().clone(), unfiltered_value);
 
         let mut filtered_build_ran = false;
         let second = store.execute_cooperative(
@@ -7884,7 +7887,7 @@ mod env_scoped_key_identity_guards {
             filtered_build_ran,
             "filtered StructuralTransit must not warm-hit the unfiltered family"
         );
-        assert_value_node(second.value, filtered_value);
+        assert_value_node(second.value().clone(), filtered_value);
 
         // Mutation recipe: remove `vue_heritage_policy` from any FamilyKey
         // variant or rebuild a demoted context from the default transit
@@ -7988,7 +7991,7 @@ mod env_scoped_key_identity_guards {
                 )
             },
         );
-        assert_value_node(first.value, structural_result);
+        assert_value_node(first.value().clone(), structural_result);
 
         let mut second_build_ran = false;
         let second = store.execute_cooperative(
@@ -8005,7 +8008,7 @@ mod env_scoped_key_identity_guards {
             second_build_ran,
             "a TypeOf query with different provenance must cold-build, not warm-hit a prior context"
         );
-        assert_value_node(second.value, macro_result);
+        assert_value_node(second.value().clone(), macro_result);
     }
 
     /// A `StructuralTransit` `typeof` lowering and a `Published` `typeof`
@@ -8046,7 +8049,7 @@ mod env_scoped_key_identity_guards {
                 )
             },
         );
-        assert_value_node(first.value, published_result);
+        assert_value_node(first.value().clone(), published_result);
 
         let mut second_build_ran = false;
         let second = store.execute_cooperative(
@@ -8063,7 +8066,7 @@ mod env_scoped_key_identity_guards {
             second_build_ran,
             "a StructuralTransit TypeOf query must cold-build, not warm-hit the Published slot"
         );
-        assert_value_node(second.value, transit_result);
+        assert_value_node(second.value().clone(), transit_result);
     }
 }
 
@@ -8426,7 +8429,7 @@ fn transit_skeleton_warm_does_not_serve_published_skeleton_request() {
         || (QueryResult::Value(value_id), family_test_dep_signature()),
     );
     assert!(
-        matches!(read.value, QueryResult::Value(id) if id == value_id),
+        matches!(read.value().clone(), QueryResult::Value(id) if id == value_id),
         "the transit cold build must publish its value"
     );
     assert!(
@@ -8454,7 +8457,7 @@ fn transit_skeleton_warm_does_not_serve_published_skeleton_request() {
         || (QueryResult::Value(value2), family_test_dep_signature()),
     );
     assert!(
-        matches!(read2.value, QueryResult::Value(id) if id == value2),
+        matches!(read2.value().clone(), QueryResult::Value(id) if id == value2),
         "the published cold build must publish its value"
     );
     assert!(
@@ -8528,7 +8531,7 @@ fn vue_runtime_surface_warm_never_serves_unfiltered_macro_surface() {
         },
     );
     assert!(matches!(
-        runtime_read.value,
+        runtime_read.value().clone(),
         QueryResult::Value(id) if id == runtime_value
     ));
     assert!(store.get_unvalidated(&runtime_key).is_some());
@@ -8553,7 +8556,7 @@ fn vue_runtime_surface_warm_never_serves_unfiltered_macro_surface() {
         },
     );
     assert!(matches!(
-        unfiltered_read.value,
+        unfiltered_read.value().clone(),
         QueryResult::Value(id) if id == unfiltered_value
     ));
     assert!(store.get_unvalidated(&unfiltered_key).is_some());
@@ -8825,8 +8828,16 @@ mod prepared_identity_bijection {
                 },
             ),
             SemanticQueryKeyTag::ReduceIntersection => (
-                SemanticQueryKey::reduce_intersection_operands(nodes(&[1, 2])),
-                SemanticQueryKey::reduce_intersection_operands(nodes(&[1, 3])),
+                SemanticQueryKey::reduce_intersection_operands(
+                    verter_type_engine::semantic_query_memo::test_support::synthetic_operand_graph(
+                    ),
+                    nodes(&[1, 2]),
+                ),
+                SemanticQueryKey::reduce_intersection_operands(
+                    verter_type_engine::semantic_query_memo::test_support::synthetic_operand_graph(
+                    ),
+                    nodes(&[1, 3]),
+                ),
             ),
             SemanticQueryKeyTag::ProjectObjectSpread => {
                 let context =
@@ -9518,7 +9529,8 @@ fn release_intern_document(
         release_member("own", param),
         release_member("shared", shared),
     ]);
-    let object = store.intern_node_with_scope(SemanticNodeData::Object(view.clone()), scope);
+    let object =
+        store.intern_node_with_scope(SemanticNodeData::Object(view.copy_for_tests()), scope);
     let alias = store.intern_node(SemanticNodeData::Alias(object));
     (param, object, alias, view)
 }
@@ -9649,7 +9661,7 @@ fn release_canonical_leaves_an_unrelated_inflight_build_and_its_publish_alone() 
     released.wait();
     let read = join_within(winner, "winner");
     assert!(
-        matches!(read.value, QueryResult::Value(id) if id == winner_result),
+        matches!(read.value().clone(), QueryResult::Value(id) if id == winner_result),
         "the winner returns its own value to its caller"
     );
     assert!(
@@ -9699,7 +9711,7 @@ fn release_canonical_keeps_project_path_flat_when_a_consumer_redispatches_dead_b
                 )
             },
         );
-        assert!(matches!(read.value, QueryResult::Value(_)));
+        assert!(matches!(read.value().clone(), QueryResult::Value(_)));
         assert!(
             store.get_unvalidated(&key).is_some(),
             "cycle {cycle}: the live entry is warm"
@@ -9958,7 +9970,7 @@ mod release_embedded_node_family_tests {
                 "FlowReturn.context.type_substitution parameter",
                 Box::new(move |node| {
                     flow_return_key(
-                        CanonicalTypeSubstitution::new(vec![(node, live)]),
+                        CanonicalTypeSubstitution::new(verter_type_engine::semantic_query_memo::test_support::synthetic_operand_graph(), vec![(node, live)]),
                         verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
                     )
                 }),
@@ -9967,7 +9979,7 @@ mod release_embedded_node_family_tests {
                 "FlowReturn.context.type_substitution image",
                 Box::new(move |node| {
                     flow_return_key(
-                        CanonicalTypeSubstitution::new(vec![(live, node)]),
+                        CanonicalTypeSubstitution::new(verter_type_engine::semantic_query_memo::test_support::synthetic_operand_graph(), vec![(live, node)]),
                         verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
                     )
                 }),
@@ -9983,7 +9995,7 @@ mod release_embedded_node_family_tests {
                 Box::new(move |node| {
                     resolve_call_key(
                         live,
-                        CanonicalTypeSubstitution::new(vec![(node, live)]),
+                        CanonicalTypeSubstitution::new(verter_type_engine::semantic_query_memo::test_support::synthetic_operand_graph(), vec![(node, live)]),
                         FlowNarrowingKey::empty(),
                     )
                 }),
@@ -9993,7 +10005,7 @@ mod release_embedded_node_family_tests {
                 Box::new(move |node| {
                     resolve_call_key(
                         live,
-                        CanonicalTypeSubstitution::new(vec![(live, node)]),
+                        CanonicalTypeSubstitution::new(verter_type_engine::semantic_query_memo::test_support::synthetic_operand_graph(), vec![(live, node)]),
                         FlowNarrowingKey::empty(),
                     )
                 }),
@@ -10004,7 +10016,7 @@ mod release_embedded_node_family_tests {
                     resolve_call_key(
                         live,
                         CanonicalTypeSubstitution::empty(),
-                        FlowNarrowingKey::new(Arc::from([node])),
+                        FlowNarrowingKey::new(verter_type_engine::semantic_query_memo::test_support::synthetic_operand_graph(), Arc::from([node])),
                     )
                 }),
             ),
@@ -10023,17 +10035,19 @@ mod release_embedded_node_family_tests {
             ),
             (
                 "Relate.inference_context.inferable_params",
-                Box::new(move |node| SemanticQueryKey::Relate {
+                Box::new(move |node| {
+                    SemanticQueryKey::Relate {
                     source: live,
                     target: live,
                     relation: RelationKind::Assignable,
                     policy: Default::default(),
                     source_freshness: Default::default(),
                     inference_context: Some(InferenceContextKey {
-                        inferable_params: InferableParamSetId::new(Arc::from([node])),
+                        inferable_params: InferableParamSetId::new(verter_type_engine::semantic_query_memo::test_support::synthetic_operand_graph(), Arc::from([node])),
                         ..Default::default()
                     }),
                     context: RelationContext::default(),
+                }
                 }),
             ),
             (
@@ -10044,10 +10058,10 @@ mod release_embedded_node_family_tests {
                         SemanticContextId,
                     };
                     SemanticQueryKey::ReduceIntersection {
-                        input: IntersectionInputRef::from_steps(&[
+                        input: IntersectionInputRef::from_steps(verter_type_engine::semantic_query_memo::test_support::synthetic_operand_graph(), &[
                             IntersectionTerm::Value(live),
                             IntersectionTerm::EvaluateSubgroup {
-                                input: IntersectionInputRef::from_operands(&[live, live, node]),
+                                input: IntersectionInputRef::from_operands(verter_type_engine::semantic_query_memo::test_support::synthetic_operand_graph(), &[live, live, node]),
                                 purpose: IntersectionPurpose::CheckerReduction,
                             },
                         ]),
@@ -10058,18 +10072,22 @@ mod release_embedded_node_family_tests {
             ),
             (
                 "FlowNarrowingAt.flow",
-                Box::new(move |node| SemanticQueryKey::FlowNarrowingAt {
+                Box::new(move |node| {
+                    SemanticQueryKey::FlowNarrowingAt {
                     point: consumer_point(),
-                    flow: FlowNarrowingKey::new(Arc::from([node])),
+                    flow: FlowNarrowingKey::new(verter_type_engine::semantic_query_memo::test_support::synthetic_operand_graph(), Arc::from([node])),
                     context: analysis_context(),
+                }
                 }),
             ),
             (
                 "ContextualTypeAt.contextual",
-                Box::new(move |node| SemanticQueryKey::ContextualTypeAt {
+                Box::new(move |node| {
+                    SemanticQueryKey::ContextualTypeAt {
                     point: consumer_point(),
-                    contextual: ContextualTypingKey::new(Arc::from([node])),
+                    contextual: ContextualTypingKey::new(verter_type_engine::semantic_query_memo::test_support::synthetic_operand_graph(), Arc::from([node])),
                     context: analysis_context(),
+                }
                 }),
             ),
         ]
@@ -10169,7 +10187,7 @@ mod release_embedded_node_family_tests {
                     )
                 },
             );
-            assert!(matches!(read.value, QueryResult::Value(_)));
+            assert!(matches!(read.value().clone(), QueryResult::Value(_)));
             assert_eq!(
                 store.get_unvalidated(&key).is_some(),
                 admitted,

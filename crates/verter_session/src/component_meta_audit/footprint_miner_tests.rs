@@ -45,7 +45,14 @@ fn mine_footprint_empty_state_yields_empty_subgraph_and_zero_counters() {
     let graph = empty_graph();
     let ctx = make_ctx(1);
     let state = AccumulatorState::default();
-    let fp = mine_footprint(&graph, state, &ctx, 10_000, &AuditCaps::default());
+    let fp = mine_footprint(
+        &graph,
+        &graph.construction_grant_for_tests(),
+        state,
+        &ctx,
+        10_000,
+        &AuditCaps::default(),
+    );
     assert_eq!(fp.derivation_subgraph.nodes.len(), 0);
     assert_eq!(fp.derivation_subgraph.edges.len(), 0);
     assert_eq!(fp.cache_outcomes.cold_builds, 0);
@@ -64,6 +71,7 @@ fn mine_footprint_cache_outcomes_read_from_per_context_atomic_counters() {
     ctx.cold_aborts_swept.store(11, Ordering::Relaxed);
     let fp = mine_footprint(
         &graph,
+        &graph.construction_grant_for_tests(),
         AccumulatorState::default(),
         &ctx,
         10_000,
@@ -90,7 +98,14 @@ fn mine_footprint_truncates_at_max_derivation_edges_sets_orphan_flag() {
             OriginMeta::None,
         ));
     }
-    let fp = mine_footprint(&graph, state, &ctx, 5, &AuditCaps::default());
+    let fp = mine_footprint(
+        &graph,
+        &graph.construction_grant_for_tests(),
+        state,
+        &ctx,
+        5,
+        &AuditCaps::default(),
+    );
     assert_eq!(fp.derivation_subgraph.edges.len(), 5);
     assert!(fp.graph_completeness.has_orphan_edges);
     assert_eq!(fp.graph_completeness.edges_truncated, 5);
@@ -123,8 +138,22 @@ fn mine_footprint_identical_inputs_produce_byte_identical_outputs() {
             },
         ));
     }
-    let fp_a = mine_footprint(&graph, state_a, &ctx_a, 10_000, &AuditCaps::default());
-    let fp_b = mine_footprint(&graph, state_b, &ctx_b, 10_000, &AuditCaps::default());
+    let fp_a = mine_footprint(
+        &graph,
+        &graph.construction_grant_for_tests(),
+        state_a,
+        &ctx_a,
+        10_000,
+        &AuditCaps::default(),
+    );
+    let fp_b = mine_footprint(
+        &graph,
+        &graph.construction_grant_for_tests(),
+        state_b,
+        &ctx_b,
+        10_000,
+        &AuditCaps::default(),
+    );
     let bytes_a = serde_json::to_vec(&fp_a).expect("serialise a");
     let bytes_b = serde_json::to_vec(&fp_b).expect("serialise b");
     assert_eq!(
@@ -156,7 +185,14 @@ fn mine_footprint_conditional_decisions_distinguish_true_false_deferred() {
         CoreOriginEdgeKind::ConditionalSelect,
         OriginMeta::None,
     ));
-    let fp = mine_footprint(&graph, state, &ctx, 10_000, &AuditCaps::default());
+    let fp = mine_footprint(
+        &graph,
+        &graph.construction_grant_for_tests(),
+        state,
+        &ctx,
+        10_000,
+        &AuditCaps::default(),
+    );
     let branches: Vec<ConditionalBranch> =
         fp.conditional_decisions.iter().map(|c| c.branch).collect();
     assert!(branches.contains(&ConditionalBranch::True));
@@ -177,7 +213,14 @@ fn mine_footprint_alias_resolve_emits_one_record_per_hop() {
             OriginMeta::AliasName(Arc::from(format!("alias_{hop}"))),
         ));
     }
-    let fp = mine_footprint(&graph, state, &ctx, 10_000, &AuditCaps::default());
+    let fp = mine_footprint(
+        &graph,
+        &graph.construction_grant_for_tests(),
+        state,
+        &ctx,
+        10_000,
+        &AuditCaps::default(),
+    );
     assert_eq!(fp.alias_resolutions.len(), 3);
     for rec in &fp.alias_resolutions {
         assert!(rec.alias_name.starts_with("alias_"));
@@ -205,7 +248,14 @@ fn mine_footprint_path_segments_preserve_member_index_distinction() {
         CoreOriginEdgeKind::ProjectPath,
         OriginMeta::Path(Arc::from(path)),
     ));
-    let fp = mine_footprint(&graph, state, &ctx, 10_000, &AuditCaps::default());
+    let fp = mine_footprint(
+        &graph,
+        &graph.construction_grant_for_tests(),
+        state,
+        &ctx,
+        10_000,
+        &AuditCaps::default(),
+    );
     assert_eq!(fp.projections.len(), 1);
     let segs = &fp.projections[0].path;
     assert!(
@@ -232,7 +282,14 @@ fn mine_footprint_indexed_ready_builds_extracted_from_structured_events() {
             canonical_id: Arc::from("/b.ts"),
             whole_hash: [10u8; 16],
         });
-    let fp = mine_footprint(&graph, state, &ctx, 10_000, &AuditCaps::default());
+    let fp = mine_footprint(
+        &graph,
+        &graph.construction_grant_for_tests(),
+        state,
+        &ctx,
+        10_000,
+        &AuditCaps::default(),
+    );
     assert_eq!(fp.indexed_ready_builds.len(), 2);
     assert_eq!(fp.indexed_ready_builds[0].canonical_id.as_ref(), "/a.ts");
     assert_eq!(fp.indexed_ready_builds[1].canonical_id.as_ref(), "/b.ts");
@@ -256,7 +313,14 @@ fn mine_footprint_multiple_derivations_for_same_result_produce_multiple_edges() 
         CoreOriginEdgeKind::AliasResolve,
         OriginMeta::AliasName(Arc::from("path_b")),
     ));
-    let fp = mine_footprint(&graph, state, &ctx, 10_000, &AuditCaps::default());
+    let fp = mine_footprint(
+        &graph,
+        &graph.construction_grant_for_tests(),
+        state,
+        &ctx,
+        10_000,
+        &AuditCaps::default(),
+    );
     assert_eq!(fp.derivation_subgraph.edges.len(), 2);
     assert_eq!(
         fp.derivation_subgraph.edges[0].result, fp.derivation_subgraph.edges[1].result,
@@ -271,6 +335,12 @@ use verter_type_engine::semantic_query::PrimitiveKind;
 /// `type_args` are carried IN at construction through the sanctioned
 /// `SemanticNodeData::new_bare_ref` constructor — never hand-bound — so this
 /// is a REAL carrier node, not a faked `SemanticNodeData`.
+/// Hash `data` inside a construction lane of `graph`, as the miner does.
+fn hash_in_lane(graph: &SemanticGraphStore, data: &SemanticNodeData) -> Hash16 {
+    let _lane = graph.enter_node_root_scope();
+    structural_hash_of(graph, data)
+}
+
 fn bare_ref_with_arg(arg_child: SemanticNodeId) -> SemanticNodeData {
     SemanticNodeData::new_bare_ref(
         Arc::from("Foo"),
@@ -301,8 +371,8 @@ fn structural_hash_discriminates_carrier_type_args_foo_a_vs_foo_b() {
     let foo_a = bare_ref_with_arg(child_a); // Foo<A>
     let foo_b = bare_ref_with_arg(child_b); // Foo<B>
 
-    let hash_a = structural_hash_of(&graph, &foo_a);
-    let hash_b = structural_hash_of(&graph, &foo_b);
+    let hash_a = hash_in_lane(&graph, &foo_a);
+    let hash_b = hash_in_lane(&graph, &foo_b);
     assert_ne!(
         hash_a, hash_b,
         "DISCRIMINATION: Foo<A> and Foo<B> (same head, different single type argument) must \
@@ -326,8 +396,8 @@ fn structural_hash_is_stable_for_identical_carriers() {
     let foo_a1 = bare_ref_with_arg(child_a);
     let foo_a2 = bare_ref_with_arg(child_a);
 
-    let hash_a1 = structural_hash_of(&graph, &foo_a1);
-    let hash_a2 = structural_hash_of(&graph, &foo_a2);
+    let hash_a1 = hash_in_lane(&graph, &foo_a1);
+    let hash_a2 = hash_in_lane(&graph, &foo_a2);
     assert_eq!(
         hash_a1, hash_a2,
         "STABILITY: two structurally-identical Foo<A> carriers must yield the SAME structural \
@@ -350,14 +420,14 @@ fn structural_hash_discriminates_exact_infer_binder_identity() {
     };
 
     assert_ne!(
-        structural_hash_of(&graph, &left),
-        structural_hash_of(&graph, &right),
+        hash_in_lane(&graph, &left),
+        hash_in_lane(&graph, &right),
         "same-name infer references bound by distinct declarations must have \
          distinct audit structural fingerprints"
     );
     assert_eq!(
-        structural_hash_of(&graph, &left),
-        structural_hash_of(
+        hash_in_lane(&graph, &left),
+        hash_in_lane(
             &graph,
             &SemanticNodeData::InferRef {
                 name: Arc::from("T"),
@@ -393,7 +463,7 @@ fn structural_hash_discriminates_spread_operand_identity() {
     let data = |operand| {
         SemanticNodeData::ObjectSpreadProgram(
             verter_type_engine::semantic_query::ObjectSpreadProgram {
-                effects: Arc::from([
+                effects: verter_type_engine::semantic_query::PayloadArray::from([
                     verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
                         verter_type_engine::semantic_query::AuthoredPropertyEffect {
                             key: member.key.clone(),
@@ -414,8 +484,8 @@ fn structural_hash_discriminates_spread_operand_identity() {
         )
     };
     assert_ne!(
-        structural_hash_of(&graph, &data(operand)),
-        structural_hash_of(&graph, &data(other_operand)),
+        hash_in_lane(&graph, &data(operand)),
+        hash_in_lane(&graph, &data(other_operand)),
         "spread operand identity is part of the footprint structural fingerprint"
     );
 }
@@ -442,8 +512,8 @@ fn structural_hash_carrier_discrimination_comes_from_args_not_head() {
     );
     // …yet the fingerprints diverge, so the arg child is the discriminator.
     assert_ne!(
-        structural_hash_of(&graph, &foo_a),
-        structural_hash_of(&graph, &foo_b),
+        hash_in_lane(&graph, &foo_a),
+        hash_in_lane(&graph, &foo_b),
         "with identical heads, the differing fingerprints prove the carrier ARG child is what \
          discriminates the fingerprint."
     );
@@ -494,8 +564,8 @@ fn structural_hash_is_cross_graph_stable_despite_different_child_ordinals() {
     );
 
     assert_eq!(
-        structural_hash_of(&graph_a, &foo_a),
-        structural_hash_of(&graph_b, &foo_b),
+        hash_in_lane(&graph_a, &foo_a),
+        hash_in_lane(&graph_b, &foo_b),
         "CROSS-GRAPH STABILITY: two equivalent `Foo<String>` carriers must hash IDENTICALLY \
          even when the `String` child received a different arena ordinal in each graph. The \
          pre-fix code folded the raw ordinal into the bytes and FAILED this; a content-only \
@@ -545,8 +615,8 @@ fn structural_hash_discriminates_nested_non_carrier_child_across_colliding_ordin
     );
 
     assert_ne!(
-        structural_hash_of(&graph_a, &foo_a),
-        structural_hash_of(&graph_b, &foo_b),
+        hash_in_lane(&graph_a, &foo_a),
+        hash_in_lane(&graph_b, &foo_b),
         "NESTED DISCRIMINATION: `Foo<Box<String>>` and `Foo<Box<Number>>` must hash \
          DIFFERENTLY even though the outer Box and inner-primitive ordinals collide. The \
          pre-fix carrier-only recursion + Debug-non-carrier arm rendered the Box identically \
@@ -594,8 +664,8 @@ fn structural_hash_recursion_into_grandchildren_is_load_bearing() {
     );
 
     assert_ne!(
-        structural_hash_of(&graph_a, &foo_a),
-        structural_hash_of(&graph_b, &foo_b),
+        hash_in_lane(&graph_a, &foo_a),
+        hash_in_lane(&graph_b, &foo_b),
         "LOAD-BEARING RECURSION: the only difference is a primitive TWO non-carrier levels \
          deep behind colliding ordinals. The fingerprints diverge ONLY because `encode_child` \
          recursively descends `graph.node_data` to that primitive. Delete the recursion (or \
@@ -671,6 +741,7 @@ fn mine_footprint_byte_identical_over_interned_carrier_nodes() {
 
     let fp_a = mine_footprint(
         &graph_a,
+        &graph_a.construction_grant_for_tests(),
         state_referencing(carrier_a, child_a),
         &ctx_a,
         10_000,
@@ -678,6 +749,7 @@ fn mine_footprint_byte_identical_over_interned_carrier_nodes() {
     );
     let fp_b = mine_footprint(
         &graph_b,
+        &graph_b.construction_grant_for_tests(),
         state_referencing(carrier_b, child_b),
         &ctx_b,
         10_000,
@@ -775,11 +847,11 @@ fn synthetic_binding_is_cross_graph_stable_despite_different_value_node_ordinals
         "test setup must give the `value_node` target different ordinals across the two graphs"
     );
 
-    let hash_a = structural_hash_of(
+    let hash_a = hash_in_lane(
         &graph_a,
         &graph_a.node_data(binding_a).expect("binding_a interned"),
     );
-    let hash_b = structural_hash_of(
+    let hash_b = hash_in_lane(
         &graph_b,
         &graph_b.node_data(binding_b).expect("binding_b interned"),
     );
@@ -828,11 +900,11 @@ fn synthetic_binding_distinguishes_value_node_content_under_colliding_ordinals()
         "test setup must collide the `value_node` target ordinal across the two graphs"
     );
 
-    let hash_a = structural_hash_of(
+    let hash_a = hash_in_lane(
         &graph_a,
         &graph_a.node_data(binding_a).expect("binding_a interned"),
     );
-    let hash_b = structural_hash_of(
+    let hash_b = hash_in_lane(
         &graph_b,
         &graph_b.node_data(binding_b).expect("binding_b interned"),
     );

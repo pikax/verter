@@ -115,8 +115,18 @@ packed_id!(AppliedResultId);
 pub struct TypeToken(u64);
 
 impl TypeToken {
+    /// A token from its raw handle. Only the kernel mints tokens; test builds
+    /// expose the raw constructor as a fixture seam.
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub const fn from_raw(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    /// Kernel-internal token minting; see the test-build variant.
+    #[cfg(not(any(test, feature = "test-support")))]
+    #[must_use]
+    pub(crate) const fn from_raw(raw: u64) -> Self {
         Self(raw)
     }
 

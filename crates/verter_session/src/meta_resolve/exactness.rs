@@ -10,16 +10,11 @@ pub(crate) fn classify_node(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: SemanticNodeId,
 ) -> ExpansionExactness {
-    let unwrapped =
-        match verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), node)
-            .as_deref()
-        {
-            Some(SemanticNodeData::Alias(target)) => *target,
-            _ => node,
-        };
-    match verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), unwrapped)
-        .as_deref()
-    {
+    let unwrapped = match dispatch.graph().read_in_scope(node).as_deref() {
+        Some(SemanticNodeData::Alias(target)) => *target,
+        _ => node,
+    };
+    match dispatch.graph().read_in_scope(unwrapped).as_deref() {
         Some(SemanticNodeData::Primitive(_)) | Some(SemanticNodeData::Literal(_)) => {
             ExpansionExactness::ExactConcrete
         }
@@ -41,16 +36,12 @@ pub(crate) fn node_root_should_stay_symbolic(
     >,
     node: SemanticNodeId,
 ) -> bool {
-    let unwrapped =
-        match verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), node)
-            .as_deref()
-        {
-            Some(SemanticNodeData::Alias(target)) => *target,
-            _ => node,
-        };
+    let unwrapped = match dispatch.graph().read_in_scope(node).as_deref() {
+        Some(SemanticNodeData::Alias(target)) => *target,
+        _ => node,
+    };
     matches!(
-        verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), unwrapped)
-            .as_deref(),
+        dispatch.graph().read_in_scope(unwrapped).as_deref(),
         Some(
             SemanticNodeData::Mapped { .. }
                 | SemanticNodeData::Conditional { .. }
@@ -68,16 +59,16 @@ fn object_is_closed_node(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: SemanticNodeId,
 ) -> bool {
-    let Some(data) =
-        verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), node)
-    else {
+    let Some(data) = dispatch.graph().read_in_scope(node) else {
         return false;
     };
     let SemanticNodeData::Object(view) = data.as_ref() else {
         return false;
     };
     view.positive_members().iter().all(|member| {
-        verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), member.value)
+        dispatch
+            .graph()
+            .read_in_scope(member.value)
             .is_some_and(|data| {
                 !matches!(
                     data.as_ref(),

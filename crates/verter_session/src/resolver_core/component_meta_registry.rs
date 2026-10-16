@@ -1221,8 +1221,8 @@ use verter_type_engine::semantic_query::{IndexKey, SemanticNodeData, SemanticNod
 fn registry_node_data<C: verter_type_engine::resolver_core::ResolverCapabilities>(
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
     node: SemanticNodeId,
-) -> Option<Arc<SemanticNodeData>> {
-    verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), node)
+) -> Option<verter_type_engine::semantic_query_memo::node_data_lease::NodeDataLease> {
+    dispatch.graph().read_in_scope(node)
 }
 
 /// Unwrap ONE `Alias` hop (the node-domain analog of stripping a
@@ -1765,9 +1765,9 @@ fn collect_registry_refs_node_inner(
             }
             if cursor.is_whole_surface() {
                 for signature in surface
-                    .call_signatures
+                    .call_signatures()
                     .iter()
-                    .chain(surface.construct_signatures.iter())
+                    .chain(surface.construct_signatures().iter())
                 {
                     collect_registry_member_surface_refs_node(
                         ctx,
@@ -1781,7 +1781,7 @@ fn collect_registry_refs_node_inner(
                         visited,
                     );
                 }
-                for signature in surface.index_signatures.iter() {
+                for signature in surface.index_signatures().iter() {
                     collect_registry_member_surface_refs_node(
                         ctx,
                         dispatch,
@@ -2124,9 +2124,9 @@ fn collect_registry_member_surface_refs_node(
                 );
             }
             for signature in surface
-                .call_signatures
+                .call_signatures()
                 .iter()
-                .chain(surface.construct_signatures.iter())
+                .chain(surface.construct_signatures().iter())
             {
                 recurse(
                     ctx,
@@ -2137,7 +2137,7 @@ fn collect_registry_member_surface_refs_node(
                     visited,
                 );
             }
-            for signature in surface.index_signatures.iter() {
+            for signature in surface.index_signatures().iter() {
                 recurse(
                     ctx,
                     signature.key_type,

@@ -753,6 +753,13 @@ impl NodeArenaCore {
     pub(crate) fn is_live(&self, id: SemanticNodeId) -> bool {
         matches!(self.inner.read().slot(id), Slot::Live(..))
     }
+    /// The payload of a live slot only; a released slot has none.
+    pub(super) fn live_payload(&self, id: SemanticNodeId) -> Option<Arc<SemanticNodeData>> {
+        match self.inner.read().slot(id) {
+            Slot::Live(payload, _) => Some(Arc::clone(payload)),
+            _ => None,
+        }
+    }
     pub(crate) fn counted(&self) -> bool {
         #[cfg(any(test, feature = "test-support"))]
         {
@@ -1447,7 +1454,7 @@ mod arena_intern_tests {
         let recursive_over = |arg: SemanticNodeId| {
             arena.push(SemanticNodeData::Opaque(QueryError::RecursiveRef {
                 name: Arc::from("Tree"),
-                args: Arc::from([arg]),
+                args: [arg].into(),
             }))
         };
         let over_closed = recursive_over(closed);
@@ -1643,7 +1650,7 @@ mod arena_intern_tests {
                     prototype: Some(prototype),
                     object_literal: false,
                 }),
-                type_arguments: Arc::from([]),
+                type_arguments: crate::semantic_query::PayloadArray::from([]),
                 surface: kept,
             })
         };

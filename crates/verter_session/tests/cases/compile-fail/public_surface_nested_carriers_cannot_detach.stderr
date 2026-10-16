@@ -1,0 +1,92 @@
+error[E0308]: mismatched types
+  --> tests/cases/compile-fail/public_surface_nested_carriers_cannot_detach.rs:12:5
+   |
+11 | fn detach_surface(view: &SurfaceView) -> SurfaceView {
+   |                                          ----------- expected `SurfaceView` because of return type
+12 |     view.clone()
+   |     ^^^^^^^^^^^^ expected `SurfaceView`, found `&SurfaceView`
+   |
+note: `SurfaceView` does not implement `Clone`, so `&SurfaceView` was cloned instead
+  --> tests/cases/compile-fail/public_surface_nested_carriers_cannot_detach.rs:12:5
+   |
+12 |     view.clone()
+   |     ^^^^
+
+error[E0616]: field `entries` of struct `SurfaceView` is private
+  --> tests/cases/compile-fail/public_surface_nested_carriers_cannot_detach.rs:16:22
+   |
+16 |     Arc::clone(&view.entries)
+   |                      ^^^^^^^ private field
+   |
+help: a method `entries` also exists, call it with parentheses
+   |
+16 |     Arc::clone(&view.entries())
+   |                             ++
+
+error[E0616]: field `call_signatures` of struct `SurfaceView` is private
+  --> tests/cases/compile-fail/public_surface_nested_carriers_cannot_detach.rs:20:22
+   |
+20 |     Arc::clone(&view.call_signatures)
+   |                      ^^^^^^^^^^^^^^^ private field
+   |
+help: a method `call_signatures` also exists, call it with parentheses
+   |
+20 |     Arc::clone(&view.call_signatures())
+   |                                     ++
+
+error[E0308]: mismatched types
+  --> tests/cases/compile-fail/public_surface_nested_carriers_cannot_detach.rs:24:5
+   |
+23 | fn detach_member(member: &SurfaceMember) -> SurfaceMember {
+   |                                             ------------- expected `SurfaceMember` because of return type
+24 |     member.clone()
+   |     ^^^^^^^^^^^^^^ expected `SurfaceMember`, found `&SurfaceMember`
+   |
+note: `SurfaceMember` does not implement `Clone`, so `&SurfaceMember` was cloned instead
+  --> tests/cases/compile-fail/public_surface_nested_carriers_cannot_detach.rs:24:5
+   |
+24 |     member.clone()
+   |     ^^^^^^
+
+error[E0277]: the trait bound `SurfaceMember: Clone` is not satisfied
+  --> tests/cases/compile-fail/public_surface_nested_carriers_cannot_detach.rs:28:29
+   |
+28 |     view.positive_members().to_vec()
+   |                             ^^^^^^ the trait `Clone` is not implemented for `SurfaceMember`
+   |
+note: required by a bound in `slice::<impl [T]>::to_vec`
+  --> $RUST/alloc/src/slice.rs
+   |
+   |     pub fn to_vec(&self) -> Vec<T>
+   |            ------ required by a bound in this associated function
+   |     where
+   |         T: Clone,
+   |            ^^^^^ required by this bound in `slice::<impl [T]>::to_vec`
+
+error[E0308]: mismatched types
+  --> tests/cases/compile-fail/public_surface_nested_carriers_cannot_detach.rs:32:5
+   |
+31 | fn detach_entry(entry: &SurfaceEntry) -> SurfaceEntry {
+   |                                          ------------ expected `SurfaceEntry` because of return type
+32 |     entry.clone()
+   |     ^^^^^^^^^^^^^ expected `SurfaceEntry`, found `&SurfaceEntry`
+   |
+note: `SurfaceEntry` does not implement `Clone`, so `&SurfaceEntry` was cloned instead
+  --> tests/cases/compile-fail/public_surface_nested_carriers_cannot_detach.rs:32:5
+   |
+32 |     entry.clone()
+   |     ^^^^^
+
+error[E0308]: mismatched types
+  --> tests/cases/compile-fail/public_surface_nested_carriers_cannot_detach.rs:36:5
+   |
+35 | fn detach_index_signature(signature: &IndexSignature) -> IndexSignature {
+   |                                                          -------------- expected `verter_type_engine::semantic_query::IndexSignature` because of return type
+36 |     signature.clone()
+   |     ^^^^^^^^^^^^^^^^^ expected `IndexSignature`, found `&IndexSignature`
+   |
+note: `verter_type_engine::semantic_query::IndexSignature` does not implement `Clone`, so `&verter_type_engine::semantic_query::IndexSignature` was cloned instead
+  --> tests/cases/compile-fail/public_surface_nested_carriers_cannot_detach.rs:36:5
+   |
+36 |     signature.clone()
+   |     ^^^^^^^^^

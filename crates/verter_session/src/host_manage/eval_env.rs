@@ -1585,10 +1585,7 @@ impl VerterHost {
                                             let root_is_reference_carrier =
                                                 engine.dispatch.macro_type_arg_hot_ref(canonical, ctx.macro_index)
                                                 .and_then(|product| {
-                                                    verter_type_engine::project_semantic_dispatch::node_data_for(
-                                                        engine.dispatch.graph(),
-                                                        product.hot.node(),
-                                                    )
+                                                    engine.dispatch.graph().read_in_scope(product.hot.node())
                                                 })
                                                 .is_some_and(|data| {
                                                     data.bare_ref_head().is_some()

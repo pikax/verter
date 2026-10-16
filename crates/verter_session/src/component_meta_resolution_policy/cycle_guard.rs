@@ -289,9 +289,7 @@ fn hash_node_rec<H: std::hash::Hasher>(
     let ordinal = seen.len() as u64;
     seen.insert(node, ordinal);
 
-    let Some(data) =
-        verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), node)
-    else {
+    let Some(data) = dispatch.graph().read_in_scope(node) else {
         hasher.write_u8(0xFD);
         return;
     };
@@ -383,16 +381,16 @@ fn hash_node_rec<H: std::hash::Hasher>(
                 member.method_kind.hash(hasher);
                 hash_node_rec(dispatch, member.value, hasher, seen, depth + 1);
             }
-            hasher.write_u64(surface.call_signatures.len() as u64);
-            for signature in surface.call_signatures.iter() {
+            hasher.write_u64(surface.call_signatures().len() as u64);
+            for signature in surface.call_signatures().iter() {
                 hash_node_rec(dispatch, *signature, hasher, seen, depth + 1);
             }
-            hasher.write_u64(surface.construct_signatures.len() as u64);
-            for signature in surface.construct_signatures.iter() {
+            hasher.write_u64(surface.construct_signatures().len() as u64);
+            for signature in surface.construct_signatures().iter() {
                 hash_node_rec(dispatch, *signature, hasher, seen, depth + 1);
             }
-            hasher.write_u64(surface.index_signatures.len() as u64);
-            for signature in surface.index_signatures.iter() {
+            hasher.write_u64(surface.index_signatures().len() as u64);
+            for signature in surface.index_signatures().iter() {
                 hash_node_rec(dispatch, signature.key_type, hasher, seen, depth + 1);
                 hash_node_rec(dispatch, signature.value_type, hasher, seen, depth + 1);
             }
@@ -849,7 +847,7 @@ mod tests {
         let object = |operand| {
             graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
                 verter_type_engine::semantic_query::ObjectSpreadProgram {
-                    effects: Arc::from([
+                    effects: verter_type_engine::semantic_query::PayloadArray::from([
                         verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
                             verter_type_engine::semantic_query::AuthoredPropertyEffect {
                                 key: member.key.clone(),
@@ -981,7 +979,7 @@ mod tests {
             graph.intern_node_with_scope(
                 SemanticNodeData::InstantiationRef {
                     base: wrapper_base.clone(),
-                    args: Arc::from([arg]),
+                    args: verter_type_engine::semantic_query::PayloadArray::from([arg]),
                 },
                 scope(),
             )

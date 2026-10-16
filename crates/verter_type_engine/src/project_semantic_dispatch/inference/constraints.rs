@@ -106,7 +106,12 @@ impl<D: super::InferenceDemandDriver> super::InferenceTxn<'_, D> {
                 _ => vec![member],
             })
             .collect();
-        let kind = |member: SemanticNodeId| graph.node_data(member).as_deref().cloned();
+        let kind = |member: SemanticNodeId| {
+            graph
+                .node_data(member)
+                .as_deref()
+                .map(crate::semantic_query::SemanticNodeData::clone)
+        };
         if members.iter().any(|member| {
             matches!(
                 kind(*member),

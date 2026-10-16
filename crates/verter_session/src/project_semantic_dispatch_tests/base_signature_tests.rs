@@ -82,7 +82,7 @@ fn print_alias(host: &VerterHost, name: &str) -> String {
         .flatten()
         .unwrap_or_else(|| panic!("{name} must resolve"));
     let expr = host
-        .project_node_to_type_expr_for_test(node)
+        .project_node_to_type_expr_for_test(node.id())
         .unwrap_or_else(|| panic!("{name} must project to a TypeExpr"));
     print(&expr)
 }
@@ -247,7 +247,7 @@ fn base_signature_inference(arity: usize) -> (usize, String) {
             - before;
     let node = outcome.ok().flatten().expect("R resolves");
     let expr = host
-        .project_node_to_type_expr_for_test(node)
+        .project_node_to_type_expr_for_test(node.id())
         .expect("R projects to a TypeExpr");
     (visits, print(&expr))
 }

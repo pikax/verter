@@ -64,9 +64,11 @@ fn function_with_return_span(
 ) -> SemanticNodeId {
     graph.intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Call,
-        params: Arc::from(params.into_boxed_slice()),
+        params: verter_type_engine::semantic_query::PayloadArray::from(params.into_boxed_slice()),
         return_type,
-        type_parameters: Arc::from(Vec::new().into_boxed_slice()),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+            Vec::new().into_boxed_slice(),
+        ),
         occurrence: None,
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
             return_type,
@@ -100,7 +102,9 @@ fn alias(graph: &SemanticGraphStore, inner: SemanticNodeId) -> SemanticNodeId {
 
 fn tuple(graph: &SemanticGraphStore, elements: Vec<TupleElement>) -> SemanticNodeId {
     graph.intern_node(SemanticNodeData::Tuple {
-        elements: Arc::from(elements.into_boxed_slice()),
+        elements: verter_type_engine::semantic_query::PayloadArray::from(
+            elements.into_boxed_slice(),
+        ),
         readonly: false,
     })
 }
@@ -163,7 +167,7 @@ fn instantiation_ref(
             whole_hash: HashValue::default(),
             decl_name: Arc::from(base_name),
         },
-        args: Arc::from(args.into_boxed_slice()),
+        args: verter_type_engine::semantic_query::PayloadArray::from(args.into_boxed_slice()),
     })
 }
 
@@ -1302,7 +1306,8 @@ fn exact_instance_owner_prepared_body_locator_materializes_without_ordinary_fall
             scope: ScopeId::file(Arc::clone(&identity.canonical_id), identity.owner),
             name: Arc::clone(&identity.decl_name),
         }))
-        .value
+        .value()
+        .clone()
     {
         QueryResult::Value(node) => node,
         other => panic!("the exact-owner DeclRef resolves, got {other:?}"),
@@ -1332,7 +1337,8 @@ fn exact_instance_owner_prepared_body_locator_materializes_without_ordinary_fall
                 ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
             ),
         )))
-        .value
+        .value()
+        .clone()
     {
         QueryResult::Value(node) => node,
         other => panic!("the exact-owner declaration instantiates, got {other:?}"),

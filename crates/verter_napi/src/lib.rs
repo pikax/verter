@@ -4081,7 +4081,7 @@ impl NapiVerterHost {
             // adapter only wraps the bytes in a `Buffer`.
             let type_expr_buf = match resolved {
                 Some(node_id) => host
-                    .project_node_to_type_expr_json_bytes(node_id)
+                    .project_node_to_type_expr_json_bytes(&node_id)
                     .map(Buffer::from),
                 None => None,
             };
@@ -4118,7 +4118,7 @@ impl NapiVerterHost {
             // adapter only wraps the bytes in a `Buffer`.
             let type_expr_buf = match resolved {
                 Some(node_id) => host
-                    .project_node_to_type_expr_json_bytes(node_id)
+                    .project_node_to_type_expr_json_bytes(&node_id)
                     .map(Buffer::from),
                 None => None,
             };

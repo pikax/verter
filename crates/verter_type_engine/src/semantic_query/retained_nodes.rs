@@ -5,7 +5,7 @@ use super::*;
 impl QueryError {
     pub(crate) fn for_each_retained_node(&self, visit: impl FnMut(SemanticNodeId)) {
         match self {
-            Self::RecursiveRef { name: _, args } => args.iter().copied().for_each(visit),
+            Self::RecursiveRef { name: _, args } => args.operands().iter().copied().for_each(visit),
             Self::CheckerRecovery {
                 diagnostic: _,
                 basis: _,
@@ -158,7 +158,7 @@ impl crate::project_semantic_dispatch::walk::ShallowDiagnostic {
                 visit(*source);
                 visit(*target);
             }
-            Self::InstantiationError { decl: _, error } => error.for_each_retained_node(visit),
+            Self::InstantiationError { decl: _, error } => error.0.for_each_retained_node(visit),
             Self::CyclicInstantiation { decl: _ }
             | Self::UnresolvedSurfaceArm {
                 name: _,

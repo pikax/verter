@@ -371,15 +371,22 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
         match &mut rebuilt {
             SemanticNodeData::Array { element, .. } => slot(element),
             SemanticNodeData::Tuple { elements, .. } => {
-                let mut values = elements.to_vec();
+                let mut values = elements
+                    .iter()
+                    .map(crate::semantic_query::TupleElement::copy)
+                    .collect::<Vec<_>>();
                 for element in &mut values {
                     slot(&mut element.value);
                 }
-                *elements = Arc::from(values.into_boxed_slice());
+                *elements = crate::semantic_query::PayloadArray::from(values.into_boxed_slice());
             }
             SemanticNodeData::Object(surface) => {
                 use crate::semantic_query::{SurfaceEntry, SurfaceView};
-                let mut entries = surface.entries.to_vec();
+                let mut entries = surface
+                    .entries
+                    .iter()
+                    .map(crate::semantic_query::SurfaceEntry::clone)
+                    .collect::<Vec<_>>();
                 for entry in &mut entries {
                     match entry {
                         SurfaceEntry::Member(member) => slot(&mut member.value),
@@ -401,11 +408,14 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
                 predicate,
                 ..
             } => {
-                let mut values = params.to_vec();
+                let mut values = params
+                    .iter()
+                    .map(crate::semantic_query::FunctionParam::copy)
+                    .collect::<Vec<_>>();
                 for param in &mut values {
                     slot(&mut param.ty);
                 }
-                *params = Arc::from(values.into_boxed_slice());
+                *params = crate::semantic_query::PayloadArray::from(values.into_boxed_slice());
                 let declared = *return_type;
                 slot(return_type);
                 // A declared return carrier names the return type it

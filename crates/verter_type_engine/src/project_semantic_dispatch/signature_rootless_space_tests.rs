@@ -63,14 +63,14 @@ fn sibling_literal_signatures_claim_distinct_binder_spaces() {
         )));
         let signature = graph.intern_node(SemanticNodeData::Signature {
             kind: SignatureKind::Call,
-            params: Arc::from([FunctionParam::synthetic(
+            params: crate::semantic_query::PayloadArray::from([FunctionParam::synthetic(
                 Some(Arc::from("x")),
                 literal,
                 false,
                 false,
             )]),
             return_type: void,
-            type_parameters: Arc::from(Vec::new()),
+            type_parameters: crate::semantic_query::PayloadArray::from(Vec::new()),
             occurrence: None,
             return_carrier: SignatureReturnCarrier::Declared(void),
             signature_span: None,

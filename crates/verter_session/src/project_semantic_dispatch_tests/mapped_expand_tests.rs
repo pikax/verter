@@ -74,7 +74,7 @@ fn named_answer(source: &str, probe: &str) -> Answer {
         .expect("the probe exists");
     let stats = host.project_type_store().semantic_graph().stats_snapshot();
     let wire = host
-        .project_node_to_type_expr_json_bytes(node)
+        .project_node_to_type_expr_json_bytes(&node)
         .expect("the answer projects");
     let mut decoder = serde_json::Deserializer::from_slice(&wire);
     decoder.disable_recursion_limit();

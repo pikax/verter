@@ -303,75 +303,90 @@ const UNION_TRUNCATION_THRESHOLD: usize = 8;
 /// (`.claude/skills/type-resolution/SKILL.md` §14, termination rule 3).
 const TRUNCATION_TOKEN: &str = "…";
 
-/// The single §14.1 projection rule: render an already-computed
-/// [`SemanticQueryValue`] under `needs`. NEVER stores, re-parses, or
-/// re-resolves — it only reads `store` node data + `needs`.
-pub fn display(
+construction_ordinal_seam! {
+    /// The single §14.1 projection rule: render an already-computed
+    /// [`SemanticQueryValue`] under `needs`. NEVER stores, re-parses, or
+    /// re-resolves — it only reads `store` node data + `needs`.
+    fn display(
+        store: &SemanticGraphStore,
+        value: &SemanticQueryValue,
+        needs: DisplayNeeds,
+    ) -> DisplayString {
+        match value {
+            SemanticQueryValue::TypeNode(id) => {
+                display_type_node(store, *id, needs, MAX_DISPLAY_DEPTH, &mut DisplayContext::default())
+            }
+            SemanticQueryValue::ObjectProjection(_) => unreachable!(
+                "display: ObjectProjection has no producer until witness-gated projection consumers land"
+            ),
+            SemanticQueryValue::OverloadSet(sigs) => {
+                let rendered: Vec<String> = sigs
+                    .iter()
+                    .map(|s| display_signature(store, s, needs).0)
+                    .collect();
+                DisplayString(rendered.join("; "))
+            }
+            SemanticQueryValue::Relation(payload) => display_relation(payload),
+            SemanticQueryValue::BroadRuntime(classification) => DisplayString(
+                classification
+                    .kinds()
+                    .iter()
+                    .map(|kind| format!("{kind:?}"))
+                    .collect::<Vec<_>>()
+                    .join(" | "),
+            ),
+            SemanticQueryValue::MaterializationCycleGate(outcome) => {
+                DisplayString(format!("{outcome:?}"))
+            }
+            SemanticQueryValue::DeclarationAnalysis(d) => display_declaration_analysis(store, d, needs),
+            SemanticQueryValue::ProgramAnalysis(p) => display_program_analysis(store, p, needs),
+            SemanticQueryValue::FlowReturn(result) => DisplayString(format!(
+                "{} (can_fall_through: {})",
+                display_type_node(store, result.return_type(), needs, MAX_DISPLAY_DEPTH, &mut DisplayContext::default()).0,
+                result
+                    .can_fall_through
+                    .reaches_end(verter_session_query::flow::completion::CompletionDischarge::PublishedResult),
+            )),
+            SemanticQueryValue::ResolveCall(result) => {
+                let return_type = match result.as_ref() {
+                    crate::semantic_query::ResolvedCallResult::Selected { return_type, .. }
+                    | crate::semantic_query::ResolvedCallResult::DynamicAny { return_type } => {
+                        *return_type
+                    }
+                };
+                DisplayString(
+                    display_type_node(store, return_type, needs, MAX_DISPLAY_DEPTH, &mut DisplayContext::default()).0,
+                )
+            }
+            SemanticQueryValue::SignatureSet(value) => DisplayString(format!("{:?}", value.set)),
+            SemanticQueryValue::SignatureResult(value) => {
+                DisplayString(format!("{:?}", value.result))
+            }
+            SemanticQueryValue::TruthinessDomain(domain) => {
+                DisplayString(format!("{domain:?}"))
+            }
+            // §14.1: the reserved native-checker seam. No producer constructs it,
+            // so reaching it here is a logic error. Matched explicitly — NOT via a
+            // `_` wildcard — so any future live `SemanticQueryValue` arm forces a
+            // compile error here instead of silently falling through.
+            SemanticQueryValue::DiagnosticAnalysis(_) => unreachable!(
+                "display: DiagnosticAnalysis is a non-live reserved seam — no producer constructs it"
+            ),
+        }
+    }
+}
+
+/// [`display`] inside a construction lane this thread holds of `store`.
+/// Without such a lane a value's bare ordinals authorize no read and there
+/// is no rendering.
+pub fn display_in_scope(
     store: &SemanticGraphStore,
     value: &SemanticQueryValue,
     needs: DisplayNeeds,
-) -> DisplayString {
-    match value {
-        SemanticQueryValue::TypeNode(id) => {
-            display_type_node(store, *id, needs, MAX_DISPLAY_DEPTH, &mut DisplayContext::default())
-        }
-        SemanticQueryValue::ObjectProjection(_) => unreachable!(
-            "display: ObjectProjection has no producer until witness-gated projection consumers land"
-        ),
-        SemanticQueryValue::OverloadSet(sigs) => {
-            let rendered: Vec<String> = sigs
-                .iter()
-                .map(|s| display_signature(store, s, needs).0)
-                .collect();
-            DisplayString(rendered.join("; "))
-        }
-        SemanticQueryValue::Relation(payload) => display_relation(payload),
-        SemanticQueryValue::BroadRuntime(classification) => DisplayString(
-            classification
-                .kinds()
-                .iter()
-                .map(|kind| format!("{kind:?}"))
-                .collect::<Vec<_>>()
-                .join(" | "),
-        ),
-        SemanticQueryValue::MaterializationCycleGate(outcome) => {
-            DisplayString(format!("{outcome:?}"))
-        }
-        SemanticQueryValue::DeclarationAnalysis(d) => display_declaration_analysis(store, d, needs),
-        SemanticQueryValue::ProgramAnalysis(p) => display_program_analysis(store, p, needs),
-        SemanticQueryValue::FlowReturn(result) => DisplayString(format!(
-            "{} (can_fall_through: {})",
-            display_type_node(store, result.return_type(), needs, MAX_DISPLAY_DEPTH, &mut DisplayContext::default()).0,
-            result
-                .can_fall_through
-                .reaches_end(verter_session_query::flow::completion::CompletionDischarge::PublishedResult),
-        )),
-        SemanticQueryValue::ResolveCall(result) => {
-            let return_type = match result.as_ref() {
-                crate::semantic_query::ResolvedCallResult::Selected { return_type, .. }
-                | crate::semantic_query::ResolvedCallResult::DynamicAny { return_type } => {
-                    *return_type
-                }
-            };
-            DisplayString(
-                display_type_node(store, return_type, needs, MAX_DISPLAY_DEPTH, &mut DisplayContext::default()).0,
-            )
-        }
-        SemanticQueryValue::SignatureSet(value) => DisplayString(format!("{:?}", value.set)),
-        SemanticQueryValue::SignatureResult(value) => {
-            DisplayString(format!("{:?}", value.result))
-        }
-        SemanticQueryValue::TruthinessDomain(domain) => {
-            DisplayString(format!("{domain:?}"))
-        }
-        // §14.1: the reserved native-checker seam. No producer constructs it,
-        // so reaching it here is a logic error. Matched explicitly — NOT via a
-        // `_` wildcard — so any future live `SemanticQueryValue` arm forces a
-        // compile error here instead of silently falling through.
-        SemanticQueryValue::DiagnosticAnalysis(_) => unreachable!(
-            "display: DiagnosticAnalysis is a non-live reserved seam — no producer constructs it"
-        ),
-    }
+) -> Option<DisplayString> {
+    store
+        .holds_construction_lane()
+        .then(|| display(store, value, needs))
 }
 
 /// Structural walk of one graph node. EXHAUSTIVE over every

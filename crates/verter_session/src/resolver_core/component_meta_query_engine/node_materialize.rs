@@ -26,9 +26,7 @@ pub(crate) fn component_meta_registry_node_has_explicit_object_surface(
         if !visited.insert(node) {
             continue;
         }
-        let Some(data) =
-            verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), node)
-        else {
+        let Some(data) = dispatch.graph().read_in_scope(node) else {
             continue;
         };
         match data.as_ref() {

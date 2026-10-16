@@ -365,7 +365,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                                 return TerminalSymbolInstantiationDemandOutcome::Complete(Some(
                                     TerminalSymbolInstantiation {
                                         symbol,
-                                        args: Arc::clone(args),
+                                        args: Arc::clone(args.as_arc()),
                                     },
                                 ));
                             }
@@ -387,7 +387,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                             let read = self.execute_read(SemanticQueryKey::Instantiate(
                                 crate::semantic_query::InstantiateKey::new(
                                     slot,
-                                    Arc::clone(args),
+                                    Arc::clone(args.as_arc()),
                                     self.instantiate_context_for(&base.canonical_id, context),
                                 ),
                             ));
@@ -518,7 +518,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                             let read = self.execute_read(SemanticQueryKey::Instantiate(
                                 crate::semantic_query::InstantiateKey::new(
                                     slot,
-                                    Arc::clone(args),
+                                    Arc::clone(args.as_arc()),
                                     self.instantiate_context_for(&base.canonical_id, context),
                                 ),
                             ));

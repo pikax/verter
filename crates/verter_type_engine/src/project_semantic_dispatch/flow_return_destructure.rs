@@ -641,8 +641,11 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
                 }))
             }
             SemanticNodeData::Tuple { elements, .. } => {
-                let remaining: Vec<crate::semantic_query::TupleElement> =
-                    elements.iter().skip(consumed).cloned().collect();
+                let remaining: Vec<crate::semantic_query::TupleElement> = elements
+                    .iter()
+                    .skip(consumed)
+                    .map(crate::semantic_query::TupleElement::copy)
+                    .collect();
                 drop(data);
                 // An optional element read out of its tuple carries its
                 // missing-element `undefined` (`sliceTupleType` reads the
@@ -662,7 +665,9 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
                     })
                     .collect();
                 Some(graph.intern_node(SemanticNodeData::Tuple {
-                    elements: Arc::from(remaining.into_boxed_slice()),
+                    elements: crate::semantic_query::PayloadArray::from(
+                        remaining.into_boxed_slice(),
+                    ),
                     readonly: false,
                 }))
             }

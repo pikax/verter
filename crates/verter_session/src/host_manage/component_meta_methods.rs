@@ -424,6 +424,7 @@ impl VerterHost {
                         audit_builder.record_files(files);
                         let footprint = crate::component_meta_audit::mine_footprint(
                             self.project_type_store().semantic_graph(),
+                            self.project_type_store().construction_grant(),
                             state,
                             &ctx,
                             self.config.max_derivation_edges,
@@ -1286,6 +1287,7 @@ impl VerterHost {
                 .then(|| {
                     build_origin_graph(
                         self.project_type_store.semantic_graph(),
+                        self.project_type_store.construction_grant(),
                         surface_identities_for_export.as_ref(),
                     )
                 })
@@ -1457,9 +1459,7 @@ impl VerterHost {
                     );
                 }
             }
-            match verter_type_engine::project_semantic_dispatch::node_data_for(graph, node)
-                .as_deref()
-            {
+            match graph.read_in_scope(node).as_deref() {
                 Some(verter_type_engine::semantic_query::SemanticNodeData::Object(surface)) => {
                     for member in surface.positive_members().iter() {
                         collect_one_filtered_node(
@@ -1474,9 +1474,9 @@ impl VerterHost {
                         );
                     }
                     for signature in surface
-                        .call_signatures
+                        .call_signatures()
                         .iter()
-                        .chain(surface.construct_signatures.iter())
+                        .chain(surface.construct_signatures().iter())
                     {
                         collect_one_filtered_node(
                             ctx,dispatch,
@@ -1489,7 +1489,7 @@ impl VerterHost {
                             cursor,
                         );
                     }
-                    for signature in surface.index_signatures.iter() {
+                    for signature in surface.index_signatures().iter() {
                         collect_one_filtered_node(
                             ctx,dispatch,
                             signature.key_type,

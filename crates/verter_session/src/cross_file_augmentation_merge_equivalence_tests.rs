@@ -376,7 +376,7 @@ fn cross_file_module_augmentation_merge_surface_matches_oracle() {
         let node = host
             .resolve_named_symbol("/types.ts", "Foo", Some(mode))
             .unwrap_or_else(|| panic!("Foo must resolve in {mode:?}"));
-        match node_data(&host, node).as_ref() {
+        match node_data(&host, node.id()).as_ref() {
             SemanticNodeData::MergedDecl { contributors } => {
                 assert_eq!(
                     contributors.len(),
@@ -398,7 +398,7 @@ fn cross_file_module_augmentation_merge_surface_matches_oracle() {
         }
 
         let projected = host
-            .project_node_to_type_expr_for_test(node)
+            .project_node_to_type_expr_for_test(node.id())
             .unwrap_or_else(|| panic!("the merged `Foo` must project in {mode:?}"));
         let dispatch_surface = object_member_surface(&projected);
         assert_eq!(
@@ -425,7 +425,7 @@ fn cross_file_module_augmentation_merge_surface_matches_oracle() {
     let alias_node = host
         .resolve_named_symbol("/use.ts", "A", Some(ProjectionMode::Expanded))
         .expect("A must resolve Expanded through the imported augmented Foo");
-    match node_data(&host, alias_node).as_ref() {
+    match node_data(&host, alias_node.id()).as_ref() {
         SemanticNodeData::MergedDecl { contributors } => assert_eq!(
             contributors.len(),
             2,
@@ -439,7 +439,7 @@ fn cross_file_module_augmentation_merge_surface_matches_oracle() {
         ),
     }
     let alias_projected = host
-        .project_node_to_type_expr_for_test(alias_node)
+        .project_node_to_type_expr_for_test(alias_node.id())
         .expect("the aliased merged surface must project");
     let alias_surface = object_member_surface(&alias_projected);
     assert_eq!(
@@ -515,7 +515,7 @@ fn warm_parent_rejects_contributor_source_env_move_with_unchanged_content() {
         || host.resolve_named_symbol("/types.ts", "Foo", Some(ProjectionMode::Expanded)),
     );
     let node = resolved.expect("augmented Foo must resolve");
-    match node_data(&host, node).as_ref() {
+    match node_data(&host, node.id()).as_ref() {
         SemanticNodeData::MergedDecl { contributors } => {
             assert_eq!(contributors.len(), 2, "base + augmenter contributors");
         }
@@ -799,7 +799,7 @@ fn every_version_rooted_augmentation_contributor_records_source_env_identity() {
     // Both augmenters genuinely CONTRIBUTED (so both were version-rooted by
     // the stitch): the merged carrier folds base + 2 augmenter bodies, and
     // the projected surface carries each contributor's member.
-    match node_data(&host, node).as_ref() {
+    match node_data(&host, node.id()).as_ref() {
         SemanticNodeData::MergedDecl { contributors } => assert_eq!(
             contributors.len(),
             3,
@@ -808,7 +808,7 @@ fn every_version_rooted_augmentation_contributor_records_source_env_identity() {
         other => panic!("the augmented Foo must be a MergedDecl carrier, got {other:?}"),
     }
     let projected = host
-        .project_node_to_type_expr_for_test(node)
+        .project_node_to_type_expr_for_test(node.id())
         .expect("the merged Foo must project");
     let surface = object_member_surface(&projected);
     assert_eq!(
@@ -1102,13 +1102,13 @@ fn external_module_augmentation_discharges_exact_unresolved_owner_debt() {
         "a non-file ambient import must begin as exact typed unresolved-owner debt"
     );
     assert!(
-        !ambient_read.result_is_partial() && !ambient_read.cache_suppress,
+        !ambient_read.result_is_partial() && !ambient_read.cache_suppress(),
         "the exact Cfg debt must discharge when the normal resolver reaches the live ambient \
          augmentation; got partial={}, suppress={}",
         ambient_read.result_is_partial(),
-        ambient_read.cache_suppress,
+        ambient_read.cache_suppress(),
     );
-    let ambient_node = match ambient_read.value {
+    let ambient_node = match ambient_read.value().clone() {
         QueryResult::Value(value) => value,
         other => panic!("ambient U must resolve to a value, got {other:?}"),
     };
@@ -1140,11 +1140,11 @@ fn external_module_augmentation_discharges_exact_unresolved_owner_debt() {
         "the absent import must retain exact typed unresolved-owner debt"
     );
     assert!(
-        missing_read.result_is_partial() && missing_read.cache_suppress,
+        missing_read.result_is_partial() && missing_read.cache_suppress(),
         "an undischargeable owner debt must remain Partial(MissingDependency) and ReturnOnly; \
          got partial={}, suppress={}",
         missing_read.result_is_partial(),
-        missing_read.cache_suppress,
+        missing_read.cache_suppress(),
     );
 }
 
@@ -1365,7 +1365,7 @@ fn external_module_augmentation_torn_contributor_folds_cache_suppress() {
                     ProjectionReductionContext::published(ProjectionMode::Expanded),
                 ),
             ));
-        dispatch.execute_read(key).cache_suppress
+        dispatch.execute_read(key).cache_suppress()
     };
 
     // TORN: arm the injection, then COLD-build `/use.ts::U`. `Cfg` resolves to
@@ -1489,7 +1489,7 @@ fn relative_augmentation_torn_stitch_fans_non_cacheability_to_outer_tracer() {
             verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_)
         );
         (
-            read.cache_suppress,
+            read.cache_suppress(),
             read.result_is_partial(),
             outer_non_cacheable,
         )
@@ -1626,7 +1626,7 @@ fn external_module_augmentation_broken_lease_contributor_folds_cache_suppress() 
                     ProjectionReductionContext::published(ProjectionMode::Expanded),
                 ),
             ));
-        dispatch.execute_read(key).cache_suppress
+        dispatch.execute_read(key).cache_suppress()
     };
 
     // BROKEN LEASE: cold-build `/use.ts::U`. The external augmentation stitch
@@ -1722,7 +1722,7 @@ fn no_augmenter_resolve_still_records_the_augmenter_set_shape_fact() {
     );
     let node = resolved.expect("the un-augmented Foo must resolve");
     let projected = host
-        .project_node_to_type_expr_for_test(node)
+        .project_node_to_type_expr_for_test(node.id())
         .expect("the un-augmented Foo must project");
     assert_eq!(
         object_member_surface(&projected),
@@ -1854,7 +1854,7 @@ fn augmenter_entering_the_program_after_a_warm_no_augmentation_result_invalidate
     assert_eq!(
         object_member_surface(
             &host
-                .project_node_to_type_expr_for_test(cold)
+                .project_node_to_type_expr_for_test(cold.id())
                 .expect("un-augmented Foo projects")
         ),
         vec![("base".to_string(), "Primitive(String)".to_string())],
@@ -1881,7 +1881,7 @@ fn augmenter_entering_the_program_after_a_warm_no_augmentation_result_invalidate
         .expect("the augmented Foo must resolve");
     let surface = object_member_surface(
         &host
-            .project_node_to_type_expr_for_test(warm)
+            .project_node_to_type_expr_for_test(warm.id())
             .expect("augmented Foo projects"),
     );
     assert_eq!(
@@ -1933,7 +1933,7 @@ fn an_augmenter_of_another_declaration_shares_the_absent_read_and_still_invalida
             .expect("Keys must resolve");
         format!(
             "{:?}",
-            host.project_node_to_type_expr_for_test(node)
+            host.project_node_to_type_expr_for_test(node.id())
                 .expect("Keys projects")
         )
     };
@@ -1990,7 +1990,7 @@ fn every_instantiation_sharing_an_absent_augmentation_read_invalidates_when_an_a
             .expect("Keys must resolve");
         format!(
             "{:?}",
-            host.project_node_to_type_expr_for_test(node)
+            host.project_node_to_type_expr_for_test(node.id())
                 .expect("Keys projects")
         )
     };
@@ -2070,7 +2070,7 @@ fn augmenter_gaining_a_declaration_invalidates_the_warm_non_contributing_result(
     assert_eq!(
         object_member_surface(
             &host
-                .project_node_to_type_expr_for_test(cold)
+                .project_node_to_type_expr_for_test(cold.id())
                 .expect("Bar projects")
         ),
         vec![("b".to_string(), "Primitive(String)".to_string())],
@@ -2095,7 +2095,7 @@ fn augmenter_gaining_a_declaration_invalidates_the_warm_non_contributing_result(
         .expect("the augmented Bar must resolve");
     let surface = object_member_surface(
         &host
-            .project_node_to_type_expr_for_test(warm)
+            .project_node_to_type_expr_for_test(warm.id())
             .expect("augmented Bar projects"),
     );
     assert_eq!(

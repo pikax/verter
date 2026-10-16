@@ -84,8 +84,19 @@ crate::output_sinks::define_output_capability! {
     mint: pub(in crate::typeinfo::raise)
 }
 
+/// The ordinal a projection reads, proven to be the live node `node` roots
+/// in this request's graph. A root minted by another graph is foreign and a
+/// node a legacy close released is stale: both project nothing.
+fn owned_projection_subject(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    node: &verter_type_engine::semantic_query_memo::node_roots::NodeRoot,
+) -> Option<SemanticNodeId> {
+    let read = dispatch.graph().read(node.node_ref().ok()?).ok()?;
+    Some(read.root().id())
+}
+
 impl VerterHost {
-    /// Project a [`SemanticNodeId`] to its wire-encoded `TypeExpr` bytes
+    /// Project an owned node root to its wire-encoded `TypeExpr` bytes
     /// for FFI use.
     ///
     /// Materializes the node into a sealed output carrier through the
@@ -100,7 +111,10 @@ impl VerterHost {
     ///
     /// [`OutputProjector`]: crate::output_sinks::OutputProjector
     #[must_use]
-    pub fn project_node_to_type_expr_json_bytes(&self, node: SemanticNodeId) -> Option<Vec<u8>> {
+    pub fn project_node_to_type_expr_json_bytes(
+        &self,
+        node: &verter_type_engine::semantic_query_memo::node_roots::NodeRoot,
+    ) -> Option<Vec<u8>> {
         // Query-RETURNER: it returns the encoded `TypeExpr` with no outer
         // publish fence, so it MUST raise against a PROVEN-CURRENT
         // snapshot. A known-stale (`ReturnOnly`) read would raise the node
@@ -115,6 +129,7 @@ impl VerterHost {
         // Mint the typeinfo bytes-facade output capability (constructor
         // visible only within `crate::typeinfo::raise`): this FFI facade is a
         // true output sink.
+        let node = owned_projection_subject(&dispatch, node)?;
         let cap = TypeinfoRaiseOutputCap::new(&dispatch);
         let type_expr = cap
             .materialize_output_type_expr(node)?
@@ -188,7 +203,7 @@ impl VerterHost {
         )
     }
 
-    /// Project a [`SemanticNodeId`] to its bounded wire
+    /// Project an owned node root to its bounded wire
     /// [`SemanticTypeGraph`](verter_protocol::typeinfo::graph::SemanticTypeGraph)
     /// export — the graph-protocol answer for the typeinfo graph
     /// operations.
@@ -207,7 +222,7 @@ impl VerterHost {
     #[must_use]
     pub fn project_node_to_semantic_type_graph(
         &self,
-        node: SemanticNodeId,
+        node: &verter_type_engine::semantic_query_memo::node_roots::NodeRoot,
         budgets: &verter_protocol::typeinfo::graph_export::GraphExportBudgets,
     ) -> Option<verter_protocol::typeinfo::graph::SemanticTypeGraph> {
         // Query-RETURNER: same proven-current-snapshot contract as the
@@ -217,11 +232,24 @@ impl VerterHost {
         let host_ctx =
             crate::resolver_core::HostResolverContext::from_current(self, &current_view, overlay);
         let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+        let node = owned_projection_subject(&dispatch, node)?;
         let cap = TypeinfoRaiseOutputCap::new(&dispatch);
         let type_expr = cap
             .materialize_output_type_expr(node)?
             .into_type_expr(cap.authority());
         Some(verter_protocol::typeinfo::graph_export::encode_type_expr_graph(&type_expr, budgets))
+    }
+
+    /// Fixture sibling of [`Self::project_node_to_type_expr_json_bytes`] for
+    /// a construction ordinal a test already holds; production projects only
+    /// an owned root.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn project_ordinal_to_type_expr_json_bytes_for_test(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<Vec<u8>> {
+        serde_json::to_vec(&self.project_node_to_type_expr_for_test(node)?).ok()
     }
 
     /// Test-only sibling of [`Self::project_node_to_type_expr_json_bytes`]

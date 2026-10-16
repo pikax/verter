@@ -40,7 +40,7 @@ fn every_variant() -> Vec<QueryError> {
         },
         QueryError::RecursiveRef {
             name: Arc::from("TreeNode"),
-            args: std::sync::Arc::from([]),
+            args: Default::default(),
         },
         QueryError::Other(Arc::from("boom")),
         QueryError::DeclPlaceholder {
@@ -120,7 +120,7 @@ fn only_miss_and_raise_miss_are_optional_absence() {
 fn recursive_ref_raises_as_recursion() {
     let err = QueryError::RecursiveRef {
         name: Arc::from("TreeNode"),
-        args: std::sync::Arc::from([]),
+        args: Default::default(),
     };
     let class = classify_query_error(&err);
     assert_eq!(class.disposition, QueryErrorDisposition::RecursionCarrier);

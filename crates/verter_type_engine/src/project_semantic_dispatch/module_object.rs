@@ -460,7 +460,13 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     crate::semantic_query::ProjectionMode::Shallow,
                 ),
             )
-            .map(|surface| surface.positive_members().to_vec())
+            .map(|surface| {
+                surface
+                    .positive_members()
+                    .iter()
+                    .map(crate::semantic_query::SurfaceMember::clone)
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default();
         let headers = &indexed.shallow_state.headers;
         let merged: Vec<(Arc<str>, ValueRootKey)> = headers

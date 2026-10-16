@@ -93,7 +93,7 @@ pub(crate) fn node_root_is_explicit_selector_operator(
             Some(BuiltinUtility::Pick | BuiltinUtility::Omit | BuiltinUtility::Record)
         )
     };
-    match graph.node_data(node).as_deref() {
+    match graph.read_in_scope(node).as_deref() {
         Some(SemanticNodeData::Alias(inner)) => {
             node_root_is_explicit_selector_operator(dispatch, *inner)
         }

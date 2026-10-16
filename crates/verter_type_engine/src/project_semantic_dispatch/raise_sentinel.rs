@@ -401,7 +401,7 @@ mod tests {
             },
             QueryError::RecursiveRef {
                 name: Arc::from("Tree"),
-                args: std::sync::Arc::from([]),
+                args: Default::default(),
             },
             QueryError::Other(Arc::from("custom failure text")),
             QueryError::DeclPlaceholder {

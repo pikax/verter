@@ -554,8 +554,8 @@ impl CallValue {
             } => (
                 *return_type,
                 return_carrier.clone(),
-                Arc::clone(type_parameters),
-                Arc::clone(params),
+                Arc::clone(type_parameters.as_arc()),
+                Arc::clone(params.as_arc()),
             ),
             SemanticNodeData::DeferredCallable(callable) => {
                 let header =
@@ -723,7 +723,10 @@ fn reduce_instantiated_return(
     node: SemanticNodeId,
 ) -> SemanticNodeId {
     let graph = dispatch.arena();
-    let Some(SemanticNodeData::Intersection(members)) = graph.node_data(node).as_deref().cloned()
+    let Some(SemanticNodeData::Intersection(members)) = graph
+        .node_data(node)
+        .as_deref()
+        .map(crate::semantic_query::SemanticNodeData::clone)
     else {
         return node;
     };

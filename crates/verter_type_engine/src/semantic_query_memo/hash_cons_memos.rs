@@ -33,79 +33,83 @@ pub(crate) struct DeferredEvaluationMemoEntry {
 }
 
 impl SemanticGraphStore {
-    /// Hash-cons memo lookup for
-    /// `substitute_semantic_type_param`. Bumps
-    /// `substitute_memo_hits` on hit, `substitute_memo_misses` on
-    /// miss.
-    pub fn substitute_memo_get(
-        &self,
-        value_expr: SemanticNodeId,
-        parameter_node: SemanticNodeId,
-        arg: SemanticNodeId,
-    ) -> Option<SemanticNodeId> {
-        let hit =
-            self.substitute_memo
-                .get(&(value_expr, parameter_node, arg))
-                .map(|entry| {
-                    let (result, roots) = entry.value();
-                    super::node_roots::NodeRootScope::capture(
-                        super::node_roots::NodeRoot::from_roots(*result, roots.clone()),
-                    );
-                    *result
-                });
-        if hit.is_some() {
-            self.stats
-                .substitute_memo_hits
-                .fetch_add(1, Ordering::Relaxed);
-        } else {
-            self.stats
-                .substitute_memo_misses
-                .fetch_add(1, Ordering::Relaxed);
+    construction_ordinal_seam! {
+        /// Hash-cons memo lookup for
+        /// `substitute_semantic_type_param`. Bumps
+        /// `substitute_memo_hits` on hit, `substitute_memo_misses` on
+        /// miss.
+        fn substitute_memo_get(
+            &self,
+            value_expr: SemanticNodeId,
+            parameter_node: SemanticNodeId,
+            arg: SemanticNodeId,
+        ) -> Option<SemanticNodeId> {
+            let hit =
+                self.substitute_memo
+                    .get(&(value_expr, parameter_node, arg))
+                    .map(|entry| {
+                        let (result, roots) = entry.value();
+                        super::node_roots::NodeRootScope::capture(
+                            super::node_roots::NodeRoot::from_roots(*result, roots.clone()),
+                        );
+                        *result
+                    });
+            if hit.is_some() {
+                self.stats
+                    .substitute_memo_hits
+                    .fetch_add(1, Ordering::Relaxed);
+            } else {
+                self.stats
+                    .substitute_memo_misses
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            hit
         }
-        hit
     }
 
-    /// First-writer-wins publish for `substitute_memo`. Tracks the
-    /// inserted key in the FIFO sidecar so the deque can evict the
-    /// oldest entry once the retention cap is exceeded; an
-    /// `Entry::Occupied` collision (a concurrent publisher already
-    /// landed an identical-result write) does NOT push into the
-    /// FIFO since the key is already tracked.
-    pub fn substitute_memo_publish(
-        &self,
-        value_expr: SemanticNodeId,
-        parameter_node: SemanticNodeId,
-        arg: SemanticNodeId,
-        result: SemanticNodeId,
-    ) {
-        let key = (value_expr, parameter_node, arg);
-        match self.substitute_memo.entry(key) {
-            Entry::Occupied(_) => {
-                // First-writer-wins: another thread already
-                // published. No FIFO bookkeeping required.
-            }
-            Entry::Vacant(slot) => {
-                let Ok(roots) =
-                    self.root_existing_nodes(vec![value_expr, parameter_node, arg, result])
-                else {
-                    return;
-                };
-                slot.insert((result, roots));
-                let mut fifo = self.substitute_memo_fifo.lock();
-                fifo.push_back(key);
-                while fifo.len() > HASH_CONS_MEMO_RETENTION_CAP {
-                    if let Some(victim) = fifo.pop_front() {
-                        // Drop the FIFO lock BEFORE touching
-                        // `substitute_memo` to avoid blocking
-                        // concurrent publishers while DashMap's
-                        // shard lock is taken; re-acquire on the
-                        // next loop iteration if we still need
-                        // to evict.
-                        drop(fifo);
-                        self.substitute_memo.remove(&victim);
-                        fifo = self.substitute_memo_fifo.lock();
-                    } else {
-                        break;
+    construction_ordinal_seam! {
+        /// First-writer-wins publish for `substitute_memo`. Tracks the
+        /// inserted key in the FIFO sidecar so the deque can evict the
+        /// oldest entry once the retention cap is exceeded; an
+        /// `Entry::Occupied` collision (a concurrent publisher already
+        /// landed an identical-result write) does NOT push into the
+        /// FIFO since the key is already tracked.
+        fn substitute_memo_publish(
+            &self,
+            value_expr: SemanticNodeId,
+            parameter_node: SemanticNodeId,
+            arg: SemanticNodeId,
+            result: SemanticNodeId,
+        ) {
+            let key = (value_expr, parameter_node, arg);
+            match self.substitute_memo.entry(key) {
+                Entry::Occupied(_) => {
+                    // First-writer-wins: another thread already
+                    // published. No FIFO bookkeeping required.
+                }
+                Entry::Vacant(slot) => {
+                    let Ok(roots) =
+                        self.root_existing_nodes(vec![value_expr, parameter_node, arg, result])
+                    else {
+                        return;
+                    };
+                    slot.insert((result, roots));
+                    let mut fifo = self.substitute_memo_fifo.lock();
+                    fifo.push_back(key);
+                    while fifo.len() > HASH_CONS_MEMO_RETENTION_CAP {
+                        if let Some(victim) = fifo.pop_front() {
+                            // Drop the FIFO lock BEFORE touching
+                            // `substitute_memo` to avoid blocking
+                            // concurrent publishers while DashMap's
+                            // shard lock is taken; re-acquire on the
+                            // next loop iteration if we still need
+                            // to evict.
+                            drop(fifo);
+                            self.substitute_memo.remove(&victim);
+                            fifo = self.substitute_memo_fifo.lock();
+                        } else {
+                            break;
+                        }
                     }
                 }
             }

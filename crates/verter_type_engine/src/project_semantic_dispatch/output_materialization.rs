@@ -322,6 +322,18 @@ mod carrier {
             self.node_id
         }
 
+        /// Borrow the producing node this output owns.
+        pub fn node(
+            &self,
+        ) -> Option<
+            Result<
+                crate::semantic_query_memo::node_roots::NodeRef<'_>,
+                crate::semantic_query::QueryError,
+            >,
+        > {
+            self.node_id.map(|node| self.roots.0.node_ref(node))
+        }
+
         /// The accumulated dependency signature (facts-rail metadata — always
         /// readable, NOT the laundering surface).
         pub fn dep_signature(&self) -> &DepSignature {

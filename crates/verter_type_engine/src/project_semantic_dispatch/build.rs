@@ -2865,7 +2865,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 (
                     QueryResult::Value(self.opaque(QueryError::RecursiveRef {
                         name: Arc::from("default"),
-                        args: Arc::from([]),
+                        args: Default::default(),
                     })),
                     empty_signature(),
                 )
@@ -3007,9 +3007,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let ctor_fn = self.graph().intern_node_with_scope(
             SemanticNodeData::Signature {
                 kind: crate::semantic_query::SignatureKind::Construct,
-                params: Arc::from(Vec::new().into_boxed_slice()),
+                params: crate::semantic_query::PayloadArray::from(Vec::new().into_boxed_slice()),
                 return_type: instance_return,
-                type_parameters: Arc::from(Vec::new().into_boxed_slice()),
+                type_parameters: crate::semantic_query::PayloadArray::from(
+                    Vec::new().into_boxed_slice(),
+                ),
                 occurrence: None,
                 // The synthesized default-constructor instance is a concrete
                 // seed, never a body-derived obligation.
@@ -3524,7 +3526,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return Some(shape);
         }
         let graph = self.graph();
-        let Some(SemanticNodeData::Object(view)) = graph.node_data(shape).as_deref().cloned()
+        let Some(SemanticNodeData::Object(view)) = graph
+            .node_data(shape)
+            .as_deref()
+            .map(crate::semantic_query::SemanticNodeData::clone)
         else {
             return Some(shape);
         };
@@ -3537,7 +3542,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 let SurfaceEntry::ConstructSignature(signature) = entry else {
                     return entry.clone();
                 };
-                let Some(mut data) = graph.node_data(*signature).as_deref().cloned() else {
+                let Some(mut data) = graph
+                    .node_data(*signature)
+                    .as_deref()
+                    .map(crate::semantic_query::SemanticNodeData::clone)
+                else {
                     return entry.clone();
                 };
                 if let SemanticNodeData::Signature {
@@ -3900,7 +3909,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             self.graph().intern_node_with_scope(
                 SemanticNodeData::InstantiationRef {
                     base: identity,
-                    args,
+                    args: crate::semantic_query::PayloadArray::from(args),
                 },
                 scope,
             )
@@ -3915,7 +3924,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     !matches!(entry, SurfaceEntry::Member(existing)
                 if existing.key.as_string() == Some("prototype"))
                 })
-                .cloned(),
+                .map(crate::semantic_query::SurfaceEntry::clone),
         );
         self.graph()
             .intern_node(SemanticNodeData::Object(SurfaceView::from_entries(
@@ -4066,7 +4075,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 return_type_span,
                 predicate,
                 is_abstract,
-            }) = self.graph().node_data(rebound).as_deref().cloned()
+            }) = self
+                .graph()
+                .node_data(rebound)
+                .as_deref()
+                .map(crate::semantic_query::SemanticNodeData::clone)
             else {
                 return signature;
             };
@@ -4086,7 +4099,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     self.graph().intern_node_with_scope(
                         SemanticNodeData::InstantiationRef {
                             base: identity.clone(),
-                            args: Arc::clone(&instance_args),
+                            args: crate::semantic_query::PayloadArray::from(Arc::clone(
+                                &instance_args,
+                            )),
                         },
                         scope,
                     )
@@ -4097,7 +4112,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 kind,
                 params,
                 return_type,
-                type_parameters: Arc::clone(&clause),
+                type_parameters: crate::semantic_query::PayloadArray::from(Arc::clone(&clause)),
                 occurrence,
                 return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(
                     return_type,
@@ -4404,7 +4419,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let settled = self.resolve_signature_source_carrier(base.constructor_type, context);
         let static_members: Arc<[SurfaceMember]> = match self.graph().node_data(settled).as_deref()
         {
-            Some(SemanticNodeData::Object(view)) => Arc::from(view.positive_members()),
+            Some(SemanticNodeData::Object(view)) => view
+                .positive_members()
+                .iter()
+                .map(crate::semantic_query::SurfaceMember::clone)
+                .collect(),
             _ => Arc::from(Vec::new().into_boxed_slice()),
         };
         self.graph().intern_node(SemanticNodeData::Object(
@@ -4583,7 +4602,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let base_view = base_view.clone();
         drop(base_data);
 
-        let mut members: Vec<SurfaceMember> = own_view.positive_members().to_vec();
+        let mut members: Vec<SurfaceMember> = own_view
+            .positive_members()
+            .iter()
+            .map(crate::semantic_query::SurfaceMember::clone)
+            .collect::<Vec<_>>();
         for base_member in base_view.positive_members().iter() {
             if !members
                 .iter()
@@ -4636,9 +4659,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                     ..
                                 }) => self.graph().intern_node(SemanticNodeData::Signature {
                                     kind: *kind,
-                                    params: Arc::clone(params),
+                                    params: params.share(),
                                     return_type: derived_return,
-                                    type_parameters: Arc::clone(type_parameters),
+                                    type_parameters: type_parameters.share(),
                                     // A synthesized inheritance twin — no
                                     // authored position of its own.
                                     occurrence: None,
@@ -4682,7 +4705,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 call_signatures.push(*sig);
             }
         }
-        let mut index_signatures = own_view.index_signatures.to_vec();
+        let mut index_signatures = own_view
+            .index_signatures
+            .iter()
+            .map(crate::semantic_query::IndexSignature::clone)
+            .collect::<Vec<_>>();
         for sig in base_view.index_signatures.iter() {
             let duplicate = index_signatures.iter().any(|existing| {
                 existing == sig
@@ -4987,7 +5014,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let carrier = self.graph().intern_node_with_scope(
                 SemanticNodeData::InstantiationRef {
                     base: identity,
-                    args: Arc::clone(args),
+                    args: crate::semantic_query::PayloadArray::from(Arc::clone(args)),
                 },
                 scope.clone(),
             );
@@ -5320,7 +5347,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     .with_observed_self_roots([(Arc::clone(decl_canonical), decl_whole_hash)]);
                     out.merge_completeness(completeness);
                     out.approximation = approximation;
-                    out.walker_diagnostics = read.walker_diagnostics.to_vec();
+                    out.walker_diagnostics = read
+                        .walker_diagnostics
+                        .iter()
+                        .map(crate::project_semantic_dispatch::walk::ShallowDiagnostic::clone)
+                        .collect::<Vec<_>>();
                     out.cache_suppress = read.cache_suppress;
                     return InstantiateStart::Done(Box::new(out));
                 }
@@ -5367,7 +5398,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput<_> = (
                 QueryResult::Value(self.opaque(QueryError::RecursiveRef {
                     name: Arc::clone(decl_name),
-                    args: Arc::clone(args),
+                    args: Arc::clone(args).into(),
                 })),
                 empty_signature(),
             )
@@ -6025,7 +6056,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         all_contributors.extend_from_slice(&contributor_nodes[position..]);
         let merged = self.graph().intern_node_with_scope(
             SemanticNodeData::MergedDecl {
-                contributors: Arc::from(all_contributors.into_boxed_slice()),
+                contributors: crate::semantic_query::PayloadArray::from(
+                    all_contributors.into_boxed_slice(),
+                ),
             },
             base_scope.clone(),
         );
@@ -7655,7 +7688,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // contributor's `MergedDecl` reduction validates on those facts).
         let merged = self.graph().intern_node_with_scope(
             SemanticNodeData::MergedDecl {
-                contributors: Arc::from(contributor_nodes.into_boxed_slice()),
+                contributors: crate::semantic_query::PayloadArray::from(
+                    contributor_nodes.into_boxed_slice(),
+                ),
             },
             scope.clone(),
         );
@@ -8837,7 +8872,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             };
             return self.filter_vue_ignored_contributor(shape, ignored);
         };
-        let contributors = Arc::clone(contributors);
+        let contributors = Arc::clone(contributors.as_arc());
         drop(data);
 
         let mut changed = false;
@@ -8862,7 +8897,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         self.graph().intern_preserving_scope(
             shape,
             SemanticNodeData::MergedDecl {
-                contributors: Arc::from(filtered.into_boxed_slice()),
+                contributors: crate::semantic_query::PayloadArray::from(
+                    filtered.into_boxed_slice(),
+                ),
             },
         )
     }
@@ -10318,7 +10355,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             .cloned_known()
                             .is_some_and(|key| pick_set.contains(&key))
                     })
-                    .cloned()
+                    .map(crate::semantic_query::SurfaceMember::clone)
                     .collect();
                 let result_surface = SurfaceView::from_members(picked, None);
                 let result = graph.intern_node(SemanticNodeData::Object(result_surface));
@@ -10901,9 +10938,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         };
         let twin = SemanticNodeData::Signature {
             kind: crate::semantic_query::SignatureKind::Construct,
-            params: Arc::clone(params),
+            params: params.share(),
             return_type: *return_type,
-            type_parameters: Arc::clone(type_parameters),
+            type_parameters: type_parameters.share(),
             // The kind twin is the SAME authored position and carrier.
             occurrence: occurrence.clone(),
             return_carrier: return_carrier.clone(),
@@ -11006,7 +11043,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         };
         let params: Arc<[crate::semantic_query::FunctionParam]> = params
             .iter()
-            .cloned()
+            .map(crate::semantic_query::FunctionParam::copy)
             .map(|mut param| {
                 param.ty = base(param.ty);
                 param
@@ -11015,9 +11052,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let return_type = base(*return_type);
         Some(graph.intern_node(SemanticNodeData::Signature {
             kind: *kind,
-            params,
+            params: crate::semantic_query::PayloadArray::from(params),
             return_type,
-            type_parameters: Arc::from(Vec::new().into_boxed_slice()),
+            type_parameters: crate::semantic_query::PayloadArray::from(
+                Vec::new().into_boxed_slice(),
+            ),
             occurrence: occurrence.clone(),
             return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(return_type),
             signature_span: *signature_span,
@@ -11331,7 +11370,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if type_parameters.is_empty() || args.len() > type_parameters.len() {
             return self.opaque(QueryError::Miss);
         }
-        let mut params: Vec<crate::semantic_query::FunctionParam> = parts.params.to_vec();
+        let mut params: Vec<crate::semantic_query::FunctionParam> = parts
+            .params
+            .iter()
+            .map(crate::semantic_query::FunctionParam::copy)
+            .collect::<Vec<_>>();
         let mut bound: Vec<(SemanticNodeId, SemanticNodeId)> = Vec::new();
         for (index, decl) in type_parameters.iter().enumerate() {
             let arg = match self.instantiation_argument(args, index, decl.default, &bound) {
@@ -11524,7 +11567,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         else {
             return self.opaque(QueryError::Miss);
         };
-        let type_parameters = Arc::clone(type_parameters);
+        let type_parameters = Arc::clone(type_parameters.as_arc());
         drop(data);
         if type_parameters.is_empty() || args.len() > type_parameters.len() {
             return self.opaque(QueryError::Miss);
@@ -11567,9 +11610,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 ..
             }) => self.graph().intern_node(SemanticNodeData::Signature {
                 kind: *kind,
-                params: Arc::clone(params),
+                params: params.share(),
                 return_type: *return_type,
-                type_parameters: Arc::from(
+                type_parameters: crate::semantic_query::PayloadArray::from(
                     Vec::<crate::semantic_query::TypeParamDecl>::new().into_boxed_slice(),
                 ),
                 occurrence: occurrence.clone(),
@@ -11990,10 +12033,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             Arc<[crate::semantic_query::TupleElement]>,
             usize,
             Option<SemanticNodeId>,
-        )> = vec![(Arc::from(elements), 0, None)];
+        )> = vec![(
+            elements
+                .iter()
+                .map(crate::semantic_query::TupleElement::copy)
+                .collect(),
+            0,
+            None,
+        )];
         let mut splicing: FxHashSet<SemanticNodeId> = FxHashSet::default();
         while let Some((elements, next, _)) = levels.last_mut() {
-            let Some(element) = elements.get(*next).cloned() else {
+            let Some(element) = elements
+                .get(*next)
+                .map(crate::semantic_query::TupleElement::copy)
+            else {
                 if let Some((_, _, Some(tuple))) = levels.pop() {
                     splicing.remove(&tuple);
                 }
@@ -12009,7 +12062,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     .and_then(|tuple| match self.graph().node_data(tuple).as_deref() {
                         Some(SemanticNodeData::Tuple {
                             elements: inner, ..
-                        }) => Some((tuple, Arc::clone(inner))),
+                        }) => Some((tuple, Arc::clone(inner.as_arc()))),
                         _ => None,
                     });
                 if let Some((tuple, inner)) = inner {
@@ -12086,9 +12139,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         };
         let rebuilt = SemanticNodeData::Signature {
             kind: *kind,
-            params: Arc::from(ordinary.to_vec().into_boxed_slice()),
+            params: crate::semantic_query::PayloadArray::from(
+                ordinary
+                    .iter()
+                    .map(crate::semantic_query::FunctionParam::copy)
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            ),
             return_type: *return_type,
-            type_parameters: Arc::clone(type_parameters),
+            type_parameters: type_parameters.share(),
             occurrence: occurrence.clone(),
             return_carrier: return_carrier.clone(),
             signature_span: *signature_span,
@@ -12118,7 +12177,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 
         let data = self.graph().node_data(function_node)?;
         let params = match data.as_ref() {
-            SemanticNodeData::Signature { params, .. } => Arc::clone(params),
+            SemanticNodeData::Signature { params, .. } => Arc::clone(params.as_arc()),
             SemanticNodeData::DeferredCallable(callable) => Arc::clone(
                 callable
                     .parts(&crate::semantic_query::ResolveOverloadSetConsumer::witness())
@@ -13589,7 +13648,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             members
                 .iter()
                 .filter(|member| member.visibility.is_public())
-                .cloned()
+                .map(crate::semantic_query::SurfaceMember::clone)
                 .collect()
         }
 
@@ -13598,7 +13657,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 public_members(view.positive_members()),
                 crate::semantic_query::PartialReasonSet::empty(),
                 view.key_domain_is_closed(),
-                view.index_signatures.to_vec(),
+                view.index_signatures
+                    .iter()
+                    .map(crate::semantic_query::IndexSignature::clone)
+                    .collect(),
             ));
         }
 
@@ -13658,7 +13720,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 public_members(view.positive_members()),
                 read_partial_classes,
                 view.key_domain_is_closed(),
-                view.index_signatures.to_vec(),
+                view.index_signatures
+                    .iter()
+                    .map(crate::semantic_query::IndexSignature::clone)
+                    .collect(),
             )),
             // A carrier that resolved to a construction program (the
             // walker's typed open evidence) degrades through the same
@@ -13700,13 +13765,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
         };
         let single_closed = matches!(formula.alternatives(), [only] if only.closed().is_some());
-        let mut canonical_evidence = super::canonical_algebra::CanonicalEvidence::default();
-        let members = super::walk::spread_formula_positive_members_for_macro(
-            self.graph(),
-            &formula,
-            &mut canonical_evidence,
-        );
-        self.deposit_canonical_evidence(canonical_evidence);
+        let members = self.spread_formula_positive_members_for_macro(&formula);
         Some((members, !single_closed))
     }
 
@@ -13831,7 +13890,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 ))
             }
             SemanticNodeData::Tuple { elements, readonly } if mapper.name_remap.is_none() => {
-                let (elements, readonly) = (Arc::clone(elements), *readonly);
+                let (elements, readonly) = (Arc::clone(elements.as_arc()), *readonly);
                 drop(data);
                 let mut mapped: Vec<crate::semantic_query::TupleElement> =
                     Vec::with_capacity(elements.len());
@@ -13887,7 +13946,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     self.graph().intern_preserving_scope(
                         resolved,
                         SemanticNodeData::Tuple {
-                            elements: Arc::from(mapped.into_boxed_slice()),
+                            elements: crate::semantic_query::PayloadArray::from(
+                                mapped.into_boxed_slice(),
+                            ),
                             readonly: modified_readonly(readonly, mapper.readonly),
                         },
                     ),
@@ -15240,7 +15301,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     Arc::clone(&base.decl_name),
                 );
                 let inst_ctx = self.instantiate_context_for(&base.canonical_id, context);
-                let args = Arc::clone(args);
+                let args = Arc::clone(args.as_arc());
                 let read = self.execute_read(SemanticQueryKey::Instantiate(
                     crate::semantic_query::InstantiateKey::new(slot, args, inst_ctx),
                 ));
@@ -15535,8 +15596,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         node: SemanticNodeId,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> SemanticNodeId {
-        let Some(SemanticNodeData::InstantiationRef { base, args }) =
-            self.graph().node_data(node).as_deref().cloned()
+        let Some(SemanticNodeData::InstantiationRef { base, args }) = self
+            .graph()
+            .node_data(node)
+            .as_deref()
+            .map(crate::semantic_query::SemanticNodeData::clone)
         else {
             return node;
         };
@@ -15547,7 +15611,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         );
         let inst_ctx = self.instantiate_context_for(&base.canonical_id, context);
         let read = self.execute_read(SemanticQueryKey::Instantiate(
-            crate::semantic_query::InstantiateKey::new(slot, args, inst_ctx),
+            crate::semantic_query::InstantiateKey::new(slot, args.as_arc().clone(), inst_ctx),
         ));
         crate::request_context::observe_component_meta_read_suppress(&read);
         let QueryResult::Value(instantiated) = read.value else {
@@ -16223,7 +16287,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 drop(data);
                 let pattern = graph.intern_node(SemanticNodeData::TemplateLiteral {
                     quasis: Arc::from(vec![Arc::from(""), Arc::from("")].into_boxed_slice()),
-                    expressions: Arc::from(vec![resolved].into_boxed_slice()),
+                    expressions: crate::semantic_query::PayloadArray::from(
+                        vec![resolved].into_boxed_slice(),
+                    ),
                 });
                 self.string_mapping_carrier(intrinsic, pattern)
             }
@@ -16231,7 +16297,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 quasis,
                 expressions,
             }) if expressions.iter().all(|hole| self.is_template_hole(*hole)) => {
-                let (quasis, expressions) = (Arc::clone(quasis), Arc::clone(expressions));
+                let (quasis, expressions) = (Arc::clone(quasis), Arc::clone(expressions.as_arc()));
                 drop(data);
                 self.apply_template_string_mapping(intrinsic, &quasis, &expressions, context)
             }
@@ -16290,7 +16356,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     whole_hash: crate::semantic_query::HashValue::default(),
                     decl_name: Arc::from(intrinsic),
                 },
-                args: Arc::from(vec![operand].into_boxed_slice()),
+                args: crate::semantic_query::PayloadArray::from(vec![operand].into_boxed_slice()),
             })
     }
 
@@ -16438,7 +16504,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let node = reduced.unwrap_or_else(|_| {
             self.graph().intern_node(SemanticNodeData::TemplateLiteral {
                 quasis: Arc::clone(pattern),
-                expressions: Arc::clone(args),
+                expressions: crate::semantic_query::PayloadArray::from(Arc::clone(args)),
             })
         });
         let mut output = crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
@@ -16720,9 +16786,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         node: SemanticNodeId,
     ) -> Option<SemanticNodeId> {
         let (name, args) = match self.graph().node_data(node).as_deref() {
-            Some(SemanticNodeData::Opaque(QueryError::RecursiveRef { name, args })) => {
-                (Arc::clone(name), Arc::clone(args))
-            }
+            Some(SemanticNodeData::Opaque(QueryError::RecursiveRef { name, args })) => (
+                Arc::clone(name),
+                Arc::<[SemanticNodeId]>::from(args.operands()),
+            ),
             _ => return None,
         };
         let scope = self.graph().node_scope(node)?;
@@ -16754,7 +16821,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         } else {
             SemanticNodeData::InstantiationRef {
                 base: identity,
-                args,
+                args: crate::semantic_query::PayloadArray::from(args),
             }
         };
         Some(self.graph().intern_node_with_scope(carrier, scope.clone()))
@@ -16902,7 +16969,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
             ),
             Some(SemanticNodeData::InstantiationRef { base, args }) => {
-                (base.clone(), Arc::clone(args))
+                (base.clone(), Arc::clone(args.as_arc()))
             }
             _ => return None,
         };
@@ -17171,11 +17238,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     Some(NodeScopeId::File { canonical_id, owner: edge_owner, .. })
                         if canonical_id == *canonical && edge_owner == owner
                 );
-                (edge == name && declared_here).then(|| Arc::clone(args))
+                (edge == name && declared_here)
+                    .then(|| Arc::<[SemanticNodeId]>::from(args.operands()))
             }
             Some(SemanticNodeData::InstantiationRef { base, args }) => {
                 (base.canonical_id == *canonical && base.owner == owner && base.decl_name == *name)
-                    .then(|| Arc::clone(args))
+                    .then(|| Arc::clone(args.as_arc()))
             }
             _ => None,
         }
@@ -17192,7 +17260,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     whole_hash: crate::semantic_query::HashValue::default(),
                     decl_name: Arc::from("Awaited"),
                 },
-                args: Arc::from(vec![argument].into_boxed_slice()),
+                args: crate::semantic_query::PayloadArray::from(vec![argument].into_boxed_slice()),
             })
     }
 
@@ -17408,7 +17476,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 LibStep::Done(LibAwaited::Deferred)
             }
             SemanticNodeData::Union(members) => {
-                let members = members.clone();
+                let members = members.share();
                 drop(data);
                 let mut reduced = Vec::with_capacity(members.len());
                 for member in members.iter() {
@@ -17755,7 +17823,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // Union distribution: every arm re-enters the family and the
             // results renormalise canonically.
             SemanticNodeData::Union(members) => {
-                let members = members.clone();
+                let members = members.share();
                 drop(data);
                 self.awaited_union_step(AwaitedRelation::Normalize, &members, context)
             }
@@ -17890,7 +17958,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 AwaitedStep::Next(args[0])
             }
             SemanticNodeData::Union(members) => {
-                let members = members.clone();
+                let members = members.share();
                 drop(data);
                 self.awaited_union_step(AwaitedRelation::Payload, &members, context)
             }
@@ -18004,7 +18072,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let authored = || {
             graph.intern_node(SemanticNodeData::TemplateLiteral {
                 quasis: Arc::from(quasis.to_vec().into_boxed_slice()),
-                expressions: Arc::from(args.to_vec().into_boxed_slice()),
+                expressions: crate::semantic_query::PayloadArray::from(
+                    args.to_vec().into_boxed_slice(),
+                ),
             })
         };
         let alternatives = match self.template_alternatives(quasis, args, eval_context) {
@@ -18077,7 +18147,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             Some(SemanticNodeData::TemplateLiteral {
                 quasis,
                 expressions,
-            }) => Some((Arc::clone(quasis), Arc::clone(expressions))),
+            }) => Some((Arc::clone(quasis), Arc::clone(expressions.as_arc()))),
             _ => None,
         };
         if !args.iter().any(|arg| nested(*arg).is_some()) {
@@ -18314,7 +18384,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 quasis,
                 expressions,
             }) => {
-                let (quasis, expressions) = (Arc::clone(quasis), Arc::clone(expressions));
+                let (quasis, expressions) = (Arc::clone(quasis), Arc::clone(expressions.as_arc()));
                 drop(data);
                 self.template_alternatives(&quasis, &expressions, eval_context)
             }
@@ -18382,7 +18452,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .into_iter()
                 .map(|text| Arc::from(text.as_str()))
                 .collect(),
-            expressions: Arc::from(holes.into_boxed_slice()),
+            expressions: crate::semantic_query::PayloadArray::from(holes.into_boxed_slice()),
         })
     }
 
@@ -18524,6 +18594,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     QueryResult::Value(type_args[0])
                 } else {
                     let read = self.execute_read(SemanticQueryKey::reduce_intersection_operands(
+                        self.graph(),
                         Arc::clone(type_args),
                     ));
                     crate::fact_signature_helpers::merge_dep_signature_into_local_fence(
@@ -18723,6 +18794,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             match self
                 .execute_read(
                     crate::semantic_query::SemanticQueryKey::reduce_intersection_operands(
+                        self.graph(),
                         std::sync::Arc::from(members.to_vec().into_boxed_slice()),
                     ),
                 )
@@ -19084,7 +19156,7 @@ pub(super) enum GlobalSpace {
 /// The result of [`ProjectSemanticDispatch::normalize_tuple_spread`]: either a
 /// (possibly spliced) element list that interns as a `Tuple`, or the array
 /// node a sole rest-of-array tuple collapses to (`[...E[]]` ≡ `E[]`).
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum NormalizedTupleShape {
     Tuple(Vec<crate::semantic_query::TupleElement>),
     Array(SemanticNodeId),

@@ -594,21 +594,21 @@ fn assert_exhausted_follower_abort(
                             };
                             assert!(
                                 matches!(
-                                    raw.value,
+                                    raw.value().clone(),
                                     QueryResult::Error(QueryError::ExecutionAborted(
                                         ExecutionAbort::Superseded
                                     ))
                                 ),
                                 "an exhausted follower must deliver a typed abort: {:?}",
-                                raw.value
+                                raw.value().clone()
                             );
-                            assert!(raw.cache_suppress && raw.result_is_partial());
+                            assert!(raw.cache_suppress() && raw.result_is_partial());
                             assert!(raw
                                 .partial_reasons()
                                 .contains(PartialReasonSet::SUPERSEDED_GENERATION));
                             if matches!(delivery, Follower::Raw) {
                                 assert!(
-                                    raw.receipt.priced().is_none(),
+                                    raw.receipt().priced().is_none(),
                                     "aborted delivery must not charge the retained completion"
                                 );
                             }
@@ -637,7 +637,7 @@ fn assert_exhausted_follower_abort(
                 assert!(joined, "the follower must join the held inner flight");
                 assert!(
                     matches!(
-                        &produced.value,
+                        &produced.value(),
                         QueryResult::Value(SemanticQueryValue::FlowReturn(value)) if matches!(value.fact(), FactResult::Complete(_))
                     ),
                     "the unaffected producer still delivers its complete value"
@@ -659,7 +659,9 @@ fn assert_exhausted_follower_abort(
                     host.as_ref(), enclosing_key.clone(), || node,
                     || (QueryResult::Value(node), verter_type_engine::semantic_query_memo::test_support::empty_signature_for_tests()),
                 );
-                assert!(matches!(clean.value, QueryResult::Value(value) if value == node));
+                assert!(
+                    matches!(clean.value().clone(), QueryResult::Value(value) if value == node)
+                );
                 assert_eq!(
                     dispatch
                         .graph()
@@ -697,13 +699,13 @@ fn flow_execution_abort_reaches_raw_direct_and_public_consumers() {
                 .execute_via_cold_build_helper(SemanticQueryKey::FlowReturn(Box::new(key.clone())));
             assert!(
                 matches!(
-                    raw.value,
+                    raw.value().clone(),
                     QueryResult::Error(QueryError::ExecutionAborted(ExecutionAbort::Superseded))
                 ),
                 "raw dispatch cannot deliver rejected evidence: {:?}",
-                raw.value
+                raw.value().clone()
             );
-            assert!(raw.cache_suppress);
+            assert!(raw.cache_suppress());
             assert!(matches!(
                 dispatch.execute_flow_return(key.clone()),
                 FlowReturnStep::Aborted(ExecutionAbort::Superseded)
@@ -1239,7 +1241,7 @@ fn flow_return_empty_cycle_is_return_only_and_never_never() {
             dispatch
                 .graph()
                 .get_flow_return_result(dispatch.ctx, &key)
-                .map(|served| served.value)
+                .map(|served| served.value().clone())
                 .is_none(),
             "an empty recursive cycle admits no family value"
         );
@@ -1372,7 +1374,7 @@ fn flow_return_key_carries_no_value_environment() {
             let warm = fresh
                 .graph()
                 .get_flow_return_result(fresh.ctx, &warm_key)
-                .map(|served| served.value);
+                .map(|served| served.value().clone());
             assert!(
                 warm.is_some(),
                 "the second demand of the same function identity is a warm family hit"
@@ -1383,10 +1385,13 @@ fn flow_return_key_carries_no_value_environment() {
         // the key.
         let mut typed = key.clone();
         typed.context.type_substitution =
-            verter_type_engine::semantic_query::CanonicalTypeSubstitution::new(vec![(
-                verter_type_engine::semantic_query::SemanticNodeId(7),
-                verter_type_engine::semantic_query::SemanticNodeId(8),
-            )]);
+            verter_type_engine::semantic_query::CanonicalTypeSubstitution::new(
+                dispatch.graph(),
+                vec![(
+                    verter_type_engine::semantic_query::SemanticNodeId(7),
+                    verter_type_engine::semantic_query::SemanticNodeId(8),
+                )],
+            );
         assert_ne!(typed, key, "a type substitution fork is a distinct key");
     });
 }
@@ -1459,7 +1464,7 @@ pub(crate) fn flow_return_keys_do_not_warm_hit_across_env_axes() {
             dispatch
                 .graph()
                 .get_flow_return_result(dispatch.ctx, &shifted)
-                .map(|served| served.value)
+                .map(|served| served.value().clone())
                 .is_none(),
             "a shifted-env key must not warm-hit the base entry"
         );
@@ -1547,7 +1552,7 @@ fn function_return_helper_flow_arm_builds_the_identical_key() {
                 fresh
                     .graph()
                     .get_flow_return_result(fresh.ctx, &key)
-                    .map(|served| served.value)
+                    .map(|served| served.value().clone())
                     .is_some(),
                 "the helper's demand admits under the identical key"
             );
@@ -1764,9 +1769,9 @@ fn inline_no_value_close_folds_the_no_surface_rails() {
         let observed = verter_type_engine::request_context::current_cold_compute_completeness();
         scope.discard();
         assert!(
-            matches!(read.value, QueryResult::Value(_)),
+            matches!(read.value().clone(), QueryResult::Value(_)),
             "the outer's degraded success stays usable, got {:?}",
-            read.value
+            read.value().clone()
         );
         assert!(
             observed
@@ -1843,7 +1848,7 @@ fn mixed_component_member_entry_self_roots_cover_all_component_files() {
         .into_parts();
     let node = expr.ok().flatten().expect("RootAssign resolves");
     let projected = host
-        .project_node_to_type_expr_for_test(node)
+        .project_node_to_type_expr_for_test(node.id())
         .expect("RootAssign projects");
     assert_eq!(
         projected,
@@ -1974,7 +1979,7 @@ fn flow_return_member_call_self_recursion_is_return_only_not_complete_miss() {
         assert!(dispatch
             .graph()
             .get_flow_return_result(dispatch.ctx, &dispatch.flow_return_key_for(&identity))
-            .map(|served| served.value)
+            .map(|served| served.value().clone())
             .is_none());
     });
 }
@@ -3290,7 +3295,7 @@ fn flow_return_warm_read_consults_no_slice_state() {
         let warm_read = dispatch
             .graph()
             .get_flow_return_result(dispatch.ctx, &key)
-            .map(|served| served.value)
+            .map(|served| served.value().clone())
             .expect("the published FlowReturn entry warm-validates on a live view");
         assert_eq!(warm_read, cold);
         flow_result_value(dispatch, key)
@@ -3725,11 +3730,11 @@ fn static_return_keys_are_exact_beside_an_unfinished_member_value() {
             ));
         let read = dispatch.execute_read(key);
         assert_eq!(
-            read.fact_status,
+            read.fact_status().clone(),
             FactStatus::Complete,
             "static keys own their source fact: {read:?}"
         );
-        let QueryResult::Value(node) = read.value else {
+        let QueryResult::Value(node) = read.value().clone() else {
             panic!("the key source has a value")
         };
         let data = graph.node_data(node).unwrap();
@@ -4187,7 +4192,7 @@ pub(crate) fn flow_return_routes_through_project_semantic_dispatch() {
         let stored = fresh
             .graph()
             .get_flow_return_result(fresh.ctx, &key)
-            .map(|served| served.value)
+            .map(|served| served.value().clone())
             .expect("the dispatched FlowReturn published to the graph store");
         assert_eq!(
             stored, dispatched,
@@ -5286,7 +5291,7 @@ fn flow_return_resurrected_member_publishes_a_readable_entry() {
                 let warm = dispatch
                     .graph()
                     .get_flow_return_result(dispatch.ctx, &key)
-                    .map(|served| served.value);
+                    .map(|served| served.value().clone());
                 (materialized, warm)
             });
             let materialized =
@@ -5354,7 +5359,7 @@ fn flow_scc_members_never_publish_onto_a_superseded_root() {
                 let query = SemanticQueryKey::FlowReturn(Box::new(key.clone()));
                 let result = graph
                     .get_flow_return_result(dispatch.ctx, &key)
-                    .map(|served| served.value)
+                    .map(|served| served.value().clone())
                     .unwrap_or_else(|| panic!("{name} must be warm before re-staging"));
                 let materialized = graph
                     .entry_satisfied_projection_for_tests(&query)
@@ -5408,7 +5413,7 @@ fn flow_scc_members_never_publish_onto_a_superseded_root() {
                 let candidates = graph.slot_candidate_count_for_tests(query);
                 let warm = graph
                     .get_flow_return_result(dispatch.ctx, key)
-                    .map(|served| served.value)
+                    .map(|served| served.value().clone())
                     .is_some();
                 if invalidate_root {
                     assert!(
@@ -6756,16 +6761,16 @@ fn declined_member_projection_probe_leaks_no_partial_into_the_enclosing_build() 
         let read = dispatch.execute_read(SemanticQueryKey::FlowReturn(Box::new(key)));
         assert!(
             matches!(
-                read.value,
+                read.value().clone(),
                 verter_type_engine::semantic_query::QueryResult::Error(
                     verter_type_engine::semantic_query::QueryError::Miss
                 )
             ),
             "the member demand itself fails closed with the typed miss, got {:?}",
-            read.value
+            read.value().clone()
         );
         assert!(
-            read.result_is_partial() && read.cache_suppress,
+            read.result_is_partial() && read.cache_suppress(),
             "a direct member-demand consumer keeps the no-surface rails"
         );
         assert!(
@@ -6859,7 +6864,7 @@ fn flow_root_publish_requires_complete_flow_proof() {
             fresh
                 .graph()
                 .get_flow_return_result(fresh.ctx, &warm_key)
-                .map(|served| served.value)
+                .map(|served| served.value().clone())
                 .is_some(),
             "the second request is a warm family hit"
         );
@@ -7171,12 +7176,12 @@ fn pending_flow_roots_surface_their_operation_specific_gap() {
         for (key, gap) in pending_roots {
             let read = dispatch.execute_via_cold_build_helper(key);
             assert!(
-                matches!(read.value, QueryResult::Error(QueryError::Miss)),
+                matches!(read.value().clone(), QueryResult::Error(QueryError::Miss)),
                 "a pending typed-gap root is a typed miss, got {:?}",
-                read.value
+                read.value().clone()
             );
             assert!(
-                read.result_is_partial() && read.cache_suppress,
+                read.result_is_partial() && read.cache_suppress(),
                 "a pending typed-gap root is a typed partial, ReturnOnly"
             );
             assert!(
@@ -7186,10 +7191,10 @@ fn pending_flow_roots_surface_their_operation_specific_gap() {
                 read.partial_reasons()
             );
             assert!(
-                read.walker_diagnostics
+                read.walker_diagnostics()
                     .contains(&ShallowDiagnostic::PendingFlowRoot { gap }),
                 "the operation-specific typed gap is surfaced on the read, got {:?}",
-                read.walker_diagnostics
+                read.walker_diagnostics()
             );
         }
     });
@@ -7220,12 +7225,12 @@ fn flow_root_proof_gate_veto_marks_the_read_partial() {
         let read = dispatch
             .execute_via_cold_build_helper(SemanticQueryKey::FlowReturn(Box::new(key.clone())));
         assert!(
-            matches!(read.value, QueryResult::Value(_)),
+            matches!(read.value().clone(), QueryResult::Value(_)),
             "the usable value still flows to the caller, got {:?}",
-            read.value
+            read.value().clone()
         );
         assert!(
-            read.result_is_partial() && read.cache_suppress,
+            read.result_is_partial() && read.cache_suppress(),
             "the proof-gate veto marks the read partial + suppressed"
         );
         assert!(
@@ -7280,12 +7285,12 @@ fn obligation_budget_refusal_takes_the_faulting_request_class() {
         let read = dispatch
             .execute_via_cold_build_helper(SemanticQueryKey::FlowReturn(Box::new(key.clone())));
         assert!(
-            matches!(read.value, QueryResult::Value(_)),
+            matches!(read.value().clone(), QueryResult::Value(_)),
             "the usable value still flows to the caller, got {:?}",
-            read.value
+            read.value().clone()
         );
         assert!(
-            read.result_is_partial() && read.cache_suppress,
+            read.result_is_partial() && read.cache_suppress(),
             "the budget refusal marks the read partial + suppressed"
         );
         assert!(
@@ -7497,9 +7502,10 @@ fn deferred_scc_member_finalizes_after_per_key_substitution() {
         let root_key = key_of("rootFn");
         let mut member_key = key_of("memberFn");
         member_key.context.type_substitution =
-            verter_type_engine::semantic_query::CanonicalTypeSubstitution::new(vec![(
-                binder, number,
-            )]);
+            verter_type_engine::semantic_query::CanonicalTypeSubstitution::new(
+                graph,
+                vec![(binder, number)],
+            );
 
         // Open both frames and prepare BOTH demands for real.
         let root_idx = dispatch
@@ -10705,7 +10711,7 @@ fn refused_member_cause_reaches_the_root_that_consumed_its_value() {
                     "{label} armed={armed}: the root build ran and drained the injected member"
                 );
                 assert!(
-                    read.result_is_partial() && read.cache_suppress,
+                    read.result_is_partial() && read.cache_suppress(),
                     "{label} armed={armed}: the refused batch keeps the root non-admissible"
                 );
                 assert_eq!(
@@ -10780,12 +10786,12 @@ fn unserved_demand_site_takes_the_transient_class() {
             "the one-shot slot is consumed by the preparation's derivation"
         );
         assert!(
-            matches!(read.value, QueryResult::Value(_)),
+            matches!(read.value().clone(), QueryResult::Value(_)),
             "the evaluation's own derivation served, so the usable value still flows, got {:?}",
-            read.value
+            read.value().clone()
         );
         assert!(
-            read.result_is_partial() && read.cache_suppress,
+            read.result_is_partial() && read.cache_suppress(),
             "the refused preparation keeps the read partial + suppressed"
         );
         assert!(
@@ -10885,15 +10891,15 @@ fn an_inherited_comparison_refusal_cannot_certify_an_unproven_relation() {
             dispatch.execute_via_cold_build_helper(refused_key.clone())
         });
         assert!(
-            matches!(refusal.fact_status, FactStatus::Approximate(_, _)),
+            matches!(refusal.fact_status(), FactStatus::Approximate(_, _)),
             "{refusal:?}"
         );
         assert!(
-            matches!(refusal.value, QueryResult::Value(SemanticQueryValue::Relation(ref payload))
+            matches!(refusal.value().clone(), QueryResult::Value(SemanticQueryValue::Relation(ref payload))
             if payload.outcome == RelationOutcome::NotAssignable)
         );
         assert_eq!(
-            refusal.walker_diagnostics.as_ref(),
+            refusal.walker_diagnostics(),
             &[super::walk::ShallowDiagnostic::RelationTooComplex { source, target }]
         );
         struct HookGuard<'a>(&'a verter_type_engine::semantic_query_memo::SemanticGraphStore);
@@ -10914,18 +10920,18 @@ fn an_inherited_comparison_refusal_cannot_certify_an_unproven_relation() {
         drop(hook);
         assert!(unproven_member_slot_consumed(&host));
         assert_eq!(
-            read.walker_diagnostics.as_ref(),
+            read.walker_diagnostics(),
             &[super::walk::ShallowDiagnostic::RelationTooComplex { source, target }]
         );
         assert!(read
             .partial_reasons()
             .contains(PartialReasonSet::FLOW_RETURN_UNVERIFIED));
         assert!(
-            matches!(read.fact_status, FactStatus::Unavailable(_)),
+            matches!(read.fact_status(), FactStatus::Unavailable(_)),
             "another pair's recovery cannot authorize this unproven judgment: {read:?}"
         );
         assert!(matches!(
-            read.value,
+            read.value().clone(),
             QueryResult::Error(QueryError::IncompleteSemanticOperand { .. })
         ));
         assert_eq!(graph.slot_candidate_count_for_tests(&root_key), 0);
@@ -10936,9 +10942,9 @@ fn an_inherited_comparison_refusal_cannot_certify_an_unproven_relation() {
         let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         let key = dispatch.relate_key_for(number, number).to_query_key();
         let control = dispatch.execute_via_cold_build_helper(key.clone());
-        assert_eq!(control.fact_status, FactStatus::Complete);
+        assert_eq!(control.fact_status().clone(), FactStatus::Complete);
         assert!(
-            matches!(control.value, QueryResult::Value(SemanticQueryValue::Relation(ref payload))
+            matches!(control.value().clone(), QueryResult::Value(SemanticQueryValue::Relation(ref payload))
             if payload.outcome == RelationOutcome::Assignable)
         );
         assert_eq!(graph.slot_candidate_count_for_tests(&key), 1);
@@ -10967,19 +10973,19 @@ fn unproven_flow_member_makes_relation_root_decided_return_only() {
             );
             assert!(
                 matches!(
-                    read.value,
+                    read.value().clone(),
                     QueryResult::Error(QueryError::IncompleteSemanticOperand { .. })
                 ),
                 "request {request}: an unproven judgment without a bounded interpretation is withheld, got {:?}",
-                read.value
+                read.value().clone()
             );
             assert!(matches!(
-                read.fact_status,
+                read.fact_status(),
                 verter_type_engine::semantic_query::FactStatus::Unavailable(_)
             ));
             assert_flow_unverified_rails(
                 read.result_is_partial(),
-                read.cache_suppress,
+                read.cache_suppress(),
                 read.partial_reasons(),
                 &format!("request {request}: relation root"),
             );
@@ -10994,14 +11000,14 @@ fn unproven_flow_member_makes_relation_root_decided_return_only() {
         let read = dispatch.execute_via_cold_build_helper(query_key.clone());
         assert!(
             matches!(
-                read.value,
+                read.value().clone(),
                 QueryResult::Value(SemanticQueryValue::Relation(_))
             ),
             "control: the decided verdict flows, got {:?}",
-            read.value
+            read.value().clone()
         );
         assert!(
-            !read.result_is_partial() && !read.cache_suppress,
+            !read.result_is_partial() && !read.cache_suppress(),
             "control: an unpoisoned root keeps the clean rails"
         );
         assert_eq!(
@@ -11060,15 +11066,15 @@ fn unproven_flow_member_makes_call_root_complete_return_only() {
         );
         assert!(
             matches!(
-                read.value,
+                read.value().clone(),
                 QueryResult::Value(SemanticQueryValue::ResolveCall(_))
             ),
             "the resolved call still flows to the caller, got {:?}",
-            read.value
+            read.value().clone()
         );
         assert_flow_unverified_rails(
             read.result_is_partial(),
-            read.cache_suppress,
+            read.cache_suppress(),
             read.partial_reasons(),
             "call root",
         );
@@ -11107,18 +11113,18 @@ fn unproven_flow_member_makes_call_root_complete_return_only() {
         let read = dispatch.execute_via_cold_build_helper(query_key.clone());
         assert!(
             matches!(
-                read.value,
+                read.value().clone(),
                 QueryResult::Value(SemanticQueryValue::ResolveCall(_))
             ),
             "control: the resolved call flows, got {:?}",
-            read.value
+            read.value().clone()
         );
         assert!(
-            !read.result_is_partial() && !read.cache_suppress,
+            !read.result_is_partial() && !read.cache_suppress(),
             "control: an unpoisoned root keeps the clean rails"
         );
         assert!(
-            read.fact_status.is_complete(),
+            read.fact_status().is_complete(),
             "control: selection is exact"
         );
         assert_eq!(
@@ -11161,10 +11167,10 @@ fn unproven_flow_member_withholds_flow_root_verdict() {
             unproven_member_slot_consumed(&host),
             "the flow root build ran and drained the injected member"
         );
-        let QueryResult::Value(SemanticQueryValue::FlowReturn(result)) = &read.value else {
+        let QueryResult::Value(SemanticQueryValue::FlowReturn(result)) = &read.value() else {
             panic!(
                 "the root's evaluated value still flows, got {:?}",
-                read.value
+                read.value().clone()
             );
         };
         assert_eq!(
@@ -11174,7 +11180,7 @@ fn unproven_flow_member_withholds_flow_root_verdict() {
         );
         assert_flow_unverified_rails(
             read.result_is_partial(),
-            read.cache_suppress,
+            read.cache_suppress(),
             read.partial_reasons(),
             "flow root",
         );
@@ -11192,14 +11198,14 @@ fn unproven_flow_member_withholds_flow_root_verdict() {
         let read = dispatch.execute_via_cold_build_helper(root_query.clone());
         assert!(
             matches!(
-                read.value,
+                read.value().clone(),
                 QueryResult::Value(SemanticQueryValue::FlowReturn(_))
             ),
             "control: the root's value flows, got {:?}",
-            read.value
+            read.value().clone()
         );
         assert!(
-            !read.result_is_partial() && !read.cache_suppress,
+            !read.result_is_partial() && !read.cache_suppress(),
             "control: an unpoisoned root keeps the clean rails"
         );
         assert_eq!(
@@ -11709,7 +11715,7 @@ fn flow_expr_cold_warm(
             dispatch
                 .graph()
                 .get_flow_return_result(dispatch.ctx, &key(dispatch))
-                .map(|served| served.value)
+                .map(|served| served.value().clone())
         });
         assert_eq!(
             warm.as_ref(),
@@ -12448,8 +12454,10 @@ fn flow_return_reunion_absorbs_a_subtype_arm_but_the_canonical_union_keeps_both(
         let narrow = object(string);
         let wide = object(string_or_number);
         let union = dispatch.intern_normalized_union_or_intersection(&[narrow, wide], true);
-        let Some(verter_type_engine::semantic_query::SemanticNodeData::Union(members)) =
-            graph.node_data(union).as_deref().cloned()
+        let Some(verter_type_engine::semantic_query::SemanticNodeData::Union(members)) = graph
+            .node_data(union)
+            .as_deref()
+            .map(verter_type_engine::semantic_query::SemanticNodeData::copy_for_tests)
         else {
             panic!("the canonical union of the two object arms must stay a union");
         };
@@ -12663,7 +12671,7 @@ fn flow_return_reunion_asks_each_arm_pair_once_and_a_warm_replay_asks_nothing() 
         let warm = dispatch
             .graph()
             .get_flow_return_result(dispatch.ctx, &key(dispatch))
-            .map(|served| served.value);
+            .map(|served| served.value().clone());
         assert_eq!(
             warm.as_ref(),
             Some(&cold),

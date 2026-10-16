@@ -369,7 +369,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         scope_owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Option<(
-        verter_type_engine::semantic_query::SurfaceView,
+        verter_type_engine::semantic_query_memo::node_data_lease::SurfaceLease,
         SemanticNodeId,
     )> {
         let root = self.dispatch_root_instantiated(scope_canonical_id, scope_owner, symbol_name)?;
@@ -426,7 +426,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         scope_owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Option<verter_type_expr::facts::ProjectedSurfaceFact> {
-        use verter_type_engine::project_semantic_dispatch::node_data_for;
         use verter_type_engine::semantic_query::SemanticNodeData;
         use verter_type_expr::facts::{ProjectedMemberFact, ProjectedSurfaceFact};
 
@@ -471,7 +470,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         };
         let peel_alias = |mut node: SemanticNodeId| {
             while let Some(SemanticNodeData::Alias(inner)) =
-                node_data_for(self.dispatch.graph(), node).as_deref()
+                self.dispatch.graph().read_in_scope(node).as_deref()
             {
                 node = *inner;
             }
@@ -479,8 +478,13 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         };
         // Lone-`extends` heritage shape only: heritage `DeclRef` arms plus
         // exactly ONE own-member `Object` arm.
-        let arms = match node_data_for(self.dispatch.graph(), peel_alias(body_root)).as_deref() {
-            Some(SemanticNodeData::Intersection(arms)) => arms.clone(),
+        let arms = match self
+            .dispatch
+            .graph()
+            .read_in_scope(peel_alias(body_root))
+            .as_deref()
+        {
+            Some(SemanticNodeData::Intersection(arms)) => arms.to_vec(),
             _ => return None,
         };
         let mut heritage: Vec<(
@@ -490,7 +494,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         )> = Vec::new();
         let mut own_object_arms = 0usize;
         for arm in arms.iter() {
-            match node_data_for(self.dispatch.graph(), peel_alias(*arm)).as_deref() {
+            match self
+                .dispatch
+                .graph()
+                .read_in_scope(peel_alias(*arm))
+                .as_deref()
+            {
                 Some(SemanticNodeData::DeclRef { identity }) => heritage.push((
                     std::sync::Arc::clone(&identity.canonical_id),
                     identity.owner,
@@ -508,9 +517,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         let (view, _surface_node) =
             compound_root_surface_view_via_dispatch(self.dispatch, body_root)?;
         let closed = view.closed();
-        if !view.call_signatures.is_empty()
-            || !view.construct_signatures.is_empty()
-            || !view.index_signatures.is_empty()
+        if !view.call_signatures().is_empty()
+            || !view.construct_signatures().is_empty()
+            || !view.index_signatures().is_empty()
             || view.has_known_index_signature()
         {
             return None;
@@ -586,8 +595,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     ) -> Option<AdmittedRouteProjectionNode> {
         match route {
             RouteDemand::MemberPath(path) if !path.is_empty() => {
-                let graph = std::sync::Arc::clone(self.semantic_dispatch().graph());
-                let _scope = graph.enter_node_root_scope();
+                let _scope = self.semantic_dispatch().enter_construction_scope();
                 let root =
                     self.dispatch_root_instantiated(scope_canonical_id, scope_owner, root_symbol)?;
                 let query_path: std::sync::Arc<[PathSegment]> = std::sync::Arc::from(
@@ -669,8 +677,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         // Step A: instantiate the route root to a projectable body. Navigate
         // keeps generic carriers intact (the builtin engine re-projects in the
         // caller's mode), mirroring the materialiser's Step A.
-        let graph = std::sync::Arc::clone(self.semantic_dispatch().graph());
-        let _scope = graph.enter_node_root_scope();
+        let _scope = self.semantic_dispatch().enter_construction_scope();
         let body_id =
             self.dispatch_root_instantiated(scope_canonical_id, scope_owner, root_symbol)?;
         let dispatch = self.semantic_dispatch();

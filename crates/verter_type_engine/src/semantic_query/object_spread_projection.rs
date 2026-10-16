@@ -783,7 +783,7 @@ impl<'a> ClosedObjectProjectionAlternative<'a> {
     }
 
     #[must_use]
-    pub fn to_closed_surface_view(self) -> Option<super::SurfaceView> {
+    pub(crate) fn to_closed_surface_view(self) -> Option<super::SurfaceView> {
         // A complete surface materialisation is a WHOLE-domain operation
         // (see [`ClosedDomainScope`]).
         if !self.is_whole_domain() {
@@ -966,7 +966,7 @@ impl<'a> ClosedObjectProjectionFormula<'a> {
         self.alternatives().map(|alternative| alternative.surface())
     }
 
-    pub fn to_closed_surface_views(
+    pub(crate) fn to_closed_surface_views(
         self,
     ) -> impl ExactSizeIterator<Item = Option<super::SurfaceView>> + 'a {
         self.alternatives()

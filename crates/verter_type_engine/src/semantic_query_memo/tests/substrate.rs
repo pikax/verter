@@ -374,11 +374,15 @@ fn intern_span_participates_in_identity() {
     let ret = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
     let mk = |end: u32| SemanticNodeData::Signature {
         kind: crate::semantic_query::SignatureKind::Call,
-        params: Arc::from(Vec::<crate::semantic_query::FunctionParam>::new()),
+        params: crate::semantic_query::PayloadArray::from(Vec::<
+            crate::semantic_query::FunctionParam,
+        >::new()),
         return_type: ret,
         occurrence: None,
         return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(ret),
-        type_parameters: Arc::from(Vec::<crate::semantic_query::TypeParamDecl>::new()),
+        type_parameters: crate::semantic_query::PayloadArray::from(Vec::<
+            crate::semantic_query::TypeParamDecl,
+        >::new()),
         signature_span: Some(verter_span::Span::new(0, end)),
         return_type_span: None,
         predicate: None,
@@ -1861,6 +1865,19 @@ fn walk_origin_chain_releases_derivation_lock_before_visitor() {
         dep_sig_for("/w/x.ts", 1),
     );
 
+    let mut unlaned = 0usize;
+    store.walk_origin_chain(target, |_kind, _edge| unlaned += 1);
+    assert_eq!(
+        unlaned, 0,
+        "a bare ordinal outside a construction lane authorizes no origin read"
+    );
+    assert!(
+        store.export_origin_edges_in_scope().is_empty(),
+        "outside a construction lane the edge export names no ordinal"
+    );
+
+    let _lane = store.enter_node_root_scope();
+    assert_eq!(store.export_origin_edges_in_scope().len(), 1);
     let mut visited_count = 0usize;
     store.walk_origin_chain(target, |_kind, _edge| {
         // Recursive call back into the store from inside the
@@ -2846,4 +2863,41 @@ fn release_canonical_drops_the_union_views_of_the_closed_document() {
         1,
         "a view of a released union is served, never kept"
     );
+}
+
+/// The public display and union builder keyed by bare ordinals answer only
+/// inside a construction lane the thread holds of the graph: outside one,
+/// an ordinal authorizes neither a rendering nor a union over its subtree.
+#[test]
+fn display_and_union_by_ordinal_answer_only_inside_a_construction_lane() {
+    let store = SemanticGraphStore::new();
+    let number = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let string = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let value = SemanticQueryValue::TypeNode(number);
+    let union = |store: &SemanticGraphStore| {
+        crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union_in_scope(
+            store,
+            &[number, string],
+            verter_session_query::flow::policy::NullabilityPolicy::Strict,
+        )
+    };
+
+    assert!(
+        display::display_in_scope(&store, &value, DisplayNeeds::empty()).is_none(),
+        "outside a construction lane an ordinal renders nothing"
+    );
+    assert!(
+        union(&store).is_none(),
+        "outside a construction lane an ordinal builds no union"
+    );
+
+    let _lane = store.enter_node_root_scope();
+    let shown = display::display_in_scope(&store, &value, DisplayNeeds::empty())
+        .expect("inside the lane the ordinal renders");
+    assert_eq!(String::from(shown), "number");
+    let composite = union(&store).expect("inside the lane the union builds");
+    assert!(matches!(
+        store.node_data(composite.node).as_deref(),
+        Some(SemanticNodeData::Union(_))
+    ));
 }

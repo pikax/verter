@@ -17,7 +17,7 @@ use crate::typeinfo::surface::{CanonicalSpan, TypeInfoSurfaceMember};
 use verter_type_engine::project_semantic_dispatch::callable_view::{
     ArmCombineNode, CallableNodeView,
 };
-use verter_type_engine::project_semantic_dispatch::{node_data_for, ProjectSemanticDispatch};
+use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
 use verter_type_engine::semantic_query::{
     PathSegment, ProjectionMode, ProjectionReductionContext, SemanticNodeData, SemanticNodeId,
 };
@@ -117,7 +117,7 @@ pub(crate) fn slots_from_typeinfo_surface<C: crate::session_attachment::SessionC
                     return None;
                 }
             };
-            let combine = match node_data_for(dispatch.graph(), realized_root).as_deref() {
+            let combine = match dispatch.graph().read_in_scope(realized_root).as_deref() {
                 Some(SemanticNodeData::Union(_)) => ArmCombineNode::Union,
                 _ => ArmCombineNode::Intersection,
             };
@@ -347,11 +347,7 @@ fn binding_fields_from_param_node<C: crate::session_attachment::SessionCapabilit
     if let Some(reasons) =
         verter_type_engine::semantic_query::surface_resolution::stable_member_carrier_partiality(
             ctx,
-            verter_type_engine::project_semantic_dispatch::node_data_for(
-                dispatch.graph(),
-                first_param,
-            )
-            .as_deref(),
+            dispatch.graph().read_in_scope(first_param).as_deref(),
         )
     {
         verter_type_engine::request_context::fold_result_completeness(
@@ -465,7 +461,7 @@ fn pick_source_root_node<C: verter_type_engine::resolver_core::ResolverCapabilit
             ProjectionReductionContext::published(ProjectionMode::Navigate),
         )
         .into_complete_node()?;
-    match node_data_for(dispatch.graph(), peeled).as_deref() {
+    match dispatch.graph().read_in_scope(peeled).as_deref() {
         Some(SemanticNodeData::InstantiationRef { base, args })
             if base.canonical_id.as_ref() == "__builtin__"
                 && base.decl_name.as_ref() == "Pick"
@@ -479,7 +475,7 @@ fn pick_source_root_node<C: verter_type_engine::resolver_core::ResolverCapabilit
             // sink instead — here `None` means CONCRETE materialization, not a
             // preserved carrier.
             let root = args[0];
-            match node_data_for(dispatch.graph(), root).as_deref() {
+            match dispatch.graph().read_in_scope(root).as_deref() {
                 Some(
                     SemanticNodeData::DeclRef { .. }
                     | SemanticNodeData::InstantiationRef { .. }

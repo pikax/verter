@@ -887,9 +887,10 @@ mod tests {
             members: Arc::from(Vec::new().into_boxed_slice()),
             nullability: verter_session_query::flow::policy::NullabilityPolicy::Strict,
         };
-        let normalize_intersection = SemanticQueryKey::reduce_intersection_operands(Arc::from(
-            Vec::new().into_boxed_slice(),
-        ));
+        let normalize_intersection = SemanticQueryKey::reduce_intersection_operands(
+            crate::semantic_query_memo::test_support::synthetic_operand_graph(),
+            Arc::from(Vec::new().into_boxed_slice()),
+        );
         let project_object_spread = SemanticQueryKey::ProjectObjectSpread {
             program: dummy_node,
             selector: crate::semantic_query::ObjectProjectionSelector::Surface,

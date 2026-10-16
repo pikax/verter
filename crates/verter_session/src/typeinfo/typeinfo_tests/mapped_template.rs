@@ -20,7 +20,7 @@ fn mapped_index_wire_answer(
         .into_parts();
     let node = outcome.expect("resolution succeeds").expect("type exists");
     let bytes = host
-        .project_node_to_type_expr_json_bytes(node)
+        .project_node_to_type_expr_json_bytes(&node)
         .unwrap_or_else(|| panic!("{name} must survive JSON projection"));
     serde_json::from_slice(&bytes).expect("valid TypeExpr JSON")
 }
@@ -365,8 +365,11 @@ fn recursive_mapped_index_budget_refusal_does_not_warm() {
             ProjectionReductionContext::published(ProjectionMode::Expanded),
         ),
     )));
-    let QueryResult::Value(node) = shell.value else {
-        panic!("the authored access must resolve: {:?}", shell.value);
+    let QueryResult::Value(node) = shell.value().clone() else {
+        panic!(
+            "the authored access must resolve: {:?}",
+            shell.value().clone()
+        );
     };
     let data = graph.node_data(node).unwrap();
     let SemanticNodeData::IndexedAccess { object, index } = data.as_ref() else {
@@ -397,19 +400,21 @@ fn recursive_mapped_index_budget_refusal_does_not_warm() {
         let read = dispatch.execute_read(key.clone());
         assert!(context.projection_budget.is_exhausted());
         assert!(read.result_is_partial());
-        assert!(read.cache_suppress);
-        assert!(matches!(read.fact_status, FactStatus::Unavailable(_)));
+        assert!(read.cache_suppress());
+        assert!(matches!(read.fact_status(), FactStatus::Unavailable(_)));
         assert!(
             matches!(
-                read.value,
+                read.value().clone(),
                 QueryResult::Error(QueryError::IncompleteSemanticOperand { .. })
             ),
             "a stopped walk cannot publish an evaluated value: {:?}",
-            read.value
+            read.value().clone()
         );
         assert!(!graph.contains_key(&memo_key));
     }
-    let bytes = host.project_node_to_type_expr_json_bytes(node).unwrap();
+    let bytes = host
+        .project_ordinal_to_type_expr_json_bytes_for_test(node)
+        .unwrap();
     let answer: TypeExpr = serde_json::from_slice(&bytes).unwrap();
     let TypeExpr::IndexedAccess { object, index } = &answer else {
         panic!("the authored index must survive refusal: {answer:?}");
@@ -470,9 +475,12 @@ fn recursive_mapped_index_budget_refusal_does_not_warm() {
     );
     let _guard = RequestContextGuard::install(context);
     let read = dispatch.execute_read(key);
-    assert!(!read.result_is_partial() && !read.cache_suppress);
-    let QueryResult::Value(value) = read.value else {
-        panic!("the roomy request must complete: {:?}", read.value);
+    assert!(!read.result_is_partial() && !read.cache_suppress());
+    let QueryResult::Value(value) = read.value().clone() else {
+        panic!(
+            "the roomy request must complete: {:?}",
+            read.value().clone()
+        );
     };
     let answer = host.project_node_to_type_expr_for_test(value).unwrap();
     let TypeExpr::Union(paths) = &answer else {
@@ -909,7 +917,7 @@ pub(crate) fn keyspace_budget_exceeded_admits_nothing() {
 
     // (1) Carrier-stops: the value is the deferred TemplateLiteral SHELL, never
     //     an enumerated 1600-arm literal union.
-    let value = match read.value {
+    let value = match read.value().clone() {
         QueryResult::Value(id) => id,
         other => panic!("expected a value node, got {other:?}"),
     };
@@ -927,7 +935,7 @@ pub(crate) fn keyspace_budget_exceeded_admits_nothing() {
     // (2) Not warm-admitted: the refused product is a non-cacheable,
     //     budget-tainted partial.
     assert!(
-        read.cache_suppress,
+        read.cache_suppress(),
         "a refused template product must be cache-suppressed (never warm-admitted)"
     );
     assert!(
@@ -939,7 +947,7 @@ pub(crate) fn keyspace_budget_exceeded_admits_nothing() {
     // ledger fully enumerates and is admissible.
     let (small_read, small_graph) =
         template_literal_reduce_read(&host, &["", "-", ""], &[union_a, union_b]);
-    let small_value = match small_read.value {
+    let small_value = match small_read.value().clone() {
         QueryResult::Value(id) => id,
         other => panic!("expected a value node, got {other:?}"),
     };
@@ -950,7 +958,7 @@ pub(crate) fn keyspace_budget_exceeded_admits_nothing() {
         small_data.as_ref()
     );
     assert!(
-        !small_read.cache_suppress,
+        !small_read.cache_suppress(),
         "the enumerated product is a complete result and must not be suppressed"
     );
     assert!(

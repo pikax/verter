@@ -40,7 +40,7 @@ use rustc_hash::FxBuildHasher;
 use crate::semantic_query::demand::{MaterializedPoint, ProjectionPath};
 use crate::semantic_query::SemanticQueryKey;
 
-use super::family::{family_and_slot, point_for_slot, requested_path_for_key, FamilyKey, ModeSlot};
+use super::family::{point_for_slot, requested_path_for_key, FamilyKey, ModeSlot};
 
 /// Hash a [`SemanticQueryKey`] with the same fixed hasher
 /// [`PreparedKeyHandle::prepare`] caches — lets a by-key probe against
@@ -75,7 +75,13 @@ impl PreparedKeyHandle {
     /// `family_and_slot` walk, ONE requested-point build, ONE key
     /// hash. The key is moved in, never cloned.
     pub fn prepare(key: SemanticQueryKey) -> Self {
-        let (family, slot) = family_and_slot(&key);
+        Self::prepare_in(None, key)
+    }
+
+    /// [`Self::prepare`] whose interned family operands are owned in
+    /// `arena`, the graph that issued the key.
+    fn prepare_in(arena: Option<&Arc<super::arena::NodeArenaCore>>, key: SemanticQueryKey) -> Self {
+        let (family, slot) = super::family::family_and_slot_in(arena, &key);
         let requested_path = requested_path_for_key(&key);
         // Same formula as `family::requested_point_for_key`, reusing
         // the `family_and_slot` result instead of re-projecting. Keys
@@ -129,7 +135,7 @@ impl super::SemanticGraphStore {
                 .ok(),
             _ => None,
         };
-        let mut prepared = PreparedKeyHandle::prepare(key);
+        let mut prepared = PreparedKeyHandle::prepare_in(Some(&self.arena.core), key);
         let mut nodes = Vec::new();
         prepared.family().for_each_node_id(|node| {
             if node.0 < super::UNALLOCATABLE_ID_FLOOR {

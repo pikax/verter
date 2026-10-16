@@ -235,7 +235,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     }
                     undecidable = !self.push_instantiated_runtime_subject(
                         base,
-                        Arc::clone(args),
+                        Arc::clone(args.as_arc()),
                         item,
                         transit,
                         &mut work,

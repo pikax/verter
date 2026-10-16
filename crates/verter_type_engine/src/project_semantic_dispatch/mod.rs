@@ -543,6 +543,13 @@ pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabili
     /// The facts the root frame of the running drive traced soundly, left
     /// by its completion for the drive's entry to seal a refusal on.
     driven_root_traced: std::cell::RefCell<Option<TracedFacts>>,
+    /// The dispatch's share of its graph's construction owner on this
+    /// thread: every ordinal a live dispatcher of the graph interns or reads
+    /// is owned until the last of them drops, so a producer reading a
+    /// construction ordinal after a nested query returns still holds it, and
+    /// dispatchers may be interleaved and dropped in any order. Declared
+    /// last so it closes after every other field.
+    _construction: crate::semantic_query_memo::node_roots::DispatchConstructionScope,
 }
 
 /// One result a dispatcher's build published ([`ProjectSemanticDispatch`]'s
@@ -586,7 +593,7 @@ impl AdoptedTerminal {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub struct BuildLocalTaint {
     /// An adopted child guarantee tied to its actual returned type position.
     adopted_terminal: AdoptedTerminal,
@@ -813,9 +820,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         ctx: &'a dyn ResolverContext<C>,
         harness: crate::semantic_query_memo::ownership_harness::CountedOwnershipHarness,
     ) -> Self {
-        let mut dispatch = Self::new(ctx);
-        dispatch.binding.graph = Arc::new(harness.into_graph());
-        dispatch
+        Self::bind(ctx, Some(Arc::new(harness.into_graph())))
     }
 
     /// Create a dispatcher bound to a sealed request context.
@@ -825,6 +830,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// explicitly fenced host seam when exercising dispatch in isolation.
     #[must_use]
     pub fn new(ctx: &'a dyn ResolverContext<C>) -> Self {
+        Self::bind(ctx, None)
+    }
+
+    fn bind(
+        ctx: &'a dyn ResolverContext<C>,
+        graph: Option<Arc<crate::semantic_query_memo::SemanticGraphStore>>,
+    ) -> Self {
         // The non-request-bound construction counter belongs only to the
         // explicit test-support seam. Production implementations of the
         // sealed trait are request-bound by construction.
@@ -834,8 +846,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
         let snapshot =
             crate::resolver_core::fact_validation_port::LiveFactValidation::request_snapshot(ctx);
+        let mut binding = ctx.attach_engine();
+        if let Some(graph) = graph {
+            binding.construction =
+                crate::semantic_query_memo::node_roots::NodeConstructionGrant::mint(&graph);
+            binding.graph = graph;
+        }
+        let binding_graph_scope =
+            crate::semantic_query_memo::node_roots::DispatchConstructionScope::enter(
+                binding.construction.arena(),
+            );
         Self {
-            binding: ctx.attach_engine(),
+            binding,
             policy: ctx.engine_policy(),
             cancellation: snapshot.flags().cancellation_checkpoint(),
             snapshot,
@@ -868,7 +890,25 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             ),
             published_results: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
             driven_root_traced: std::cell::RefCell::new(None),
+            _construction: binding_graph_scope,
         }
+    }
+
+    /// Open a nested construction scope of this dispatcher's graph: the
+    /// producer lane a builder reads and roots construction ordinals in.
+    #[must_use]
+    pub fn enter_construction_scope(
+        &self,
+    ) -> crate::semantic_query_memo::node_roots::NodeRootScope {
+        self.binding.construction.enter_scope()
+    }
+
+    /// The construction lane of this dispatcher's graph.
+    #[must_use]
+    pub fn construction_grant(
+        &self,
+    ) -> &crate::semantic_query_memo::node_roots::NodeConstructionGrant {
+        &self.binding.construction
     }
 
     /// The operational budget ledger for demands rooted at this dispatcher.
@@ -971,7 +1011,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         whole_hash: crate::semantic_query::HashValue::default(),
                         decl_name: Arc::clone(&key.base().merged_symbol_name),
                     },
-                    args: Arc::clone(key.args()),
+                    args: crate::semantic_query::PayloadArray::from(Arc::clone(key.args())),
                 })
             }
             SemanticQueryKey::ProjectPath { base, path, .. } if path.is_empty() => *base,
@@ -1057,7 +1097,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             SemanticQueryKey::TemplateLiteralReduce { pattern, args, .. } => {
                 graph.intern_node(SemanticNodeData::TemplateLiteral {
                     quasis: Arc::clone(pattern),
-                    expressions: Arc::clone(args),
+                    expressions: crate::semantic_query::PayloadArray::from(Arc::clone(args)),
                 })
             }
             _ => {
@@ -1524,7 +1564,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if additions.is_empty() {
             return;
         }
-        let mut diagnostics = read.walker_diagnostics.to_vec();
+        let mut diagnostics = read
+            .walker_diagnostics
+            .iter()
+            .map(crate::project_semantic_dispatch::walk::ShallowDiagnostic::clone)
+            .collect::<Vec<_>>();
         for diagnostic in additions.iter() {
             if !diagnostics.contains(diagnostic) {
                 diagnostics.push(diagnostic.clone());
@@ -2417,7 +2461,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         self.graph().intern_node_with_scope(
             SemanticNodeData::Opaque(QueryError::RecursiveRef {
                 name: Arc::clone(&identity.decl_name),
-                args,
+                args: args.into(),
             }),
             NodeScopeId::File {
                 canonical_id: Arc::clone(&identity.canonical_id),
@@ -3524,8 +3568,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         self.project_generation_signature(),
                     )
                         .into();
-                    output.walker_diagnostics =
-                        self.connected_limit_diagnostics(carrier, reasons).to_vec();
+                    output.walker_diagnostics = self
+                        .connected_limit_diagnostics(carrier, reasons)
+                        .iter()
+                        .map(crate::project_semantic_dispatch::walk::ShallowDiagnostic::clone)
+                        .collect();
                     output.cache_suppress = true;
                     output.mark_partial();
                     output.approximation = interpretation;
@@ -3907,7 +3954,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 if let SemanticQueryKey::Instantiate(k) = &sentinel_key {
                     return graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
                         name: Arc::clone(&k.base().merged_symbol_name),
-                        args: Arc::clone(k.args()),
+                        args: Arc::clone(k.args()).into(),
                     }));
                 }
                 graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss))
@@ -4943,14 +4990,23 @@ pub fn resolve_decl_key(
     }
 }
 
-/// Convenience: fetch the resolved semantic-node payload for a previously
-/// executed key. Returns `None` if the memo has not warmed the key yet.
-///
-/// Accepts `&dyn ResolverContext`; the trait method
-/// `dispatch_node_data` provides the same access from any context.
-/// Existing callers passing `&VerterHost` upcast implicitly.
+/// Read the payload behind a construction ordinal inside the engine. A
+/// consumer outside it reads through an owner's capability or
+/// [`SemanticGraphStore::read_in_scope`](crate::semantic_query_memo::SemanticGraphStore::read_in_scope);
+/// test builds expose the ordinal read as a fixture seam.
+#[cfg(any(test, feature = "test-support"))]
 #[must_use]
 pub fn node_data_for(
+    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    node: SemanticNodeId,
+) -> Option<Arc<SemanticNodeData>> {
+    graph.node_data(node)
+}
+
+/// See the test-build variant.
+#[cfg(not(any(test, feature = "test-support")))]
+#[must_use]
+pub(crate) fn node_data_for(
     graph: &crate::semantic_query_memo::SemanticGraphStore,
     node: SemanticNodeId,
 ) -> Option<Arc<SemanticNodeData>> {

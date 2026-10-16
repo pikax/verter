@@ -201,7 +201,9 @@ fn shallow_walker_substitutes_mapper_binder_per_enumerated_key() {
 
     let graph = host.project_type_store().semantic_graph();
     let (decl_identity, args) = match graph.node_data(carrier).as_deref() {
-        Some(SemanticNodeData::InstantiationRef { base, args }) => (base.clone(), Arc::clone(args)),
+        Some(SemanticNodeData::InstantiationRef { base, args }) => {
+            (base.clone(), Arc::from(&args[..]))
+        }
         other => panic!(
             "expected `InstantiationRef` carrier from StructuralTransit(Navigate) lowering, \
              got {other:?}"
@@ -248,7 +250,7 @@ fn shallow_walker_substitutes_mapper_binder_per_enumerated_key() {
         .node_data(surface_node)
         .expect("surface node must have data");
     let view = match surface_data.as_ref() {
-        SemanticNodeData::Object(view) => view.clone(),
+        SemanticNodeData::Object(view) => view.copy_for_tests(),
         other => panic!("ProjectPath terminal must be `SemanticNodeData::Object`, got {other:?}"),
     };
 

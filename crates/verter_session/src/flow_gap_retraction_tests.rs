@@ -86,7 +86,7 @@ fn call_once(host: &Arc<VerterHost>, canonical: &str, function: &str) -> Sample 
             (
                 result.degradation(),
                 None,
-                host.project_node_to_type_expr_json_bytes(node)
+                host.project_ordinal_to_type_expr_json_bytes_for_test(node)
                     .map(|bytes| String::from_utf8(bytes).expect("UTF-8 TypeExpr JSON")),
                 host.project_node_to_type_expr_for_test(node)
                     .map(|ty| format!("{ty:?}")),

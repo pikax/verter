@@ -338,7 +338,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     view.positive_members()
                         .iter()
                         .filter(|member| !own.contains(&member.key))
-                        .cloned(),
+                        .map(crate::semantic_query::SurfaceMember::clone),
                 );
                 view.with_positive_members(Arc::from(members.into_boxed_slice()))
             }

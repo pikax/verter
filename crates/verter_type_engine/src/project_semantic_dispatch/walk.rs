@@ -140,7 +140,7 @@ pub fn probe_walk_typeof_resolved<C: crate::resolver_core::ResolverCapabilities>
 /// Variants describe non-fatal observations (cycle short-circuits, open
 /// conditionals, pathological-input cap) so consumers can render
 /// human-readable messages without re-walking the graph.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub enum ShallowDiagnostic {
     /// The connected root demand exhausted its projection/evaluation work
     /// envelope while identities were still changing. This is operational
@@ -170,7 +170,7 @@ pub enum ShallowDiagnostic {
     /// distinguish missing declarations from budget exhaustion.
     InstantiationError {
         decl: DeclIdentity,
-        error: QueryError,
+        error: DiagnosticError,
     },
     /// Open conditional encountered at empty-path Shallow terminal —
     /// no branch was selected, so the walker yields the empty surface
@@ -229,6 +229,99 @@ pub enum ShallowDiagnostic {
         /// The check's target.
         target: SemanticNodeId,
     },
+}
+
+impl ShallowDiagnostic {
+    /// A fixture copy. Test builds only: production consumers borrow the
+    /// carrier from the lease that owns its operands.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn copy_for_tests(&self) -> Self {
+        self.clone()
+    }
+
+    /// Copy inside the owning crate. A consumer borrows this carrier from the lease that owns its graph operands; there is no public detached copy.
+    #[allow(
+        clippy::clone_on_copy,
+        reason = "an exhaustive field copy, so a new field cannot be skipped"
+    )]
+    pub(crate) fn clone(&self) -> Self {
+        match self {
+            Self::ProjectionWorkLimit { root } => Self::ProjectionWorkLimit { root: root.clone() },
+            Self::ConnectedQueryDepthLimit { root } => {
+                Self::ConnectedQueryDepthLimit { root: root.clone() }
+            }
+            Self::ConnectedMemoryLimit { root } => {
+                Self::ConnectedMemoryLimit { root: root.clone() }
+            }
+            Self::DuplicateArmShortCircuited { node } => {
+                Self::DuplicateArmShortCircuited { node: node.clone() }
+            }
+            Self::CycleShortCircuited { node } => Self::CycleShortCircuited { node: node.clone() },
+            Self::CyclicInstantiation { decl } => Self::CyclicInstantiation { decl: decl.clone() },
+            Self::InstantiationError { decl, error } => Self::InstantiationError {
+                decl: decl.clone(),
+                error: error.clone(),
+            },
+            Self::OpenConditional { node } => Self::OpenConditional { node: node.clone() },
+            Self::PathologicalInput { root } => Self::PathologicalInput { root: root.clone() },
+            Self::UnionArmEmpty {
+                union_node,
+                arm_index,
+            } => Self::UnionArmEmpty {
+                union_node: union_node.clone(),
+                arm_index: arm_index.clone(),
+            },
+            Self::OpenSpreadProgram { node } => Self::OpenSpreadProgram { node: node.clone() },
+            Self::UnresolvedSurfaceArm {
+                name,
+                owner_canonical,
+                owner,
+            } => Self::UnresolvedSurfaceArm {
+                name: name.clone(),
+                owner_canonical: owner_canonical.clone(),
+                owner: owner.clone(),
+            },
+            Self::PendingFlowRoot { gap } => Self::PendingFlowRoot { gap: gap.clone() },
+            Self::RelationTooComplex { source, target } => Self::RelationTooComplex {
+                source: source.clone(),
+                target: target.clone(),
+            },
+        }
+    }
+}
+
+/// The query failure a diagnostic records. Consumers render it; its graph
+/// operands (a recursive back-edge's arguments) stay with the read that
+/// delivered the diagnostic, so the error has no public copy and no
+/// borrowed `QueryError` view to copy from.
+#[derive(PartialEq, Eq, Hash)]
+pub struct DiagnosticError(pub(crate) QueryError);
+
+impl DiagnosticError {
+    /// Record a fixture failure. Production diagnostics are minted by the
+    /// shallow walker.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn for_tests(error: QueryError) -> Self {
+        Self(error)
+    }
+
+    /// Whether the recorded failure is a fatal query-level failure.
+    #[must_use]
+    pub fn is_fatal(&self) -> bool {
+        is_fatal_query_error(&self.0)
+    }
+
+    pub(crate) fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl std::fmt::Debug for DiagnosticError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
 }
 
 impl ShallowDiagnostic {
@@ -603,7 +696,7 @@ enum SurfacelessWalk {
 /// for the type-resolution unification): named members PLUS call signatures,
 /// construct signatures, index signatures, and the keyspace. Members stay
 /// shallow — each `value` is a `SemanticNodeId`, never an expanded body.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub struct ShallowSurface {
     /// Resolver-ordered stream. This is the only ordering authority; the
     /// kind-specific vectors below are derived indexes.
@@ -621,12 +714,66 @@ pub struct ShallowSurface {
     pub keyspace: Option<SemanticNodeId>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl ShallowSurface {
+    /// A fixture copy. Test builds only: production consumers borrow the
+    /// carrier from the lease that owns its operands.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn copy_for_tests(&self) -> Self {
+        self.clone()
+    }
+
+    /// Copy inside the owning crate; there is no public detached copy of the graph operands it carries.
+    #[allow(
+        clippy::clone_on_copy,
+        reason = "an exhaustive field copy, so a new field cannot be skipped"
+    )]
+    pub(crate) fn clone(&self) -> Self {
+        Self {
+            entries: self
+                .entries
+                .iter()
+                .map(ShallowSurfaceEntry::clone)
+                .collect(),
+            members: self
+                .members
+                .iter()
+                .map(ShallowSurfaceMember::clone)
+                .collect(),
+            call_signatures: self.call_signatures.clone(),
+            construct_signatures: self.construct_signatures.clone(),
+            index_signatures: self
+                .index_signatures
+                .iter()
+                .map(crate::semantic_query::IndexSignature::clone)
+                .collect(),
+            keyspace: self.keyspace.clone(),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
 pub enum ShallowSurfaceEntry {
     Member(ShallowSurfaceMember),
     CallSignature(SemanticNodeId),
     ConstructSignature(SemanticNodeId),
     IndexSignature(crate::semantic_query::IndexSignature),
+}
+
+impl ShallowSurfaceEntry {
+    /// Copy inside the owning crate; there is no public detached copy of the graph operands it carries.
+    #[allow(
+        clippy::clone_on_copy,
+        reason = "an exhaustive field copy, so a new field cannot be skipped"
+    )]
+    pub(crate) fn clone(&self) -> Self {
+        match self {
+            Self::Member(v0) => Self::Member(v0.clone()),
+            Self::CallSignature(v0) => Self::CallSignature(v0.clone()),
+            Self::ConstructSignature(v0) => Self::ConstructSignature(v0.clone()),
+            Self::IndexSignature(v0) => Self::IndexSignature(v0.clone()),
+        }
+    }
 }
 
 /// One member contribution while the walker is merging arms. Carries the
@@ -640,7 +787,7 @@ pub enum ShallowSurfaceEntry {
 /// `merge_role` propagates the surface-merge role (OwnBody / Heritage /
 /// Authored) so the intersection merge can apply own-body-shadows-heritage
 /// ONLY to real interface/class heritage (not authored intersections).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct ShallowSurfaceMember {
     pub key: crate::semantic_query::AuthoredPropertyKey,
     pub value: SemanticNodeId,
@@ -676,6 +823,27 @@ pub struct ShallowSurfaceMember {
     /// materialization; a verbatim single-source carry preserves the source
     /// origin.
     pub excess_origin: verter_type_expr::ExcessPropertyOrigin,
+}
+
+impl ShallowSurfaceMember {
+    /// Copy inside the owning crate; there is no public detached copy of the
+    /// graph operands a member carries.
+    pub(crate) fn clone(&self) -> Self {
+        Self {
+            key: self.key.clone(),
+            value: self.value,
+            optional: self.optional,
+            readonly: self.readonly,
+            method_kind: self.method_kind,
+            has_implementation_body: self.has_implementation_body,
+            visibility: self.visibility,
+            declared_in_macro_type_arg: self.declared_in_macro_type_arg,
+            merge_role: self.merge_role,
+            spans: self.spans,
+            declaration_origin: self.declaration_origin.clone(),
+            excess_origin: self.excess_origin,
+        }
+    }
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -737,7 +905,7 @@ impl ShallowSurface {
     /// signatures and the keyspace are carried verbatim so the empty-path
     /// Shallow projection no longer drops them.
     #[must_use]
-    pub fn from_object(view: &SurfaceView) -> Self {
+    pub(crate) fn from_object(view: &SurfaceView) -> Self {
         let entries = view
             .entries
             .iter()
@@ -794,7 +962,10 @@ pub(crate) fn presence_intersection_members(
     evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
 ) -> Vec<crate::semantic_query::SurfaceMember> {
     if let [only] = arm_members {
-        return only.clone();
+        return only
+            .iter()
+            .map(crate::semantic_query::SurfaceMember::clone)
+            .collect();
     }
     let arm_surfaces: Vec<Option<ShallowSurface>> = arm_members
         .iter()
@@ -811,7 +982,9 @@ pub(crate) fn presence_intersection_members(
     match merge_intersection_surfaces_with_graph(graph, &arm_surfaces, evidence) {
         Some(merged) => surface_view_from_shallow(&merged)
             .positive_members()
-            .to_vec(),
+            .iter()
+            .map(crate::semantic_query::SurfaceMember::clone)
+            .collect(),
         None => Vec::new(),
     }
 }
@@ -832,7 +1005,10 @@ pub(crate) fn presence_union_members(
     evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
 ) -> Vec<crate::semantic_query::SurfaceMember> {
     if let [only] = arm_members {
-        return only.clone();
+        return only
+            .iter()
+            .map(crate::semantic_query::SurfaceMember::clone)
+            .collect();
     }
     let arm_surfaces: Vec<Option<ShallowSurface>> = arm_members
         .iter()
@@ -849,7 +1025,9 @@ pub(crate) fn presence_union_members(
     match merge_union_surfaces_for_macro(graph, &arm_surfaces, evidence) {
         Some(merged) => surface_view_from_shallow(&merged)
             .positive_members()
-            .to_vec(),
+            .iter()
+            .map(crate::semantic_query::SurfaceMember::clone)
+            .collect(),
         None => Vec::new(),
     }
 }
@@ -1228,7 +1406,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDi
 /// [`merge_declaration_surfaces_core`]: the graph reducer interns it into an
 /// `Object`, the display projection renders it directly. Neither side
 /// re-implements the peer-merge precedence.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub(crate) struct MergedDeclSurface {
     pub(crate) members: Vec<MergedDeclMember>,
     pub(crate) call_signatures: Vec<SemanticNodeId>,
@@ -1246,7 +1424,7 @@ pub(crate) struct MergedDeclSurface {
 /// graph reducer interns a multi-value method group into an overload group
 /// `Intersection`; the display projection renders it as a property holding
 /// that intersection — both yield the identical surface.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct MergedDeclMember {
     pub(crate) member: ShallowSurfaceMember,
     pub(crate) values: Vec<SemanticNodeId>,
@@ -1257,59 +1435,61 @@ pub(crate) struct MergedDeclMember {
 /// `extends`/`implements` HERITAGE reference arms plus the peer-merged own-body
 /// surface. Mirrors the graph reducer's `Intersection([heritage…, own_object])`
 /// shape so the read-only display projection renders byte-identically.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub(crate) struct MergedDeclDisplaySurface {
     pub(crate) heritage_arms: Vec<SemanticNodeId>,
     pub(crate) own_surface: MergedDeclSurface,
 }
 
-/// Reduce a [`SemanticNodeData::MergedDecl`] carrier to a single peer-merged
-/// node (graph-only entry point; the dispatch method delegates here).
-///
-/// Each contributor body is split into its OWN-body surface(s) and its
-/// `extends`/`implements` HERITAGE arms:
-/// * an interface body with no heritage is a bare `Object` — its members are
-///   own-body;
-/// * an interface-with-`extends` body is an `Intersection` whose `Object`
-///   arm(s) are own-body and whose remaining (reference) arms are heritage.
-///
-/// All contributors' own-body surfaces peer-merge via
-/// [`merge_declaration_surfaces`] (member union + ordered method overload
-/// accumulation). Heritage arms are PRESERVED, not flattened here: the reducer
-/// emits `Intersection([heritage…, peer_merged_own_Object])` so the existing
-/// consumer paths (raise / expand / walk-segment / relation) resolve the
-/// heritage references lazily and apply own-body-shadows-heritage precedence
-/// (the own `Object` arm is last). When a contributor has no heritage the
-/// result is the peer-merged `Object` directly. This keeps a single
-/// declaration-merge engine and a single heritage-resolution path — the reducer
-/// never eagerly expands a heritage `Ref`.
-pub fn reduce_merged_decl_with_graph(
-    graph: &SemanticGraphStore,
-    contributors: &[SemanticNodeId],
-) -> SemanticNodeId {
-    let mut own_surfaces: Vec<ShallowSurface> = Vec::with_capacity(contributors.len());
-    let mut heritage_arms: Vec<SemanticNodeId> = Vec::new();
-    for contributor in contributors {
-        collect_merged_contributor_arms(graph, *contributor, &mut own_surfaces, &mut heritage_arms);
+construction_ordinal_seam! {
+    /// Reduce a [`SemanticNodeData::MergedDecl`] carrier to a single peer-merged
+    /// node (graph-only entry point; the dispatch method delegates here).
+    ///
+    /// Each contributor body is split into its OWN-body surface(s) and its
+    /// `extends`/`implements` HERITAGE arms:
+    /// * an interface body with no heritage is a bare `Object` — its members are
+    ///   own-body;
+    /// * an interface-with-`extends` body is an `Intersection` whose `Object`
+    ///   arm(s) are own-body and whose remaining (reference) arms are heritage.
+    ///
+    /// All contributors' own-body surfaces peer-merge via
+    /// [`merge_declaration_surfaces`] (member union + ordered method overload
+    /// accumulation). Heritage arms are PRESERVED, not flattened here: the reducer
+    /// emits `Intersection([heritage…, peer_merged_own_Object])` so the existing
+    /// consumer paths (raise / expand / walk-segment / relation) resolve the
+    /// heritage references lazily and apply own-body-shadows-heritage precedence
+    /// (the own `Object` arm is last). When a contributor has no heritage the
+    /// result is the peer-merged `Object` directly. This keeps a single
+    /// declaration-merge engine and a single heritage-resolution path — the reducer
+    /// never eagerly expands a heritage `Ref`.
+    fn reduce_merged_decl_with_graph(
+        graph: &SemanticGraphStore,
+        contributors: &[SemanticNodeId],
+    ) -> SemanticNodeId {
+        let mut own_surfaces: Vec<ShallowSurface> = Vec::with_capacity(contributors.len());
+        let mut heritage_arms: Vec<SemanticNodeId> = Vec::new();
+        for contributor in contributors {
+            collect_merged_contributor_arms(graph, *contributor, &mut own_surfaces, &mut heritage_arms);
+        }
+        let merged = merge_declaration_surfaces(graph, &own_surfaces);
+        let own_object =
+            graph.intern_node(SemanticNodeData::Object(surface_view_from_shallow(&merged)));
+        if heritage_arms.is_empty() {
+            return own_object;
+        }
+        // Preserve heritage: own-body object LAST so the intersection heritage-shadow
+        // reducer lets the merged own members shadow inherited same-name members.
+        // A HERITAGE body: arm order is own-body-last topology and rendered
+        // type-text fidelity — never the commutative canonical route — and its
+        // signatures inherit by concatenation, own first.
+        let mut arms = heritage_arms;
+        arms.push(own_object);
+        graph.intern_node(SemanticNodeData::Intersection(
+            crate::semantic_query::composite::CompositeList::heritage(Arc::from(
+                arms.into_boxed_slice(),
+            )),
+        ))
     }
-    let merged = merge_declaration_surfaces(graph, &own_surfaces);
-    let own_object =
-        graph.intern_node(SemanticNodeData::Object(surface_view_from_shallow(&merged)));
-    if heritage_arms.is_empty() {
-        return own_object;
-    }
-    // Preserve heritage: own-body object LAST so the intersection heritage-shadow
-    // reducer lets the merged own members shadow inherited same-name members.
-    // A HERITAGE body: arm order is own-body-last topology and rendered
-    // type-text fidelity — never the commutative canonical route — and its
-    // signatures inherit by concatenation, own first.
-    let mut arms = heritage_arms;
-    arms.push(own_object);
-    graph.intern_node(SemanticNodeData::Intersection(
-        crate::semantic_query::composite::CompositeList::heritage(Arc::from(
-            arms.into_boxed_slice(),
-        )),
-    ))
 }
 
 /// Compute the peer-merged declaration surface for display without interning
@@ -2002,7 +2182,11 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
     /// Whether `node` is a surface every member of which is known and none
     /// of which is named `name` (in either element-access spelling).
     fn surface_proves_absent(&self, node: SemanticNodeId, name: &PropertyKey) -> bool {
-        let Some(SemanticNodeData::Object(view)) = self.graph().node_data(node).as_deref().cloned()
+        let Some(SemanticNodeData::Object(view)) = self
+            .graph()
+            .node_data(node)
+            .as_deref()
+            .map(crate::semantic_query::SemanticNodeData::clone)
         else {
             return false;
         };
@@ -2402,7 +2586,13 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         if !is_union {
             return probes
                 .iter()
-                .flat_map(|probe| probe.view.index_signatures.iter().cloned())
+                .flat_map(|probe| {
+                    probe
+                        .view
+                        .index_signatures
+                        .iter()
+                        .map(crate::semantic_query::IndexSignature::clone)
+                })
                 .collect();
         }
         let Some((first, rest)) = probes.split_first() else {
@@ -2412,7 +2602,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             view.index_signatures
                 .iter()
                 .find(|signature| self.index_key_types(signature.key_type).contains(&key_type))
-                .cloned()
+                .map(crate::semantic_query::IndexSignature::clone)
         };
         let mut signatures = Vec::new();
         for signature in first.view.index_signatures.iter() {
@@ -3362,7 +3552,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             if cap_active && index >= budget {
                 results.push(self.dispatch.opaque(QueryError::RecursiveRef {
                     name: Arc::from("depth-budget-exceeded"),
-                    args: Arc::from([]),
+                    args: Default::default(),
                 }));
                 return;
             }
@@ -3385,7 +3575,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 SemanticNodeData::MergedDecl { contributors } => {
                     // Reduce the peer-merged surface and re-process the current
                     // segment against the merged object.
-                    let contributors = contributors.clone();
+                    let contributors = contributors.share();
                     drop(data);
                     current = self.dispatch.reduce_merged_decl(&contributors);
                     continue;
@@ -3811,7 +4001,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     // ([`Self::composite_hop`]). A union that is itself an
                     // arm of a split reports so, and its composite reads it
                     // flattened.
-                    let arms = arms.clone();
+                    let arms = arms.share();
                     drop(data);
                     if Self::reports_at(arm_read, index).is_some() {
                         self.note_composite_arm(arm_read, index, current);
@@ -3872,7 +4062,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     // intersection ([`Self::composite_hop`]).
                     let heritage = arms.origin_category()
                         == crate::semantic_query::composite::CompositeOriginCategory::Heritage;
-                    let arms = arms.clone();
+                    let arms = arms.share();
                     drop(data);
                     let mut restricted = arm_read.filter(|read| read.at == index);
                     if heritage {
@@ -5156,7 +5346,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                             base.owner,
                             Arc::clone(&base.decl_name),
                         );
-                    let args_clone = Arc::clone(args);
+                    let args_clone = Arc::clone(args.as_arc());
                     drop(data);
                     if let Some(callee_arg) = flow_member_arg {
                         if let Some(member_node) = self
@@ -5275,7 +5465,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     // empty). `length` is the tuple's possible lengths;
                     // any other key is a member of the tuple's apparent
                     // `Array`.
-                    let elements = elements.clone();
+                    let elements = elements.share();
                     drop(data);
                     let member = self.dispatch.apparent_member_name(segment);
                     if member.as_deref() == Some("length") {
@@ -5735,7 +5925,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             }
             SemanticNodeData::InstantiationRef { base, args } => {
                 let identity = base.clone();
-                let args_clone = Arc::clone(args);
+                let args_clone = Arc::clone(args.as_arc());
                 let carrier_mode = self.mode();
                 drop(data);
                 let inst_base = self.dispatch.type_slot_for(
@@ -6660,7 +6850,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             }
             SemanticNodeData::MergedDecl { contributors } => {
                 // Reduce the peer-merged surface, then expand the merged object.
-                let contributors = contributors.clone();
+                let contributors = contributors.share();
                 drop(data);
                 let merged = self.dispatch.reduce_merged_decl(&contributors);
                 work.push(ExpandFrame::Expand(merged));
@@ -7489,7 +7679,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 // Intersection through the heritage-overlay path so inherited
                 // members surface and own members shadow them — exactly the same
                 // resolution a single `interface extends Base` body receives.
-                let contributors = contributors.clone();
+                let contributors = contributors.share();
                 drop(data);
                 let merged = self.dispatch.reduce_merged_decl(&contributors);
                 work.push(Frame::Visit {
@@ -7531,7 +7721,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 drop(data);
                 let buffer_id = *next_buffer_id;
                 *next_buffer_id += 1;
-                intersection_buffers.insert(buffer_id, vec![None; arms.len()]);
+                intersection_buffers.insert(buffer_id, std::iter::repeat_with(|| None).take(arms.len()).collect::<Vec<_>>());
                 // Push the flush frame BEFORE the iterator frame so
                 // LIFO pop order executes the flush after every arm
                 // has contributed.
@@ -7561,7 +7751,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 drop(data);
                 let buffer_id = *next_buffer_id;
                 *next_buffer_id += 1;
-                union_buffers.insert(buffer_id, vec![None; arms.len()]);
+                union_buffers.insert(buffer_id, std::iter::repeat_with(|| None).take(arms.len()).collect::<Vec<_>>());
                 work.push(Frame::FlushUnion {
                     buffer_id,
                     parent_target: target,
@@ -7581,8 +7771,8 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             }
             SemanticNodeData::InstantiationRef { base, args } => {
                 let identity = base.clone();
-                let args_clone = Arc::clone(args);
-                let args_for_filter = Arc::clone(args);
+                let args_clone = Arc::clone(args.as_arc());
+                let args_for_filter = Arc::clone(args.as_arc());
                 drop(data);
                 // A result utility at a surface boundary owns its key source,
                 // while each member keeps a separate value demand.
@@ -7640,7 +7830,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         {
                             let buffer_id = *next_buffer_id;
                             *next_buffer_id += 1;
-                            intersection_buffers.insert(buffer_id, vec![None; 1]);
+                            intersection_buffers.insert(buffer_id, std::iter::repeat_with(|| None).take(1).collect::<Vec<_>>());
                             work.push(Frame::FlushObjectFilter {
                                 buffer_id,
                                 keys,
@@ -7707,7 +7897,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         self.walker_diagnostics
                             .push(ShallowDiagnostic::InstantiationError {
                                 decl: identity,
-                                error,
+                                error: DiagnosticError(error),
                             });
                         self.contribute_surface(
                             target,
@@ -7804,7 +7994,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         self.walker_diagnostics
                             .push(ShallowDiagnostic::InstantiationError {
                                 decl: identity,
-                                error,
+                                error: DiagnosticError(error),
                             });
                         self.contribute_surface(
                             target,
@@ -7867,7 +8057,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     // optional automatically.
                     let buffer_id = *next_buffer_id;
                     *next_buffer_id += 1;
-                    union_buffers.insert(buffer_id, vec![None; 2]);
+                    union_buffers.insert(buffer_id, std::iter::repeat_with(|| None).take(2).collect::<Vec<_>>());
                     work.push(Frame::FlushUnion {
                         buffer_id,
                         parent_target: target,
@@ -7907,7 +8097,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     // using the iterator-frame discipline.
                     let buffer_id = *next_buffer_id;
                     *next_buffer_id += 1;
-                    union_buffers.insert(buffer_id, vec![None; 2]);
+                    union_buffers.insert(buffer_id, std::iter::repeat_with(|| None).take(2).collect::<Vec<_>>());
                     work.push(Frame::FlushUnion {
                         buffer_id,
                         parent_target: target,
@@ -10137,100 +10327,102 @@ pub(super) fn value_may_contribute_call_signatures(
     false
 }
 
-/// Merge per-arm union surfaces under the TS-correct common-member rule,
-/// matching the canonical union common-member semantics:
-///
-/// - A member survives iff it is present (by name) in EVERY resolvable arm.
-/// - Its value is the UNION of the per-arm member value nodes (`(A | B)['k']`
-///   is `A['k'] | B['k']`).
-/// - `optional` iff optional in ANY arm; `readonly` iff readonly in ALL arms.
-/// - `is_method` / `declared_in_macro_type_arg` are `false`; the merge role is
-///   [`MemberMergeRole::Authored`] — a synthesized common member is reached
-///   THROUGH the union, never the macro-T own body or a heritage overlay, so
-///   it must not pretend to be own-body / heritage.
-/// - A union has no single call/construct/index surface, so the merged surface
-///   carries none.
-///
-/// Returns `Some(empty)` when there are no common members (a disjoint union
-/// resolved, it simply has no common members) or when any arm is a non-Object
-/// (`None`) surface — a union with an unreadable / non-Object arm has no
-/// common Object members. Returns `None` only when the arm vector is empty
-/// (defensive).
-pub fn merge_union_surfaces(
-    graph: &SemanticGraphStore,
-    arm_surfaces: &[Option<ShallowSurface>],
-    evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
-) -> Option<ShallowSurface> {
-    if arm_surfaces.is_empty() {
-        return None;
-    }
-    // Any None arm means the union has a non-Object arm — there are
-    // no common Object members, so the merged surface is empty.
-    if arm_surfaces.iter().any(|s| s.is_none()) {
-        return Some(ShallowSurface::empty());
-    }
-    let live: Vec<&ShallowSurface> = arm_surfaces.iter().filter_map(|s| s.as_ref()).collect();
-    if live.is_empty() {
-        return Some(ShallowSurface::empty());
-    }
-    // One-pass per-name aggregation (replacing the retired
-    // O(arms × members²) per-name `find` loop): each arm contributes its
-    // FIRST occurrence of a name, in arm order — identical selection to
-    // the retired per-arm `find`.
-    let by_name = aggregate_union_members(&live);
-    // Emit in ARM-0 SOURCE ORDER, including duplicate-name occurrences —
-    // each arm-0 occurrence emits one row aggregated from the per-arm
-    // first occurrences, exactly as the retired per-name loop did. The
-    // lookup matches under JS property identity ([`authored_keys_collide`])
-    // so a dual-spelling arm-0 key finds its aggregated entry.
-    let mut members: Vec<ShallowSurfaceMember> = Vec::new();
-    for first_member in &live[0].members {
-        let Some((_, accum)) = by_name
-            .iter()
-            .find(|(key, _)| authored_keys_collide(key, &first_member.key))
-        else {
-            // Unreachable: arm 0's own members always aggregate.
-            continue;
-        };
-        // Common-member rule: a member survives iff present (by name) in
-        // EVERY resolvable arm.
-        if accum.declaring_arms != live.len() {
-            continue;
+construction_ordinal_seam! {
+    /// Merge per-arm union surfaces under the TS-correct common-member rule,
+    /// matching the canonical union common-member semantics:
+    ///
+    /// - A member survives iff it is present (by name) in EVERY resolvable arm.
+    /// - Its value is the UNION of the per-arm member value nodes (`(A | B)['k']`
+    ///   is `A['k'] | B['k']`).
+    /// - `optional` iff optional in ANY arm; `readonly` iff readonly in ALL arms.
+    /// - `is_method` / `declared_in_macro_type_arg` are `false`; the merge role is
+    ///   [`MemberMergeRole::Authored`] — a synthesized common member is reached
+    ///   THROUGH the union, never the macro-T own body or a heritage overlay, so
+    ///   it must not pretend to be own-body / heritage.
+    /// - A union has no single call/construct/index surface, so the merged surface
+    ///   carries none.
+    ///
+    /// Returns `Some(empty)` when there are no common members (a disjoint union
+    /// resolved, it simply has no common members) or when any arm is a non-Object
+    /// (`None`) surface — a union with an unreadable / non-Object arm has no
+    /// common Object members. Returns `None` only when the arm vector is empty
+    /// (defensive).
+    fn merge_union_surfaces(
+        graph: &SemanticGraphStore,
+        arm_surfaces: &[Option<ShallowSurface>],
+        evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
+    ) -> Option<ShallowSurface> {
+        if arm_surfaces.is_empty() {
+            return None;
         }
-        members.push(ShallowSurfaceMember {
-            key: first_member.key.clone(),
-            // Value type = union of the per-arm member values. A single
-            // shared value node stays as-is (no singleton union wrapper).
-            value: accum.value_node(graph, evidence),
-            optional: accum.optional_in_any,
-            readonly: accum.readonly_in_all,
-            method_kind: None,
-            has_implementation_body: false,
-            // Union common-member synthesis is never a literal origin.
-            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
-            // Union common-member (`(A|B)['k']`): the MOST-RESTRICTIVE
-            // accessibility across the per-arm contributors via the shared
-            // fold, so a member non-public in any arm is never synthesized
-            // as `Public` (matching the `_for_macro` sibling and TS
-            // member-access rules). For a single declaring arm the fold
-            // returns that arm's accessibility.
-            visibility: accum.visibility,
-            declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-            merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
-            // Union common-member: the name appears in every arm, so there is
-            // no single source declaration site — genuinely synthetic. No spans
-            // and no single declaration file (a multi-origin fact).
-            spans: verter_type_expr::MemberSpans::default(),
-            declaration_origin: None,
-        });
+        // Any None arm means the union has a non-Object arm — there are
+        // no common Object members, so the merged surface is empty.
+        if arm_surfaces.iter().any(|s| s.is_none()) {
+            return Some(ShallowSurface::empty());
+        }
+        let live: Vec<&ShallowSurface> = arm_surfaces.iter().filter_map(|s| s.as_ref()).collect();
+        if live.is_empty() {
+            return Some(ShallowSurface::empty());
+        }
+        // One-pass per-name aggregation (replacing the retired
+        // O(arms × members²) per-name `find` loop): each arm contributes its
+        // FIRST occurrence of a name, in arm order — identical selection to
+        // the retired per-arm `find`.
+        let by_name = aggregate_union_members(&live);
+        // Emit in ARM-0 SOURCE ORDER, including duplicate-name occurrences —
+        // each arm-0 occurrence emits one row aggregated from the per-arm
+        // first occurrences, exactly as the retired per-name loop did. The
+        // lookup matches under JS property identity ([`authored_keys_collide`])
+        // so a dual-spelling arm-0 key finds its aggregated entry.
+        let mut members: Vec<ShallowSurfaceMember> = Vec::new();
+        for first_member in &live[0].members {
+            let Some((_, accum)) = by_name
+                .iter()
+                .find(|(key, _)| authored_keys_collide(key, &first_member.key))
+            else {
+                // Unreachable: arm 0's own members always aggregate.
+                continue;
+            };
+            // Common-member rule: a member survives iff present (by name) in
+            // EVERY resolvable arm.
+            if accum.declaring_arms != live.len() {
+                continue;
+            }
+            members.push(ShallowSurfaceMember {
+                key: first_member.key.clone(),
+                // Value type = union of the per-arm member values. A single
+                // shared value node stays as-is (no singleton union wrapper).
+                value: accum.value_node(graph, evidence),
+                optional: accum.optional_in_any,
+                readonly: accum.readonly_in_all,
+                method_kind: None,
+                has_implementation_body: false,
+                // Union common-member synthesis is never a literal origin.
+                excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+                // Union common-member (`(A|B)['k']`): the MOST-RESTRICTIVE
+                // accessibility across the per-arm contributors via the shared
+                // fold, so a member non-public in any arm is never synthesized
+                // as `Public` (matching the `_for_macro` sibling and TS
+                // member-access rules). For a single declaring arm the fold
+                // returns that arm's accessibility.
+                visibility: accum.visibility,
+                declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                // Union common-member: the name appears in every arm, so there is
+                // no single source declaration site — genuinely synthetic. No spans
+                // and no single declaration file (a multi-origin fact).
+                spans: verter_type_expr::MemberSpans::default(),
+                declaration_origin: None,
+            });
+        }
+        Some(ShallowSurface::from_entries(
+            members
+                .into_iter()
+                .map(ShallowSurfaceEntry::Member)
+                .collect(),
+            None,
+        ))
     }
-    Some(ShallowSurface::from_entries(
-        members
-            .into_iter()
-            .map(ShallowSurfaceEntry::Member)
-            .collect(),
-        None,
-    ))
 }
 
 /// One-pass per-name aggregation state shared by the two union-arm merge
@@ -10357,108 +10549,110 @@ fn aggregate_union_members(
     ordered
 }
 
-/// Merge per-arm union surfaces under the **Vue macro object-surface**
-/// rule — the UNION of arm members, NOT the TS
-/// property-access common-member intersection.
-///
-/// A prop / slot present in ANY union arm is part of the component macro
-/// surface (`defineProps<FixedProps | BubbleProps>()` declares every
-/// arm's props). The merge rules:
-///
-/// - A member survives iff it is present (by name) in AT LEAST ONE arm.
-/// - Its value is the UNION of the per-arm member values for the arms
-///   that declare it (a single declaring arm stays as-is).
-/// - `optional` iff optional in ANY arm OR ABSENT from any arm (a member
-///   not declared by every arm is optional on the merged surface).
-/// - `readonly` iff readonly in ALL arms that declare it.
-/// - `is_method` / `declared_in_macro_type_arg` are `false`; merge role is
-///   [`MemberMergeRole::Authored`] — a member reached THROUGH the union is
-///   neither macro-T own-body nor heritage.
-/// - A union has no single call/construct/index surface, so the merged
-///   surface carries none.
-///
-/// Returns `Some(empty)` when no arm declares any Object member. Returns
-/// `None` only when the arm vector is empty (defensive). Unlike the
-/// common-member rule, a non-Object (`None`) arm does NOT collapse the
-/// whole surface — the Object arms still contribute their members (a
-/// `{ a } | string` macro surface publishes `a`, optional).
-pub fn merge_union_surfaces_for_macro(
-    graph: &SemanticGraphStore,
-    arm_surfaces: &[Option<ShallowSurface>],
-    evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
-) -> Option<ShallowSurface> {
-    if arm_surfaces.is_empty() {
-        return None;
-    }
-    let arm_count = arm_surfaces.len();
-    let live: Vec<&ShallowSurface> = arm_surfaces.iter().filter_map(|s| s.as_ref()).collect();
-    if live.is_empty() {
-        return Some(ShallowSurface::empty());
-    }
-    // A non-Object arm (`None`) means that arm declares NO members, so
-    // every member is effectively absent from it → optional on the union.
-    let has_non_object_arm = arm_surfaces.iter().any(|s| s.is_none());
+construction_ordinal_seam! {
+    /// Merge per-arm union surfaces under the **Vue macro object-surface**
+    /// rule — the UNION of arm members, NOT the TS
+    /// property-access common-member intersection.
+    ///
+    /// A prop / slot present in ANY union arm is part of the component macro
+    /// surface (`defineProps<FixedProps | BubbleProps>()` declares every
+    /// arm's props). The merge rules:
+    ///
+    /// - A member survives iff it is present (by name) in AT LEAST ONE arm.
+    /// - Its value is the UNION of the per-arm member values for the arms
+    ///   that declare it (a single declaring arm stays as-is).
+    /// - `optional` iff optional in ANY arm OR ABSENT from any arm (a member
+    ///   not declared by every arm is optional on the merged surface).
+    /// - `readonly` iff readonly in ALL arms that declare it.
+    /// - `is_method` / `declared_in_macro_type_arg` are `false`; merge role is
+    ///   [`MemberMergeRole::Authored`] — a member reached THROUGH the union is
+    ///   neither macro-T own-body nor heritage.
+    /// - A union has no single call/construct/index surface, so the merged
+    ///   surface carries none.
+    ///
+    /// Returns `Some(empty)` when no arm declares any Object member. Returns
+    /// `None` only when the arm vector is empty (defensive). Unlike the
+    /// common-member rule, a non-Object (`None`) arm does NOT collapse the
+    /// whole surface — the Object arms still contribute their members (a
+    /// `{ a } | string` macro surface publishes `a`, optional).
+    fn merge_union_surfaces_for_macro(
+        graph: &SemanticGraphStore,
+        arm_surfaces: &[Option<ShallowSurface>],
+        evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
+    ) -> Option<ShallowSurface> {
+        if arm_surfaces.is_empty() {
+            return None;
+        }
+        let arm_count = arm_surfaces.len();
+        let live: Vec<&ShallowSurface> = arm_surfaces.iter().filter_map(|s| s.as_ref()).collect();
+        if live.is_empty() {
+            return Some(ShallowSurface::empty());
+        }
+        // A non-Object arm (`None`) means that arm declares NO members, so
+        // every member is effectively absent from it → optional on the union.
+        let has_non_object_arm = arm_surfaces.iter().any(|s| s.is_none());
 
-    // Per-name aggregation emitting in first-seen order across all arms.
-    // JS property identity: dual spellings of one property
-    // (`{1: x} | {"1": y}`) aggregate into ONE entry — the fold's
-    // `member_position` already collides them, so the macro merge matches
-    // (surfaces are one-level and small, so a linear collides scan
-    // replaces the strict-key map).
-    let mut ordered: Vec<(crate::semantic_query::AuthoredPropertyKey, UnionMemberAccum)> =
-        Vec::new();
-    for (arm_index, arm) in live.iter().enumerate() {
-        for member in &arm.members {
-            let position = ordered
-                .iter()
-                .position(|(key, _)| authored_keys_collide(key, &member.key));
-            match position {
-                Some(index) => ordered[index].1.absorb(arm_index, member),
-                None => {
-                    ordered.push((member.key.clone(), UnionMemberAccum::new()));
-                    let last = ordered.len() - 1;
-                    ordered[last].1.absorb(arm_index, member);
+        // Per-name aggregation emitting in first-seen order across all arms.
+        // JS property identity: dual spellings of one property
+        // (`{1: x} | {"1": y}`) aggregate into ONE entry — the fold's
+        // `member_position` already collides them, so the macro merge matches
+        // (surfaces are one-level and small, so a linear collides scan
+        // replaces the strict-key map).
+        let mut ordered: Vec<(crate::semantic_query::AuthoredPropertyKey, UnionMemberAccum)> =
+            Vec::new();
+        for (arm_index, arm) in live.iter().enumerate() {
+            for member in &arm.members {
+                let position = ordered
+                    .iter()
+                    .position(|(key, _)| authored_keys_collide(key, &member.key));
+                match position {
+                    Some(index) => ordered[index].1.absorb(arm_index, member),
+                    None => {
+                        ordered.push((member.key.clone(), UnionMemberAccum::new()));
+                        let last = ordered.len() - 1;
+                        ordered[last].1.absorb(arm_index, member);
+                    }
                 }
             }
         }
-    }
 
-    let mut members: Vec<ShallowSurfaceMember> = Vec::with_capacity(ordered.len());
-    for (key, accum) in &ordered {
-        // Absent from at least one arm (a live arm without it, or a
-        // non-Object arm) ⇒ optional on the merged surface.
-        let optional =
-            accum.optional_in_any || accum.declaring_arms < arm_count || has_non_object_arm;
-        members.push(ShallowSurfaceMember {
-            key: key.clone(),
-            value: accum.value_node(graph, evidence),
-            optional,
-            readonly: accum.readonly_in_all,
-            method_kind: None,
-            has_implementation_body: false,
-            // Union-arm merge synthesis is never a literal origin.
-            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
-            // Most-restrictive accessibility across all DECLARING arms via
-            // the shared fold: `Public` only when Public in every declaring
-            // arm; a member non-public in any arm stays non-public (never
-            // synthesized Public). For a member declared by exactly one arm
-            // the fold returns that arm's accessibility.
-            visibility: accum.visibility,
-            declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-            merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
-            // Union arm-member: reached THROUGH the union, no single source
-            // declaration site — genuinely synthetic (multi-origin).
-            spans: verter_type_expr::MemberSpans::default(),
-            declaration_origin: None,
-        });
+        let mut members: Vec<ShallowSurfaceMember> = Vec::with_capacity(ordered.len());
+        for (key, accum) in &ordered {
+            // Absent from at least one arm (a live arm without it, or a
+            // non-Object arm) ⇒ optional on the merged surface.
+            let optional =
+                accum.optional_in_any || accum.declaring_arms < arm_count || has_non_object_arm;
+            members.push(ShallowSurfaceMember {
+                key: key.clone(),
+                value: accum.value_node(graph, evidence),
+                optional,
+                readonly: accum.readonly_in_all,
+                method_kind: None,
+                has_implementation_body: false,
+                // Union-arm merge synthesis is never a literal origin.
+                excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+                // Most-restrictive accessibility across all DECLARING arms via
+                // the shared fold: `Public` only when Public in every declaring
+                // arm; a member non-public in any arm stays non-public (never
+                // synthesized Public). For a member declared by exactly one arm
+                // the fold returns that arm's accessibility.
+                visibility: accum.visibility,
+                declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                // Union arm-member: reached THROUGH the union, no single source
+                // declaration site — genuinely synthetic (multi-origin).
+                spans: verter_type_expr::MemberSpans::default(),
+                declaration_origin: None,
+            });
+        }
+        Some(ShallowSurface::from_entries(
+            members
+                .into_iter()
+                .map(ShallowSurfaceEntry::Member)
+                .collect(),
+            None,
+        ))
     }
-    Some(ShallowSurface::from_entries(
-        members
-            .into_iter()
-            .map(ShallowSurfaceEntry::Member)
-            .collect(),
-        None,
-    ))
 }
 
 fn surface_member_from_shallow(member: &ShallowSurfaceMember) -> SurfaceMember {
@@ -10478,42 +10672,48 @@ fn surface_member_from_shallow(member: &ShallowSurfaceMember) -> SurfaceMember {
     }
 }
 
-/// Positive member evidence of an open / multi-alternative spread
-/// formula for MACRO surface consumers (props / emits branch merge):
-/// the union of per-alternative positive facts under the
-/// `MacroObjectSurface` enumeration rule. This is publication-only
-/// evidence — it never interns a closed `Object` and never claims
-/// completeness; the consumer carries incompleteness in its own channel
-/// (the walker's `OpenSpreadProgram` diagnostic / `cache_suppress`).
-/// A single alternative bypasses the union merge so member fidelity
-/// (method kind, spans, origins) survives verbatim.
-#[must_use]
-pub fn spread_formula_positive_members_for_macro(
-    graph: &SemanticGraphStore,
-    formula: &crate::semantic_query::ObjectProjectionFormula,
-    evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
-) -> Vec<crate::semantic_query::SurfaceMember> {
-    if let [only] = formula.alternatives() {
-        let surface = shallow_surface_from_projection_alternative(graph, only);
-        return surface_view_from_shallow(&surface)
-            .positive_members()
-            .to_vec();
-    }
-    let arm_surfaces: Vec<Option<ShallowSurface>> = formula
-        .alternatives()
-        .iter()
-        .map(|alternative| {
-            Some(shallow_surface_from_projection_alternative(
-                graph,
-                alternative,
-            ))
-        })
-        .collect();
-    match merge_union_surfaces_for_macro(graph, &arm_surfaces, evidence) {
-        Some(merged) => surface_view_from_shallow(&merged)
-            .positive_members()
-            .to_vec(),
-        None => Vec::new(),
+construction_ordinal_seam! {
+    /// Positive member evidence of an open / multi-alternative spread
+    /// formula for MACRO surface consumers (props / emits branch merge):
+    /// the union of per-alternative positive facts under the
+    /// `MacroObjectSurface` enumeration rule. This is publication-only
+    /// evidence — it never interns a closed `Object` and never claims
+    /// completeness; the consumer carries incompleteness in its own channel
+    /// (the walker's `OpenSpreadProgram` diagnostic / `cache_suppress`).
+    /// A single alternative bypasses the union merge so member fidelity
+    /// (method kind, spans, origins) survives verbatim.
+    #[must_use]
+    fn spread_formula_positive_members_for_macro(
+        graph: &SemanticGraphStore,
+        formula: &crate::semantic_query::ObjectProjectionFormula,
+        evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
+    ) -> Vec<crate::semantic_query::SurfaceMember> {
+        if let [only] = formula.alternatives() {
+            let surface = shallow_surface_from_projection_alternative(graph, only);
+            return surface_view_from_shallow(&surface)
+                .positive_members()
+                .iter()
+                .map(crate::semantic_query::SurfaceMember::clone)
+                .collect();
+        }
+        let arm_surfaces: Vec<Option<ShallowSurface>> = formula
+            .alternatives()
+            .iter()
+            .map(|alternative| {
+                Some(shallow_surface_from_projection_alternative(
+                    graph,
+                    alternative,
+                ))
+            })
+            .collect();
+        match merge_union_surfaces_for_macro(graph, &arm_surfaces, evidence) {
+            Some(merged) => surface_view_from_shallow(&merged)
+                .positive_members()
+                .iter()
+                .map(crate::semantic_query::SurfaceMember::clone)
+                .collect(),
+            None => Vec::new(),
+        }
     }
 }
 
@@ -10748,6 +10948,26 @@ enum ExpansionCombineKind {
 }
 
 impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
+    /// Positive member evidence of an object-projection formula for macro
+    /// surface consumers (see [`spread_formula_positive_members_for_macro`]),
+    /// computed in this dispatcher's construction lane. The members' value
+    /// operands are this graph's; the canonical evidence the union merge
+    /// gathers is deposited on this dispatcher.
+    #[must_use]
+    pub fn spread_formula_positive_members_for_macro(
+        &self,
+        formula: &crate::semantic_query::ObjectProjectionFormula,
+    ) -> Vec<crate::semantic_query::SurfaceMember> {
+        let mut canonical_evidence = super::canonical_algebra::CanonicalEvidence::default();
+        let members = spread_formula_positive_members_for_macro(
+            self.graph(),
+            formula,
+            &mut canonical_evidence,
+        );
+        self.deposit_canonical_evidence(canonical_evidence);
+        members
+    }
+
     /// A literal index absent from an exact closed domain, including the
     /// apparent members the ordinary path reader adds. This proves absence
     /// without asking the unavailable member for a value.
@@ -11444,7 +11664,7 @@ mod overload_carrier_exclusion_tests {
             "DeclRef" => SemanticNodeData::DeclRef { identity },
             "InstantiationRef" => SemanticNodeData::InstantiationRef {
                 base: identity,
-                args: Arc::from(
+                args: crate::semantic_query::PayloadArray::from(
                     vec![graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String))]
                         .into_boxed_slice(),
                 ),
@@ -11539,7 +11759,7 @@ mod overload_carrier_exclusion_tests {
                 readonly: false,
             },
             "Tuple" => SemanticNodeData::Tuple {
-                elements: Arc::from(
+                elements: crate::semantic_query::PayloadArray::from(
                     vec![crate::semantic_query::TupleElement {
                         label: None,
                         value: element,
@@ -11552,7 +11772,9 @@ mod overload_carrier_exclusion_tests {
             },
             "TemplateLiteral" => SemanticNodeData::TemplateLiteral {
                 quasis: Arc::from(vec![Arc::<str>::from("hello-")].into_boxed_slice()),
-                expressions: Arc::from(vec![element].into_boxed_slice()),
+                expressions: crate::semantic_query::PayloadArray::from(
+                    vec![element].into_boxed_slice(),
+                ),
             },
             other => unreachable!("unknown apparent-type carrier kind `{other}`"),
         };

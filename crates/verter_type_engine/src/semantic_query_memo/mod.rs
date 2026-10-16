@@ -49,6 +49,7 @@ use crate::semantic_query::{
 
 pub mod arena;
 mod binder_dependencies;
+pub mod construction_copy;
 pub mod delivery_lease;
 pub mod derivation;
 pub mod family;
@@ -735,6 +736,19 @@ pub enum MemoFamilyBound {
     ForTest(usize),
 }
 
+/// How a host-composed graph reclaims node slots. Production graphs keep
+/// the canonical-sweep regime; the counted regime is the controlled
+/// ownership fixture, available to test builds only.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GraphOwnership {
+    /// Canonical sweeps reclaim node slots.
+    #[default]
+    Legacy,
+    /// The counted fixture: a node is destroyed when its last root drops.
+    #[cfg(any(test, feature = "test-support"))]
+    CountedForTests,
+}
+
 impl Default for SemanticGraphStore {
     fn default() -> Self {
         Self::with_arena(Default::default())
@@ -744,6 +758,15 @@ impl Default for SemanticGraphStore {
 impl SemanticGraphStore {
     /// Bind signature-token ownership to the final arena before publishing
     /// the store, including the controlled counted fixture constructor.
+    /// A graph in `ownership`'s reclamation regime.
+    pub(crate) fn with_ownership(ownership: GraphOwnership) -> Self {
+        match ownership {
+            GraphOwnership::Legacy => Self::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            GraphOwnership::CountedForTests => Self::with_arena(NodeArena::counted_for_tests()),
+        }
+    }
+
     fn with_arena(arena: NodeArena) -> Self {
         let signatures = crate::signature_kernel::SignatureStore::default();
         signatures.bind_graph(&arena.core);
@@ -1938,39 +1961,41 @@ impl SemanticGraphStore {
         result.map(narrow_cache_read)
     }
 
-    /// Carrier-aware warm read that validates BEFORE bubbling. Returns
-    /// the cached value only when the entry's
-    /// [`ReadSetSignature`](verter_session_query::facts::fact_cache::ReadSetSignature)
-    /// validates against the live store view; otherwise `None`. On
-    /// validation failure the bubble channel is NOT exercised — a
-    /// stale entry must not pollute an outer tracer with observations
-    /// that no longer reflect the current state.
-    ///
-    /// This is the production warm-read entry point used by callers
-    /// that consult the warm map outside the cooperative-admission
-    /// flow (e.g. the prefix-probe in `build_project_path`). The
-    /// cold-build helper inside `execute_cooperative` continues to use
-    /// `get` because its own coordination flow performs the validate /
-    /// remove / cold-recompute dance one level up.
-    ///
-    /// Counter semantics: a miss-by-staleness records the same
-    /// `cache_counters.semantic_graph.misses` bump as a true cold
-    /// miss; from the caller's perspective the entry is unavailable
-    /// either way.
-    #[must_use]
-    pub fn get_validated<C: crate::resolver_core::ResolverCapabilities>(
-        &self,
-        key: &SemanticQueryKey,
-        ctx: &dyn crate::resolver_core::ResolverContext<C>,
-    ) -> Option<CacheRead<QueryResult<SemanticNodeId>>> {
-        let (family, slot) = family_and_slot(key);
-        // Same formula as `requested_point_for_key`, reusing the
-        // `family_and_slot` projection above instead of re-running it.
-        let requested = crate::semantic_query::demand::MaterializedPoint::new(
-            family::point_for_slot(slot, &requested_path_for_key(key)),
-        );
-        self.get_validated_value_impl(&family, slot, &requested, ctx, None, None, true)
-            .map(narrow_cache_read)
+    construction_ordinal_seam! {
+        /// Carrier-aware warm read that validates BEFORE bubbling. Returns
+        /// the cached value only when the entry's
+        /// [`ReadSetSignature`](verter_session_query::facts::fact_cache::ReadSetSignature)
+        /// validates against the live store view; otherwise `None`. On
+        /// validation failure the bubble channel is NOT exercised — a
+        /// stale entry must not pollute an outer tracer with observations
+        /// that no longer reflect the current state.
+        ///
+        /// This is the production warm-read entry point used by callers
+        /// that consult the warm map outside the cooperative-admission
+        /// flow (e.g. the prefix-probe in `build_project_path`). The
+        /// cold-build helper inside `execute_cooperative` continues to use
+        /// `get` because its own coordination flow performs the validate /
+        /// remove / cold-recompute dance one level up.
+        ///
+        /// Counter semantics: a miss-by-staleness records the same
+        /// `cache_counters.semantic_graph.misses` bump as a true cold
+        /// miss; from the caller's perspective the entry is unavailable
+        /// either way.
+        #[must_use]
+        fn get_validated<C: crate::resolver_core::ResolverCapabilities>(
+            &self,
+            key: &SemanticQueryKey,
+            ctx: &dyn crate::resolver_core::ResolverContext<C>,
+        ) -> Option<CacheRead<QueryResult<SemanticNodeId>>> {
+            let (family, slot) = family_and_slot(key);
+            // Same formula as `requested_point_for_key`, reusing the
+            // `family_and_slot` projection above instead of re-running it.
+            let requested = crate::semantic_query::demand::MaterializedPoint::new(
+                family::point_for_slot(slot, &requested_path_for_key(key)),
+            );
+            self.get_validated_value_impl(&family, slot, &requested, ctx, None, None, true)
+                .map(narrow_cache_read)
+        }
     }
 
     /// Prepared-token variant of [`Self::get_validated`] — reads the

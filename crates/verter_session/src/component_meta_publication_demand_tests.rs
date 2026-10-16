@@ -1063,11 +1063,15 @@ fn relation_oracle_record_target_normalisation_records_no_published_context() {
     let any_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
     let inner_record = graph.intern_node(SemanticNodeData::InstantiationRef {
         base: builtin_record_identity(),
-        args: Arc::from(vec![lit_button, any_node].into_boxed_slice()),
+        args: verter_type_engine::semantic_query::PayloadArray::from(
+            vec![lit_button, any_node].into_boxed_slice(),
+        ),
     });
     let target = graph.intern_node(SemanticNodeData::InstantiationRef {
         base: builtin_record_identity(),
-        args: Arc::from(vec![lit_ui, inner_record].into_boxed_slice()),
+        args: verter_type_engine::semantic_query::PayloadArray::from(
+            vec![lit_ui, inner_record].into_boxed_slice(),
+        ),
     });
 
     let guard = CaptureToken::start_for_query("relation_oracle_transit_probe");
@@ -1230,7 +1234,7 @@ fn root_conditional_still_distributes() {
         .node_data(result)
         .expect("distribution result node exists");
     let arms = match data.as_ref() {
-        SemanticNodeData::Union(arms) if arms.len() == 2 => arms.clone(),
+        SemanticNodeData::Union(arms) if arms.len() == 2 => arms.to_vec(),
         other => panic!(
             "a query-root unbound conditional under Expanded must distribute into a \
              two-arm Union (both branches surface), got {other:?}"
