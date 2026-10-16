@@ -5,15 +5,18 @@
 //! query error copies opaquely: it carries its operands without exposing
 //! them. Origin reads, display and the canonical union builder keyed by an
 //! ordinal stay callable: they answer only inside a construction lane the
-//! caller holds.
+//! caller holds, and a dispatcher merges a macro spread formula in its own
+//! lane.
 
 use verter_session_query::flow::policy::NullabilityPolicy;
 use verter_type_engine::project_semantic_dispatch::canonical_algebra;
 use verter_type_engine::project_semantic_dispatch::one_level_surface::OneLevelSurface;
 use verter_type_engine::project_semantic_dispatch::walk::ShallowDiagnostic;
+use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+use verter_type_engine::resolver_core::ResolverCapabilities;
 use verter_type_engine::semantic_query::{
-    display, CacheRead, DisplayNeeds, QueryError, QueryResult, SemanticNodeData, SemanticNodeId,
-    SemanticQueryValue, SurfaceEntry,
+    display, CacheRead, DisplayNeeds, ObjectProjectionFormula, QueryError, QueryResult,
+    SemanticNodeData, SemanticNodeId, SemanticQueryValue, SurfaceEntry,
 };
 use verter_type_engine::semantic_query_memo::node_data_lease::{NodeDataLease, SurfaceLease};
 use verter_type_engine::semantic_query_memo::node_roots::NodeRoot;
@@ -104,6 +107,13 @@ fn render_and_build_in_lane(graph: &SemanticGraphStore, id: SemanticNodeId) -> b
     let union =
         canonical_algebra::intern_ordered_union_in_scope(graph, &[id], NullabilityPolicy::Strict);
     shown.is_some() && union.is_some()
+}
+
+fn spread_through_a_dispatcher<C: ResolverCapabilities>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
+    formula: &ObjectProjectionFormula,
+) -> usize {
+    dispatch.spread_formula_positive_members_for_macro(formula).len()
 }
 
 fn keep_error(error: &QueryError) -> QueryError {

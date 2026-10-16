@@ -746,13 +746,7 @@ pub fn read_positive_surface_members<C: crate::resolver_core::ResolverCapabiliti
                     };
                 }
             };
-            let mut canonical_evidence = super::canonical_algebra::CanonicalEvidence::default();
-            let members = super::walk::spread_formula_positive_members_for_macro(
-                dispatch.graph(),
-                &formula,
-                &mut canonical_evidence,
-            );
-            dispatch.deposit_canonical_evidence(canonical_evidence);
+            let members = dispatch.spread_formula_positive_members_for_macro(&formula);
             SurfaceResolution::resolved(members)
         }
         Some(SemanticNodeData::Union(arms)) => {

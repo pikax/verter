@@ -6,20 +6,25 @@
 //! read keyed by a bare ordinal — alias chains, origin scopes, structure
 //! verdicts, substitution memos, member indexes, origin-edge exports and
 //! records, stable keys and their orderings, union and intersection
-//! builders, printed names, mapper and `keyof` classifications, index
-//! signature applicability, merged-declaration reduction, flow-return
-//! verdicts, display — is callable outside the engine, and no bare ordinal
+//! builders, union-surface merges over caller-built surfaces, warm memo
+//! reads and producer claims keyed by a query identity, printed
+//! names, mapper and `keyof` classifications, index signature
+//! applicability, merged-declaration reduction, flow-return verdicts,
+//! display — is callable outside the engine, and no bare ordinal
 //! releases kernel roots. The lane-gated readers (`display_in_scope`,
-//! `intern_ordered_union_in_scope`) answer only inside a held lane.
+//! `intern_ordered_union_in_scope`) answer only inside a held lane, and a
+//! macro spread-formula merge runs only through a dispatcher.
 
 use verter_session_query::flow::completion::NormalCompletion;
 use verter_session_query::flow::policy::NullabilityPolicy;
 use verter_type_engine::project_semantic_dispatch::{canonical_algebra, relation_predicates, walk};
+use verter_type_engine::resolver_core::{RequestFlags, ResolverCapabilities, ResolverContext};
 use verter_type_engine::semantic_query::semantic_context::SemanticContext;
 use verter_type_engine::semantic_query::{
     display, keyof_operand_is_type_variable, printed_union_arms, stable_key,
-    ClassExpressionIdentity, DepSignature, DisplayNeeds, FlowReturnResult, MapperKind,
-    OriginEdgeKind, OriginMeta, PrimitiveKind, PropertyKey, SemanticNodeData, SemanticNodeId,
+    ClassExpressionIdentity, DepSignature, DisplayNeeds, FlowReturnKey, FlowReturnResult,
+    MapperKind, ObjectProjectionFormula, OriginEdgeKind, OriginMeta, PrimitiveKind, PropertyKey,
+    RelateMemoKey, ResolveCallKey, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
     SemanticQueryValue, SurfaceView,
 };
 use verter_type_engine::semantic_query_memo::node_roots::NodeConstructionGrant;
@@ -126,6 +131,36 @@ fn render_and_judge(graph: &SemanticGraphStore, id: SemanticNodeId, completion: 
         DisplayNeeds::empty(),
     );
     let _verdict = FlowReturnResult::new(graph, id, completion, None);
+}
+
+fn merge_caller_surfaces(
+    graph: &SemanticGraphStore,
+    arms: &[Option<walk::ShallowSurface>],
+    formula: &ObjectProjectionFormula,
+    evidence: &mut canonical_algebra::CanonicalEvidence,
+) {
+    let _common = walk::merge_union_surfaces(graph, arms, evidence);
+    let _macro = walk::merge_union_surfaces_for_macro(graph, arms, evidence);
+    let _members = walk::spread_formula_positive_members_for_macro(graph, formula, evidence);
+}
+
+fn read_memos_by_key<C: ResolverCapabilities>(
+    graph: &SemanticGraphStore,
+    ctx: &dyn ResolverContext<C>,
+    flags: &RequestFlags,
+    key: SemanticQueryKey,
+    flow: &FlowReturnKey,
+    relation: &RelateMemoKey,
+    call: &ResolveCallKey,
+) {
+    let _warm = graph.get_validated(&key, ctx);
+    let _flow = graph.get_flow_return_result(ctx, flow);
+    let _relation = graph.get_relation_payload(ctx, relation);
+    let _call = graph.get_resolve_call_result(ctx, call);
+    let _same_path = graph.is_same_path_claim(&key);
+    let _recompute = graph.begin_query_recompute(flags, key);
+    let _flow_flight = graph.begin_inline_flow_return_flight(flow);
+    let _relation_flight = graph.begin_inline_relation_flight(relation);
 }
 
 fn main() {}
