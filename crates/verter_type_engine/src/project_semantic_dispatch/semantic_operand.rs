@@ -183,9 +183,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             forced.generation(),
             forced.node(),
             evidence,
+            forced.lease().clone(),
             SemanticOperandAuthority::mint_for_forcing_boundary(),
-        )
-        .with_lease(forced.lease().clone()))
+        ))
     }
 
     /// Seal an exact authored locator and authority-issued node operands used

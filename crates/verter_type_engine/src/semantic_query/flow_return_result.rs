@@ -181,31 +181,33 @@ pub struct FlowReturnWrap {
 transports_completion!(FlowReturnResult => FlowReturnResult);
 
 impl FlowReturnResult {
-    /// THE construction point of a flow-return value.
-    ///
-    /// `degradation` is the evaluation's OWN observed reason (a
-    /// modeled-`any` substitution it made knowingly). It is not the whole
-    /// verdict: this constructor additionally inspects `return_type` and
-    /// folds [`FlowReturnDegradation::UnresolvedValue`] in whenever the
-    /// value REACHES a semantic-miss carrier
-    /// ([`flow_return_value_is_unresolved`]). The evaluation's own reason
-    /// wins when both apply (first-observed reason, deterministic).
-    ///
-    /// The evaluation is the AUTHORITY on its own degradation: a position
-    /// whose resolver is a named downstream block contributes the typed
-    /// unresolved marker and records
-    /// [`FlowReturnDegradation::UnmodeledPosition`] where it stands. This
-    /// fold is the BACKSTOP for the residue — a leaf lowering that answered
-    /// a miss carrier inside the structure it handed back, which no
-    /// position observed.
-    #[must_use]
-    pub fn new(
-        graph: &crate::semantic_query_memo::SemanticGraphStore,
-        return_type: SemanticNodeId,
-        can_fall_through: NormalCompletion,
-        degradation: Option<FlowReturnDegradation>,
-    ) -> Self {
-        Self::new_with_fresh_literal_arms(graph, return_type, can_fall_through, degradation, &[])
+    construction_ordinal_seam! {
+        /// THE construction point of a flow-return value.
+        ///
+        /// `degradation` is the evaluation's OWN observed reason (a
+        /// modeled-`any` substitution it made knowingly). It is not the whole
+        /// verdict: this constructor additionally inspects `return_type` and
+        /// folds [`FlowReturnDegradation::UnresolvedValue`] in whenever the
+        /// value REACHES a semantic-miss carrier
+        /// ([`flow_return_value_is_unresolved`]). The evaluation's own reason
+        /// wins when both apply (first-observed reason, deterministic).
+        ///
+        /// The evaluation is the AUTHORITY on its own degradation: a position
+        /// whose resolver is a named downstream block contributes the typed
+        /// unresolved marker and records
+        /// [`FlowReturnDegradation::UnmodeledPosition`] where it stands. This
+        /// fold is the BACKSTOP for the residue — a leaf lowering that answered
+        /// a miss carrier inside the structure it handed back, which no
+        /// position observed.
+        #[must_use]
+        fn new(
+            graph: &crate::semantic_query_memo::SemanticGraphStore,
+            return_type: SemanticNodeId,
+            can_fall_through: NormalCompletion,
+            degradation: Option<FlowReturnDegradation>,
+        ) -> Self {
+            Self::new_with_fresh_literal_arms(graph, return_type, can_fall_through, degradation, &[])
+        }
     }
 
     /// [`Self::new`] with the join's surviving fresh literal arms. The

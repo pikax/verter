@@ -380,7 +380,9 @@ impl AuthoredSemanticOperand {
 #[derive(Debug, Clone)]
 enum SemanticOperandKind {
     Node {
-        lease: crate::semantic_query_memo::delivery_lease::SemanticDeliveryLease,
+        /// Held, never read: keeps `node` rooted in its issuing graph for
+        /// as long as any copy of the operand lives.
+        _lease: crate::semantic_query_memo::delivery_lease::SemanticDeliveryLease,
         store_identity: u64,
         generation: u64,
         node: SemanticNodeId,
@@ -396,30 +398,22 @@ pub struct SemanticOperand {
 }
 
 impl SemanticOperand {
-    pub(crate) fn with_lease(
-        mut self,
-        owned: crate::semantic_query_memo::delivery_lease::SemanticDeliveryLease,
-    ) -> Self {
-        if let SemanticOperandKind::Node { lease, .. } = &mut self.kind {
-            *lease = owned;
-        }
-        self
-    }
     /// Token-gated construction of the runtime-node arm: the forcing
-    /// authority seals a published node to its store and generation.
+    /// authority seals a published node to its store and generation. The
+    /// operand owns `node` through `lease`, the delivery that rooted it in
+    /// its issuing graph — never through whichever construction scope is
+    /// innermost on this thread, which may belong to another graph.
     pub(crate) fn node(
         store_identity: u64,
         generation: u64,
         node: SemanticNodeId,
         evidence: SemanticOperandEvidence,
+        lease: crate::semantic_query_memo::delivery_lease::SemanticDeliveryLease,
         _authority: SemanticOperandAuthority,
     ) -> Self {
         Self {
             kind: SemanticOperandKind::Node {
-                lease:
-                    crate::semantic_query_memo::delivery_lease::SemanticDeliveryLease::from_roots(
-                        crate::semantic_query_memo::node_roots::NodeRootScope::root_current([node]),
-                    ),
+                _lease: lease,
                 store_identity,
                 generation,
                 node,

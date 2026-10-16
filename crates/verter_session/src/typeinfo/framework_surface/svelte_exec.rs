@@ -2022,12 +2022,14 @@ pub(crate) fn resolve_svelte_value_export_member(
         } else {
             instance_export_display_node(graph, member_node)
         };
-        let type_annotation: String = verter_type_engine::semantic_query::display::display(
-            graph,
-            &SemanticQueryValue::TypeNode(display_node),
-            DisplayNeeds::empty(),
-        )
-        .into();
+        // The dispatcher holds this graph's construction lane.
+        let type_annotation: Option<String> =
+            verter_type_engine::semantic_query::display::display_in_scope(
+                graph,
+                &SemanticQueryValue::TypeNode(display_node),
+                DisplayNeeds::empty(),
+            )
+            .map(Into::into);
         let mut reference_names = rustc_hash::FxHashSet::default();
         crate::resolver_core::component_meta_registry::collect_node_ref_names(
             dispatch,
@@ -2036,7 +2038,7 @@ pub(crate) fn resolve_svelte_value_export_member(
         );
         let mut type_references: Vec<_> = reference_names.into_iter().collect();
         type_references.sort();
-        (Some(shallow), Some(type_annotation), type_references)
+        (Some(shallow), type_annotation, type_references)
     });
 
     NamedTypeMember {

@@ -13765,13 +13765,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
         };
         let single_closed = matches!(formula.alternatives(), [only] if only.closed().is_some());
-        let mut canonical_evidence = super::canonical_algebra::CanonicalEvidence::default();
-        let members = super::walk::spread_formula_positive_members_for_macro(
-            self.graph(),
-            &formula,
-            &mut canonical_evidence,
-        );
-        self.deposit_canonical_evidence(canonical_evidence);
+        let members = self.spread_formula_positive_members_for_macro(&formula);
         Some((members, !single_closed))
     }
 
