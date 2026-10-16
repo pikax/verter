@@ -381,7 +381,10 @@ impl SemanticGraphStore {
         }
 
         let staged_entries: Vec<_> = prepared.iter().map(|member| &member.entry).collect();
-        let retentions = match self.reserve_scc_batch(&staged_entries) {
+        let registered_canonicals =
+            reverse_index::ReverseIndexInputs::new(carrier, &dispatch_dep_signature)
+                .canonical_count();
+        let retentions = match self.reserve_scc_batch(&staged_entries, registered_canonicals) {
             Ok(retentions) => retentions,
             Err(_) => {
                 for member in &prepared {
@@ -561,6 +564,7 @@ impl SemanticGraphStore {
     pub(super) fn reserve_scc_batch(
         &self,
         members: &[&MemoEntry],
+        registered_canonicals: usize,
     ) -> Result<
         Vec<Arc<super::retention::MemoRetention>>,
         verter_session_query::retention::RetentionRefusal,
@@ -587,7 +591,7 @@ impl SemanticGraphStore {
             .map_err(refuse)?;
         let own: Vec<usize> = members
             .iter()
-            .map(|entry| super::retention::own_reservation_bytes(entry, 1))
+            .map(|entry| super::retention::own_reservation_bytes(entry, 1, registered_canonicals))
             .collect();
         // A shared carrier's evidence pages were claimed with the root; a
         // page only a member's carrier holds is claimed here.
@@ -790,13 +794,15 @@ impl SemanticGraphStore {
         entry.admission_seq = admission_seq;
         // A seed is charged like every published candidate; one the account
         // refuses is not seeded.
-        let Ok(retention) = self.reserve_memo_candidate(&entry, 1) else {
+        let reverse_index_inputs =
+            reverse_index::ReverseIndexInputs::new(&carrier, &dispatch_dep_signature);
+        let Ok(retention) =
+            self.reserve_memo_candidate(&entry, 1, reverse_index_inputs.canonical_count())
+        else {
             return;
         };
         entry.lease.attach_retention(|| retention.callers());
         entry.retention = Some(retention);
-        let reverse_index_inputs =
-            reverse_index::ReverseIndexInputs::new(&carrier, &dispatch_dep_signature);
         let mut entries = self.entries_lock_diagnosed();
         let NewlyKeyedFamily(is_new) = self.publish_staged_locked(
             &mut entries,

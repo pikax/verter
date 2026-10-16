@@ -72,7 +72,7 @@ fn an_scc_member_shares_the_carrier_charge_and_keeps_it_after_the_root_drains() 
     let member = stage_relation(&store, &carrier, &roots, &receipt);
 
     let root_retention = store
-        .reserve_memo_candidate(&root, 1)
+        .reserve_memo_candidate(&root, 1, 1)
         .expect("the root is admitted");
     let carrier_bytes = carrier_charge(&carrier, &roots);
     assert!(
@@ -83,9 +83,9 @@ fn an_scc_member_shares_the_carrier_charge_and_keeps_it_after_the_root_drains() 
     assert!(after_root >= carrier_bytes + root_retention.own_bytes());
 
     let members = store
-        .reserve_scc_batch(&[&member])
+        .reserve_scc_batch(&[&member], 1)
         .expect("the member's incremental footprint is admitted");
-    let member_own = super::retention::own_reservation_bytes(&member, 1);
+    let member_own = super::retention::own_reservation_bytes(&member, 1, 1);
     assert_eq!(
         account.snapshot().retained_bytes - after_root,
         member_own
@@ -140,7 +140,7 @@ fn a_refused_candidate_keeps_no_charge_and_no_registration() {
         .expect("the receipt alone fits");
     let before = account.snapshot().retained_bytes;
     store
-        .reserve_memo_candidate(&root, 1)
+        .reserve_memo_candidate(&root, 1, 1)
         .expect_err("the oversized carrier does not fit, whatever the entry's own size");
     assert_eq!(
         account.snapshot().retained_bytes,

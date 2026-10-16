@@ -92,9 +92,16 @@ pub const fn box_bytes<T>() -> usize {
 ///
 /// Keyed by the allocation's address. Every key names an allocation the
 /// measured value holds for the whole measurement, so an address cannot be
-/// freed and reused while the set is live.
+/// freed and reused while the set is live. The first few keys stay inline,
+/// so measuring a small value allocates nothing.
 #[derive(Default)]
-pub struct AliasSet(FxHashSet<usize>);
+pub struct AliasSet {
+    inline: smallvec::SmallVec<[usize; ALIAS_INLINE]>,
+    spilled: Option<FxHashSet<usize>>,
+}
+
+/// Allocations an [`AliasSet`] tracks before it spills to a hash set.
+const ALIAS_INLINE: usize = 8;
 
 impl AliasSet {
     /// An empty set.
@@ -105,19 +112,35 @@ impl AliasSet {
 
     /// `true` the first time `arc`'s allocation is offered, `false` after.
     pub fn first<T: ?Sized>(&mut self, arc: &Arc<T>) -> bool {
-        self.0.insert(Arc::as_ptr(arc).cast::<()>() as usize)
+        let key = Arc::as_ptr(arc).cast::<()>() as usize;
+        if let Some(spilled) = self.spilled.as_mut() {
+            return spilled.insert(key);
+        }
+        if self.inline.contains(&key) {
+            return false;
+        }
+        if self.inline.len() < ALIAS_INLINE {
+            self.inline.push(key);
+            return true;
+        }
+        let mut spilled: FxHashSet<usize> = self.inline.drain(..).collect();
+        spilled.insert(key);
+        self.spilled = Some(spilled);
+        true
     }
 
     /// Distinct allocations counted so far.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.0.len()
+        self.spilled
+            .as_ref()
+            .map_or(self.inline.len(), FxHashSet::len)
     }
 
     /// Whether nothing has been counted.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.len() == 0
     }
 }
 

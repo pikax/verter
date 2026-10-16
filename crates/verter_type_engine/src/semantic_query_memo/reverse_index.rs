@@ -45,6 +45,11 @@ pub(super) struct ReverseIndexInputs<'a> {
 }
 
 impl<'a> ReverseIndexInputs<'a> {
+    /// The canonicals each populated slot registers under.
+    pub(super) fn canonical_count(&self) -> usize {
+        self.canonicals.ordered.len()
+    }
+
     pub(super) fn new(
         read_set_signature: &'a verter_session_query::facts::fact_cache::ReadSetSignature,
         dispatch_dep_signature: &'a DepSignature,
@@ -118,18 +123,13 @@ impl<'a> RegisteredCanonicals<'a> {
 /// `Arc<FamilyKey>` every record of the candidate shares. A canonical's
 /// shard itself is the index's container, created with its first record
 /// and dropped with its last.
-pub(super) fn registration_bytes(
-    read_set_signature: &verter_session_query::facts::fact_cache::ReadSetSignature,
-    dispatch_dep_signature: &DepSignature,
-    populated_slots: usize,
-) -> usize {
+pub(super) fn registration_bytes(registered_canonicals: usize, populated_slots: usize) -> usize {
     use verter_session_query::retention::allocation::arc_block_bytes;
     type Record = ((u64, ModeSlot), (Arc<FamilyKey>, RegisteredFacts));
-    let canonicals = RegisteredCanonicals::of(read_set_signature, dispatch_dep_signature);
-    if canonicals.is_empty() || populated_slots == 0 {
+    if registered_canonicals == 0 || populated_slots == 0 {
         return 0;
     }
-    let records = canonicals.ordered.len() * populated_slots;
+    let records = registered_canonicals * populated_slots;
     (records * (std::mem::size_of::<Record>() + 1)).div_ceil(7) * 8
         + arc_block_bytes(std::mem::size_of::<FamilyKey>())
 }

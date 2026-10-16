@@ -216,12 +216,13 @@ impl SemanticGraphStore {
         &self,
         entry: &MemoEntry,
         populated_slots: usize,
+        registered_canonicals: usize,
     ) -> Result<Arc<MemoRetention>, RetentionRefusal> {
         let reserved = match entry
             .cost_receipt
             .reserve_retention(self.retention_account())
         {
-            Ok(()) => self.reserve_candidate_charges(entry, populated_slots),
+            Ok(()) => self.reserve_candidate_charges(entry, populated_slots, registered_canonicals),
             Err(refusal) => Err(refusal),
         };
         reserved.map(Arc::new).inspect_err(|refusal| {
@@ -238,9 +239,10 @@ impl SemanticGraphStore {
         &self,
         entry: &MemoEntry,
         populated_slots: usize,
+        registered_canonicals: usize,
     ) -> Result<MemoRetention, RetentionRefusal> {
         let shared = self.hold_shared_allocations(SharedParts::of(entry))?;
-        let own_bytes = own_reservation_bytes(entry, populated_slots);
+        let own_bytes = own_reservation_bytes(entry, populated_slots, registered_canonicals);
         match verter_session_query::facts::receipt::reserve_retained_with_evidence(
             self.retention_account(),
             own_bytes,
@@ -483,7 +485,13 @@ impl SharedHolds {
 }
 
 /// What `entry`'s own reservation covers: its bookkeeping for
-/// `populated_slots` slots and the counters of its empty shared slices.
-pub(super) fn own_reservation_bytes(entry: &MemoEntry, populated_slots: usize) -> usize {
-    entry.own_retained_footprint_bytes(populated_slots) + SharedParts::of(entry).empty_slice_bytes()
+/// `populated_slots` slots registered under `registered_canonicals`
+/// canonicals each, and the counters of its empty shared slices.
+pub(super) fn own_reservation_bytes(
+    entry: &MemoEntry,
+    populated_slots: usize,
+    registered_canonicals: usize,
+) -> usize {
+    entry.own_retained_footprint_bytes(populated_slots, registered_canonicals)
+        + SharedParts::of(entry).empty_slice_bytes()
 }

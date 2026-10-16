@@ -90,3 +90,19 @@ fn an_evidence_receipt_costs_only_its_slot() {
         "a page carries its own charge, so its holder is charged only the slot"
     );
 }
+
+#[test]
+fn an_alias_set_counts_each_allocation_once_past_its_inline_capacity() {
+    let names: Vec<Arc<str>> = (0..20).map(|index| Arc::from(format!("{index}"))).collect();
+    let mut aliases = AliasSet::new();
+    for name in &names {
+        assert!(aliases.first(name));
+    }
+    for name in &names {
+        assert!(
+            !aliases.first(name),
+            "an alias is counted once, inline or spilled"
+        );
+    }
+    assert_eq!(aliases.len(), names.len());
+}

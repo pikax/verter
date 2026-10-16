@@ -291,7 +291,13 @@ impl SemanticGraphStore {
         // refuses is not seeded.
         let populated_slots =
             family::publication_slot_bound(slot, &entry.satisfied_projection, &requested_path);
-        let Ok(retention) = self.reserve_memo_candidate(&entry, populated_slots) else {
+        let reverse_index_inputs =
+            reverse_index::ReverseIndexInputs::new(&read_set_signature, &dispatch_dep_signature);
+        let Ok(retention) = self.reserve_memo_candidate(
+            &entry,
+            populated_slots,
+            reverse_index_inputs.canonical_count(),
+        ) else {
             return 0;
         };
         entry.lease.attach_retention(|| retention.callers());
@@ -323,7 +329,7 @@ impl SemanticGraphStore {
             &self.canonical_to_entries,
             &family,
             &populated_slots,
-            &reverse_index::ReverseIndexInputs::new(&read_set_signature, &dispatch_dep_signature),
+            &reverse_index_inputs,
             admission_seq,
         );
         drop(entries);

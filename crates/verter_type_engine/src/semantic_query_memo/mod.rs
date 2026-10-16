@@ -2449,6 +2449,8 @@ impl SemanticGraphStore {
         let read_set_signature = read_set_signature.clone();
         let winner_dep_signature = retention::allocation_key(dispatch_dep_signature);
         let dispatch_dep_signature = self.dep_signature_interner.intern(dispatch_dep_signature);
+        let reverse_index_inputs =
+            reverse_index::ReverseIndexInputs::new(&read_set_signature, &dispatch_dep_signature);
         let validated_at_generation = flags.current_project_generation();
         let admission_seq = self.alloc_candidate_admission_seq();
         let mut entry = MemoEntry {
@@ -2474,7 +2476,11 @@ impl SemanticGraphStore {
         // caller uncached — never a stale candidate, never a partial.
         let populated_slots =
             family::publication_slot_bound(slot, satisfied_projection, requested_path);
-        let retention = match self.reserve_memo_candidate(&entry, populated_slots) {
+        let retention = match self.reserve_memo_candidate(
+            &entry,
+            populated_slots,
+            reverse_index_inputs.canonical_count(),
+        ) {
             Ok(retention) => retention,
             Err(_) => return WarmPublishOutcome::Skipped,
         };
@@ -2577,9 +2583,10 @@ impl SemanticGraphStore {
             &self.canonical_to_entries,
             family,
             &populated_slots,
-            &reverse_index::ReverseIndexInputs::new(&read_set_signature, &dispatch_dep_signature),
+            &reverse_index_inputs,
             admission_seq,
         );
+        drop(reverse_index_inputs);
         let published = PublishedMemoCandidate {
             read_set_signature,
             self_root_canonicals: Arc::clone(self_root_canonicals),
@@ -2706,6 +2713,10 @@ impl SemanticGraphStore {
         verter_audit::attribute!(CacheCandidateCopy);
         let dispatch_dep_signature = self.dep_signature_interner.intern(&dispatch_dep_signature);
         let dispatch_dep_signature_clone = Arc::clone(&dispatch_dep_signature);
+        let reverse_index_inputs = reverse_index::ReverseIndexInputs::new(
+            &read_set_signature,
+            &dispatch_dep_signature_clone,
+        );
         let validated_at_generation = flags.current_project_generation();
         let admission_seq = self.alloc_candidate_admission_seq();
         let mut entry = MemoEntry {
@@ -2737,7 +2748,11 @@ impl SemanticGraphStore {
         // narrow request recomputes.
         let populated_slots =
             family::publication_slot_bound(slot, &entry.satisfied_projection, requested_path);
-        match self.reserve_memo_candidate(&entry, populated_slots) {
+        match self.reserve_memo_candidate(
+            &entry,
+            populated_slots,
+            reverse_index_inputs.canonical_count(),
+        ) {
             Ok(retention) => {
                 entry.lease.attach_retention(|| retention.callers());
                 entry.retention = Some(retention);
@@ -2811,10 +2826,7 @@ impl SemanticGraphStore {
             &self.canonical_to_entries,
             family,
             &populated_slots,
-            &reverse_index::ReverseIndexInputs::new(
-                &read_set_signature,
-                &dispatch_dep_signature_clone,
-            ),
+            &reverse_index_inputs,
             admission_seq,
         );
         let admitted = !populated_slots.is_empty();

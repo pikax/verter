@@ -127,18 +127,18 @@ impl MemoEntry {
     /// none outlives the candidate. The carrier, the delivered rails and the
     /// value are shared allocations, charged once through
     /// [`super::retention::MemoRetention`]'s shared holds.
-    pub(super) fn own_retained_footprint_bytes(&self, populated_slots: usize) -> usize {
+    pub(super) fn own_retained_footprint_bytes(
+        &self,
+        populated_slots: usize,
+        registered_canonicals: usize,
+    ) -> usize {
         use crate::semantic_query::allocation_footprint::OwnedHeap as _;
         let mut aliases = verter_session_query::retention::allocation::AliasSet::new();
         populated_slots
             * (std::mem::size_of::<Self>() + verter_session_query::retention::ENTRY_OVERHEAD_BYTES)
             + self.satisfied_projection.owned_heap_bytes(&mut aliases)
             + self.lease.owned_heap_bytes(&mut aliases)
-            + super::reverse_index::registration_bytes(
-                &self.read_set_signature,
-                &self.dispatch_dep_signature,
-                populated_slots,
-            )
+            + super::reverse_index::registration_bytes(registered_canonicals, populated_slots)
     }
 }
 
