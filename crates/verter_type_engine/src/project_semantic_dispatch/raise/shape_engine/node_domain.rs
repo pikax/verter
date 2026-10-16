@@ -183,11 +183,15 @@ impl RaisedShapeAlgebra for RaisedShapeAlg<'_> {
             summary,
         )
     }
-    fn recursive_ref(&mut self, name: Arc<str>) -> RaisedShapeResult {
+    fn recursive_ref(
+        &mut self,
+        name: Arc<str>,
+        type_arguments: Vec<RaisedShapeResult>,
+    ) -> RaisedShapeResult {
         self.result(
             RaisedTerm::RecursiveRef {
                 name,
-                type_arguments: Vec::new(),
+                type_arguments: type_arguments.into_iter().map(|a| a.key).collect(),
                 conditional_context: Vec::new(),
             },
             summary::materialized_expanded_leaf(),
@@ -675,7 +679,11 @@ impl RaisedShapeAlgebra for RaisedFactsAlg {
     fn opaque_sentinel(&mut self, err: &QueryError) -> RaisedShapeSummary {
         summary::opaque_sentinel(err)
     }
-    fn recursive_ref(&mut self, _name: Arc<str>) -> RaisedShapeSummary {
+    fn recursive_ref(
+        &mut self,
+        _name: Arc<str>,
+        _type_arguments: Vec<RaisedShapeSummary>,
+    ) -> RaisedShapeSummary {
         summary::materialized_expanded_leaf()
     }
     fn reference(
@@ -1057,8 +1065,16 @@ impl RaisedShapeAlgebra for DeclarationFactsAlg {
             ..DeclarationOut::unsafe_leaf()
         }
     }
-    fn recursive_ref(&mut self, _name: Arc<str>) -> DeclarationOut {
-        DeclarationOut::leaf(DeclarationTag::Other)
+    fn recursive_ref(
+        &mut self,
+        _name: Arc<str>,
+        type_arguments: Vec<DeclarationOut>,
+    ) -> DeclarationOut {
+        if type_arguments.is_empty() {
+            DeclarationOut::leaf(DeclarationTag::Other)
+        } else {
+            DeclarationOut::combine(DeclarationTag::Other, type_arguments)
+        }
     }
     fn reference(
         &mut self,

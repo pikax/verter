@@ -296,14 +296,43 @@ test("CI builds one provider-free archive and runs providers serially in their o
     /cargo nextest|install-action@nextest|name:\s*rust-nextest-archive|download-artifact/,
   );
   assert.match(success, /^\s*- rust-providers-live\s*$/m);
-  for (const lane of ["tsserver", "tsgo"]) {
-    assert.match(providers, new RegExp(`provider-ci\\.mjs run ${lane}`));
-  }
-  assert.match(providers, /VERTER_REQUIRE_TSSERVER:\s*"1"/);
-  assert.match(providers, /packages\/typescript-plugin\/src/);
-  assert.match(providers, /--exclude ['"]packages\/typescript-plugin\/src\/tsc\/\*\*['"]/);
+  // Pull request CI runs tsgo, the main platform. tsserver, the legacy engine,
+  // and its plugin run in the scheduled tsserver nightly workflow.
+  assert.match(providers, /provider-ci\.mjs run tsgo/);
   assert.match(providers, /VERTER_REQUIRE_TSGO:\s*"1"/);
+  assert.doesNotMatch(providers, /VERTER_REQUIRE_TSSERVER/);
+  assert.doesNotMatch(
+    workflow,
+    /provider-ci\.mjs run tsserver|vitest run packages\/typescript-plugin\//,
+  );
   assert.doesNotMatch(core, /VERTER_REQUIRE_TS(?:GO|SERVER)/);
+
+  const nightly = readFileSync(
+    join(REPO_ROOT, ".github", "workflows", "tsserver-nightly.yml"),
+    "utf8",
+  );
+  assert.match(nightly, /^name: tsserver nightly$/m);
+  assert.match(nightly, /^\s+schedule:\s*$/m);
+  assert.match(nightly, /^\s+workflow_dispatch:\s*$/m);
+  const tsserver = yamlJob(nightly, "providers");
+  assert.match(tsserver, /provider-ci\.mjs run tsserver/);
+  assert.match(tsserver, /VERTER_REQUIRE_TSSERVER:\s*"1"/);
+  assert.doesNotMatch(tsserver, /cargo nextest|install-action@nextest/);
+  const plugin = yamlJob(nightly, "plugin");
+  assert.match(
+    plugin,
+    /vitest run packages\/typescript-plugin\/src --exclude ['"]packages\/typescript-plugin\/src\/tsc\/\*\*['"]/,
+  );
+  // The one job a watcher reads must depend on every lane in the workflow.
+  const result = yamlJob(nightly, "result");
+  const jobs = nightly.slice(nightly.search(/^jobs:\s*$/m));
+  const lanes = [...jobs.matchAll(/^ {2}([a-z0-9-]+):\r?\n/gm)]
+    .map((match) => match[1])
+    .filter((job) => !["jobs", "result"].includes(job));
+  assert.ok(lanes.length >= 5, `expected the nightly lanes, found ${lanes.join(", ")}`);
+  for (const job of lanes) {
+    assert.match(result, new RegExp(`needs:.*\\b${job}\\b`), `the nightly result must need ${job}`);
+  }
   // Timings are written under CARGO_TARGET_DIR (default target/). The upload
   // must use that same root or a relocated target dir drops the artifact.
   assert.match(
@@ -313,11 +342,16 @@ test("CI builds one provider-free archive and runs providers serially in their o
   assert.doesNotMatch(providers, /path:\s*target\/provider-timings\/\*\.json/);
 });
 
-test("native-only TypeScript plugin specs remain with the native artifact", () => {
-  const workflow = readFileSync(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
-  const native = yamlJob(workflow, "native-test");
-  assert.match(native, /vitest run packages\/typescript-plugin\/src\/tsc/);
-  assert.doesNotMatch(native, /pnpm --filter @verter\/typescript-plugin test/);
+test("native-only TypeScript plugin specs run after a native build in the tsserver nightly", () => {
+  const nightly = readFileSync(
+    join(REPO_ROOT, ".github", "workflows", "tsserver-nightly.yml"),
+    "utf8",
+  );
+  const plugin = yamlJob(nightly, "plugin");
+  const build = plugin.indexOf("pnpm run build:native");
+  const specs = plugin.indexOf("vitest run packages/typescript-plugin/src/tsc");
+  assert.ok(build !== -1 && specs !== -1 && build < specs, "src/tsc specs run after build:native");
+  assert.doesNotMatch(plugin, /pnpm --filter @verter\/typescript-plugin test/);
 
   const pkg = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8"));
   assert.match(pkg.scripts["test:scripts"], /provider-ci-lane-selftest\.mjs/);

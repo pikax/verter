@@ -4,7 +4,12 @@
 //! as a frame whose declaration-body projection, where it would evaluate an
 //! instantiation in place, needs it instead, so a chain of instantiations
 //! (an alias chain, a reference whose arguments are applications) is a
-//! chain of heap-owned frames, never of native calls. Each frame owns what
+//! chain of heap-owned frames, never of native calls. A body projection
+//! that reaches a value's `typeof` needs it the same way, and the `typeof`
+//! of a value declared with an authored annotation builds as a frame too,
+//! whose annotation projection needs each instantiation it reaches: an
+//! interface heritage a hundred levels deep, named by an annotation, is a
+//! hundred frames. Each frame owns what
 //! its build owns across its steps — the build's state, its producer lease
 //! on the memo, its fact tracer and its build-local taint — and installs
 //! the tracer and taint only while one of its steps runs. A delivery
@@ -26,7 +31,7 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
-use super::build::{InstantiateBuild, InstantiatePoll, InstantiateStart};
+use super::build::{InstantiateBuild, InstantiatePoll, InstantiateStart, TypeofBuild, TypeofStart};
 use super::cost_receipt::Nesting;
 use super::{BuildLocalTaint, CarrierNormalizationPrelude, ProjectSemanticDispatch};
 use crate::fact_signature_helpers::ReadSetSignatureExt as _;
@@ -69,14 +74,21 @@ pub(super) enum QueryFrame<'p, 'a, C: crate::resolver_core::ResolverCapabilities
     Instantiate(Box<InstantiateFrame<'p, 'a, C>>),
 }
 
-/// An instantiation's build between its steps.
+/// The build a frame carries between its steps: an instantiation's, or a
+/// `typeof`'s whose value's annotation is lowering.
+pub(super) enum FrameBuild {
+    Instantiate(Box<InstantiateBuild>),
+    Typeof(Box<TypeofBuild>),
+}
+
+/// An instantiation's — or a `typeof`'s — build between its steps.
 pub(super) struct InstantiateFrame<'p, 'a, C: crate::resolver_core::ResolverCapabilities> {
     dispatch: &'p ProjectSemanticDispatch<'a, C>,
     key: SemanticQueryKey,
     lease: Option<ProducerLease<'p>>,
     tracer: Option<crate::fact_signature_helpers::StepwiseFactTracer<'p, C::Clocks>>,
     taint: BuildLocalTaint,
-    build: Option<Box<InstantiateBuild>>,
+    build: Option<FrameBuild>,
     /// The declaration and arguments the build entered as active, until it
     /// leaves them.
     active: Option<(
@@ -608,33 +620,65 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             Err(()) => unreachable!("a stopped drive delivers nothing"),
         });
         let poll = match frame.build.as_mut() {
-            Some(build) => self.drain_instantiate(build, delivered),
+            Some(FrameBuild::Instantiate(build)) => self.drain_instantiate(build, delivered),
+            Some(FrameBuild::Typeof(build)) => self.drain_typeof(build, delivered),
             None => {
                 self.open_cold_build(None);
-                let SemanticQueryKey::Instantiate(key) = &frame.key else {
-                    unreachable!("an instantiation frame produces an instantiation")
-                };
-                let refusal = self
-                    .cold_build_budget_refusal(&frame.key)
-                    .or_else(|| self.instantiation_budget_refusal(frame.depth));
-                let begun = match refusal {
-                    Some(refusal) => InstantiateStart::Done(Box::new(refusal)),
-                    None => self.begin_instantiate(
-                        key.base(),
-                        key.args(),
-                        key.source(),
-                        key.context(),
-                        true,
-                    ),
-                };
-                match begun {
-                    InstantiateStart::Done(output) => InstantiatePoll::Done(output),
-                    InstantiateStart::Build(build) => {
-                        frame.active =
-                            Some((build.active_identity.clone(), Arc::clone(&build.args)));
-                        let build = frame.build.insert(build);
-                        self.drain_instantiate(build, None)
+                match &frame.key {
+                    SemanticQueryKey::Instantiate(key) => {
+                        let refusal = self
+                            .cold_build_budget_refusal(&frame.key)
+                            .or_else(|| self.instantiation_budget_refusal(frame.depth));
+                        let begun = match refusal {
+                            Some(refusal) => InstantiateStart::Done(Box::new(refusal)),
+                            None => self.begin_instantiate(
+                                key.base(),
+                                key.args(),
+                                key.source(),
+                                key.context(),
+                                true,
+                            ),
+                        };
+                        match begun {
+                            InstantiateStart::Done(output) => InstantiatePoll::Done(output),
+                            InstantiateStart::Build(build) => {
+                                frame.active =
+                                    Some((build.active_identity.clone(), Arc::clone(&build.args)));
+                                let FrameBuild::Instantiate(build) =
+                                    frame.build.insert(FrameBuild::Instantiate(build))
+                                else {
+                                    unreachable!("the build was just inserted")
+                                };
+                                self.drain_instantiate(build, None)
+                            }
+                        }
                     }
+                    SemanticQueryKey::TypeOf {
+                        value_root,
+                        path,
+                        context,
+                    } => {
+                        let begun = match self.cold_build_budget_refusal(&frame.key) {
+                            Some(refusal) => TypeofStart::Done(Box::new(refusal)),
+                            None => self.begin_typeof(
+                                &value_root.root,
+                                path,
+                                context.projection_reduction,
+                            ),
+                        };
+                        match begun {
+                            TypeofStart::Done(output) => InstantiatePoll::Done(output),
+                            TypeofStart::Build(build) => {
+                                let FrameBuild::Typeof(build) =
+                                    frame.build.insert(FrameBuild::Typeof(build))
+                                else {
+                                    unreachable!("the build was just inserted")
+                                };
+                                self.drain_typeof(build, None)
+                            }
+                        }
+                    }
+                    _ => unreachable!("a frame produces an instantiation or a typeof"),
                 }
             }
         };

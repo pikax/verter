@@ -202,6 +202,15 @@ fn compact_domains(facts: &mut Vec<FactVersionRef>, basis: &AggregateGenerations
     /// A bucket whose population is `None` is a real bucket — its facts
     /// still group and still survive together — it simply can never mint.
     type BucketKey = (CompactionDomain, Option<AggregatePopulation>);
+    // No bucket can cross the threshold in a set no wider than it, and only
+    // an aggregate already present is lifted otherwise.
+    if facts.len() <= FACT_DOMAIN_PRECISE_MAX
+        && !facts
+            .iter()
+            .any(|fact| matches!(fact, FactVersionRef::DomainGeneration(_)))
+    {
+        return false;
+    }
     let mut precise: rustc_hash::FxHashMap<BucketKey, usize> = rustc_hash::FxHashMap::default();
     let mut already_lifted: rustc_hash::FxHashSet<BucketKey> = rustc_hash::FxHashSet::default();
     for fact in facts.iter() {
@@ -541,24 +550,26 @@ impl FactReadSet {
     /// canonical set — there is exactly one canonicaliser.
     #[inline]
     pub fn absorb_canonical_signature(&mut self, signature: &Arc<[FactVersionRef]>) {
+        self.absorb_canonical_signature_verified_once(signature, &std::cell::OnceCell::new());
+    }
+
+    /// [`Self::absorb_canonical_signature`] sharing one order verification
+    /// across every read set the witness is replayed into. A read set that
+    /// already holds the run returns before the verification is demanded, so
+    /// a repeated warm replay costs no work proportional to its width.
+    #[inline]
+    pub fn absorb_canonical_signature_verified_once<'a>(
+        &mut self,
+        signature: &'a Arc<[FactVersionRef]>,
+        verified: &std::cell::OnceCell<Option<VerifiedCanonicalRun<'a>>>,
+    ) {
         if signature.is_empty() || self.recently_absorbed(signature) {
             return;
         }
-        match VerifiedCanonicalRun::verify(signature) {
+        match verified.get_or_init(|| VerifiedCanonicalRun::verify(signature)) {
             Some(run) => self.canonical_runs.push(Arc::clone(run.0)),
             None => self.observe_borrowed_signature(signature),
         }
-    }
-
-    /// [`Self::absorb_canonical_signature`] for a run whose order a caller
-    /// already verified, so a witness replayed into several read sets is
-    /// verified once.
-    #[inline]
-    pub fn absorb_verified_run(&mut self, run: &VerifiedCanonicalRun<'_>) {
-        if run.0.is_empty() || self.recently_absorbed(run.0) {
-            return;
-        }
-        self.canonical_runs.push(Arc::clone(run.0));
     }
 
     /// Whether one of the last [`INLINE_CAPACITY`] absorbed runs is
@@ -566,21 +577,31 @@ impl FactReadSet {
     /// order; replaying it must not grow live storage for each warm read.
     #[inline]
     fn recently_absorbed(&self, signature: &Arc<[FactVersionRef]>) -> bool {
+        let recent =
+            &self.canonical_runs[self.canonical_runs.len().saturating_sub(INLINE_CAPACITY)..];
         let mut comparisons = 0;
-        let seen = self
-            .canonical_runs
-            .iter()
-            .rev()
-            .take(INLINE_CAPACITY)
-            .any(|run| {
-                comparisons += 1;
-                Arc::ptr_eq(run, signature)
-                    || (run.len() == signature.len()
-                        && run.iter().zip(signature.iter()).all(|(left, right)| {
-                            comparisons += 1;
-                            left == right
-                        }))
-            });
+        let mut seen = false;
+        for run in recent.iter().rev() {
+            comparisons += 1;
+            if Arc::ptr_eq(run, signature) {
+                seen = true;
+                break;
+            }
+            if run.len() == signature.len() {
+                let mut equal = true;
+                for (left, right) in run.iter().zip(signature.iter()) {
+                    comparisons += 1;
+                    if left != right {
+                        equal = false;
+                        break;
+                    }
+                }
+                if equal {
+                    seen = true;
+                    break;
+                }
+            }
+        }
         record_signature_work(comparisons);
         seen
     }
@@ -689,6 +710,19 @@ impl FactReadSet {
         if self.mutation_unstable {
             return FactReadSetFinalise::MutationUnstable;
         }
+        // A scope that only replayed one completed witness seals as that
+        // witness: canonicalising it again would rebuild the same facts.
+        if self.observations.is_empty()
+            && self.canonical_runs.len() == 1
+            && seals_unchanged(&self.canonical_runs[0])
+        {
+            let arc = self.canonical_runs.pop().expect("exactly one absorbed run");
+            return if self.non_cacheable_propagation.is_some() {
+                FactReadSetFinalise::NonCacheable(arc)
+            } else {
+                FactReadSetFinalise::Ok(arc)
+            };
+        }
         // Canonicalise so two tracers that observed the same set of facts
         // in different orders produce byte-identical signatures: sort +
         // dedup the local observations under the derived total order, then
@@ -796,11 +830,18 @@ impl FactReadSetCell {
         self.0.borrow_mut().absorb_canonical_signature(signature);
     }
 
-    /// Absorb a verified canonical run through `&self`. See
-    /// [`FactReadSet::absorb_verified_run`].
+    /// Absorb a canonical witness through `&self`, sharing one order
+    /// verification. See
+    /// [`FactReadSet::absorb_canonical_signature_verified_once`].
     #[inline]
-    pub fn absorb_verified_run(&self, run: &VerifiedCanonicalRun<'_>) {
-        self.0.borrow_mut().absorb_verified_run(run);
+    pub fn absorb_canonical_signature_verified_once<'a>(
+        &self,
+        signature: &'a Arc<[FactVersionRef]>,
+        verified: &std::cell::OnceCell<Option<VerifiedCanonicalRun<'a>>>,
+    ) {
+        self.0
+            .borrow_mut()
+            .absorb_canonical_signature_verified_once(signature, verified);
     }
 
     /// The mark of everything observed so far, through `&self`. See
@@ -900,6 +941,21 @@ impl FactReadSetCell {
 /// the first level, the cut points are positions in the canonical order,
 /// and the returned top level is itself canonical, so it absorbs into an
 /// enclosing tracer as a canonical run like any finalised signature.
+/// Whether sealing the canonical `run` alone reproduces it: no receipt in
+/// it can consume another, no domain can lift or already holds an
+/// aggregate, and it is too narrow to page.
+fn seals_unchanged(run: &[FactVersionRef]) -> bool {
+    run.len() <= FACT_PAGE_WIDTH.min(FACT_DOMAIN_PRECISE_MAX)
+        && run
+            .iter()
+            .filter(|fact| matches!(fact, FactVersionRef::Receipt(_)))
+            .nth(1)
+            .is_none()
+        && !run
+            .iter()
+            .any(|fact| matches!(fact, FactVersionRef::DomainGeneration(_)))
+}
+
 fn page_canonical(entries: Vec<FactVersionRef>) -> Vec<FactVersionRef> {
     page_canonical_at_width(entries, FACT_PAGE_WIDTH)
 }

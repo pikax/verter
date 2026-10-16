@@ -17,12 +17,15 @@ import {
 
 import {
   E2E_CI_SHARD_COUNT,
+  E2E_CI_SHARD_COUNTS,
+  E2E_CI_TIERS,
   E2E_FIXTURE_WEIGHTS,
   EDITOR_ACCEPTANCE_ROUTES,
   EXTENSION_ACCEPTANCE_ROUTES,
   NON_REQUIRED_E2E_ROUTES,
   STANDARD_E2E_FIXTURES,
   TYPE_PROVIDER_ROUTES,
+  buildE2eCiRouteInventory,
   buildE2eCiShards,
   buildE2eRouteInventory,
   buildGitHubActionsMatrix,
@@ -56,18 +59,33 @@ describe("VS Code E2E route inventory", () => {
     expect(routes.filter((route) => route.typeProvider === "off")).toHaveLength(2);
     expect(new Set(labels).size).toBe(labels.length);
 
-    // The CI matrix is the required inventory, grouped into runner shards: every
-    // required route lands in exactly one shard and nothing outside it does.
-    expect(matrix.include).toHaveLength(E2E_CI_SHARD_COUNT);
-    const scheduled = matrix.include.flatMap((entry) => selectE2eRoutesByLabels(entry.routes));
-    const required = buildRequiredE2eRouteInventory();
-    expect(scheduled.map(e2eRouteLabel).sort()).toEqual(required.map(e2eRouteLabel).sort());
-    expect(matrix.include.map((entry) => entry.shard)).toEqual(
-      Array.from({ length: E2E_CI_SHARD_COUNT }, (_, index) => String(index + 1)),
-    );
-    for (const entry of matrix.include) {
-      expect(entry.shard_count).toBe(String(E2E_CI_SHARD_COUNT));
+    // The CI matrices are the required inventory, split into the pull request
+    // tier and the tsserver tier (the scheduled `tsserver nightly` workflow)
+    // and grouped into runner shards: every required route lands in exactly
+    // one shard of exactly one tier, and nothing outside it does.
+    expect(matrix).toEqual(buildGitHubActionsMatrix("pr"));
+    const scheduled: string[] = [];
+    for (const tier of E2E_CI_TIERS) {
+      const tierMatrix = buildGitHubActionsMatrix(tier);
+      const count = E2E_CI_SHARD_COUNTS[tier];
+      expect(tierMatrix.include).toHaveLength(count);
+      expect(tierMatrix.include.map((entry) => entry.shard)).toEqual(
+        Array.from({ length: count }, (_, index) => String(index + 1)),
+      );
+      for (const entry of tierMatrix.include) {
+        expect(entry.shard_count).toBe(String(count));
+        for (const route of selectE2eRoutesByLabels(entry.routes)) {
+          const engine = route.typeProvider;
+          expect(engine === "tsserver" || engine === "editor-tsserver", e2eRouteLabel(route)).toBe(
+            tier === "tsserver",
+          );
+          scheduled.push(e2eRouteLabel(route));
+        }
+      }
     }
+    const required = buildRequiredE2eRouteInventory();
+    expect(scheduled.sort()).toEqual(required.map(e2eRouteLabel).sort());
+    expect(E2E_CI_SHARD_COUNT).toBe(E2E_CI_SHARD_COUNTS.pr);
   });
 
   describe("CI shards", () => {
@@ -80,41 +98,50 @@ describe("VS Code E2E route inventory", () => {
       );
     });
 
-    it("bin-packs the required routes by duration weight into balanced, deterministic shards", () => {
-      const shards = buildE2eCiShards();
-      const required = buildRequiredE2eRouteInventory();
+    it.each(E2E_CI_TIERS)(
+      "bin-packs the %s tier by duration weight into balanced, deterministic shards",
+      (tier) => {
+        const count = E2E_CI_SHARD_COUNTS[tier];
+        const shards = buildE2eCiShards(count, tier);
+        const required = buildE2eCiRouteInventory(tier);
 
-      expect(shards).toHaveLength(E2E_CI_SHARD_COUNT);
-      expect(shards.every((shard) => shard.routes.length > 0)).toBe(true);
-      expect(shards.flatMap((shard) => shard.routes.map(e2eRouteLabel)).sort()).toEqual(
-        required.map(e2eRouteLabel).sort(),
-      );
-      for (const { route } of NON_REQUIRED_E2E_ROUTES) {
-        expect(shards.flatMap((shard) => shard.routes)).not.toContainEqual(route);
-      }
+        expect(shards).toHaveLength(count);
+        expect(shards.every((shard) => shard.routes.length > 0)).toBe(true);
+        expect(shards.flatMap((shard) => shard.routes.map(e2eRouteLabel)).sort()).toEqual(
+          required.map(e2eRouteLabel).sort(),
+        );
+        for (const { route } of NON_REQUIRED_E2E_ROUTES) {
+          expect(shards.flatMap((shard) => shard.routes)).not.toContainEqual(route);
+        }
 
-      // Balanced: the heaviest shard is within two weight units of the lightest.
-      // A naive `index % shardCount` assignment leaves the four parity routes
-      // (the heaviest by far) stacked on the same shards and fails this bound.
-      const loads = shards.map((shard) =>
-        shard.routes.reduce((sum, r) => sum + e2eRouteWeight(r), 0),
-      );
-      expect(Math.max(...loads) - Math.min(...loads)).toBeLessThanOrEqual(2);
-      const heaviest = Math.max(...required.map(e2eRouteWeight));
-      const naive = Array.from({ length: E2E_CI_SHARD_COUNT }, (_, shard) =>
-        required
-          .filter((_, index) => index % E2E_CI_SHARD_COUNT === shard)
-          .reduce((sum, r) => sum + e2eRouteWeight(r), 0),
-      );
-      expect(Math.max(...naive) - Math.min(...naive)).toBeGreaterThanOrEqual(heaviest);
+        // Balanced: the heaviest shard is within two weight units of the lightest.
+        // A naive `index % shardCount` assignment leaves the four parity routes
+        // (the heaviest by far) stacked on the same shards and fails this bound.
+        const loads = shards.map((shard) =>
+          shard.routes.reduce((sum, r) => sum + e2eRouteWeight(r), 0),
+        );
+        expect(Math.max(...loads) - Math.min(...loads)).toBeLessThanOrEqual(2);
+        // The pull request tier's inventory order stacks the parity routes so a
+        // naive split cannot balance it (the tsserver tier's order happens to
+        // spread them, so the contrast is shown on the pr tier only).
+        if (tier === "pr") {
+          const heaviest = Math.max(...required.map(e2eRouteWeight));
+          const naive = Array.from({ length: count }, (_, shard) =>
+            required
+              .filter((_, index) => index % count === shard)
+              .reduce((sum, r) => sum + e2eRouteWeight(r), 0),
+          );
+          expect(Math.max(...naive) - Math.min(...naive)).toBeGreaterThanOrEqual(heaviest);
+        }
 
-      // Deterministic: the same inventory always yields the same partition.
-      expect(buildE2eCiShards()).toEqual(shards);
-    });
+        // Deterministic: the same inventory always yields the same partition.
+        expect(buildE2eCiShards(count, tier)).toEqual(shards);
+      },
+    );
 
     it("refuses a shard count that cannot hold the inventory", () => {
       expect(() => buildE2eCiShards(0)).toThrow(/shard count/);
-      expect(() => buildE2eCiShards(buildRequiredE2eRouteInventory().length + 1)).toThrow(
+      expect(() => buildE2eCiShards(buildE2eCiRouteInventory("pr").length + 1)).toThrow(
         /shard count/,
       );
     });

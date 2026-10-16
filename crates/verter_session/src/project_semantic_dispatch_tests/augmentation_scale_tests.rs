@@ -798,19 +798,35 @@ fn probe_answer(host: &VerterHost, size: usize, global: bool) {
         .resolve_named_symbol("/scenario.ts", "Probe", Some(ProjectionMode::Expanded))
         .expect("probe answers");
     let mut pending = vec![node.id()];
-    let mut members = 0usize;
+    let mut actual = BTreeSet::new();
     while let Some(node) = pending.pop() {
         match graph.node_data(node).as_deref().expect("live result") {
             SemanticNodeData::Union(arms) => pending.extend(arms.iter().copied()),
             SemanticNodeData::Alias(inner) => pending.push(*inner),
-            SemanticNodeData::Literal(_) => members += 1,
+            SemanticNodeData::Literal(LiteralValue::String(value)) if global => {
+                actual.insert(value.to_string());
+            }
+            SemanticNodeData::Literal(LiteralValue::Number(value)) if !global => {
+                actual.insert(value.to_string());
+            }
             other => panic!("size={size}, global={global}: incomplete answer {other:?}"),
         }
     }
+    let mut expected: BTreeSet<String> = (0..size)
+        .map(|i| {
+            if global {
+                format!("t{i}")
+            } else {
+                i.to_string()
+            }
+        })
+        .collect();
+    if !global {
+        expected.insert("-1".to_owned());
+    }
     assert_eq!(
-        members,
-        if global { size } else { size + 1 },
-        "size={size}, global={global}: every contributor must answer"
+        actual, expected,
+        "size={size}, global={global}: every contributor must answer with its own value"
     );
 }
 

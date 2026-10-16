@@ -569,6 +569,20 @@ struct LiveRootRegistry {
     released: std::sync::atomic::AtomicBool,
 }
 
+/// Replace the retirements a sweep accounted for with the versions it
+/// kept, preserving every retirement noted while it walked.
+///
+/// A retirement can land on a chain the sweep already walked; overwriting
+/// the counter with `kept` would lose it, leaving the counter at zero with
+/// a retained version, so the release-time sweep would never run for it.
+/// A concurrently noted retirement the walk also saw is counted twice,
+/// which costs at most one extra sweep.
+fn reconcile_unreclaimed_retirements(counter: &AtomicU64, noted_before_walk: u64, kept: usize) {
+    let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        Some(current.saturating_sub(noted_before_walk) + kept as u64)
+    });
+}
+
 /// [`LiveRootRegistry`]'s guarded state.
 #[derive(Debug, Default)]
 struct RootRegistryState {
@@ -1398,6 +1412,7 @@ impl FileArtifactStore {
     /// three versioned membership domains.
     pub fn reclaim_retired_versions(&self) -> usize {
         let retention = self.retention_epochs();
+        let noted_before_walk = self.unreclaimed_retirements.load(Ordering::Relaxed);
         self.retirements_since_reclaim.store(0, Ordering::Relaxed);
         let mut reclaimed = 0usize;
         let mut kept = 0usize;
@@ -1430,8 +1445,7 @@ impl FileArtifactStore {
                 .count();
             !slot.is_empty()
         });
-        self.unreclaimed_retirements
-            .store(kept as u64, Ordering::Relaxed);
+        reconcile_unreclaimed_retirements(&self.unreclaimed_retirements, noted_before_walk, kept);
         reclaimed
     }
 

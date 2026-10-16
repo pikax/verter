@@ -36,6 +36,25 @@ use verter_session_query::type_solver::arena::PrimitiveKind;
 
 use super::ProjectSemanticDispatch;
 
+/// Whether an intersection of `category` is an intersection TYPE — one the
+/// checker reads by the intersection rules — rather than a declaration's
+/// heritage or an overload group, which are signature lists of one symbol.
+fn intersection_type_category(category: CompositeOriginCategory) -> bool {
+    match category {
+        CompositeOriginCategory::Heritage
+        | CompositeOriginCategory::OverloadGroup
+        | CompositeOriginCategory::MergedOverloadGroup => false,
+        CompositeOriginCategory::Canonical(_)
+        | CompositeOriginCategory::CanonicalUnproven
+        | CompositeOriginCategory::AuthoredShell
+        | CompositeOriginCategory::OrderedCarrier
+        | CompositeOriginCategory::PreservingRebuild
+        | CompositeOriginCategory::QuerySubject => true,
+        #[cfg(any(test, feature = "test-support"))]
+        CompositeOriginCategory::TestFixture => true,
+    }
+}
+
 fn kernel_kind(kind: GraphSignatureKind) -> SignatureKind {
     match kind {
         GraphSignatureKind::Call => SignatureKind::Call,
@@ -303,6 +322,45 @@ impl<'w, 'a, 'd, C: crate::resolver_core::ResolverCapabilities> Walk<'w, 'a, 'd,
             .strict_null_checks
     }
 
+    /// The members of an intersection type with every member that is itself
+    /// an intersection type — written, or named by an alias or a value's
+    /// type — spread in place, as the checker's `getIntersectionType`
+    /// flattens them: `A & (B & K)` has the members `A`, `B` and `K`, so the
+    /// mixin rule reads each constructor (`typeof M1(M0(Base))` mixes both
+    /// layers into `Base`'s construct signature). Iterative, so an
+    /// intersection nested N deep is N member reads.
+    fn flattened_intersection_members(&self, members: Vec<SemanticNodeId>) -> Vec<SemanticNodeId> {
+        let graph = self.dispatch().graph();
+        let mut flattened = Vec::with_capacity(members.len());
+        let mut seen = FxHashSet::default();
+        let mut pending: Vec<SemanticNodeId> = members.into_iter().rev().collect();
+        while let Some(member) = pending.pop() {
+            if !seen.insert(member) {
+                continue;
+            }
+            let mut settled = self.dispatch().resolve_signature_source_carrier(
+                member,
+                ProjectionReductionContext::structural_transit(),
+            );
+            let mut aliases = FxHashSet::default();
+            while let Some(SemanticNodeData::Alias(target)) = graph.node_data(settled).as_deref() {
+                if !aliases.insert(*target) {
+                    break;
+                }
+                settled = *target;
+            }
+            match graph.node_data(settled).as_deref() {
+                Some(SemanticNodeData::Intersection(nested))
+                    if intersection_type_category(nested.origin_category()) =>
+                {
+                    pending.extend(nested.iter().rev().copied());
+                }
+                _ => flattened.push(member),
+            }
+        }
+        flattened
+    }
+
     fn discover(&mut self, node: SemanticNodeId) -> Found {
         // A lib runtime nominal's builtin-sentinel carrier is TERMINAL: it
         // names a global interface, not a declaration with a body, so the
@@ -387,6 +445,11 @@ impl<'w, 'a, 'd, C: crate::resolver_core::ResolverCapabilities> Walk<'w, 'a, 'd,
                 let category = members.origin_category();
                 let members: Vec<SemanticNodeId> = members.iter().copied().collect();
                 drop(data);
+                let members = if intersection_type_category(category) {
+                    self.flattened_intersection_members(members)
+                } else {
+                    members
+                };
                 let mut lists = Vec::with_capacity(members.len());
                 for member in members {
                     lists.push(self.discover(member)?);

@@ -168,7 +168,7 @@ impl SemanticQueryKeyDigest {
         let mut hasher = rustc_hash::FxHasher::default();
         canonical.hash(&mut hasher);
         Self {
-            variant: std::mem::discriminant(&canonical),
+            variant: std::mem::discriminant(canonical.as_ref()),
             hash: hasher.finish(),
         }
     }
@@ -177,43 +177,32 @@ impl SemanticQueryKeyDigest {
 #[cfg(any(test, feature = "test-support"))]
 fn canonicalise_for_digest(
     key: &crate::semantic_query::SemanticQueryKey,
-) -> crate::semantic_query::SemanticQueryKey {
+) -> std::borrow::Cow<'_, crate::semantic_query::SemanticQueryKey> {
+    use std::borrow::Cow;
     use std::sync::Arc;
 
     use crate::semantic_query::{PathSegment, SemanticQueryKey};
     match key {
-        SemanticQueryKey::ProjectMember { base, member, mode } => SemanticQueryKey::ProjectPath {
-            base: *base,
-            path: Arc::from(
-                vec![PathSegment::Member(
-                    crate::semantic_query::PropertyKey::identifier(Arc::clone(member)),
-                )]
-                .into_boxed_slice(),
-            ),
-            context: crate::semantic_query::ProjectionReductionContext::published(*mode),
-        },
-        SemanticQueryKey::IndexedAccess { base, index, mode } => SemanticQueryKey::ProjectPath {
-            base: *base,
-            path: Arc::from(vec![PathSegment::Index(index.clone())].into_boxed_slice()),
-            context: crate::semantic_query::ProjectionReductionContext::published(*mode),
-        },
-        SemanticQueryKey::ReduceUnion {
-            members,
-            nullability,
-        } => SemanticQueryKey::ReduceUnion {
-            members: Arc::clone(members),
-            nullability: *nullability,
-        },
-        SemanticQueryKey::ReduceIntersection {
-            input,
-            purpose,
-            context,
-        } => SemanticQueryKey::ReduceIntersection {
-            input: input.clone(),
-            purpose: *purpose,
-            context: context.clone(),
-        },
-        other => other.clone(),
+        SemanticQueryKey::ProjectMember { base, member, mode } => {
+            Cow::Owned(SemanticQueryKey::ProjectPath {
+                base: *base,
+                path: Arc::from(
+                    vec![PathSegment::Member(
+                        crate::semantic_query::PropertyKey::identifier(Arc::clone(member)),
+                    )]
+                    .into_boxed_slice(),
+                ),
+                context: crate::semantic_query::ProjectionReductionContext::published(*mode),
+            })
+        }
+        SemanticQueryKey::IndexedAccess { base, index, mode } => {
+            Cow::Owned(SemanticQueryKey::ProjectPath {
+                base: *base,
+                path: Arc::from(vec![PathSegment::Index(index.clone())].into_boxed_slice()),
+                context: crate::semantic_query::ProjectionReductionContext::published(*mode),
+            })
+        }
+        other => Cow::Borrowed(other),
     }
 }
 
@@ -2441,6 +2430,9 @@ pub fn prepared_decl_body_is_closed<C: crate::resolver_core::ResolverCapabilitie
     // chain (true recursion — including one that round-trips through a
     // recipe escape's lowering and a key-domain gate's fresh walk) refuses
     // — UNAVAILABLE, not a proof of openness.
+    let Some(_nesting) = OpennessNesting::enter() else {
+        return ClosednessVerdict::Unavailable;
+    };
     if !dispatch.push_closedness_active(key) {
         return ClosednessVerdict::Unavailable;
     }
@@ -2595,6 +2587,34 @@ fn recipe_key_domain_closedness<C: crate::resolver_core::ResolverCapabilities>(
                 };
             }
             match prepared.name_resolution.get(name.as_str()) {
+                // A class's base names no type when it is a value — a class
+                // expression a variable holds, or the value an `extends`
+                // expression (`extends Mixin(Base)`) registers beside the
+                // class. The base is that value's instance, whose keys are
+                // fixed where the class is declared: a class with no type
+                // parameters of its own reaches no generic through it.
+                Some(target)
+                    if prepared.kind == verter_session_query::declarations::TypeDeclKind::Class
+                        && prepared.type_parameters.is_empty()
+                        && dispatch
+                            .ctx
+                            .prepared_type_decl_return_only(
+                                &target.canonical_id,
+                                target.owner,
+                                &target.symbol_name,
+                            )
+                            .is_none()
+                        && dispatch
+                            .ctx
+                            .prepared_value_decl_return_only(
+                                &target.canonical_id,
+                                target.owner,
+                                &target.symbol_name,
+                            )
+                            .is_some() =>
+                {
+                    ClosednessVerdict::ProvenClosed
+                }
                 Some(target) => prepared_decl_body_is_closed(
                     dispatch,
                     &target.canonical_id,
@@ -3121,20 +3141,56 @@ fn builtin_utility_key_domain_is_closed(decl_name: &str, args: &[KeyDomainBindin
 /// Node budget for the enumeration-domain openness walk
 /// ([`enumeration_domain_node_is_open`]). The walk is a bounded, shallow
 /// typed-IR inspection — it never reduces, substitutes, or loads new
-/// files — so this cap only guards a pathological already-interned
-/// graph; legitimate utility sources resolve in a handful of hops.
+/// files — and visits each node once per position, so this cap only guards
+/// a pathological already-interned graph: an intersection of thousands of
+/// mapped arms, an object of thousands of members, or a heritage chain
+/// hundreds of declarations deep all decide well inside it.
 ///
-/// The budget is ALSO the walk's de-facto stack-depth ceiling (the
-/// openness recursion and the prepared-decl key-domain proofs it
-/// delegates to consume at least one budget unit per nesting level), so
-/// raising it requires a separate recursion-depth bound first: a
-/// 10_000-deep finite `KeyOf` chain overflows a 2 MiB test-thread stack
-/// near ~2048 nested walk frames. A deep-but-provably-closed real-world
-/// chain that exhausts this budget (`Unavailable` ⇒ L1 carrier-stop) is
-/// NOT silently dropped at surface demands: the shallow walker's
-/// `Pick`-carrier surface enumeration (`Frame::FlushObjectFilter`)
-/// still publishes the picked keys from the source's enumerable arms.
-const ENUMERATION_DOMAIN_OPENNESS_NODE_BUDGET: u32 = 256;
+/// The budget is no bound on the native stack: the walk's own children run
+/// on its explicit worklist, and the arms that re-enter it — a nested mapped
+/// type's scoped walk, a conditional or instantiation read, a declaration's
+/// closedness proof — nest at most [`OPENNESS_NESTING_LIMIT`] deep.
+/// A deep-but-provably-closed real-world chain that exhausts either bound
+/// (`Unavailable` ⇒ L1 carrier-stop) is NOT silently dropped at surface
+/// demands: the shallow walker's `Pick`-carrier surface enumeration
+/// (`Frame::FlushObjectFilter`) still publishes the picked keys from the
+/// source's enumerable arms.
+pub const ENUMERATION_DOMAIN_OPENNESS_NODE_BUDGET: u32 = 1 << 16;
+
+/// How deep openness walks may re-enter one another on one thread's native
+/// stack: a nested mapped type's scoped walk, a conditional or
+/// instantiation the walk reads, a declaration's closedness proof. Past it
+/// the question is undecidable — open for a key domain — exactly as when
+/// the node budget runs out.
+const OPENNESS_NESTING_LIMIT: u32 = 256;
+
+thread_local! {
+    /// The openness walks and closedness proofs open on this thread's
+    /// native stack.
+    static OPENNESS_NESTING: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// One level of openness re-entry on this thread's native stack, held
+/// for its extent; `None` past [`OPENNESS_NESTING_LIMIT`].
+struct OpennessNesting;
+
+impl OpennessNesting {
+    fn enter() -> Option<Self> {
+        OPENNESS_NESTING.with(|nesting| {
+            let depth = nesting.get();
+            (depth < OPENNESS_NESTING_LIMIT).then(|| {
+                nesting.set(depth + 1);
+                OpennessNesting
+            })
+        })
+    }
+}
+
+impl Drop for OpennessNesting {
+    fn drop(&mut self) {
+        OPENNESS_NESTING.with(|nesting| nesting.set(nesting.get() - 1));
+    }
+}
 
 /// Enumeration-domain argument index for an OBJECT-FILTER builtin utility
 /// (`Pick` / `Omit`), if `base` names one.
@@ -3924,6 +3980,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> OpenWalk<'a, C> {
         node: SemanticNodeId,
         data: Arc<SemanticNodeData>,
     ) -> bool {
+        let Some(_nesting) = OpennessNesting::enter() else {
+            return self.role.question().undecidable_is_open();
+        };
         match data.as_ref() {
             // --- type parameter: open unless BOUND for this walk ---
             // An unsubstituted outer `TypeParam` is an unbound generic;

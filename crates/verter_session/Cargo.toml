@@ -273,6 +273,7 @@ uuid = { version = "1.23", features = ["rng-getrandom"] }
 
 [dev-dependencies]
 verter_session_query = { workspace = true, features = ["test-support"] }
+serde_json = { workspace = true, features = ["unbounded_depth"] }
 # The retention-account replacement seam the overlay residency tests drive.
 verter_workspace = { path = "../verter_workspace", features = ["test-support"] }
 # Oracle harness snapshot-identity hashing (test-only — the harness lives under

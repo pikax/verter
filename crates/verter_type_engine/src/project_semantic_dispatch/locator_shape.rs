@@ -2676,16 +2676,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             AuthoredBodyLocator::JsdocTypedefBody(typedef) => &typedef.anchor,
             AuthoredBodyLocator::MacroPayload(payload) => &payload.anchor,
         };
-        let slot = self
-            .type_slot_for(
-                Arc::clone(&anchor.canonical_id),
-                anchor.owner,
-                Arc::clone(&anchor.symbol),
-            )
-            .with_symbol_space(semantic_space_for_locator_space(anchor.space));
         let env = self
             .ctx
             .host_view_env_hashes_for(anchor.canonical_id.as_ref());
+        let slot = self
+            .finalize_slot_seed_in_env(
+                crate::semantic_query::DeclarationSlotSeed::new(
+                    Arc::clone(&anchor.canonical_id),
+                    anchor.owner,
+                    Arc::clone(&anchor.symbol),
+                    crate::semantic_query::SemanticSymbolSpace::Type,
+                ),
+                &env,
+            )
+            .with_symbol_space(semantic_space_for_locator_space(anchor.space));
         let key = match LocatorLoweringKey::new_unsubstituted(
             slot,
             locator,

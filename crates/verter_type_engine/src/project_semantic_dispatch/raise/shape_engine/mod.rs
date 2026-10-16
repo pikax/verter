@@ -746,7 +746,9 @@ pub trait RaisedShapeAlgebra {
     /// stays for strings that arrive RAW (the `RawFallback` carrier and
     /// externally-interned `Unknown` nodes).
     fn opaque_sentinel(&mut self, err: &QueryError) -> Self::Out;
-    fn recursive_ref(&mut self, name: Arc<str>) -> Self::Out;
+    /// A recursive reference over its raised type arguments (`Kebab<B>`
+    /// in `Kebab`'s own body names its arguments, as the checker prints it).
+    fn recursive_ref(&mut self, name: Arc<str>, type_arguments: Vec<Self::Out>) -> Self::Out;
     /// A bare `Ref { name, type_arguments }` shell (also the `DeclPlaceholder`
     /// / `DeclRef` shell with empty args, and the `BareRef`/`InstantiationRef`
     /// carriers with raised-or-surface-member-fallback args).

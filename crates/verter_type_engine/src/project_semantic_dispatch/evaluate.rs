@@ -2293,7 +2293,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         args: &[SemanticNodeId],
         context: ProjectionReductionContext,
     ) -> CarrierArgumentsOutcome {
-        let argument_context = self.instantiation_argument_context(base, context);
+        self.evaluate_carrier_arguments_deferring(self.defers_type_arguments(base), args, context)
+    }
+
+    /// [`Self::evaluate_carrier_arguments`] for an owner whose
+    /// [`Self::defers_type_arguments`] answer the caller already read.
+    pub(super) fn evaluate_carrier_arguments_deferring(
+        &self,
+        defers_type_arguments: bool,
+        args: &[SemanticNodeId],
+        context: ProjectionReductionContext,
+    ) -> CarrierArgumentsOutcome {
+        let argument_context = Self::argument_context_for(defers_type_arguments, context);
         let mut completeness = ResultCompleteness::Complete;
         let mut availability = crate::semantic_query::FactStatus::Complete;
         let mut cache_suppress = false;
@@ -2305,7 +2316,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     self.graph().node_data(arg).as_deref(),
                     Some(SemanticNodeData::IndexedAccess { .. })
                 );
-                let outcome = if indexed && !self.defers_type_arguments(base) {
+                let outcome = if indexed && !defers_type_arguments {
                     let probe = self.observe_read(|| {
                         self.evaluate_deferred_outcome(
                             arg,
@@ -2889,6 +2900,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     } else {
                         parent.demand
                     };
+                    if self.evaluates_to_itself(node, context, demand) {
+                        // The operand's one step is paid to this frame, as
+                        // a pushed operand's first step is.
+                        if let Err(reasons) = self.charge_connected_work() {
+                            for frame in frames.iter().rev() {
+                                if frame.recording {
+                                    self.connected_demand.abandon_cost_scope();
+                                }
+                            }
+                            return aborted_evaluation_outcome(&frames, None, reasons);
+                        }
+                        completed_child = Some(EvaluateDeferredOutcome::complete(node));
+                        continue;
+                    }
                     frames.push(DeferredEvaluationFrame::new(
                         node,
                         context,
@@ -2966,6 +2991,46 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
         }
+    }
+
+    /// Whether the evaluator finishes `node` as itself in its first step
+    /// without reading a fact or naming an operand: no arm of the step
+    /// rewrites it and its demand selects no value children. Such an
+    /// evaluation completes as `node` with an empty read set: sealing that
+    /// empty set under the node's own self-root cannot refuse, and a memo
+    /// hit replays no fact. A pushed operand of this kind is therefore
+    /// finished in place, paying only the step a pushed operand pays its
+    /// parent, with no frame, tracer or memo probe of its own.
+    fn evaluates_to_itself(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+        demand: DeferredEvaluationDemand,
+    ) -> bool {
+        let Some(data) = self.graph().node_data(node) else {
+            return false;
+        };
+        let rewritten = match data.as_ref() {
+            SemanticNodeData::Alias(_)
+            | SemanticNodeData::KeyOf { .. }
+            | SemanticNodeData::IndexedAccess { .. }
+            | SemanticNodeData::Mapped { .. }
+            | SemanticNodeData::TypeOf(_)
+            | SemanticNodeData::Conditional { .. }
+            | SemanticNodeData::TemplateLiteral { .. }
+            | SemanticNodeData::Opaque(QueryError::DeclPlaceholder { .. })
+            | SemanticNodeData::BareRef(_)
+            | SemanticNodeData::ImportType(_) => true,
+            // The mapped-index-value arm reads the declaration's kind.
+            SemanticNodeData::InstantiationRef { .. } => {
+                demand == DeferredEvaluationDemand::MappedIndexValue
+            }
+            data => {
+                demand != DeferredEvaluationDemand::Shell
+                    && self.selected_value_children(data, context).is_some()
+            }
+        };
+        !rewritten
     }
 
     fn selected_value_children(

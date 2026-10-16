@@ -1897,6 +1897,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let env = self
             .ctx
             .host_view_env_hashes_for(seed.defining_canonical.as_ref());
+        self.finalize_slot_seed_in_env(seed, &env)
+    }
+
+    /// [`Self::finalize_slot_seed`] under the defining file's env hashes a
+    /// caller already read for that file.
+    pub(super) fn finalize_slot_seed_in_env(
+        &self,
+        seed: crate::semantic_query::DeclarationSlotSeed,
+        env: &verter_session_query::resolution::EnvHashes,
+    ) -> crate::semantic_query::ResolvedDeclSlotIdentity {
         let project_identity = self
             .ctx
             .host_view_project_identity_for(seed.defining_canonical.as_ref())
