@@ -371,7 +371,10 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
         match &mut rebuilt {
             SemanticNodeData::Array { element, .. } => slot(element),
             SemanticNodeData::Tuple { elements, .. } => {
-                let mut values = elements.iter().map(crate::semantic_query::TupleElement::copy).collect::<Vec<_>>();
+                let mut values = elements
+                    .iter()
+                    .map(crate::semantic_query::TupleElement::copy)
+                    .collect::<Vec<_>>();
                 for element in &mut values {
                     slot(&mut element.value);
                 }
@@ -405,7 +408,10 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
                 predicate,
                 ..
             } => {
-                let mut values = params.iter().map(crate::semantic_query::FunctionParam::copy).collect::<Vec<_>>();
+                let mut values = params
+                    .iter()
+                    .map(crate::semantic_query::FunctionParam::copy)
+                    .collect::<Vec<_>>();
                 for param in &mut values {
                     slot(&mut param.ty);
                 }

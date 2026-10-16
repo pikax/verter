@@ -2114,7 +2114,9 @@ fn rebuild_function<C: crate::resolver_core::ResolverCapabilities>(
             is_abstract: dispatch.signature_is_abstract(node),
             params: crate::semantic_query::PayloadArray::from(new_params.into_boxed_slice()),
             return_type: new_return,
-            type_parameters: crate::semantic_query::PayloadArray::from(new_type_params.into_boxed_slice()),
+            type_parameters: crate::semantic_query::PayloadArray::from(
+                new_type_params.into_boxed_slice(),
+            ),
             // Node remapping preserves source provenance — the occurrence
             // verbatim, the declared carrier retargeted at the remapped
             // return.

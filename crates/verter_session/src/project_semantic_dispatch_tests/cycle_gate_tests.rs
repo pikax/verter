@@ -1034,7 +1034,9 @@ mod carrier_descent_tests {
         let inst_base = decl_identity("/dep.ts", "Box");
         let inst_ref = graph.intern_node(SemanticNodeData::InstantiationRef {
             base: inst_base.clone(),
-            args: verter_type_engine::semantic_query::PayloadArray::from(Vec::new().into_boxed_slice()),
+            args: verter_type_engine::semantic_query::PayloadArray::from(
+                Vec::new().into_boxed_slice(),
+            ),
         });
         for carrier in carriers_wrapping(&graph, inst_ref) {
             let mut out: Vec<(DeclIdentity, bool)> = Vec::new();

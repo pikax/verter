@@ -2237,7 +2237,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 params,
                 type_parameters,
                 ..
-            }) => Some((Arc::clone(params.as_arc()), Arc::clone(type_parameters.as_arc()))),
+            }) => Some((
+                Arc::clone(params.as_arc()),
+                Arc::clone(type_parameters.as_arc()),
+            )),
             Some(SemanticNodeData::DeferredCallable(callable)) => {
                 let parts = callable.parts(&ResolveOverloadSetConsumer::witness());
                 Some((Arc::clone(parts.params), Arc::clone(parts.type_parameters)))

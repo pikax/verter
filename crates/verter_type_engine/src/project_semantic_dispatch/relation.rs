@@ -5201,9 +5201,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
         Some((
             first.value,
-            remainder[..arity].iter().map(crate::semantic_query::TupleElement::copy).collect::<Vec<_>>(),
+            remainder[..arity]
+                .iter()
+                .map(crate::semantic_query::TupleElement::copy)
+                .collect::<Vec<_>>(),
             second.value,
-            remainder[arity..].iter().map(crate::semantic_query::TupleElement::copy).collect::<Vec<_>>(),
+            remainder[arity..]
+                .iter()
+                .map(crate::semantic_query::TupleElement::copy)
+                .collect::<Vec<_>>(),
         ))
     }
 
@@ -5345,7 +5351,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 })
             }
             Some(SemanticNodeData::Tuple { elements, .. }) => {
-                let elements = elements.iter().map(crate::semantic_query::TupleElement::copy).collect::<Vec<_>>();
+                let elements = elements
+                    .iter()
+                    .map(crate::semantic_query::TupleElement::copy)
+                    .collect::<Vec<_>>();
                 let mut verdict = assignable(bindings);
                 let mut variadic_key_domain = false;
                 for (index, element) in elements.into_iter().enumerate() {
@@ -5648,7 +5657,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 match self.normalize_tuple_spread(&elements, readonly) {
                     super::build::NormalizedTupleShape::Tuple(elements) => {
                         Some(graph.intern_node(SemanticNodeData::Tuple {
-                            elements: crate::semantic_query::PayloadArray::from(elements.into_boxed_slice()),
+                            elements: crate::semantic_query::PayloadArray::from(
+                                elements.into_boxed_slice(),
+                            ),
                             readonly,
                         }))
                     }
@@ -9891,7 +9902,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 identity.clone(),
                 Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
             ),
-            SemanticNodeData::InstantiationRef { base, args } => (base.clone(), Arc::clone(args.as_arc())),
+            SemanticNodeData::InstantiationRef { base, args } => {
+                (base.clone(), Arc::clone(args.as_arc()))
+            }
             _ => return IdentityCarrierUnwrap::Concrete(id),
         };
         drop(data);
@@ -13941,11 +13954,15 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
                 ) {
                     let (first, first_slice, second, second_slice) = split;
                     let first_slice = graph.intern_node(SemanticNodeData::Tuple {
-                        elements: crate::semantic_query::PayloadArray::from(first_slice.into_boxed_slice()),
+                        elements: crate::semantic_query::PayloadArray::from(
+                            first_slice.into_boxed_slice(),
+                        ),
                         readonly: false,
                     });
                     let second_slice = graph.intern_node(SemanticNodeData::Tuple {
-                        elements: crate::semantic_query::PayloadArray::from(second_slice.into_boxed_slice()),
+                        elements: crate::semantic_query::PayloadArray::from(
+                            second_slice.into_boxed_slice(),
+                        ),
                         readonly: false,
                     });
                     results.push(
@@ -14031,7 +14048,9 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
                     // labels, optionality and rest kept and never readonly
                     // (`sliceTupleType`).
                     let remainder_tuple = graph.intern_node(SemanticNodeData::Tuple {
-                        elements: crate::semantic_query::PayloadArray::from(remainder.into_boxed_slice()),
+                        elements: crate::semantic_query::PayloadArray::from(
+                            remainder.into_boxed_slice(),
+                        ),
                         readonly: false,
                     });
                     if !self.relation_deposit(infer_element, remainder_tuple, occurrence) {

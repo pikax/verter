@@ -489,7 +489,9 @@ fn conditional_any_check_detects_nested_infer_patterns() {
     //     `any extends Wrapper<infer U> ? U : Y`.
     let wrapper = graph.intern_node(SemanticNodeData::InstantiationRef {
         base: DeclIdentity::synthetic("Wrapper"),
-        args: verter_type_engine::semantic_query::PayloadArray::from(vec![infer_u].into_boxed_slice()),
+        args: verter_type_engine::semantic_query::PayloadArray::from(
+            vec![infer_u].into_boxed_slice(),
+        ),
     });
     assert!(
         dispatch

@@ -1231,11 +1231,15 @@ fn property_readonly_modifier_does_not_gate_assignability_in_either_direction() 
         label: None,
     };
     let readonly_tuple = graph.intern_node(SemanticNodeData::Tuple {
-        elements: verter_type_engine::semantic_query::PayloadArray::from(vec![element()].into_boxed_slice()),
+        elements: verter_type_engine::semantic_query::PayloadArray::from(
+            vec![element()].into_boxed_slice(),
+        ),
         readonly: true,
     });
     let mutable_tuple = graph.intern_node(SemanticNodeData::Tuple {
-        elements: verter_type_engine::semantic_query::PayloadArray::from(vec![element()].into_boxed_slice()),
+        elements: verter_type_engine::semantic_query::PayloadArray::from(
+            vec![element()].into_boxed_slice(),
+        ),
         readonly: false,
     });
     let tuple_result =
@@ -4891,7 +4895,9 @@ fn contravariant_infer_candidates_intersect_not_union() {
             return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
                 void_node,
             ),
-            type_parameters: verter_type_engine::semantic_query::PayloadArray::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+            type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+                Vec::<TypeParamDecl>::new().into_boxed_slice(),
+            ),
             signature_span: None,
             return_type_span: None,
             predicate: None,
@@ -5706,7 +5712,9 @@ fn constructor_type_substitutes_bound_infer_inside_signature() {
         return_type: t_ref,
         occurrence: None,
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(t_ref),
-        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+            Vec::<TypeParamDecl>::new().into_boxed_slice(),
+        ),
         signature_span: None,
         return_type_span: None,
         predicate: None,
@@ -5776,13 +5784,17 @@ fn constructor_type_relates_and_binds_infer_return() {
     let ctor_of = |ret: verter_type_engine::semantic_query::SemanticNodeId| {
         let signature = graph.intern_node(SemanticNodeData::Signature {
             kind: verter_type_engine::semantic_query::SignatureKind::Call,
-            params: verter_type_engine::semantic_query::PayloadArray::from(Vec::<FunctionParam>::new().into_boxed_slice()),
+            params: verter_type_engine::semantic_query::PayloadArray::from(
+                Vec::<FunctionParam>::new().into_boxed_slice(),
+            ),
             return_type: ret,
             occurrence: None,
             return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
                 ret,
             ),
-            type_parameters: verter_type_engine::semantic_query::PayloadArray::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+            type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+                Vec::<TypeParamDecl>::new().into_boxed_slice(),
+            ),
             signature_span: None,
             return_type_span: None,
             predicate: None,
@@ -5871,7 +5883,9 @@ fn mapped_constructor_value_substitutes_per_key() {
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
             k_param,
         ),
-        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+            Vec::<TypeParamDecl>::new().into_boxed_slice(),
+        ),
         signature_span: None,
         return_type_span: None,
         predicate: None,
@@ -5971,7 +5985,9 @@ fn constructor_pattern_infer_declaration_shadows_outer_binder() {
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
             any_node,
         ),
-        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+            Vec::<TypeParamDecl>::new().into_boxed_slice(),
+        ),
         signature_span: None,
         return_type_span: None,
         predicate: None,
@@ -5995,7 +6011,9 @@ fn constructor_pattern_infer_declaration_shadows_outer_binder() {
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
             any_node,
         ),
-        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+            Vec::<TypeParamDecl>::new().into_boxed_slice(),
+        ),
         signature_span: None,
         return_type_span: None,
         predicate: None,
@@ -6074,7 +6092,9 @@ fn signature_fixture_nodes(
         return_type: ret,
         occurrence: None,
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(ret),
-        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+            Vec::<TypeParamDecl>::new().into_boxed_slice(),
+        ),
         signature_span: None,
         return_type_span: None,
         predicate: None,
@@ -6289,13 +6309,17 @@ fn signature_kind_semantics_and_cross_producer_parity() {
         use verter_type_engine::semantic_query::{FunctionParam, TypeParamDecl};
         graph.intern_node(SemanticNodeData::Signature {
             kind: SignatureKind::Construct,
-            params: verter_type_engine::semantic_query::PayloadArray::from(Vec::<FunctionParam>::new().into_boxed_slice()),
+            params: verter_type_engine::semantic_query::PayloadArray::from(
+                Vec::<FunctionParam>::new().into_boxed_slice(),
+            ),
             return_type: infer_r,
             occurrence: None,
             return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
                 infer_r,
             ),
-            type_parameters: verter_type_engine::semantic_query::PayloadArray::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+            type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+                Vec::<TypeParamDecl>::new().into_boxed_slice(),
+            ),
             signature_span: None,
             return_type_span: None,
             predicate: None,

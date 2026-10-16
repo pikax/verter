@@ -471,7 +471,9 @@ fn utility_enumeration_domain_open_for_unbound_generic_closed_for_concrete() {
             whole_hash: HashValue::default(),
             decl_name: Arc::from("PropsBase"),
         },
-        args: verter_type_engine::semantic_query::PayloadArray::from(vec![tparam].into_boxed_slice()),
+        args: verter_type_engine::semantic_query::PayloadArray::from(
+            vec![tparam].into_boxed_slice(),
+        ),
     });
     assert!(
         verter_type_engine::project_semantic_dispatch::raise::utility_enumeration_domain_is_open_or_unknown(
@@ -505,7 +507,9 @@ fn utility_enumeration_domain_open_for_unbound_generic_closed_for_concrete() {
             whole_hash: HashValue::default(),
             decl_name: Arc::from("PropsBase"),
         },
-        args: verter_type_engine::semantic_query::PayloadArray::from(vec![concrete_array].into_boxed_slice()),
+        args: verter_type_engine::semantic_query::PayloadArray::from(
+            vec![concrete_array].into_boxed_slice(),
+        ),
     });
     assert!(
         verter_type_engine::project_semantic_dispatch::raise::utility_enumeration_domain_is_open_or_unknown(
@@ -791,7 +795,9 @@ fn utility_enumeration_domain_mapped_name_remap_binder_bound_outer_open() {
             quasis: Arc::from(
                 vec![Arc::<str>::from("on"), Arc::<str>::from("")].into_boxed_slice(),
             ),
-            expressions: verter_type_engine::semantic_query::PayloadArray::from(vec![interpolant].into_boxed_slice()),
+            expressions: verter_type_engine::semantic_query::PayloadArray::from(
+                vec![interpolant].into_boxed_slice(),
+            ),
         })
     };
 
@@ -823,7 +829,9 @@ fn utility_enumeration_domain_mapped_name_remap_binder_bound_outer_open() {
     // CLOSED control: a CONCRETE name-remap (no interpolant).
     let closed_remap = graph.intern_node(SemanticNodeData::TemplateLiteral {
         quasis: Arc::from(vec![Arc::<str>::from("on")].into_boxed_slice()),
-        expressions: verter_type_engine::semantic_query::PayloadArray::from(Vec::new().into_boxed_slice()),
+        expressions: verter_type_engine::semantic_query::PayloadArray::from(
+            Vec::new().into_boxed_slice(),
+        ),
     });
     assert!(
         !verter_type_engine::project_semantic_dispatch::raise::utility_enumeration_domain_is_open_or_unknown(

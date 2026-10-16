@@ -95,7 +95,9 @@ fn signature_with_carrier(
         kind,
         params: verter_type_engine::semantic_query::PayloadArray::from(params.into_boxed_slice()),
         return_type,
-        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(type_parameters.into_boxed_slice()),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+            type_parameters.into_boxed_slice(),
+        ),
         occurrence: Some(occurrence(name, ordinal)),
         return_carrier,
         signature_span: None,
@@ -1355,7 +1357,9 @@ fn anonymous_signature(
         kind: SignatureKind::Call,
         params: verter_type_engine::semantic_query::PayloadArray::from(params.into_boxed_slice()),
         return_type,
-        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(type_parameters.into_boxed_slice()),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+            type_parameters.into_boxed_slice(),
+        ),
         occurrence: None,
         return_carrier: SignatureReturnCarrier::Declared(return_type),
         signature_span: None,

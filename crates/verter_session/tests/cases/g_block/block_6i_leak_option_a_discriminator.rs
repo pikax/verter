@@ -201,7 +201,9 @@ fn shallow_walker_substitutes_mapper_binder_per_enumerated_key() {
 
     let graph = host.project_type_store().semantic_graph();
     let (decl_identity, args) = match graph.node_data(carrier).as_deref() {
-        Some(SemanticNodeData::InstantiationRef { base, args }) => (base.clone(), Arc::from(&args[..])),
+        Some(SemanticNodeData::InstantiationRef { base, args }) => {
+            (base.clone(), Arc::from(&args[..]))
+        }
         other => panic!(
             "expected `InstantiationRef` carrier from StructuralTransit(Navigate) lowering, \
              got {other:?}"

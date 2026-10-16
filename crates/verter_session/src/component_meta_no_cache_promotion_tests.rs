@@ -1848,7 +1848,9 @@ fn conditional_relation_budget_trip_folds_partial_and_refuses_relation_memo() {
         };
         graph.intern_node(SemanticNodeData::InstantiationRef {
             base: partial_builtin,
-            args: verter_type_engine::semantic_query::PayloadArray::from(vec![arg].into_boxed_slice()),
+            args: verter_type_engine::semantic_query::PayloadArray::from(
+                vec![arg].into_boxed_slice(),
+            ),
         })
     };
     let check = mk_partial_instref("cond_check_arg");

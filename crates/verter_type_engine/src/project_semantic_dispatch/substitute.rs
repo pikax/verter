@@ -799,7 +799,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         node,
                         SemanticNodeData::ClassExpressionInstance {
                             identity: Arc::clone(identity),
-                            type_arguments: crate::semantic_query::PayloadArray::from(new_arguments.into_boxed_slice()),
+                            type_arguments: crate::semantic_query::PayloadArray::from(
+                                new_arguments.into_boxed_slice(),
+                            ),
                             surface: sub,
                         },
                     ),
@@ -900,7 +902,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     self.graph().intern_preserving_scope(
                         node,
                         SemanticNodeData::MergedDecl {
-                            contributors: crate::semantic_query::PayloadArray::from(new_contributors.into_boxed_slice()),
+                            contributors: crate::semantic_query::PayloadArray::from(
+                                new_contributors.into_boxed_slice(),
+                            ),
                         },
                     ),
                     true,
@@ -957,7 +961,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         self.graph().intern_preserving_scope(
                             node,
                             SemanticNodeData::Tuple {
-                                elements: crate::semantic_query::PayloadArray::from(normalized.into_boxed_slice()),
+                                elements: crate::semantic_query::PayloadArray::from(
+                                    normalized.into_boxed_slice(),
+                                ),
                                 readonly: *readonly,
                             },
                         ),
@@ -1184,7 +1190,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         node,
                         SemanticNodeData::TemplateLiteral {
                             quasis: Arc::clone(quasis),
-                            expressions: crate::semantic_query::PayloadArray::from(new_expressions.into_boxed_slice()),
+                            expressions: crate::semantic_query::PayloadArray::from(
+                                new_expressions.into_boxed_slice(),
+                            ),
                         },
                     ),
                     true,
@@ -1481,7 +1489,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         node,
                         SemanticNodeData::InstantiationRef {
                             base: base.clone(),
-                            args: crate::semantic_query::PayloadArray::from(new_args.into_boxed_slice()),
+                            args: crate::semantic_query::PayloadArray::from(
+                                new_args.into_boxed_slice(),
+                            ),
                         },
                     ),
                     true,

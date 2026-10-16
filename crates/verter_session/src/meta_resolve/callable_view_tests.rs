@@ -66,7 +66,9 @@ fn function_with_return_span(
         kind: verter_type_engine::semantic_query::SignatureKind::Call,
         params: verter_type_engine::semantic_query::PayloadArray::from(params.into_boxed_slice()),
         return_type,
-        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(Vec::new().into_boxed_slice()),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+            Vec::new().into_boxed_slice(),
+        ),
         occurrence: None,
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
             return_type,
@@ -100,7 +102,9 @@ fn alias(graph: &SemanticGraphStore, inner: SemanticNodeId) -> SemanticNodeId {
 
 fn tuple(graph: &SemanticGraphStore, elements: Vec<TupleElement>) -> SemanticNodeId {
     graph.intern_node(SemanticNodeData::Tuple {
-        elements: verter_type_engine::semantic_query::PayloadArray::from(elements.into_boxed_slice()),
+        elements: verter_type_engine::semantic_query::PayloadArray::from(
+            elements.into_boxed_slice(),
+        ),
         readonly: false,
     })
 }

@@ -1959,7 +1959,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 params,
                 type_parameters,
                 ..
-            }) => (Arc::clone(params.as_arc()), Arc::clone(type_parameters.as_arc())),
+            }) => (
+                Arc::clone(params.as_arc()),
+                Arc::clone(type_parameters.as_arc()),
+            ),
             // The sealed index-composed carrier: applicability reads its
             // parameters and binders, never a return type — it has none.
             Some(SemanticNodeData::DeferredCallable(callable)) => {
@@ -4113,14 +4116,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     .map(|element| self.call_shape_transform(element.value, policy, memo))
                     .collect::<Vec<_>>();
                 if policy == ConstParamPolicy::Const {
-                    let mut mapped = elements.iter().map(crate::semantic_query::TupleElement::copy).collect::<Vec<_>>();
+                    let mut mapped = elements
+                        .iter()
+                        .map(crate::semantic_query::TupleElement::copy)
+                        .collect::<Vec<_>>();
                     for (element, value) in mapped.iter_mut().zip(values) {
                         element.value = value;
                     }
                     graph.intern_preserving_scope(
                         node,
                         SemanticNodeData::Tuple {
-                            elements: crate::semantic_query::PayloadArray::from(mapped.into_boxed_slice()),
+                            elements: crate::semantic_query::PayloadArray::from(
+                                mapped.into_boxed_slice(),
+                            ),
                             readonly: true,
                         },
                     )
@@ -4498,10 +4506,18 @@ fn tuple_suffix_target(
     match suffix {
         [] => None,
         [only] if only.rest => Some(only.value),
-        _ => Some(graph.intern_node(SemanticNodeData::Tuple {
-            elements: crate::semantic_query::PayloadArray::from(suffix.iter().map(crate::semantic_query::TupleElement::copy).collect::<Vec<_>>().into_boxed_slice()),
-            readonly: false,
-        })),
+        _ => Some(
+            graph.intern_node(SemanticNodeData::Tuple {
+                elements: crate::semantic_query::PayloadArray::from(
+                    suffix
+                        .iter()
+                        .map(crate::semantic_query::TupleElement::copy)
+                        .collect::<Vec<_>>()
+                        .into_boxed_slice(),
+                ),
+                readonly: false,
+            }),
+        ),
     }
 }
 

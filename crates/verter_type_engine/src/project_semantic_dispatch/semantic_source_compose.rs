@@ -904,7 +904,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 kind,
                 params: crate::semantic_query::PayloadArray::from(params.into_boxed_slice()),
                 return_type,
-                type_parameters: crate::semantic_query::PayloadArray::from(type_parameters.into_boxed_slice()),
+                type_parameters: crate::semantic_query::PayloadArray::from(
+                    type_parameters.into_boxed_slice(),
+                ),
                 // The fact-composition path does not carry occurrence-grade
                 // provenance today; the overload-set producer treats an
                 // occurrence-less candidate as an honest `Miss`.

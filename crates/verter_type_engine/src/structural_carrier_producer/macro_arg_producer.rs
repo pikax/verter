@@ -1032,7 +1032,9 @@ fn lower_function_signature(
             kind,
             params: crate::semantic_query::PayloadArray::from(params.into_boxed_slice()),
             return_type,
-            type_parameters: crate::semantic_query::PayloadArray::from(type_parameters.into_boxed_slice()),
+            type_parameters: crate::semantic_query::PayloadArray::from(
+                type_parameters.into_boxed_slice(),
+            ),
             occurrence: None,
             return_carrier,
             signature_span: func.spans.signature,

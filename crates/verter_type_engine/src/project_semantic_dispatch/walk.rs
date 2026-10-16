@@ -735,7 +735,11 @@ impl ShallowSurface {
                 .iter()
                 .map(ShallowSurfaceEntry::clone)
                 .collect(),
-            members: self.members.clone(),
+            members: self
+                .members
+                .iter()
+                .map(ShallowSurfaceMember::clone)
+                .collect(),
             call_signatures: self.call_signatures.clone(),
             construct_signatures: self.construct_signatures.clone(),
             index_signatures: self
@@ -783,7 +787,7 @@ impl ShallowSurfaceEntry {
 /// `merge_role` propagates the surface-merge role (OwnBody / Heritage /
 /// Authored) so the intersection merge can apply own-body-shadows-heritage
 /// ONLY to real interface/class heritage (not authored intersections).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct ShallowSurfaceMember {
     pub key: crate::semantic_query::AuthoredPropertyKey,
     pub value: SemanticNodeId,
@@ -819,6 +823,27 @@ pub struct ShallowSurfaceMember {
     /// materialization; a verbatim single-source carry preserves the source
     /// origin.
     pub excess_origin: verter_type_expr::ExcessPropertyOrigin,
+}
+
+impl ShallowSurfaceMember {
+    /// Copy inside the owning crate; there is no public detached copy of the
+    /// graph operands a member carries.
+    pub(crate) fn clone(&self) -> Self {
+        Self {
+            key: self.key.clone(),
+            value: self.value,
+            optional: self.optional,
+            readonly: self.readonly,
+            method_kind: self.method_kind,
+            has_implementation_body: self.has_implementation_body,
+            visibility: self.visibility,
+            declared_in_macro_type_arg: self.declared_in_macro_type_arg,
+            merge_role: self.merge_role,
+            spans: self.spans,
+            declaration_origin: self.declaration_origin.clone(),
+            excess_origin: self.excess_origin,
+        }
+    }
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -880,7 +905,7 @@ impl ShallowSurface {
     /// signatures and the keyspace are carried verbatim so the empty-path
     /// Shallow projection no longer drops them.
     #[must_use]
-    pub fn from_object(view: &SurfaceView) -> Self {
+    pub(crate) fn from_object(view: &SurfaceView) -> Self {
         let entries = view
             .entries
             .iter()
@@ -1399,7 +1424,7 @@ pub(crate) struct MergedDeclSurface {
 /// graph reducer interns a multi-value method group into an overload group
 /// `Intersection`; the display projection renders it as a property holding
 /// that intersection — both yield the identical surface.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct MergedDeclMember {
     pub(crate) member: ShallowSurfaceMember,
     pub(crate) values: Vec<SemanticNodeId>,
@@ -11719,7 +11744,9 @@ mod overload_carrier_exclusion_tests {
             },
             "TemplateLiteral" => SemanticNodeData::TemplateLiteral {
                 quasis: Arc::from(vec![Arc::<str>::from("hello-")].into_boxed_slice()),
-                expressions: crate::semantic_query::PayloadArray::from(vec![element].into_boxed_slice()),
+                expressions: crate::semantic_query::PayloadArray::from(
+                    vec![element].into_boxed_slice(),
+                ),
             },
             other => unreachable!("unknown apparent-type carrier kind `{other}`"),
         };

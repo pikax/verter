@@ -70,14 +70,19 @@ fn tuple_spreads_splice_at_any_depth() {
         let graph = dispatch.graph();
         let (one, two) = (literal(dispatch, "1"), literal(dispatch, "2"));
         let mut tuple = graph.intern_node(SemanticNodeData::Tuple {
-            elements: verter_type_engine::semantic_query::PayloadArray::from([element(one, false), element(two, false)]),
+            elements: verter_type_engine::semantic_query::PayloadArray::from([
+                element(one, false),
+                element(two, false),
+            ]),
             readonly: false,
         });
         // bounded-loop: a fixed DEPTH-level fixture constructor.
         for _ in 0..DEPTH {
             let alias = graph.intern_node(SemanticNodeData::Alias(tuple));
             tuple = graph.intern_node(SemanticNodeData::Tuple {
-                elements: verter_type_engine::semantic_query::PayloadArray::from([element(alias, true)]),
+                elements: verter_type_engine::semantic_query::PayloadArray::from([element(
+                    alias, true,
+                )]),
                 readonly: false,
             });
         }

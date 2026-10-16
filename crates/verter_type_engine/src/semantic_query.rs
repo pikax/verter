@@ -9857,7 +9857,6 @@ impl TupleElement {
     }
 }
 
-
 /// Immutable semantic-node payload. Storage for this enum is owned by the
 /// shared semantic graph; node ids hand out views without copying.
 ///
@@ -11334,7 +11333,6 @@ impl FunctionParam {
     }
 }
 
-
 /// Whether a declared parameter type is a literal type in TypeScript's
 /// syntax (`LiteralType`): a string, number, bigint or boolean literal, or
 /// `null`. A reference to a literal alias, a union of literals, a template
@@ -11467,7 +11465,6 @@ impl TypeParamDecl {
         }
     }
 }
-
 
 // ──────────────────────────────────────────────────────────────────────────
 // API traits

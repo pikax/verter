@@ -621,7 +621,7 @@ fn index_signature_build_uses_declaration_origin_for_scopeless_nodes() {
     assert_eq!(
         TypeInfoSurface::from_one_level(
             graph,
-            &verter_type_engine::project_semantic_dispatch::one_level_surface::OneLevelSurface::from_view(&view),
+            &verter_type_engine::project_semantic_dispatch::one_level_surface::OneLevelSurface::from_view_for_tests(graph, &view),
         ),
         surface,
     );
@@ -730,7 +730,7 @@ fn member_build_uses_declaration_origin_for_scopeless_value() {
     assert_eq!(
         TypeInfoSurface::from_one_level(
             graph,
-            &verter_type_engine::project_semantic_dispatch::one_level_surface::OneLevelSurface::from_view(&view),
+            &verter_type_engine::project_semantic_dispatch::one_level_surface::OneLevelSurface::from_view_for_tests(graph, &view),
         ),
         surface,
     );
@@ -1019,9 +1019,13 @@ fn one_level_surface_converts_every_entry_kind_and_generic_roots_stay_open() {
         graph.intern_node_with_scope(
             SemanticNodeData::Signature {
                 kind,
-                params: verter_type_engine::semantic_query::PayloadArray::from(Vec::new().into_boxed_slice()),
+                params: verter_type_engine::semantic_query::PayloadArray::from(
+                    Vec::new().into_boxed_slice(),
+                ),
                 return_type: number,
-                type_parameters: verter_type_engine::semantic_query::PayloadArray::from(Vec::new().into_boxed_slice()),
+                type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+                    Vec::new().into_boxed_slice(),
+                ),
                 occurrence: None,
                 return_carrier: SignatureReturnCarrier::Declared(number),
                 signature_span: Some(span),
@@ -1073,7 +1077,7 @@ fn one_level_surface_converts_every_entry_kind_and_generic_roots_stay_open() {
     };
 
     let built = TypeInfoSurface::build(graph, &view);
-    let one_level = OneLevelSurface::from_view(&view);
+    let one_level = OneLevelSurface::from_view_for_tests(graph, &view);
     assert_eq!(one_level.entries(), view.entries());
     assert_eq!(TypeInfoSurface::from_one_level(graph, &one_level), built);
     assert_eq!(built.members.len(), 1);

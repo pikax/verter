@@ -109,7 +109,8 @@ struct ClassBase {
     exact_source: Option<SemanticNodeId>,
     /// The parameters of each accepted base construct signature, in order —
     /// a constructor-less class inherits one construct signature per entry.
-    constructor_params: Vec<crate::semantic_query::PayloadArray<crate::semantic_query::FunctionParam>>,
+    constructor_params:
+        Vec<crate::semantic_query::PayloadArray<crate::semantic_query::FunctionParam>>,
     /// The base instance type: the first accepted construct signature's
     /// result, when it is a valid base type. A union result is not
     /// (`isValidBaseType`): the class then inherits no instance member,
@@ -658,7 +659,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let authored = graph.intern_node_with_scope(
             SemanticNodeData::ClassExpressionInstance {
                 identity: Arc::new(identity.clone()),
-                type_arguments: crate::semantic_query::PayloadArray::from(Arc::clone(&type_arguments)),
+                type_arguments: crate::semantic_query::PayloadArray::from(Arc::clone(
+                    &type_arguments,
+                )),
                 surface,
             },
             self.binder_env.scope.clone(),
@@ -676,7 +679,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     prototype: Some(prototype),
                     ..identity
                 }),
-                type_arguments: crate::semantic_query::PayloadArray::from(Arc::clone(&type_arguments)),
+                type_arguments: crate::semantic_query::PayloadArray::from(Arc::clone(
+                    &type_arguments,
+                )),
                 surface,
             },
             self.binder_env.scope.clone(),

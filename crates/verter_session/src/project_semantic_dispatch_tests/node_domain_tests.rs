@@ -194,13 +194,17 @@ fn root_only_projection_root_kind_matches_full_fold() {
     // does not cover and the root-only `Object` arm must reproduce.
     let func = graph.intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Call,
-        params: verter_type_engine::semantic_query::PayloadArray::from(StdArc::from(Vec::new().into_boxed_slice())),
+        params: verter_type_engine::semantic_query::PayloadArray::from(StdArc::from(
+            Vec::new().into_boxed_slice(),
+        )),
         return_type: string,
         occurrence: None,
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
             string,
         ),
-        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(StdArc::from(Vec::new().into_boxed_slice())),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(StdArc::from(
+            Vec::new().into_boxed_slice(),
+        )),
         signature_span: None,
         return_type_span: None,
         predicate: None,
@@ -365,13 +369,17 @@ fn root_only_projection_matches_full_fold_across_all_arms() {
     ));
     let func = graph.intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Call,
-        params: verter_type_engine::semantic_query::PayloadArray::from(StdArc::from(Vec::new().into_boxed_slice())),
+        params: verter_type_engine::semantic_query::PayloadArray::from(StdArc::from(
+            Vec::new().into_boxed_slice(),
+        )),
         return_type: string,
         occurrence: None,
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
             string,
         ),
-        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(StdArc::from(Vec::new().into_boxed_slice())),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(StdArc::from(
+            Vec::new().into_boxed_slice(),
+        )),
         signature_span: None,
         return_type_span: None,
         predicate: None,
@@ -409,7 +417,9 @@ fn root_only_projection_matches_full_fold_across_all_arms() {
     let ctor = graph.intern_construct_twin_for_tests(func);
     let alias = graph.intern_node(SemanticNodeData::Alias(open_obj));
     let merged = graph.intern_node(SemanticNodeData::MergedDecl {
-        contributors: verter_type_engine::semantic_query::PayloadArray::from(StdArc::from(vec![open_obj].into_boxed_slice())),
+        contributors: verter_type_engine::semantic_query::PayloadArray::from(StdArc::from(
+            vec![open_obj].into_boxed_slice(),
+        )),
     });
 
     // Leaf / carrier arms the earlier collapsed-intersection test does not
@@ -425,7 +435,9 @@ fn root_only_projection_matches_full_fold_across_all_arms() {
     });
     let template = graph.intern_node(SemanticNodeData::TemplateLiteral {
         quasis: StdArc::from(vec![StdArc::from("q")].into_boxed_slice()),
-        expressions: verter_type_engine::semantic_query::PayloadArray::from(StdArc::from(Vec::new().into_boxed_slice())),
+        expressions: verter_type_engine::semantic_query::PayloadArray::from(StdArc::from(
+            Vec::new().into_boxed_slice(),
+        )),
     });
     let type_param = graph.intern_node(SemanticNodeData::TypeParam {
         decl: DeclIdentity {
@@ -465,7 +477,9 @@ fn root_only_projection_matches_full_fold_across_all_arms() {
             whole_hash: HashValue::default(),
             decl_name: StdArc::from("Gen"),
         },
-        args: verter_type_engine::semantic_query::PayloadArray::from(StdArc::from(vec![string].into_boxed_slice())),
+        args: verter_type_engine::semantic_query::PayloadArray::from(StdArc::from(
+            vec![string].into_boxed_slice(),
+        )),
     });
     let bare_ref = graph.intern_node(SemanticNodeData::new_bare_ref(
         StdArc::from("Bare"),
@@ -818,7 +832,9 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
     let fn_with = |return_type, params: Vec<verter_type_engine::semantic_query::FunctionParam>| {
         SemanticNodeData::Signature {
             kind: verter_type_engine::semantic_query::SignatureKind::Call,
-            params: verter_type_engine::semantic_query::PayloadArray::from(StdArc::from(params.into_boxed_slice())),
+            params: verter_type_engine::semantic_query::PayloadArray::from(StdArc::from(
+                params.into_boxed_slice(),
+            )),
             return_type,
             type_parameters: verter_type_engine::semantic_query::PayloadArray::from(StdArc::from(
                 Vec::<verter_type_engine::semantic_query::TypeParamDecl>::new().into_boxed_slice(),
@@ -869,7 +885,9 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
             "template.expression",
             graph.intern_node(SemanticNodeData::TemplateLiteral {
                 quasis: StdArc::from(vec![StdArc::from("x")].into_boxed_slice()),
-                expressions: verter_type_engine::semantic_query::PayloadArray::from(StdArc::from(vec![dangling].into_boxed_slice())),
+                expressions: verter_type_engine::semantic_query::PayloadArray::from(StdArc::from(
+                    vec![dangling].into_boxed_slice(),
+                )),
             }),
         ),
         (

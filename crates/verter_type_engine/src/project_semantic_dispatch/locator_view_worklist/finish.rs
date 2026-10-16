@@ -120,7 +120,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         ancestors: &[ProjectionFrame],
     ) -> ProjectionFinish {
         if let SemanticNodeData::InstantiationRef { base, args } = data {
-            return self.finish_application_projection(node, context, base, args.as_arc(), memo, ancestors);
+            return self.finish_application_projection(
+                node,
+                context,
+                base,
+                args.as_arc(),
+                memo,
+                ancestors,
+            );
         }
         ProjectionFinish::Node(self.finish_projection_structure(
             node,

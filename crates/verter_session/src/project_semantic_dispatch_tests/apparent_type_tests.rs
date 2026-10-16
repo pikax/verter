@@ -166,7 +166,9 @@ fn rootless_signature(
             vec![FunctionParam::synthetic(None, string, false, false)].into_boxed_slice(),
         ),
         return_type,
-        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(Vec::new().into_boxed_slice()),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+            Vec::new().into_boxed_slice(),
+        ),
         occurrence: None,
         return_carrier: SignatureReturnCarrier::Declared(return_type),
         signature_span: None,

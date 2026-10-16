@@ -43,7 +43,9 @@ fn template(host: &VerterHost, quasis: &[&str], expressions: &[SemanticNodeId]) 
         .semantic_graph()
         .intern_node(SemanticNodeData::TemplateLiteral {
             quasis: quasis.iter().map(|q| Arc::from(*q)).collect(),
-            expressions: verter_type_engine::semantic_query::PayloadArray::from(expressions.to_vec().into_boxed_slice()),
+            expressions: verter_type_engine::semantic_query::PayloadArray::from(
+                expressions.to_vec().into_boxed_slice(),
+            ),
         })
 }
 
