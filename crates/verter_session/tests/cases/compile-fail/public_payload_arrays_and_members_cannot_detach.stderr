@@ -76,16 +76,16 @@ error[E0277]: the trait bound `ObjectConstructionEffect: Clone` is not satisfied
    |     |
    |     required by a bound introduced by this call
 
-error[E0624]: method `nodes` is private
+error[E0624]: method `operands` is private
   --> tests/cases/compile-fail/public_payload_arrays_and_members_cannot_detach.rs:56:55
    |
-56 |         QueryError::RecursiveRef { args, .. } => args.nodes().to_vec(),
-   |                                                       ^^^^^ private method
+56 |         QueryError::RecursiveRef { args, .. } => args.operands().to_vec(),
+   |                                                       ^^^^^^^^ private method
    |
   ::: $WORKSPACE/crates/verter_type_engine/src/semantic_query.rs
    |
-   |     pub(crate) fn nodes(&self) -> &[SemanticNodeId] {
-   |     ----------------------------------------------- private method defined here
+   |     pub(crate) fn operands(&self) -> &[SemanticNodeId] {
+   |     -------------------------------------------------- private method defined here
 
 error[E0624]: associated function `from_view` is private
   --> tests/cases/compile-fail/public_payload_arrays_and_members_cannot_detach.rs:62:22

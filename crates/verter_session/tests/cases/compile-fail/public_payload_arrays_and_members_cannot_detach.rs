@@ -53,7 +53,7 @@ fn copy_effect(effect: &ObjectConstructionEffect) -> ObjectConstructionEffect {
 
 fn recursive_arguments(error: &QueryError) -> Vec<SemanticNodeId> {
     match error {
-        QueryError::RecursiveRef { args, .. } => args.nodes().to_vec(),
+        QueryError::RecursiveRef { args, .. } => args.operands().to_vec(),
         _ => Vec::new(),
     }
 }
