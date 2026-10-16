@@ -958,6 +958,22 @@ not grow the outer tracer per read. The window bounds insertion work; it
 does not bound the answer or replace final canonicalization. Distinct versions
 of the same fact remain distinct observations.
 
+Per-query frame cost: every cold query seals its tracer, builds its completed
+carrier and registers its memo candidate, so these steps copy nothing per fact
+beyond the output they own. `FactReadSet::finalise` merges absorbed canonical
+runs over borrowed facts (comparison count unchanged) and clones each distinct
+fact once; fan-out to an enclosing tracer copies a fact only when its recent
+window lacks it; `semantic_graph_read_set_signature` keys self-roots in a sorted
+small list and leaves sorting to the one seal. The reverse index registers and
+drains through ONE borrowed projection (`RegisteredCanonicals` over
+`ReadSetSignature::for_each_canonical_id` ∪ the dispatch-fence canonicals), so
+publish, displacement, FIFO eviction and canonical invalidation stay symmetric
+without allocating a canonical per call; an existing shard is reached by a read
+guard (which excludes the outer `remove_if` like the write-locked `entry` path),
+and a prune attempts the outer drop only when it emptied the inner map. The
+allocation canary `recursive_paths_allocations_per_entity_stay_flat` guards the
+per-entity allocation ceiling and its flat growth across layouts.
+
 Paged signature evidence: a `fact_dep_signature` is never refused for its
 width. `FactReadSet::finalise` (and `seal_canonical_signature` for a signature
 a producer assembles by hand) cuts a canonical set wider than

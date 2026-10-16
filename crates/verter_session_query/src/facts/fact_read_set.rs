@@ -493,6 +493,17 @@ impl FactReadSet {
         }
     }
 
+    /// [`Self::observe`] for a borrowed fact: it is copied only when the
+    /// recent window does not already hold it.
+    #[inline]
+    pub fn observe_ref(&mut self, fact: &FactVersionRef) {
+        let (seen, comparisons) = self.recently_observed(fact);
+        record_signature_work(comparisons);
+        if !seen {
+            self.observations.push(fact.clone());
+        }
+    }
+
     /// Bulk-record a previously finalised signature.
     ///
     /// Used when a higher-tier cold compute consumes a lower-tier
@@ -817,6 +828,13 @@ impl FactReadSetCell {
         self.0.borrow_mut().observe(fact);
     }
 
+    /// Record one borrowed observation through `&self`. See
+    /// [`FactReadSet::observe_ref`].
+    #[inline]
+    pub fn observe_ref(&self, fact: &FactVersionRef) {
+        self.0.borrow_mut().observe_ref(fact);
+    }
+
     /// Bulk-record a previously finalised signature through `&self`.
     #[inline]
     pub fn observe_borrowed_signature(&self, sig: &[FactVersionRef]) {
@@ -1073,59 +1091,88 @@ impl<'a> VerifiedCanonicalRun<'a> {
     }
 }
 
-/// Merge two strictly-increasing runs into one strictly-increasing run,
-/// dropping cross-run duplicates. `O(left.len() + right.len())`
-/// comparisons, one allocation for the output.
-fn merge_canonical_runs(left: &[FactVersionRef], right: &[FactVersionRef]) -> Vec<FactVersionRef> {
+/// One operand of a [`merge_canonical_batch`] round: an absorbed run, or the
+/// borrowed output of an earlier round. Both are strictly increasing.
+enum MergeLevel<'a> {
+    Run(&'a [FactVersionRef]),
+    Merged(Vec<&'a FactVersionRef>),
+}
+
+impl<'a> MergeLevel<'a> {
+    fn len(&self) -> usize {
+        match self {
+            Self::Run(run) => run.len(),
+            Self::Merged(merged) => merged.len(),
+        }
+    }
+
+    fn get(&self, index: usize) -> &'a FactVersionRef {
+        match self {
+            Self::Run(run) => &run[index],
+            Self::Merged(merged) => merged[index],
+        }
+    }
+}
+
+/// Merge two strictly-increasing operands into one strictly-increasing
+/// borrowed run, dropping cross-run duplicates. `O(left.len() +
+/// right.len())` comparisons and one pointer allocation; no fact is copied.
+fn merge_canonical_runs<'a>(left: &MergeLevel<'a>, right: &MergeLevel<'a>) -> MergeLevel<'a> {
     use std::cmp::Ordering;
-    let mut out = Vec::with_capacity(left.len() + right.len());
+    let (left_len, right_len) = (left.len(), right.len());
+    let mut out = Vec::with_capacity(left_len + right_len);
     let (mut i, mut j) = (0usize, 0usize);
-    while i < left.len() && j < right.len() {
-        match compare_fact_refs(&left[i], &right[j]) {
+    while i < left_len && j < right_len {
+        let (l, r) = (left.get(i), right.get(j));
+        match compare_fact_refs(l, r) {
             Ordering::Less => {
-                out.push(left[i].clone());
+                out.push(l);
                 i += 1;
             }
             Ordering::Greater => {
-                out.push(right[j].clone());
+                out.push(r);
                 j += 1;
             }
             Ordering::Equal => {
-                out.push(left[i].clone());
+                out.push(l);
                 i += 1;
                 j += 1;
             }
         }
     }
-    out.extend_from_slice(&left[i..]);
-    out.extend_from_slice(&right[j..]);
-    out
+    out.extend((i..left_len).map(|index| left.get(index)));
+    out.extend((j..right_len).map(|index| right.get(index)));
+    MergeLevel::Merged(out)
 }
 
-/// Merge in balanced rounds: a run's prefix is copied once per round,
-/// rather than once for every later child witness.
+/// Merge in balanced rounds over borrowed facts, then copy each distinct
+/// fact once: a fact shared by several runs, or carried through several
+/// rounds, is compared as often as before but cloned exactly once.
 fn merge_canonical_batch(
     local: &[FactVersionRef],
     runs: &[Arc<[FactVersionRef]>],
 ) -> Vec<FactVersionRef> {
-    use std::borrow::Cow;
-    let mut level: Vec<Cow<'_, [FactVersionRef]>> = Vec::with_capacity(runs.len() + 1);
+    let mut level: Vec<MergeLevel<'_>> = Vec::with_capacity(runs.len() + 1);
     if !local.is_empty() {
-        level.push(Cow::Borrowed(local));
+        level.push(MergeLevel::Run(local));
     }
-    level.extend(runs.iter().map(|run| Cow::Borrowed(run.as_ref())));
+    level.extend(runs.iter().map(|run| MergeLevel::Run(run.as_ref())));
     while level.len() > 1 {
         let mut next = Vec::with_capacity(level.len().div_ceil(2));
         let mut pairs = level.into_iter();
         while let Some(left) = pairs.next() {
             next.push(match pairs.next() {
-                Some(right) => Cow::Owned(merge_canonical_runs(&left, &right)),
+                Some(right) => merge_canonical_runs(&left, &right),
                 None => left,
             });
         }
         level = next;
     }
-    level.pop().map(Cow::into_owned).unwrap_or_default()
+    match level.pop() {
+        Some(MergeLevel::Run(run)) => run.to_vec(),
+        Some(MergeLevel::Merged(merged)) => merged.into_iter().cloned().collect(),
+        None => Vec::new(),
+    }
 }
 
 #[cfg(test)]

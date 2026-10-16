@@ -323,6 +323,11 @@ fn recursive_mapped_index_publishes_dotted_paths_across_five_modules() {
 }
 
 #[test]
+fn recursive_mapped_index_publishes_dotted_paths_for_three_hundred_entities() {
+    assert_recursive_paths_layout(300, 5);
+}
+
+#[test]
 fn recursive_mapped_index_publishes_dotted_paths_in_small_cyclic_layouts() {
     // Two entities per module still cover cyclic imports and recursive path
     // depth under the default request fuse.

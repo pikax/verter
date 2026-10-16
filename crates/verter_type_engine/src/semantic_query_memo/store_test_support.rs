@@ -310,7 +310,6 @@ impl SemanticGraphStore {
         for (displaced_slot, displaced_entry) in &outcome.displaced {
             reverse_index::drain_candidate_reverse_index_registrations(
                 &self.canonical_to_entries,
-                &family,
                 *displaced_slot,
                 displaced_entry,
             );
@@ -424,11 +423,7 @@ impl SemanticGraphStore {
         let Some(slots) = entries.remove(&family) else {
             return false;
         };
-        reverse_index::drain_family_slots_registrations(
-            &self.canonical_to_entries,
-            &family,
-            &slots,
-        );
+        reverse_index::drain_family_slots_registrations(&self.canonical_to_entries, &slots);
         true
     }
 

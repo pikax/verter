@@ -262,18 +262,24 @@ struct ChunkTable {
 }
 
 impl ChunkTable {
+    // Every node read resolves its chunk here, so the lookup is written as
+    // one indexed match rather than a chain of option adaptors.
     #[inline]
     fn get(&self, key: &u64) -> Option<&Chunk> {
-        self.chunks
-            .get(usize::try_from(*key).ok()?)
-            .and_then(Option::as_deref)
+        let index = usize::try_from(*key).ok()?;
+        match self.chunks.get(index) {
+            Some(Some(chunk)) => Some(chunk),
+            _ => None,
+        }
     }
 
     #[inline]
     fn get_mut(&mut self, key: &u64) -> Option<&mut Chunk> {
-        self.chunks
-            .get_mut(usize::try_from(*key).ok()?)
-            .and_then(Option::as_deref_mut)
+        let index = usize::try_from(*key).ok()?;
+        match self.chunks.get_mut(index) {
+            Some(Some(chunk)) => Some(chunk),
+            _ => None,
+        }
     }
 
     fn get_or_insert_empty(&mut self, key: u64) -> &mut Chunk {

@@ -474,6 +474,25 @@ impl ReadSetSignature {
         self.entries().count()
     }
 
+    /// Visit, borrowed and in observation order, the canonical every
+    /// entry names — a consumed result's receipt contributing every
+    /// canonical its evidence reaches (its summary, not a walk). A
+    /// canonical named by several entries is visited once per entry; see
+    /// [`Self::canonical_ids`] for the deduplicated, owned projection.
+    pub fn for_each_canonical_id<'a>(&'a self, mut visit: impl FnMut(&'a str)) {
+        for fact in self.facts.iter() {
+            if let FactVersionRef::Receipt(receipt) = fact {
+                for canonical_id in receipt.canonicals().iter() {
+                    visit(canonical_id.as_ref());
+                }
+                continue;
+            }
+            if let Some(canonical_id) = fact.canonical_id() {
+                visit(canonical_id);
+            }
+        }
+    }
+
     /// Every canonical this signature depends on, in first-observation
     /// order — a consumed result's receipt contributing every canonical
     /// its evidence reaches (its summary, not a walk).

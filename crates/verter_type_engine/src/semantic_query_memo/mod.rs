@@ -1408,7 +1408,7 @@ impl SemanticGraphStore {
 
             // For each evicted entry, walk every canonical the entry
             // depended on — the carrier's fact rail
-            // (`canonical_ids()`) PLUS the dispatch fence — and remove
+            // PLUS the dispatch fence — and remove
             // THAT entry's `(family, slot)` registration from the
             // canonical's shard. Removal is by entry identity, not by
             // `Arc::ptr_eq` on the stored fact rail — see the comment
@@ -1420,36 +1420,14 @@ impl SemanticGraphStore {
             // canonical_to_entries` order permits it), so the
             // cross-canonical cleanup is atomic with the `entries`
             // eviction above.
-            let mut seen_cleanup: rustc_hash::FxHashSet<Arc<str>> =
-                rustc_hash::FxHashSet::default();
-            for (evicted_key, evicted_carrier, evicted_dispatch_sig) in &evicted_entries {
-                seen_cleanup.clear();
-                for other_canonical in evicted_carrier.canonical_ids() {
-                    if other_canonical.as_ref() == canonical_id {
-                        continue;
-                    }
-                    if !seen_cleanup.insert(Arc::clone(&other_canonical)) {
-                        continue;
-                    }
-                    reverse_index::prune_reverse_index_registration(
-                        &self.canonical_to_entries,
-                        &other_canonical,
-                        evicted_key,
-                    );
-                }
-                for (other_canonical, _) in evicted_dispatch_sig.iter() {
-                    if other_canonical.as_ref() == canonical_id {
-                        continue;
-                    }
-                    if !seen_cleanup.insert(Arc::clone(other_canonical)) {
-                        continue;
-                    }
-                    reverse_index::prune_reverse_index_registration(
-                        &self.canonical_to_entries,
-                        other_canonical,
-                        evicted_key,
-                    );
-                }
+            for ((_, slot, seq), evicted_carrier, evicted_dispatch_sig) in &evicted_entries {
+                reverse_index::drain_registrations_except(
+                    &self.canonical_to_entries,
+                    evicted_carrier,
+                    evicted_dispatch_sig,
+                    (*slot, *seq),
+                    canonical_id,
+                );
             }
             // Revoke matching ordinary flights and every independently-owned
             // binding flight before releasing `entries`. Independent binding
@@ -2542,7 +2520,6 @@ impl SemanticGraphStore {
         for (displaced_slot, displaced_entry) in &outcome.displaced {
             reverse_index::drain_candidate_reverse_index_registrations(
                 &self.canonical_to_entries,
-                family,
                 *displaced_slot,
                 displaced_entry,
             );
@@ -2776,7 +2753,6 @@ impl SemanticGraphStore {
         for (displaced_slot, displaced_entry) in &outcome.displaced {
             reverse_index::drain_candidate_reverse_index_registrations(
                 &self.canonical_to_entries,
-                family,
                 *displaced_slot,
                 displaced_entry,
             );
@@ -2890,22 +2866,26 @@ pub fn semantic_graph_read_set_signature(
 > {
     use verter_session_query::facts::fact_cache::FactVersionRef;
 
-    // Collapse the observed self-roots into a per-canonical hash map;
-    // a conflicting hash for the same canonical is a torn observation.
-    let mut self_root_hashes: rustc_hash::FxHashMap<
-        Arc<str>,
-        verter_session_query::analysis::types::Hash16,
-    > = rustc_hash::FxHashMap::default();
-    for (canonical, observed_hash) in observed_self_roots {
-        match self_root_hashes.get(canonical) {
-            Some(existing) if existing != observed_hash => {
-                return Err(crate::cache_runtime::NonAdmissionReason::SelfRootConflict)
-            }
-            _ => {
-                self_root_hashes.insert(Arc::clone(canonical), *observed_hash);
-            }
+    // Collapse the observed self-roots into one hash per canonical, sorted
+    // by canonical; a conflicting hash for the same canonical is a torn
+    // observation. A build observes a handful of roots, so the ordered
+    // list answers each lookup by binary search without a hash table.
+    let mut self_root_hashes: smallvec::SmallVec<
+        [(Arc<str>, verter_session_query::analysis::types::Hash16); 4],
+    > = observed_self_roots.iter().cloned().collect();
+    self_root_hashes.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+    for pair in self_root_hashes.windows(2) {
+        if pair[0].0 == pair[1].0 && pair[0].1 != pair[1].1 {
+            return Err(crate::cache_runtime::NonAdmissionReason::SelfRootConflict);
         }
     }
+    self_root_hashes.dedup_by(|later, earlier| later.0 == earlier.0);
+    let observed_root = |canonical: &str| {
+        self_root_hashes
+            .binary_search_by(|(root, _)| root.as_ref().cmp(canonical))
+            .ok()
+            .map(|index| &self_root_hashes[index].1)
+    };
 
     let mut facts: Vec<FactVersionRef> =
         Vec::with_capacity(self_root_hashes.len() + traced_facts.len());
@@ -2928,10 +2908,7 @@ pub fn semantic_graph_read_set_signature(
     if !self_root_hashes.is_empty() {
         for fact in verter_session_query::facts::fact_cache::signature_entries(traced_facts) {
             if let FactVersionRef::FileWholeHash { canonical_id, hash } = fact {
-                if self_root_hashes
-                    .get(canonical_id.as_str())
-                    .is_some_and(|observed_hash| hash != observed_hash)
-                {
+                if observed_root(canonical_id).is_some_and(|observed_hash| hash != observed_hash) {
                     return Err(crate::cache_runtime::NonAdmissionReason::SelfRootConflict);
                 }
             }
@@ -2944,14 +2921,17 @@ pub fn semantic_graph_read_set_signature(
     // so transitive cross-file invalidation is preserved.
     for fact in traced_facts {
         if let FactVersionRef::FileWholeHash { canonical_id, .. } = fact {
-            if self_root_hashes.contains_key(canonical_id.as_str()) {
+            if observed_root(canonical_id).is_some() {
                 continue;
             }
         }
         facts.push(fact.clone());
     }
 
-    let self_root_canonicals: Vec<Arc<str>> = self_root_hashes.into_keys().collect();
+    let self_root_canonicals: Vec<Arc<str>> = self_root_hashes
+        .iter()
+        .map(|(canonical, _)| Arc::clone(canonical))
+        .collect();
     crate::fact_signature_helpers::bound_completed_structural_carrier(
         view,
         facts,

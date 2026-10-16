@@ -261,17 +261,17 @@ pub(crate) fn observe_fan_out(fact: FactVersionRef) {
     // from inside an observer don't cause RefCell panics.
     let ptrs: SmallVec<[*const FactReadSetCell; 8]> =
         ACTIVE_TRACERS.with(|slot| slot.borrow().clone());
-    // Move the owned fact into the LAST live tracer; only the earlier
-    // ones observe clones. With the common single-tracer stack this
-    // fans out ZERO fact clones (a `FactVersionRef` carries an owned
-    // canonical `String`, so the per-observation clone was a real
-    // allocation on every traced read).
+    // Move the owned fact into the LAST live tracer; an earlier one copies
+    // it only when its recent window does not already hold it. With the
+    // common single-tracer stack this fans out ZERO fact clones (a
+    // `FactVersionRef` carries an owned canonical `String`, so a clone is a
+    // real allocation on every traced read).
     let mut live = ptrs.into_iter().filter(|ptr| !ptr.is_null()).peekable();
     while let Some(ptr) = live.next() {
         // SAFETY: see module-level SAFETY contract.
         let cell = unsafe { &*ptr };
         if live.peek().is_some() {
-            cell.observe(fact.clone());
+            cell.observe_ref(&fact);
         } else {
             cell.observe(fact);
             return;

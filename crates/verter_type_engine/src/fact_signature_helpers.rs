@@ -1357,11 +1357,16 @@ pub(crate) fn bound_completed_structural_carrier(
     mut facts: Vec<FactVersionRef>,
     mut self_root_canonicals: Vec<Arc<str>>,
 ) -> Result<StructuralCarrierReadSet, NonAdmissionReason> {
-    facts.sort_unstable();
-    facts.dedup();
     self_root_canonicals.sort();
     self_root_canonicals.dedup();
 
+    // The seal below sorts and deduplicates; only a set that may need the
+    // wide strict-root rewrite is canonicalised first, so its width is
+    // measured on distinct facts.
+    if facts.len() > FACT_PAGE_WIDTH {
+        facts.sort_unstable();
+        facts.dedup();
+    }
     if facts.len() > FACT_PAGE_WIDTH && !self_root_canonicals.is_empty() {
         // Index the requested roots once, including hashes held on evidence
         // pages. Scanning from the beginning for each root is quadratic.
