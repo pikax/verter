@@ -66,6 +66,9 @@ impl MemberOrdinalIndex {
     }
 
     /// The first member addressing this property, in authored order.
+    /// Production readers resolve through [`Self::colliding`] inside the
+    /// engine; this single-ordinal view exists for test inspection only.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn get(&self, key: &PropertyKey) -> Option<&u32> {
         self.colliding(key).first()
     }
