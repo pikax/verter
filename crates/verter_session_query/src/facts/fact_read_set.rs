@@ -282,10 +282,16 @@ fn compact_domains(facts: &mut Vec<FactVersionRef>, basis: &AggregateGenerations
 }
 
 /// Inline capacity for the observation accumulator. Empirically most
-/// computes observe between 4 and 12 facts. The inline capacity is
-/// sized to cover those without allocating; longer computes spill to
-/// the heap exactly once.
-const INLINE_CAPACITY: usize = 16;
+/// computes observe between 4 and 12 facts directly, and a fact is large,
+/// so the inline storage covers the common few without making every
+/// tracer — created per computation and moved as it is installed and
+/// sealed — carry room for the widest; longer computes spill to the heap
+/// exactly once.
+const INLINE_CAPACITY: usize = 4;
+
+/// How many of the latest observations, and of the latest absorbed runs,
+/// a repeated read is matched against before it is kept again.
+const RECENT_WINDOW: usize = 16;
 
 /// How a cache-refusal signal propagates through nested cold-compute scopes.
 ///
@@ -514,11 +520,11 @@ impl FactReadSet {
         record_signature_work(compared);
     }
 
-    /// Whether `fact` is among the last [`INLINE_CAPACITY`] observations,
+    /// Whether `fact` is among the last [`RECENT_WINDOW`] observations,
     /// with the number of comparisons that decided it.
     #[inline]
     fn recently_observed(&self, fact: &FactVersionRef) -> (bool, usize) {
-        let window = &self.observations[self.observations.len().saturating_sub(INLINE_CAPACITY)..];
+        let window = &self.observations[self.observations.len().saturating_sub(RECENT_WINDOW)..];
         match window.iter().rposition(|observed| observed == fact) {
             Some(position) => (true, window.len() - position),
             None => (false, window.len()),
@@ -572,13 +578,13 @@ impl FactReadSet {
         }
     }
 
-    /// Whether one of the last [`INLINE_CAPACITY`] absorbed runs is
+    /// Whether one of the last [`RECENT_WINDOW`] absorbed runs is
     /// `signature`. An immutable retained run already proved its canonical
     /// order; replaying it must not grow live storage for each warm read.
     #[inline]
     fn recently_absorbed(&self, signature: &Arc<[FactVersionRef]>) -> bool {
         let recent =
-            &self.canonical_runs[self.canonical_runs.len().saturating_sub(INLINE_CAPACITY)..];
+            &self.canonical_runs[self.canonical_runs.len().saturating_sub(RECENT_WINDOW)..];
         let mut comparisons = 0;
         let mut seen = false;
         for run in recent.iter().rev() {
@@ -1076,22 +1082,25 @@ impl<'a> VerifiedCanonicalRun<'a> {
 /// Merge two strictly-increasing runs into one strictly-increasing run,
 /// dropping cross-run duplicates. `O(left.len() + right.len())`
 /// comparisons, one allocation for the output.
-fn merge_canonical_runs(left: &[FactVersionRef], right: &[FactVersionRef]) -> Vec<FactVersionRef> {
+fn merge_canonical_runs<'a>(
+    left: &[&'a FactVersionRef],
+    right: &[&'a FactVersionRef],
+) -> Vec<&'a FactVersionRef> {
     use std::cmp::Ordering;
     let mut out = Vec::with_capacity(left.len() + right.len());
     let (mut i, mut j) = (0usize, 0usize);
     while i < left.len() && j < right.len() {
-        match compare_fact_refs(&left[i], &right[j]) {
+        match compare_fact_refs(left[i], right[j]) {
             Ordering::Less => {
-                out.push(left[i].clone());
+                out.push(left[i]);
                 i += 1;
             }
             Ordering::Greater => {
-                out.push(right[j].clone());
+                out.push(right[j]);
                 j += 1;
             }
             Ordering::Equal => {
-                out.push(left[i].clone());
+                out.push(left[i]);
                 i += 1;
                 j += 1;
             }
@@ -1103,29 +1112,32 @@ fn merge_canonical_runs(left: &[FactVersionRef], right: &[FactVersionRef]) -> Ve
 }
 
 /// Merge in balanced rounds: a run's prefix is copied once per round,
-/// rather than once for every later child witness.
+/// rather than once for every later child witness. The rounds move
+/// references; each surviving fact is cloned once, into the result.
 fn merge_canonical_batch(
     local: &[FactVersionRef],
     runs: &[Arc<[FactVersionRef]>],
 ) -> Vec<FactVersionRef> {
-    use std::borrow::Cow;
-    let mut level: Vec<Cow<'_, [FactVersionRef]>> = Vec::with_capacity(runs.len() + 1);
+    let mut level: Vec<Vec<&FactVersionRef>> = Vec::with_capacity(runs.len() + 1);
     if !local.is_empty() {
-        level.push(Cow::Borrowed(local));
+        level.push(local.iter().collect());
     }
-    level.extend(runs.iter().map(|run| Cow::Borrowed(run.as_ref())));
+    level.extend(runs.iter().map(|run| run.iter().collect()));
     while level.len() > 1 {
         let mut next = Vec::with_capacity(level.len().div_ceil(2));
         let mut pairs = level.into_iter();
         while let Some(left) = pairs.next() {
             next.push(match pairs.next() {
-                Some(right) => Cow::Owned(merge_canonical_runs(&left, &right)),
+                Some(right) => merge_canonical_runs(&left, &right),
                 None => left,
             });
         }
         level = next;
     }
-    level.pop().map(Cow::into_owned).unwrap_or_default()
+    level
+        .pop()
+        .map(|merged| merged.into_iter().cloned().collect())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

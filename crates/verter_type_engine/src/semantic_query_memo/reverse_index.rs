@@ -38,21 +38,22 @@ use crate::semantic_query::DepSignature;
 /// One immutable carrier projection, reused by every member of a publication
 /// batch and every populated slot. The facts and their canonical union travel
 /// together so registration cannot accidentally pair different carriers.
-pub(super) struct ReverseIndexInputs {
+/// The canonicals are borrowed from the carrier: registering under an
+/// existing shard needs no owned copy of its name.
+pub(super) struct ReverseIndexInputs<'a> {
     registered_facts: RegisteredFacts,
-    canonicals: Vec<Arc<str>>,
+    canonicals: smallvec::SmallVec<[&'a str; 8]>,
 }
 
-impl ReverseIndexInputs {
+impl<'a> ReverseIndexInputs<'a> {
     pub(super) fn new(
-        read_set_signature: &verter_session_query::facts::fact_cache::ReadSetSignature,
-        dispatch_dep_signature: &DepSignature,
+        read_set_signature: &'a verter_session_query::facts::fact_cache::ReadSetSignature,
+        dispatch_dep_signature: &'a DepSignature,
     ) -> Self {
-        let mut canonicals = read_set_signature.canonical_ids();
-        let mut seen: rustc_hash::FxHashSet<_> = canonicals.iter().cloned().collect();
+        let mut canonicals = read_set_signature.canonical_id_refs();
         for (canonical, _) in dispatch_dep_signature.iter() {
-            if seen.insert(Arc::clone(canonical)) {
-                canonicals.push(Arc::clone(canonical));
+            if !canonicals.contains(&canonical.as_ref()) {
+                canonicals.push(canonical.as_ref());
             }
         }
         Self {
@@ -84,16 +85,21 @@ pub(super) fn register_reverse_index(
     canonical_to_entries: &CanonicalToEntries,
     family: &FamilyKey,
     populated_slots: &[ModeSlot],
-    inputs: &ReverseIndexInputs,
+    inputs: &ReverseIndexInputs<'_>,
     admission_seq: u64,
 ) {
+    if populated_slots.is_empty() || inputs.canonicals.is_empty() {
+        return;
+    }
     let timing_on = verter_execution::request_context::current_timing_enabled();
+    // Every registration of this candidate names the one family.
+    let family = Arc::new(family.clone());
     for populated in populated_slots {
         for canonical in &inputs.canonicals {
             register_single_canonical(
                 canonical_to_entries,
                 canonical,
-                family,
+                &family,
                 *populated,
                 admission_seq,
                 &inputs.registered_facts,
@@ -111,22 +117,31 @@ pub(super) fn register_reverse_index(
 /// own seq. Caller holds the `entries` lock.
 pub(super) fn drain_candidate_reverse_index_registrations(
     canonical_to_entries: &CanonicalToEntries,
-    family: &FamilyKey,
+    _family: &FamilyKey,
     slot: ModeSlot,
     entry: &MemoEntry,
 ) {
-    let key = (family.clone(), slot, entry.admission_seq);
-    let mut seen: rustc_hash::FxHashSet<Arc<str>> = rustc_hash::FxHashSet::default();
-    for canonical in entry.read_set_signature.canonical_ids() {
-        if seen.insert(Arc::clone(&canonical)) {
-            prune_reverse_index_registration(canonical_to_entries, &canonical, &key);
-        }
+    for canonical in candidate_canonicals(entry) {
+        prune_reverse_index_registration(
+            canonical_to_entries,
+            canonical,
+            slot,
+            entry.admission_seq,
+        );
     }
+}
+
+/// The canonicals a candidate registered under — the union
+/// [`ReverseIndexInputs::new`] builds from its carrier and dispatch fence,
+/// each once.
+fn candidate_canonicals(entry: &MemoEntry) -> smallvec::SmallVec<[&str; 8]> {
+    let mut canonicals = entry.read_set_signature.canonical_id_refs();
     for (canonical, _) in entry.dispatch_dep_signature.iter() {
-        if seen.insert(Arc::clone(canonical)) {
-            prune_reverse_index_registration(canonical_to_entries, canonical, &key);
+        if !canonicals.contains(&canonical.as_ref()) {
+            canonicals.push(canonical.as_ref());
         }
     }
+    canonicals
 }
 
 /// Remove one `(family, slot, seq)` registration from `canonical`'s
@@ -136,9 +151,10 @@ pub(super) fn drain_candidate_reverse_index_registrations(
 /// per-canonical `Mutex` before the outer drop is attempted; the
 /// outer drop is then a single [`dashmap::DashMap::remove_if`] whose
 /// emptiness predicate runs while the shard write lock is held.
-/// A [`register_reverse_index`] inserter takes that same shard write
-/// lock for the whole `entry(canonical).or_insert_with(...)` + inner
-/// `insert`, so the two serialise: either the inserter runs first
+/// A [`register_reverse_index`] inserter holds that shard's lock — read
+/// for an existing shard, write for `entry(canonical).or_insert_with(...)`
+/// — across its inner `insert`, so the two serialise: either the inserter
+/// runs first
 /// and `remove_if`'s predicate observes the inner map non-empty
 /// (drop skipped), or `remove_if` runs first, drops the empty outer
 /// entry, and the inserter's later `or_insert_with` re-creates a
@@ -146,49 +162,69 @@ pub(super) fn drain_candidate_reverse_index_registrations(
 /// just-removed outer entry.
 pub(super) fn prune_reverse_index_registration(
     canonical_to_entries: &CanonicalToEntries,
-    canonical: &Arc<str>,
-    registration: &(FamilyKey, ModeSlot, u64),
+    canonical: &str,
+    slot: ModeSlot,
+    seq: u64,
 ) {
-    let (_, slot, seq) = registration;
-    if let Some(shard) = canonical_to_entries.get(canonical) {
-        shard.value().lock().remove(&(*seq, *slot));
+    let emptied = match canonical_to_entries.get(canonical) {
+        Some(shard) => {
+            let mut map = shard.value().lock();
+            map.remove(&(seq, slot));
+            map.is_empty()
+        }
+        None => return,
+    };
+    // Only a shard this removal emptied can be dropped; the drop re-checks
+    // emptiness under the shard write lock.
+    if emptied {
+        canonical_to_entries.remove_if(canonical, |_, mutex| mutex.lock().is_empty());
     }
-    canonical_to_entries.remove_if(canonical, |_, mutex| mutex.lock().is_empty());
 }
 
 /// Single-shard registration step used by
 /// [`register_reverse_index`]. Inserts one
 /// `(seq, slot) -> (family, registered_facts)` record into the
-/// `canonical_to_entries[canonical]` shard, taking the shard write
-/// lock for the whole `entry(canonical).or_insert_with(...)` + inner
-/// `insert` pair.
+/// `canonical_to_entries[canonical]` shard, holding the shard lock (read
+/// for an existing shard, write to create one) across the inner `insert`.
 #[inline]
 fn register_single_canonical(
     canonical_to_entries: &CanonicalToEntries,
-    canonical: &Arc<str>,
-    family: &FamilyKey,
+    canonical: &str,
+    family: &Arc<FamilyKey>,
     populated: ModeSlot,
     admission_seq: u64,
     registered_facts: &RegisteredFacts,
     timing_on: bool,
 ) {
-    let shard = canonical_to_entries
-        .entry(Arc::clone(canonical))
-        .or_insert_with(|| Mutex::new(FxHashMap::default()));
     let lock_start = if timing_on {
         Some(Instant::now())
     } else {
         None
     };
+    let record = (Arc::clone(family), Arc::clone(registered_facts));
+    // An existing shard takes the registration under its read lock; only a
+    // canonical without one copies its name into a new shard. A shard the
+    // prune drops between the two steps is re-created by the second, as the
+    // single-step path would.
+    if let Some(shard) = canonical_to_entries.get(canonical) {
+        let mut map = shard.value().lock();
+        record_lock_wait(lock_start);
+        map.insert((admission_seq, populated), record);
+        return;
+    }
+    let shard = canonical_to_entries
+        .entry(Arc::from(canonical))
+        .or_insert_with(|| Mutex::new(FxHashMap::default()));
     let mut map = shard.value().lock();
+    record_lock_wait(lock_start);
+    map.insert((admission_seq, populated), record);
+}
+
+fn record_lock_wait(lock_start: Option<Instant>) {
     let lock_wait = lock_start
         .map(|t| t.elapsed())
         .unwrap_or(std::time::Duration::ZERO);
     crate::request_observers::record_family_map_lock_acquisition(lock_wait);
-    map.insert(
-        (admission_seq, populated),
-        (family.clone(), Arc::clone(registered_facts)),
-    );
 }
 
 /// Prune every reverse-index registration a REMOVED family's slots hold.
@@ -204,15 +240,15 @@ pub(super) fn drain_family_slots_registrations(
     family: &FamilyKey,
     slots: &FamilySlots,
 ) -> bool {
+    let _ = family;
     let mut pruned_any = false;
     for (slot, entry) in slots.iter_populated_slots_all() {
-        let carrier_canonicals = entry.read_set_signature.canonical_ids();
-        let dispatch_canonicals = entry.dispatch_dep_signature.iter().map(|(c, _)| c);
-        for canonical in carrier_canonicals.iter().chain(dispatch_canonicals) {
+        for canonical in candidate_canonicals(entry) {
             prune_reverse_index_registration(
                 canonical_to_entries,
                 canonical,
-                &(family.clone(), slot, entry.admission_seq),
+                slot,
+                entry.admission_seq,
             );
             pruned_any = true;
         }
