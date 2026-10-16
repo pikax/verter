@@ -3548,7 +3548,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 SemanticNodeData::MergedDecl { contributors } => {
                     // Reduce the peer-merged surface and re-process the current
                     // segment against the merged object.
-                    let contributors = contributors.clone();
+                    let contributors = contributors.share();
                     drop(data);
                     current = self.dispatch.reduce_merged_decl(&contributors);
                     continue;
@@ -5319,7 +5319,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                             base.owner,
                             Arc::clone(&base.decl_name),
                         );
-                    let args_clone = Arc::clone(args);
+                    let args_clone = Arc::clone(args.as_arc());
                     drop(data);
                     if let Some(callee_arg) = flow_member_arg {
                         if let Some(member_node) = self
@@ -5438,7 +5438,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     // empty). `length` is the tuple's possible lengths;
                     // any other key is a member of the tuple's apparent
                     // `Array`.
-                    let elements = elements.clone();
+                    let elements = elements.share();
                     drop(data);
                     let member = self.dispatch.apparent_member_name(segment);
                     if member.as_deref() == Some("length") {
@@ -5898,7 +5898,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             }
             SemanticNodeData::InstantiationRef { base, args } => {
                 let identity = base.clone();
-                let args_clone = Arc::clone(args);
+                let args_clone = Arc::clone(args.as_arc());
                 let carrier_mode = self.mode();
                 drop(data);
                 let inst_base = self.dispatch.type_slot_for(
@@ -6823,7 +6823,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             }
             SemanticNodeData::MergedDecl { contributors } => {
                 // Reduce the peer-merged surface, then expand the merged object.
-                let contributors = contributors.clone();
+                let contributors = contributors.share();
                 drop(data);
                 let merged = self.dispatch.reduce_merged_decl(&contributors);
                 work.push(ExpandFrame::Expand(merged));
@@ -7652,7 +7652,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 // Intersection through the heritage-overlay path so inherited
                 // members surface and own members shadow them — exactly the same
                 // resolution a single `interface extends Base` body receives.
-                let contributors = contributors.clone();
+                let contributors = contributors.share();
                 drop(data);
                 let merged = self.dispatch.reduce_merged_decl(&contributors);
                 work.push(Frame::Visit {
@@ -7744,8 +7744,8 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             }
             SemanticNodeData::InstantiationRef { base, args } => {
                 let identity = base.clone();
-                let args_clone = Arc::clone(args);
-                let args_for_filter = Arc::clone(args);
+                let args_clone = Arc::clone(args.as_arc());
+                let args_for_filter = Arc::clone(args.as_arc());
                 drop(data);
                 // A result utility at a surface boundary owns its key source,
                 // while each member keeps a separate value demand.
@@ -11611,7 +11611,7 @@ mod overload_carrier_exclusion_tests {
             "DeclRef" => SemanticNodeData::DeclRef { identity },
             "InstantiationRef" => SemanticNodeData::InstantiationRef {
                 base: identity,
-                args: Arc::from(
+                args: crate::semantic_query::PayloadArray::from(
                     vec![graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String))]
                         .into_boxed_slice(),
                 ),
@@ -11706,7 +11706,7 @@ mod overload_carrier_exclusion_tests {
                 readonly: false,
             },
             "Tuple" => SemanticNodeData::Tuple {
-                elements: Arc::from(
+                elements: crate::semantic_query::PayloadArray::from(
                     vec![crate::semantic_query::TupleElement {
                         label: None,
                         value: element,
@@ -11719,7 +11719,7 @@ mod overload_carrier_exclusion_tests {
             },
             "TemplateLiteral" => SemanticNodeData::TemplateLiteral {
                 quasis: Arc::from(vec![Arc::<str>::from("hello-")].into_boxed_slice()),
-                expressions: Arc::from(vec![element].into_boxed_slice()),
+                expressions: crate::semantic_query::PayloadArray::from(vec![element].into_boxed_slice()),
             },
             other => unreachable!("unknown apparent-type carrier kind `{other}`"),
         };

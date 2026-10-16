@@ -697,7 +697,7 @@ fn carrier_instantiation_args(
         return None;
     }
     match dispatch.graph().read_in_scope(node)?.as_ref() {
-        SemanticNodeData::InstantiationRef { args, .. } => Some(Arc::clone(args)),
+        SemanticNodeData::InstantiationRef { args, .. } => Some(Arc::from(&args[..])),
         SemanticNodeData::Alias(next) => carrier_instantiation_args(dispatch, *next, visited),
         _ => None,
     }

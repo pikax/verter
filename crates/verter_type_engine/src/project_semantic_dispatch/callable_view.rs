@@ -729,7 +729,7 @@ impl<'a, 'ctx, C: crate::resolver_core::ResolverCapabilities> CallableNodeView<'
         match data.as_ref() {
             // A `Snippet<Params>` carrier — read the un-instantiated `Params`.
             SemanticNodeData::InstantiationRef { args, .. } => {
-                let args = Arc::clone(args);
+                let args = Arc::clone(args.as_arc());
                 drop(data);
                 match args.len() {
                     // A default `Snippet` — a present, binding-less slot.

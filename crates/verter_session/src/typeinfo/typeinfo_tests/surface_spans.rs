@@ -1019,9 +1019,9 @@ fn one_level_surface_converts_every_entry_kind_and_generic_roots_stay_open() {
         graph.intern_node_with_scope(
             SemanticNodeData::Signature {
                 kind,
-                params: Arc::from(Vec::new().into_boxed_slice()),
+                params: verter_type_engine::semantic_query::PayloadArray::from(Vec::new().into_boxed_slice()),
                 return_type: number,
-                type_parameters: Arc::from(Vec::new().into_boxed_slice()),
+                type_parameters: verter_type_engine::semantic_query::PayloadArray::from(Vec::new().into_boxed_slice()),
                 occurrence: None,
                 return_carrier: SignatureReturnCarrier::Declared(number),
                 signature_span: Some(span),

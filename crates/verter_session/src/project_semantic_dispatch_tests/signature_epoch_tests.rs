@@ -557,9 +557,9 @@ fn a_joiner_never_takes_a_retired_epoch_value_from_the_build_it_joined() {
         let sig = graph.intern_node_with_scope(
             SemanticNodeData::Signature {
                 kind: SignatureKind::Call,
-                params: Arc::from(vec![param(string)].into_boxed_slice()),
+                params: verter_type_engine::semantic_query::PayloadArray::from(vec![param(string)].into_boxed_slice()),
                 return_type: string,
-                type_parameters: Arc::from(Vec::new().into_boxed_slice()),
+                type_parameters: verter_type_engine::semantic_query::PayloadArray::from(Vec::new().into_boxed_slice()),
                 occurrence: Some(occurrence(name, 0)),
                 return_carrier: SignatureReturnCarrier::Declared(string),
                 signature_span: None,

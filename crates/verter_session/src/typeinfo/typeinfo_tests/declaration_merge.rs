@@ -422,7 +422,7 @@ fn merged_interface_generic_heritage_own_member_shadows_expanded() {
     //    eagerly-materialised heritage `Object` is indistinguishable from
     //    the own body and silently steals member precedence).
     let contributors = match graph.node_data(node.id()).as_deref() {
-        Some(SemanticNodeData::MergedDecl { contributors }) => contributors.clone(),
+        Some(SemanticNodeData::MergedDecl { contributors }) => contributors.to_vec(),
         other => panic!("merged X must stay a MergedDecl carrier, got {other:?}"),
     };
     assert_eq!(contributors.len(), 2, "two same-name contributors");
@@ -498,7 +498,7 @@ fn merged_interface_mapper_builtin_heritage_own_member_shadows_expanded() {
     //    topology — a materialised heritage Object is indistinguishable
     //    from the own body and silently steals member precedence).
     let contributors = match graph.node_data(node.id()).as_deref() {
-        Some(SemanticNodeData::MergedDecl { contributors }) => contributors.clone(),
+        Some(SemanticNodeData::MergedDecl { contributors }) => contributors.to_vec(),
         other => panic!("merged X must stay a MergedDecl carrier, got {other:?}"),
     };
     assert_eq!(contributors.len(), 2, "two same-name contributors");
@@ -603,7 +603,7 @@ fn merged_interface_mapper_builtin_heritage_own_member_shadows_skeleton() {
     // surface by the topology-driven peer-merge reducer and silently steals
     // member precedence (own-body-shadows-heritage inverts).
     let contributors = match graph.node_data(node.id()).as_deref() {
-        Some(SemanticNodeData::MergedDecl { contributors }) => contributors.clone(),
+        Some(SemanticNodeData::MergedDecl { contributors }) => contributors.to_vec(),
         other => panic!("merged X must stay a MergedDecl carrier under Skeleton, got {other:?}"),
     };
     assert_eq!(contributors.len(), 2, "two same-name contributors");

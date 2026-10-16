@@ -824,7 +824,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         });
         let tuple = |first, second| {
             graph.intern_node(SemanticNodeData::Tuple {
-                elements: Arc::from(
+                elements: crate::semantic_query::PayloadArray::from(
                     vec![
                         crate::semantic_query::TupleElement {
                             label: None,
@@ -2351,7 +2351,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> Option<(crate::semantic_query::DeclIdentity, Arc<[SemanticNodeId]>)> {
         let (identity, arguments) = match self.graph().node_data(carrier).as_deref() {
             Some(SemanticNodeData::InstantiationRef { base, args }) => {
-                (base.clone(), Arc::clone(args))
+                (base.clone(), Arc::clone(args.as_arc()))
             }
             // An alias named without type arguments has one instantiation,
             // which never makes three.
@@ -5201,9 +5201,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
         Some((
             first.value,
-            remainder[..arity].to_vec(),
+            remainder[..arity].iter().map(crate::semantic_query::TupleElement::copy).collect::<Vec<_>>(),
             second.value,
-            remainder[arity..].to_vec(),
+            remainder[arity..].iter().map(crate::semantic_query::TupleElement::copy).collect::<Vec<_>>(),
         ))
     }
 
@@ -5345,7 +5345,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 })
             }
             Some(SemanticNodeData::Tuple { elements, .. }) => {
-                let elements = elements.to_vec();
+                let elements = elements.iter().map(crate::semantic_query::TupleElement::copy).collect::<Vec<_>>();
                 let mut verdict = assignable(bindings);
                 let mut variadic_key_domain = false;
                 for (index, element) in elements.into_iter().enumerate() {
@@ -5497,7 +5497,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     continue;
                 }
                 Some(SemanticNodeData::InstantiationRef { base, args }) => {
-                    Some((base.clone(), Arc::clone(args)))
+                    Some((base.clone(), Arc::clone(args.as_arc())))
                 }
                 Some(SemanticNodeData::DeclRef { identity }) => {
                     Some((identity.clone(), Arc::from([])))
@@ -5648,7 +5648,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 match self.normalize_tuple_spread(&elements, readonly) {
                     super::build::NormalizedTupleShape::Tuple(elements) => {
                         Some(graph.intern_node(SemanticNodeData::Tuple {
-                            elements: Arc::from(elements.into_boxed_slice()),
+                            elements: crate::semantic_query::PayloadArray::from(elements.into_boxed_slice()),
                             readonly,
                         }))
                     }
@@ -9891,7 +9891,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 identity.clone(),
                 Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
             ),
-            SemanticNodeData::InstantiationRef { base, args } => (base.clone(), Arc::clone(args)),
+            SemanticNodeData::InstantiationRef { base, args } => (base.clone(), Arc::clone(args.as_arc())),
             _ => return IdentityCarrierUnwrap::Concrete(id),
         };
         drop(data);
@@ -10020,7 +10020,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     continue;
                 }
                 SemanticNodeData::MergedDecl { contributors } => {
-                    let contributors = Arc::clone(contributors);
+                    let contributors = Arc::clone(contributors.as_arc());
                     drop(data);
                     current = super::walk::reduce_merged_decl_with_graph(graph, &contributors);
                     continue;
@@ -10075,7 +10075,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
                 ),
                 SemanticNodeData::InstantiationRef { base, args } => {
-                    (base.clone(), Arc::clone(args))
+                    (base.clone(), Arc::clone(args.as_arc()))
                 }
                 // An indexed access over a type that is not generic is the
                 // property type it reads (`Box['lit']` IS `2`, and an
@@ -13920,8 +13920,8 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
                     readonly: t_ro,
                 },
             ) => {
-                let s_els = Arc::clone(s_els);
-                let t_els = Arc::clone(t_els);
+                let s_els = Arc::clone(s_els.as_arc());
+                let t_els = Arc::clone(t_els.as_arc());
                 let s_ro = *s_ro;
                 let t_ro = *t_ro;
                 if !t_ro && s_ro {
@@ -13941,11 +13941,11 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
                 ) {
                     let (first, first_slice, second, second_slice) = split;
                     let first_slice = graph.intern_node(SemanticNodeData::Tuple {
-                        elements: Arc::from(first_slice.into_boxed_slice()),
+                        elements: crate::semantic_query::PayloadArray::from(first_slice.into_boxed_slice()),
                         readonly: false,
                     });
                     let second_slice = graph.intern_node(SemanticNodeData::Tuple {
-                        elements: Arc::from(second_slice.into_boxed_slice()),
+                        elements: crate::semantic_query::PayloadArray::from(second_slice.into_boxed_slice()),
                         readonly: false,
                     });
                     results.push(
@@ -14025,13 +14025,13 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
                         .iter()
                         .skip(prefix_len)
                         .take(remainder_end - prefix_len)
-                        .cloned()
+                        .map(crate::semantic_query::TupleElement::copy)
                         .collect();
                     // The capture is the slice of the concrete tuple, its
                     // labels, optionality and rest kept and never readonly
                     // (`sliceTupleType`).
                     let remainder_tuple = graph.intern_node(SemanticNodeData::Tuple {
-                        elements: Arc::from(remainder.into_boxed_slice()),
+                        elements: crate::semantic_query::PayloadArray::from(remainder.into_boxed_slice()),
                         readonly: false,
                     });
                     if !self.relation_deposit(infer_element, remainder_tuple, occurrence) {
@@ -14103,7 +14103,7 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
                     readonly: t_ro,
                 },
             ) => {
-                let s_els = Arc::clone(s_els);
+                let s_els = Arc::clone(s_els.as_arc());
                 let s_ro = *s_ro;
                 let t_el = *t_el;
                 let t_ro = *t_ro;
@@ -14150,7 +14150,7 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
                 },
             ) => {
                 let (s_el, s_ro, t_ro) = (*s_el, *s_ro, *t_ro);
-                let t_els = Arc::clone(t_els);
+                let t_els = Arc::clone(t_els.as_arc());
                 if !t_ro && s_ro {
                     results.push(RelationResult::NotAssignable);
                     return true;
@@ -14415,7 +14415,7 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
 
         // ── MergedDecl: reduce to its peer-merged object surface ───────
         if let SemanticNodeData::MergedDecl { contributors } = &*source_data {
-            let contributors = contributors.clone();
+            let contributors = contributors.share();
             drop(source_data);
             drop(target_data);
             let merged = self.reduce_merged_declaration(&contributors);
@@ -14423,7 +14423,7 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
             return;
         }
         if let SemanticNodeData::MergedDecl { contributors } = &*target_data {
-            let contributors = contributors.clone();
+            let contributors = contributors.share();
             drop(source_data);
             drop(target_data);
             let merged = self.reduce_merged_declaration(&contributors);

@@ -500,7 +500,7 @@ fn type_param_decl_carries_exact_param_node_and_per_parameter_const() {
     // list carries its own value, and the two decls stay distinct.
     let non_const = TypeParamDecl {
         is_const: false,
-        ..decl.clone()
+        ..decl.copy_for_tests()
     };
     assert!(!non_const.is_const);
     assert_ne!(decl, non_const);

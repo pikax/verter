@@ -698,7 +698,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 }
                 _ => return None,
             };
-            let mut position = element.clone();
+            let mut position = element.copy();
             position.value = value;
             normalized.push(position);
         }
@@ -709,7 +709,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             self.graph().intern_preserving_scope(
                 node,
                 SemanticNodeData::Tuple {
-                    elements: Arc::from(normalized),
+                    elements: crate::semantic_query::PayloadArray::from(normalized),
                     readonly: *readonly,
                 },
             ),
@@ -859,7 +859,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             Some(SemanticNodeData::TemplateLiteral {
                 quasis,
                 expressions,
-            }) => (Arc::clone(quasis), Arc::clone(expressions)),
+            }) => (Arc::clone(quasis), Arc::clone(expressions.as_arc())),
             _ => return None,
         };
         let read = self.execute_read(SemanticQueryKey::TemplateLiteralReduce {
@@ -1797,7 +1797,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             };
             if let SemanticNodeData::InstantiationRef { base, args } = &*data {
                 let base = base.clone();
-                let args = Arc::clone(args);
+                let args = Arc::clone(args.as_arc());
                 drop(data);
                 if !args
                     .iter()

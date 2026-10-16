@@ -1283,8 +1283,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         };
         let identity = return_carrier.flow_identity()?;
         (self.flow_return_key_for(identity) == *expected).then(|| CallableSignature {
-            params: Arc::clone(params),
-            type_parameters: Arc::clone(type_parameters),
+            params: Arc::clone(params.as_arc()),
+            type_parameters: Arc::clone(type_parameters.as_arc()),
             identity: identity.clone(),
         })
     }

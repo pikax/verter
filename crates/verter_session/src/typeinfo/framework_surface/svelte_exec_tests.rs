@@ -940,7 +940,7 @@ fn ntuple(
         .collect();
     graph.intern_node(
         verter_type_engine::semantic_query::SemanticNodeData::Tuple {
-            elements: Arc::from(elements.into_boxed_slice()),
+            elements: verter_type_engine::semantic_query::PayloadArray::from(elements.into_boxed_slice()),
             readonly: false,
         },
     )
@@ -962,7 +962,7 @@ fn nsnippet(
                 whole_hash: verter_type_engine::semantic_query::HashValue::default(),
                 decl_name: Arc::from("Snippet"),
             },
-            args: Arc::from(args.into_boxed_slice()),
+            args: verter_type_engine::semantic_query::PayloadArray::from(args.into_boxed_slice()),
         },
     )
 }
@@ -981,7 +981,7 @@ fn nsnippet_function(
     graph.intern_node(
         verter_type_engine::semantic_query::SemanticNodeData::Signature {
             kind: verter_type_engine::semantic_query::SignatureKind::Call,
-            params: Arc::from(
+            params: verter_type_engine::semantic_query::PayloadArray::from(
                 vec![
                     verter_type_engine::semantic_query::FunctionParam::synthetic(
                         Some(Arc::from("this")),
@@ -1003,7 +1003,7 @@ fn nsnippet_function(
             return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
                 void,
             ),
-            type_parameters: Arc::from(Vec::new().into_boxed_slice()),
+            type_parameters: verter_type_engine::semantic_query::PayloadArray::from(Vec::new().into_boxed_slice()),
             signature_span: None,
             return_type_span: None,
             predicate: None,

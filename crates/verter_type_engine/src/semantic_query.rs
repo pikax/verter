@@ -9647,6 +9647,118 @@ pub enum UndecidedReason {
     OpenAssumption,
 }
 
+/// A nested array of a graph payload: tuple elements, signature parameters
+/// and type parameters, intrinsic / instantiation / class-expression
+/// arguments, template expressions and merged contributors.
+///
+/// It is borrowed through the read that owns its payload (`Deref` to a
+/// slice) and has no public copy, and its member records have none either,
+/// so neither the array nor a member can be carried away from that owner.
+/// Construction shares the allocation inside the engine.
+pub struct PayloadArray<T>(Arc<[T]>);
+
+impl<T> PayloadArray<T> {
+    /// Share the allocation with a payload the engine is building.
+    pub(crate) fn share(&self) -> Self {
+        Self(Arc::clone(&self.0))
+    }
+
+    /// The shared allocation, for engine-internal construction.
+    pub(crate) fn as_arc(&self) -> &Arc<[T]> {
+        &self.0
+    }
+
+    /// Share the allocation with a fixture payload.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn share_for_tests(&self) -> Self {
+        self.share()
+    }
+}
+
+impl<T> std::ops::Deref for PayloadArray<T> {
+    type Target = [T];
+    fn deref(&self) -> &[T] {
+        &self.0
+    }
+}
+
+impl<T> AsRef<[T]> for PayloadArray<T> {
+    fn as_ref(&self) -> &[T] {
+        &self.0
+    }
+}
+
+impl<'a, T> IntoIterator for &'a PayloadArray<T> {
+    type Item = &'a T;
+    type IntoIter = std::slice::Iter<'a, T>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+impl<T: std::fmt::Debug> std::fmt::Debug for PayloadArray<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl<T: PartialEq> PartialEq for PayloadArray<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl<T: Eq> Eq for PayloadArray<T> {}
+
+impl<T: std::hash::Hash> std::hash::Hash for PayloadArray<T> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.hash(state);
+    }
+}
+
+impl<T> Default for PayloadArray<T> {
+    fn default() -> Self {
+        Self(Arc::from(Vec::new()))
+    }
+}
+
+impl<T> From<Arc<[T]>> for PayloadArray<T> {
+    fn from(items: Arc<[T]>) -> Self {
+        Self(items)
+    }
+}
+
+impl<T> From<Vec<T>> for PayloadArray<T> {
+    fn from(items: Vec<T>) -> Self {
+        Self(Arc::from(items))
+    }
+}
+
+impl<T> From<Box<[T]>> for PayloadArray<T> {
+    fn from(items: Box<[T]>) -> Self {
+        Self(Arc::from(items))
+    }
+}
+
+impl<T, const N: usize> From<[T; N]> for PayloadArray<T> {
+    fn from(items: [T; N]) -> Self {
+        Self(Arc::from(Vec::from(items)))
+    }
+}
+
+impl<T: Copy> From<&[T]> for PayloadArray<T> {
+    fn from(items: &[T]) -> Self {
+        Self(Arc::from(items))
+    }
+}
+
+impl<T> FromIterator<T> for PayloadArray<T> {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        Self(iter.into_iter().collect())
+    }
+}
+
 /// One element of a [`SemanticNodeData::Tuple`] shell.
 ///
 /// Preserves the declaration-site metadata the dispatcher needs to render
@@ -9655,13 +9767,33 @@ pub enum UndecidedReason {
 /// regular [`SemanticNodeId`] under the lazy-materialisation rule — the
 /// element's body is not eagerly recursed into when the owning tuple shell
 /// is interned.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct TupleElement {
     pub label: Option<Arc<str>>,
     pub value: SemanticNodeId,
     pub optional: bool,
     pub rest: bool,
 }
+
+impl TupleElement {
+    /// A fixture copy of a payload member record.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn copy_for_tests(&self) -> Self {
+        self.copy()
+    }
+
+    /// An engine-internal copy for a payload the engine is building.
+    pub(crate) fn copy(&self) -> Self {
+        Self {
+            label: self.label.clone(),
+            value: self.value,
+            optional: self.optional,
+            rest: self.rest,
+        }
+    }
+}
+
 
 /// Immutable semantic-node payload. Storage for this enum is owned by the
 /// shared semantic graph; node ids hand out views without copying.
@@ -9895,7 +10027,7 @@ pub enum SemanticNodeData {
     /// [`Self::InstantiationRef`] of a lib alias (a declaration application).
     IntrinsicApplication {
         op: CompilerIntrinsicTypeOp,
-        args: Arc<[SemanticNodeId]>,
+        args: PayloadArray<SemanticNodeId>,
     },
     Alias(SemanticNodeId),
     Object(SurfaceView),
@@ -9951,7 +10083,7 @@ pub enum SemanticNodeData {
     /// going through a side channel. Each element's `value` is a regular
     /// [`SemanticNodeId`] under the lazy-materialisation rule.
     Tuple {
-        elements: Arc<[TupleElement]>,
+        elements: PayloadArray<TupleElement>,
         readonly: bool,
     },
     /// Template-literal shell. Carries the
@@ -9962,7 +10094,7 @@ pub enum SemanticNodeData {
     /// deferred.
     TemplateLiteral {
         quasis: Arc<[Arc<str>]>,
-        expressions: Arc<[SemanticNodeId]>,
+        expressions: PayloadArray<SemanticNodeId>,
     },
     /// Deferred `keyof` shell used when the operand still carries open
     /// type-parameter structure and cannot be collapsed to a concrete key
@@ -10132,9 +10264,9 @@ pub enum SemanticNodeData {
     /// [`TypeExpr::ConstructorType`](verter_type_expr::TypeExpr::ConstructorType).
     Signature {
         kind: SignatureKind,
-        params: Arc<[FunctionParam]>,
+        params: PayloadArray<FunctionParam>,
         return_type: SemanticNodeId,
-        type_parameters: Arc<[TypeParamDecl]>,
+        type_parameters: PayloadArray<TypeParamDecl>,
         /// The authored position this signature was lowered from, when the
         /// lowering carried occurrence-grade provenance (the locator-driven
         /// rails). `None` for a signature without recoverable occurrence
@@ -10207,7 +10339,7 @@ pub enum SemanticNodeData {
     /// Raises to `TypeExpr::Ref { name: base.decl_name, type_arguments: [...raised args] }`.
     InstantiationRef {
         base: DeclIdentity,
-        args: Arc<[SemanticNodeId]>,
+        args: PayloadArray<SemanticNodeId>,
     },
 
     /// The INSTANCE type of a class expression (`return class extends
@@ -10234,7 +10366,7 @@ pub enum SemanticNodeData {
         /// [`ClassExpressionIdentity::outer_clauses`] order), then one per
         /// own type parameter. Where the class is authored each is its
         /// parameter itself.
-        type_arguments: Arc<[SemanticNodeId]>,
+        type_arguments: PayloadArray<SemanticNodeId>,
         surface: SemanticNodeId,
     },
 
@@ -10247,7 +10379,7 @@ pub enum SemanticNodeData {
     /// single declaration.
     MergedDecl {
         /// Lowered contributor bodies, in source order.
-        contributors: Arc<[SemanticNodeId]>,
+        contributors: PayloadArray<SemanticNodeId>,
     },
 
     /// Unresolved bare-name reference carrier.
@@ -10343,7 +10475,7 @@ impl SemanticNodeData {
         match self {
             Self::IntrinsicApplication { op, args } => Self::IntrinsicApplication {
                 op: op.clone(),
-                args: args.clone(),
+                args: args.share(),
             },
             Self::Alias(v0) => Self::Alias(v0.clone()),
             Self::Object(v0) => Self::Object(v0.clone()),
@@ -10359,7 +10491,7 @@ impl SemanticNodeData {
                 readonly: readonly.clone(),
             },
             Self::Tuple { elements, readonly } => Self::Tuple {
-                elements: elements.clone(),
+                elements: elements.share(),
                 readonly: readonly.clone(),
             },
             Self::TemplateLiteral {
@@ -10367,7 +10499,7 @@ impl SemanticNodeData {
                 expressions,
             } => Self::TemplateLiteral {
                 quasis: quasis.clone(),
-                expressions: expressions.clone(),
+                expressions: expressions.share(),
             },
             Self::KeyOf { base } => Self::KeyOf { base: base.clone() },
             Self::IndexedAccess { object, index } => Self::IndexedAccess {
@@ -10434,9 +10566,9 @@ impl SemanticNodeData {
                 is_abstract,
             } => Self::Signature {
                 kind: kind.clone(),
-                params: params.clone(),
+                params: params.share(),
                 return_type: return_type.clone(),
-                type_parameters: type_parameters.clone(),
+                type_parameters: type_parameters.share(),
                 occurrence: occurrence.clone(),
                 return_carrier: return_carrier.clone(),
                 signature_span: signature_span.clone(),
@@ -10450,7 +10582,7 @@ impl SemanticNodeData {
             },
             Self::InstantiationRef { base, args } => Self::InstantiationRef {
                 base: base.clone(),
-                args: args.clone(),
+                args: args.share(),
             },
             Self::ClassExpressionInstance {
                 identity,
@@ -10458,11 +10590,11 @@ impl SemanticNodeData {
                 surface,
             } => Self::ClassExpressionInstance {
                 identity: identity.clone(),
-                type_arguments: type_arguments.clone(),
+                type_arguments: type_arguments.share(),
                 surface: surface.clone(),
             },
             Self::MergedDecl { contributors } => Self::MergedDecl {
-                contributors: contributors.clone(),
+                contributors: contributors.share(),
             },
             Self::BareRef(v0) => Self::BareRef(v0.clone()),
             Self::ImportType(v0) => Self::ImportType(v0.clone()),
@@ -10512,7 +10644,10 @@ impl SemanticNodeData {
         op: CompilerIntrinsicTypeOp,
         args: Arc<[SemanticNodeId]>,
     ) -> Option<Self> {
-        (args.len() == op.arity()).then_some(Self::IntrinsicApplication { op, args })
+        (args.len() == op.arity()).then_some(Self::IntrinsicApplication {
+            op,
+            args: PayloadArray::from(args),
+        })
     }
 
     /// The kind-erased composite payload of a [`Self::Union`] /
@@ -11001,7 +11136,7 @@ pub enum SignatureKind {
 }
 
 /// Parameter of a [`SemanticNodeData::Signature`].
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct FunctionParam {
     pub name: Option<Arc<str>>,
     pub ty: SemanticNodeId,
@@ -11019,6 +11154,28 @@ pub struct FunctionParam {
     /// `(x: T)` instantiated at `'a'` is not literal-declared.
     pub declared_literal: bool,
 }
+
+impl FunctionParam {
+    /// A fixture copy of a payload member record.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn copy_for_tests(&self) -> Self {
+        self.copy()
+    }
+
+    /// An engine-internal copy for a payload the engine is building.
+    pub(crate) fn copy(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            ty: self.ty,
+            optional: self.optional,
+            rest: self.rest,
+            span: self.span,
+            declared_literal: self.declared_literal,
+        }
+    }
+}
+
 
 /// Whether a declared parameter type is a literal type in TypeScript's
 /// syntax (`LiteralType`): a string, number, bigint or boolean literal, or
@@ -11119,7 +11276,7 @@ pub fn split_this_receiver(params: &[FunctionParam]) -> (Option<&FunctionParam>,
 }
 
 /// Type-parameter declaration on a [`SemanticNodeData::Signature`].
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct TypeParamDecl {
     pub name: Arc<str>,
     /// The exact interned [`SemanticNodeData::TypeParam`] node for this
@@ -11132,6 +11289,27 @@ pub struct TypeParamDecl {
     /// is valid) — never a session-wide flag.
     pub is_const: bool,
 }
+
+impl TypeParamDecl {
+    /// A fixture copy of a payload member record.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn copy_for_tests(&self) -> Self {
+        self.copy()
+    }
+
+    /// An engine-internal copy for a payload the engine is building.
+    pub(crate) fn copy(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            param: self.param,
+            constraint: self.constraint,
+            default: self.default,
+            is_const: self.is_const,
+        }
+    }
+}
+
 
 // ──────────────────────────────────────────────────────────────────────────
 // API traits

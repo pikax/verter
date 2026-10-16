@@ -1623,7 +1623,7 @@ fn projectpath_over_instantiationref_budget_trip_withholds_value_and_does_not_wa
     };
     let instref = graph.intern_node(SemanticNodeData::InstantiationRef {
         base: partial_builtin,
-        args: Arc::from(vec![arg].into_boxed_slice()),
+        args: verter_type_engine::semantic_query::PayloadArray::from(vec![arg].into_boxed_slice()),
     });
 
     let ctx = RequestContext::with_kind_timing_and_projection_budget(
@@ -1848,7 +1848,7 @@ fn conditional_relation_budget_trip_folds_partial_and_refuses_relation_memo() {
         };
         graph.intern_node(SemanticNodeData::InstantiationRef {
             base: partial_builtin,
-            args: Arc::from(vec![arg].into_boxed_slice()),
+            args: verter_type_engine::semantic_query::PayloadArray::from(vec![arg].into_boxed_slice()),
         })
     };
     let check = mk_partial_instref("cond_check_arg");

@@ -199,9 +199,9 @@ impl SemanticGraphStore {
         };
         self.intern_node(crate::semantic_query::SemanticNodeData::Signature {
             kind: crate::semantic_query::SignatureKind::Construct,
-            params: Arc::clone(params),
+            params: params.share(),
             return_type: *return_type,
-            type_parameters: Arc::clone(type_parameters),
+            type_parameters: type_parameters.share(),
             occurrence: occurrence.clone(),
             return_carrier: return_carrier.clone(),
             signature_span: *signature_span,

@@ -267,11 +267,11 @@ fn func_node(
         .collect();
     store.intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Call,
-        params: Arc::from(params.into_boxed_slice()),
+        params: verter_type_engine::semantic_query::PayloadArray::from(params.into_boxed_slice()),
         return_type: ret,
         occurrence: None,
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(ret),
-        type_parameters: Arc::from(Vec::new().into_boxed_slice()),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(Vec::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
         predicate: None,
@@ -658,13 +658,13 @@ fn function_type_parameters_render_constraint_and_default() {
 
     let func = store.intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Call,
-        params: Arc::from(Vec::new().into_boxed_slice()),
+        params: verter_type_engine::semantic_query::PayloadArray::from(Vec::new().into_boxed_slice()),
         return_type: void_id,
         occurrence: None,
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
             void_id,
         ),
-        type_parameters: Arc::from([TypeParamDecl {
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from([TypeParamDecl {
             name: Arc::from("T"),
             param: t_decl_param,
             constraint: Some(string_id),
@@ -727,7 +727,7 @@ fn string_and_template_literals_are_escaped() {
     // backtick and a backslash renders both escaped.
     let tmpl = store.intern_node(SemanticNodeData::TemplateLiteral {
         quasis: Arc::from([Arc::from("a`b\\c") as Arc<str>]),
-        expressions: Arc::from(Vec::new().into_boxed_slice()),
+        expressions: verter_type_engine::semantic_query::PayloadArray::from(Vec::new().into_boxed_slice()),
     });
     // The verbatim impl emits ``a`b\c`` (a backtick closing the template).
     assert_eq!(render(&store, tmpl), r"`a\`b\\c`");
@@ -968,7 +968,7 @@ fn merged_decl_display_matches_graph_reduction_and_is_non_mutating() {
     let contributors = [part_a, part_b];
 
     let merged = store.intern_node(SemanticNodeData::MergedDecl {
-        contributors: Arc::from(contributors),
+        contributors: verter_type_engine::semantic_query::PayloadArray::from(contributors),
     });
 
     // Canonical reduction through the single mutating peer-merge engine
@@ -1058,7 +1058,7 @@ fn merged_decl_display_preserves_heritage_arms_like_graph_reduction() {
     ));
     let contributors = [contributor];
     let merged = store.intern_node(SemanticNodeData::MergedDecl {
-        contributors: Arc::from(contributors),
+        contributors: verter_type_engine::semantic_query::PayloadArray::from(contributors),
     });
 
     let reduced =

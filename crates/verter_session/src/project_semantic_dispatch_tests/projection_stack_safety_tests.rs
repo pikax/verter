@@ -718,7 +718,7 @@ fn runaway_generic_returns_work_partial_one_root_diagnostic_and_seals_its_refusa
             whole_hash: Default::default(),
             decl_name: Arc::from("Runaway"),
         },
-        args: Arc::from([string]),
+        args: verter_type_engine::semantic_query::PayloadArray::from([string]),
     });
     let key = SemanticQueryKey::Instantiate(InstantiateKey::new(
         verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(

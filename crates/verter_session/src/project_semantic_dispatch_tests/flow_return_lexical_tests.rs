@@ -3183,7 +3183,10 @@ fn signature_parts(
         }) => SigParts {
             params: params.iter().map(|param| param.ty).collect(),
             return_type: *return_type,
-            type_parameters: type_parameters.to_vec(),
+            type_parameters: type_parameters
+                .iter()
+                .map(verter_type_engine::semantic_query::TypeParamDecl::copy_for_tests)
+                .collect(),
         },
         other => panic!("expected a Signature answer, got {other:?}"),
     }

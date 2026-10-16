@@ -572,14 +572,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             RefHeadResolution::Resolved(identity) => graph.intern_node_with_scope(
                 SemanticNodeData::InstantiationRef {
                     base: identity,
-                    args,
+                    args: crate::semantic_query::PayloadArray::from(args),
                 },
                 scope.clone(),
             ),
             RefHeadResolution::Builtin(identity) => graph.intern_node_with_scope(
                 SemanticNodeData::InstantiationRef {
                     base: identity,
-                    args,
+                    args: crate::semantic_query::PayloadArray::from(args),
                 },
                 scope.clone(),
             ),

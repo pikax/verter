@@ -1762,7 +1762,7 @@ defineProps<Copy<ImportedProps>>()
             .node_data(resolved)
             .expect("resolved carrier node must remain addressable");
         let (base, args) = match resolved_data.as_ref() {
-        SemanticNodeData::InstantiationRef { base, args } => (base.clone(), Arc::clone(args)),
+        SemanticNodeData::InstantiationRef { base, args } => (base.clone(), Arc::<[_]>::from(&args[..])),
         other => panic!(
             "setup `Copy<Source>` must resolve to an exact InstantiationRef before projection; got {other:?}"
         ),

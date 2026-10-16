@@ -35,7 +35,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 return_type,
                 type_parameters,
                 ..
-            }) if !type_parameters.is_empty() => (*return_type, Arc::clone(type_parameters)),
+            }) if !type_parameters.is_empty() => (*return_type, Arc::clone(type_parameters.as_arc())),
             _ => return None,
         };
         let target_return = match graph.node_data(target).as_deref() {
@@ -192,9 +192,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             signature,
             SemanticNodeData::Signature {
                 kind: *kind,
-                params: Arc::clone(params),
+                params: params.share(),
                 return_type: *return_type,
-                type_parameters: Arc::from(Vec::new().into_boxed_slice()),
+                type_parameters: crate::semantic_query::PayloadArray::from(Vec::new().into_boxed_slice()),
                 occurrence: occurrence.clone(),
                 return_carrier: match return_carrier {
                     SignatureReturnCarrier::Declared(_) => {

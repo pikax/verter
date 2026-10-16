@@ -1576,7 +1576,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> SemanticNodeId {
         self.graph().intern_node_with_scope(
             SemanticNodeData::Tuple {
-                elements: Arc::from(lowered.into_boxed_slice()),
+                elements: crate::semantic_query::PayloadArray::from(lowered.into_boxed_slice()),
                 readonly,
             },
             scope.clone(),
@@ -1594,7 +1594,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         self.graph().intern_node_with_scope(
             SemanticNodeData::TemplateLiteral {
                 quasis,
-                expressions: Arc::from(expressions.into_boxed_slice()),
+                expressions: crate::semantic_query::PayloadArray::from(expressions.into_boxed_slice()),
             },
             scope.clone(),
         )
@@ -2466,9 +2466,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             crate::semantic_query::DeferredCallable::seal_signature_header(
                 SemanticNodeData::Signature {
                     kind,
-                    params: Arc::from(params.into_boxed_slice()),
+                    params: crate::semantic_query::PayloadArray::from(params.into_boxed_slice()),
                     return_type,
-                    type_parameters: Arc::from(type_parameters.into_boxed_slice()),
+                    type_parameters: crate::semantic_query::PayloadArray::from(type_parameters.into_boxed_slice()),
                     // The `LowerLocator` producer patches the ROOT signature's
                     // occurrence from the key's locator; nested function nodes
                     // carry none.

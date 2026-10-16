@@ -323,7 +323,7 @@ fn a_template_past_its_byte_allowance_is_a_memory_partial() {
             ]
             .into_boxed_slice(),
         ),
-        expressions: std::sync::Arc::from(vec![union("a"), union("b")].into_boxed_slice()),
+        expressions: verter_type_engine::semantic_query::PayloadArray::from(std::sync::Arc::from(vec![union("a"), union("b")].into_boxed_slice())),
     });
     dispatch.set_construction_byte_limit_for_tests(4 << 10);
     let (_, completeness) = dispatch.evaluate_deferred_semantic_node_with_context_for_tests(

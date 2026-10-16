@@ -1402,7 +1402,7 @@ fn key_of_over_cross_file_merged_decl_rejects_warm_entry_on_augmenter_edit() {
     let contributors: Arc<[SemanticNodeId]> =
         Arc::from(vec![base_node, aug_node].into_boxed_slice());
     let merged =
-        graph.intern_node_with_scope(SemanticNodeData::MergedDecl { contributors }, base_scope);
+        graph.intern_node_with_scope(SemanticNodeData::MergedDecl { contributors: verter_type_engine::semantic_query::PayloadArray::from(contributors) }, base_scope);
 
     let dispatch = host.semantic_dispatch();
     let key = SemanticQueryKey::KeyOf {

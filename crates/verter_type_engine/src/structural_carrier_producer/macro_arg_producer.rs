@@ -243,7 +243,7 @@ fn lower_node(
             }
             Ok(graph.intern_node_with_scope(
                 SemanticNodeData::Tuple {
-                    elements: Arc::from(lowered.into_boxed_slice()),
+                    elements: crate::semantic_query::PayloadArray::from(lowered.into_boxed_slice()),
                     readonly: *readonly,
                 },
                 scope.clone(),
@@ -258,7 +258,7 @@ fn lower_node(
             Ok(graph.intern_node_with_scope(
                 SemanticNodeData::TemplateLiteral {
                     quasis,
-                    expressions,
+                    expressions: crate::semantic_query::PayloadArray::from(expressions),
                 },
                 scope.clone(),
             ))
@@ -1030,9 +1030,9 @@ fn lower_function_signature(
     Ok(graph.intern_node_with_scope(
         SemanticNodeData::Signature {
             kind,
-            params: Arc::from(params.into_boxed_slice()),
+            params: crate::semantic_query::PayloadArray::from(params.into_boxed_slice()),
             return_type,
-            type_parameters: Arc::from(type_parameters.into_boxed_slice()),
+            type_parameters: crate::semantic_query::PayloadArray::from(type_parameters.into_boxed_slice()),
             occurrence: None,
             return_carrier,
             signature_span: func.spans.signature,

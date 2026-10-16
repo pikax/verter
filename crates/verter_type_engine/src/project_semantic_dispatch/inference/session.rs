@@ -97,7 +97,7 @@ impl ReverseRecoveredEntry {
                 value: value.clone(),
             },
             Self::TupleElement { element } => Self::TupleElement {
-                element: element.clone(),
+                element: element.copy(),
             },
             Self::IndexSignature { signature } => Self::IndexSignature {
                 signature: signature.clone(),

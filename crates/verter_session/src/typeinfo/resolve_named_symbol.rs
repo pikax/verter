@@ -956,7 +956,7 @@ pub(crate) fn materialize_through_aliases(
                             .execute_type_node(SemanticQueryKey::Instantiate(
                             verter_type_engine::semantic_query::InstantiateKey::new(
                                 inst_base,
-                                Arc::clone(args),
+                                Arc::from(&args[..]),
                                 dispatch.instantiate_context_for(
                                     &ref_base.canonical_id,
                                     verter_type_engine::semantic_query::ProjectionReductionContext::published(
@@ -1030,7 +1030,7 @@ pub(crate) fn materialize_through_aliases(
             {
                 let key = SemanticQueryKey::TemplateLiteralReduce {
                     pattern: Arc::clone(quasis),
-                    args: Arc::clone(expressions),
+                    args: Arc::from(&expressions[..]),
                     context: dispatch.template_literal_reduce_context(),
                 };
                 let step_result = match dispatch.execute_type_node(key) {

@@ -618,7 +618,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         graph.intern_node_with_scope(
             SemanticNodeData::InstantiationRef {
                 base: declaration.clone(),
-                args: Arc::from(args.into_boxed_slice()),
+                args: crate::semantic_query::PayloadArray::from(args.into_boxed_slice()),
             },
             declaration_scope(declaration),
         )
@@ -858,7 +858,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             let (declaration, args) = match self.graph().node_data(current)?.as_ref() {
                 SemanticNodeData::DeclRef { identity } => (identity.clone(), Arc::from([])),
                 SemanticNodeData::InstantiationRef { base, args } => {
-                    (base.clone(), Arc::clone(args))
+                    (base.clone(), Arc::clone(args.as_arc()))
                 }
                 _ => return None,
             };
@@ -899,7 +899,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let data = graph.node_data(node)?;
         match &*data {
             SemanticNodeData::InstantiationRef { base, args } => {
-                Some((base.clone(), Arc::clone(args)))
+                Some((base.clone(), Arc::clone(args.as_arc())))
             }
             SemanticNodeData::Opaque(QueryError::RecursiveRef { name, args })
                 if !args.is_empty() =>

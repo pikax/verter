@@ -884,7 +884,7 @@ const second: B<'shared-x' | 'shared-y'> = null as never
             // name-filtered sweep would then silently find nothing instead of
             // reporting the fork.
             if base.canonical_id.as_ref() == "/workspace/node_modules/vue/index.d.ts" {
-                vue_instantiations.insert((base.clone(), args.clone()));
+                vue_instantiations.insert((base.clone(), args.to_vec()));
             }
         }
     }

@@ -1011,7 +1011,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         whole_hash: crate::semantic_query::HashValue::default(),
                         decl_name: Arc::clone(&key.base().merged_symbol_name),
                     },
-                    args: Arc::clone(key.args()),
+                    args: crate::semantic_query::PayloadArray::from(Arc::clone(key.args())),
                 })
             }
             SemanticQueryKey::ProjectPath { base, path, .. } if path.is_empty() => *base,
@@ -1097,7 +1097,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             SemanticQueryKey::TemplateLiteralReduce { pattern, args, .. } => {
                 graph.intern_node(SemanticNodeData::TemplateLiteral {
                     quasis: Arc::clone(pattern),
-                    expressions: Arc::clone(args),
+                    expressions: crate::semantic_query::PayloadArray::from(Arc::clone(args)),
                 })
             }
             _ => {

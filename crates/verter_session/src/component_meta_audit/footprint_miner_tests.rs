@@ -45,7 +45,7 @@ fn mine_footprint_empty_state_yields_empty_subgraph_and_zero_counters() {
     let graph = empty_graph();
     let ctx = make_ctx(1);
     let state = AccumulatorState::default();
-    let fp = mine_footprint(&graph, state, &ctx, 10_000, &AuditCaps::default());
+    let fp = mine_footprint(&graph, &graph.construction_grant_for_tests(), state, &ctx, 10_000, &AuditCaps::default());
     assert_eq!(fp.derivation_subgraph.nodes.len(), 0);
     assert_eq!(fp.derivation_subgraph.edges.len(), 0);
     assert_eq!(fp.cache_outcomes.cold_builds, 0);
@@ -64,6 +64,7 @@ fn mine_footprint_cache_outcomes_read_from_per_context_atomic_counters() {
     ctx.cold_aborts_swept.store(11, Ordering::Relaxed);
     let fp = mine_footprint(
         &graph,
+        &graph.construction_grant_for_tests(),
         AccumulatorState::default(),
         &ctx,
         10_000,
@@ -90,7 +91,7 @@ fn mine_footprint_truncates_at_max_derivation_edges_sets_orphan_flag() {
             OriginMeta::None,
         ));
     }
-    let fp = mine_footprint(&graph, state, &ctx, 5, &AuditCaps::default());
+    let fp = mine_footprint(&graph, &graph.construction_grant_for_tests(), state, &ctx, 5, &AuditCaps::default());
     assert_eq!(fp.derivation_subgraph.edges.len(), 5);
     assert!(fp.graph_completeness.has_orphan_edges);
     assert_eq!(fp.graph_completeness.edges_truncated, 5);
@@ -123,8 +124,8 @@ fn mine_footprint_identical_inputs_produce_byte_identical_outputs() {
             },
         ));
     }
-    let fp_a = mine_footprint(&graph, state_a, &ctx_a, 10_000, &AuditCaps::default());
-    let fp_b = mine_footprint(&graph, state_b, &ctx_b, 10_000, &AuditCaps::default());
+    let fp_a = mine_footprint(&graph, &graph.construction_grant_for_tests(), state_a, &ctx_a, 10_000, &AuditCaps::default());
+    let fp_b = mine_footprint(&graph, &graph.construction_grant_for_tests(), state_b, &ctx_b, 10_000, &AuditCaps::default());
     let bytes_a = serde_json::to_vec(&fp_a).expect("serialise a");
     let bytes_b = serde_json::to_vec(&fp_b).expect("serialise b");
     assert_eq!(
@@ -156,7 +157,7 @@ fn mine_footprint_conditional_decisions_distinguish_true_false_deferred() {
         CoreOriginEdgeKind::ConditionalSelect,
         OriginMeta::None,
     ));
-    let fp = mine_footprint(&graph, state, &ctx, 10_000, &AuditCaps::default());
+    let fp = mine_footprint(&graph, &graph.construction_grant_for_tests(), state, &ctx, 10_000, &AuditCaps::default());
     let branches: Vec<ConditionalBranch> =
         fp.conditional_decisions.iter().map(|c| c.branch).collect();
     assert!(branches.contains(&ConditionalBranch::True));
@@ -177,7 +178,7 @@ fn mine_footprint_alias_resolve_emits_one_record_per_hop() {
             OriginMeta::AliasName(Arc::from(format!("alias_{hop}"))),
         ));
     }
-    let fp = mine_footprint(&graph, state, &ctx, 10_000, &AuditCaps::default());
+    let fp = mine_footprint(&graph, &graph.construction_grant_for_tests(), state, &ctx, 10_000, &AuditCaps::default());
     assert_eq!(fp.alias_resolutions.len(), 3);
     for rec in &fp.alias_resolutions {
         assert!(rec.alias_name.starts_with("alias_"));
@@ -205,7 +206,7 @@ fn mine_footprint_path_segments_preserve_member_index_distinction() {
         CoreOriginEdgeKind::ProjectPath,
         OriginMeta::Path(Arc::from(path)),
     ));
-    let fp = mine_footprint(&graph, state, &ctx, 10_000, &AuditCaps::default());
+    let fp = mine_footprint(&graph, &graph.construction_grant_for_tests(), state, &ctx, 10_000, &AuditCaps::default());
     assert_eq!(fp.projections.len(), 1);
     let segs = &fp.projections[0].path;
     assert!(
@@ -232,7 +233,7 @@ fn mine_footprint_indexed_ready_builds_extracted_from_structured_events() {
             canonical_id: Arc::from("/b.ts"),
             whole_hash: [10u8; 16],
         });
-    let fp = mine_footprint(&graph, state, &ctx, 10_000, &AuditCaps::default());
+    let fp = mine_footprint(&graph, &graph.construction_grant_for_tests(), state, &ctx, 10_000, &AuditCaps::default());
     assert_eq!(fp.indexed_ready_builds.len(), 2);
     assert_eq!(fp.indexed_ready_builds[0].canonical_id.as_ref(), "/a.ts");
     assert_eq!(fp.indexed_ready_builds[1].canonical_id.as_ref(), "/b.ts");
@@ -256,7 +257,7 @@ fn mine_footprint_multiple_derivations_for_same_result_produce_multiple_edges() 
         CoreOriginEdgeKind::AliasResolve,
         OriginMeta::AliasName(Arc::from("path_b")),
     ));
-    let fp = mine_footprint(&graph, state, &ctx, 10_000, &AuditCaps::default());
+    let fp = mine_footprint(&graph, &graph.construction_grant_for_tests(), state, &ctx, 10_000, &AuditCaps::default());
     assert_eq!(fp.derivation_subgraph.edges.len(), 2);
     assert_eq!(
         fp.derivation_subgraph.edges[0].result, fp.derivation_subgraph.edges[1].result,
@@ -671,6 +672,7 @@ fn mine_footprint_byte_identical_over_interned_carrier_nodes() {
 
     let fp_a = mine_footprint(
         &graph_a,
+        &graph_a.construction_grant_for_tests(),
         state_referencing(carrier_a, child_a),
         &ctx_a,
         10_000,
@@ -678,6 +680,7 @@ fn mine_footprint_byte_identical_over_interned_carrier_nodes() {
     );
     let fp_b = mine_footprint(
         &graph_b,
+        &graph_b.construction_grant_for_tests(),
         state_referencing(carrier_b, child_b),
         &ctx_b,
         10_000,

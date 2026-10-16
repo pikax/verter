@@ -212,8 +212,8 @@ impl DeferredCallable {
         };
         SemanticNodeData::DeferredCallable(Self {
             kind: *kind,
-            params: Arc::clone(params),
-            type_parameters: Arc::clone(type_parameters),
+            params: Arc::clone(params.as_arc()),
+            type_parameters: Arc::clone(type_parameters.as_arc()),
             occurrence: occurrence.clone(),
             return_carrier: SignatureReturnCarrier::DeferredFlow(source.clone()),
             signature_span: *signature_span,
@@ -289,7 +289,7 @@ impl DeferredCallable {
 
     pub(crate) fn without_receiver(&self, ordinary: &[FunctionParam]) -> Self {
         let mut rebuilt = self.clone();
-        rebuilt.params = Arc::from(ordinary);
+        rebuilt.params = ordinary.iter().map(FunctionParam::copy).collect();
         rebuilt.predicate = None;
         rebuilt
     }
@@ -322,9 +322,9 @@ impl DeferredCallable {
     pub(crate) fn into_general_signature(self, return_type: SemanticNodeId) -> SemanticNodeData {
         SemanticNodeData::Signature {
             kind: self.kind,
-            params: self.params,
+            params: crate::semantic_query::PayloadArray::from(self.params),
             return_type,
-            type_parameters: self.type_parameters,
+            type_parameters: crate::semantic_query::PayloadArray::from(self.type_parameters),
             occurrence: self.occurrence,
             return_carrier: match self.return_carrier {
                 SignatureReturnCarrier::DeferredFlow(source) => {
@@ -365,9 +365,9 @@ impl SemanticNodeData {
                 ..
             } => Some(CallableHeaderParts {
                 kind: *kind,
-                params,
+                params: params.as_arc(),
                 return_carrier,
-                type_parameters,
+                type_parameters: type_parameters.as_arc(),
                 return_type_span: *return_type_span,
             }),
             Self::DeferredCallable(callable) => {

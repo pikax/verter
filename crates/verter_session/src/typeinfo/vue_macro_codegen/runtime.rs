@@ -127,7 +127,7 @@ pub(super) fn direct_member_dependency_is_missing(
                 let tracked_dependency =
                     tracked_dependency || dependency_names.contains(base.decl_name.as_ref());
                 let base = base.clone();
-                let args = Arc::clone(args);
+                let args: Arc<[_]> = Arc::from(&args[..]);
                 drop(data);
                 let (resolved, local) = observe_local(|| {
                     dispatch.execute_type_node(SemanticQueryKey::Instantiate(
@@ -285,7 +285,7 @@ fn is_definitely_non_object_root(
             }
             SemanticNodeData::InstantiationRef { base, args } => {
                 let base = base.clone();
-                let args = Arc::clone(args);
+                let args: Arc<[_]> = Arc::from(&args[..]);
                 drop(data);
                 let resolved = dispatch.execute_type_node(SemanticQueryKey::Instantiate(
                     verter_type_engine::semantic_query::InstantiateKey::new(

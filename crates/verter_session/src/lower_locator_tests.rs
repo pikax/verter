@@ -887,7 +887,7 @@ fn locator_shape_infer_predeclaration_does_not_capture_ordinary_sibling_ref() {
         other => panic!("expected conditional, got {other:?}"),
     };
     let elements = match graph.node_data(extends).as_deref() {
-        Some(SemanticNodeData::Tuple { elements, .. }) => Arc::clone(elements),
+        Some(SemanticNodeData::Tuple { elements, .. }) => elements.share_for_tests(),
         other => panic!("expected tuple pattern, got {other:?}"),
     };
     assert!(matches!(

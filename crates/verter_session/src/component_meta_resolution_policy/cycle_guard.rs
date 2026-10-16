@@ -979,7 +979,7 @@ mod tests {
             graph.intern_node_with_scope(
                 SemanticNodeData::InstantiationRef {
                     base: wrapper_base.clone(),
-                    args: Arc::from([arg]),
+                    args: verter_type_engine::semantic_query::PayloadArray::from([arg]),
                 },
                 scope(),
             )

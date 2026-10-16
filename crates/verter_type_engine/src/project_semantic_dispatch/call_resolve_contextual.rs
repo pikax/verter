@@ -978,7 +978,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let declarations: Vec<_> = positions
             .iter()
             .map(|&position| {
-                let mut declaration = progress.parameters[position].clone();
+                let mut declaration = progress.parameters[position].copy();
                 declaration.constraint = declaration
                     .constraint
                     .map(|bound| self.substitute_canonical(bound, &retained_substitution));

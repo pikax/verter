@@ -554,8 +554,8 @@ impl CallValue {
             } => (
                 *return_type,
                 return_carrier.clone(),
-                Arc::clone(type_parameters),
-                Arc::clone(params),
+                Arc::clone(type_parameters.as_arc()),
+                Arc::clone(params.as_arc()),
             ),
             SemanticNodeData::DeferredCallable(callable) => {
                 let header =

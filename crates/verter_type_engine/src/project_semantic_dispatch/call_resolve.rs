@@ -1585,7 +1585,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     elements: elements
                         .iter()
                         .map(|element| {
-                            let mut element = element.clone();
+                            let mut element = element.copy();
                             element.value = mapped[&element.value];
                             element
                         })
@@ -1959,7 +1959,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 params,
                 type_parameters,
                 ..
-            }) => (Arc::clone(params), Arc::clone(type_parameters)),
+            }) => (Arc::clone(params.as_arc()), Arc::clone(type_parameters.as_arc())),
             // The sealed index-composed carrier: applicability reads its
             // parameters and binders, never a return type — it has none.
             Some(SemanticNodeData::DeferredCallable(callable)) => {
@@ -1971,7 +1971,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let params: Arc<[FunctionParam]> = Arc::from(
             params
                 .iter()
-                .cloned()
+                .map(crate::semantic_query::FunctionParam::copy)
                 .map(|mut param| {
                     param.ty = self.substitute_canonical(param.ty, &key.context.substitution);
                     param.ty = self.substitute_canonical(param.ty, &contextual_substitution);
@@ -1983,7 +1983,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let raw_type_params = match graph.node_data(raw_candidate.node).as_deref() {
             Some(SemanticNodeData::Signature {
                 type_parameters, ..
-            }) => Arc::clone(type_parameters),
+            }) => Arc::clone(type_parameters.as_arc()),
             Some(SemanticNodeData::DeferredCallable(callable)) => {
                 Arc::clone(callable.parts(&consumer).type_parameters)
             }
@@ -2445,7 +2445,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         };
         let fixation_params: Vec<_> = raw_type_params
             .iter()
-            .cloned()
+            .map(crate::semantic_query::TypeParamDecl::copy)
             .map(|mut decl| {
                 decl.constraint = decl
                     .constraint
@@ -2647,7 +2647,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // and its arguments recheck positionally. Only a rest still
         // uninstantiated after fixation stays one tuple bundle.
         let substituted_rest_param = rest.map(|rest| {
-            let mut param = rest.param.clone();
+            let mut param = rest.param.copy();
             param.ty = self.substitute_canonical(param.ty, &substitution);
             param
         });
@@ -3508,7 +3508,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             _ => argument.node,
         };
         let source = graph.intern_node(SemanticNodeData::Tuple {
-            elements: Arc::from(
+            elements: crate::semantic_query::PayloadArray::from(
                 trailing
                     .iter()
                     .map(|argument| crate::semantic_query::TupleElement {
@@ -3861,7 +3861,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             base.owner,
             Arc::clone(&base.decl_name),
         );
-        let args = Arc::clone(args);
+        let args = Arc::clone(args.as_arc());
         let read = self.execute_read(SemanticQueryKey::Instantiate(
             crate::semantic_query::InstantiateKey::new(
                 slot,
@@ -4113,14 +4113,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     .map(|element| self.call_shape_transform(element.value, policy, memo))
                     .collect::<Vec<_>>();
                 if policy == ConstParamPolicy::Const {
-                    let mut mapped = elements.to_vec();
+                    let mut mapped = elements.iter().map(crate::semantic_query::TupleElement::copy).collect::<Vec<_>>();
                     for (element, value) in mapped.iter_mut().zip(values) {
                         element.value = value;
                     }
                     graph.intern_preserving_scope(
                         node,
                         SemanticNodeData::Tuple {
-                            elements: Arc::from(mapped.into_boxed_slice()),
+                            elements: crate::semantic_query::PayloadArray::from(mapped.into_boxed_slice()),
                             readonly: true,
                         },
                     )
@@ -4309,7 +4309,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             Some(SemanticNodeData::TypeParam { .. }) => RestShape::GenericTuple(resolved),
             Some(SemanticNodeData::Array { element, .. }) => RestShape::Array(*element),
             Some(SemanticNodeData::Tuple { elements, .. }) => {
-                RestShape::Tuple(Arc::clone(elements))
+                RestShape::Tuple(Arc::clone(elements.as_arc()))
             }
             _ => RestShape::Unresolved,
         }
@@ -4499,7 +4499,7 @@ fn tuple_suffix_target(
         [] => None,
         [only] if only.rest => Some(only.value),
         _ => Some(graph.intern_node(SemanticNodeData::Tuple {
-            elements: Arc::from(suffix.to_vec().into_boxed_slice()),
+            elements: crate::semantic_query::PayloadArray::from(suffix.iter().map(crate::semantic_query::TupleElement::copy).collect::<Vec<_>>().into_boxed_slice()),
             readonly: false,
         })),
     }

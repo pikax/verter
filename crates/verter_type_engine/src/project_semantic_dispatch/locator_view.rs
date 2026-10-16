@@ -417,7 +417,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // peer-merge reducer then mis-buckets as OWN surface, losing
             // own-body-shadows-heritage precedence.
             Some(SemanticNodeData::MergedDecl { contributors }) => BodyPlan::Merged {
-                contributors: Arc::clone(contributors),
+                contributors: Arc::clone(contributors.as_arc()),
                 next: 0,
                 ids: Vec::with_capacity(contributors.len()),
                 current: None,
@@ -708,7 +708,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             BodyPlan::Merged { ids, .. } => self.graph().intern_preserving_scope(
                 projection.shape,
                 SemanticNodeData::MergedDecl {
-                    contributors: Arc::from(ids.into_boxed_slice()),
+                    contributors: crate::semantic_query::PayloadArray::from(ids.into_boxed_slice()),
                 },
             ),
         }
@@ -771,7 +771,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
             ),
             Some(SemanticNodeData::InstantiationRef { base, args }) => {
-                (base.clone(), Arc::clone(args))
+                (base.clone(), Arc::clone(args.as_arc()))
             }
             _ => return None,
         };

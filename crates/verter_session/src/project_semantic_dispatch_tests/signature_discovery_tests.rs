@@ -514,7 +514,7 @@ fn optionality_and_tuple_rest_flatten_under_the_active_context() {
     let string = prim(&d, PrimitiveKind::String);
     let number = prim(&d, PrimitiveKind::Number);
     let tuple = d.graph().intern_node(SemanticNodeData::Tuple {
-        elements: Arc::from(
+        elements: verter_type_engine::semantic_query::PayloadArray::from(
             vec![
                 TupleElement {
                     label: Some(Arc::from("a")),
@@ -583,9 +583,9 @@ fn enumeration_forces_no_body_and_an_unrecoverable_body_effect_forces_none() {
     let string = prim(&d, PrimitiveKind::String);
     let node = d.graph().intern_node(SemanticNodeData::Signature {
         kind: SignatureKind::Call,
-        params: Arc::from(vec![param(string)].into_boxed_slice()),
+        params: verter_type_engine::semantic_query::PayloadArray::from(vec![param(string)].into_boxed_slice()),
         return_type: string,
-        type_parameters: Arc::from(Vec::new().into_boxed_slice()),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(Vec::new().into_boxed_slice()),
         occurrence: Some(occurrence("body", 0)),
         return_carrier: SignatureReturnCarrier::Function(
             verter_type_expr::facts::FunctionReturnSource::Absent,
@@ -1017,7 +1017,10 @@ fn mixin_construct_intersections_follow_the_checker_mixin_rule() {
             );
         } else {
             let elements = match d.graph().node_data(parameters).as_deref() {
-                Some(SemanticNodeData::Tuple { elements, .. }) => elements.to_vec(),
+                Some(SemanticNodeData::Tuple { elements, .. }) => elements
+                    .iter()
+                    .map(verter_type_engine::semantic_query::TupleElement::copy_for_tests)
+                    .collect::<Vec<_>>(),
                 other => panic!("{label}: expected a parameter tuple, got {other:?}"),
             };
             assert_eq!(
@@ -1499,9 +1502,9 @@ fn untyped_javascript_signatures_publish_the_untyped_flag() {
         let identity = occ.function.clone();
         let node = d.graph().intern_node(SemanticNodeData::Signature {
             kind: SignatureKind::Call,
-            params: Arc::from(vec![param(param_ty)].into_boxed_slice()),
+            params: verter_type_engine::semantic_query::PayloadArray::from(vec![param(param_ty)].into_boxed_slice()),
             return_type: any,
-            type_parameters: Arc::from(Vec::new().into_boxed_slice()),
+            type_parameters: verter_type_engine::semantic_query::PayloadArray::from(Vec::new().into_boxed_slice()),
             occurrence: Some(occ),
             return_carrier: SignatureReturnCarrier::Function(
                 verter_type_expr::facts::FunctionReturnSource::Flow(identity),
@@ -1540,9 +1543,9 @@ fn each_read_reports_the_authored_node_its_own_subject_carries() {
     let authored_at = |return_type_span: Option<verter_span::Span>, return_type| {
         d.graph().intern_node(SemanticNodeData::Signature {
             kind: SignatureKind::Call,
-            params: Arc::from(vec![param(string)].into_boxed_slice()),
+            params: verter_type_engine::semantic_query::PayloadArray::from(vec![param(string)].into_boxed_slice()),
             return_type,
-            type_parameters: Arc::from(Vec::new().into_boxed_slice()),
+            type_parameters: verter_type_engine::semantic_query::PayloadArray::from(Vec::new().into_boxed_slice()),
             occurrence: Some(occurrence("f", 0)),
             return_carrier: SignatureReturnCarrier::Declared(return_type),
             signature_span: None,

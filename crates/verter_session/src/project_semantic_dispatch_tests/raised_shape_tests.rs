@@ -649,7 +649,7 @@ fn parity_merged_decl_peer_merges_to_object() {
         "b", number_id,
     )])));
     let merged = graph.intern_node(SemanticNodeData::MergedDecl {
-        contributors: Arc::from(vec![obj_a, obj_b].into_boxed_slice()),
+        contributors: verter_type_engine::semantic_query::PayloadArray::from(vec![obj_a, obj_b].into_boxed_slice()),
     });
     assert_classifier_parity(&host, merged, "merged-decl-two-objects");
     assert!(
@@ -694,7 +694,7 @@ fn parity_lazy_carriers() {
             whole_hash: [0u8; 16],
             decl_name: Arc::from("Box"),
         },
-        args: Arc::from(vec![arg].into_boxed_slice()),
+        args: verter_type_engine::semantic_query::PayloadArray::from(vec![arg].into_boxed_slice()),
     });
     assert_classifier_parity(&host, instref, "instantiation-ref");
 
@@ -712,7 +712,7 @@ fn parity_lazy_carriers() {
             whole_hash: [0u8; 16],
             decl_name: Arc::from("Box"),
         },
-        args: Arc::from(vec![SemanticNodeId(u64::MAX)].into_boxed_slice()),
+        args: verter_type_engine::semantic_query::PayloadArray::from(vec![SemanticNodeId(u64::MAX)].into_boxed_slice()),
     });
     assert_classifier_parity(&host, instref_miss_arg, "instantiation-ref-raise-miss-arg");
     assert!(
@@ -1468,7 +1468,7 @@ fn parity_function_and_constructor_type() {
     // NOT a miss, AND a Function is an expanded surface.
     let func = graph.intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Call,
-        params: Arc::from(
+        params: verter_type_engine::semantic_query::PayloadArray::from(
             vec![FunctionParam::synthetic(
                 Some(Arc::from("a")),
                 string_id,
@@ -1482,7 +1482,7 @@ fn parity_function_and_constructor_type() {
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
             number_id,
         ),
-        type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
         predicate: None,
@@ -1505,7 +1505,7 @@ fn parity_function_and_constructor_type() {
     let miss = graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss));
     let func_miss_param = graph.intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Call,
-        params: Arc::from(
+        params: verter_type_engine::semantic_query::PayloadArray::from(
             vec![FunctionParam::synthetic(
                 Some(Arc::from("bad")),
                 miss,
@@ -1519,7 +1519,7 @@ fn parity_function_and_constructor_type() {
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
             number_id,
         ),
-        type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
         predicate: None,
@@ -1566,7 +1566,7 @@ fn parity_template_literal_leaf_vs_recurse_boundary() {
     // — the exact leaf-vs-recurse boundary. ⇒ NOT a miss.
     let template = graph.intern_node(SemanticNodeData::TemplateLiteral {
         quasis: Arc::from(vec![Arc::<str>::from("a"), Arc::<str>::from("")].into_boxed_slice()),
-        expressions: Arc::from(vec![string_id].into_boxed_slice()),
+        expressions: verter_type_engine::semantic_query::PayloadArray::from(vec![string_id].into_boxed_slice()),
     });
     assert_classifier_parity(&host, template, "template-literal-materialized-expr");
     assert!(
@@ -1583,7 +1583,7 @@ fn parity_template_literal_leaf_vs_recurse_boundary() {
     let miss = graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss));
     let template_miss_expr = graph.intern_node(SemanticNodeData::TemplateLiteral {
         quasis: Arc::from(vec![Arc::<str>::from("x"), Arc::<str>::from("")].into_boxed_slice()),
-        expressions: Arc::from(vec![miss].into_boxed_slice()),
+        expressions: verter_type_engine::semantic_query::PayloadArray::from(vec![miss].into_boxed_slice()),
     });
     assert_classifier_parity(&host, template_miss_expr, "template-literal-miss-expr-leaf");
     assert!(
@@ -2009,7 +2009,7 @@ fn raised_shape_eq_node_type_expr_ignores_has_ts_annotation_like_typeexpr_partia
     // both hardcode false).
     let func_node = graph.intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Call,
-        params: Arc::from(
+        params: verter_type_engine::semantic_query::PayloadArray::from(
             vec![FunctionParam::synthetic(
                 Some(Arc::from("a")),
                 string_id,
@@ -2023,7 +2023,7 @@ fn raised_shape_eq_node_type_expr_ignores_has_ts_annotation_like_typeexpr_partia
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
             number_id,
         ),
-        type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
         predicate: None,
@@ -2116,7 +2116,7 @@ fn raise_oracle_payload_shape_preserves_recursed_children() {
     // (`Primitive(String)`) in its `expressions`, not drop it.
     let template = graph.intern_node(SemanticNodeData::TemplateLiteral {
         quasis: Arc::from(vec![Arc::<str>::from("a"), Arc::<str>::from("")].into_boxed_slice()),
-        expressions: Arc::from(vec![string_id].into_boxed_slice()),
+        expressions: verter_type_engine::semantic_query::PayloadArray::from(vec![string_id].into_boxed_slice()),
     });
     let template_oracle = raise_oracle(&host, template).expect("template raises");
     match &template_oracle {
@@ -2137,7 +2137,7 @@ fn raise_oracle_payload_shape_preserves_recursed_children() {
     // predicate reads materialized.
     let template_miss = graph.intern_node(SemanticNodeData::TemplateLiteral {
         quasis: Arc::from(vec![Arc::<str>::from("x"), Arc::<str>::from("")].into_boxed_slice()),
-        expressions: Arc::from(vec![miss].into_boxed_slice()),
+        expressions: verter_type_engine::semantic_query::PayloadArray::from(vec![miss].into_boxed_slice()),
     });
     let template_miss_oracle = raise_oracle(&host, template_miss).expect("template raises");
     match &template_miss_oracle {
@@ -2442,7 +2442,7 @@ fn node_improvement_verdict_matches_type_expr_improvement_over_raise() {
     // `Foo<Bar>` — a generic instantiation, symbolic-carrier penalty 2, no divergence.
     let foo_of_bar = graph.intern_node(SemanticNodeData::InstantiationRef {
         base: decl_identity_unscoped("/w/m.ts", "Foo"),
-        args: Arc::from(vec![bar].into_boxed_slice()),
+        args: verter_type_engine::semantic_query::PayloadArray::from(vec![bar].into_boxed_slice()),
     });
 
     // Mapped whose `source == key_space == Foo` — the former double-count fixture
@@ -2577,7 +2577,7 @@ fn publication_score_corpus(
 
     let function = graph.intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Call,
-        params: Arc::from(
+        params: verter_type_engine::semantic_query::PayloadArray::from(
             vec![FunctionParam::synthetic(
                 Some(Arc::from("a")),
                 string,
@@ -2591,7 +2591,7 @@ fn publication_score_corpus(
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
             number,
         ),
-        type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
         predicate: None,
@@ -2668,7 +2668,7 @@ fn publication_score_corpus(
         (
             "tuple",
             graph.intern_node(SemanticNodeData::Tuple {
-                elements: Arc::from(
+                elements: verter_type_engine::semantic_query::PayloadArray::from(
                     vec![verter_type_engine::semantic_query::TupleElement {
                         label: None,
                         value: foo,
@@ -2684,7 +2684,7 @@ fn publication_score_corpus(
         (
             "merged_decl",
             graph.intern_node(SemanticNodeData::MergedDecl {
-                contributors: Arc::from(vec![obj_a, obj_b].into_boxed_slice()),
+                contributors: verter_type_engine::semantic_query::PayloadArray::from(vec![obj_a, obj_b].into_boxed_slice()),
             }),
         ),
         (
@@ -2704,7 +2704,7 @@ fn publication_score_corpus(
                 quasis: Arc::from(
                     vec![Arc::<str>::from("a"), Arc::<str>::from("")].into_boxed_slice(),
                 ),
-                expressions: Arc::from(vec![foo].into_boxed_slice()),
+                expressions: verter_type_engine::semantic_query::PayloadArray::from(vec![foo].into_boxed_slice()),
             }),
         ),
         ("key_of", keyof_tp),
@@ -2775,7 +2775,7 @@ fn publication_score_corpus(
             "instantiation_ref",
             graph.intern_node(SemanticNodeData::InstantiationRef {
                 base: decl_identity_unscoped("/w/m.ts", "Foo"),
-                args: Arc::from(vec![bar].into_boxed_slice()),
+                args: verter_type_engine::semantic_query::PayloadArray::from(vec![bar].into_boxed_slice()),
             }),
         ),
         (
@@ -2857,7 +2857,7 @@ fn publication_score_corpus(
                         object_literal: false,
                     },
                 ),
-                type_arguments: Arc::from([foo]),
+                type_arguments: verter_type_engine::semantic_query::PayloadArray::from([foo]),
                 surface: obj_a,
             }),
         ),
@@ -3130,7 +3130,7 @@ fn tuple_with_unraisable_element_fails_whole() {
     let graph = graph_of(&host);
     let str_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let node = graph.intern_node(SemanticNodeData::Tuple {
-        elements: Arc::from(
+        elements: verter_type_engine::semantic_query::PayloadArray::from(
             vec![
                 verter_type_engine::semantic_query::TupleElement {
                     label: None,
@@ -3161,7 +3161,7 @@ fn template_literal_with_unraisable_expression_fails_whole() {
     let graph = graph_of(&host);
     let node = graph.intern_node(SemanticNodeData::TemplateLiteral {
         quasis: Arc::from(vec![Arc::from("x")].into_boxed_slice()),
-        expressions: Arc::from(vec![SemanticNodeId(u64::MAX)].into_boxed_slice()),
+        expressions: verter_type_engine::semantic_query::PayloadArray::from(vec![SemanticNodeId(u64::MAX)].into_boxed_slice()),
     });
     assert!(
         !fold_raises(&host, node),
@@ -3175,13 +3175,13 @@ fn function_with_unraisable_return_fails_whole() {
     let graph = graph_of(&host);
     let node = graph.intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Call,
-        params: Arc::from(Vec::<FunctionParam>::new().into_boxed_slice()),
+        params: verter_type_engine::semantic_query::PayloadArray::from(Vec::<FunctionParam>::new().into_boxed_slice()),
         return_type: SemanticNodeId(u64::MAX),
         occurrence: None,
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
             SemanticNodeId(u64::MAX),
         ),
-        type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
         predicate: None,
@@ -3200,7 +3200,7 @@ fn function_with_unraisable_parameter_fails_whole() {
     let str_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let node = graph.intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Call,
-        params: Arc::from(
+        params: verter_type_engine::semantic_query::PayloadArray::from(
             vec![FunctionParam::synthetic(
                 Some(Arc::from("a")),
                 SemanticNodeId(u64::MAX),
@@ -3214,7 +3214,7 @@ fn function_with_unraisable_parameter_fails_whole() {
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
             str_id,
         ),
-        type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
         predicate: None,
@@ -3275,7 +3275,7 @@ fn carrier_arg_fallback_is_typed_surface_member_and_marks_partial() {
     let graph = graph_of(&host);
     let node = graph.intern_node(SemanticNodeData::InstantiationRef {
         base: decl_identity_unscoped("/w/r.ts", "Box"),
-        args: Arc::from(vec![SemanticNodeId(u64::MAX)].into_boxed_slice()),
+        args: verter_type_engine::semantic_query::PayloadArray::from(vec![SemanticNodeId(u64::MAX)].into_boxed_slice()),
     });
     let dispatch = ProjectSemanticDispatch::new(&host);
     let mut active = rustc_hash::FxHashSet::default();

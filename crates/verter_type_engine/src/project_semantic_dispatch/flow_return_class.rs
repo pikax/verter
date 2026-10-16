@@ -109,7 +109,7 @@ struct ClassBase {
     exact_source: Option<SemanticNodeId>,
     /// The parameters of each accepted base construct signature, in order —
     /// a constructor-less class inherits one construct signature per entry.
-    constructor_params: Vec<Arc<[crate::semantic_query::FunctionParam]>>,
+    constructor_params: Vec<crate::semantic_query::PayloadArray<crate::semantic_query::FunctionParam>>,
     /// The base instance type: the first accepted construct signature's
     /// result, when it is a valid base type. A union result is not
     /// (`isValidBaseType`): the class then inherits no instance member,
@@ -630,7 +630,13 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         }
         let own_type_parameters: Vec<crate::semantic_query::TypeParamDecl> = class_env
             .as_ref()
-            .map(|class_env| class_env.type_param_decls.clone())
+            .map(|class_env| {
+                class_env
+                    .type_param_decls
+                    .iter()
+                    .map(crate::semantic_query::TypeParamDecl::copy)
+                    .collect()
+            })
             .unwrap_or_default();
         type_arguments.extend(own_type_parameters.iter().map(|decl| decl.param));
         let type_arguments: Arc<[SemanticNodeId]> = Arc::from(type_arguments.into_boxed_slice());
@@ -652,7 +658,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let authored = graph.intern_node_with_scope(
             SemanticNodeData::ClassExpressionInstance {
                 identity: Arc::new(identity.clone()),
-                type_arguments: Arc::clone(&type_arguments),
+                type_arguments: crate::semantic_query::PayloadArray::from(Arc::clone(&type_arguments)),
                 surface,
             },
             self.binder_env.scope.clone(),
@@ -670,17 +676,22 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     prototype: Some(prototype),
                     ..identity
                 }),
-                type_arguments: Arc::clone(&type_arguments),
+                type_arguments: crate::semantic_query::PayloadArray::from(Arc::clone(&type_arguments)),
                 surface,
             },
             self.binder_env.scope.clone(),
         );
-        let construct = |params: Arc<[crate::semantic_query::FunctionParam]>| {
+        let construct = |params: crate::semantic_query::PayloadArray<
+            crate::semantic_query::FunctionParam,
+        >| {
             graph.intern_node(SemanticNodeData::Signature {
                 kind: crate::semantic_query::SignatureKind::Construct,
                 params,
                 return_type: instance,
-                type_parameters: Arc::from(own_type_parameters.clone().into_boxed_slice()),
+                type_parameters: own_type_parameters
+                    .iter()
+                    .map(crate::semantic_query::TypeParamDecl::copy)
+                    .collect(),
                 occurrence: None,
                 return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(instance),
                 signature_span: None,
@@ -706,16 +717,16 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                             parameter.rest,
                         ));
                     }
-                    out.push(construct(Arc::from(params.into_boxed_slice())));
+                    out.push(construct(params.into()));
                 }
                 out
             }
             (None, Some(base)) => base
                 .constructor_params
                 .iter()
-                .map(|params| construct(Arc::clone(params)))
+                .map(|params| construct(params.share()))
                 .collect(),
-            (None, None) => vec![construct(Arc::from(Vec::new().into_boxed_slice()))],
+            (None, None) => vec![construct(Default::default())],
         };
         // The constructor's `prototype` property (`getTypeOfPrototypeProperty`):
         // the prototype computed above. It replaces a static the class

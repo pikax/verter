@@ -93,9 +93,9 @@ fn signature_with_carrier(
 ) -> SemanticNodeId {
     dispatch.graph().intern_node(SemanticNodeData::Signature {
         kind,
-        params: Arc::from(params.into_boxed_slice()),
+        params: verter_type_engine::semantic_query::PayloadArray::from(params.into_boxed_slice()),
         return_type,
-        type_parameters: Arc::from(type_parameters.into_boxed_slice()),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(type_parameters.into_boxed_slice()),
         occurrence: Some(occurrence(name, ordinal)),
         return_carrier,
         signature_span: None,
@@ -656,7 +656,7 @@ fn bucket_arity_rest_and_spread_mapping_are_decisive() {
     );
     let callee = callable(&dispatch, vec![exact, rest], vec![construct]);
     let tuple = graph.intern_node(SemanticNodeData::Tuple {
-        elements: Arc::from(
+        elements: verter_type_engine::semantic_query::PayloadArray::from(
             vec![
                 TupleElement {
                     label: None,
@@ -789,7 +789,7 @@ fn mixed_const_policy_is_applied_per_parameter() {
         verter_type_expr::LiteralValue::String("a".into()),
     ));
     let tuple_arg = graph.intern_node(SemanticNodeData::Tuple {
-        elements: Arc::from(
+        elements: verter_type_engine::semantic_query::PayloadArray::from(
             vec![TupleElement {
                 label: None,
                 value: string_a,
@@ -801,7 +801,7 @@ fn mixed_const_policy_is_applied_per_parameter() {
         readonly: false,
     });
     let ret = graph.intern_node(SemanticNodeData::Tuple {
-        elements: Arc::from(
+        elements: verter_type_engine::semantic_query::PayloadArray::from(
             vec![
                 TupleElement {
                     label: None,
@@ -1243,15 +1243,14 @@ fn contextual_receiver_budget_exhaustion_admits_nothing() {
             display_name: Arc::from("T"),
         });
         let receiver = graph.intern_node(SemanticNodeData::Tuple {
-            elements: Arc::from(vec![
-                TupleElement {
+            elements: (0..128)
+                .map(|_| TupleElement {
                     label: None,
                     value: number,
                     optional: false,
                     rest: false,
-                };
-                128
-            ]),
+                })
+                .collect(),
             readonly: false,
         });
         let target = graph.intern_node(SemanticNodeData::Array {
@@ -1354,9 +1353,9 @@ fn anonymous_signature(
 ) -> SemanticNodeId {
     dispatch.graph().intern_node(SemanticNodeData::Signature {
         kind: SignatureKind::Call,
-        params: Arc::from(params.into_boxed_slice()),
+        params: verter_type_engine::semantic_query::PayloadArray::from(params.into_boxed_slice()),
         return_type,
-        type_parameters: Arc::from(type_parameters.into_boxed_slice()),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(type_parameters.into_boxed_slice()),
         occurrence: None,
         return_carrier: SignatureReturnCarrier::Declared(return_type),
         signature_span: None,
@@ -1984,7 +1983,7 @@ fn generic_rest_infers_a_tuple_candidate_and_never_caps_arity() {
     });
     let tuple = |elements: Vec<SemanticNodeId>| {
         graph.intern_node(SemanticNodeData::Tuple {
-            elements: Arc::from(
+            elements: verter_type_engine::semantic_query::PayloadArray::from(
                 elements
                     .into_iter()
                     .map(|value| TupleElement {
@@ -2870,7 +2869,7 @@ fn tuple_of(
     values: Vec<SemanticNodeId>,
 ) -> SemanticNodeId {
     dispatch.graph().intern_node(SemanticNodeData::Tuple {
-        elements: Arc::from(
+        elements: verter_type_engine::semantic_query::PayloadArray::from(
             values
                 .into_iter()
                 .map(|value| TupleElement {
@@ -3189,7 +3188,7 @@ fn rest_tuple_required_elements_count_all_fixed_params() {
         verter_type_expr::LiteralValue::String("x".into()),
     ));
     let required_rest = graph.intern_node(SemanticNodeData::Tuple {
-        elements: Arc::from(
+        elements: verter_type_engine::semantic_query::PayloadArray::from(
             vec![TupleElement {
                 label: None,
                 value: string,
@@ -3244,7 +3243,7 @@ fn rest_tuple_required_elements_count_all_fixed_params() {
         "g(1, \"x\") selects, got {full:?}"
     );
     let optional_rest = graph.intern_node(SemanticNodeData::Tuple {
-        elements: Arc::from(
+        elements: verter_type_engine::semantic_query::PayloadArray::from(
             vec![TupleElement {
                 label: None,
                 value: string,
@@ -4893,7 +4892,7 @@ fn binder_reach_through_an_alias_chain(query_depth: u16) -> super::call_resolve:
             whole_hash: verter_type_engine::semantic_query::HashValue::default(),
             decl_name: Arc::from("A2"),
         },
-        args: Arc::from(vec![t].into_boxed_slice()),
+        args: verter_type_engine::semantic_query::PayloadArray::from(vec![t].into_boxed_slice()),
     });
     dispatch.deposit_at_top_level_for_tests(chain, t)
 }

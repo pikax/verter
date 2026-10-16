@@ -536,7 +536,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     .collect();
                 self.graph().intern_node_with_scope(
                     SemanticNodeData::MergedDecl {
-                        contributors: Arc::from(ids.into_boxed_slice()),
+                        contributors: crate::semantic_query::PayloadArray::from(ids.into_boxed_slice()),
                     },
                     scope.clone(),
                 )

@@ -374,11 +374,11 @@ fn intern_span_participates_in_identity() {
     let ret = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
     let mk = |end: u32| SemanticNodeData::Signature {
         kind: crate::semantic_query::SignatureKind::Call,
-        params: Arc::from(Vec::<crate::semantic_query::FunctionParam>::new()),
+        params: crate::semantic_query::PayloadArray::from(Vec::<crate::semantic_query::FunctionParam>::new()),
         return_type: ret,
         occurrence: None,
         return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(ret),
-        type_parameters: Arc::from(Vec::<crate::semantic_query::TypeParamDecl>::new()),
+        type_parameters: crate::semantic_query::PayloadArray::from(Vec::<crate::semantic_query::TypeParamDecl>::new()),
         signature_span: Some(verter_span::Span::new(0, end)),
         return_type_span: None,
         predicate: None,

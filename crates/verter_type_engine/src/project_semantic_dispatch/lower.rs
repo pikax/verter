@@ -1897,7 +1897,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             crate::project_semantic_dispatch::build::NormalizedTupleShape::Tuple(normalized) => {
                 self.graph().intern_node_with_scope(
                     SemanticNodeData::Tuple {
-                        elements: Arc::from(normalized.into_boxed_slice()),
+                        elements: crate::semantic_query::PayloadArray::from(normalized.into_boxed_slice()),
                         readonly,
                     },
                     scope.clone(),
@@ -1920,7 +1920,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         self.graph().intern_node_with_scope(
             SemanticNodeData::TemplateLiteral {
                 quasis: Arc::from(lowered_quasis.into_boxed_slice()),
-                expressions: Arc::from(lowered_expressions.into_boxed_slice()),
+                expressions: crate::semantic_query::PayloadArray::from(lowered_expressions.into_boxed_slice()),
             },
             scope.clone(),
         )
@@ -3070,9 +3070,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     crate::semantic_query::DeferredCallable::seal_signature_header(
                         SemanticNodeData::Signature {
                             kind,
-                            params: Arc::from(params.into_boxed_slice()),
+                            params: crate::semantic_query::PayloadArray::from(params.into_boxed_slice()),
                             return_type,
-                            type_parameters: Arc::from(type_parameters.into_boxed_slice()),
+                            type_parameters: crate::semantic_query::PayloadArray::from(type_parameters.into_boxed_slice()),
                             // The generic type-expression lowering carries no
                             // declaration occurrence: occurrence-aware provenance
                             // arrives through the locator-driven rails (the

@@ -261,7 +261,7 @@ fn materialize_tuple_preserves_element_rest_flag() {
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let value = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let node = graph.intern_node(SemanticNodeData::Tuple {
-        elements: Arc::from(
+        elements: verter_type_engine::semantic_query::PayloadArray::from(
             vec![TupleElement {
                 label: None,
                 value,
@@ -305,11 +305,11 @@ fn materialize_constructor_type_preserves_ctor_ness() {
     let ret = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Void));
     let signature = graph.intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Call,
-        params: Arc::from(Vec::new().into_boxed_slice()),
+        params: verter_type_engine::semantic_query::PayloadArray::from(Vec::new().into_boxed_slice()),
         return_type: ret,
         occurrence: None,
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(ret),
-        type_parameters: Arc::from(Vec::new().into_boxed_slice()),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(Vec::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
         predicate: None,

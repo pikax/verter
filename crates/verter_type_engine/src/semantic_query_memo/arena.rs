@@ -1513,7 +1513,7 @@ mod arena_intern_tests {
                     prototype: Some(prototype),
                     object_literal: false,
                 }),
-                type_arguments: Arc::from([]),
+                type_arguments: crate::semantic_query::PayloadArray::from([]),
                 surface: kept,
             })
         };

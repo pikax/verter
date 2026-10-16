@@ -92,7 +92,7 @@ fn an_imported_utility_route_is_found_at_any_depth() {
                     whole_hash: verter_type_engine::semantic_query::HashValue::default(),
                     decl_name: Arc::from("Partial"),
                 },
-                args: Arc::from([argument]),
+                args: verter_type_engine::semantic_query::PayloadArray::from([argument]),
             })
         },
         |engine, node| {
@@ -117,7 +117,7 @@ fn an_imported_generic_route_is_found_at_any_depth() {
             ));
             graph.intern_node(SemanticNodeData::InstantiationRef {
                 base: foreign("Box"),
-                args: Arc::from([argument]),
+                args: verter_type_engine::semantic_query::PayloadArray::from([argument]),
             })
         },
         |engine, node| {

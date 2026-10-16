@@ -3932,7 +3932,7 @@ fn classify_node(
             expressions,
         }) => {
             let quasis = Arc::clone(quasis);
-            let expressions = Arc::clone(expressions);
+            let expressions = Arc::clone(expressions.as_arc());
             classify_template(walk, &quasis, &expressions)
         }
         Some(SemanticNodeData::Union(members)) => {
@@ -4104,7 +4104,7 @@ fn render_domain(walk: &mut TruthinessWalk<'_>, node: SemanticNodeId) -> RenderD
             expressions,
         }) => {
             let quasis = Arc::clone(quasis);
-            let expressions = Arc::clone(expressions);
+            let expressions = Arc::clone(expressions.as_arc());
             let nested = classify_template(walk, &quasis, &expressions);
             // A template denotes strings, so its render domain IS its
             // truthiness domain: the one falsy string is `""`.

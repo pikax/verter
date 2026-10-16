@@ -902,9 +902,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         HotTypeRef::new(self.graph().intern_node_with_scope(
             SemanticNodeData::Signature {
                 kind,
-                params: Arc::from(params.into_boxed_slice()),
+                params: crate::semantic_query::PayloadArray::from(params.into_boxed_slice()),
                 return_type,
-                type_parameters: Arc::from(type_parameters.into_boxed_slice()),
+                type_parameters: crate::semantic_query::PayloadArray::from(type_parameters.into_boxed_slice()),
                 // The fact-composition path does not carry occurrence-grade
                 // provenance today; the overload-set producer treats an
                 // occurrence-less candidate as an honest `Miss`.
@@ -949,7 +949,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             .collect();
         HotTypeRef::new(self.graph().intern_node_with_scope(
             SemanticNodeData::Tuple {
-                elements: Arc::from(elements.into_boxed_slice()),
+                elements: crate::semantic_query::PayloadArray::from(elements.into_boxed_slice()),
                 readonly: tuple.readonly,
             },
             scope,

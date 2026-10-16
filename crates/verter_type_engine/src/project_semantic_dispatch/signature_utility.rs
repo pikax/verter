@@ -463,7 +463,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     whole_hash: Default::default(),
                     decl_name: Arc::from(utility.builtin_name()),
                 },
-                args: Arc::from([subject]),
+                args: crate::semantic_query::PayloadArray::from([subject]),
             });
         let entries = view
             .entries
@@ -491,7 +491,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         signature: SemanticNodeId,
     ) -> Option<Arc<[crate::semantic_query::FunctionParam]>> {
         match self.graph().node_data(signature).as_deref() {
-            Some(SemanticNodeData::Signature { params, .. }) => Some(Arc::clone(params)),
+            Some(SemanticNodeData::Signature { params, .. }) => Some(Arc::clone(params.as_arc())),
             Some(SemanticNodeData::DeferredCallable(callable)) => Some(Arc::clone(
                 callable
                     .parts(&crate::semantic_query::ResolveOverloadSetConsumer::witness())

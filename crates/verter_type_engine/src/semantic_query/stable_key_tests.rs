@@ -1035,14 +1035,14 @@ fn generic_signature(
     };
     graph.intern_node(SemanticNodeData::Signature {
         kind: SignatureKind::Call,
-        params: Arc::from([FunctionParam::synthetic(
+        params: crate::semantic_query::PayloadArray::from([FunctionParam::synthetic(
             Some(Arc::from("x")),
             binder,
             false,
             false,
         )]),
         return_type: binder,
-        type_parameters: Arc::from([TypeParamDecl {
+        type_parameters: crate::semantic_query::PayloadArray::from([TypeParamDecl {
             name: Arc::from("T"),
             param: binder,
             constraint,
@@ -1314,12 +1314,12 @@ fn literal_param_signature(
     let zero = graph.intern_node(SemanticNodeData::Literal(LiteralValue::Number(0.0)));
     graph.intern_node(SemanticNodeData::Signature {
         kind: SignatureKind::Call,
-        params: Arc::from([FunctionParam {
+        params: crate::semantic_query::PayloadArray::from([FunctionParam {
             declared_literal,
             ..FunctionParam::synthetic(Some(Arc::from("x")), param, false, false)
         }]),
         return_type: zero,
-        type_parameters: Arc::from(Vec::new()),
+        type_parameters: crate::semantic_query::PayloadArray::from(Vec::new()),
         occurrence: None,
         return_carrier: SignatureReturnCarrier::Declared(zero),
         signature_span: None,
@@ -1432,9 +1432,9 @@ fn nullary_signature(
     use crate::semantic_query::{SignatureKind, SignatureReturnCarrier};
     graph.intern_node(SemanticNodeData::Signature {
         kind: SignatureKind::Call,
-        params: Arc::from(Vec::new()),
+        params: crate::semantic_query::PayloadArray::from(Vec::new()),
         return_type,
-        type_parameters: Arc::from(Vec::new()),
+        type_parameters: crate::semantic_query::PayloadArray::from(Vec::new()),
         occurrence: None,
         return_carrier: SignatureReturnCarrier::Declared(carrier),
         signature_span: None,
@@ -1643,7 +1643,7 @@ fn classification_visits_each_node_once() {
             rest: false,
         };
         next = graph.intern_node(SemanticNodeData::Tuple {
-            elements: Arc::from([element(b), element(c)]),
+            elements: crate::semantic_query::PayloadArray::from([element(b), element(c)]),
             readonly: false,
         });
     }
@@ -1788,7 +1788,7 @@ fn a_folded_fingerprint_is_the_hash_of_the_written_key() {
         rest: false,
     };
     let shared = graph.intern_node(SemanticNodeData::Tuple {
-        elements: Arc::from([element(deep), element(deep)]),
+        elements: crate::semantic_query::PayloadArray::from([element(deep), element(deep)]),
         readonly: false,
     });
     let key = stable_key_for_node(&graph, shared);
@@ -1881,7 +1881,7 @@ fn the_retention_walk_visits_every_retained_id() {
             prototype: Some(prototype),
             object_literal: false,
         }),
-        type_arguments: Arc::from([]),
+        type_arguments: crate::semantic_query::PayloadArray::from([]),
         surface,
     };
     let mut retained = Vec::new();
@@ -2056,7 +2056,7 @@ fn closing_a_document_releases_its_key_classes() {
         );
         node = graph.intern_node_with_scope(
             SemanticNodeData::Tuple {
-                elements: Arc::from([
+                elements: crate::semantic_query::PayloadArray::from([
                     crate::semantic_query::TupleElement {
                         label: None,
                         value: node,

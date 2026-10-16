@@ -293,7 +293,7 @@ fn kernel_effects_read_the_declared_predicate_under_the_call_map() {
     let signature = |name: &str, type_parameters: Vec<TypeParamDecl>, ret, predicate| {
         graph.intern_node(SemanticNodeData::Signature {
             kind: SignatureKind::Call,
-            params: Arc::from(
+            params: verter_type_engine::semantic_query::PayloadArray::from(
                 vec![FunctionParam::synthetic(
                     Some(Arc::from("x")),
                     unknown,
@@ -303,7 +303,7 @@ fn kernel_effects_read_the_declared_predicate_under_the_call_map() {
                 .into_boxed_slice(),
             ),
             return_type: ret,
-            type_parameters: Arc::from(type_parameters.into_boxed_slice()),
+            type_parameters: verter_type_engine::semantic_query::PayloadArray::from(type_parameters.into_boxed_slice()),
             occurrence: Some(occurrence(name, 0)),
             return_carrier: SignatureReturnCarrier::Declared(ret),
             signature_span: None,
@@ -546,7 +546,7 @@ fn predicates_participate_in_identity_ordering_and_display() {
     let signature = |ret, predicate| {
         graph.intern_node(SemanticNodeData::Signature {
             kind: SignatureKind::Call,
-            params: Arc::from(
+            params: verter_type_engine::semantic_query::PayloadArray::from(
                 vec![FunctionParam::synthetic(
                     Some(Arc::from("x")),
                     unknown,
@@ -556,7 +556,7 @@ fn predicates_participate_in_identity_ordering_and_display() {
                 .into_boxed_slice(),
             ),
             return_type: ret,
-            type_parameters: Arc::from(Vec::new().into_boxed_slice()),
+            type_parameters: verter_type_engine::semantic_query::PayloadArray::from(Vec::new().into_boxed_slice()),
             occurrence: None,
             return_carrier: SignatureReturnCarrier::Declared(ret),
             signature_span: None,

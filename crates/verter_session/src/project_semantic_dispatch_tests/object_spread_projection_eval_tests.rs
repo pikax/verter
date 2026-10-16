@@ -460,13 +460,13 @@ fn whole_program_excess_and_direct_signature_rules_survive_open_spreads() {
     });
     let call = graph.intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Call,
-        params: Arc::from([]),
+        params: verter_type_engine::semantic_query::PayloadArray::from([]),
         return_type: number,
         occurrence: None,
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
             number,
         ),
-        type_parameters: Arc::from([]),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from([]),
         signature_span: None,
         return_type_span: None,
         predicate: None,
@@ -586,13 +586,13 @@ fn accessor_effects_normalize_to_writable_property_values() {
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let getter = graph.intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Call,
-        params: Arc::from([]),
+        params: verter_type_engine::semantic_query::PayloadArray::from([]),
         return_type: number,
         occurrence: None,
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
             number,
         ),
-        type_parameters: Arc::from([]),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from([]),
         signature_span: None,
         return_type_span: None,
         predicate: None,
@@ -600,7 +600,7 @@ fn accessor_effects_normalize_to_writable_property_values() {
     });
     let setter = graph.intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Call,
-        params: Arc::from([
+        params: verter_type_engine::semantic_query::PayloadArray::from([
             verter_type_engine::semantic_query::FunctionParam::synthetic(
                 Some(Arc::from("value")),
                 number,
@@ -613,7 +613,7 @@ fn accessor_effects_normalize_to_writable_property_values() {
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
             graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Void)),
         ),
-        type_parameters: Arc::from([]),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from([]),
         signature_span: None,
         return_type_span: None,
         predicate: None,
@@ -1479,13 +1479,13 @@ fn accessor_checker_parity_getter_setter_paired_duplicate_around_spreads() {
     let getter = |value: SemanticNodeId| {
         graph.intern_node(SemanticNodeData::Signature {
             kind: verter_type_engine::semantic_query::SignatureKind::Call,
-            params: Arc::from([]),
+            params: verter_type_engine::semantic_query::PayloadArray::from([]),
             return_type: value,
             occurrence: None,
             return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
                 value,
             ),
-            type_parameters: Arc::from([]),
+            type_parameters: verter_type_engine::semantic_query::PayloadArray::from([]),
             signature_span: None,
             return_type_span: None,
             predicate: None,
@@ -1495,7 +1495,7 @@ fn accessor_checker_parity_getter_setter_paired_duplicate_around_spreads() {
     let setter = |value: SemanticNodeId| {
         graph.intern_node(SemanticNodeData::Signature {
             kind: verter_type_engine::semantic_query::SignatureKind::Call,
-            params: Arc::from([
+            params: verter_type_engine::semantic_query::PayloadArray::from([
                 verter_type_engine::semantic_query::FunctionParam::synthetic(
                     Some(Arc::from("value")),
                     value,
@@ -1508,7 +1508,7 @@ fn accessor_checker_parity_getter_setter_paired_duplicate_around_spreads() {
             return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
                 graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Void)),
             ),
-            type_parameters: Arc::from([]),
+            type_parameters: verter_type_engine::semantic_query::PayloadArray::from([]),
             signature_span: None,
             return_type_span: None,
             predicate: None,
@@ -2771,13 +2771,13 @@ fn key_liveness_keeps_the_getter_of_a_paired_accessor() {
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let getter = graph.intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Call,
-        params: Arc::from([]),
+        params: verter_type_engine::semantic_query::PayloadArray::from([]),
         return_type: number,
         occurrence: None,
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
             number,
         ),
-        type_parameters: Arc::from([]),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from([]),
         signature_span: None,
         return_type_span: None,
         predicate: None,
@@ -2785,7 +2785,7 @@ fn key_liveness_keeps_the_getter_of_a_paired_accessor() {
     });
     let setter = graph.intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Call,
-        params: Arc::from([
+        params: verter_type_engine::semantic_query::PayloadArray::from([
             verter_type_engine::semantic_query::FunctionParam::synthetic(
                 Some(Arc::from("value")),
                 string,
@@ -2798,7 +2798,7 @@ fn key_liveness_keeps_the_getter_of_a_paired_accessor() {
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
             graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Void)),
         ),
-        type_parameters: Arc::from([]),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from([]),
         signature_span: None,
         return_type_span: None,
         predicate: None,
@@ -3636,13 +3636,13 @@ fn paired_setter_excess_candidate_tracks_the_fact_key_spelling() {
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let getter_sig = graph.intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Call,
-        params: Arc::from([]),
+        params: verter_type_engine::semantic_query::PayloadArray::from([]),
         return_type: string,
         occurrence: None,
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
             string,
         ),
-        type_parameters: Arc::from([]),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from([]),
         signature_span: None,
         return_type_span: None,
         predicate: None,
@@ -3650,7 +3650,7 @@ fn paired_setter_excess_candidate_tracks_the_fact_key_spelling() {
     });
     let setter_sig = graph.intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Call,
-        params: Arc::from([
+        params: verter_type_engine::semantic_query::PayloadArray::from([
             verter_type_engine::semantic_query::FunctionParam::synthetic(
                 Some(Arc::from("value")),
                 string,
@@ -3663,7 +3663,7 @@ fn paired_setter_excess_candidate_tracks_the_fact_key_spelling() {
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
             graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Void)),
         ),
-        type_parameters: Arc::from([]),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from([]),
         signature_span: None,
         return_type_span: None,
         predicate: None,
@@ -4110,11 +4110,11 @@ fn raise_fold_keeps_index_signature_off_the_single_call_fast_path() {
     let void = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Void));
     let call_sig = graph.intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Call,
-        params: Arc::from([]),
+        params: verter_type_engine::semantic_query::PayloadArray::from([]),
         return_type: void,
         occurrence: None,
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(void),
-        type_parameters: Arc::from([]),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from([]),
         signature_span: None,
         return_type_span: None,
         predicate: None,

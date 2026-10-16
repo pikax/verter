@@ -346,7 +346,7 @@ impl<'w, 'a, 'd, C: crate::resolver_core::ResolverCapabilities> Walk<'w, 'a, 'd,
                 self.discover(surface)
             }
             SemanticNodeData::MergedDecl { contributors } => {
-                let contributors = Arc::clone(contributors);
+                let contributors = Arc::clone(contributors.as_arc());
                 drop(data);
                 self.discover_merged_declaration(&contributors)
             }
@@ -675,8 +675,8 @@ impl<'w, 'a, 'd, C: crate::resolver_core::ResolverCapabilities> Walk<'w, 'a, 'd,
                 ..
             } => (
                 *kind,
-                Arc::clone(params),
-                Arc::clone(type_parameters),
+                Arc::clone(params.as_arc()),
+                Arc::clone(type_parameters.as_arc()),
                 occurrence.clone(),
                 return_carrier.clone(),
                 *signature_span,
@@ -2237,7 +2237,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 params,
                 type_parameters,
                 ..
-            }) => Some((Arc::clone(params), Arc::clone(type_parameters))),
+            }) => Some((Arc::clone(params.as_arc()), Arc::clone(type_parameters.as_arc()))),
             Some(SemanticNodeData::DeferredCallable(callable)) => {
                 let parts = callable.parts(&ResolveOverloadSetConsumer::witness());
                 Some((Arc::clone(parts.params), Arc::clone(parts.type_parameters)))
@@ -2343,9 +2343,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         };
         Ok(self.graph().intern_node(SemanticNodeData::Signature {
             kind,
-            params,
+            params: crate::semantic_query::PayloadArray::from(params),
             return_type,
-            type_parameters,
+            type_parameters: crate::semantic_query::PayloadArray::from(type_parameters),
             occurrence: None,
             return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(return_type),
             signature_span: None,

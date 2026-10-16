@@ -184,11 +184,11 @@ fn broad_runtime_classifies_container_callable_and_object_without_member_descent
     });
     let callable = graph.intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Call,
-        params: Arc::from([]),
+        params: verter_type_engine::semantic_query::PayloadArray::from([]),
         return_type: leaf,
         occurrence: None,
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(leaf),
-        type_parameters: Arc::from([]),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from([]),
         signature_span: None,
         return_type_span: None,
         predicate: None,
@@ -218,11 +218,11 @@ fn broad_runtime_classifies_container_callable_and_object_without_member_descent
     // dangling, because classification must never descend into them.
     let constructor = graph.intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Construct,
-        params: Arc::from([]),
+        params: verter_type_engine::semantic_query::PayloadArray::from([]),
         return_type: leaf,
         occurrence: None,
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(leaf),
-        type_parameters: Arc::from([]),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from([]),
         signature_span: None,
         return_type_span: None,
         predicate: None,

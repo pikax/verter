@@ -398,7 +398,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // `keyof` over a merged interface is the UNION of every
                 // contributor's keys — the same accumulation the intersection
                 // combine performs.
-                let contributors = Arc::clone(contributors);
+                let contributors = Arc::clone(contributors.as_arc());
                 drop(data);
                 let n = contributors.len();
                 if n == 0 {
@@ -1214,7 +1214,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             base.owner,
                             Arc::clone(&base.decl_name),
                         ),
-                        Arc::clone(args),
+                        Arc::clone(args.as_arc()),
                         self.instantiate_context_for(
                             &base.canonical_id,
                             crate::semantic_query::ProjectionReductionContext::published(
@@ -1587,7 +1587,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // A merged interface's keyset is the UNION of every
                 // contributor's members — the needle admits iff ANY contributor
                 // admits (same accumulation as the intersection arm).
-                let contributors = Arc::clone(contributors);
+                let contributors = Arc::clone(contributors.as_arc());
                 drop(data);
                 let mut any_admits = false;
                 let mut any_inconclusive = false;

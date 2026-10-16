@@ -1207,7 +1207,7 @@ fn symbolic_projection_rejects_swapped_repeated_canonical_references() {
     let b = decl_ref("/workspace/b.ts");
     let tuple = |values: &[verter_type_engine::semantic_query::SemanticNodeId]| {
         graph.intern_node(SemanticNodeData::Tuple {
-            elements: Arc::from(
+            elements: verter_type_engine::semantic_query::PayloadArray::from(
                 values
                     .iter()
                     .map(|value| verter_type_engine::semantic_query::TupleElement {
@@ -1277,7 +1277,7 @@ fn symbolic_projection_rejects_swapped_repeated_lexical_scopes() {
     let b = bare_ref("/workspace/scope-b.ts");
     let tuple = |values: &[verter_type_engine::semantic_query::SemanticNodeId]| {
         graph.intern_node(SemanticNodeData::Tuple {
-            elements: Arc::from(
+            elements: verter_type_engine::semantic_query::PayloadArray::from(
                 values
                     .iter()
                     .map(|value| verter_type_engine::semantic_query::TupleElement {
