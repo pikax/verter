@@ -1979,7 +1979,19 @@ pub fn context_to_slot(ctx: ProjectionReductionContext) -> ModeSlot {
 /// Project a [`SemanticQueryKey`] onto its `(family, slot)` pair. For
 /// mode-bearing variants the mode is stripped into the slot; for everything
 /// else the slot is `Single`.
+///
+/// Interned family operands own nothing here: this is the pure key
+/// mapping. A family key a graph keeps comes from [`family_and_slot_in`].
 pub fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
+    family_and_slot_in(None, key)
+}
+
+/// [`family_and_slot`] whose interned family operands are owned in `arena`,
+/// the graph that issued the key.
+pub(crate) fn family_and_slot_in(
+    arena: Option<&std::sync::Arc<super::arena::NodeArenaCore>>,
+    key: &SemanticQueryKey,
+) -> (FamilyKey, ModeSlot) {
     match key {
         SemanticQueryKey::ResolveDecl(decl) => {
             (FamilyKey::ResolveDecl(decl.clone()), ModeSlot::Single)
@@ -2164,6 +2176,7 @@ pub fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
         } => (
             FamilyKey::Relate {
                 key: super::family_intern::InternedRelateKey::intern(
+                    arena,
                     crate::semantic_query::RelateMemoKey {
                         source: *source,
                         target: *target,
@@ -2388,7 +2401,7 @@ pub fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
         // context), so the family uses the `Single` slot.
         SemanticQueryKey::ResolveCall(key) => (
             FamilyKey::ResolveCall {
-                key: super::family_intern::InternedResolveCallKey::intern((**key).clone()),
+                key: super::family_intern::InternedResolveCallKey::intern(arena, (**key).clone()),
             },
             ModeSlot::Single,
         ),

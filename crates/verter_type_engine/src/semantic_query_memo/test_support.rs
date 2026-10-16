@@ -274,3 +274,13 @@ impl Drop for TestForceColdAbortGuard<'_> {
         self.flag.store(false, Ordering::SeqCst);
     }
 }
+
+/// The issuing graph for identity fixtures built from synthetic ordinals
+/// that no graph allocated. Such operands name no live node, so a record
+/// issued here owns nothing.
+#[cfg(any(test, feature = "test-support"))]
+#[must_use]
+pub fn synthetic_operand_graph() -> &'static SemanticGraphStore {
+    static GRAPH: std::sync::OnceLock<SemanticGraphStore> = std::sync::OnceLock::new();
+    GRAPH.get_or_init(SemanticGraphStore::default)
+}

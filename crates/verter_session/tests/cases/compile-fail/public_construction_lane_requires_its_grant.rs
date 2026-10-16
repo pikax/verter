@@ -4,9 +4,12 @@
 //! cannot be minted from the graph (and, see
 //! `public_node_capability_cannot_be_forged`, not forged either). No graph
 //! read keyed by a bare ordinal — alias chains, origin scopes, structure
-//! verdicts, substitution memos — is callable outside the engine.
+//! verdicts, substitution memos, member indexes, origin-edge exports — is
+//! callable outside the engine, and no bare ordinal releases kernel roots.
 
-use verter_type_engine::semantic_query::{PrimitiveKind, SemanticNodeData, SemanticNodeId};
+use verter_type_engine::semantic_query::{
+    PrimitiveKind, SemanticNodeData, SemanticNodeId, SurfaceView,
+};
 use verter_type_engine::semantic_query_memo::node_roots::NodeConstructionGrant;
 use verter_type_engine::semantic_query_memo::SemanticGraphStore;
 
@@ -41,6 +44,19 @@ fn classify_a_structure(graph: &SemanticGraphStore, id: SemanticNodeId) -> bool 
 fn read_a_substitution(graph: &SemanticGraphStore, id: SemanticNodeId) {
     let _hit = graph.substitute_memo_get(id, id, id);
     graph.substitute_memo_publish(id, id, id, id);
+}
+
+fn index_a_surface(graph: &SemanticGraphStore, id: SemanticNodeId, view: &SurfaceView) {
+    let _index = graph.member_ordinal_index(id, view);
+}
+
+fn export_every_origin_edge(graph: &SemanticGraphStore) {
+    let _edges = graph.export_all_origin_edges();
+}
+
+fn release_kernel_roots(graph: &SemanticGraphStore, id: SemanticNodeId) {
+    let _stranded = graph.signature_store().note_released_nodes([id]);
+    let _epoch = graph.release_signature_records_naming([id]);
 }
 
 fn main() {}

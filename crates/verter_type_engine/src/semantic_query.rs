@@ -1690,14 +1690,56 @@ impl CanonicalTypeSubstitution {
         Self(Arc::from(Vec::new().into_boxed_slice()), Default::default())
     }
 
-    /// Canonicalize `(type_parameter, bound)` pairs: sorted and
-    /// deduplicated by the parameter node (first binding wins).
+    /// Canonicalize `(type_parameter, bound)` pairs of `graph`: sorted and
+    /// deduplicated by the parameter node (first binding wins). The
+    /// substitution owns its operands in `graph`.
     #[must_use]
-    pub fn new(mut bindings: Vec<(SemanticNodeId, SemanticNodeId)>) -> Self {
+    pub fn new(
+        graph: &crate::semantic_query_memo::SemanticGraphStore,
+        bindings: Vec<(SemanticNodeId, SemanticNodeId)>,
+    ) -> Self {
+        Self::rooted(bindings, |operands| {
+            crate::semantic_query_memo::node_roots::IdentityNodeRoots::in_graph(graph, operands)
+        })
+    }
+
+    /// [`Self::new`] for the graph whose arena is `arena`; `None` when the
+    /// issuer is bound to no graph and so owns no graph operand.
+    pub(crate) fn new_in_arena(
+        arena: Option<&Arc<crate::semantic_query_memo::arena::NodeArenaCore>>,
+        bindings: Vec<(SemanticNodeId, SemanticNodeId)>,
+    ) -> Self {
+        Self::rooted(bindings, |operands| {
+            arena.map_or_else(Default::default, |arena| {
+                crate::semantic_query_memo::node_roots::IdentityNodeRoots::in_arena(arena, operands)
+            })
+        })
+    }
+
+    /// [`Self::new`] for bindings derived from `sources`, owned in the graph
+    /// that issued them.
+    pub(crate) fn derived_from(
+        sources: &[&Self],
+        bindings: Vec<(SemanticNodeId, SemanticNodeId)>,
+    ) -> Self {
+        Self::rooted(bindings, |operands| {
+            crate::semantic_query_memo::node_roots::IdentityNodeRoots::derived_from(
+                sources.iter().map(|source| &source.1),
+                operands,
+            )
+        })
+    }
+
+    fn rooted(
+        mut bindings: Vec<(SemanticNodeId, SemanticNodeId)>,
+        root: impl FnOnce(
+            &mut dyn Iterator<Item = SemanticNodeId>,
+        ) -> crate::semantic_query_memo::node_roots::IdentityNodeRoots,
+    ) -> Self {
         bindings.sort_by_key(|(param, _)| param.0);
         bindings.dedup_by_key(|(param, _)| param.0);
-        let roots = crate::semantic_query_memo::node_roots::IdentityNodeRoots::scoped(
-            bindings
+        let roots = root(
+            &mut bindings
                 .iter()
                 .flat_map(|&(parameter, value)| [parameter, value]),
         );
@@ -7686,9 +7728,13 @@ impl FlowNarrowingKey {
     /// this the order-sensitive `Arc` derive would over-key equivalent flow
     /// axes.
     #[must_use]
-    pub fn new(facts: Arc<[SemanticNodeId]>) -> Self {
+    pub fn new(
+        graph: &crate::semantic_query_memo::SemanticGraphStore,
+        facts: Arc<[SemanticNodeId]>,
+    ) -> Self {
         let facts = canonical_node_set(facts);
-        let roots = crate::semantic_query_memo::node_roots::IdentityNodeRoots::scoped(
+        let roots = crate::semantic_query_memo::node_roots::IdentityNodeRoots::in_graph(
+            graph,
             facts.iter().copied(),
         );
         Self(facts, roots)
@@ -7745,9 +7791,13 @@ impl ContextualTypingKey {
     /// constructions of the same set (`[a, b]` / `[b, a]`) are the SAME key
     /// (the §2.58 "canonicalize before key construction" contract).
     #[must_use]
-    pub fn new(targets: Arc<[SemanticNodeId]>) -> Self {
+    pub fn new(
+        graph: &crate::semantic_query_memo::SemanticGraphStore,
+        targets: Arc<[SemanticNodeId]>,
+    ) -> Self {
         let targets = canonical_node_set(targets);
-        let roots = crate::semantic_query_memo::node_roots::IdentityNodeRoots::scoped(
+        let roots = crate::semantic_query_memo::node_roots::IdentityNodeRoots::in_graph(
+            graph,
             targets.iter().copied(),
         );
         Self(targets, roots)
@@ -8000,9 +8050,13 @@ impl InferableParamSetId {
     /// constructions of the same open-parameter set are the SAME key (the
     /// §2.58 "canonicalize before key construction" contract).
     #[must_use]
-    pub fn new(params: Arc<[SemanticNodeId]>) -> Self {
+    pub fn new(
+        graph: &crate::semantic_query_memo::SemanticGraphStore,
+        params: Arc<[SemanticNodeId]>,
+    ) -> Self {
         let params = canonical_node_set(params);
-        let roots = crate::semantic_query_memo::node_roots::IdentityNodeRoots::scoped(
+        let roots = crate::semantic_query_memo::node_roots::IdentityNodeRoots::in_graph(
+            graph,
             params.iter().copied(),
         );
         Self(params, roots)
@@ -9466,9 +9520,12 @@ impl SemanticQueryKey {
     /// Checker-reduction `ReduceIntersection` over a flat operand list.
     /// Binary/unary/empty lists allocate no recipe.
     #[must_use]
-    pub fn reduce_intersection_operands(members: Arc<[SemanticNodeId]>) -> Self {
+    pub fn reduce_intersection_operands(
+        graph: &crate::semantic_query_memo::SemanticGraphStore,
+        members: Arc<[SemanticNodeId]>,
+    ) -> Self {
         Self::ReduceIntersection {
-            input: IntersectionInputRef::from_operands(&members),
+            input: IntersectionInputRef::from_operands(graph, &members),
             purpose: IntersectionPurpose::CheckerReduction,
             context: SemanticContextId::production(),
         }

@@ -353,9 +353,10 @@ fn kernel_effects_read_the_declared_predicate_under_the_call_map() {
         .intern_substitution(
             CallSubstitution::map(
                 space,
-                verter_type_engine::semantic_query::CanonicalTypeSubstitution::new(vec![(
-                    token, number,
-                )]),
+                verter_type_engine::semantic_query::CanonicalTypeSubstitution::new(
+                    graph,
+                    vec![(token, number)],
+                ),
             ),
             None,
         )

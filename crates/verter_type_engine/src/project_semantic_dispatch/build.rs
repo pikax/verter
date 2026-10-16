@@ -18600,6 +18600,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     QueryResult::Value(type_args[0])
                 } else {
                     let read = self.execute_read(SemanticQueryKey::reduce_intersection_operands(
+                        self.graph(),
                         Arc::clone(type_args),
                     ));
                     crate::fact_signature_helpers::merge_dep_signature_into_local_fence(
@@ -18799,6 +18800,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             match self
                 .execute_read(
                     crate::semantic_query::SemanticQueryKey::reduce_intersection_operands(
+                        self.graph(),
                         std::sync::Arc::from(members.to_vec().into_boxed_slice()),
                     ),
                 )

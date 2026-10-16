@@ -221,7 +221,10 @@ pub fn publish_signature(
             SignatureStore::binder_token(input.space_key, ordinal as u32)?,
         ));
     }
-    let environment = store.intern_environment(CanonicalTypeSubstitution::new(env), None)?;
+    let environment = store.intern_environment(
+        CanonicalTypeSubstitution::new_in_arena(store.graph_arena().as_ref(), env),
+        None,
+    )?;
 
     let mut parameters = Vec::with_capacity(input.params.len());
     for p in &input.params {
@@ -715,7 +718,10 @@ fn residual_of(
             SignatureStore::binder_token(space_key(rep.space), *rep_ordinal)?,
         ));
     }
-    let env = compose_canonical(c.env, &CanonicalTypeSubstitution::new(to_rep));
+    let env = compose_canonical(
+        c.env,
+        &CanonicalTypeSubstitution::derived_from(&[c.env], to_rep),
+    );
     let environment = store.intern_environment(env, None)?;
     let descriptor = store.intern_descriptor(
         SignatureDescriptor {

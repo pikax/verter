@@ -1,6 +1,7 @@
 //! Discriminating tests for `VerterStableV1` keys, carrier-qualified
 //! unions, ReduceIntersection grouping, and identity-vs-relation-vs-display.
 
+use crate::semantic_query_memo::test_support::synthetic_operand_graph;
 use std::sync::Arc;
 
 use crate::project_semantic_dispatch::canonical_algebra::{
@@ -124,7 +125,7 @@ fn binary_reduce_intersection_allocates_no_recipe() {
     let input = IntersectionInputRef::binary(a, b);
     assert!(!input.is_recipe());
     assert_eq!(
-        IntersectionInputRef::from_operands(&[a, b]),
+        IntersectionInputRef::from_operands(synthetic_operand_graph(), &[a, b]),
         IntersectionInputRef::Binary(a, b)
     );
 }
@@ -135,22 +136,31 @@ fn two_term_list_with_subgroup_does_not_collapse_to_binary() {
     let b = SemanticNodeId(2);
     let c = SemanticNodeId(3);
     let nested = IntersectionInputRef::binary(b, c);
-    let grouped = IntersectionInputRef::from_steps(&[
-        IntersectionTerm::Value(a),
-        IntersectionTerm::EvaluateSubgroup {
-            input: nested,
-            purpose: IntersectionPurpose::CheckerReduction,
-        },
-    ]);
+    let grouped = IntersectionInputRef::from_steps(
+        synthetic_operand_graph(),
+        &[
+            IntersectionTerm::Value(a),
+            IntersectionTerm::EvaluateSubgroup {
+                input: nested,
+                purpose: IntersectionPurpose::CheckerReduction,
+            },
+        ],
+    );
     assert!(grouped.is_recipe());
-    assert_ne!(grouped, IntersectionInputRef::from_operands(&[a, b, c]));
-    let left_assoc = IntersectionInputRef::from_steps(&[
-        IntersectionTerm::EvaluateSubgroup {
-            input: IntersectionInputRef::binary(a, b),
-            purpose: IntersectionPurpose::CheckerReduction,
-        },
-        IntersectionTerm::Value(c),
-    ]);
+    assert_ne!(
+        grouped,
+        IntersectionInputRef::from_operands(synthetic_operand_graph(), &[a, b, c])
+    );
+    let left_assoc = IntersectionInputRef::from_steps(
+        synthetic_operand_graph(),
+        &[
+            IntersectionTerm::EvaluateSubgroup {
+                input: IntersectionInputRef::binary(a, b),
+                purpose: IntersectionPurpose::CheckerReduction,
+            },
+            IntersectionTerm::Value(c),
+        ],
+    );
     assert_ne!(grouped, left_assoc);
 }
 
@@ -162,7 +172,10 @@ fn fingerprint_is_fnv_of_exact_bytes() {
 
 #[test]
 fn reduce_intersection_key_carries_context() {
-    let key = SemanticQueryKey::reduce_intersection_operands(Arc::from([SemanticNodeId(1)]));
+    let key = SemanticQueryKey::reduce_intersection_operands(
+        synthetic_operand_graph(),
+        Arc::from([SemanticNodeId(1)]),
+    );
     match key {
         SemanticQueryKey::ReduceIntersection { context, .. } => {
             assert_eq!(context, SemanticContextId::production());

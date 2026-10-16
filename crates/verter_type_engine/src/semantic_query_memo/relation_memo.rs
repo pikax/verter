@@ -79,7 +79,10 @@ impl SemanticGraphStore {
         key: &crate::semantic_query::RelateMemoKey,
     ) -> Option<CacheRead<crate::semantic_query::RelationPayload>> {
         let family = FamilyKey::Relate {
-            key: super::family_intern::InternedRelateKey::intern(key.clone()),
+            key: super::family_intern::InternedRelateKey::intern(
+                Some(&self.arena.core),
+                key.clone(),
+            ),
         };
         // A relation entry always materialises the modeless identity
         // point, so the §3.4 gate is the modeless identity point every
@@ -122,7 +125,10 @@ impl SemanticGraphStore {
         key: &crate::semantic_query::RelateMemoKey,
     ) -> Option<RelationPublishedCarrier> {
         let family = FamilyKey::Relate {
-            key: super::family_intern::InternedRelateKey::intern(key.clone()),
+            key: super::family_intern::InternedRelateKey::intern(
+                Some(&self.arena.core),
+                key.clone(),
+            ),
         };
         let entries = self.entries_lock_diagnosed();
         let slots = entries.get(&family)?;
@@ -259,7 +265,7 @@ impl SemanticGraphStore {
         self.publish_unfenced_candidate_for_tests(
             None,
             FamilyKey::Relate {
-                key: super::family_intern::InternedRelateKey::intern(key),
+                key: super::family_intern::InternedRelateKey::intern(Some(&self.arena.core), key),
             },
             SemanticQueryValue::Relation(payload),
             relation_satisfied_projection(),
@@ -287,7 +293,7 @@ impl SemanticGraphStore {
         self.publish_unfenced_candidate_for_tests(
             Some(view),
             FamilyKey::Relate {
-                key: super::family_intern::InternedRelateKey::intern(key),
+                key: super::family_intern::InternedRelateKey::intern(Some(&self.arena.core), key),
             },
             SemanticQueryValue::Relation(payload),
             relation_satisfied_projection(),

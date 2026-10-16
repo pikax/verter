@@ -4,6 +4,7 @@ use super::records::{BinderDeclaration, BinderSpace, SignatureSetRef, SpellingId
 use super::substitution::{CallSubstitution, SubstTerm, MAX_SUBSTITUTION_CHAIN_DEPTH};
 use super::test_support::intern_one_call;
 use crate::semantic_query::{CanonicalTypeSubstitution, SemanticNodeId};
+use crate::semantic_query_memo::test_support::synthetic_operand_graph;
 
 #[test]
 fn stale_epoch_handle_is_rejected() {
@@ -317,10 +318,13 @@ fn compose_rejects_unrelated_codomain() {
         .intern_substitution(
             CallSubstitution::map(
                 decl,
-                CanonicalTypeSubstitution::new(vec![(
-                    SignatureStore::binder_token(1, 0).unwrap(),
-                    SignatureStore::binder_token(1, 1).unwrap(),
-                )]),
+                CanonicalTypeSubstitution::new(
+                    synthetic_operand_graph(),
+                    vec![(
+                        SignatureStore::binder_token(1, 0).unwrap(),
+                        SignatureStore::binder_token(1, 1).unwrap(),
+                    )],
+                ),
             ),
             None,
         )
@@ -329,10 +333,13 @@ fn compose_rejects_unrelated_codomain() {
         .intern_substitution(
             CallSubstitution::map(
                 other,
-                CanonicalTypeSubstitution::new(vec![(
-                    SignatureStore::binder_token(3, 0).unwrap(),
-                    crate::semantic_query::SemanticNodeId(9),
-                )]),
+                CanonicalTypeSubstitution::new(
+                    synthetic_operand_graph(),
+                    vec![(
+                        SignatureStore::binder_token(3, 0).unwrap(),
+                        crate::semantic_query::SemanticNodeId(9),
+                    )],
+                ),
             ),
             None,
         )
@@ -405,7 +412,10 @@ fn intern_substitution_recomputes_compose_depth_and_spaces() {
         .intern_substitution(
             CallSubstitution::map(
                 space,
-                CanonicalTypeSubstitution::new(vec![(SemanticNodeId(1), SemanticNodeId(2))]),
+                CanonicalTypeSubstitution::new(
+                    synthetic_operand_graph(),
+                    vec![(SemanticNodeId(1), SemanticNodeId(2))],
+                ),
             ),
             None,
         )
@@ -414,7 +424,10 @@ fn intern_substitution_recomputes_compose_depth_and_spaces() {
         .intern_substitution(
             CallSubstitution::map(
                 space,
-                CanonicalTypeSubstitution::new(vec![(SemanticNodeId(2), SemanticNodeId(3))]),
+                CanonicalTypeSubstitution::new(
+                    synthetic_operand_graph(),
+                    vec![(SemanticNodeId(2), SemanticNodeId(3))],
+                ),
             ),
             None,
         )
@@ -462,7 +475,10 @@ fn intern_hand_built_compose_chain_flattens_past_the_bound() {
         .intern_substitution(
             CallSubstitution::map(
                 space,
-                CanonicalTypeSubstitution::new(vec![(SemanticNodeId(1), SemanticNodeId(2))]),
+                CanonicalTypeSubstitution::new(
+                    synthetic_operand_graph(),
+                    vec![(SemanticNodeId(1), SemanticNodeId(2))],
+                ),
             ),
             None,
         )
@@ -473,10 +489,13 @@ fn intern_hand_built_compose_chain_flattens_past_the_bound() {
             .intern_substitution(
                 CallSubstitution::map(
                     space,
-                    CanonicalTypeSubstitution::new(vec![(
-                        SemanticNodeId(u64::from(i) + 1),
-                        SemanticNodeId(u64::from(i) + 2),
-                    )]),
+                    CanonicalTypeSubstitution::new(
+                        synthetic_operand_graph(),
+                        vec![(
+                            SemanticNodeId(u64::from(i) + 1),
+                            SemanticNodeId(u64::from(i) + 2),
+                        )],
+                    ),
                 ),
                 None,
             )

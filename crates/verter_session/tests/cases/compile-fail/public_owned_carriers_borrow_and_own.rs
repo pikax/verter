@@ -86,7 +86,9 @@ fn keep_surface_member(surface: &OneLevelSurface) -> Result<Option<NodeRoot>, Qu
 fn read_origin_in_lane(graph: &SemanticGraphStore, id: SemanticNodeId) -> usize {
     let mut edges = 0;
     graph.walk_origin_chain(id, |_, _| edges += 1);
-    edges + usize::from(graph.node_scope_in_scope(id).is_some())
+    edges
+        + graph.export_origin_edges_in_scope().len()
+        + usize::from(graph.node_scope_in_scope(id).is_some())
 }
 
 fn keep_error(error: &QueryError) -> QueryError {

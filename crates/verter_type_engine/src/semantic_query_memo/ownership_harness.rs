@@ -164,8 +164,8 @@ mod tests {
             let node = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
                 "operand".into(),
             )));
-            let substitution = CanonicalTypeSubstitution::new(vec![(node, node)]);
-            let recipe = IntersectionInputRef::from_operands(&[node, node, node]);
+            let substitution = CanonicalTypeSubstitution::new(graph, vec![(node, node)]);
+            let recipe = IntersectionInputRef::from_operands(graph, &[node, node, node]);
             let prepared = graph
                 .prepare_rooted_key(SemanticQueryKey::ClassifyTruthinessDomain { subject: node });
             let receipt = DemandCostReceipt::new(
@@ -198,14 +198,17 @@ mod tests {
             let node = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
                 "same content".into(),
             )));
-            let nested = IntersectionInputRef::from_operands(&[node, node, node]);
-            IntersectionInputRef::from_steps(&[
-                IntersectionTerm::EvaluateSubgroup {
-                    input: nested,
-                    purpose: IntersectionPurpose::CheckerReduction,
-                },
-                IntersectionTerm::Value(node),
-            ])
+            let nested = IntersectionInputRef::from_operands(graph, &[node, node, node]);
+            IntersectionInputRef::from_steps(
+                graph,
+                &[
+                    IntersectionTerm::EvaluateSubgroup {
+                        input: nested,
+                        purpose: IntersectionPurpose::CheckerReduction,
+                    },
+                    IntersectionTerm::Value(node),
+                ],
+            )
         };
         let a = first.run(make);
         let b = second.run(make);
@@ -222,6 +225,87 @@ mod tests {
         assert_eq!(second.live_nodes(), 1);
         drop(b);
         assert_eq!(second.live_nodes(), 0);
+    }
+
+    #[test]
+    fn counted_identity_records_root_in_their_issuing_graph_not_the_newest_dispatcher() {
+        use crate::semantic_query::{ContextualTypingKey, FlowNarrowingKey, InferableParamSetId};
+        use crate::semantic_query_memo::node_roots::DispatchConstructionScope;
+        use std::sync::Arc;
+
+        let issuing = CountedOwnershipHarness::new();
+        let newest = CountedOwnershipHarness::new();
+        let issuing_dispatcher = DispatchConstructionScope::enter(&issuing.graph.arena.core);
+        // A second graph's dispatcher opened later is the thread's newest
+        // owner, and allocates the same ordinal the issuing graph does.
+        let newest_dispatcher = DispatchConstructionScope::enter(&newest.graph.arena.core);
+        let node = issuing
+            .graph
+            .intern_node(SemanticNodeData::Literal(LiteralValue::String(
+                "issued operand".into(),
+            )));
+        let coinciding = newest
+            .graph
+            .intern_node(SemanticNodeData::Literal(LiteralValue::String(
+                "coinciding operand".into(),
+            )));
+        assert_eq!(node, coinciding);
+        let graph = &issuing.graph;
+        let set = || Arc::from([node]);
+        let substitution = CanonicalTypeSubstitution::new(graph, vec![(node, node)]);
+        let flow = FlowNarrowingKey::new(graph, set());
+        let contextual = ContextualTypingKey::new(graph, set());
+        let params = InferableParamSetId::new(graph, set());
+        let recipe = IntersectionInputRef::from_operands(graph, &[node, node, node]);
+        drop(newest_dispatcher);
+        drop(issuing_dispatcher);
+        assert_eq!(
+            newest.live_nodes(),
+            0,
+            "no identity of the issuing graph retains the newest graph's node"
+        );
+        assert_eq!(
+            issuing.live_nodes(),
+            1,
+            "the identities own their operand in the graph that issued it"
+        );
+        drop((substitution, flow, contextual, params));
+        assert_eq!(issuing.live_nodes(), 1, "the recipe still owns it");
+        drop(recipe);
+        assert_eq!(issuing.live_nodes(), 0, "the final release drains it");
+    }
+
+    #[test]
+    fn a_dispatcher_owner_keeps_each_delivery_once_however_often_it_is_read() {
+        use crate::semantic_query::{QueryResult, SemanticQueryValue};
+        use crate::semantic_query_memo::node_roots::{DispatchConstructionScope, NodeRootScope};
+
+        let harness = CountedOwnershipHarness::new();
+        let dispatcher = DispatchConstructionScope::enter(&harness.graph.arena.core);
+        let node = harness
+            .graph
+            .intern_node(SemanticNodeData::Literal(LiteralValue::String(
+                "delivered".into(),
+            )));
+        let read = QueryResult::Value(SemanticQueryValue::TypeNode(node));
+        let lease = harness.graph.lease_delivery(&read, &[]).unwrap();
+        for _ in 0..64 {
+            drop(lease.clone());
+        }
+        {
+            let _build = harness.graph.enter_node_root_scope();
+            drop(lease.clone());
+        }
+        assert_eq!(
+            NodeRootScope::retained_deliveries_for_tests(),
+            1,
+            "repeated reads of one delivery are kept once, not once per read"
+        );
+        drop(lease);
+        assert_eq!(harness.live_nodes(), 1, "the dispatcher still owns it");
+        drop(dispatcher);
+        assert_eq!(NodeRootScope::retained_deliveries_for_tests(), 0);
+        assert_eq!(harness.live_nodes(), 0);
     }
 
     #[test]

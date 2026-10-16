@@ -84,46 +84,48 @@ pub(super) const MEMBER_ORDINAL_INDEX_RETENTION_CAP: usize = 16_384;
 pub const MEMBER_ORDINAL_INDEX_LINEAR_SCAN_MAX: usize = 16;
 
 impl SemanticGraphStore {
-    /// Return the lazily-built member-ordinal index for the interned
-    /// `Object` node `id`, whose payload surface the caller already holds
-    /// as `view`. Builds at most once per node id (first-writer-wins;
-    /// concurrent builders produce identical maps because the payload is
-    /// immutable).
-    ///
-    /// The caller is responsible for passing the `SurfaceView` that
-    /// belongs to `id` — the sidecar trusts the pairing, mirroring how
-    /// every walker arm already reads the view through
-    /// [`Self::node_data`].
-    #[must_use]
-    pub fn member_ordinal_index(
-        &self,
-        id: SemanticNodeId,
-        view: &SurfaceView,
-    ) -> Arc<MemberOrdinalIndex> {
-        if let Some(existing) = self.member_ordinal_index_memo.get(&id) {
-            return Arc::clone(existing.value());
-        }
-        let built = Arc::new(MemberOrdinalIndex::from_members(view.positive_members()));
-        match self.member_ordinal_index_memo.entry(id) {
-            Entry::Occupied(existing) => Arc::clone(existing.get()),
-            Entry::Vacant(slot) => {
-                slot.insert(Arc::clone(&built));
-                let mut fifo = self.member_ordinal_index_fifo.lock();
-                fifo.push_back(id);
-                while fifo.len() > MEMBER_ORDINAL_INDEX_RETENTION_CAP {
-                    if let Some(victim) = fifo.pop_front() {
-                        // Drop the FIFO lock BEFORE touching the DashMap
-                        // (mirrors the hash-cons eviction ordering) so a
-                        // concurrent builder is never blocked behind a
-                        // shard removal; re-acquire to continue evicting.
-                        drop(fifo);
-                        self.member_ordinal_index_memo.remove(&victim);
-                        fifo = self.member_ordinal_index_fifo.lock();
-                    } else {
-                        break;
+    construction_ordinal_seam! {
+        /// Return the lazily-built member-ordinal index for the interned
+        /// `Object` node `id`, whose payload surface the caller already holds
+        /// as `view`. Builds at most once per node id (first-writer-wins;
+        /// concurrent builders produce identical maps because the payload is
+        /// immutable).
+        ///
+        /// The caller is responsible for passing the `SurfaceView` that
+        /// belongs to `id` — the sidecar trusts the pairing, mirroring how
+        /// every walker arm already reads the view through
+        /// [`Self::node_data`].
+        #[must_use]
+        fn member_ordinal_index(
+            &self,
+            id: SemanticNodeId,
+            view: &SurfaceView,
+        ) -> Arc<MemberOrdinalIndex> {
+            if let Some(existing) = self.member_ordinal_index_memo.get(&id) {
+                return Arc::clone(existing.value());
+            }
+            let built = Arc::new(MemberOrdinalIndex::from_members(view.positive_members()));
+            match self.member_ordinal_index_memo.entry(id) {
+                Entry::Occupied(existing) => Arc::clone(existing.get()),
+                Entry::Vacant(slot) => {
+                    slot.insert(Arc::clone(&built));
+                    let mut fifo = self.member_ordinal_index_fifo.lock();
+                    fifo.push_back(id);
+                    while fifo.len() > MEMBER_ORDINAL_INDEX_RETENTION_CAP {
+                        if let Some(victim) = fifo.pop_front() {
+                            // Drop the FIFO lock BEFORE touching the DashMap
+                            // (mirrors the hash-cons eviction ordering) so a
+                            // concurrent builder is never blocked behind a
+                            // shard removal; re-acquire to continue evicting.
+                            drop(fifo);
+                            self.member_ordinal_index_memo.remove(&victim);
+                            fifo = self.member_ordinal_index_fifo.lock();
+                        } else {
+                            break;
+                        }
                     }
+                    built
                 }
-                built
             }
         }
     }

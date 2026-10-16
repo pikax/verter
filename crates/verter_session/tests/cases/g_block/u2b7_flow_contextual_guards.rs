@@ -16,6 +16,7 @@
 //! under one identity is returned for another ONLY when they share a slot.
 
 use std::sync::Arc;
+use verter_type_engine::semantic_query_memo::test_support::synthetic_operand_graph;
 
 use verter_session::{HostConfig, VerterHost};
 use verter_session_query::facts::fact_cache::ReadSetSignature;
@@ -288,7 +289,11 @@ fn contextual_type_at_do_not_warm_hit() {
 fn flow_narrowing_at_identity_covers_flow_axis() {
     // Differ ONLY in the per-variant `flow` demand axis (env all 0).
     let base = flow_narrowing_key_with_flow("a.ts", 0, FlowNarrowingKey::empty());
-    let other = flow_narrowing_key_with_flow("a.ts", 0, FlowNarrowingKey::new(node_set(7)));
+    let other = flow_narrowing_key_with_flow(
+        "a.ts",
+        0,
+        FlowNarrowingKey::new(synthetic_operand_graph(), node_set(7)),
+    );
     assert_distinct_identity(&base, &other);
 }
 
@@ -305,8 +310,11 @@ fn flow_narrowing_at_identity_covers_substitution_axis() {
 fn contextual_type_at_identity_covers_contextual_axis() {
     // Differ ONLY in the per-variant `contextual` demand axis (env all 0).
     let base = contextual_type_key_with_contextual("a.ts", 0, ContextualTypingKey::empty());
-    let other =
-        contextual_type_key_with_contextual("a.ts", 0, ContextualTypingKey::new(node_set(7)));
+    let other = contextual_type_key_with_contextual(
+        "a.ts",
+        0,
+        ContextualTypingKey::new(synthetic_operand_graph(), node_set(7)),
+    );
     assert_distinct_identity(&base, &other);
 }
 
@@ -335,8 +343,8 @@ fn node_set2(a: u64, b: u64) -> Arc<[SemanticNodeId]> {
 
 #[test]
 fn flow_narrowing_key_is_order_insensitive_set() {
-    let ab = FlowNarrowingKey::new(node_set2(3, 8));
-    let ba = FlowNarrowingKey::new(node_set2(8, 3));
+    let ab = FlowNarrowingKey::new(synthetic_operand_graph(), node_set2(3, 8));
+    let ba = FlowNarrowingKey::new(synthetic_operand_graph(), node_set2(8, 3));
     assert_eq!(ab, ba, "FlowNarrowingKey must be an order-insensitive set");
     assert_eq!(
         ab.ids(),
@@ -359,20 +367,25 @@ fn flow_narrowing_key_is_order_insensitive_set() {
     );
 
     // A genuinely DIFFERENT set must stay distinct.
-    let key_ac = flow_narrowing_key_with_flow("a.ts", 0, FlowNarrowingKey::new(node_set2(3, 9)));
+    let key_ac = flow_narrowing_key_with_flow(
+        "a.ts",
+        0,
+        FlowNarrowingKey::new(synthetic_operand_graph(), node_set2(3, 9)),
+    );
     assert_distinct_identity(&key_ab, &key_ac);
 
     // Duplicates collapse — the set carries each id once.
-    let dup = FlowNarrowingKey::new(Arc::from(
-        vec![SemanticNodeId(5), SemanticNodeId(5), SemanticNodeId(2)].into_boxed_slice(),
-    ));
+    let dup = FlowNarrowingKey::new(
+        synthetic_operand_graph(),
+        Arc::from(vec![SemanticNodeId(5), SemanticNodeId(5), SemanticNodeId(2)].into_boxed_slice()),
+    );
     assert_eq!(dup.ids(), &[SemanticNodeId(2), SemanticNodeId(5)]);
 }
 
 #[test]
 fn contextual_type_key_is_order_insensitive_set() {
-    let ab = ContextualTypingKey::new(node_set2(3, 8));
-    let ba = ContextualTypingKey::new(node_set2(8, 3));
+    let ab = ContextualTypingKey::new(synthetic_operand_graph(), node_set2(3, 8));
+    let ba = ContextualTypingKey::new(synthetic_operand_graph(), node_set2(8, 3));
     assert_eq!(
         ab, ba,
         "ContextualTypingKey must be an order-insensitive set"
@@ -396,13 +409,17 @@ fn contextual_type_key_is_order_insensitive_set() {
          from the `[b, a]` ordering — they are the SAME memo slot"
     );
 
-    let key_ac =
-        contextual_type_key_with_contextual("a.ts", 0, ContextualTypingKey::new(node_set2(3, 9)));
+    let key_ac = contextual_type_key_with_contextual(
+        "a.ts",
+        0,
+        ContextualTypingKey::new(synthetic_operand_graph(), node_set2(3, 9)),
+    );
     assert_distinct_identity(&key_ab, &key_ac);
 
-    let dup = ContextualTypingKey::new(Arc::from(
-        vec![SemanticNodeId(5), SemanticNodeId(5), SemanticNodeId(2)].into_boxed_slice(),
-    ));
+    let dup = ContextualTypingKey::new(
+        synthetic_operand_graph(),
+        Arc::from(vec![SemanticNodeId(5), SemanticNodeId(5), SemanticNodeId(2)].into_boxed_slice()),
+    );
     assert_eq!(dup.ids(), &[SemanticNodeId(2), SemanticNodeId(5)]);
 }
 

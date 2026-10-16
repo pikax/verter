@@ -20,6 +20,7 @@
 //! the full-identity key splits them and the assertions PASS.
 
 use std::sync::Arc;
+use verter_type_engine::semantic_query_memo::test_support::synthetic_operand_graph;
 
 use verter_session::{HostConfig, VerterHost};
 use verter_session_query::facts::fact_cache::ReadSetSignature;
@@ -518,9 +519,10 @@ pub(crate) fn relate_same_nodes_different_inference_context_do_not_warm_hit() {
 
     // A baseline session over one inferable param.
     let session = InferenceContextKey {
-        inferable_params: InferableParamSetId::new(Arc::from(
-            vec![SemanticNodeId(100)].into_boxed_slice(),
-        )),
+        inferable_params: InferableParamSetId::new(
+            graph,
+            Arc::from(vec![SemanticNodeId(100)].into_boxed_slice()),
+        ),
         ..InferenceContextKey::default()
     };
 
@@ -539,9 +541,10 @@ pub(crate) fn relate_same_nodes_different_inference_context_do_not_warm_hit() {
     // A DIFFERENT inferable-param set → another distinct slot.
     publish(RelateMemoKey {
         inference_context: Some(InferenceContextKey {
-            inferable_params: InferableParamSetId::new(Arc::from(
-                vec![SemanticNodeId(200)].into_boxed_slice(),
-            )),
+            inferable_params: InferableParamSetId::new(
+                graph,
+                Arc::from(vec![SemanticNodeId(200)].into_boxed_slice()),
+            ),
             ..session.clone()
         }),
         ..base.clone()
@@ -625,12 +628,14 @@ pub(crate) fn relate_same_nodes_different_inference_context_do_not_warm_hit() {
 
 #[test]
 fn inferable_param_set_id_is_order_insensitive_set() {
-    let ab = InferableParamSetId::new(Arc::from(
-        vec![SemanticNodeId(3), SemanticNodeId(8)].into_boxed_slice(),
-    ));
-    let ba = InferableParamSetId::new(Arc::from(
-        vec![SemanticNodeId(8), SemanticNodeId(3)].into_boxed_slice(),
-    ));
+    let ab = InferableParamSetId::new(
+        synthetic_operand_graph(),
+        Arc::from(vec![SemanticNodeId(3), SemanticNodeId(8)].into_boxed_slice()),
+    );
+    let ba = InferableParamSetId::new(
+        synthetic_operand_graph(),
+        Arc::from(vec![SemanticNodeId(8), SemanticNodeId(3)].into_boxed_slice()),
+    );
     assert_eq!(
         ab, ba,
         "InferableParamSetId must be an order-insensitive set"
@@ -656,15 +661,17 @@ fn inferable_param_set_id_is_order_insensitive_set() {
     );
 
     // A genuinely different SET stays distinct.
-    let ac = InferableParamSetId::new(Arc::from(
-        vec![SemanticNodeId(3), SemanticNodeId(9)].into_boxed_slice(),
-    ));
+    let ac = InferableParamSetId::new(
+        synthetic_operand_graph(),
+        Arc::from(vec![SemanticNodeId(3), SemanticNodeId(9)].into_boxed_slice()),
+    );
     assert_ne!(ab, ac, "a different inferable-param set must be distinct");
 
     // Duplicates collapse — each open parameter appears once.
-    let dup = InferableParamSetId::new(Arc::from(
-        vec![SemanticNodeId(5), SemanticNodeId(5), SemanticNodeId(2)].into_boxed_slice(),
-    ));
+    let dup = InferableParamSetId::new(
+        synthetic_operand_graph(),
+        Arc::from(vec![SemanticNodeId(5), SemanticNodeId(5), SemanticNodeId(2)].into_boxed_slice()),
+    );
     assert_eq!(dup.ids(), &[SemanticNodeId(2), SemanticNodeId(5)]);
 }
 

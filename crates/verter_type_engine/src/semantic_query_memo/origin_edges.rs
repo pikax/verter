@@ -228,8 +228,24 @@ impl SemanticGraphStore {
         self.derivation.lock().bucket_count()
     }
 
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    pub fn export_all_origin_edges(&self) -> Vec<(SemanticNodeId, OriginEdgeKind, OriginEdge)> {
-        self.derivation.lock().all_edges()
+    construction_ordinal_seam! {
+        /// Every retained origin edge, keyed by construction ordinals.
+        #[cfg_attr(feature = "hotpath", hotpath::measure)]
+        fn export_all_origin_edges(&self) -> Vec<(SemanticNodeId, OriginEdgeKind, OriginEdge)> {
+            self.derivation.lock().all_edges()
+        }
+    }
+
+    /// Every retained origin edge, read inside a construction lane this
+    /// thread holds of this graph. Without such a lane the ordinals the
+    /// edges name authorize nothing and the export is empty.
+    #[must_use]
+    pub fn export_origin_edges_in_scope(
+        &self,
+    ) -> Vec<(SemanticNodeId, OriginEdgeKind, OriginEdge)> {
+        if !super::node_roots::NodeRootScope::holds(&self.arena.core) {
+            return Vec::new();
+        }
+        self.export_all_origin_edges()
     }
 }

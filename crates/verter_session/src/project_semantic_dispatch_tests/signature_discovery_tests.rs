@@ -682,7 +682,10 @@ fn declared_result_applies_the_call_map_once_and_leaks_no_binder_token() {
 
     let mapped = store
         .intern_substitution(
-            CallSubstitution::map(space, CanonicalTypeSubstitution::new(vec![(token, number)])),
+            CallSubstitution::map(
+                space,
+                CanonicalTypeSubstitution::new(d.graph(), vec![(token, number)]),
+            ),
             None,
         )
         .unwrap();

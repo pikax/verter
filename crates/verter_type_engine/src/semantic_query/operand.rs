@@ -309,6 +309,7 @@ impl AuthoredSemanticOperand {
     /// Seal an authored locator. Lexical scope and binder frame are derived
     /// from the locator; callers cannot supply them independently.
     fn from_authority(
+        graph: Option<&crate::semantic_query_memo::SemanticGraphStore>,
         locator: AuthoredBodyLocator,
         substitution: Arc<[SemanticNodeId]>,
         split_env: OperandSplitEnv,
@@ -317,9 +318,16 @@ impl AuthoredSemanticOperand {
     ) -> Self {
         Self {
             lexical_scope: OperandLexicalScope::for_locator(&locator),
-            _roots: crate::semantic_query_memo::node_roots::IdentityNodeRoots::scoped(
-                substitution.iter().copied(),
-            ),
+            _roots: match graph {
+                Some(graph) => crate::semantic_query_memo::node_roots::IdentityNodeRoots::in_graph(
+                    graph,
+                    substitution.iter().copied(),
+                ),
+                // A fixture with no issuing graph to name.
+                None => crate::semantic_query_memo::node_roots::IdentityNodeRoots::scoped(
+                    substitution.iter().copied(),
+                ),
+            },
             binder: OperandBinderIdentity::for_locator(&locator),
             locator,
             substitution,
@@ -431,6 +439,7 @@ impl SemanticOperand {
     /// the unforgeable [`SemanticOperandAuthority`] no internal consumer
     /// can mint an authored operand.
     pub(crate) fn from_authored_authority(
+        graph: Option<&crate::semantic_query_memo::SemanticGraphStore>,
         locator: AuthoredBodyLocator,
         substitution: Arc<[SemanticNodeId]>,
         split_env: OperandSplitEnv,
@@ -439,6 +448,7 @@ impl SemanticOperand {
         _authority: SemanticOperandAuthority,
     ) -> Self {
         Self::authored(AuthoredSemanticOperand::from_authority(
+            graph,
             locator,
             substitution,
             split_env,

@@ -1385,10 +1385,13 @@ fn flow_return_key_carries_no_value_environment() {
         // the key.
         let mut typed = key.clone();
         typed.context.type_substitution =
-            verter_type_engine::semantic_query::CanonicalTypeSubstitution::new(vec![(
-                verter_type_engine::semantic_query::SemanticNodeId(7),
-                verter_type_engine::semantic_query::SemanticNodeId(8),
-            )]);
+            verter_type_engine::semantic_query::CanonicalTypeSubstitution::new(
+                dispatch.graph(),
+                vec![(
+                    verter_type_engine::semantic_query::SemanticNodeId(7),
+                    verter_type_engine::semantic_query::SemanticNodeId(8),
+                )],
+            );
         assert_ne!(typed, key, "a type substitution fork is a distinct key");
     });
 }
@@ -7499,9 +7502,10 @@ fn deferred_scc_member_finalizes_after_per_key_substitution() {
         let root_key = key_of("rootFn");
         let mut member_key = key_of("memberFn");
         member_key.context.type_substitution =
-            verter_type_engine::semantic_query::CanonicalTypeSubstitution::new(vec![(
-                binder, number,
-            )]);
+            verter_type_engine::semantic_query::CanonicalTypeSubstitution::new(
+                graph,
+                vec![(binder, number)],
+            );
 
         // Open both frames and prepare BOTH demands for real.
         let root_idx = dispatch

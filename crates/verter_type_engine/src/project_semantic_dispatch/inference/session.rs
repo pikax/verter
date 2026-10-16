@@ -183,7 +183,10 @@ pub struct InferenceSessionSetup {
 }
 
 impl InferenceSessionSetup {
+    /// Its inferable parameter set is owned in `graph`, the graph that
+    /// issued the parameters.
     pub fn new(
+        graph: &crate::semantic_query_memo::SemanticGraphStore,
         infos: Arc<[InferenceInfoSetup]>,
         variance_phase: VariancePhase,
         pass_kind: InferencePassKind,
@@ -201,13 +204,16 @@ impl InferenceSessionSetup {
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
         );
-        let inferable_params = InferableParamSetId::new(Arc::from(
-            infos
-                .iter()
-                .map(|info| info.param_node)
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
-        ));
+        let inferable_params = InferableParamSetId::new(
+            graph,
+            Arc::from(
+                infos
+                    .iter()
+                    .map(|info| info.param_node)
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            ),
+        );
         Self {
             context_key: InferenceContextKey {
                 inferable_params,
