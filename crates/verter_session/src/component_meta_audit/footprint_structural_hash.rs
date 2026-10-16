@@ -386,8 +386,8 @@ impl StructuralEncoder<'_> {
                 for m in surface.positive_members().iter() {
                     self.encode_surface_member(m, depth);
                 }
-                self.encode_child_slice(&surface.call_signatures(), depth);
-                self.encode_child_slice(&surface.construct_signatures(), depth);
+                self.encode_child_slice(surface.call_signatures(), depth);
+                self.encode_child_slice(surface.construct_signatures(), depth);
                 self.buf
                     .extend_from_slice(&(surface.index_signatures().len() as u64).to_le_bytes());
                 for sig in surface.index_signatures().iter() {

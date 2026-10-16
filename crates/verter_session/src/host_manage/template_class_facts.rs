@@ -488,7 +488,7 @@ fn classify_binding(
     let read = dispatch.execute_read(key);
     verter_type_engine::meta_resolve::emit_dispatch_dep_signature_facts(
         dispatch,
-        &read.dep_signature(),
+        read.dep_signature(),
     );
     verter_type_engine::request_context::observe_component_meta_read_suppress(&read);
     match read.value() {
@@ -500,7 +500,7 @@ fn classify_binding(
             ClosedLiteralDomainUnresolvedReason::Cycle,
             ReactiveWrapperUnresolvedReason::Cycle,
         ),
-        QueryResult::Error(error) => unresolved_row_from_query(subject, &error),
+        QueryResult::Error(error) => unresolved_row_from_query(subject, error),
         QueryResult::Value(_) => unresolved_row(
             subject,
             ClosedLiteralDomainUnresolvedReason::Fault,

@@ -5858,8 +5858,8 @@ fn surface_view_carries_call_signatures_and_construct_signatures() {
     let data = graph.node_data(obj).expect("interned");
     match &*data {
         SemanticNodeData::Object(s) => {
-            assert_eq!(s.call_signatures().as_ref(), &[string_id]);
-            assert_eq!(s.construct_signatures().as_ref(), &[num_id]);
+            assert_eq!(s.call_signatures(), &[string_id]);
+            assert_eq!(s.construct_signatures(), &[num_id]);
         }
         other => panic!("expected Object, got {other:?}"),
     }
@@ -24656,8 +24656,8 @@ fn cacheread_warm_replays_walker_diagnostics_after_memo_hit() {
         first_count,
     );
     assert_eq!(
-        &*second.walker_diagnostics(),
-        &*first.walker_diagnostics(),
+        second.walker_diagnostics(),
+        first.walker_diagnostics(),
         "warm-replay walker_diagnostics contents must match cold-build contents \
          (no-poison invariant: warm reads replay verbatim)"
     );
@@ -31500,7 +31500,7 @@ fn shallow_intersection_signature_entries_are_the_discovery_authoritys() {
         "shallow_intersection_signature_entries_are_the_discovery_authoritys",
     );
     assert_eq!(
-        view.call_signatures().as_ref(),
+        view.call_signatures(),
         discovered.as_slice(),
         "the merged object's call signatures are exactly what discovery answers"
     );

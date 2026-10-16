@@ -360,10 +360,10 @@ pub(crate) fn resolve_payload_surface_with_scope(
                 ),
             });
             verter_type_engine::request_context::observe_component_meta_read_suppress(&branch_read);
-            emit_dispatch_dep_signature_facts(dispatch, &branch_read.dep_signature());
+            emit_dispatch_dep_signature_facts(dispatch, branch_read.dep_signature());
             if !branch_read.walker_diagnostics().is_empty() {
                 diag_sink.push(shallow_diagnostics_to_macro_expansion(
-                    &branch_read.walker_diagnostics(),
+                    branch_read.walker_diagnostics(),
                     macro_index,
                     expansion_kind.clone(),
                     branch_read.cache_suppress(),

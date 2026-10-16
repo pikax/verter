@@ -559,7 +559,7 @@ fn class_expression_index_signatures_and_accessor_properties() {
         let result = clean_result(dispatch, "indexed", FunctionPartIdentity::DeclarationBody);
         let (constructor, instance) = constructor_and_instance(dispatch, result.return_type());
         let own = instance_surface(dispatch, instance);
-        let [instance_index] = &own.index_signatures()[..] else {
+        let [instance_index] = own.index_signatures() else {
             panic!("one instance index signature");
         };
         assert_matches(
@@ -574,7 +574,7 @@ fn class_expression_index_signatures_and_accessor_properties() {
             "number",
             "instance index value",
         );
-        let [static_index] = &constructor.index_signatures()[..] else {
+        let [static_index] = constructor.index_signatures() else {
             panic!("one static index signature");
         };
         assert_matches(

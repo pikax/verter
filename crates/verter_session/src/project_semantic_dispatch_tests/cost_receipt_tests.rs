@@ -1211,7 +1211,7 @@ fn root_read_with_context(
     };
     RootAnswer {
         answer,
-        status: read.fact_status().clone(),
+        status: *read.fact_status(),
         has_value: matches!(read.value().clone(), QueryResult::Value(_)),
         partial: read.result_is_partial(),
         reasons: read.partial_reason_classes(),

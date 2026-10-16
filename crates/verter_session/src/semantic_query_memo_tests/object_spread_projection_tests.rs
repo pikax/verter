@@ -582,7 +582,7 @@ fn cross_view_projection_joiner_forks_when_winner_carrier_fails_follower_validat
         other => panic!("expected an object projection, got {other:?}"),
     };
     assert!(matches!(
-        key_fact(&winner_read.value()),
+        key_fact(winner_read.value()),
         verter_type_engine::semantic_query::ProjectionEvidence::Proven(node) if node == base_value
     ));
     assert!(matches!(

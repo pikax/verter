@@ -21,10 +21,9 @@ use verter_type_engine::semantic_query::{
 };
 
 fn domain_of(host: &VerterHost, subject: SemanticNodeId) -> TruthinessDomain {
-    ProjectSemanticDispatch::new(host)
+    *ProjectSemanticDispatch::new(host)
         .classify_truthiness_domain_read(subject)
         .value()
-        .clone()
 }
 
 fn prim(host: &VerterHost, kind: PrimitiveKind) -> SemanticNodeId {

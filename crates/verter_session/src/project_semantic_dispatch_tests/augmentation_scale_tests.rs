@@ -778,7 +778,7 @@ fn merged_global_instantiation_preserves_approximation_from_every_declaration() 
                     ))
                 ));
             }
-            let answer = (node, read.fact_status().clone());
+            let answer = (node, *read.fact_status());
             if let Some(first) = first {
                 assert_eq!(
                     answer, first,

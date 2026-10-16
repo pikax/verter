@@ -131,7 +131,7 @@ fn only_call_signature(
     node: SemanticNodeId,
 ) -> SemanticNodeId {
     match dispatch.graph().node_data(node).as_deref() {
-        Some(SemanticNodeData::Object(surface)) => match surface.call_signatures().as_ref() {
+        Some(SemanticNodeData::Object(surface)) => match surface.call_signatures() {
             [signature] => *signature,
             other => panic!("expected one call signature, got {other:?}"),
         },

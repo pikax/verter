@@ -57,7 +57,7 @@ fn assert_unavailable_projection(
         "{read:?}"
     );
     let [verter_type_engine::project_semantic_dispatch::walk::ShallowDiagnostic::ProjectionWorkLimit { root }] =
-        read.walker_diagnostics().as_ref()
+        read.walker_diagnostics()
     else {
         panic!("one typed work-limit diagnostic is required: {read:?}")
     };
@@ -213,7 +213,7 @@ fn request_projection_budget_caps_distinct_dispatch_cold_builds() {
             if reasons.contains(PartialReasonSet::PROJECTION_WORK_LIMIT)
     ));
     assert!(matches!(
-        second.walker_diagnostics().as_ref(),
+        second.walker_diagnostics(),
         [verter_type_engine::project_semantic_dispatch::walk::ShallowDiagnostic::ProjectionWorkLimit { .. }]
     ));
 }
@@ -306,7 +306,7 @@ fn post_trip_projection_op_queries_bypass_cooperative_admission() {
             if reasons.contains(PartialReasonSet::PROJECTION_WORK_LIMIT)
     ));
     assert!(matches!(
-        second_keyof.walker_diagnostics().as_ref(),
+        second_keyof.walker_diagnostics(),
         [verter_type_engine::project_semantic_dispatch::walk::ShallowDiagnostic::ProjectionWorkLimit { .. }]
     ));
     let executed_at_trip = request_budget.projection_ops_executed_count();
@@ -334,7 +334,7 @@ fn post_trip_projection_op_queries_bypass_cooperative_admission() {
             "post-trip query #{i} must retain a typed unavailable result (got {result:?})"
         );
         assert!(matches!(
-            result.walker_diagnostics().as_ref(),
+            result.walker_diagnostics(),
             [verter_type_engine::project_semantic_dispatch::walk::ShallowDiagnostic::ProjectionWorkLimit { .. }]
         ));
     }
@@ -454,7 +454,7 @@ fn post_trip_typeof_early_exit_attributes_to_typeof_cold_counter() {
         "post-trip TypeOf must take the typed-partial budget early-exit (got {result:?})"
     );
     assert!(matches!(
-        result.walker_diagnostics().as_ref(),
+        result.walker_diagnostics(),
         [verter_type_engine::project_semantic_dispatch::walk::ShallowDiagnostic::ProjectionWorkLimit { .. }]
     ));
     let typeof_cold_after = live_ctx
@@ -1156,7 +1156,7 @@ fn budget_trip_conditional_suppresses_and_does_not_warm() {
             if reasons.contains(PartialReasonSet::PROJECTION_WORK_LIMIT)
     ));
     assert_eq!(
-        second.walker_diagnostics().as_ref(),
+        second.walker_diagnostics(),
         &[
             verter_type_engine::project_semantic_dispatch::walk::ShallowDiagnostic::ProjectionWorkLimit {
                 root: second_carrier,
@@ -1301,7 +1301,7 @@ fn budget_trip_instantiate_suppresses_and_does_not_warm() {
             if reasons.contains(PartialReasonSet::PROJECTION_WORK_LIMIT)
     ));
     assert_eq!(
-        second.walker_diagnostics().as_ref(),
+        second.walker_diagnostics(),
         &[
             verter_type_engine::project_semantic_dispatch::walk::ShallowDiagnostic::ProjectionWorkLimit {
                 root: second_carrier,

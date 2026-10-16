@@ -1003,7 +1003,7 @@ fn resolve_member_value_for_classification(
         ),
     });
     verter_type_engine::request_context::observe_component_meta_read_suppress(&read);
-    emit_dispatch_dep_signature_facts(dispatch, &read.dep_signature());
+    emit_dispatch_dep_signature_facts(dispatch, read.dep_signature());
     match *read.value() {
         QueryResult::Value(id) => id,
         _ => value,

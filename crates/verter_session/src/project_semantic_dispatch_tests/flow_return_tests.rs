@@ -10895,7 +10895,7 @@ fn an_inherited_comparison_refusal_cannot_certify_an_unproven_relation() {
             if payload.outcome == RelationOutcome::NotAssignable)
         );
         assert_eq!(
-            refusal.walker_diagnostics().as_ref(),
+            refusal.walker_diagnostics(),
             &[super::walk::ShallowDiagnostic::RelationTooComplex { source, target }]
         );
         struct HookGuard<'a>(&'a verter_type_engine::semantic_query_memo::SemanticGraphStore);
@@ -10916,7 +10916,7 @@ fn an_inherited_comparison_refusal_cannot_certify_an_unproven_relation() {
         drop(hook);
         assert!(unproven_member_slot_consumed(&host));
         assert_eq!(
-            read.walker_diagnostics().as_ref(),
+            read.walker_diagnostics(),
             &[super::walk::ShallowDiagnostic::RelationTooComplex { source, target }]
         );
         assert!(read

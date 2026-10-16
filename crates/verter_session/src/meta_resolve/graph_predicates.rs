@@ -407,7 +407,7 @@ pub(crate) fn node_root_reaches_transitive_cycle_with_fence(
         verter_type_engine::request_context::observe_component_meta_read_suppress(&read);
         verter_type_engine::fact_signature_helpers::merge_dep_signature_into_local_fence(
             &mut fence,
-            &read.dep_signature(),
+            read.dep_signature(),
         );
         outcomes.push(read.value().clone());
     }

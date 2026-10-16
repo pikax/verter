@@ -551,10 +551,10 @@ pub(crate) fn resolve_macro_payload(
         context: dispatch.macro_payload_context_for(&owner.canonical_id, ProjectionMode::Navigate),
     });
     verter_type_engine::request_context::observe_component_meta_read_suppress(&payload_read);
-    emit_dispatch_dep_signature_facts(dispatch, &payload_read.dep_signature());
+    emit_dispatch_dep_signature_facts(dispatch, payload_read.dep_signature());
     if !payload_read.walker_diagnostics().is_empty() {
         diag_sink.push(shallow_diagnostics_to_macro_expansion(
-            &payload_read.walker_diagnostics(),
+            payload_read.walker_diagnostics(),
             macro_index,
             expansion_kind.clone(),
             payload_read.cache_suppress(),
@@ -664,10 +664,10 @@ pub(crate) fn resolve_macro_payload(
                             ProjectionMode::Navigate,
                         ),
                 });
-                emit_dispatch_dep_signature_facts(dispatch,  &probe_read.dep_signature());
+                emit_dispatch_dep_signature_facts(dispatch,  probe_read.dep_signature());
                 if !probe_read.walker_diagnostics().is_empty() {
                     diag_sink.push(shallow_diagnostics_to_macro_expansion(
-                        &probe_read.walker_diagnostics(),
+                        probe_read.walker_diagnostics(),
                         macro_index,
                         expansion_kind.clone(),
                         probe_read.cache_suppress(),
@@ -701,10 +701,10 @@ pub(crate) fn resolve_macro_payload(
                                     name: std::sync::Arc::clone(&identity.decl_name),
                                 },
                             ));
-                        emit_dispatch_dep_signature_facts(dispatch, &read.dep_signature());
+                        emit_dispatch_dep_signature_facts(dispatch, read.dep_signature());
                         if !read.walker_diagnostics().is_empty() {
                             diag_sink.push(shallow_diagnostics_to_macro_expansion(
-                                &read.walker_diagnostics(),
+                                read.walker_diagnostics(),
                                 macro_index,
                                 expansion_kind.clone(),
                                 read.cache_suppress(),
@@ -795,10 +795,10 @@ pub(crate) fn resolve_payload_surface(
             ),
     });
     verter_type_engine::request_context::observe_component_meta_read_suppress(&surface_read);
-    emit_dispatch_dep_signature_facts(dispatch, &surface_read.dep_signature());
+    emit_dispatch_dep_signature_facts(dispatch, surface_read.dep_signature());
     if !surface_read.walker_diagnostics().is_empty() {
         diag_sink.push(shallow_diagnostics_to_macro_expansion(
-            &surface_read.walker_diagnostics(),
+            surface_read.walker_diagnostics(),
             macro_index,
             expansion_kind.clone(),
             surface_read.cache_suppress(),
@@ -827,7 +827,7 @@ pub(crate) fn resolve_payload_surface(
             // complete no-surface answer; an OPERATIONAL fault (budget /
             // cancellation / torn state) is an INCOMPLETE resolution with
             // its typed reason on the returned claim.
-            match verter_type_engine::semantic_query::surface_resolution::stable_query_error_partiality(&e) {
+            match verter_type_engine::semantic_query::surface_resolution::stable_query_error_partiality(e) {
                 Some(reasons) => {
                     claims.incomplete(reasons)
                 }

@@ -1607,7 +1607,7 @@ fn each_read_reports_the_authored_node_its_own_subject_carries() {
         "premise: the union keeps both authored arms, got {arms:?}"
     );
     assert_eq!(
-        &*composite.candidate_nodes()[0].constituents(),
+        composite.candidate_nodes()[0].constituents(),
         arms.as_slice(),
         "a composite names the authored node of every constituent, in arm order"
     );

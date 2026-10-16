@@ -484,7 +484,7 @@ fn a_primitive_member_read_is_scoped_to_its_project_and_reused_warm() {
 
     let a = read("/a/main.ts", "onlyA");
     assert_eq!(
-        value(&a.value()),
+        value(a.value()),
         Some("a".to_string()),
         "project A reads its own String member"
     );
@@ -528,7 +528,7 @@ fn a_primitive_member_read_is_scoped_to_its_project_and_reused_warm() {
     let before = graph.stats_snapshot();
     let warm = read("/a/main.ts", "onlyA");
     let after = graph.stats_snapshot();
-    assert_eq!(value(&warm.value()), Some("a".to_string()));
+    assert_eq!(value(warm.value()), Some("a".to_string()));
     assert_eq!(
         after.misses, before.misses,
         "a warm repeat is served from the memo"

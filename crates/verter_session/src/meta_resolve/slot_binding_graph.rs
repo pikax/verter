@@ -647,10 +647,10 @@ pub(crate) fn resolve_slot_bindings_graph_native(
         verter_type_engine::request_context::observe_component_meta_read_suppress(
             &macro_payload_read,
         );
-        emit_slot_binding_graph_dispatch_facts(dispatch, &macro_payload_read.dep_signature());
+        emit_slot_binding_graph_dispatch_facts(dispatch, macro_payload_read.dep_signature());
         if !macro_payload_read.walker_diagnostics().is_empty() {
             diag_sink.push(shallow_diagnostics_to_macro_expansion(
-                &macro_payload_read.walker_diagnostics(),
+                macro_payload_read.walker_diagnostics(),
                 macro_index,
                 MacroExpansionKind::DefineSlots,
                 macro_payload_read.cache_suppress(),
@@ -677,9 +677,9 @@ pub(crate) fn resolve_slot_bindings_graph_native(
                 continue;
             }
             QueryResult::Error(e) => {
-                if is_fatal_query_error(&e) {
+                if is_fatal_query_error(e) {
                     ledger.suppress(
-                        verter_type_engine::semantic_query::surface_resolution::NonEmptyReasons::from_query_error(&e),
+                        verter_type_engine::semantic_query::surface_resolution::NonEmptyReasons::from_query_error(e),
                     );
                 }
                 diag_sink.push(macro_expansion_for_query_error(
@@ -836,10 +836,10 @@ pub(crate) fn compute_bindings_via_graph(
     });
     // Dual-emit: legacy accumulator + fact-tracer fan-out.
     verter_type_engine::request_context::observe_component_meta_read_suppress(&slot_surface_read);
-    emit_slot_binding_graph_dispatch_facts(dispatch, &slot_surface_read.dep_signature());
+    emit_slot_binding_graph_dispatch_facts(dispatch, slot_surface_read.dep_signature());
     if !slot_surface_read.walker_diagnostics().is_empty() {
         diag_sink.push(shallow_diagnostics_to_macro_expansion(
-            &slot_surface_read.walker_diagnostics(),
+            slot_surface_read.walker_diagnostics(),
             owner_macro.macro_index,
             MacroExpansionKind::DefineSlots,
             slot_surface_read.cache_suppress(),
@@ -863,10 +863,10 @@ pub(crate) fn compute_bindings_via_graph(
             return out;
         }
         QueryResult::Error(e) => {
-            if is_fatal_query_error(&e) {
+            if is_fatal_query_error(e) {
                 ledger.suppress(
                     verter_type_engine::semantic_query::surface_resolution::NonEmptyReasons::from_query_error(
-                        &e,
+                        e,
                     ),
                 );
             }
@@ -1029,10 +1029,10 @@ pub(crate) fn compute_bindings_via_graph(
         verter_type_engine::request_context::observe_component_meta_read_suppress(
             &param_surface_read,
         );
-        emit_slot_binding_graph_dispatch_facts(dispatch, &param_surface_read.dep_signature());
+        emit_slot_binding_graph_dispatch_facts(dispatch, param_surface_read.dep_signature());
         if !param_surface_read.walker_diagnostics().is_empty() {
             diag_sink.push(shallow_diagnostics_to_macro_expansion(
-                &param_surface_read.walker_diagnostics(),
+                param_surface_read.walker_diagnostics(),
                 owner_macro.macro_index,
                 MacroExpansionKind::DefineSlots,
                 param_surface_read.cache_suppress(),
@@ -1056,9 +1056,9 @@ pub(crate) fn compute_bindings_via_graph(
                 continue;
             }
             QueryResult::Error(e) => {
-                if is_fatal_query_error(&e) {
+                if is_fatal_query_error(e) {
                     ledger.suppress(
-                        verter_type_engine::semantic_query::surface_resolution::NonEmptyReasons::from_query_error(&e),
+                        verter_type_engine::semantic_query::surface_resolution::NonEmptyReasons::from_query_error(e),
                     );
                 }
                 diag_sink.push(macro_expansion_for_query_error(
@@ -1132,7 +1132,7 @@ pub(crate) fn compute_bindings_via_graph(
                     verter_type_engine::request_context::observe_component_meta_read_suppress(
                         &value_read,
                     );
-                    emit_slot_binding_graph_dispatch_facts(dispatch, &value_read.dep_signature());
+                    emit_slot_binding_graph_dispatch_facts(dispatch, value_read.dep_signature());
                     if value_read.result_is_partial() {
                         ledger.suppress_partial_read(
                             dispatch.host_attachment().surface_claims(),

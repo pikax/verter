@@ -635,11 +635,11 @@ fn cycle_gate_cold_and_warm_reads_return_family_dep_signature() {
     let cold = gate_read(host, "/cg_sig_root.ts", "Probe");
     assert_decided(&cold, MaterializationCycleGateVerdict::Stop, "sig prime");
     assert!(
-        signature_covers(&cold.dep_signature(), "/cg_sig_root.ts"),
+        signature_covers(cold.dep_signature(), "/cg_sig_root.ts"),
         "cold read: dep signature must cover the root canonical"
     );
     assert!(
-        signature_covers(&cold.dep_signature(), "/cg_sig_helper.ts"),
+        signature_covers(cold.dep_signature(), "/cg_sig_helper.ts"),
         "cold read: dep signature must cover the visited helper canonical"
     );
 
@@ -651,8 +651,8 @@ fn cycle_gate_cold_and_warm_reads_return_family_dep_signature() {
         "fixture: the second read is warm"
     );
     assert!(
-        signature_covers(&warm.dep_signature(), "/cg_sig_root.ts")
-            && signature_covers(&warm.dep_signature(), "/cg_sig_helper.ts"),
+        signature_covers(warm.dep_signature(), "/cg_sig_root.ts")
+            && signature_covers(warm.dep_signature(), "/cg_sig_helper.ts"),
         "warm read: dep signature must cover root and visited helper — \
          the consumer merges it into its local fence on BOTH read paths"
     );

@@ -768,7 +768,7 @@ fn runaway_generic_returns_work_partial_one_root_diagnostic_and_seals_its_refusa
     ));
     let [ShallowDiagnostic::ProjectionWorkLimit {
         root: diagnostic_root,
-    }] = first.walker_diagnostics().as_ref()
+    }] = first.walker_diagnostics()
     else {
         panic!(
             "the runaway root must surface exactly one machine-typed work-limit diagnostic, got {:?}",
@@ -784,7 +784,7 @@ fn runaway_generic_returns_work_partial_one_root_diagnostic_and_seals_its_refusa
             if reasons.contains(PartialReasonSet::PROJECTION_WORK_LIMIT)
     ));
     assert_eq!(
-        second.walker_diagnostics().as_ref(),
+        second.walker_diagnostics(),
         &[ShallowDiagnostic::ProjectionWorkLimit {
             root: *diagnostic_root,
         }]
@@ -851,7 +851,7 @@ fn connected_query_depth_limit_is_distinct_diagnostic_and_seals_its_refusal() {
     ));
     let [ShallowDiagnostic::ConnectedQueryDepthLimit {
         root: diagnostic_root,
-    }] = first.walker_diagnostics().as_ref()
+    }] = first.walker_diagnostics()
     else {
         panic!(
             "the root demand must surface exactly one query-depth diagnostic, got {:?}",
@@ -868,7 +868,7 @@ fn connected_query_depth_limit_is_distinct_diagnostic_and_seals_its_refusal() {
                 && !reasons.contains(PartialReasonSet::PROJECTION_WORK_LIMIT)
     ));
     assert_eq!(
-        second.walker_diagnostics().as_ref(),
+        second.walker_diagnostics(),
         &[ShallowDiagnostic::ConnectedQueryDepthLimit {
             root: *diagnostic_root,
         }]

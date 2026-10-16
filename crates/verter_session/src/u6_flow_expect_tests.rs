@@ -2372,9 +2372,9 @@ pub(crate) mod checker_syntax {
                 } =>
             {
                 let lone = if *construct {
-                    surface.construct_signatures().as_ref()
+                    surface.construct_signatures()
                 } else {
-                    surface.call_signatures().as_ref()
+                    surface.call_signatures()
                 };
                 match lone {
                     [signature] => matches_node(dispatch, *signature, expected, depth + 1),
