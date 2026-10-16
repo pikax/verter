@@ -130,23 +130,52 @@ an owning `NodeRoot`; two roots are equal when they name the same node of the
 same graph.
 
 Ordinal payload reads (`SemanticGraphStore::node_data`, `node_data_for`, the
-signature `type_token_node` accessors) are crate-private in production and exist
-publicly only as `test`/`test-support` fixture seams. Construction-domain
-producers outside the engine (component-meta projectors, framework surface
-producers, audit miners) read ordinals with `read_in_scope` / `root_in_scope`,
-which answer only while the thread holds a construction scope of that graph and
-return rooted leases; `copy_in_scope` is the sealed builder copy of a member,
-entry, index signature, surface, payload or diagnostic, rooting the copy's
-operands in the active scope. Every `ProjectSemanticDispatch` owns a
-construction scope over its bound graph for its whole lifetime, declared last so
-it closes after the dispatcher's other state, so a producer reading a result
-ordinal after a nested query returns still holds it.
+signature `type_token_node` accessors), ordinal rooting (`root_nodes`) and scope
+entry (`enter_node_root_scope`) are crate-private in production and exist
+publicly only as `test`/`test-support` fixture seams. The construction lane —
+reading and rooting bare ordinals — opens only through a
+`NodeConstructionGrant`: non-forgeable, minted solely by `EngineStores::create*`
+with its graph, held privately by the host's `ProjectTypeStore` (session code
+reaches it through `construction_grant()`) and carried by each `EngineBinding`
+(`EngineBinding::new` rejects a grant for another graph). Holding the graph alone
+grants nothing. Construction-domain producers outside the engine (component-meta
+projectors, framework surface producers, audit miners) open scopes with
+`grant.enter_scope()` or a dispatcher's `enter_construction_scope()`, root with
+`grant.root_nodes` / `NodeRootScope::root_nodes`, and read with `read_in_scope` /
+`root_in_scope` (a `Result`: foreign or stale operands are typed errors, which
+the host typeinfo entry points surface as faults rather than `Ok(None)`);
+`enter_nested_scope` bounds a reader's intermediates inside a lane it already
+holds and grants nothing new. `copy_in_scope` is the sealed builder copy of a
+member, entry, index signature, surface, payload or diagnostic, rooting the
+copy's operands in the active scope.
+
+Construction owners are thread-local and addressed by token, never by stack
+position, so scopes and dispatchers close in any order. Every
+`ProjectSemanticDispatch` shares ONE construction owner per graph on its thread
+with every other live dispatcher of that graph (`DispatchConstructionScope`,
+declared last on the dispatcher): an ordinal any of them interns or reads stays
+owned until the graph's last dispatcher on the thread drops, so interleaved
+dispatchers never release one another's operands. A lexical `NodeRootScope`
+releases its roots when it closes and hands its delivery attachments to the
+nearest remaining owner of its graph. Records rooted at mint
+(`SignatureSetValue`, `OneLevelSurface`) root in the graph that produced them,
+never in whichever graph's scope is innermost.
 
 Aggregate payload carriers have no public copy: `SemanticNodeData`,
 `SurfaceView`, `SurfaceMember`, `SurfaceEntry`, `IndexSignature`,
-`ShallowDiagnostic`, `ShallowSurface`/`ShallowSurfaceEntry` and
-`SignatureCandidateNodes` copy only crate-privately (exhaustive field copies,
-so a new field cannot be skipped); test builds add `copy_for_tests`. A
+`ShallowDiagnostic`, `ShallowSurface`/`ShallowSurfaceEntry`/`ShallowSurfaceMember`,
+`SignatureCandidateNodes`, the payload member records (`TupleElement`,
+`FunctionParam`, `TypeParamDecl`, `ObjectConstructionEffect` and its
+`Authored*Effect` records, `ObjectSpreadProgram`) and composite arms
+(`CompositeList`, `CompositeMembers`) copy only crate-privately (exhaustive
+field copies, so a new field cannot be skipped); test builds add
+`copy_for_tests`. Nested payload arrays are `PayloadArray`s: borrowed slices
+with no public copy and no exposed `Arc`. A `QueryError` copies opaquely: its
+`RecursiveRef` arguments are a `RecursiveRefArgs` exposing only a length.
+Query-identity children (`MapperKey`, `IndexKey`, carriers, deferred callables,
+pending substitutions) copy with the keys they identify; their ordinals are
+labels that authorize no read. `OneLevelSurface` is an owning adapter whose
+`from_view` is crate-private. A
 `SurfaceView` exposes its stream and indexes as borrowed slices, never as shared
 `Arc`s. `CacheRead` fields are crate-private: a consumer borrows `value()` and
 `walker_diagnostics()`; a clone of a read clones its lease. `ShallowDiagnostic`'s
