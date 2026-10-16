@@ -126,7 +126,7 @@ fn probe(size: usize, global: bool) -> (usize, usize, usize, usize) {
         root_visits <= ROOT_FACT_VISITS_PER_CONTRIBUTOR * size,
         "root-fact sealing must be linear: size={size}, global={global}, visits={root_visits}"
     );
-    let mut pending = vec![node];
+    let mut pending = vec![node.id()];
     let mut actual = BTreeSet::new();
     while let Some(node) = pending.pop() {
         match graph.node_data(node).as_deref().expect("live result") {
@@ -325,7 +325,7 @@ fn global_interface_bases_share_the_merged_instantiation() {
     for canonical in ["/b.ts", "/c.ts", "/a.ts"] {
         assert_eq!(
             host.resolve_named_symbol(canonical, "Shared", Some(ProjectionMode::Navigate)),
-            Some(first)
+            Some(first.clone())
         );
     }
     assert_eq!(
@@ -342,7 +342,7 @@ fn global_interface_bases_share_the_merged_instantiation() {
         "a contributor edit rejects the shared answer"
     );
     let raised = host
-        .project_node_to_type_expr_for_test(updated)
+        .project_node_to_type_expr_for_test(updated.id())
         .expect("merged surface");
     let verter_type_expr::TypeExpr::Object(shape) = &raised else {
         panic!("object expected")
@@ -371,7 +371,7 @@ fn a_cold_batch_consumer_of_a_warm_subject_observes_contributor_edits_and_additi
         let node = host
             .resolve_named_symbol("/read.ts", name, Some(ProjectionMode::Expanded))
             .expect("batch");
-        let mut pending = vec![node];
+        let mut pending = vec![node.id()];
         let mut values = BTreeSet::new();
         while let Some(node) = pending.pop() {
             match graph.node_data(node).as_deref().expect("live value") {
@@ -434,7 +434,7 @@ fn finite_batch_reads_match_single_keys_across_projection_modes() {
     let graph = host.project_type_store().semantic_graph();
     // Supply the accessor kind directly at the surface boundary: this
     // control isolates the consumer from authored signature-kind lowering.
-    let data = graph.node_data(base).expect("surface");
+    let data = graph.node_data(base.id()).expect("surface");
     let SemanticNodeData::Object(surface) = data.as_ref() else {
         panic!("object subject")
     };
@@ -457,7 +457,7 @@ fn finite_batch_reads_match_single_keys_across_projection_modes() {
         SemanticNodeData::Object(
             verter_type_engine::semantic_query::SurfaceView::from_members(members, None),
         ),
-        graph.node_scope(base).expect("subject scope"),
+        graph.node_scope(base.id()).expect("subject scope"),
     );
     let key_names = ["optional", "access", "method", "named", "namedAgain", "5"];
     let keys: Vec<_> = key_names
@@ -593,7 +593,7 @@ fn project_global_reads_retain_unowned_dependencies_and_exclude_other_projects()
         .resolve_named_symbol("/app/read.ts", "Probe", Some(ProjectionMode::Expanded))
         .expect("global read");
     assert_eq!(
-        host.project_node_to_type_expr_for_test(node),
+        host.project_node_to_type_expr_for_test(node.id()),
         Some(verter_type_expr::TypeExpr::Literal(
             verter_type_expr::LiteralValue::Number(2.0)
         ))
@@ -629,7 +629,7 @@ fn global_interface_default_arguments_survive_shared_instantiation() {
                 .resolve_named_symbol("/b.ts", name, Some(ProjectionMode::Expanded))
                 .expect("projection");
             let ty = host
-                .project_node_to_type_expr_for_test(node)
+                .project_node_to_type_expr_for_test(node.id())
                 .expect("raised member");
             let expected = verter_type_expr::TypeExpr::Primitive(if expected == "string" {
                 verter_type_expr::PrimitiveName::String
@@ -678,7 +678,7 @@ fn global_interface_added_parameters_keep_explicit_arguments() {
                 .resolve_named_symbol(canonical, name, Some(ProjectionMode::Expanded))
                 .expect("projection");
             assert_eq!(
-                host.project_node_to_type_expr_for_test(node),
+                host.project_node_to_type_expr_for_test(node.id()),
                 Some(verter_type_expr::TypeExpr::Primitive(expected)),
                 "{canonical}: {name}"
             );
@@ -797,7 +797,7 @@ fn probe_answer(host: &VerterHost, size: usize, global: bool) {
     let node = host
         .resolve_named_symbol("/scenario.ts", "Probe", Some(ProjectionMode::Expanded))
         .expect("probe answers");
-    let mut pending = vec![node];
+    let mut pending = vec![node.id()];
     let mut members = 0usize;
     while let Some(node) = pending.pop() {
         match graph.node_data(node).as_deref().expect("live result") {

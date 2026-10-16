@@ -120,7 +120,10 @@ impl VerterHost {
     pub fn evaluate_type_expression_with_audit(
         &self,
         req: EvaluateTypeExpressionRequest,
-    ) -> AuditedResult<Option<SemanticNodeId>, TypeResolutionRequestError> {
+    ) -> AuditedResult<
+        Option<verter_type_engine::semantic_query_memo::node_roots::NodeRoot>,
+        TypeResolutionRequestError,
+    > {
         let _node_scope = self
             .project_type_store
             .semantic_graph()
@@ -188,7 +191,7 @@ impl VerterHost {
                 ctx.trace_id.clone(),
                 state,
             );
-            return audited_from_outcome(outcome, record);
+            return audited_from_outcome(outcome, record, self.project_type_store.semantic_graph());
         }
 
         let payload = TypeResolutionPayload {
@@ -272,7 +275,7 @@ impl VerterHost {
         };
         let cloned = record.clone();
         registration.finalize(record);
-        audited_from_outcome(outcome, cloned)
+        audited_from_outcome(outcome, cloned, self.project_type_store.semantic_graph())
     }
 }
 
@@ -281,9 +284,15 @@ impl VerterHost {
 fn audited_from_outcome(
     outcome: Result<Option<SemanticNodeId>, TypeResolutionRequestError>,
     audit: RequestAuditRecord,
-) -> AuditedResult<Option<SemanticNodeId>, TypeResolutionRequestError> {
+    graph: &verter_type_engine::semantic_query_memo::SemanticGraphStore,
+) -> AuditedResult<
+    Option<verter_type_engine::semantic_query_memo::node_roots::NodeRoot>,
+    TypeResolutionRequestError,
+> {
     match outcome {
-        Ok(value) => AuditedResult::ok(value, audit),
+        // Delivered under its own root, so the caller's projection outlives
+        // this request's construction scope.
+        Ok(value) => AuditedResult::ok(value.and_then(|node| graph.root_in_scope(node)), audit),
         Err(error) => AuditedResult::err(error, audit),
     }
 }

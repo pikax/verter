@@ -715,11 +715,11 @@ fn conditional_edits_match_fresh_results_at_both_forcing_sites() {
                     .flatten()
                     .expect("conditional resolves after an edit");
                 let graph = host.project_type_store().semantic_graph();
-                assert!(matches!(graph.node_data(node).as_deref(),
+                assert!(matches!(graph.node_data(node.id()).as_deref(),
                     Some(SemanticNodeData::Literal(LiteralValue::String(value))) if value == expected));
                 verter_type_engine::semantic_query::display::display(
                     graph,
-                    &SemanticQueryValue::TypeNode(node),
+                    &SemanticQueryValue::TypeNode(node.id()),
                     DisplayNeeds::empty(),
                 )
                 .0
@@ -1834,7 +1834,7 @@ fn production_nested_same_name_conditional_infers_have_distinct_identity() {
         2,
         "same-name nested declarations must carry distinct collision-free binder tokens"
     );
-    match graph.node_data(result).as_deref() {
+    match graph.node_data(result.id()).as_deref() {
         Some(SemanticNodeData::Tuple { elements, .. }) => {
             assert_eq!(elements.len(), 2);
             assert!(matches!(
@@ -1873,7 +1873,7 @@ fn production_nested_same_name_conditional_does_not_bind_outer_reverse_session()
         .ok()
         .flatten()
         .expect("the nested reverse-infer shadow fixture must resolve");
-    let (outer_infer, nested_template) = match graph.node_data(result).as_deref() {
+    let (outer_infer, nested_template) = match graph.node_data(result.id()).as_deref() {
         Some(SemanticNodeData::Conditional { extends, .. }) => {
             match graph.node_data(*extends).as_deref() {
                 Some(SemanticNodeData::Mapped { source, mapper }) => (*source, mapper.value_expr),
@@ -1893,7 +1893,7 @@ fn production_nested_same_name_conditional_does_not_bind_outer_reverse_session()
     );
     assert!(
         matches!(
-            graph.node_data(result).as_deref(),
+            graph.node_data(result.id()).as_deref(),
             Some(SemanticNodeData::Conditional { .. })
         ),
         "the inner `infer T` shadows the reverse mapper's outer `infer T`; it cannot become T[P]"
@@ -14517,7 +14517,7 @@ fn production_lowering_seeds_the_selected_infer_before_the_mapped_template() {
 
     let recovered = require_object_surface(
         &graph,
-        result,
+        result.id(),
         "production-lowered reverse homomorphic conditional",
     );
     assert_eq!(recovered.positive_members().len(), 1);
@@ -14563,7 +14563,7 @@ fn production_lowering_keeps_an_inner_same_name_binder_innermost() {
         .expect("the production-lowered shadow fixture must resolve");
     assert!(
         matches!(
-            graph.node_data(result).as_deref(),
+            graph.node_data(result.id()).as_deref(),
             Some(SemanticNodeData::Conditional { .. })
         ),
         "the signature's own `<T>` must shadow the outer selected `infer T`; the reverse relation stays deferred"
@@ -15042,7 +15042,7 @@ fn production_reverse_homomorphic_recovers_named_and_instantiated_sources() {
             .ok()
             .flatten()
             .unwrap_or_else(|| panic!("{name} must resolve"));
-        let recovered = require_object_surface(&graph, result, name);
+        let recovered = require_object_surface(&graph, result.id(), name);
         assert!(
             matches!(
                 graph
@@ -26313,7 +26313,7 @@ fn resolve_class_mech(host: &VerterHost, name: &str) -> verter_type_expr::TypeEx
         .ok()
         .flatten()
         .unwrap_or_else(|| panic!("{name} must resolve"));
-    host.project_node_to_type_expr_for_test(node)
+    host.project_node_to_type_expr_for_test(node.id())
         .unwrap_or_else(|| panic!("{name} resolved node must project to TypeExpr"))
 }
 
@@ -27108,7 +27108,7 @@ fn resolve_named_in(host: &VerterHost, canonical: &str, name: &str) -> verter_ty
         .ok()
         .flatten()
         .unwrap_or_else(|| panic!("{name} must resolve"));
-    host.project_node_to_type_expr_for_test(node)
+    host.project_node_to_type_expr_for_test(node.id())
         .unwrap_or_else(|| panic!("{name} resolved node must project to TypeExpr"))
 }
 
@@ -29510,7 +29510,7 @@ fn nested_uppercase_keyof_merged_interface_resolves_to_transformed_keyspace() {
     let k = host
         .resolve_named_symbol("/w/f8.ts", "K", Some(ProjectionMode::Expanded))
         .expect("K resolves");
-    let data = graph.node_data(k).unwrap();
+    let data = graph.node_data(k.id()).unwrap();
     // Negative: must NOT widen to the broad `string` primitive (the fail-closed
     // result of the string intrinsic over an `Opaque(Miss)` keyspace).
     assert!(
@@ -29521,7 +29521,7 @@ fn nested_uppercase_keyof_merged_interface_resolves_to_transformed_keyspace() {
     // {"A", "B"} — no widened `string` arm hiding behind the lenient
     // filter (the strict helper returns `None` if any non-string-literal
     // arm is present).
-    let mut keys = exact_keyspace_string_literals(&graph, k).unwrap_or_else(|| {
+    let mut keys = exact_keyspace_string_literals(&graph, k.id()).unwrap_or_else(|| {
         panic!("Uppercase<keyof I> must be a PURE union of string literals, got {data:?}")
     });
     keys.sort();
@@ -32773,7 +32773,7 @@ fn expanded_projection_of_alias_twin_union_collapses_to_the_shared_object() {
     let shared_object = outcome.ok().flatten().expect("A must resolve");
     assert!(
         matches!(
-            graph.node_data(shared_object).as_deref(),
+            graph.node_data(shared_object.id()).as_deref(),
             Some(SemanticNodeData::Object(_))
         ),
         "the fixture needs A's materialised object"
@@ -32792,7 +32792,7 @@ fn expanded_projection_of_alias_twin_union_collapses_to_the_shared_object() {
     ));
     let base = graph.intern_node(SemanticNodeData::Union(
         verter_type_engine::semantic_query::composite::CompositeList::authored_shell_for_tests(
-            Arc::from(vec![placeholder, shared_object].into_boxed_slice()),
+            Arc::from(vec![placeholder, shared_object.id()].into_boxed_slice()),
         ),
     ));
     let projected = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
@@ -32807,7 +32807,7 @@ fn expanded_projection_of_alias_twin_union_collapses_to_the_shared_object() {
     };
     assert_eq!(
         result,
-        shared_object,
+        shared_object.id(),
         "the reference arm expands onto the sibling's object — the derived \
          rebuild must collapse `obj | obj` to the one object, got {:?}",
         graph.node_data(result)
@@ -32845,7 +32845,7 @@ fn instantiation_of_duplicate_projection_union_collapses_to_the_shared_arm() {
             Some(ProjectionMode::Expanded),
         )
         .into_parts();
-    let src_node = outcome.ok().flatten().expect("Src must resolve");
+    let src_node = outcome.ok().flatten().expect("Src must resolve").id();
 
     let read = dispatch.execute_read(SemanticQueryKey::Instantiate(InstantiateKey::new(
         verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
@@ -33074,7 +33074,7 @@ fn expanded_projection_preserves_ordered_carrier_arm_order() {
             Some(ProjectionMode::Expanded),
         )
         .into_parts();
-    let obj_b = outcome.ok().flatten().expect("B must resolve");
+    let obj_b = outcome.ok().flatten().expect("B must resolve").id();
     let (outcome, _) = host
         .resolve_named_symbol_with_audit(
             "/w/ordered-preserve.ts",
@@ -33082,7 +33082,7 @@ fn expanded_projection_preserves_ordered_carrier_arm_order() {
             Some(ProjectionMode::Expanded),
         )
         .into_parts();
-    let obj_a = outcome.ok().flatten().expect("A must resolve");
+    let obj_a = outcome.ok().flatten().expect("A must resolve").id();
     assert!(
         obj_a.0 > obj_b.0,
         "fixture guard: the preserved order must be descending by id so a \

@@ -679,7 +679,7 @@ fn probe_answer(host: &VerterHost) -> Result<Vec<u8>, String> {
         .into_parts();
     match outcome {
         Ok(Some(node)) => host
-            .project_node_to_type_expr_json_bytes(node)
+            .project_node_to_type_expr_json_bytes(&node)
             .ok_or_else(|| "the answer did not materialise".to_owned()),
         Ok(None) => Err("miss".to_owned()),
         Err(fault) => Err(format!("{fault:?}")),

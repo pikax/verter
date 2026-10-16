@@ -48,7 +48,7 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
-use verter_type_engine::semantic_query::SemanticNodeId;
+use verter_type_engine::semantic_query_memo::node_roots::NodeRoot;
 use verter_type_expr::TypeExpr;
 use verter_workspace::{AmbientLibSpec, MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
@@ -461,7 +461,7 @@ fn request(
     scenario_id: &str,
     alias: &str,
     keep_audit: bool,
-) -> (RequestRecord, Option<SemanticNodeId>) {
+) -> (RequestRecord, Option<NodeRoot>) {
     let start = Instant::now();
     let carrier = host.resolve_named_symbol_with_audit(scenario_id, alias, None);
     let micros = micros(start);
@@ -550,7 +550,7 @@ fn wire_node_counts(root: &serde_json::Value) -> (usize, Vec<String>, usize) {
 }
 
 /// The wire bytes of `node`'s answer, or why there are none.
-fn wire_bytes(host: &VerterHost, node: Option<SemanticNodeId>) -> Result<Vec<u8>, String> {
+fn wire_bytes(host: &VerterHost, node: Option<&NodeRoot>) -> Result<Vec<u8>, String> {
     let node = node.ok_or_else(|| "no value to observe".to_string())?;
     host.project_node_to_type_expr_json_bytes(node)
         .ok_or_else(|| "the answer did not materialise".to_string())
@@ -763,13 +763,13 @@ pub fn run_job(
     sink.phase("observe")?;
     for (probe, (node, warm_nodes)) in result.probes.iter_mut().zip(&nodes) {
         let start = Instant::now();
-        let cold_bytes = wire_bytes(&host, *node);
+        let cold_bytes = wire_bytes(&host, node.as_ref());
         probe.observation = Some(observe(cold_bytes.as_deref().map_err(Clone::clone)));
         for (record, warm_node) in probe.warm.iter_mut().zip(warm_nodes) {
             record.same_answer_as_cold = Some(match (node, warm_node) {
-                (Some(cold), Some(warm)) if cold == warm => true,
+                (Some(cold), Some(warm)) if cold.id() == warm.id() => true,
                 (Some(_), Some(_)) => {
-                    matches!((&cold_bytes, wire_bytes(&host, *warm_node)), (Ok(a), Ok(b)) if *a == b)
+                    matches!((&cold_bytes, wire_bytes(&host, warm_node.as_ref())), (Ok(a), Ok(b)) if *a == b)
                 }
                 _ => false,
             });

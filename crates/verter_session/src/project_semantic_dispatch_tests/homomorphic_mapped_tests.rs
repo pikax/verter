@@ -420,7 +420,7 @@ fn named_mapped_index_completes_with_and_without_audit_capture() {
                 .expect("named demand must complete")
                 .expect("probe exists");
             let bytes = host
-                .project_node_to_type_expr_json_bytes(node)
+                .project_node_to_type_expr_json_bytes(&node)
                 .expect("answer projects");
             let answer: TypeExpr = serde_json::from_slice(&bytes).expect("valid answer");
             let TypeExpr::Union(arms) = &answer else {
@@ -499,9 +499,11 @@ fn assert_navigate_mapped_value(source: &str, probe: &str, expected: &str) {
     let dispatch = super::ProjectSemanticDispatch::new(&host);
     let expected = checker_syntax::parse(expected).expect("checker answer parses");
     assert!(
-        checker_syntax::matches_node(&dispatch, node, &expected, 0),
+        checker_syntax::matches_node(&dispatch, node.id(), &expected, 0),
         "unexpected selected value: {:?}",
-        host.project_type_store().semantic_graph().node_data(node)
+        host.project_type_store()
+            .semantic_graph()
+            .node_data(node.id())
     );
 }
 
@@ -526,7 +528,12 @@ fn public_probe(source: &str, probe: &str, expected: &str) -> Option<bool> {
     let node = answer.ok()?.expect("probe exists");
     let dispatch = super::ProjectSemanticDispatch::new(&host);
     let expected = checker_syntax::parse(expected).expect("checker answer parses");
-    Some(checker_syntax::matches_node(&dispatch, node, &expected, 0))
+    Some(checker_syntax::matches_node(
+        &dispatch,
+        node.id(),
+        &expected,
+        0,
+    ))
 }
 
 /// A getter whose return inference this engine refuses (a closure assigns

@@ -189,6 +189,14 @@ pub struct NodeRoot {
     roots: NodeRootSet,
 }
 
+/// Two roots are equal when they name the same node of the same graph.
+impl PartialEq for NodeRoot {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id && self.roots.arena_identity() == other.roots.arena_identity()
+    }
+}
+impl Eq for NodeRoot {}
+
 impl NodeRoot {
     pub(crate) fn from_roots(id: SemanticNodeId, roots: NodeRootSet) -> Self {
         Self { id, roots }

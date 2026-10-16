@@ -56,11 +56,11 @@ fn upsert_ts(host: &VerterHost, canonical_id: &str, source: &str) {
 /// always present.
 fn parts<E>(
     carrier: verter_audit::AuditedResult<
-        Option<verter_type_engine::semantic_query::SemanticNodeId>,
+        Option<verter_type_engine::semantic_query_memo::node_roots::NodeRoot>,
         E,
     >,
 ) -> (
-    Option<verter_type_engine::semantic_query::SemanticNodeId>,
+    Option<verter_type_engine::semantic_query_memo::node_roots::NodeRoot>,
     verter_audit::RequestAuditRecord,
 ) {
     let (outcome, record) = carrier.into_parts();
@@ -348,7 +348,7 @@ export type Outer = Inner;
     // exactly what Identity forbids.
     let store = host.project_type_store().semantic_graph();
     let data = store
-        .node_data(id_node)
+        .node_data(id_node.id())
         .expect("node interned during resolution");
     assert!(
         !matches!(data.as_ref(), SemanticNodeData::Object(_)),
@@ -393,7 +393,7 @@ export type Outer = Inner;
 
     let store = host.project_type_store().semantic_graph();
     let data = store
-        .node_data(nav_node)
+        .node_data(nav_node.id())
         .expect("node interned during resolution");
     assert!(
         !matches!(data.as_ref(), SemanticNodeData::Alias(_)),
@@ -423,7 +423,7 @@ export type Outer = Inner;
 
     let store = host.project_type_store().semantic_graph();
     let data = store
-        .node_data(exp_node)
+        .node_data(exp_node.id())
         .expect("node interned during resolution");
     assert!(
         !matches!(data.as_ref(), SemanticNodeData::Alias(_)),
@@ -468,7 +468,7 @@ export type Outer = Inner;
 
     let store = host.project_type_store().semantic_graph();
     let data = store
-        .node_data(def_node)
+        .node_data(def_node.id())
         .expect("node interned during resolution");
     assert!(
         matches!(data.as_ref(), SemanticNodeData::Object(_)),
@@ -578,7 +578,7 @@ fn evaluate_simple_primitive_returns_primitive() {
     let _ = assert_one_typeresolution_record(&record);
 
     let store = host.project_type_store().semantic_graph();
-    let data = store.node_data(node).expect("primitive node interned");
+    let data = store.node_data(node.id()).expect("primitive node interned");
     assert!(
         matches!(data.as_ref(), SemanticNodeData::Primitive(_)),
         "expression `string` must reduce to a Primitive node; got {:?}",
@@ -602,7 +602,7 @@ fn evaluate_object_type() {
     let node = node.expect("object expression must resolve");
 
     let store = host.project_type_store().semantic_graph();
-    let data = store.node_data(node).expect("object node interned");
+    let data = store.node_data(node.id()).expect("object node interned");
     assert!(
         matches!(data.as_ref(), SemanticNodeData::Object(_)),
         "expression `{{ x; y }}` must reduce to an Object node; got {:?}",
@@ -646,7 +646,9 @@ export type Foo = { foo: number };
     let node = node.expect("imported expression must resolve");
 
     let store = host.project_type_store().semantic_graph();
-    let data = store.node_data(node).expect("imported Foo node interned");
+    let data = store
+        .node_data(node.id())
+        .expect("imported Foo node interned");
     // `Foo` is `{ foo: number }` — Expanded must reach the
     // concrete Object body when the import resolved correctly.
     // The discriminating contract is that `extra_imports` produced
@@ -865,7 +867,9 @@ export type Wrap<T> = { wrapped: T };
     let node = node.expect("Wrap<string> must resolve");
     let _ = assert_one_typeresolution_record(&record);
     let store = host.project_type_store().semantic_graph();
-    let data = store.node_data(node).expect("instantiated node interned");
+    let data = store
+        .node_data(node.id())
+        .expect("instantiated node interned");
     // The instantiated body is an Object with a single member
     // `wrapped: string`.
     match data.as_ref() {
@@ -1059,7 +1063,7 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
     let resolved = resolved.expect("ColorModeSelectProps must resolve");
     let _ = assert_one_typeresolution_record(&record);
     let mut public_names = Vec::new();
-    collect_surface_member_names(store, resolved, &mut public_names);
+    collect_surface_member_names(store, resolved.id(), &mut public_names);
     for inherited in ["open", "defaultOpen", "disabled"] {
         assert!(
             public_names.iter().any(|n| n == inherited),

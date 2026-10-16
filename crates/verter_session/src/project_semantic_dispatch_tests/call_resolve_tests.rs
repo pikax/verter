@@ -3331,7 +3331,10 @@ fn a_source_call_infers_from_every_argument_position() {
                 .resolve_named_symbol_with_audit(canonical, "R", None)
                 .into_parts();
             let node = outcome.ok().flatten().expect("R resolves to a node");
-            let data = host.project_type_store().semantic_graph().node_data(node);
+            let data = host
+                .project_type_store()
+                .semantic_graph()
+                .node_data(node.id());
             assert!(
                 matches!(
                     data.as_deref(),

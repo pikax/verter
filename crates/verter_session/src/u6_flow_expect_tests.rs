@@ -920,7 +920,7 @@ pub(crate) fn drive_expect_boundary_with_lib(
     let (degradation, json, node, error, error_kind) = match first.as_result() {
         Ok(result) => (
             Some(degr_of(result.degradation())),
-            host.project_node_to_type_expr_json_bytes(result.return_type())
+            host.project_ordinal_to_type_expr_json_bytes_for_test(result.return_type())
                 .map(|bytes| String::from_utf8(bytes).expect("TypeExpr JSON is UTF-8")),
             Some(result.return_type()),
             None,
@@ -962,7 +962,7 @@ pub(crate) fn drive_expect_boundary_with_lib(
         match second.as_result() {
             Ok(result) => (
                 Some(degr_of(result.degradation())),
-                host.project_node_to_type_expr_json_bytes(result.return_type())
+                host.project_ordinal_to_type_expr_json_bytes_for_test(result.return_type())
                     .map(|bytes| String::from_utf8(bytes).expect("TypeExpr JSON is UTF-8")),
                 None,
                 None,

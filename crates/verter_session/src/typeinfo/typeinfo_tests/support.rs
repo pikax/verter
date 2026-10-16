@@ -147,7 +147,9 @@ pub(crate) fn resolve_expr(
         .into_parts();
     let node = outcome.ok().flatten();
     let expr = host
-        .project_node_to_type_expr_for_test(node.unwrap_or_else(|| panic!("{name} must resolve")))
+        .project_node_to_type_expr_for_test(
+            node.unwrap_or_else(|| panic!("{name} must resolve")).id(),
+        )
         .unwrap_or_else(|| panic!("{name} resolved node must project to TypeExpr"));
     (expr, record)
 }
@@ -231,7 +233,8 @@ pub(crate) fn evaluate_expr(
     let node = outcome.ok().flatten();
     let expr = host
         .project_node_to_type_expr_for_test(
-            node.unwrap_or_else(|| panic!("{expression} must resolve")),
+            node.unwrap_or_else(|| panic!("{expression} must resolve"))
+                .id(),
         )
         .unwrap_or_else(|| panic!("{expression} resolved node must project to TypeExpr"));
     (expr, record)

@@ -261,7 +261,9 @@ fn callable_base(host: &VerterHost) -> SemanticNodeId {
     let graph = host.project_type_store().semantic_graph();
     // `typeof greet` resolves to the function's own surface; its single call
     // signature is the authored callable a member lookup starts from.
-    let data = graph.node_data(node).expect("`Callable` node must exist");
+    let data = graph
+        .node_data(node.id())
+        .expect("`Callable` node must exist");
     let signature = match &*data {
         SemanticNodeData::Object(surface) if surface.call_signatures().len() == 1 => {
             surface.call_signatures()[0]

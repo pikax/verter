@@ -1845,7 +1845,7 @@ fn mixed_component_member_entry_self_roots_cover_all_component_files() {
         .into_parts();
     let node = expr.ok().flatten().expect("RootAssign resolves");
     let projected = host
-        .project_node_to_type_expr_for_test(node)
+        .project_node_to_type_expr_for_test(node.id())
         .expect("RootAssign projects");
     assert_eq!(
         projected,

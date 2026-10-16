@@ -195,9 +195,9 @@ fn demand_record(
     host: &VerterHost,
     demand: &Demand,
     record: super::RequestRecord,
-    node: Option<super::SemanticNodeId>,
+    node: Option<super::NodeRoot>,
 ) -> DemandRecord {
-    let bytes = wire_bytes(host, node);
+    let bytes = wire_bytes(host, node.as_ref());
     DemandRecord {
         file: demand.file.clone(),
         alias: demand.alias.clone(),

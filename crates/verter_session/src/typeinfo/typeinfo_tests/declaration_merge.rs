@@ -421,7 +421,7 @@ fn merged_interface_generic_heritage_own_member_shadows_expanded() {
     //    peer-merge reducer classifies heritage arms by topology — an
     //    eagerly-materialised heritage `Object` is indistinguishable from
     //    the own body and silently steals member precedence).
-    let contributors = match graph.node_data(node).as_deref() {
+    let contributors = match graph.node_data(node.id()).as_deref() {
         Some(SemanticNodeData::MergedDecl { contributors }) => contributors.clone(),
         other => panic!("merged X must stay a MergedDecl carrier, got {other:?}"),
     };
@@ -497,7 +497,7 @@ fn merged_interface_mapper_builtin_heritage_own_member_shadows_expanded() {
     //    carrier (the peer-merge reducer classifies heritage arms by
     //    topology — a materialised heritage Object is indistinguishable
     //    from the own body and silently steals member precedence).
-    let contributors = match graph.node_data(node).as_deref() {
+    let contributors = match graph.node_data(node.id()).as_deref() {
         Some(SemanticNodeData::MergedDecl { contributors }) => contributors.clone(),
         other => panic!("merged X must stay a MergedDecl carrier, got {other:?}"),
     };
@@ -602,7 +602,7 @@ fn merged_interface_mapper_builtin_heritage_own_member_shadows_skeleton() {
     // A materialised heritage `Object` / `Mapped` there is mis-bucketed as OWN
     // surface by the topology-driven peer-merge reducer and silently steals
     // member precedence (own-body-shadows-heritage inverts).
-    let contributors = match graph.node_data(node).as_deref() {
+    let contributors = match graph.node_data(node.id()).as_deref() {
         Some(SemanticNodeData::MergedDecl { contributors }) => contributors.clone(),
         other => panic!("merged X must stay a MergedDecl carrier under Skeleton, got {other:?}"),
     };

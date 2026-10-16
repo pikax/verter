@@ -22,7 +22,7 @@
 //!     canonical_id: &str,
 //!     name: &str,
 //!     mode: ProjectionMode,
-//! ) -> AuditedResult<Option<SemanticNodeId>, TypeResolutionRequestError>;
+//! ) -> AuditedResult<Option<NodeRoot>, TypeResolutionRequestError>;
 //!
 //! pub fn resolve_named_symbol_wire_with_audit(
 //!     host: &VerterHost,
@@ -30,10 +30,15 @@
 //!     name: &str,
 //!     wire_type_args: &[Arc<TypeExpr>], // symbolic; lowered inside the request
 //!     mode: ProjectionMode,
-//! ) -> AuditedResult<Option<SemanticNodeId>, TypeResolutionRequestError>;
+//! ) -> AuditedResult<Option<NodeRoot>, TypeResolutionRequestError>;
 //!
-//! pub fn resolve_named_symbol(...)  -> Option<SemanticNodeId>;
+//! pub fn resolve_named_symbol(...)  -> Option<NodeRoot>;
 //! ```
+//!
+//! A resolved node is delivered as an owning
+//! [`NodeRoot`](verter_type_engine::semantic_query_memo::node_roots::NodeRoot): the caller holds
+//! it across later requests and projects it through that root, never
+//! through a bare ordinal.
 //!
 //! Default-mode policy:
 //! - Generic carrier (declaration-site type parameters) → `Navigate`.
@@ -119,7 +124,10 @@ impl VerterHost {
         canonical_id: &str,
         name: &str,
         mode: ResolveMode,
-    ) -> AuditedResult<Option<SemanticNodeId>, TypeResolutionRequestError> {
+    ) -> AuditedResult<
+        Option<verter_type_engine::semantic_query_memo::node_roots::NodeRoot>,
+        TypeResolutionRequestError,
+    > {
         // Bare-named-symbol resolution: no type arguments. Generic
         // instantiation is wire-only (see the module doc / the
         // `resolve_named_symbol_wire_with_audit` foot-gun note), so this
@@ -161,7 +169,10 @@ impl VerterHost {
         name: &str,
         wire_type_args: &[Arc<TypeExpr>],
         mode: ResolveMode,
-    ) -> AuditedResult<Option<SemanticNodeId>, TypeResolutionRequestError> {
+    ) -> AuditedResult<
+        Option<verter_type_engine::semantic_query_memo::node_roots::NodeRoot>,
+        TypeResolutionRequestError,
+    > {
         self.resolve_named_symbol_audited(
             canonical_id,
             name,
@@ -182,7 +193,10 @@ impl VerterHost {
         name: &str,
         type_args: NamedSymbolTypeArgs<'_>,
         mode: ResolveMode,
-    ) -> AuditedResult<Option<SemanticNodeId>, TypeResolutionRequestError> {
+    ) -> AuditedResult<
+        Option<verter_type_engine::semantic_query_memo::node_roots::NodeRoot>,
+        TypeResolutionRequestError,
+    > {
         // Registration / context setup mirrors
         // `resolve_type_with_audit`. We construct the registration
         // BEFORE installing the TLS guard so the `Noop` arm can
@@ -353,7 +367,7 @@ impl VerterHost {
         canonical_id: &str,
         name: &str,
         mode: ResolveMode,
-    ) -> Option<SemanticNodeId> {
+    ) -> Option<verter_type_engine::semantic_query_memo::node_roots::NodeRoot> {
         // Bare-named-symbol resolution (no type arguments) — the non-audit
         // sibling MUST drop its type-arg parameter too: it forwards to the
         // now-bare audited entry, so it cannot carry caller-pre-lowered ids
@@ -423,9 +437,15 @@ fn compute_effective_mode(
 /// Package a resolve-named-symbol outcome and its audit record into the
 /// [`AuditedResult`] carrier.
 fn audited_from_outcome(
-    outcome: Result<Option<SemanticNodeId>, TypeResolutionRequestError>,
+    outcome: Result<
+        Option<verter_type_engine::semantic_query_memo::node_roots::NodeRoot>,
+        TypeResolutionRequestError,
+    >,
     audit: RequestAuditRecord,
-) -> AuditedResult<Option<SemanticNodeId>, TypeResolutionRequestError> {
+) -> AuditedResult<
+    Option<verter_type_engine::semantic_query_memo::node_roots::NodeRoot>,
+    TypeResolutionRequestError,
+> {
     match outcome {
         Ok(value) => AuditedResult::ok(value, audit),
         Err(error) => AuditedResult::err(error, audit),
@@ -479,7 +499,10 @@ fn resolve_named_symbol_request(
     type_args: NamedSymbolTypeArgs<'_>,
     requested_mode: ResolveMode,
 ) -> (
-    Result<Option<SemanticNodeId>, TypeResolutionRequestError>,
+    Result<
+        Option<verter_type_engine::semantic_query_memo::node_roots::NodeRoot>,
+        TypeResolutionRequestError,
+    >,
     ProjectionMode,
 ) {
     // This is a query-RETURNER, not a fenced publisher: it builds a
@@ -533,13 +556,20 @@ fn resolve_named_symbol_request(
         }
     };
 
-    resolve_named_symbol_in_current_view(
+    let (outcome, mode) = resolve_named_symbol_in_current_view(
         host,
         &dispatch,
         canonical_id,
         name,
         type_args,
         effective_mode,
+    );
+    // Deliver the resolved node under its own root: the caller holds it
+    // past this request's construction scope, and a later projection reads
+    // it through that root, never through the bare ordinal.
+    (
+        outcome.map(|node| node.and_then(|node| dispatch.graph().root_in_scope(node))),
+        mode,
     )
 }
 

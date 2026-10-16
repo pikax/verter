@@ -1234,7 +1234,7 @@ fn nested_class_expression_raise(depth: usize) -> (usize, usize) {
         .expect("the nested class expression resolves");
     let before = super::raise::folded_nodes_for_tests();
     let raised = host
-        .project_node_to_type_expr_for_test(node)
+        .project_node_to_type_expr_for_test(node.id())
         .expect("the nested class expression raises");
     let folded = super::raise::folded_nodes_for_tests() - before;
     let bytes = serde_json::to_vec(&raised).expect("serializes").len();

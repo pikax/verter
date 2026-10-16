@@ -3741,6 +3741,7 @@ fn resolve_relation_fixture_symbol(
         .ok()
         .flatten()
         .unwrap_or_else(|| panic!("{name} must resolve on {canonical}"))
+        .id()
 }
 
 /// D7.1 vertical: optional-to-required decides `NotAssignable` through the

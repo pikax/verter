@@ -1083,7 +1083,7 @@ fn never_upserted_contributors_follow_snapshot_edits_and_removals() {
             .resolve_named_symbol("/use.ts", "Result", Some(ProjectionMode::Expanded))
             .expect("global type resolves");
         let store = host.project_type_store().semantic_graph();
-        let mut pending = vec![node];
+        let mut pending = vec![node.id()];
         let mut names = Vec::new();
         while let Some(node) = pending.pop() {
             let data = store.node_data(node).expect("node");

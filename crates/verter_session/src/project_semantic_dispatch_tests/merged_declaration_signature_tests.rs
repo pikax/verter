@@ -335,7 +335,8 @@ fn literal_number_at(host: &crate::VerterHost, scenario: &str, name: &str) -> f6
     use verter_type_engine::semantic_query::{LiteralValue, ProjectionMode, SemanticNodeData};
     let mut node = host
         .resolve_named_symbol(scenario, name, Some(ProjectionMode::Expanded))
-        .expect("the probe answers");
+        .expect("the probe answers")
+        .id();
     let graph = host.project_type_store().semantic_graph();
     loop {
         match graph.node_data(node).as_deref().expect("a live answer") {
@@ -935,11 +936,13 @@ fn a_single_imported_global_retires_when_its_incoming_edge_is_removed() {
     };
     let host = program_host(&config, &files("import './globals'; export {};"));
     let read = |host: &crate::VerterHost, name: &str| {
-        let mut node = host.resolve_named_symbol(
-            &format!("{PROGRAM_ROOT}/scenario.ts"),
-            name,
-            Some(ProjectionMode::Expanded),
-        )?;
+        let mut node = host
+            .resolve_named_symbol(
+                &format!("{PROGRAM_ROOT}/scenario.ts"),
+                name,
+                Some(ProjectionMode::Expanded),
+            )?
+            .id();
         let graph = host.project_type_store().semantic_graph();
         loop {
             match graph.node_data(node)?.as_ref() {

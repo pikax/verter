@@ -20,7 +20,7 @@ fn mapped_index_wire_answer(
         .into_parts();
     let node = outcome.expect("resolution succeeds").expect("type exists");
     let bytes = host
-        .project_node_to_type_expr_json_bytes(node)
+        .project_node_to_type_expr_json_bytes(&node)
         .unwrap_or_else(|| panic!("{name} must survive JSON projection"));
     serde_json::from_slice(&bytes).expect("valid TypeExpr JSON")
 }
@@ -412,7 +412,9 @@ fn recursive_mapped_index_budget_refusal_does_not_warm() {
         );
         assert!(!graph.contains_key(&memo_key));
     }
-    let bytes = host.project_node_to_type_expr_json_bytes(node).unwrap();
+    let bytes = host
+        .project_ordinal_to_type_expr_json_bytes_for_test(node)
+        .unwrap();
     let answer: TypeExpr = serde_json::from_slice(&bytes).unwrap();
     let TypeExpr::IndexedAccess { object, index } = &answer else {
         panic!("the authored index must survive refusal: {answer:?}");

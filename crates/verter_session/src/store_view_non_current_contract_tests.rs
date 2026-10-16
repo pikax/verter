@@ -969,7 +969,7 @@ fn evaluate_type_expression_cleanup_preserves_concurrently_owned_scratch() {
     let cached = host.scratch_cache().lock().get(&scratch_uri);
     assert_eq!(
         cached,
-        Some(owner_node),
+        Some(owner_node.id()),
         "the scratch_cache fast-path must still return the owning evaluation's node id"
     );
     let warm = host

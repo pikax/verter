@@ -2642,7 +2642,7 @@ mod corpus_suite {
 
             let first_node = first_result.return_type();
             let first_json = host
-                .project_node_to_type_expr_json_bytes(first_node)
+                .project_ordinal_to_type_expr_json_bytes_for_test(first_node)
                 .map(|bytes| String::from_utf8(bytes).expect("TypeExpr JSON is UTF-8"));
             {
                 let store_view = host.resolver_store_view_read().into_owned_view();
@@ -2703,7 +2703,7 @@ mod corpus_suite {
                 "locked row `{id}` second call must retain exactly one candidate"
             );
             let second_json = host
-                .project_node_to_type_expr_json_bytes(second_result.return_type())
+                .project_ordinal_to_type_expr_json_bytes_for_test(second_result.return_type())
                 .map(|bytes| String::from_utf8(bytes).expect("TypeExpr JSON is UTF-8"));
             assert_eq!(
                 second_json, first_json,
