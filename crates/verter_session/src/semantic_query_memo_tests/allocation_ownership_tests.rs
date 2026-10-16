@@ -326,3 +326,26 @@ fn a_sealed_refusal_hands_its_delivered_rail_to_a_surviving_read() {
     drop(harness);
     assert_eq!(account.snapshot().total_bytes(), 0);
 }
+
+/// A flight's cell is live work: pinned from its claim, and released when
+/// the aborted flight's last holder drops it.
+#[test]
+fn an_aborted_flight_releases_its_storage_pin() {
+    let account = unbounded();
+    let harness = CountedOwnershipHarness::with_account(StoreAccount::new(Arc::clone(&account)));
+    let before = caller_pinned(&harness, &account);
+    harness.run(|store| {
+        let flight = store
+            .begin_inline_member_flight_for_tests(key())
+            .expect("no other producer owns the key");
+        let account_pinned = account.snapshot().pinned_bytes - store.graph_storage_charge_bytes();
+        assert!(account_pinned > before, "the open flight's cell is charged");
+        store.abort_inline_member_flight(&flight);
+        drop(flight);
+    });
+    assert_eq!(
+        caller_pinned(&harness, &account),
+        before,
+        "the aborted flight's cell is released with its last holder"
+    );
+}
