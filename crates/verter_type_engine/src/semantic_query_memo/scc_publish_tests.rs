@@ -5,7 +5,9 @@
 use super::*;
 use crate::semantic_query::RelationOutcome;
 use verter_session_query::facts::fact_cache::{FactVersionRef, ReadSetSignature};
-use verter_session_query::retention::allocation::{arc_str_list_bytes, fact_slice_bytes, AliasSet};
+use verter_session_query::retention::allocation::{
+    arc_block_bytes, arc_str_list_bytes, fact_slice_bytes, AliasSet,
+};
 use verter_session_query::retention::shared::registration_bytes;
 use verter_session_query::retention::{RetentionLimits, SemanticRetentionAccount, StoreAccount};
 
@@ -86,22 +88,30 @@ fn an_scc_member_shares_the_carrier_charge_and_keeps_it_after_the_root_drains() 
         .reserve_scc_batch(&[&member], 1)
         .expect("the member's incremental footprint is admitted");
     let member_own = super::retention::own_reservation_bytes(&member, 1, 1);
+    // What the member newly retains, from its allocations alone: its own
+    // bookkeeping and its own (empty) relation-binding value under one
+    // registration. The carrier and self-root list are the root's already.
+    let member_value = arc_block_bytes(0) + registration_bytes();
+    let delta = account.snapshot().retained_bytes - after_root;
     assert_eq!(
-        account.snapshot().retained_bytes - after_root,
-        member_own
-            + members[0]
-                .shared_holds()
-                .filter(|hold| !root_retention
-                    .shared_holds()
-                    .any(|root_hold| root_hold.shares_charge_with(hold)))
-                .map(|hold| hold.bytes())
-                .sum::<usize>(),
-        "the member pays its own bookkeeping and only the allocations the root \
-         does not already charge — never the shared carrier a second time"
+        delta,
+        member_own + member_value,
+        "the member pays its own bookkeeping and its own value — never the shared \
+         carrier or self-root list a second time"
     );
     assert!(
-        account.snapshot().retained_bytes - after_root < carrier_bytes,
-        "a second charge of the shared carrier would cost at least its size"
+        delta < CANONICAL_LEN,
+        "a second charge of either shared allocation would cost its oversized canonical"
+    );
+    assert!(
+        members[0]
+            .shared_holds()
+            .filter(|hold| root_retention
+                .shared_holds()
+                .any(|root_hold| root_hold.shares_charge_with(hold)))
+            .count()
+            == 2,
+        "the member holds the root's carrier and self-root charges"
     );
 
     drop(root_retention);
