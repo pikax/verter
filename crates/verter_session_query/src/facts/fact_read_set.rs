@@ -541,24 +541,26 @@ impl FactReadSet {
     /// canonical set — there is exactly one canonicaliser.
     #[inline]
     pub fn absorb_canonical_signature(&mut self, signature: &Arc<[FactVersionRef]>) {
+        self.absorb_canonical_signature_verified_once(signature, &std::cell::OnceCell::new());
+    }
+
+    /// [`Self::absorb_canonical_signature`] sharing one order verification
+    /// across every read set the witness is replayed into. A read set that
+    /// already holds the run returns before the verification is demanded, so
+    /// a repeated warm replay costs no work proportional to its width.
+    #[inline]
+    pub fn absorb_canonical_signature_verified_once<'a>(
+        &mut self,
+        signature: &'a Arc<[FactVersionRef]>,
+        verified: &std::cell::OnceCell<Option<VerifiedCanonicalRun<'a>>>,
+    ) {
         if signature.is_empty() || self.recently_absorbed(signature) {
             return;
         }
-        match VerifiedCanonicalRun::verify(signature) {
+        match verified.get_or_init(|| VerifiedCanonicalRun::verify(signature)) {
             Some(run) => self.canonical_runs.push(Arc::clone(run.0)),
             None => self.observe_borrowed_signature(signature),
         }
-    }
-
-    /// [`Self::absorb_canonical_signature`] for a run whose order a caller
-    /// already verified, so a witness replayed into several read sets is
-    /// verified once.
-    #[inline]
-    pub fn absorb_verified_run(&mut self, run: &VerifiedCanonicalRun<'_>) {
-        if run.0.is_empty() || self.recently_absorbed(run.0) {
-            return;
-        }
-        self.canonical_runs.push(Arc::clone(run.0));
     }
 
     /// Whether one of the last [`INLINE_CAPACITY`] absorbed runs is
@@ -796,11 +798,18 @@ impl FactReadSetCell {
         self.0.borrow_mut().absorb_canonical_signature(signature);
     }
 
-    /// Absorb a verified canonical run through `&self`. See
-    /// [`FactReadSet::absorb_verified_run`].
+    /// Absorb a canonical witness through `&self`, sharing one order
+    /// verification. See
+    /// [`FactReadSet::absorb_canonical_signature_verified_once`].
     #[inline]
-    pub fn absorb_verified_run(&self, run: &VerifiedCanonicalRun<'_>) {
-        self.0.borrow_mut().absorb_verified_run(run);
+    pub fn absorb_canonical_signature_verified_once<'a>(
+        &self,
+        signature: &'a Arc<[FactVersionRef]>,
+        verified: &std::cell::OnceCell<Option<VerifiedCanonicalRun<'a>>>,
+    ) {
+        self.0
+            .borrow_mut()
+            .absorb_canonical_signature_verified_once(signature, verified);
     }
 
     /// The mark of everything observed so far, through `&self`. See
