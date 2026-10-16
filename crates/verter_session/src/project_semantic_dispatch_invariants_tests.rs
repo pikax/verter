@@ -6416,7 +6416,7 @@ pub(crate) mod fresh_excess_property_checking {
     ) -> SemanticNodeId {
         graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
             verter_type_engine::semantic_query::ObjectSpreadProgram {
-                effects: Arc::from([
+                effects: verter_type_engine::semantic_query::PayloadArray::from([
                     verter_type_engine::semantic_query::ObjectConstructionEffect::Spread(operand),
                 ]),
             },

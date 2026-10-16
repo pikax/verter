@@ -456,7 +456,7 @@ fn expanded_locator_projection_does_not_request_hidden_spread_writes() {
     };
     let root = graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
         verter_type_engine::semantic_query::ObjectSpreadProgram {
-            effects: Arc::from([
+            effects: verter_type_engine::semantic_query::PayloadArray::from([
                 verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
                     verter_type_engine::semantic_query::AuthoredPropertyEffect {
                         key: verter_type_engine::semantic_query::AuthoredPropertyKey::string("a"),

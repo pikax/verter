@@ -107,7 +107,7 @@ fn program(
     effects: impl IntoIterator<Item = ObjectConstructionEffect>,
 ) -> SemanticNodeId {
     graph.intern_node(SemanticNodeData::ObjectSpreadProgram(ObjectSpreadProgram {
-        effects: Arc::from(effects.into_iter().collect::<Vec<_>>()),
+        effects: verter_type_engine::semantic_query::PayloadArray::from(effects.into_iter().collect::<Vec<_>>()),
     }))
 }
 

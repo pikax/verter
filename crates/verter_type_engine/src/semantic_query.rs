@@ -256,15 +256,15 @@ mod object_spread_program_contract_tests {
         let spread = SemanticNodeId(22);
         let construct = SemanticNodeId(33);
         let program = ObjectSpreadProgram {
-            effects: Arc::from([
+            effects: crate::semantic_query::PayloadArray::from([
                 ObjectConstructionEffect::DirectCall(call),
                 ObjectConstructionEffect::Spread(spread),
                 ObjectConstructionEffect::DirectConstruct(construct),
             ]),
         };
-        let node = SemanticNodeData::ObjectSpreadProgram(program.clone());
+        let node = SemanticNodeData::ObjectSpreadProgram(program.share());
         let reordered = SemanticNodeData::ObjectSpreadProgram(ObjectSpreadProgram {
-            effects: Arc::from([
+            effects: crate::semantic_query::PayloadArray::from([
                 ObjectConstructionEffect::Spread(spread),
                 ObjectConstructionEffect::DirectCall(call),
                 ObjectConstructionEffect::DirectConstruct(construct),
@@ -337,7 +337,7 @@ mod object_spread_program_contract_tests {
             member_path: Arc::from([]),
         };
         let program = ObjectSpreadProgram {
-            effects: Arc::from([
+            effects: crate::semantic_query::PayloadArray::from([
                 ObjectConstructionEffect::DirectProperty(property),
                 ObjectConstructionEffect::DirectMethod(method),
                 ObjectConstructionEffect::DirectGet(accessor(
@@ -9832,7 +9832,7 @@ pub(crate) fn authored_property_key_child(key: &AuthoredPropertyKey) -> Option<S
 }
 
 /// Lossless authored property write in an object construction.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct AuthoredPropertyEffect {
     pub key: AuthoredPropertyKey,
     pub value: SemanticNodeId,
@@ -9847,7 +9847,7 @@ pub struct AuthoredPropertyEffect {
 }
 
 /// Lossless authored method write in an object construction.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct AuthoredMethodEffect {
     pub key: AuthoredPropertyKey,
     pub signature: SemanticNodeId,
@@ -9863,7 +9863,7 @@ pub struct AuthoredMethodEffect {
 
 /// Lossless authored getter or setter write in an object construction. The
 /// enclosing effect variant carries the accessor kind.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct AuthoredAccessorEffect {
     pub key: AuthoredPropertyKey,
     pub signature: SemanticNodeId,
@@ -9878,7 +9878,7 @@ pub struct AuthoredAccessorEffect {
 }
 
 /// Lossless authored index signature in an object construction.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct AuthoredIndexEffect {
     pub key_type: SemanticNodeId,
     pub value_type: SemanticNodeId,
@@ -9888,7 +9888,7 @@ pub struct AuthoredIndexEffect {
 }
 
 /// One source-ordered effect in a spread-bearing object construction.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub enum ObjectConstructionEffect {
     DirectProperty(AuthoredPropertyEffect),
     DirectMethod(AuthoredMethodEffect),
@@ -9898,6 +9898,101 @@ pub enum ObjectConstructionEffect {
     DirectCall(SemanticNodeId),
     DirectConstruct(SemanticNodeId),
     Spread(SemanticNodeId),
+}
+
+impl AuthoredPropertyEffect {
+    pub(crate) fn copy(&self) -> Self {
+        Self {
+            key: self.key.clone(),
+            value: self.value,
+            optional: self.optional,
+            readonly: self.readonly,
+            visibility: self.visibility,
+            spans: self.spans,
+            declaration_origin: self.declaration_origin.clone(),
+            declared_in_macro_type_arg: self.declared_in_macro_type_arg,
+            merge_role: self.merge_role,
+            excess_origin: self.excess_origin,
+        }
+    }
+}
+
+impl AuthoredMethodEffect {
+    pub(crate) fn copy(&self) -> Self {
+        Self {
+            key: self.key.clone(),
+            signature: self.signature,
+            optional: self.optional,
+            has_implementation_body: self.has_implementation_body,
+            visibility: self.visibility,
+            spans: self.spans,
+            declaration_origin: self.declaration_origin.clone(),
+            declared_in_macro_type_arg: self.declared_in_macro_type_arg,
+            merge_role: self.merge_role,
+            excess_origin: self.excess_origin,
+        }
+    }
+}
+
+impl AuthoredAccessorEffect {
+    pub(crate) fn copy(&self) -> Self {
+        Self {
+            key: self.key.clone(),
+            signature: self.signature,
+            optional: self.optional,
+            has_implementation_body: self.has_implementation_body,
+            visibility: self.visibility,
+            spans: self.spans,
+            declaration_origin: self.declaration_origin.clone(),
+            declared_in_macro_type_arg: self.declared_in_macro_type_arg,
+            merge_role: self.merge_role,
+            excess_origin: self.excess_origin,
+        }
+    }
+}
+
+impl AuthoredIndexEffect {
+    pub(crate) fn copy(&self) -> Self {
+        Self {
+            key_type: self.key_type,
+            value_type: self.value_type,
+            readonly: self.readonly,
+            spans: self.spans,
+            declaration_origin: self.declaration_origin.clone(),
+        }
+    }
+}
+
+impl ObjectConstructionEffect {
+    /// A fixture copy of a program effect.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn copy_for_tests(&self) -> Self {
+        self.copy()
+    }
+
+    /// An engine-internal copy for a program the engine is building.
+    pub(crate) fn copy(&self) -> Self {
+        match self {
+            Self::DirectProperty(effect) => Self::DirectProperty(effect.copy()),
+            Self::DirectMethod(effect) => Self::DirectMethod(effect.copy()),
+            Self::DirectGet(effect) => Self::DirectGet(effect.copy()),
+            Self::DirectSet(effect) => Self::DirectSet(effect.copy()),
+            Self::DirectIndex(effect) => Self::DirectIndex(effect.copy()),
+            Self::DirectCall(node) => Self::DirectCall(*node),
+            Self::DirectConstruct(node) => Self::DirectConstruct(*node),
+            Self::Spread(node) => Self::Spread(*node),
+        }
+    }
+}
+
+impl ObjectSpreadProgram {
+    /// Share the program's effects with a payload the engine is building.
+    pub(crate) fn share(&self) -> Self {
+        Self {
+            effects: self.effects.share(),
+        }
+    }
 }
 
 impl ObjectConstructionEffect {
@@ -9933,9 +10028,9 @@ impl ObjectConstructionEffect {
 }
 
 /// Immutable source-ordered authority for a spread-bearing object.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct ObjectSpreadProgram {
-    pub effects: Arc<[ObjectConstructionEffect]>,
+    pub effects: PayloadArray<ObjectConstructionEffect>,
 }
 
 impl ObjectSpreadProgram {
@@ -9960,7 +10055,7 @@ impl ObjectSpreadProgram {
             .iter()
             .map(|effect| match effect {
                 ObjectConstructionEffect::DirectProperty(effect) => {
-                    let mut effect = effect.clone();
+                    let mut effect = effect.copy();
                     if let AuthoredPropertyKey::Computed(node) = &mut effect.key {
                         *node = map(*node);
                     }
@@ -9968,7 +10063,7 @@ impl ObjectSpreadProgram {
                     ObjectConstructionEffect::DirectProperty(effect)
                 }
                 ObjectConstructionEffect::DirectMethod(effect) => {
-                    let mut effect = effect.clone();
+                    let mut effect = effect.copy();
                     if let AuthoredPropertyKey::Computed(node) = &mut effect.key {
                         *node = map(*node);
                     }
@@ -9976,7 +10071,7 @@ impl ObjectSpreadProgram {
                     ObjectConstructionEffect::DirectMethod(effect)
                 }
                 ObjectConstructionEffect::DirectGet(effect) => {
-                    let mut effect = effect.clone();
+                    let mut effect = effect.copy();
                     if let AuthoredPropertyKey::Computed(node) = &mut effect.key {
                         *node = map(*node);
                     }
@@ -9984,7 +10079,7 @@ impl ObjectSpreadProgram {
                     ObjectConstructionEffect::DirectGet(effect)
                 }
                 ObjectConstructionEffect::DirectSet(effect) => {
-                    let mut effect = effect.clone();
+                    let mut effect = effect.copy();
                     if let AuthoredPropertyKey::Computed(node) = &mut effect.key {
                         *node = map(*node);
                     }
@@ -9992,7 +10087,7 @@ impl ObjectSpreadProgram {
                     ObjectConstructionEffect::DirectSet(effect)
                 }
                 ObjectConstructionEffect::DirectIndex(effect) => {
-                    let mut effect = effect.clone();
+                    let mut effect = effect.copy();
                     effect.key_type = map(effect.key_type);
                     effect.value_type = map(effect.value_type);
                     ObjectConstructionEffect::DirectIndex(effect)
@@ -10009,7 +10104,7 @@ impl ObjectSpreadProgram {
             })
             .collect::<Vec<_>>();
         Self {
-            effects: Arc::from(effects.into_boxed_slice()),
+            effects: effects.into(),
         }
     }
 }
@@ -10479,7 +10574,7 @@ impl SemanticNodeData {
             },
             Self::Alias(v0) => Self::Alias(v0.clone()),
             Self::Object(v0) => Self::Object(v0.clone()),
-            Self::ObjectSpreadProgram(v0) => Self::ObjectSpreadProgram(v0.clone()),
+            Self::ObjectSpreadProgram(v0) => Self::ObjectSpreadProgram(v0.share()),
             Self::Union(v0) => Self::Union(v0.share()),
             Self::Intersection(v0) => Self::Intersection(v0.share()),
             Self::Primitive(v0) => Self::Primitive(v0.clone()),

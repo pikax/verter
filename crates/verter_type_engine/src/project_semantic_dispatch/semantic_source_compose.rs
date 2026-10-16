@@ -529,7 +529,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         flush_run(&mut run, &mut effects);
         HotTypeRef::new(self.graph().intern_node_with_scope(
             SemanticNodeData::ObjectSpreadProgram(crate::semantic_query::ObjectSpreadProgram {
-                effects: Arc::from(effects),
+                effects: crate::semantic_query::PayloadArray::from(effects),
             }),
             scope.clone(),
         ))

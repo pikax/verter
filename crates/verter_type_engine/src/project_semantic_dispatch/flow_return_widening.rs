@@ -309,7 +309,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             // direct write after its construction program. As a whole value
             // it is kept as it is.
             Some(SemanticNodeData::ObjectSpreadProgram(program)) => {
-                let program = program.clone();
+                let program = program.share();
                 drop(data);
                 values.push(match siblings {
                     Some(siblings) => self.spread_literal_in_context(node, &program, &siblings),
@@ -374,7 +374,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let effects: Vec<crate::semantic_query::ObjectConstructionEffect> = program
             .effects
             .iter()
-            .cloned()
+            .map(crate::semantic_query::ObjectConstructionEffect::copy)
             .chain(
                 added
                     .iter()
@@ -384,7 +384,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         self.graph()
             .intern_node(SemanticNodeData::ObjectSpreadProgram(
                 crate::semantic_query::ObjectSpreadProgram {
-                    effects: Arc::from(effects.into_boxed_slice()),
+                    effects: crate::semantic_query::PayloadArray::from(effects.into_boxed_slice()),
                 },
             ))
     }

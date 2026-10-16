@@ -2044,7 +2044,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     return graph.intern_node_with_scope(
                         SemanticNodeData::ObjectSpreadProgram(
                             crate::semantic_query::ObjectSpreadProgram {
-                                effects: Arc::from(effects),
+                                effects: crate::semantic_query::PayloadArray::from(effects),
                             },
                         ),
                         scope.clone(),

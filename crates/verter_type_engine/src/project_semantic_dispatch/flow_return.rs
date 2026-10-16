@@ -13366,7 +13366,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                             let difference = effects.len() as isize - width as isize;
                             frame
                                 .effects
-                                .splice(position..position + width, effects.iter().cloned());
+                                .splice(position..position + width, effects.iter().map(crate::semantic_query::ObjectConstructionEffect::copy));
                             frame.effect_ordinals.splice(
                                 position..position + width,
                                 std::iter::repeat_n(ordinal, effects.len()),
@@ -14173,7 +14173,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             }
             return Positional::Value(self.dispatch.graph().intern_node_with_scope(
                 SemanticNodeData::ObjectSpreadProgram(crate::semantic_query::ObjectSpreadProgram {
-                    effects: Arc::from(effects.into_boxed_slice()),
+                    effects: crate::semantic_query::PayloadArray::from(effects.into_boxed_slice()),
                 }),
                 self.binder_env.scope.clone(),
             ));

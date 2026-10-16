@@ -28039,7 +28039,7 @@ fn subtree_references_node_descends_object_spread_program_effects() {
     });
     let program = graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
         verter_type_engine::semantic_query::ObjectSpreadProgram {
-            effects: Arc::from(
+            effects: verter_type_engine::semantic_query::PayloadArray::from(
                 vec![
                     verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
                         verter_type_engine::semantic_query::AuthoredPropertyEffect {
@@ -28091,7 +28091,7 @@ fn extends_pattern_declares_infer_descends_object_spread_program() {
     let program_with = |value: SemanticNodeId| {
         graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
             verter_type_engine::semantic_query::ObjectSpreadProgram {
-                effects: Arc::from(
+                effects: verter_type_engine::semantic_query::PayloadArray::from(
                     vec![
                         verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
                             verter_type_engine::semantic_query::AuthoredPropertyEffect {
@@ -28159,7 +28159,7 @@ fn mapped_type_does_not_hoist_k_dependent_program_value_expr() {
     });
     let value_expr = graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
         verter_type_engine::semantic_query::ObjectSpreadProgram {
-            effects: Arc::from(
+            effects: verter_type_engine::semantic_query::PayloadArray::from(
                 vec![
                     verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
                         verter_type_engine::semantic_query::AuthoredPropertyEffect {
@@ -28246,7 +28246,7 @@ fn record_shape_classification_sees_binder_inside_program_value() {
     });
     let value_expr = graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
         verter_type_engine::semantic_query::ObjectSpreadProgram {
-            effects: Arc::from(
+            effects: verter_type_engine::semantic_query::PayloadArray::from(
                 vec![
                     verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
                         verter_type_engine::semantic_query::AuthoredPropertyEffect {
@@ -28357,14 +28357,14 @@ fn source_members_for_program_source_is_positive_evidence_with_partial_flag() {
         |effects: Vec<verter_type_engine::semantic_query::ObjectConstructionEffect>| {
             graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
                 verter_type_engine::semantic_query::ObjectSpreadProgram {
-                    effects: Arc::from(effects.into_boxed_slice()),
+                    effects: verter_type_engine::semantic_query::PayloadArray::from(effects.into_boxed_slice()),
                 },
             ))
         };
 
     // Open source `{ a: number, ...T }`: positive member `a`, partial.
     let open_source = program_of(vec![
-        direct_a.clone(),
+        direct_a.copy_for_tests(),
         verter_type_engine::semantic_query::ObjectConstructionEffect::Spread(type_param),
     ]);
     let (members, partial_classes) = dispatch
@@ -28444,7 +28444,7 @@ fn mapped_type_over_open_program_source_defers() {
     });
     let open_source = graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
         verter_type_engine::semantic_query::ObjectSpreadProgram {
-            effects: Arc::from(
+            effects: verter_type_engine::semantic_query::PayloadArray::from(
                 vec![
                     verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
                         verter_type_engine::semantic_query::AuthoredPropertyEffect {
@@ -28580,7 +28580,7 @@ fn keyof_intersection_with_open_program_arm_stays_open() {
         |effects: Vec<verter_type_engine::semantic_query::ObjectConstructionEffect>| {
             graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
                 verter_type_engine::semantic_query::ObjectSpreadProgram {
-                    effects: Arc::from(effects.into_boxed_slice()),
+                    effects: verter_type_engine::semantic_query::PayloadArray::from(effects.into_boxed_slice()),
                 },
             ))
         };
@@ -28677,7 +28677,7 @@ fn keyof_intersection_poisons_through_union_nesting() {
     });
     let open_program = graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
         verter_type_engine::semantic_query::ObjectSpreadProgram {
-            effects: Arc::from(
+            effects: verter_type_engine::semantic_query::PayloadArray::from(
                 vec![
                     verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
                         verter_type_engine::semantic_query::AuthoredPropertyEffect {
@@ -28752,7 +28752,7 @@ fn excess_arm_knows_property_reads_program_targets() {
         |effects: Vec<verter_type_engine::semantic_query::ObjectConstructionEffect>| {
             graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
                 verter_type_engine::semantic_query::ObjectSpreadProgram {
-                    effects: Arc::from(effects.into_boxed_slice()),
+                    effects: verter_type_engine::semantic_query::PayloadArray::from(effects.into_boxed_slice()),
                 },
             ))
         };
@@ -28760,7 +28760,7 @@ fn excess_arm_knows_property_reads_program_targets() {
 
     // Closed program `{a, ...{b}}`: presence AND absence are proven.
     let closed_program = program_of(vec![
-        direct_a.clone(),
+        direct_a.copy_for_tests(),
         verter_type_engine::semantic_query::ObjectConstructionEffect::Spread(simple_object(
             &graph,
             &[("b", string)],
