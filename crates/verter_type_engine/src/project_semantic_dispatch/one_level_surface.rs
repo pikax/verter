@@ -158,7 +158,6 @@ impl OneLevelSurface {
     }
 
     /// Borrow one operand this surface owns.
-    #[must_use]
     pub fn node(
         &self,
         node: SemanticNodeId,
