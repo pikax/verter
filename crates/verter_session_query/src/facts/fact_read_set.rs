@@ -67,9 +67,11 @@
 //!
 //! Installations NEST: the installer pushes onto a per-thread tracer
 //! STACK, and every observation fans out to ALL active cells (see
-//! `resolver_context`'s fan-out chokepoints). An inner cold compute
-//! therefore records its facts into its own cell AND into every
-//! enclosing one, so an outer compute's observation set stays complete
+//! `resolver_context`'s fan-out chokepoints) — directly, or below a
+//! delivering scope through the completed read set that scope's owner
+//! hands down. An inner cold compute therefore records its facts into its
+//! own cell AND into every enclosing one, so an outer compute's
+//! observation set stays complete
 //! while the inner one can make its OWN admission decision (a nested
 //! non-cacheable read or nested mutation instability refuses the inner
 //! entry without silently laundering into the outer signature). The

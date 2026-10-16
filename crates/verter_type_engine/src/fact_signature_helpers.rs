@@ -113,6 +113,34 @@ where
     (value, finalise_compute_scope(source, read_set))
 }
 
+/// [`install_fact_tracer`] for a compute whose owner delivers the
+/// finalised read set — as a carrier holding at least those facts — to the
+/// tracers active when it completes. Observations made inside it then stop
+/// at its own scope instead of also fanning out to every enclosing one,
+/// which receive them once, deduplicated, through that delivery.
+pub(crate) fn install_delivering_fact_tracer<
+    F,
+    R,
+    W: verter_session_query::facts::clocks::WorkspaceClocks + Clone,
+>(
+    source: &FactTracerBasisSource<'_, W>,
+    f: F,
+) -> (R, FactReadSetFinalise)
+where
+    F: FnOnce() -> R,
+{
+    let (value, read_set) =
+        crate::resolver_core::resolver_context::with_delivering_fact_tracer_cell(
+            source.live_basis(),
+            |_cell| {
+                #[cfg(any(test, feature = "test-support"))]
+                force_tracer_refusal(source, None);
+                f()
+            },
+        );
+    (value, finalise_compute_scope(source, read_set))
+}
+
 /// Finalise the read set of one compute's tracer scope: re-check its basis,
 /// then finalise it.
 fn finalise_compute_scope<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>(
@@ -126,7 +154,10 @@ fn finalise_compute_scope<W: verter_session_query::facts::clocks::WorkspaceClock
 /// The fact tracer of one compute that runs in steps (a continuation
 /// frame's build): installed on the thread only while one of its steps
 /// runs, and finalised once, as [`install_fact_tracer`] finalises its
-/// scope, when the compute completes.
+/// scope, when the compute completes. Its observations stop at its own
+/// scope: the owner replays the finalised set (or a carrier holding it)
+/// into the scope that consumes the compute, as
+/// [`install_delivering_fact_tracer`] does.
 pub(crate) struct StepwiseFactTracer<'h, W> {
     source: FactTracerBasisSource<'h, W>,
     tracer: crate::resolver_core::resolver_context::OwnedFactTracer,

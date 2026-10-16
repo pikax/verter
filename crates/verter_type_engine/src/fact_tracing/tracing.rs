@@ -14,9 +14,15 @@
 //! architecture guard verifies it.
 //!
 //! Nesting is supported: the active tracers form a per-thread STACK
-//! (`ACTIVE_TRACERS`), and every observation / non-cacheability mark fans out
-//! to ALL active levels, so an inner scope's observations are also seen by
-//! every enclosing scope. Readers must go through
+//! (`ACTIVE_TRACERS`), and every observation fans out to every enclosing
+//! scope that would not otherwise see it: down the stack from the innermost
+//! scope to the first DELIVERING scope ([`install_delivering`]) inclusive. A
+//! delivering scope's owner hands its whole completed read set (or a
+//! stronger one) to the scopes active when it completes, so the scopes
+//! below it receive its observations exactly once, already deduplicated,
+//! instead of once per observation. Without a delivering scope an
+//! observation reaches every level. A non-cacheability mark reaches every
+//! level it names regardless. Readers must go through
 //! `ResolverContext::current_fact_tracer`, never through the TLS slot directly;
 //! the slot is private to this module.
 
@@ -57,7 +63,7 @@ thread_local! {
     /// pattern is exercised by
     /// `tests/cases/g_misc0/tracer_stack_reentrant_observe_safe.rs`. All access
     /// is single-threaded (TLS).
-    static ACTIVE_TRACERS: RefCell<SmallVec<[*const FactReadSetCell; 8]>> =
+    static ACTIVE_TRACERS: RefCell<SmallVec<[ActiveTracer; 8]>> =
         RefCell::new(SmallVec::new());
 
     /// Per-thread stack of passive [`FactReadRecorder`]s. Same SAFETY
@@ -66,6 +72,42 @@ thread_local! {
     /// guard pops it on drop, unwinding included.
     static ACTIVE_RECORDERS: RefCell<SmallVec<[*const FactReadRecorder; 4]>> =
         RefCell::new(SmallVec::new());
+}
+
+/// One installed tracer: its cell, and whether its owner delivers its
+/// completed read set to the scopes below it.
+#[derive(Clone, Copy)]
+struct ActiveTracer {
+    cell: *const FactReadSetCell,
+    delivers: bool,
+}
+
+/// Every installed tracer cell, innermost last.
+fn active_cells() -> SmallVec<[*const FactReadSetCell; 8]> {
+    ACTIVE_TRACERS.with(|slot| {
+        slot.borrow()
+            .iter()
+            .map(|tracer| tracer.cell)
+            .filter(|cell| !cell.is_null())
+            .collect()
+    })
+}
+
+/// The tracer cells an observation made now must reach, innermost last:
+/// from the innermost scope down to the first delivering scope inclusive.
+fn observing_cells() -> SmallVec<[*const FactReadSetCell; 8]> {
+    ACTIVE_TRACERS.with(|slot| {
+        let stack = slot.borrow();
+        let first = stack
+            .iter()
+            .rposition(|tracer| tracer.delivers)
+            .unwrap_or(0);
+        stack[first..]
+            .iter()
+            .map(|tracer| tracer.cell)
+            .filter(|cell| !cell.is_null())
+            .collect()
+    })
 }
 
 /// A passive witness of the fact reads made while it is installed: every
@@ -111,14 +153,11 @@ pub(crate) struct EvidenceMarks {
 /// Mark every active tracer and recorder: before a result that may
 /// complete with a receipt begins, and again when it ends.
 pub(crate) fn mark_evidence() -> EvidenceMarks {
-    let tracers = ACTIVE_TRACERS.with(|slot| {
-        slot.borrow()
-            .iter()
-            .filter(|ptr| !ptr.is_null())
-            // SAFETY: see module-level SAFETY contract.
-            .map(|&ptr| (ptr, unsafe { &*ptr }.mark()))
-            .collect()
-    });
+    let tracers = active_cells()
+        .into_iter()
+        // SAFETY: see module-level SAFETY contract.
+        .map(|ptr| (ptr, unsafe { &*ptr }.mark()))
+        .collect();
     let recorders = ACTIVE_RECORDERS.with(|slot| {
         slot.borrow()
             .iter()
@@ -140,8 +179,7 @@ pub(crate) fn collapse_evidence(
     end: &EvidenceMarks,
     receipt: &FactVersionRef,
 ) {
-    let active: SmallVec<[*const FactReadSetCell; 8]> =
-        ACTIVE_TRACERS.with(|slot| slot.borrow().clone());
+    let active = active_cells();
     for (ptr, start_mark) in &start.tracers {
         let Some((_, end_mark)) = end.tracers.iter().find(|(end_ptr, _)| end_ptr == ptr) else {
             continue;
@@ -204,8 +242,26 @@ fn active_recorders() -> SmallVec<[*const FactReadRecorder; 4]> {
 /// entire scope duration. `clear` is called on the RAII guard's drop —
 /// even on panic — so the pointer is removed before the cell is freed.
 pub(crate) fn install(cell: &FactReadSetCell) {
+    push_tracer(cell, false);
+}
+
+/// Push `cell` as a DELIVERING scope: observations made while it is
+/// installed reach it and the scopes above it, but not the scopes below.
+///
+/// The caller owns the delivery: when the scope completes, its whole read
+/// set — or a carrier holding at least those facts — must reach the scopes
+/// active then, through the ordinary fan-out. Same SAFETY contract as
+/// [`install`].
+pub(crate) fn install_delivering(cell: &FactReadSetCell) {
+    push_tracer(cell, true);
+}
+
+fn push_tracer(cell: &FactReadSetCell, delivers: bool) {
     ACTIVE_TRACERS.with(|slot| {
-        slot.borrow_mut().push(cell as *const FactReadSetCell);
+        slot.borrow_mut().push(ActiveTracer {
+            cell: cell as *const FactReadSetCell,
+            delivers,
+        });
     });
 }
 
@@ -225,7 +281,7 @@ pub(crate) fn clear() {
 pub fn current_tracer<'a>() -> Option<&'a FactReadSetCell> {
     ACTIVE_TRACERS.with(|slot| {
         let stack = slot.borrow();
-        let ptr = stack.last().copied();
+        let ptr = stack.last().map(|tracer| tracer.cell);
         drop(stack);
         match ptr {
             Some(p) if !p.is_null() => {
@@ -240,7 +296,8 @@ pub fn current_tracer<'a>() -> Option<&'a FactReadSetCell> {
     })
 }
 
-/// Fan an observed fact into **every** active tracer on the stack.
+/// Fan an observed fact into every active tracer that must observe it (see
+/// the module docs: down to the first delivering scope).
 ///
 /// Snapshot-then-iterate: collect the pointer set under a borrow,
 /// drop the borrow, then iterate the collected set. No borrow is held
@@ -259,8 +316,7 @@ pub(crate) fn observe_fan_out(fact: FactVersionRef) {
     // Collect pointers under a short borrow, then drop the borrow
     // before calling into FactReadSetCell so re-entrant installs
     // from inside an observer don't cause RefCell panics.
-    let ptrs: SmallVec<[*const FactReadSetCell; 8]> =
-        ACTIVE_TRACERS.with(|slot| slot.borrow().clone());
+    let ptrs = observing_cells();
     // Move the owned fact into the LAST live tracer; an earlier one copies
     // it only when its recent window does not already hold it. With the
     // common single-tracer stack this fans out ZERO fact clones (a
@@ -279,7 +335,7 @@ pub(crate) fn observe_fan_out(fact: FactVersionRef) {
     }
 }
 
-/// Fan a borrowed signature into **every** active tracer on the stack.
+/// Fan a borrowed signature into every active tracer that must observe it.
 #[inline]
 pub(crate) fn observe_fan_out_borrowed(sig: &[FactVersionRef]) {
     observe_signature_consumers(sig, |cell| cell.observe_borrowed_signature(sig));
@@ -310,8 +366,7 @@ fn observe_signature_consumers(sig: &[FactVersionRef], observe: impl Fn(&FactRea
             .borrow_mut()
             .extend(sig.iter().cloned());
     }
-    let ptrs: SmallVec<[*const FactReadSetCell; 8]> =
-        ACTIVE_TRACERS.with(|slot| slot.borrow().clone());
+    let ptrs = observing_cells();
     for ptr in ptrs {
         if !ptr.is_null() {
             // SAFETY: see module-level SAFETY contract.
@@ -343,8 +398,7 @@ pub(super) fn apply_non_cacheable_propagation(propagation: NonCacheablePropagati
         // SAFETY: see `ACTIVE_RECORDERS`.
         unsafe { &*recorder }.non_cacheable.set(true);
     }
-    let ptrs: SmallVec<[*const FactReadSetCell; 8]> =
-        ACTIVE_TRACERS.with(|slot| slot.borrow().clone());
+    let ptrs = active_cells();
     let first = match propagation {
         NonCacheablePropagation::LocalOnly => ptrs.len().saturating_sub(1),
         NonCacheablePropagation::Transitive => 0,
@@ -518,6 +572,45 @@ mod fan_out_tests {
         clear();
         assert_eq!(outer.len(), 1, "outer tracer must observe the fact");
         assert_eq!(inner.len(), 1, "inner tracer must observe the fact");
+    }
+
+    /// A delivering scope keeps what is observed inside it from the scopes
+    /// below it, which receive it once when its owner delivers the
+    /// completed set; the scopes above it, a recorder and a transitive
+    /// refusal still see everything at once.
+    #[test]
+    fn a_delivering_scope_stops_the_fan_out_below_it() {
+        let fact = |canonical: &str| FactVersionRef::FileWholeHash {
+            canonical_id: canonical.to_string(),
+            hash: [3u8; 16],
+        };
+        let outer = FactReadSetCell::new();
+        let delivering = FactReadSetCell::new();
+        let inner = FactReadSetCell::new();
+        let recorder = FactReadRecorder::default();
+        install(&outer);
+        install_delivering(&delivering);
+        install(&inner);
+        let scope = install_recorder(&recorder);
+        observe_fan_out(fact("/inner.ts"));
+        observe_fan_out_borrowed(&[fact("/borrowed.ts")]);
+        apply_non_cacheable_propagation(
+            verter_session_query::facts::fact_read_set::NonCacheablePropagation::Transitive,
+        );
+        drop(scope);
+        clear();
+        assert_eq!((inner.len(), delivering.len(), outer.len()), (2, 2, 0));
+        assert!(outer.non_cacheable_read_observed());
+        // The delivering scope completes: its owner hands its set down.
+        clear();
+        let delivered: std::sync::Arc<[FactVersionRef]> =
+            std::sync::Arc::from([fact("/borrowed.ts"), fact("/inner.ts")]);
+        observe_fan_out_canonical(&delivered);
+        clear();
+        assert_eq!(outer.len(), 2, "the delivered set reaches the scope below");
+        let (recorded, non_cacheable) = recorder.into_parts();
+        assert_eq!(recorded.len(), 2);
+        assert!(non_cacheable);
     }
 
     /// A fan-out with NO active tracer is a no-op (no panic, nothing

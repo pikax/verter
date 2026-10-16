@@ -540,6 +540,20 @@ pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabili
     /// (a content, source-environment or project-shape clock moved) is
     /// never served: the claim computes.
     published_results: std::cell::RefCell<rustc_hash::FxHashMap<SemanticQueryKey, PublishedResult>>,
+    /// The receipt of each root evaluation this dispatcher admitted as
+    /// finishing as itself ([`Self::admit_self_evaluation`]): one step under
+    /// the evaluation's own identity, a pure function of that identity, so
+    /// every admission of it shares one receipt.
+    self_evaluation_receipts: std::cell::RefCell<
+        rustc_hash::FxHashMap<
+            (
+                SemanticNodeId,
+                crate::semantic_query::ProjectionReductionContext,
+                evaluate::DeferredEvaluationDemand,
+            ),
+            Arc<cost_receipt::DemandCostReceipt>,
+        >,
+    >,
     /// The facts the root frame of the running drive traced soundly, left
     /// by its completion for the drive's entry to seal a refusal on.
     driven_root_traced: std::cell::RefCell<Option<TracedFacts>>,
@@ -889,6 +903,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 connected_demand::DemandCancellation::from_flags(snapshot.flags()),
             ),
             published_results: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
+            self_evaluation_receipts: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
             driven_root_traced: std::cell::RefCell::new(None),
             _construction: binding_graph_scope,
         }
@@ -3739,7 +3754,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             &mut Option<crate::semantic_query::operand::SemanticOperandEvidence>,
         >,
     ) -> CacheRead<QueryResult<SemanticQueryValue>> {
-        let _scope = self.graph().enter_node_root_scope();
+        // The execution's own construction scope hands its deliveries to
+        // the dispatcher's enclosing scope when it closes; they and the
+        // read's lease keep its value rooted until the delivery lease below
+        // re-roots it in that scope.
         let mut read = self.execute_via_cold_build_helper_owned(key, publication, operand_evidence);
         read.lease = self
             .graph()
@@ -4293,8 +4311,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // panic / early-return too (panic-safe pop), so an unwinding
             // cold build never leaks a stale frame onto the stack.
             let taint_guard = BuildLocalTaintGuard::push(&self.build_local_taint);
+            // The build's carrier — every fact it traced, its fence and
+            // prelude facts and its self-roots — is delivered to the tracers
+            // active when it completes (`complete` bubbles it whether or not
+            // the result is admitted), so its observations stop at its scope.
             let (output, finalise) =
-                crate::fact_signature_helpers::install_fact_tracer(&basis_source, || {
+                crate::fact_signature_helpers::install_delivering_fact_tracer(&basis_source, || {
                     self.open_cold_build(evidence_target_key.as_ref());
                     #[cfg(any(test, feature = "test-support"))]
                     if let Some(hook) = self.graph().produce_hook_for_tests() {

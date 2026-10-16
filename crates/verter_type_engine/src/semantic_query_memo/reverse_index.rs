@@ -142,18 +142,17 @@ pub(super) fn register_reverse_index(
     let timing_on = verter_execution::request_context::current_timing_enabled();
     // Every registration of this candidate names the one family.
     let family = Arc::new(family.clone());
-    for populated in populated_slots {
-        for canonical in inputs.canonicals.iter() {
-            register_single_canonical(
-                canonical_to_entries,
-                canonical,
-                &family,
-                *populated,
-                admission_seq,
-                &inputs.registered_facts,
-                timing_on,
-            );
-        }
+    // One shard lookup and lock per canonical takes every populated slot.
+    for canonical in inputs.canonicals.iter() {
+        register_canonical_slots(
+            canonical_to_entries,
+            canonical,
+            &family,
+            populated_slots,
+            admission_seq,
+            &inputs.registered_facts,
+            timing_on,
+        );
     }
 }
 
@@ -233,15 +232,16 @@ pub(super) fn prune_reverse_index_registration(
 
 /// Single-shard registration step used by
 /// [`register_reverse_index`]. Inserts one
-/// `(seq, slot) -> (family, registered_facts)` record into the
-/// `canonical_to_entries[canonical]` shard, holding the shard lock (read
-/// for an existing shard, write to create one) across the inner `insert`.
+/// `(seq, slot) -> (family, registered_facts)` record per populated slot
+/// into the `canonical_to_entries[canonical]` shard, holding the shard lock
+/// (read for an existing shard, write to create one) across the inner
+/// inserts.
 #[inline]
-fn register_single_canonical(
+fn register_canonical_slots(
     canonical_to_entries: &CanonicalToEntries,
     canonical: &str,
     family: &Arc<FamilyKey>,
-    populated: ModeSlot,
+    populated_slots: &[ModeSlot],
     admission_seq: u64,
     registered_facts: &RegisteredFacts,
     timing_on: bool,
@@ -251,7 +251,14 @@ fn register_single_canonical(
     } else {
         None
     };
-    let record = (Arc::clone(family), Arc::clone(registered_facts));
+    let insert = |map: &mut FxHashMap<_, _>| {
+        for populated in populated_slots {
+            map.insert(
+                (admission_seq, *populated),
+                (Arc::clone(family), Arc::clone(registered_facts)),
+            );
+        }
+    };
     // An existing shard takes the registration under its read lock; only a
     // canonical without one copies its name into a new shard. A shard the
     // prune drops between the two steps is re-created by the second, as the
@@ -259,7 +266,7 @@ fn register_single_canonical(
     if let Some(shard) = canonical_to_entries.get(canonical) {
         let mut map = shard.value().lock();
         record_lock_wait(lock_start);
-        map.insert((admission_seq, populated), record);
+        insert(&mut map);
         return;
     }
     let shard = canonical_to_entries
@@ -267,7 +274,7 @@ fn register_single_canonical(
         .or_insert_with(|| Mutex::new(FxHashMap::default()));
     let mut map = shard.value().lock();
     record_lock_wait(lock_start);
-    map.insert((admission_seq, populated), record);
+    insert(&mut map);
 }
 
 fn record_lock_wait(lock_start: Option<Instant>) {

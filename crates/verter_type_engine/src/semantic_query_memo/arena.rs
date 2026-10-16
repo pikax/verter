@@ -860,9 +860,8 @@ impl NodeArena {
         data: SemanticNodeData,
         scope: NodeScopeId,
     ) -> SemanticNodeId {
-        let root = self.intern_owned(data, scope);
-        let id = root.id();
-        super::node_roots::NodeRootScope::capture(root);
+        let id = self.push_impl(data, scope);
+        super::node_roots::NodeRootScope::capture_constructed(&self.core, id);
         id
     }
 
@@ -1076,6 +1075,9 @@ impl NodeArena {
         ))
     }
 
+    /// Intern `data` and hand back the count its intern took as an owned
+    /// root.
+    #[cfg(test)]
     pub(super) fn intern_owned(
         &self,
         data: SemanticNodeData,
