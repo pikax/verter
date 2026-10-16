@@ -474,3 +474,149 @@ fn a_reduced_output_owns_its_node() {
     );
     assert!(graph.node_is_live(reduced.node_id()));
 }
+
+/// A deferred conditional delivered through a public read owns the operands
+/// its pending substitution will apply later: they stay readable through
+/// the payload's child capabilities after the construction scope and the
+/// cache are gone, and the final read's drop releases them.
+#[test]
+fn a_deferred_substitutions_pending_operands_stay_owned_by_the_delivering_read() {
+    use verter_type_engine::semantic_query::ConditionalPendingSubstitution;
+    let host = host();
+    let harness = CountedOwnershipHarness::new();
+    let pending_argument = RefCell::new(None);
+    let read = harness.run(|store| {
+        store.execute_cooperative(
+            &host,
+            key("Target"),
+            || panic!("no recursion"),
+            || {
+                let param = literal(store, "parameter");
+                let argument = literal(store, "pending argument");
+                *pending_argument.borrow_mut() = Some(argument);
+                let conditional = store.intern_node(SemanticNodeData::Conditional {
+                    check: param,
+                    extends: literal(store, "extends"),
+                    true_branch_ref: literal(store, "true branch"),
+                    false_branch_ref: literal(store, "false branch"),
+                    distributive: false,
+                    pending: Some(Arc::new(
+                        ConditionalPendingSubstitution::empty().append_true(param, argument),
+                    )),
+                });
+                (QueryResult::Value(conditional), empty_signature())
+            },
+        )
+    });
+    let argument = pending_argument.into_inner().expect("the build ran");
+    let clone = read.clone();
+    harness.run(|store| store.invalidate_all());
+    drop(read);
+    let QueryResult::Value(node) = *clone.value() else {
+        panic!("the deferred conditional is delivered: {clone:?}");
+    };
+    let payload = clone.node(node).unwrap().read().unwrap();
+    let operand = payload.child(argument).unwrap().read().unwrap();
+    assert!(matches!(
+        &*operand,
+        SemanticNodeData::Literal(LiteralValue::String(text)) if text == "pending argument"
+    ));
+    drop((operand, payload));
+    assert_eq!(harness.live_nodes(), 6, "the read owns the deferred shell");
+    drop(clone);
+    assert_eq!(harness.live_nodes(), 0, "the final read releases it");
+}
+
+/// Dispatchers over one graph share its construction owner on their
+/// thread: an operand one of them returns stays owned while any of them
+/// lives, whichever is dropped first, and a free construction scope may
+/// close before a dispatcher opened after it.
+#[test]
+fn dispatchers_drop_in_any_order_and_never_release_a_live_dispatchers_operands() {
+    let host = counted_host();
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let first = host.semantic_dispatch();
+    let second = host.semantic_dispatch();
+    let node = first.opaque(QueryError::Other(Arc::from("first's operand")));
+    drop(second);
+    assert!(
+        graph.node_is_live(node),
+        "a dispatcher's operand survives a later dispatcher's drop"
+    );
+    let third = host.semantic_dispatch();
+    drop(first);
+    assert!(
+        graph.node_is_live(node),
+        "a dispatcher still alive keeps the operands of one dropped before it"
+    );
+    let free = graph.enter_node_root_scope();
+    let fourth = host.semantic_dispatch();
+    drop(free);
+    drop(third);
+    assert!(graph.node_is_live(node));
+    drop(fourth);
+    assert!(
+        !graph.node_is_live(node),
+        "the last dispatcher's drop releases the shared construction owner"
+    );
+}
+
+/// A one-level surface the shared projection hands out is an owning
+/// adapter: its members stay readable through it after the dispatch, the
+/// caches and the resolved base are gone.
+#[test]
+fn a_projected_one_level_surface_owns_its_members() {
+    use verter_type_engine::project_semantic_dispatch::one_level_surface::project_one_level_surface;
+    use verter_type_engine::semantic_query::{ProjectionReductionContext, SurfaceEntry};
+    let host = counted_host();
+    let base = host
+        .resolve_named_symbol(FILE, "Target", Some(ProjectionMode::Navigate))
+        .expect("the interface resolves");
+    let surface = {
+        let d = host.semantic_dispatch();
+        project_one_level_surface(
+            &host,
+            &d,
+            base.id(),
+            Arc::from([]),
+            ProjectionReductionContext::published(ProjectionMode::Shallow),
+            None,
+        )
+        .resolved_for_tests()
+        .expect("the interface has a one-level surface")
+    };
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    graph.invalidate_all();
+    drop(base);
+    let [SurfaceEntry::Member(member)] = surface.entries() else {
+        panic!("one member: {surface:?}");
+    };
+    assert!(
+        graph.node_is_live(member.value),
+        "the surface owns its member"
+    );
+    let value = surface.node(member.value).unwrap().read().unwrap();
+    assert!(
+        matches!(&*value, SemanticNodeData::Primitive(_)),
+        "{value:?}"
+    );
+}
+
+/// A resolved node the delivery cannot root is a typed fault, never an
+/// absent result indistinguishable from "not found".
+#[test]
+fn a_resolved_node_that_cannot_be_rooted_is_a_typed_fault() {
+    let host = counted_host();
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let unowned =
+        SemanticNodeId(verter_type_engine::semantic_query_memo::UNALLOCATABLE_ID_FLOOR + 1);
+    assert!(
+        crate::typeinfo::resolve_named_symbol::deliver_resolved_root(&graph, unowned).is_err(),
+        "outside a construction lane nothing roots"
+    );
+    let _lane = host.project_type_store().construction_grant().enter_scope();
+    assert!(
+        crate::typeinfo::resolve_named_symbol::deliver_resolved_root(&graph, unowned).is_err(),
+        "an ordinal the graph never allocated does not root"
+    );
+}

@@ -840,6 +840,70 @@ fn sustained_unique_edits_keep_the_kernel_store_bounded_and_the_answers_fresh() 
     );
 }
 
+/// A signature set owns its candidates in the graph whose walk published
+/// them, whichever graph's construction scope is newest on the thread: a
+/// dispatcher of another graph opened after the publishing one neither
+/// captures the candidates nor lends their ordinals to its own payloads.
+#[test]
+fn a_signature_set_roots_its_candidates_in_the_graph_that_published_them() {
+    use verter_type_engine::semantic_query::QueryOutcome;
+    use verter_type_engine::semantic_query_memo::ownership_harness::CountedOwnershipHarness;
+    let host = host();
+    let d = ProjectSemanticDispatch::with_ownership_harness(
+        host.as_ref(),
+        CountedOwnershipHarness::new(),
+    );
+    let [overloaded, _] = subjects(&d);
+    // Another graph's dispatcher, opened after `d`: its scope is the newest.
+    let other = ProjectSemanticDispatch::with_ownership_harness(
+        host.as_ref(),
+        CountedOwnershipHarness::new(),
+    );
+    let QueryOutcome::Ready(ready) = d.signatures_of_type_with_authored(
+        d.graph().signature_store(),
+        overloaded,
+        SignatureKind::Call,
+        SemanticContextId::production(),
+    ) else {
+        panic!("an overloaded callable answers");
+    };
+    let value = ready.value;
+    let graph = Arc::clone(d.graph());
+    drop(d);
+    graph.invalidate_all();
+    graph.signature_store().replace_epoch().unwrap();
+    let authored: Vec<SemanticNodeId> = value
+        .candidate_nodes()
+        .iter()
+        .map(|candidate| candidate.authored().expect("authored leaves"))
+        .collect();
+    assert_eq!(authored.len(), 2, "both overloads are candidates");
+    for node in &authored {
+        let payload = graph
+            .read(value.node(*node).unwrap())
+            .expect("the candidate is read in the graph that published it");
+        assert!(
+            matches!(&*payload, SemanticNodeData::Signature { .. }),
+            "{payload:?}"
+        );
+        assert!(
+            matches!(
+                other.graph().read(value.node(*node).unwrap()),
+                Err(verter_type_engine::semantic_query::QueryError::ForeignSemanticOperand)
+            ),
+            "the newer graph's store refuses the publisher's candidate"
+        );
+    }
+    drop(other);
+    assert!(authored.iter().all(|node| graph.node_is_live(*node)));
+    drop(value);
+    assert_eq!(
+        graph.node_count(),
+        graph.node_ownership_counts().permanent_nodes,
+        "the final copy releases the candidate topology"
+    );
+}
+
 /// A signature set handed to a consumer owns its candidates' publishing
 /// nodes: a clone of the value reads every authored candidate after the
 /// dispatch scope, the memo and the epoch that produced it are gone, and the

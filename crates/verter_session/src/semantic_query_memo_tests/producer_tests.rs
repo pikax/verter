@@ -372,7 +372,20 @@ fn keyed_output(
     store: &SemanticGraphStore,
     hash: [u8; 16],
 ) -> verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput<SemanticQueryValue> {
-    let node = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    keyed_output_of(
+        store,
+        hash,
+        SemanticNodeData::Primitive(PrimitiveKind::String),
+    )
+}
+
+/// [`keyed_output`] delivering `data`.
+fn keyed_output_of(
+    store: &SemanticGraphStore,
+    hash: [u8; 16],
+    data: SemanticNodeData,
+) -> verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput<SemanticQueryValue> {
+    let node = store.intern_node(data);
     let carrier = verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(vec![
         FactVersionRef::FileWholeHash {
             canonical_id: KEYED.to_string(),
@@ -483,6 +496,66 @@ fn a_producer_belongs_to_its_task_and_a_subscription_waits_when_its_holder_choos
     assert_eq!(store.stats_snapshot().joined_waits, 1);
     drop((first, second));
     assert_eq!(store.wait_graph_counts_for_tests(), (0, 0));
+}
+
+/// A subscriber joined to another task's flight receives a read that owns
+/// the delivered value in its own right: after the producer's read, the
+/// cache and the construction scope are gone, the joined read still reads
+/// the value, and its drop releases it.
+#[test]
+fn a_joined_read_owns_the_value_after_the_producer_and_the_cache_are_gone() {
+    use verter_type_engine::semantic_query_memo::ownership_harness::CountedOwnershipHarness;
+    let (host, hash) = keyed_host();
+    let harness = CountedOwnershipHarness::new();
+    let (produced, joined) = harness.run(|store| {
+        let owner = store.task_registry_for_tests().register_task();
+        let follower = store.task_registry_for_tests().register_task();
+        let (claimed, _) = claim(store, &host, &owner);
+        let Claim::Produce(lease) = claimed else {
+            panic!("the first claim of a cold key produces it");
+        };
+        let (subscribed, mut attempt) = claim(store, &host, &follower);
+        let Claim::Subscribed(subscription) = subscribed else {
+            panic!("another task's claim subscribes to the open producer");
+        };
+        let receipt = lease.fixture_receipt();
+        let mut capture = ReadCapture::default();
+        let flags = host.request_flags();
+        let output = keyed_output_of(
+            store,
+            hash,
+            SemanticNodeData::Literal(verter_type_expr::LiteralValue::String("joined".into())),
+        );
+        let Ok(mut settled) = lease.settle(&host, flags, output, Some(receipt)) else {
+            panic!("an uncancelled producer settles");
+        };
+        settled
+            .admit(&host, flags, &mut capture)
+            .expect("an uncancelled producer is admitted");
+        let produced = settled.complete(&host, &mut capture);
+        let Joined::Read(joined) = subscription.wait(&host, flags, &mut attempt, &mut capture)
+        else {
+            panic!("a same-view subscriber reads the delivered result");
+        };
+        (produced, joined)
+    });
+    harness.run(|store| store.invalidate_all());
+    drop(produced);
+    let QueryResult::Value(SemanticQueryValue::TypeNode(node)) = joined.value().clone() else {
+        panic!("the subscriber receives the producer's node: {joined:?}");
+    };
+    assert_eq!(harness.live_nodes(), 1, "the joined read owns the value");
+    let payload = joined.node(node).unwrap().read().unwrap();
+    assert!(matches!(
+        &*payload,
+        SemanticNodeData::Literal(verter_type_expr::LiteralValue::String(text)) if text == "joined"
+    ));
+    drop((payload, joined));
+    assert_eq!(
+        harness.live_nodes(),
+        0,
+        "the joined read's drop releases it"
+    );
 }
 
 #[test]

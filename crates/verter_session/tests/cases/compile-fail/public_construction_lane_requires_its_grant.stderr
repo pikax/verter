@@ -1,0 +1,35 @@
+error[E0624]: method `enter_node_root_scope` is private
+  --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:12:24
+   |
+12 |     let _scope = graph.enter_node_root_scope();
+   |                        ^^^^^^^^^^^^^^^^^^^^^ private method
+   |
+  ::: $WORKSPACE/crates/verter_type_engine/src/semantic_query_memo/nodes.rs
+   |
+   |     pub(crate) fn enter_node_root_scope(&self) -> node_roots::NodeRootScope {
+   |     ----------------------------------------------------------------------- private method defined here
+
+error[E0624]: method `root_nodes` is private
+  --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:16:24
+   |
+16 |       let _roots = graph.root_nodes([id]);
+   |                          ^^^^^^^^^^ private method
+   |
+  ::: $WORKSPACE/crates/verter_type_engine/src/semantic_query_memo/nodes.rs
+   |
+   | /     pub(crate) fn root_nodes(
+   | |         &self,
+   | |         ids: impl IntoIterator<Item = SemanticNodeId>,
+   | |     ) -> Result<node_roots::NodeRootSet, QueryError> {
+   | |____________________________________________________- private method defined here
+
+error[E0624]: associated function `mint` is private
+  --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:20:28
+   |
+20 |     NodeConstructionGrant::mint(graph)
+   |                            ^^^^ private associated function
+   |
+  ::: $WORKSPACE/crates/verter_type_engine/src/semantic_query_memo/node_roots.rs
+   |
+   |     pub(crate) fn mint(graph: &super::SemanticGraphStore) -> Self {
+   |     ------------------------------------------------------------- private associated function defined here

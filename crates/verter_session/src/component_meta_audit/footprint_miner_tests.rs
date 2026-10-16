@@ -335,6 +335,12 @@ use verter_type_engine::semantic_query::PrimitiveKind;
 /// `type_args` are carried IN at construction through the sanctioned
 /// `SemanticNodeData::new_bare_ref` constructor — never hand-bound — so this
 /// is a REAL carrier node, not a faked `SemanticNodeData`.
+/// Hash `data` inside a construction lane of `graph`, as the miner does.
+fn hash_in_lane(graph: &SemanticGraphStore, data: &SemanticNodeData) -> Hash16 {
+    let _lane = graph.enter_node_root_scope();
+    structural_hash_of(graph, data)
+}
+
 fn bare_ref_with_arg(arg_child: SemanticNodeId) -> SemanticNodeData {
     SemanticNodeData::new_bare_ref(
         Arc::from("Foo"),
@@ -365,8 +371,8 @@ fn structural_hash_discriminates_carrier_type_args_foo_a_vs_foo_b() {
     let foo_a = bare_ref_with_arg(child_a); // Foo<A>
     let foo_b = bare_ref_with_arg(child_b); // Foo<B>
 
-    let hash_a = structural_hash_of(&graph, &foo_a);
-    let hash_b = structural_hash_of(&graph, &foo_b);
+    let hash_a = hash_in_lane(&graph, &foo_a);
+    let hash_b = hash_in_lane(&graph, &foo_b);
     assert_ne!(
         hash_a, hash_b,
         "DISCRIMINATION: Foo<A> and Foo<B> (same head, different single type argument) must \
@@ -390,8 +396,8 @@ fn structural_hash_is_stable_for_identical_carriers() {
     let foo_a1 = bare_ref_with_arg(child_a);
     let foo_a2 = bare_ref_with_arg(child_a);
 
-    let hash_a1 = structural_hash_of(&graph, &foo_a1);
-    let hash_a2 = structural_hash_of(&graph, &foo_a2);
+    let hash_a1 = hash_in_lane(&graph, &foo_a1);
+    let hash_a2 = hash_in_lane(&graph, &foo_a2);
     assert_eq!(
         hash_a1, hash_a2,
         "STABILITY: two structurally-identical Foo<A> carriers must yield the SAME structural \
@@ -414,14 +420,14 @@ fn structural_hash_discriminates_exact_infer_binder_identity() {
     };
 
     assert_ne!(
-        structural_hash_of(&graph, &left),
-        structural_hash_of(&graph, &right),
+        hash_in_lane(&graph, &left),
+        hash_in_lane(&graph, &right),
         "same-name infer references bound by distinct declarations must have \
          distinct audit structural fingerprints"
     );
     assert_eq!(
-        structural_hash_of(&graph, &left),
-        structural_hash_of(
+        hash_in_lane(&graph, &left),
+        hash_in_lane(
             &graph,
             &SemanticNodeData::InferRef {
                 name: Arc::from("T"),
@@ -478,8 +484,8 @@ fn structural_hash_discriminates_spread_operand_identity() {
         )
     };
     assert_ne!(
-        structural_hash_of(&graph, &data(operand)),
-        structural_hash_of(&graph, &data(other_operand)),
+        hash_in_lane(&graph, &data(operand)),
+        hash_in_lane(&graph, &data(other_operand)),
         "spread operand identity is part of the footprint structural fingerprint"
     );
 }
@@ -506,8 +512,8 @@ fn structural_hash_carrier_discrimination_comes_from_args_not_head() {
     );
     // …yet the fingerprints diverge, so the arg child is the discriminator.
     assert_ne!(
-        structural_hash_of(&graph, &foo_a),
-        structural_hash_of(&graph, &foo_b),
+        hash_in_lane(&graph, &foo_a),
+        hash_in_lane(&graph, &foo_b),
         "with identical heads, the differing fingerprints prove the carrier ARG child is what \
          discriminates the fingerprint."
     );
@@ -558,8 +564,8 @@ fn structural_hash_is_cross_graph_stable_despite_different_child_ordinals() {
     );
 
     assert_eq!(
-        structural_hash_of(&graph_a, &foo_a),
-        structural_hash_of(&graph_b, &foo_b),
+        hash_in_lane(&graph_a, &foo_a),
+        hash_in_lane(&graph_b, &foo_b),
         "CROSS-GRAPH STABILITY: two equivalent `Foo<String>` carriers must hash IDENTICALLY \
          even when the `String` child received a different arena ordinal in each graph. The \
          pre-fix code folded the raw ordinal into the bytes and FAILED this; a content-only \
@@ -609,8 +615,8 @@ fn structural_hash_discriminates_nested_non_carrier_child_across_colliding_ordin
     );
 
     assert_ne!(
-        structural_hash_of(&graph_a, &foo_a),
-        structural_hash_of(&graph_b, &foo_b),
+        hash_in_lane(&graph_a, &foo_a),
+        hash_in_lane(&graph_b, &foo_b),
         "NESTED DISCRIMINATION: `Foo<Box<String>>` and `Foo<Box<Number>>` must hash \
          DIFFERENTLY even though the outer Box and inner-primitive ordinals collide. The \
          pre-fix carrier-only recursion + Debug-non-carrier arm rendered the Box identically \
@@ -658,8 +664,8 @@ fn structural_hash_recursion_into_grandchildren_is_load_bearing() {
     );
 
     assert_ne!(
-        structural_hash_of(&graph_a, &foo_a),
-        structural_hash_of(&graph_b, &foo_b),
+        hash_in_lane(&graph_a, &foo_a),
+        hash_in_lane(&graph_b, &foo_b),
         "LOAD-BEARING RECURSION: the only difference is a primitive TWO non-carrier levels \
          deep behind colliding ordinals. The fingerprints diverge ONLY because `encode_child` \
          recursively descends `graph.node_data` to that primitive. Delete the recursion (or \
@@ -841,11 +847,11 @@ fn synthetic_binding_is_cross_graph_stable_despite_different_value_node_ordinals
         "test setup must give the `value_node` target different ordinals across the two graphs"
     );
 
-    let hash_a = structural_hash_of(
+    let hash_a = hash_in_lane(
         &graph_a,
         &graph_a.node_data(binding_a).expect("binding_a interned"),
     );
-    let hash_b = structural_hash_of(
+    let hash_b = hash_in_lane(
         &graph_b,
         &graph_b.node_data(binding_b).expect("binding_b interned"),
     );
@@ -894,11 +900,11 @@ fn synthetic_binding_distinguishes_value_node_content_under_colliding_ordinals()
         "test setup must collide the `value_node` target ordinal across the two graphs"
     );
 
-    let hash_a = structural_hash_of(
+    let hash_a = hash_in_lane(
         &graph_a,
         &graph_a.node_data(binding_a).expect("binding_a interned"),
     );
-    let hash_b = structural_hash_of(
+    let hash_b = hash_in_lane(
         &graph_b,
         &graph_b.node_data(binding_b).expect("binding_b interned"),
     );

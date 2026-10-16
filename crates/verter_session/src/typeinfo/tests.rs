@@ -1317,6 +1317,8 @@ fn operator_reduction_step_propagates_fault_opaque_not_masked_as_carrier() {
     // step (fault → `Err`).
     let host = make_host_with_audit();
     let graph = host.project_type_store().semantic_graph();
+    // The step classifies inside its caller's construction lane.
+    let _lane = host.project_type_store().construction_grant().enter_scope();
 
     // The operator carrier the step preserves on a non-fault.
     let carrier = graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {

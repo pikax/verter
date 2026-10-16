@@ -1,7 +1,13 @@
 error[E0451]: fields `id` and `arena` of struct `NodeRef` are private
- --> tests/cases/compile-fail/public_node_capability_cannot_be_forged.rs:9:15
-  |
-9 |     NodeRef { id, ..issued }
-  |               ^^    ^^^^^^ field `arena` is private
-  |               |
-  |               private field
+  --> tests/cases/compile-fail/public_node_capability_cannot_be_forged.rs:10:15
+   |
+10 |     NodeRef { id, ..issued }
+   |               ^^    ^^^^^^ field `arena` is private
+   |               |
+   |               private field
+
+error[E0451]: field `arena` of struct `NodeConstructionGrant` is private
+  --> tests/cases/compile-fail/public_node_capability_cannot_be_forged.rs:14:31
+   |
+14 |     NodeConstructionGrant { ..grant }
+   |                               ^^^^^ field `arena` is private
