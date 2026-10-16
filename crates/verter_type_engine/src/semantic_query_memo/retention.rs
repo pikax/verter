@@ -26,7 +26,17 @@ impl SemanticGraphStore {
         provenance: Arc<crate::engine_provenance::EngineProvenance>,
         retention_account: StoreAccount,
     ) -> Self {
-        let mut store = Self::with_account(retention_account);
+        Self::with_provenance_and_ownership(provenance, retention_account, Default::default())
+    }
+
+    /// [`Self::with_provenance`] in `ownership`'s reclamation regime.
+    #[must_use]
+    pub(crate) fn with_provenance_and_ownership(
+        provenance: Arc<crate::engine_provenance::EngineProvenance>,
+        retention_account: StoreAccount,
+        ownership: super::GraphOwnership,
+    ) -> Self {
+        let mut store = Self::with_account_and_ownership(retention_account, ownership);
         store.arena.provenance = Some(Arc::clone(&provenance));
         store.provenance = Some(provenance);
         store
@@ -39,9 +49,18 @@ impl SemanticGraphStore {
     /// without consuming aggregate headroom.
     #[must_use]
     pub fn with_account(retention_account: StoreAccount) -> Self {
+        Self::with_account_and_ownership(retention_account, Default::default())
+    }
+
+    /// [`Self::with_account`] in `ownership`'s reclamation regime.
+    #[must_use]
+    pub(crate) fn with_account_and_ownership(
+        retention_account: StoreAccount,
+        ownership: super::GraphOwnership,
+    ) -> Self {
         Self {
             retention_account,
-            ..Default::default()
+            ..Self::with_ownership(ownership)
         }
     }
 

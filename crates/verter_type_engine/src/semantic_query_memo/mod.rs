@@ -736,6 +736,19 @@ pub enum MemoFamilyBound {
     ForTest(usize),
 }
 
+/// How a host-composed graph reclaims node slots. Production graphs keep
+/// the canonical-sweep regime; the counted regime is the controlled
+/// ownership fixture, available to test builds only.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GraphOwnership {
+    /// Canonical sweeps reclaim node slots.
+    #[default]
+    Legacy,
+    /// The counted fixture: a node is destroyed when its last root drops.
+    #[cfg(any(test, feature = "test-support"))]
+    CountedForTests,
+}
+
 impl Default for SemanticGraphStore {
     fn default() -> Self {
         Self::with_arena(Default::default())
@@ -745,6 +758,15 @@ impl Default for SemanticGraphStore {
 impl SemanticGraphStore {
     /// Bind signature-token ownership to the final arena before publishing
     /// the store, including the controlled counted fixture constructor.
+    /// A graph in `ownership`'s reclamation regime.
+    pub(crate) fn with_ownership(ownership: GraphOwnership) -> Self {
+        match ownership {
+            GraphOwnership::Legacy => Self::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            GraphOwnership::CountedForTests => Self::with_arena(NodeArena::counted_for_tests()),
+        }
+    }
+
     fn with_arena(arena: NodeArena) -> Self {
         let signatures = crate::signature_kernel::SignatureStore::default();
         signatures.bind_graph(&arena.core);

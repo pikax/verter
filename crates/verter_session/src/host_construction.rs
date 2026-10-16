@@ -343,6 +343,7 @@ impl VerterHost {
             scheduler_config,
             HostWorkerPoolSource::Fresh,
             MemoFamilyBound::Production,
+            Default::default(),
         )
     }
 
@@ -366,6 +367,7 @@ impl VerterHost {
             scheduler_config,
             HostWorkerPoolSource::Shared(worker_pools),
             MemoFamilyBound::Production,
+            Default::default(),
         )
     }
 
@@ -375,6 +377,7 @@ impl VerterHost {
         scheduler_config: verter_scheduler::scheduler::SchedulerConfig,
         worker_pool_source: HostWorkerPoolSource,
         memo_family_bound: MemoFamilyBound,
+        ownership: verter_type_engine::semantic_query_memo::GraphOwnership,
     ) -> Self {
         #[cfg(test)]
         configure_workspace_test_projects(workspace.as_ref());
@@ -575,6 +578,7 @@ impl VerterHost {
                 Arc::clone(&provenance),
                 task_registry,
                 memo_family_bound,
+                ownership,
             );
         let project_type_store = Arc::new(project_type_store);
         // Retained artifacts own their canonical's freshness evidence in the
@@ -784,6 +788,26 @@ impl VerterHost {
             verter_scheduler::scheduler::SchedulerConfig::default(),
             HostWorkerPoolSource::Fresh,
             MemoFamilyBound::ForTest(memo_family_cap),
+            Default::default(),
+        )
+    }
+
+    /// Test support: a standalone host whose semantic graph runs the
+    /// controlled counted ownership regime — a node is destroyed when its
+    /// last root drops — so a test proves what a public delivery keeps alive
+    /// after every request, cache and scope owner is gone.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn new_standalone_with_counted_ownership_for_test(config: HostConfig) -> Self {
+        let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        Self::new_with_scheduler_config_and_worker_pool_source(
+            config,
+            workspace,
+            verter_scheduler::scheduler::SchedulerConfig::default(),
+            HostWorkerPoolSource::Fresh,
+            MemoFamilyBound::Production,
+            verter_type_engine::semantic_query_memo::GraphOwnership::CountedForTests,
         )
     }
 

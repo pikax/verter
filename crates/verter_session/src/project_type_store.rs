@@ -1139,6 +1139,7 @@ impl ProjectTypeStore {
             verter_session_query::retention::StoreAccount::default(),
             verter_execution::tasks::TaskRegistry::default(),
             verter_type_engine::semantic_query_memo::MemoFamilyBound::Production,
+            Default::default(),
         )
         .0
     }
@@ -1157,6 +1158,7 @@ impl ProjectTypeStore {
             verter_session_query::retention::StoreAccount::new(retention_account),
             verter_execution::tasks::TaskRegistry::default(),
             verter_type_engine::semantic_query_memo::MemoFamilyBound::Production,
+            Default::default(),
         )
         .0
     }
@@ -1194,12 +1196,14 @@ impl ProjectTypeStore {
         provenance: Arc<crate::meta_provenance::MetaProvenance>,
         task_registry: verter_execution::tasks::TaskRegistry,
         memo_family_bound: verter_type_engine::semantic_query_memo::MemoFamilyBound,
+        ownership: verter_type_engine::semantic_query_memo::GraphOwnership,
     ) -> (Self, EngineGrants) {
         Self::build(
             Some(provenance),
             verter_session_query::retention::StoreAccount::default(),
             task_registry,
             memo_family_bound,
+            ownership,
         )
     }
 
@@ -1208,6 +1212,7 @@ impl ProjectTypeStore {
         store_account: verter_session_query::retention::StoreAccount,
         task_registry: verter_execution::tasks::TaskRegistry,
         memo_family_bound: verter_type_engine::semantic_query_memo::MemoFamilyBound,
+        ownership: verter_type_engine::semantic_query_memo::GraphOwnership,
     ) -> (Self, EngineGrants) {
         let retention_account = store_account.clone();
         let counters = ProjectTypeStoreCounters::default();
@@ -1239,6 +1244,7 @@ impl ProjectTypeStore {
                 &counters.component_meta_cache_live,
                 task_registry,
                 memo_family_bound,
+                ownership,
             );
         let verter_type_engine::project_semantic_dispatch::engine_resources::EngineStores {
             graph: semantic_graph,
