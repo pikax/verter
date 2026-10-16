@@ -31,13 +31,15 @@ pub trait FactValidation {
         &self,
         key: &verter_session_query::source::artifact_key::FileArtifactKey,
     ) -> verter_session_query::source::env_identity::SourceEnvIdentity;
+    /// The carrier `facts` and the observed `roots` seal into. The facts
+    /// are taken by value: the carrier is built from them in place.
     fn complete_graph_signature(
         &self,
         roots: &[(
             std::sync::Arc<str>,
             verter_session_query::analysis::types::Hash16,
         )],
-        facts: &[FactVersionRef],
+        facts: Vec<FactVersionRef>,
     ) -> Result<
         crate::fact_signature_helpers::StructuralCarrierReadSet,
         crate::cache_runtime::NonAdmissionReason,

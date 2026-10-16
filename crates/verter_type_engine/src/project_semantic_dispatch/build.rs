@@ -604,7 +604,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> Vec<crate::semantic_query_memo::ObservedGraphSelfRoot> {
         let graph = self.graph();
         let mut roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot> = Vec::new();
-        let mut seen = FxHashSet::default();
+        // Few distinct roots: compared linearly until a set pays.
+        let mut seen: Option<FxHashSet<crate::semantic_query_memo::ObservedGraphSelfRoot>> = None;
         for node in nodes {
             if let Some(NodeScopeId::File {
                 canonical_id,
@@ -613,8 +614,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }) = graph.node_scope(node)
             {
                 let root = (canonical_id, whole_hash);
-                if seen.insert(root.clone()) {
+                let fresh = match &mut seen {
+                    Some(seen) => seen.insert(root.clone()),
+                    None => !roots.contains(&root),
+                };
+                if fresh {
                     roots.push(root);
+                    if seen.is_none() && roots.len() > 16 {
+                        seen = Some(roots.iter().cloned().collect());
+                    }
                 }
             }
         }

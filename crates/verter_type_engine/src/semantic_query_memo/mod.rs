@@ -2855,6 +2855,19 @@ pub fn semantic_graph_read_set_signature(
     crate::fact_signature_helpers::StructuralCarrierReadSet,
     crate::cache_runtime::NonAdmissionReason,
 > {
+    semantic_graph_carrier(view, observed_self_roots, traced_facts.to_vec())
+}
+
+/// [`semantic_graph_read_set_signature`] over traced facts the caller
+/// hands over: the carrier is built from them in place.
+pub fn semantic_graph_carrier(
+    view: &dyn verter_session_query::facts::store_view::StoreView,
+    observed_self_roots: &[ObservedGraphSelfRoot],
+    mut traced_facts: Vec<verter_session_query::facts::fact_cache::FactVersionRef>,
+) -> Result<
+    crate::fact_signature_helpers::StructuralCarrierReadSet,
+    crate::cache_runtime::NonAdmissionReason,
+> {
     use verter_session_query::facts::fact_cache::FactVersionRef;
 
     // Collapse the observed self-roots per canonical; a conflicting hash for
@@ -2882,9 +2895,6 @@ pub fn semantic_graph_read_set_signature(
             .map(|(_, hash)| hash)
     };
 
-    let mut facts: Vec<FactVersionRef> =
-        Vec::with_capacity(self_root_hashes.len() + traced_facts.len());
-
     // Every traced `FileWholeHash` for a self-root canonical MUST agree
     // with the observed hash (else the dependency rail and the observed
     // self-root disagree on the keyed file's version — a torn read). A
@@ -2892,7 +2902,7 @@ pub fn semantic_graph_read_set_signature(
     // reads through them: a page is part of the rail, not a place a torn
     // root can hide.
     if !self_root_hashes.is_empty() {
-        for fact in verter_session_query::facts::fact_cache::signature_entries(traced_facts) {
+        for fact in verter_session_query::facts::fact_cache::signature_entries(&traced_facts) {
             if let FactVersionRef::FileWholeHash { canonical_id, hash } = fact {
                 if root_hash(canonical_id.as_str())
                     .is_some_and(|observed_hash| hash != observed_hash)
@@ -2903,27 +2913,38 @@ pub fn semantic_graph_read_set_signature(
         }
     }
 
-    // Lead with one self-root `FileWholeHash` per observed self-root,
-    // pinned to the OBSERVED content version.
-    for (canonical, observed_hash) in &self_root_hashes {
-        facts.push(FactVersionRef::FileWholeHash {
-            canonical_id: canonical.as_ref().to_string(),
-            hash: *observed_hash,
-        });
-    }
-
-    // Merge the traced fact set. A top-level traced `FileWholeHash` for a
-    // self-root canonical is folded onto the observed self-root emitted
-    // above; every other traced entry (a page included) is kept verbatim
-    // so transitive cross-file invalidation is preserved.
-    for fact in traced_facts {
-        if let FactVersionRef::FileWholeHash { canonical_id, .. } = fact {
-            if root_hash(canonical_id.as_str()).is_some() {
-                continue;
+    // One self-root `FileWholeHash` per observed self-root, pinned to the
+    // OBSERVED content version, beside the traced fact set kept verbatim (a
+    // page included) so transitive cross-file invalidation is preserved. A
+    // top-level traced `FileWholeHash` for a self-root canonical already
+    // is that fact — the check above proved its hash the observed one — so
+    // only the roots the traced set does not name are added.
+    let mut named = smallvec::SmallVec::<[bool; 4]>::from_elem(false, self_root_hashes.len());
+    if !self_root_hashes.is_empty() {
+        for fact in &traced_facts {
+            if let FactVersionRef::FileWholeHash { canonical_id, .. } = fact {
+                if let Some(index) = self_root_hashes
+                    .iter()
+                    .position(|(root, _)| root.as_ref() == canonical_id.as_str())
+                {
+                    named[index] = true;
+                }
             }
         }
-        facts.push(fact.clone());
     }
+    let mut facts = traced_facts;
+    facts.extend(
+        self_root_hashes
+            .iter()
+            .zip(&named)
+            .filter(|(_, named)| !**named)
+            .map(
+                |((canonical, observed_hash), _)| FactVersionRef::FileWholeHash {
+                    canonical_id: canonical.as_ref().to_string(),
+                    hash: *observed_hash,
+                },
+            ),
+    );
 
     let self_root_canonicals: Vec<Arc<str>> = self_root_hashes
         .iter()

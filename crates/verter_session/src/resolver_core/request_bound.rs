@@ -1384,7 +1384,7 @@ impl<L: RequestBoundLifecycle> FactValidation for RequestBoundAdapter<L> {
             std::sync::Arc<str>,
             verter_session_query::analysis::types::Hash16,
         )],
-        facts: &[FactVersionRef],
+        facts: Vec<FactVersionRef>,
     ) -> Result<
         verter_type_engine::fact_signature_helpers::StructuralCarrierReadSet,
         verter_audit::NonAdmissionReason,
@@ -1392,7 +1392,7 @@ impl<L: RequestBoundLifecycle> FactValidation for RequestBoundAdapter<L> {
         verter_type_engine::count_resolver_context_call!(
             "FactValidation::complete_graph_signature"
         );
-        verter_type_engine::semantic_query_memo::semantic_graph_read_set_signature(
+        verter_type_engine::semantic_query_memo::semantic_graph_carrier(
             self.0.request_view(),
             roots,
             facts,
