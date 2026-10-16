@@ -3,13 +3,17 @@
 //! capabilities, delivered values and diagnostics, signature candidates,
 //! owning surface adapters and owning roots — without a detached copy. A
 //! query error copies opaquely: it carries its operands without exposing
-//! them. Origin reads keyed by an ordinal stay callable: they answer only
-//! inside a construction lane the caller holds.
+//! them. Origin reads, display and the canonical union builder keyed by an
+//! ordinal stay callable: they answer only inside a construction lane the
+//! caller holds.
 
+use verter_session_query::flow::policy::NullabilityPolicy;
+use verter_type_engine::project_semantic_dispatch::canonical_algebra;
 use verter_type_engine::project_semantic_dispatch::one_level_surface::OneLevelSurface;
 use verter_type_engine::project_semantic_dispatch::walk::ShallowDiagnostic;
 use verter_type_engine::semantic_query::{
-    CacheRead, QueryError, QueryResult, SemanticNodeData, SemanticNodeId, SurfaceEntry,
+    display, CacheRead, DisplayNeeds, QueryError, QueryResult, SemanticNodeData, SemanticNodeId,
+    SemanticQueryValue, SurfaceEntry,
 };
 use verter_type_engine::semantic_query_memo::node_data_lease::{NodeDataLease, SurfaceLease};
 use verter_type_engine::semantic_query_memo::node_roots::NodeRoot;
@@ -89,6 +93,17 @@ fn read_origin_in_lane(graph: &SemanticGraphStore, id: SemanticNodeId) -> usize 
     edges
         + graph.export_origin_edges_in_scope().len()
         + usize::from(graph.node_scope_in_scope(id).is_some())
+}
+
+fn render_and_build_in_lane(graph: &SemanticGraphStore, id: SemanticNodeId) -> bool {
+    let shown = display::display_in_scope(
+        graph,
+        &SemanticQueryValue::TypeNode(id),
+        DisplayNeeds::empty(),
+    );
+    let union =
+        canonical_algebra::intern_ordered_union_in_scope(graph, &[id], NullabilityPolicy::Strict);
+    shown.is_some() && union.is_some()
 }
 
 fn keep_error(error: &QueryError) -> QueryError {

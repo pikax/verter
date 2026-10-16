@@ -2864,3 +2864,40 @@ fn release_canonical_drops_the_union_views_of_the_closed_document() {
         "a view of a released union is served, never kept"
     );
 }
+
+/// The public display and union builder keyed by bare ordinals answer only
+/// inside a construction lane the thread holds of the graph: outside one,
+/// an ordinal authorizes neither a rendering nor a union over its subtree.
+#[test]
+fn display_and_union_by_ordinal_answer_only_inside_a_construction_lane() {
+    let store = SemanticGraphStore::new();
+    let number = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let string = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let value = SemanticQueryValue::TypeNode(number);
+    let union = |store: &SemanticGraphStore| {
+        crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union_in_scope(
+            store,
+            &[number, string],
+            verter_session_query::flow::policy::NullabilityPolicy::Strict,
+        )
+    };
+
+    assert!(
+        display::display_in_scope(&store, &value, DisplayNeeds::empty()).is_none(),
+        "outside a construction lane an ordinal renders nothing"
+    );
+    assert!(
+        union(&store).is_none(),
+        "outside a construction lane an ordinal builds no union"
+    );
+
+    let _lane = store.enter_node_root_scope();
+    let shown = display::display_in_scope(&store, &value, DisplayNeeds::empty())
+        .expect("inside the lane the ordinal renders");
+    assert_eq!(String::from(shown), "number");
+    let composite = union(&store).expect("inside the lane the union builds");
+    assert!(matches!(
+        store.node_data(composite.node).as_deref(),
+        Some(SemanticNodeData::Union(_))
+    ));
+}

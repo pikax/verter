@@ -1441,53 +1441,55 @@ pub(crate) struct MergedDeclDisplaySurface {
     pub(crate) own_surface: MergedDeclSurface,
 }
 
-/// Reduce a [`SemanticNodeData::MergedDecl`] carrier to a single peer-merged
-/// node (graph-only entry point; the dispatch method delegates here).
-///
-/// Each contributor body is split into its OWN-body surface(s) and its
-/// `extends`/`implements` HERITAGE arms:
-/// * an interface body with no heritage is a bare `Object` — its members are
-///   own-body;
-/// * an interface-with-`extends` body is an `Intersection` whose `Object`
-///   arm(s) are own-body and whose remaining (reference) arms are heritage.
-///
-/// All contributors' own-body surfaces peer-merge via
-/// [`merge_declaration_surfaces`] (member union + ordered method overload
-/// accumulation). Heritage arms are PRESERVED, not flattened here: the reducer
-/// emits `Intersection([heritage…, peer_merged_own_Object])` so the existing
-/// consumer paths (raise / expand / walk-segment / relation) resolve the
-/// heritage references lazily and apply own-body-shadows-heritage precedence
-/// (the own `Object` arm is last). When a contributor has no heritage the
-/// result is the peer-merged `Object` directly. This keeps a single
-/// declaration-merge engine and a single heritage-resolution path — the reducer
-/// never eagerly expands a heritage `Ref`.
-pub fn reduce_merged_decl_with_graph(
-    graph: &SemanticGraphStore,
-    contributors: &[SemanticNodeId],
-) -> SemanticNodeId {
-    let mut own_surfaces: Vec<ShallowSurface> = Vec::with_capacity(contributors.len());
-    let mut heritage_arms: Vec<SemanticNodeId> = Vec::new();
-    for contributor in contributors {
-        collect_merged_contributor_arms(graph, *contributor, &mut own_surfaces, &mut heritage_arms);
+construction_ordinal_seam! {
+    /// Reduce a [`SemanticNodeData::MergedDecl`] carrier to a single peer-merged
+    /// node (graph-only entry point; the dispatch method delegates here).
+    ///
+    /// Each contributor body is split into its OWN-body surface(s) and its
+    /// `extends`/`implements` HERITAGE arms:
+    /// * an interface body with no heritage is a bare `Object` — its members are
+    ///   own-body;
+    /// * an interface-with-`extends` body is an `Intersection` whose `Object`
+    ///   arm(s) are own-body and whose remaining (reference) arms are heritage.
+    ///
+    /// All contributors' own-body surfaces peer-merge via
+    /// [`merge_declaration_surfaces`] (member union + ordered method overload
+    /// accumulation). Heritage arms are PRESERVED, not flattened here: the reducer
+    /// emits `Intersection([heritage…, peer_merged_own_Object])` so the existing
+    /// consumer paths (raise / expand / walk-segment / relation) resolve the
+    /// heritage references lazily and apply own-body-shadows-heritage precedence
+    /// (the own `Object` arm is last). When a contributor has no heritage the
+    /// result is the peer-merged `Object` directly. This keeps a single
+    /// declaration-merge engine and a single heritage-resolution path — the reducer
+    /// never eagerly expands a heritage `Ref`.
+    fn reduce_merged_decl_with_graph(
+        graph: &SemanticGraphStore,
+        contributors: &[SemanticNodeId],
+    ) -> SemanticNodeId {
+        let mut own_surfaces: Vec<ShallowSurface> = Vec::with_capacity(contributors.len());
+        let mut heritage_arms: Vec<SemanticNodeId> = Vec::new();
+        for contributor in contributors {
+            collect_merged_contributor_arms(graph, *contributor, &mut own_surfaces, &mut heritage_arms);
+        }
+        let merged = merge_declaration_surfaces(graph, &own_surfaces);
+        let own_object =
+            graph.intern_node(SemanticNodeData::Object(surface_view_from_shallow(&merged)));
+        if heritage_arms.is_empty() {
+            return own_object;
+        }
+        // Preserve heritage: own-body object LAST so the intersection heritage-shadow
+        // reducer lets the merged own members shadow inherited same-name members.
+        // A HERITAGE body: arm order is own-body-last topology and rendered
+        // type-text fidelity — never the commutative canonical route — and its
+        // signatures inherit by concatenation, own first.
+        let mut arms = heritage_arms;
+        arms.push(own_object);
+        graph.intern_node(SemanticNodeData::Intersection(
+            crate::semantic_query::composite::CompositeList::heritage(Arc::from(
+                arms.into_boxed_slice(),
+            )),
+        ))
     }
-    let merged = merge_declaration_surfaces(graph, &own_surfaces);
-    let own_object =
-        graph.intern_node(SemanticNodeData::Object(surface_view_from_shallow(&merged)));
-    if heritage_arms.is_empty() {
-        return own_object;
-    }
-    // Preserve heritage: own-body object LAST so the intersection heritage-shadow
-    // reducer lets the merged own members shadow inherited same-name members.
-    // A HERITAGE body: arm order is own-body-last topology and rendered
-    // type-text fidelity — never the commutative canonical route — and its
-    // signatures inherit by concatenation, own first.
-    let mut arms = heritage_arms;
-    arms.push(own_object);
-    graph.intern_node(SemanticNodeData::Intersection(
-        crate::semantic_query::composite::CompositeList::heritage(Arc::from(
-            arms.into_boxed_slice(),
-        )),
-    ))
 }
 
 /// Compute the peer-merged declaration surface for display without interning

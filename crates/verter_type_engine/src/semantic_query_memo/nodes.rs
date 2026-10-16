@@ -58,6 +58,14 @@ impl SemanticGraphStore {
         node_roots::NodeRootScope::enter(&self.arena.core)
     }
 
+    /// Whether this thread holds a construction lane of this graph: the
+    /// one condition under which a bare construction ordinal names a node a
+    /// read may follow.
+    #[must_use]
+    pub(crate) fn holds_construction_lane(&self) -> bool {
+        node_roots::NodeRootScope::holds(&self.arena.core)
+    }
+
     /// Open a nested construction scope inside a construction lane this
     /// thread already holds of this graph, so a reader bounds its own
     /// intermediates. It grants nothing the held lane does not: without one

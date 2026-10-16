@@ -127,11 +127,11 @@ pub(crate) fn build_keys_union_node(
     // walk records no file roots and can never be incomplete — asserted
     // below rather than threaded to a disposition boundary.
     let composite =
-        verter_type_engine::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
+        verter_type_engine::project_semantic_dispatch::canonical_algebra::intern_ordered_union_in_scope(
             graph,
             &key_ids,
             verter_session_query::flow::policy::NullabilityPolicy::Strict,
-        );
+        )?;
     verter_debug_assert::verter_debug_assert!(
         composite.evidence.inspected_file_roots.is_empty() && !composite.evidence.incomplete,
         "key-domain union over freshly interned Global literals must carry no evidence"
