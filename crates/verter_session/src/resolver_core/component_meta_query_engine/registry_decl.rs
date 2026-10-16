@@ -484,7 +484,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .read_in_scope(peel_alias(body_root))
             .as_deref()
         {
-            Some(SemanticNodeData::Intersection(arms)) => arms.clone(),
+            Some(SemanticNodeData::Intersection(arms)) => arms.to_vec(),
             _ => return None,
         };
         let mut heritage: Vec<(

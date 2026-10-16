@@ -1230,7 +1230,7 @@ fn root_conditional_still_distributes() {
         .node_data(result)
         .expect("distribution result node exists");
     let arms = match data.as_ref() {
-        SemanticNodeData::Union(arms) if arms.len() == 2 => arms.clone(),
+        SemanticNodeData::Union(arms) if arms.len() == 2 => arms.to_vec(),
         other => panic!(
             "a query-root unbound conditional under Expanded must distribute into a \
              two-arm Union (both branches surface), got {other:?}"

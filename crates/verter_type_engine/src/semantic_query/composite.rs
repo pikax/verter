@@ -240,7 +240,7 @@ impl CompositeKind for IntersectionKind {}
 /// [`SemanticNodeData::composite_members`](super::SemanticNodeData::composite_members));
 /// it is NOT constructible outside the mints, and holding one grants no
 /// replay — neither enum variant accepts a bare `CompositeMembers`.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct CompositeMembers {
     members: Arc<[SemanticNodeId]>,
     category: CompositeOriginCategory,
@@ -250,8 +250,16 @@ impl CompositeMembers {
     /// The shared member-list allocation (refcount clone, never a deep
     /// copy).
     #[must_use]
-    pub fn members_arc(&self) -> Arc<[SemanticNodeId]> {
+    pub(crate) fn members_arc(&self) -> Arc<[SemanticNodeId]> {
         Arc::clone(&self.members)
+    }
+
+    /// Share the member list with a payload the engine is building.
+    pub(crate) fn share(&self) -> Self {
+        Self {
+            members: Arc::clone(&self.members),
+            category: self.category,
+        }
     }
 
     /// The at-rest origin-category fact — which carrier category this
@@ -301,10 +309,13 @@ pub struct CompositeList<K: CompositeKind> {
     _kind: PhantomData<fn() -> K>,
 }
 
-impl<K: CompositeKind> Clone for CompositeList<K> {
-    fn clone(&self) -> Self {
+impl<K: CompositeKind> CompositeList<K> {
+    /// Share the member list with a payload the engine is building. There
+    /// is no public copy: the list is borrowed through the read that owns
+    /// its payload.
+    pub(crate) fn share(&self) -> Self {
         Self {
-            core: self.core.clone(),
+            core: self.core.share(),
             _kind: PhantomData,
         }
     }

@@ -57,7 +57,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// per-surface.
     pub fn node_leaf_union_fact(&self, node: SemanticNodeId) -> Option<Arc<[LeafTypeFact]>> {
         let members = match super::node_data_for(self.graph(), node).as_deref() {
-            Some(SemanticNodeData::Union(members)) => members.clone(),
+            Some(SemanticNodeData::Union(members)) => members.share(),
             _ => return None,
         };
         let leaves: Option<Vec<LeafTypeFact>> = members

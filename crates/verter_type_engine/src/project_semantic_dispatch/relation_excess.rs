@@ -614,7 +614,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
             Some(SemanticNodeData::Union(arms)) => {
-                let arms = arms.clone();
+                let arms = arms.share();
                 let mut exhausted = false;
                 for arm in arms.iter() {
                     match self.is_excess_check_target(*arm, depth + 1) {
@@ -630,7 +630,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
             Some(SemanticNodeData::Intersection(arms)) => {
-                let arms = arms.clone();
+                let arms = arms.share();
                 let mut exhausted = false;
                 for arm in arms.iter() {
                     match self.is_excess_check_target(*arm, depth + 1) {
@@ -665,7 +665,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 self.is_empty_object_like_type(*inner, depth + 1)
             }
             Some(SemanticNodeData::Union(arms)) => {
-                let arms = arms.clone();
+                let arms = arms.share();
                 let mut exhausted = false;
                 for arm in arms.iter() {
                     match self.is_empty_object_like_type(*arm, depth + 1) {
@@ -681,7 +681,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
             Some(SemanticNodeData::Intersection(arms)) => {
-                let arms = arms.clone();
+                let arms = arms.share();
                 let mut exhausted = false;
                 for arm in arms.iter() {
                     match self.is_empty_object_like_type(*arm, depth + 1) {
@@ -940,7 +940,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             Some(composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_))) => {
                 let arms = composite.composite_members().expect("composite arm");
-                let arms = arms.clone();
+                let arms = arms.share();
                 let mut any_undecidable = false;
                 for inner in arms.iter() {
                     match self.arm_knows_property(*inner, key, depth + 1) {
@@ -1041,7 +1041,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 Some(graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined)))
             }
             Some(SemanticNodeData::Union(arms)) => {
-                let arms = arms.clone();
+                let arms = arms.share();
                 let mut values: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
                 for inner in arms.iter() {
                     values.push(self.arm_property_or_index_value(*inner, key)?);
@@ -1053,7 +1053,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             Some(SemanticNodeData::Intersection(arms)) => {
                 // First declaring part wins (bounded approximation of the
                 // merged intersection property).
-                let arms = arms.clone();
+                let arms = arms.share();
                 for inner in arms.iter() {
                     let value = self.arm_property_or_index_value(*inner, key)?;
                     if !matches!(

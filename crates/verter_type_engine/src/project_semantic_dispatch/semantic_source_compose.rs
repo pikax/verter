@@ -96,7 +96,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         match self.graph().node_data(node).as_deref() {
             Some(SemanticNodeData::Union(list)) => self
                 .graph()
-                .intern_node_with_scope(SemanticNodeData::Union(list.clone()), scope.clone()),
+                .intern_node_with_scope(SemanticNodeData::Union(list.share()), scope.clone()),
             _ => node,
         }
     }

@@ -16792,7 +16792,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 LibStep::Done(LibAwaited::Deferred)
             }
             SemanticNodeData::Union(members) => {
-                let members = members.clone();
+                let members = members.share();
                 drop(data);
                 let mut reduced = Vec::with_capacity(members.len());
                 for member in members.iter() {
@@ -17139,7 +17139,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // Union distribution: every arm re-enters the family and the
             // results renormalise canonically.
             SemanticNodeData::Union(members) => {
-                let members = members.clone();
+                let members = members.share();
                 drop(data);
                 self.awaited_union_step(AwaitedRelation::Normalize, &members, context)
             }
@@ -17274,7 +17274,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 AwaitedStep::Next(args[0])
             }
             SemanticNodeData::Union(members) => {
-                let members = members.clone();
+                let members = members.share();
                 drop(data);
                 self.awaited_union_step(AwaitedRelation::Payload, &members, context)
             }

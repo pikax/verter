@@ -3974,7 +3974,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     // ([`Self::composite_hop`]). A union that is itself an
                     // arm of a split reports so, and its composite reads it
                     // flattened.
-                    let arms = arms.clone();
+                    let arms = arms.share();
                     drop(data);
                     if Self::reports_at(arm_read, index).is_some() {
                         self.note_composite_arm(arm_read, index, current);
@@ -4035,7 +4035,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     // intersection ([`Self::composite_hop`]).
                     let heritage = arms.origin_category()
                         == crate::semantic_query::composite::CompositeOriginCategory::Heritage;
-                    let arms = arms.clone();
+                    let arms = arms.share();
                     drop(data);
                     let mut restricted = arm_read.filter(|read| read.at == index);
                     if heritage {

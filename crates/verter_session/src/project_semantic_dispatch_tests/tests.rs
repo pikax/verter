@@ -13127,7 +13127,7 @@ fn signature_utilities_distribute_over_union_subjects() {
     };
     let union_members = |node: SemanticNodeId, what: &str| -> Vec<SemanticNodeId> {
         match graph.node_data(node).as_deref() {
-            Some(SemanticNodeData::Union(members)) => members.members_arc().to_vec(),
+            Some(SemanticNodeData::Union(members)) => members.to_vec(),
             other => panic!("{what} must be a union, got {other:?}"),
         }
     };
@@ -23493,7 +23493,7 @@ fn intern_string_literal_union_single_uniformly_union() {
         .node_data(node)
         .unwrap();
     let arms = match &*data {
-        SemanticNodeData::Union(arms) => arms.clone(),
+        SemanticNodeData::Union(arms) => arms.to_vec(),
         other => panic!("single-element input must produce Union; got {other:?}"),
     };
     assert_eq!(
@@ -23533,7 +23533,7 @@ fn intern_string_literal_union_multi_preserves_members() {
         .node_data(node)
         .unwrap();
     let arms = match &*data {
-        SemanticNodeData::Union(arms) => arms.clone(),
+        SemanticNodeData::Union(arms) => arms.to_vec(),
         other => panic!("multi-element input must produce Union; got {other:?}"),
     };
     assert_eq!(arms.len(), 3, "Union must have arity 3 for 3 inputs");
