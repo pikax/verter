@@ -1,0 +1,25 @@
+error[E0515]: cannot return value referencing function parameter `lease`
+ --> tests/cases/compile-fail/public_node_capability_cannot_outlive_owner.rs:8:5
+  |
+8 |     lease.node_ref().unwrap()
+  |     -----^^^^^^^^^^^^^^^^^^^^
+  |     |
+  |     returns a value referencing data owned by the current function
+  |     `lease` is borrowed here
+
+error[E0515]: cannot return value referencing function parameter `root`
+  --> tests/cases/compile-fail/public_node_capability_cannot_outlive_owner.rs:12:5
+   |
+12 |     root.node_ref().unwrap()
+   |     ----^^^^^^^^^^^^^^^^^^^^
+   |     |
+   |     returns a value referencing data owned by the current function
+   |     `root` is borrowed here
+
+error: lifetime may not live long enough
+  --> tests/cases/compile-fail/public_node_capability_cannot_outlive_owner.rs:16:5
+   |
+15 | fn extend<'a>(node: NodeRef<'a>) -> NodeRef<'static> {
+   |           -- lifetime `'a` defined here
+16 |     node
+   |     ^^^^ returning this value requires that `'a` must outlive `'static`
