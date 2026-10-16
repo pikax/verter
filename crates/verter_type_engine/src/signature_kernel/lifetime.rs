@@ -101,6 +101,24 @@ pub(super) struct EpochInner {
 }
 
 impl EpochInner {
+    /// The owning root this epoch holds for a graph type token.
+    pub(super) fn graph_root(
+        &self,
+        token: super::records::TypeToken,
+    ) -> Option<crate::semantic_query_memo::node_roots::NodeRoot> {
+        let raw = token.as_u64();
+        if check_epoch(self.epoch, super::records::handle_epoch(raw)).is_err() {
+            return None;
+        }
+        let index = super::records::handle_index(raw);
+        let node = *self.type_tokens.get(index)?;
+        let roots = self.graph_roots.lock().get(&index).cloned()?;
+        roots
+            .operands()
+            .contains(&node)
+            .then(|| crate::semantic_query_memo::node_roots::NodeRoot::from_roots(node, roots))
+    }
+
     fn new(epoch: GraphEpoch, store_live_readers: Arc<AtomicU64>) -> Self {
         Self {
             epoch,
@@ -674,9 +692,39 @@ impl SignatureStore {
         Ok(super::records::TypeToken::from_raw(raw))
     }
 
-    /// The graph node a token stands for. A token from another epoch is
-    /// stale.
+    /// The graph node a token stands for, owned by the live epoch's token
+    /// root. A token from another epoch is stale; a token with no graph root
+    /// (a binder token, an unbound store) is missing.
+    pub fn type_token_root(
+        &self,
+        token: super::records::TypeToken,
+    ) -> Result<crate::semantic_query_memo::node_roots::NodeRoot, StoreError> {
+        let inner = self.inner();
+        check_epoch(inner.epoch, super::records::handle_epoch(token.as_u64()))?;
+        inner.graph_root(token).ok_or(StoreError::Missing)
+    }
+
+    /// The construction ordinal a token stands for. A token from another
+    /// epoch is stale. Outside the engine a consumer takes
+    /// [`Self::type_token_root`]; test builds expose the ordinal as a seam.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn type_token_node(
+        &self,
+        token: super::records::TypeToken,
+    ) -> Result<SemanticNodeId, StoreError> {
+        self.type_token_ordinal(token)
+    }
+
+    /// See the test-build variant.
+    #[cfg(not(any(test, feature = "test-support")))]
+    pub(crate) fn type_token_node(
+        &self,
+        token: super::records::TypeToken,
+    ) -> Result<SemanticNodeId, StoreError> {
+        self.type_token_ordinal(token)
+    }
+
+    fn type_token_ordinal(
         &self,
         token: super::records::TypeToken,
     ) -> Result<SemanticNodeId, StoreError> {

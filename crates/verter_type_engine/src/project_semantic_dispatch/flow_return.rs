@@ -14185,7 +14185,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         // selection reads the unwidened one.
         let index_signatures: Arc<[crate::semantic_query::IndexSignature]> = if late_bound.any() {
             let mut side = class_expression::MemberSide {
-                members: surface_members.clone(),
+                members: surface_members
+                    .iter()
+                    .map(crate::semantic_query::SurfaceMember::clone)
+                    .collect(),
                 index_signatures: Vec::new(),
                 computed: late_bound,
             };
@@ -25444,7 +25447,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             params,
             type_parameters,
             ..
-        }) = graph.node_data(signature).as_deref().cloned()
+        }) = graph
+            .node_data(signature)
+            .as_deref()
+            .map(crate::semantic_query::SemanticNodeData::clone)
         else {
             return signature;
         };

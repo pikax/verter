@@ -2011,8 +2011,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             }
                         }
                         let node = self.lower_locator_shape_node(&run_obj, ctx);
-                        let Some(SemanticNodeData::Object(surface)) =
-                            self.graph().node_data(node).as_deref().cloned()
+                        let Some(SemanticNodeData::Object(surface)) = self
+                            .graph()
+                            .node_data(node)
+                            .as_deref()
+                            .map(crate::semantic_query::SemanticNodeData::clone)
                         else {
                             return;
                         };

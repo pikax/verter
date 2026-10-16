@@ -367,9 +367,7 @@ fn accumulate_lowered_node_carrier_deps(
         if !visited.insert(current) {
             continue;
         }
-        let Some(data) =
-            verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), current)
-        else {
+        let Some(data) = dispatch.graph().read_in_scope(current) else {
             continue;
         };
         match data.as_ref() {
@@ -649,13 +647,13 @@ pub(crate) fn resolve_slot_bindings_graph_native(
         verter_type_engine::request_context::observe_component_meta_read_suppress(
             &macro_payload_read,
         );
-        emit_slot_binding_graph_dispatch_facts(dispatch, &macro_payload_read.dep_signature);
-        if !macro_payload_read.walker_diagnostics.is_empty() {
+        emit_slot_binding_graph_dispatch_facts(dispatch, &macro_payload_read.dep_signature());
+        if !macro_payload_read.walker_diagnostics().is_empty() {
             diag_sink.push(shallow_diagnostics_to_macro_expansion(
-                &macro_payload_read.walker_diagnostics,
+                &macro_payload_read.walker_diagnostics(),
                 macro_index,
                 MacroExpansionKind::DefineSlots,
-                macro_payload_read.cache_suppress,
+                macro_payload_read.cache_suppress(),
             ));
         }
         // A2 signal split: the component-meta warm gate keys on the
@@ -668,8 +666,8 @@ pub(crate) fn resolve_slot_bindings_graph_native(
             );
         }
 
-        let macro_payload_node = match macro_payload_read.value {
-            QueryResult::Value(id) => id,
+        let macro_payload_node = match macro_payload_read.value() {
+            QueryResult::Value(id) => *id,
             QueryResult::Recursive(_) => {
                 diag_sink.push(macro_expansion_for_cycle(
                     macro_index,
@@ -838,13 +836,13 @@ pub(crate) fn compute_bindings_via_graph(
     });
     // Dual-emit: legacy accumulator + fact-tracer fan-out.
     verter_type_engine::request_context::observe_component_meta_read_suppress(&slot_surface_read);
-    emit_slot_binding_graph_dispatch_facts(dispatch, &slot_surface_read.dep_signature);
-    if !slot_surface_read.walker_diagnostics.is_empty() {
+    emit_slot_binding_graph_dispatch_facts(dispatch, &slot_surface_read.dep_signature());
+    if !slot_surface_read.walker_diagnostics().is_empty() {
         diag_sink.push(shallow_diagnostics_to_macro_expansion(
-            &slot_surface_read.walker_diagnostics,
+            &slot_surface_read.walker_diagnostics(),
             owner_macro.macro_index,
             MacroExpansionKind::DefineSlots,
-            slot_surface_read.cache_suppress,
+            slot_surface_read.cache_suppress(),
         ));
     }
     // A2 signal split: key the warm gate on the PARTIAL signal only.
@@ -854,8 +852,8 @@ pub(crate) fn compute_bindings_via_graph(
             slot_surface_read.partial_reason_classes(),
         );
     }
-    let slot_surface = match slot_surface_read.value {
-        QueryResult::Value(id) => id,
+    let slot_surface = match slot_surface_read.value() {
+        QueryResult::Value(id) => *id,
         QueryResult::Recursive(_) => {
             diag_sink.push(macro_expansion_for_cycle(
                 owner_macro.macro_index,
@@ -972,12 +970,7 @@ pub(crate) fn compute_bindings_via_graph(
         // signature is not a callable slot shape and synthesizes no
         // bindings (the realize fallback above hands back the raw member
         // value, so the kind must be re-asserted here).
-        let param0_ty = match verter_type_engine::project_semantic_dispatch::node_data_for(
-            dispatch.graph(),
-            realized,
-        )
-        .as_deref()
-        {
+        let param0_ty = match dispatch.graph().read_in_scope(realized).as_deref() {
             Some(SemanticNodeData::Signature {
                 kind: verter_type_engine::semantic_query::SignatureKind::Call,
                 params,
@@ -1036,13 +1029,13 @@ pub(crate) fn compute_bindings_via_graph(
         verter_type_engine::request_context::observe_component_meta_read_suppress(
             &param_surface_read,
         );
-        emit_slot_binding_graph_dispatch_facts(dispatch, &param_surface_read.dep_signature);
-        if !param_surface_read.walker_diagnostics.is_empty() {
+        emit_slot_binding_graph_dispatch_facts(dispatch, &param_surface_read.dep_signature());
+        if !param_surface_read.walker_diagnostics().is_empty() {
             diag_sink.push(shallow_diagnostics_to_macro_expansion(
-                &param_surface_read.walker_diagnostics,
+                &param_surface_read.walker_diagnostics(),
                 owner_macro.macro_index,
                 MacroExpansionKind::DefineSlots,
-                param_surface_read.cache_suppress,
+                param_surface_read.cache_suppress(),
             ));
         }
         // A2 signal split: key the warm gate on the PARTIAL signal only.
@@ -1052,8 +1045,8 @@ pub(crate) fn compute_bindings_via_graph(
                 param_surface_read.partial_reason_classes(),
             );
         }
-        let param_surface = match param_surface_read.value {
-            QueryResult::Value(id) => id,
+        let param_surface = match param_surface_read.value() {
+            QueryResult::Value(id) => *id,
             QueryResult::Recursive(_) => {
                 diag_sink.push(macro_expansion_for_cycle(
                     owner_macro.macro_index,
@@ -1126,12 +1119,7 @@ pub(crate) fn compute_bindings_via_graph(
             // body; non-carrier values take no read at all, so no
             // unrelated file is ever walked. A carrier that does not
             // resolve keeps the original node (fail-closed shallow).
-            let value_node = match verter_type_engine::project_semantic_dispatch::node_data_for(
-                dispatch.graph(),
-                binding.value,
-            )
-            .as_deref()
-            {
+            let value_node = match dispatch.graph().read_in_scope(binding.value).as_deref() {
                 Some(SemanticNodeData::BareRef(_)) | Some(SemanticNodeData::ImportType(_)) => {
                     let value_read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
                         base: binding.value,
@@ -1144,14 +1132,14 @@ pub(crate) fn compute_bindings_via_graph(
                     verter_type_engine::request_context::observe_component_meta_read_suppress(
                         &value_read,
                     );
-                    emit_slot_binding_graph_dispatch_facts(dispatch, &value_read.dep_signature);
+                    emit_slot_binding_graph_dispatch_facts(dispatch, &value_read.dep_signature());
                     if value_read.result_is_partial() {
                         ledger.suppress_partial_read(
                             dispatch.host_attachment().surface_claims(),
                             value_read.partial_reason_classes(),
                         );
                     }
-                    match value_read.value {
+                    match *value_read.value() {
                         QueryResult::Value(id) => id,
                         QueryResult::Recursive(_) | QueryResult::Error(_) => binding.value,
                     }
@@ -1281,10 +1269,7 @@ fn named_reference_carrier_source(
     let mut current = value_node;
     // Peel aliases (bounded).
     for _ in 0..16 {
-        let data = verter_type_engine::project_semantic_dispatch::node_data_for(
-            dispatch.graph(),
-            current,
-        )?;
+        let data = dispatch.graph().read_in_scope(current)?;
         match &*data {
             SemanticNodeData::Alias(inner) => current = *inner,
             SemanticNodeData::DeclRef { identity } => {
@@ -1380,16 +1365,15 @@ fn closed_leaf_object_source(
     use verter_type_expr::facts::{ResolvedLocalShape, SemanticTypeSource, SynthesizedMemberFact};
     use verter_type_expr::span_origins::{MemberSpansOrigin, SourceSynthetic};
 
-    let data =
-        verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), value_node)?;
+    let data = dispatch.graph().read_in_scope(value_node)?;
     let SemanticNodeData::Object(view) = data.as_ref() else {
         return None;
     };
     // Any signature-bearing or key-space-bearing surface is richer than the
     // bounded named-member case — keep the carrier.
-    if !view.call_signatures.is_empty()
-        || !view.construct_signatures.is_empty()
-        || !view.index_signatures.is_empty()
+    if !view.call_signatures().is_empty()
+        || !view.construct_signatures().is_empty()
+        || !view.index_signatures().is_empty()
         || view.closed().has_index_signature()
     {
         return None;
@@ -1439,10 +1423,7 @@ fn closed_member_path_route_source(
     // Bounded: an authored indexed-access chain is short; the cap only
     // guards against pathological graph shapes.
     for _ in 0..64 {
-        let data = verter_type_engine::project_semantic_dispatch::node_data_for(
-            dispatch.graph(),
-            current,
-        )?;
+        let data = dispatch.graph().read_in_scope(current)?;
         match &*data {
             SemanticNodeData::Alias(inner) => {
                 current = *inner;
@@ -1574,9 +1555,7 @@ fn node_reaches_non_owner_ref(
 ) -> bool {
     use verter_type_engine::graph_walk::Reach;
     verter_type_engine::graph_walk::reaches(node, |node| {
-        let Some(data) =
-            verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), node)
-        else {
+        let Some(data) = dispatch.graph().read_in_scope(node) else {
             return Reach::Parts(Vec::new());
         };
         let hit = |hit: bool| {
@@ -1647,12 +1626,12 @@ fn node_reaches_non_owner_ref(
                 .map(|member| member.value)
                 .chain(
                     surface
-                        .index_signatures
+                        .index_signatures()
                         .iter()
                         .flat_map(|signature| [signature.key_type, signature.value_type]),
                 )
-                .chain(surface.call_signatures.iter().copied())
-                .chain(surface.construct_signatures.iter().copied())
+                .chain(surface.call_signatures().iter().copied())
+                .chain(surface.construct_signatures().iter().copied())
                 .collect(),
             SemanticNodeData::Signature {
                 params,

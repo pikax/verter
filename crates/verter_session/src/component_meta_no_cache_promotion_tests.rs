@@ -38,7 +38,7 @@ fn assert_unavailable_projection(
 ) -> SemanticNodeId {
     assert!(
         matches!(
-            read.value,
+            read.value().clone(),
             QueryResult::Error(verter_type_engine::semantic_query::QueryError::IncompleteSemanticOperand { reasons })
                 if reasons.contains(PartialReasonSet::PROJECTION_WORK_LIMIT)
         ),
@@ -46,15 +46,18 @@ fn assert_unavailable_projection(
     );
     assert!(
         matches!(
-            read.fact_status,
+            read.fact_status(),
             verter_type_engine::semantic_query::FactStatus::Unavailable(causes)
                 if causes.get().contains(PartialReasonSet::PROJECTION_WORK_LIMIT)
         ),
         "the adopted fact must retain its work-limit cause: {read:?}"
     );
-    assert!(read.result_is_partial() && read.cache_suppress, "{read:?}");
+    assert!(
+        read.result_is_partial() && read.cache_suppress(),
+        "{read:?}"
+    );
     let [verter_type_engine::project_semantic_dispatch::walk::ShallowDiagnostic::ProjectionWorkLimit { root }] =
-        read.walker_diagnostics.as_ref()
+        read.walker_diagnostics().as_ref()
     else {
         panic!("one typed work-limit diagnostic is required: {read:?}")
     };
@@ -190,18 +193,18 @@ fn request_projection_budget_caps_distinct_dispatch_cold_builds() {
 
     let first = dispatch.execute_read(first_key);
     assert!(
-        matches!(first.value, QueryResult::Value(_))
+        matches!(first.value().clone(), QueryResult::Value(_))
             && !first.result_is_partial()
-            && first.walker_diagnostics.is_empty(),
+            && first.walker_diagnostics().is_empty(),
         "first cold projection within budget must succeed, got {first:?}",
     );
 
     let second = dispatch.execute_read(second_key);
     assert!(
-        matches!(second.value, QueryResult::Error(verter_type_engine::semantic_query::QueryError::IncompleteSemanticOperand { .. }))
-            && matches!(second.fact_status, verter_type_engine::semantic_query::FactStatus::Unavailable(_))
+        matches!(second.value().clone(), QueryResult::Error(verter_type_engine::semantic_query::QueryError::IncompleteSemanticOperand { .. }))
+            && matches!(second.fact_status(), verter_type_engine::semantic_query::FactStatus::Unavailable(_))
             && second.result_is_partial()
-            && second.cache_suppress,
+            && second.cache_suppress(),
         "the limited projection must withhold its source and retain typed partial rails; got {second:?}"
     );
     assert!(matches!(
@@ -210,7 +213,7 @@ fn request_projection_budget_caps_distinct_dispatch_cold_builds() {
             if reasons.contains(PartialReasonSet::PROJECTION_WORK_LIMIT)
     ));
     assert!(matches!(
-        second.walker_diagnostics.as_ref(),
+        second.walker_diagnostics().as_ref(),
         [verter_type_engine::project_semantic_dispatch::walk::ShallowDiagnostic::ProjectionWorkLimit { .. }]
     ));
 }
@@ -276,7 +279,8 @@ fn post_trip_projection_op_queries_bypass_cooperative_admission() {
         context,
     });
     assert!(
-        matches!(first_keyof.value, QueryResult::Value(_)) && !first_keyof.result_is_partial(),
+        matches!(first_keyof.value().clone(), QueryResult::Value(_))
+            && !first_keyof.result_is_partial(),
         "1st keyof within budget should succeed (got {first_keyof:?})"
     );
     let second_keyof = dispatch.execute_read(SemanticQueryKey::KeyOf {
@@ -285,15 +289,15 @@ fn post_trip_projection_op_queries_bypass_cooperative_admission() {
     });
     assert!(
         matches!(
-            second_keyof.value,
+            second_keyof.value().clone(),
             QueryResult::Error(
                 verter_type_engine::semantic_query::QueryError::IncompleteSemanticOperand { .. }
             )
         ) && matches!(
-            second_keyof.fact_status,
+            second_keyof.fact_status(),
             verter_type_engine::semantic_query::FactStatus::Unavailable(_)
         ) && second_keyof.result_is_partial()
-            && second_keyof.cache_suppress,
+            && second_keyof.cache_suppress(),
         "2nd keyof should trip to a typed unavailable result (got {second_keyof:?})"
     );
     assert!(matches!(
@@ -302,7 +306,7 @@ fn post_trip_projection_op_queries_bypass_cooperative_admission() {
             if reasons.contains(PartialReasonSet::PROJECTION_WORK_LIMIT)
     ));
     assert!(matches!(
-        second_keyof.walker_diagnostics.as_ref(),
+        second_keyof.walker_diagnostics().as_ref(),
         [verter_type_engine::project_semantic_dispatch::walk::ShallowDiagnostic::ProjectionWorkLimit { .. }]
     ));
     let executed_at_trip = request_budget.projection_ops_executed_count();
@@ -318,19 +322,19 @@ fn post_trip_projection_op_queries_bypass_cooperative_admission() {
         let result = dispatch.execute_read(key);
         assert!(
             matches!(
-                result.value,
+                result.value().clone(),
                 QueryResult::Error(
                     verter_type_engine::semantic_query::QueryError::IncompleteSemanticOperand { .. }
                 )
             ) && matches!(
-                result.fact_status,
+                result.fact_status(),
                 verter_type_engine::semantic_query::FactStatus::Unavailable(_)
             ) && result.result_is_partial()
-                && result.cache_suppress,
+                && result.cache_suppress(),
             "post-trip query #{i} must retain a typed unavailable result (got {result:?})"
         );
         assert!(matches!(
-            result.walker_diagnostics.as_ref(),
+            result.walker_diagnostics().as_ref(),
             [verter_type_engine::project_semantic_dispatch::walk::ShallowDiagnostic::ProjectionWorkLimit { .. }]
         ));
     }
@@ -391,7 +395,7 @@ fn post_trip_typeof_early_exit_attributes_to_typeof_cold_counter() {
         context,
     });
     assert!(
-        matches!(first.value, QueryResult::Value(_)) && !first.result_is_partial(),
+        matches!(first.value().clone(), QueryResult::Value(_)) && !first.result_is_partial(),
         "1st keyof within budget should succeed (got {first:?})"
     );
     let second = dispatch.execute_read(SemanticQueryKey::KeyOf {
@@ -400,15 +404,15 @@ fn post_trip_typeof_early_exit_attributes_to_typeof_cold_counter() {
     });
     assert!(
         matches!(
-            second.value,
+            second.value().clone(),
             QueryResult::Error(
                 verter_type_engine::semantic_query::QueryError::IncompleteSemanticOperand { .. }
             )
         ) && matches!(
-            second.fact_status,
+            second.fact_status(),
             verter_type_engine::semantic_query::FactStatus::Unavailable(_)
         ) && second.result_is_partial()
-            && second.cache_suppress,
+            && second.cache_suppress(),
         "2nd keyof should trip to a typed unavailable result (got {second:?})"
     );
 
@@ -438,19 +442,19 @@ fn post_trip_typeof_early_exit_attributes_to_typeof_cold_counter() {
     let result = dispatch.execute_read(typeof_key);
     assert!(
         matches!(
-            result.value,
+            result.value().clone(),
             QueryResult::Error(
                 verter_type_engine::semantic_query::QueryError::IncompleteSemanticOperand { .. }
             )
         ) && matches!(
-            result.fact_status,
+            result.fact_status(),
             verter_type_engine::semantic_query::FactStatus::Unavailable(_)
         ) && result.result_is_partial()
-            && result.cache_suppress,
+            && result.cache_suppress(),
         "post-trip TypeOf must take the typed-partial budget early-exit (got {result:?})"
     );
     assert!(matches!(
-        result.walker_diagnostics.as_ref(),
+        result.walker_diagnostics().as_ref(),
         [verter_type_engine::project_semantic_dispatch::walk::ShallowDiagnostic::ProjectionWorkLimit { .. }]
     ));
     let typeof_cold_after = live_ctx
@@ -513,15 +517,15 @@ fn post_trip_non_projection_queries_still_dispatch_normally() {
     });
     assert!(
         matches!(
-            trip.value,
+            trip.value().clone(),
             QueryResult::Error(
                 verter_type_engine::semantic_query::QueryError::IncompleteSemanticOperand { .. }
             )
         ) && matches!(
-            trip.fact_status,
+            trip.fact_status(),
             verter_type_engine::semantic_query::FactStatus::Unavailable(_)
         ) && trip.result_is_partial()
-            && trip.cache_suppress,
+            && trip.cache_suppress(),
         "2nd keyof should trip the fuse to a typed unavailable result (got {trip:?})"
     );
 
@@ -541,7 +545,7 @@ fn post_trip_non_projection_queries_still_dispatch_normally() {
     };
     let normalize_result = dispatch.execute_read(normalize_key);
     assert!(
-        matches!(normalize_result.value, QueryResult::Value(_))
+        matches!(normalize_result.value().clone(), QueryResult::Value(_))
             && !normalize_result.result_is_partial(),
         "post-trip ReduceUnion must dispatch normally; \
          widening the early-exit gate to non-projection queries would \
@@ -1132,9 +1136,9 @@ fn budget_trip_conditional_suppresses_and_does_not_warm() {
     // (1) first cold build lands within budget and counts.
     let first = dispatch.execute_read(key_first.clone());
     assert!(
-        matches!(first.value, QueryResult::Value(_)),
+        matches!(first.value().clone(), QueryResult::Value(_)),
         "1st Conditional within budget must succeed (got {:?})",
-        first.value
+        first.value().clone()
     );
     assert_eq!(
         request_budget.projection_ops_executed_count(),
@@ -1152,7 +1156,7 @@ fn budget_trip_conditional_suppresses_and_does_not_warm() {
             if reasons.contains(PartialReasonSet::PROJECTION_WORK_LIMIT)
     ));
     assert_eq!(
-        second.walker_diagnostics.as_ref(),
+        second.walker_diagnostics().as_ref(),
         &[
             verter_type_engine::project_semantic_dispatch::walk::ShallowDiagnostic::ProjectionWorkLimit {
                 root: second_carrier,
@@ -1160,7 +1164,7 @@ fn budget_trip_conditional_suppresses_and_does_not_warm() {
         ]
     );
     assert!(
-        second.cache_suppress,
+        second.cache_suppress(),
         "a budget-exceeded Conditional read MUST carry cache_suppress=true so the partial is \
          never warmed"
     );
@@ -1277,10 +1281,10 @@ fn budget_trip_instantiate_suppresses_and_does_not_warm() {
 
     let first = dispatch.execute_read(key_first);
     assert!(
-        matches!(first.value, QueryResult::Value(node) if node == arg_first)
+        matches!(first.value().clone(), QueryResult::Value(node) if node == arg_first)
             && !first.result_is_partial(),
         "1st Instantiate within budget must succeed (got {:?})",
-        first.value
+        first.value().clone()
     );
     assert!(
         request_budget.projection_ops_executed_count() >= 1,
@@ -1297,7 +1301,7 @@ fn budget_trip_instantiate_suppresses_and_does_not_warm() {
             if reasons.contains(PartialReasonSet::PROJECTION_WORK_LIMIT)
     ));
     assert_eq!(
-        second.walker_diagnostics.as_ref(),
+        second.walker_diagnostics().as_ref(),
         &[
             verter_type_engine::project_semantic_dispatch::walk::ShallowDiagnostic::ProjectionWorkLimit {
                 root: second_carrier,
@@ -1305,7 +1309,7 @@ fn budget_trip_instantiate_suppresses_and_does_not_warm() {
         ]
     );
     assert!(
-        second.cache_suppress,
+        second.cache_suppress(),
         "a budget-exceeded Instantiate read MUST carry cache_suppress=true"
     );
     assert!(
@@ -1403,20 +1407,19 @@ fn warm_gate_keys_on_result_is_partial_not_value_kind_or_cache_suppress() {
     // (1) The Value-partial: a COMPLETE `Value` with
     // `result_is_partial = true`. A value-kind gate
     // (`matches!(value, Error | Recursive)`) is FALSE for this `Value`.
-    let value_partial: CacheRead<QueryResult<SemanticNodeId>> = CacheRead {
-        lease: Default::default(),
-        value: QueryResult::Value(value_node),
-        dep_signature: empty_sig.clone(),
-        walker_diagnostics: Arc::from([]),
-        cache_suppress: true,
-        fact_status: verter_type_engine::semantic_query::FactStatus::unavailable(
+    let value_partial: CacheRead<QueryResult<SemanticNodeId>> = CacheRead::unleased_for_tests(
+        QueryResult::Value(value_node),
+        empty_sig.clone(),
+        Arc::from([]),
+        true,
+        verter_type_engine::semantic_query::FactStatus::unavailable(
             verter_type_engine::semantic_query::PartialReasonSet::PROPAGATED,
         ),
-        receipt: verter_type_engine::semantic_query::ReadReceipt::Unpriced,
-    };
+        verter_type_engine::semantic_query::ReadReceipt::Unpriced,
+    );
     assert!(
         !matches!(
-            value_partial.value,
+            value_partial.value().clone(),
             QueryResult::Error(_) | QueryResult::Recursive(_)
         ),
         "the Value-partial is a COMPLETE Value — a value-kind gate's blind spot"
@@ -1425,15 +1428,15 @@ fn warm_gate_keys_on_result_is_partial_not_value_kind_or_cache_suppress() {
     // (2) A benign complete-but-non-cacheable result: a `Value` with
     // `cache_suppress = true` but `result_is_partial = false` (ReturnOnly /
     // overflow / unrootable self-root).
-    let complete_non_cacheable: CacheRead<QueryResult<SemanticNodeId>> = CacheRead {
-        lease: Default::default(),
-        value: QueryResult::Value(value_node),
-        dep_signature: empty_sig,
-        walker_diagnostics: Arc::from([]),
-        cache_suppress: true,
-        fact_status: verter_type_engine::semantic_query::FactStatus::Complete,
-        receipt: verter_type_engine::semantic_query::ReadReceipt::Unpriced,
-    };
+    let complete_non_cacheable: CacheRead<QueryResult<SemanticNodeId>> =
+        CacheRead::unleased_for_tests(
+            QueryResult::Value(value_node),
+            empty_sig,
+            Arc::from([]),
+            true,
+            verter_type_engine::semantic_query::FactStatus::Complete,
+            verter_type_engine::semantic_query::ReadReceipt::Unpriced,
+        );
 
     // Gate behaviour for (2) — under its OWN request — must NOT suppress:
     // keying on `cache_suppress` (a failed candidate) would wrongly fire.
@@ -1519,39 +1522,36 @@ fn benign_non_cacheable_complete_results_still_warm_component_meta_final() {
     let benign_shapes: [(&str, CacheRead<QueryResult<SemanticNodeId>>); 3] = [
         (
             "signature-overflow",
-            CacheRead {
-                lease: Default::default(),
-                value: QueryResult::Value(value_node),
-                dep_signature: empty_sig.clone(),
-                walker_diagnostics: Arc::from([]),
-                cache_suppress: true,
-                fact_status: verter_type_engine::semantic_query::FactStatus::Complete,
-                receipt: verter_type_engine::semantic_query::ReadReceipt::Unpriced,
-            },
+            CacheRead::unleased_for_tests(
+                QueryResult::Value(value_node),
+                empty_sig.clone(),
+                Arc::from([]),
+                true,
+                verter_type_engine::semantic_query::FactStatus::Complete,
+                verter_type_engine::semantic_query::ReadReceipt::Unpriced,
+            ),
         ),
         (
             "unrootable-self-root",
-            CacheRead {
-                lease: Default::default(),
-                value: QueryResult::Value(value_node),
-                dep_signature: empty_sig.clone(),
-                walker_diagnostics: Arc::from([]),
-                cache_suppress: true,
-                fact_status: verter_type_engine::semantic_query::FactStatus::Complete,
-                receipt: verter_type_engine::semantic_query::ReadReceipt::Unpriced,
-            },
+            CacheRead::unleased_for_tests(
+                QueryResult::Value(value_node),
+                empty_sig.clone(),
+                Arc::from([]),
+                true,
+                verter_type_engine::semantic_query::FactStatus::Complete,
+                verter_type_engine::semantic_query::ReadReceipt::Unpriced,
+            ),
         ),
         (
             "return-only",
-            CacheRead {
-                lease: Default::default(),
-                value: QueryResult::Value(value_node),
-                dep_signature: empty_sig,
-                walker_diagnostics: Arc::from([]),
-                cache_suppress: true,
-                fact_status: verter_type_engine::semantic_query::FactStatus::Complete,
-                receipt: verter_type_engine::semantic_query::ReadReceipt::Unpriced,
-            },
+            CacheRead::unleased_for_tests(
+                QueryResult::Value(value_node),
+                empty_sig,
+                Arc::from([]),
+                true,
+                verter_type_engine::semantic_query::FactStatus::Complete,
+                verter_type_engine::semantic_query::ReadReceipt::Unpriced,
+            ),
         ),
     ];
 
@@ -1569,8 +1569,8 @@ fn benign_non_cacheable_complete_results_still_warm_component_meta_final() {
         assert!(!current_request_result_is_partial());
         // Sanity: the shape is a COMPLETE Value, non-cacheable only.
         assert!(
-            matches!(read.value, QueryResult::Value(_))
-                && read.cache_suppress
+            matches!(read.value().clone(), QueryResult::Value(_))
+                && read.cache_suppress()
                 && !read.result_is_partial(),
             "{label}: benign shape must be a complete Value with cache_suppress=true, \
              result_is_partial=false"
@@ -1658,14 +1658,14 @@ fn projectpath_over_instantiationref_budget_trip_withholds_value_and_does_not_wa
     // A shell from a stopped member walk is not an evaluated member value.
     assert!(
         matches!(
-            read.value,
+            read.value().clone(),
             QueryResult::Error(QueryError::IncompleteSemanticOperand { .. })
         ),
         "the budget-tripped member projection must withhold its unsupported shell, got {:?}",
-        read.value
+        read.value().clone()
     );
     assert!(matches!(
-        read.fact_status,
+        read.fact_status(),
         verter_type_engine::semantic_query::FactStatus::Unavailable(_)
     ));
     assert!(read
@@ -1920,7 +1920,7 @@ fn conditional_relation_budget_trip_folds_partial_and_refuses_relation_memo() {
     assert!(
         graph
             .get_relation_payload(host.as_ref(), &dispatch.relate_key_for(check, extends),)
-            .map(|served| served.value)
+            .map(|served| served.value().clone())
             .is_none(),
         "a relation Unknown that arose from a PARTIAL nested read MUST NOT be admitted to the \
          relation memo (reverting the relation-memo partial-skip admits it here)"

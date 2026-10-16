@@ -469,9 +469,7 @@ fn harvest_role_bearing_refs_node<F: FnMut(&str)>(
             worklist.extend(args);
             continue;
         }
-        let Some(data) =
-            verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), node)
-        else {
+        let Some(data) = dispatch.graph().read_in_scope(node) else {
             continue;
         };
         match data.as_ref() {

@@ -98,7 +98,7 @@ fn answer_text(host: &VerterHost, node: SemanticNodeId) -> String {
         }
         SemanticNodeData::Object(surface) => {
             let mut members: Vec<String> = surface
-                .index_signatures
+                .index_signatures()
                 .iter()
                 .map(|signature| {
                     format!(
@@ -4661,13 +4661,17 @@ export function twinTernary(c: boolean) { return c ? twin(c) : { a: 1 }; }
     let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     let graph = dispatch.graph();
-    let Some(SemanticNodeData::Object(view)) = graph.node_data(twin).as_deref().cloned() else {
+    let Some(SemanticNodeData::Object(view)) = graph
+        .node_data(twin)
+        .as_deref()
+        .map(verter_type_engine::semantic_query::SemanticNodeData::copy_for_tests)
+    else {
         panic!("the twins collapse to one object");
     };
     assert!(
-        view.call_signatures.is_empty()
-            && view.construct_signatures.is_empty()
-            && view.index_signatures.is_empty(),
+        view.call_signatures().is_empty()
+            && view.construct_signatures().is_empty()
+            && view.index_signatures().is_empty(),
         "neither twin is callable, constructable or indexed"
     );
     let [member] = view.positive_members() else {
@@ -5925,7 +5929,10 @@ export function spreadArm(c: boolean, s: { z: number }) { return c ? { a: 1, q: 
             );
         }
         let graph = dispatch.graph();
-        let Some(SemanticNodeData::Union(arms)) = graph.node_data(spread).as_deref().cloned()
+        let Some(SemanticNodeData::Union(arms)) = graph
+            .node_data(spread)
+            .as_deref()
+            .map(verter_type_engine::semantic_query::SemanticNodeData::copy_for_tests)
         else {
             panic!("{root}: the spread join keeps both arms");
         };
@@ -5940,7 +5947,7 @@ export function spreadArm(c: boolean, s: { z: number }) { return c ? { a: 1, q: 
             })
             .unwrap_or_else(|| panic!("{root}: one arm is the spread-built literal"));
         let surface = dispatch
-            .resolve_typeinfo_surface_view(
+            .resolve_typeinfo_surface(
                 program,
                 verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit(
                 ),

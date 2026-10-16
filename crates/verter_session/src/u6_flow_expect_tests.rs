@@ -516,9 +516,9 @@ pub(crate) fn render_node(
                 })
                 .chain(
                     surface
-                        .call_signatures
+                        .call_signatures()
                         .iter()
-                        .chain(surface.construct_signatures.iter())
+                        .chain(surface.construct_signatures().iter())
                         .map(|signature| render_node(dispatch, *signature, depth + 1)),
                 )
                 .collect();
@@ -2364,17 +2364,17 @@ pub(crate) mod checker_syntax {
                 expected @ CheckerType::Function { construct, .. },
                 SemanticNodeData::Object(surface),
             ) if surface.positive_members().is_empty()
-                && surface.index_signatures.is_empty()
+                && surface.index_signatures().is_empty()
                 && if *construct {
-                    surface.call_signatures.is_empty()
+                    surface.call_signatures().is_empty()
                 } else {
-                    surface.construct_signatures.is_empty()
+                    surface.construct_signatures().is_empty()
                 } =>
             {
                 let lone = if *construct {
-                    surface.construct_signatures.as_ref()
+                    surface.construct_signatures().as_ref()
                 } else {
-                    surface.call_signatures.as_ref()
+                    surface.call_signatures().as_ref()
                 };
                 match lone {
                     [signature] => matches_node(dispatch, *signature, expected, depth + 1),

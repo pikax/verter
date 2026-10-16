@@ -316,8 +316,8 @@ fn check_barrel_chain_proofs_and_folding(count: usize) -> [(&'static str, usize)
         "__Probe",
     )));
     assert!(!result.result_is_partial(), "complete authored chain probe");
-    let QueryResult::Value(alias) = result.value else {
-        panic!("chain probe: {:?}", result.value);
+    let QueryResult::Value(alias) = result.value().clone() else {
+        panic!("chain probe: {:?}", result.value().clone());
     };
     let node = dispatch
         .normalize_node_keeping_declaration_refs_for_tests(
@@ -500,7 +500,7 @@ fn check_export_table_and_namespace_work(count: usize) -> [(&'static str, usize)
     let read = |key| {
         let result = dispatch.execute_read(key);
         assert!(!result.result_is_partial(), "complete namespace demand");
-        match result.value {
+        match result.value().clone() {
             QueryResult::Value(node) => node,
             other => panic!("namespace demand: {other:?}"),
         }
@@ -799,7 +799,8 @@ fn a_growing_namespace_shares_unchanged_tables_and_retains_linear_nodes() {
                 },
                 context,
             ))
-            .value
+            .value()
+            .clone()
         {
             QueryResult::Value(node) => node,
             other => panic!("namespace object: {other:?}"),
@@ -818,7 +819,8 @@ fn a_growing_namespace_shares_unchanged_tables_and_retains_linear_nodes() {
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 "__Probe",
             )))
-            .value
+            .value()
+            .clone()
         {
             QueryResult::Value(node) => node,
             other => panic!("authored probe: {other:?}"),

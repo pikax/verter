@@ -248,7 +248,7 @@ fn shallow_walker_substitutes_mapper_binder_per_enumerated_key() {
         .node_data(surface_node)
         .expect("surface node must have data");
     let view = match surface_data.as_ref() {
-        SemanticNodeData::Object(view) => view.clone(),
+        SemanticNodeData::Object(view) => view.copy_for_tests(),
         other => panic!("ProjectPath terminal must be `SemanticNodeData::Object`, got {other:?}"),
     };
 

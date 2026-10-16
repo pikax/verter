@@ -616,6 +616,13 @@ impl NodeArenaCore {
     pub(crate) fn is_live(&self, id: SemanticNodeId) -> bool {
         matches!(self.inner.read().slot(id), Slot::Live(..))
     }
+    /// The payload of a live slot only; a released slot has none.
+    pub(super) fn live_payload(&self, id: SemanticNodeId) -> Option<Arc<SemanticNodeData>> {
+        match self.inner.read().slot(id) {
+            Slot::Live(payload, _) => Some(Arc::clone(payload)),
+            _ => None,
+        }
+    }
     pub(crate) fn counted(&self) -> bool {
         #[cfg(any(test, feature = "test-support"))]
         {

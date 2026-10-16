@@ -72,6 +72,16 @@ impl ReducedOutputNode {
     pub fn result_is_partial(&self) -> bool {
         self.result_is_partial
     }
+
+    /// Borrow the reduced node this output owns.
+    pub fn node(
+        &self,
+    ) -> Result<
+        crate::semantic_query_memo::node_roots::NodeRef<'_>,
+        crate::semantic_query::QueryError,
+    > {
+        self._roots.0.node_ref(self.node_id)
+    }
 }
 
 // Dispatch-wide re-export of the shape engine's failed-query-carrier
@@ -1246,7 +1256,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         false_branch_ref: d_false,
                         distributive: d_dist,
                         pending: d_pending,
-                    }) = self.graph().node_data(reduced).as_deref().cloned()
+                    }) = self.graph().node_data(reduced).as_deref().map(crate::semantic_query::SemanticNodeData::clone)
                     {
                         let demanded_true = self.apply_conditional_branch_pending(
                             d_true,
@@ -1916,7 +1926,9 @@ fn rebuild_object<C: crate::resolver_core::ResolverCapabilities>(
     if !changed {
         return Some(node);
     }
-    let mut members = new_members.iter().cloned();
+    let mut members = new_members
+        .iter()
+        .map(crate::semantic_query::SurfaceMember::clone);
     let mut calls = new_calls.iter().copied();
     let mut constructs = new_constructs.iter().copied();
     let entries = view

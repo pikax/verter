@@ -3064,8 +3064,8 @@ fn invalid_call_signature_drop_keeps_typed_degradation_in_sidecar() {
 
     let string_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let miss = graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss));
-    let mut surface = object_surface(&[("a", string_id)]);
-    surface.call_signatures = Arc::from(vec![miss].into_boxed_slice());
+    let surface = object_surface(&[("a", string_id)]);
+    let surface = surface.with_call_signatures(Arc::from(vec![miss].into_boxed_slice()));
     let obj = graph.intern_node(SemanticNodeData::Object(surface));
 
     let dispatch = ProjectSemanticDispatch::new(&host);

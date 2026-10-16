@@ -115,8 +115,11 @@ fn run_deep_tuple_projection_child() {
                 ),
             )));
             (
-                read.value,
-                read.walker_diagnostics,
+                read.value().clone(),
+                read.walker_diagnostics()
+                    .iter()
+                    .map(verter_type_engine::project_semantic_dispatch::walk::ShallowDiagnostic::copy_for_tests)
+                    .collect::<Vec<_>>(),
                 current_cold_compute_completeness(),
             )
         })
@@ -181,8 +184,11 @@ fn run_deep_conditional_projection_child() {
                 ),
             )));
             (
-                read.value,
-                read.walker_diagnostics,
+                read.value().clone(),
+                read.walker_diagnostics()
+                    .iter()
+                    .map(verter_type_engine::project_semantic_dispatch::walk::ShallowDiagnostic::copy_for_tests)
+                    .collect::<Vec<_>>(),
                 current_cold_compute_completeness(),
             )
         })
@@ -637,13 +643,13 @@ fn exact_memo_identity_cycle_precedes_both_operational_limits() {
     let after = graph.stats_snapshot();
 
     assert!(
-        matches!(read.value, QueryResult::Recursive(_)),
+        matches!(read.value().clone(), QueryResult::Recursive(_)),
         "the exact in-flight memo identity must retain the established recursion sentinel"
     );
     assert!(
-        read.walker_diagnostics.is_empty(),
+        read.walker_diagnostics().is_empty(),
         "an exact identity cycle must not be mislabeled as either operational limit: {:?}",
-        read.walker_diagnostics
+        read.walker_diagnostics()
     );
     assert_eq!(
         after.same_path_sentinel_returns,
@@ -746,10 +752,10 @@ fn runaway_generic_returns_work_partial_one_root_diagnostic_and_seals_its_refusa
         "fresh-identity growth must stop on the work rail, not query depth"
     );
     assert!(first.result_is_partial());
-    assert!(first.cache_suppress);
+    assert!(first.cache_suppress());
     assert!(
         matches!(
-            first.value,
+            first.value().clone(),
             QueryResult::Error(
                 verter_type_engine::semantic_query::QueryError::IncompleteSemanticOperand { .. }
             )
@@ -757,16 +763,16 @@ fn runaway_generic_returns_work_partial_one_root_diagnostic_and_seals_its_refusa
         "a stopped demand must supply no usable source: {first:?}"
     );
     assert!(matches!(
-        first.fact_status,
+        first.fact_status(),
         verter_type_engine::semantic_query::FactStatus::Unavailable(_)
     ));
     let [ShallowDiagnostic::ProjectionWorkLimit {
         root: diagnostic_root,
-    }] = first.walker_diagnostics.as_ref()
+    }] = first.walker_diagnostics().as_ref()
     else {
         panic!(
             "the runaway root must surface exactly one machine-typed work-limit diagnostic, got {:?}",
-            first.walker_diagnostics
+            first.walker_diagnostics()
         );
     };
 
@@ -778,7 +784,7 @@ fn runaway_generic_returns_work_partial_one_root_diagnostic_and_seals_its_refusa
             if reasons.contains(PartialReasonSet::PROJECTION_WORK_LIMIT)
     ));
     assert_eq!(
-        second.walker_diagnostics.as_ref(),
+        second.walker_diagnostics().as_ref(),
         &[ShallowDiagnostic::ProjectionWorkLimit {
             root: *diagnostic_root,
         }]
@@ -832,7 +838,7 @@ fn connected_query_depth_limit_is_distinct_diagnostic_and_seals_its_refusal() {
     assert!(!reasons.contains(PartialReasonSet::PROJECTION_WORK_LIMIT));
     assert!(
         matches!(
-            first.value,
+            first.value().clone(),
             QueryResult::Error(
                 verter_type_engine::semantic_query::QueryError::IncompleteSemanticOperand { .. }
             )
@@ -840,16 +846,16 @@ fn connected_query_depth_limit_is_distinct_diagnostic_and_seals_its_refusal() {
         "a stopped demand must supply no usable source: {first:?}"
     );
     assert!(matches!(
-        first.fact_status,
+        first.fact_status(),
         verter_type_engine::semantic_query::FactStatus::Unavailable(_)
     ));
     let [ShallowDiagnostic::ConnectedQueryDepthLimit {
         root: diagnostic_root,
-    }] = first.walker_diagnostics.as_ref()
+    }] = first.walker_diagnostics().as_ref()
     else {
         panic!(
             "the root demand must surface exactly one query-depth diagnostic, got {:?}",
-            first.walker_diagnostics
+            first.walker_diagnostics()
         );
     };
 
@@ -862,7 +868,7 @@ fn connected_query_depth_limit_is_distinct_diagnostic_and_seals_its_refusal() {
                 && !reasons.contains(PartialReasonSet::PROJECTION_WORK_LIMIT)
     ));
     assert_eq!(
-        second.walker_diagnostics.as_ref(),
+        second.walker_diagnostics().as_ref(),
         &[ShallowDiagnostic::ConnectedQueryDepthLimit {
             root: *diagnostic_root,
         }]
@@ -905,13 +911,13 @@ fn legitimate_recursive_type_uses_recursive_carrier_without_limit_diagnostic() {
         ResultCompleteness::Complete,
         "a semantic recursion back-edge is a complete recursive carrier, not operational partiality"
     );
-    let QueryResult::Value(value) = read.value else {
+    let QueryResult::Value(value) = read.value().clone() else {
         panic!("a legitimate recursive type must resolve to a value carrier");
     };
     assert!(
-        read.walker_diagnostics.is_empty(),
+        read.walker_diagnostics().is_empty(),
         "legitimate recursive types must not be diagnosed as an operational limit: {:?}",
-        read.walker_diagnostics
+        read.walker_diagnostics()
     );
     let raised = dispatch
         .materialize_output_type_expr_for_test(value)
@@ -967,13 +973,13 @@ fn stable_unresolved_reference_is_complete_carrier_without_limit_diagnostic() {
         ResultCompleteness::Complete,
         "an unresolved authored reference is a stable Complete carrier"
     );
-    let QueryResult::Value(value) = read.value else {
+    let QueryResult::Value(value) = read.value().clone() else {
         panic!("a stable unresolved reference must return its value carrier");
     };
     assert!(
-        read.walker_diagnostics.is_empty(),
+        read.walker_diagnostics().is_empty(),
         "stable unresolved references must not receive budget diagnostics: {:?}",
-        read.walker_diagnostics
+        read.walker_diagnostics()
     );
     assert!(
         matches!(

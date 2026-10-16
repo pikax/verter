@@ -68,6 +68,8 @@ pub fn mine_footprint(
     max_edges: usize,
     caps: &AuditCaps,
 ) -> RequestFootprintAudit {
+    // A construction reader: the scope owns every ordinal it reads.
+    let _scope = graph.enter_node_root_scope();
     // ── 1. Collect unique SemanticNodeIds touched by raw edges ──────
     let mut touched: Vec<SemanticNodeId> = Vec::new();
     {
@@ -91,7 +93,7 @@ pub fn mine_footprint(
     let mut nodes: Vec<(SemanticNodeId, NodeRecord)> = touched
         .into_iter()
         .map(|id| {
-            let data = graph.node_data(id);
+            let data = graph.read_in_scope(id);
             let record = build_node_record(graph, data.as_deref());
             (id, record)
         })

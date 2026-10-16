@@ -2124,7 +2124,10 @@ fn intersect_unions_of_primitive_types(
     // false`.
     let primitive_union_members =
         |arm: SemanticNodeId| -> Option<Vec<SemanticNodeId>> {
-            let Some(SemanticNodeData::Union(members)) = graph.node_data(arm).as_deref().cloned()
+            let Some(SemanticNodeData::Union(members)) = graph
+                .node_data(arm)
+                .as_deref()
+                .map(crate::semantic_query::SemanticNodeData::clone)
             else {
                 return None;
             };

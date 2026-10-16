@@ -2261,7 +2261,11 @@ fn excess_property_checking_is_an_argument_position_rule() {
         verter_type_engine::semantic_query::FreshnessKey::Regular,
         "a regularized surface is no longer a fresh source"
     );
-    let Some(SemanticNodeData::Object(view)) = graph.node_data(regular).as_deref().cloned() else {
+    let Some(SemanticNodeData::Object(view)) = graph
+        .node_data(regular)
+        .as_deref()
+        .map(verter_type_engine::semantic_query::SemanticNodeData::copy_for_tests)
+    else {
         panic!("the regularized peer is still an object surface");
     };
     for slot in view.positive_members() {
@@ -2453,7 +2457,7 @@ fn resolve_call_same_key_argument_edit_rejects_warm_and_recomputes_the_new_overl
             dispatch
                 .graph()
                 .get_resolve_call_result(dispatch.ctx, &key)
-                .map(|served| served.value)
+                .map(|served| served.value().clone())
                 .is_some(),
             "the first revision's result is warm under the content-free key"
         );
@@ -2473,7 +2477,7 @@ fn resolve_call_same_key_argument_edit_rejects_warm_and_recomputes_the_new_overl
             dispatch
                 .graph()
                 .get_resolve_call_result(dispatch.ctx, &key)
-                .map(|served| served.value)
+                .map(|served| served.value().clone())
                 .is_none(),
             "the value-side read set / self-roots REJECT the warm entry the \
              equal key would otherwise serve"
@@ -2487,7 +2491,7 @@ fn resolve_call_same_key_argument_edit_rejects_warm_and_recomputes_the_new_overl
             dispatch
                 .graph()
                 .get_resolve_call_result(dispatch.ctx, &key)
-                .map(|served| served.value)
+                .map(|served| served.value().clone())
                 .is_some(),
             "the recomputed result warms under the same key"
         );

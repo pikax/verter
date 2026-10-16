@@ -53,20 +53,65 @@ impl SemanticGraphStore {
         self.arena.try_intern_owned(data, scope)
     }
 
-    /// Read a node and retain its graph topology until this lease drops.
-    pub fn lease_node_data(
+    /// Read a node through an arena-qualified capability. A capability
+    /// minted by another graph is foreign; a slot a legacy close already
+    /// released is stale. Neither reads as a live payload.
+    pub fn read(
         &self,
-        node: SemanticNodeId,
+        node: node_roots::NodeRef<'_>,
     ) -> Result<node_data_lease::NodeDataLease, QueryError> {
-        let roots = self.root_nodes([node])?;
-        let data = self
-            .node_data(node)
-            .ok_or(QueryError::ForeignSemanticOperand)?;
-        Ok(node_data_lease::NodeDataLease {
-            data,
-            root: node_roots::NodeRoot::from_roots(node, roots),
-        })
+        if !Arc::ptr_eq(node.arena(), &self.arena.core) {
+            return Err(QueryError::ForeignSemanticOperand);
+        }
+        node.read()
     }
+
+    /// Read a construction ordinal while this thread holds a construction
+    /// scope of this graph — the producer lane a semantic builder runs in.
+    /// The scope is the capability: outside one the ordinal authorizes
+    /// nothing and the read is `None`. A live node is returned under its own
+    /// root, so the lease outlives the scope. A slot a legacy close already
+    /// released reads as the unresolved placeholder with no root, exactly as
+    /// the production close lifecycle reports it, and none of its children
+    /// can be borrowed through it.
+    pub fn read_in_scope(&self, id: SemanticNodeId) -> Option<node_data_lease::NodeDataLease> {
+        if !node_roots::NodeRootScope::holds(&self.arena.core) {
+            return None;
+        }
+        match node_roots::NodeRootSet::acquire(Arc::clone(&self.arena.core), vec![id]) {
+            Ok(roots) => Some(node_data_lease::NodeDataLease {
+                data: self.arena.get(id)?,
+                root: node_roots::NodeRoot::from_roots(id, roots),
+            }),
+            Err(QueryError::StaleSemanticOperand) => Some(node_data_lease::NodeDataLease {
+                data: self.arena.get(id)?,
+                root: node_roots::NodeRoot::from_roots(id, Default::default()),
+            }),
+            Err(_) => None,
+        }
+    }
+
+    /// Root a live construction ordinal for delivery beyond the construction
+    /// scope this thread holds of this graph. Without such a scope, or for a
+    /// slot a legacy close already released, there is nothing to root.
+    pub fn root_in_scope(&self, id: SemanticNodeId) -> Option<node_roots::NodeRoot> {
+        if !node_roots::NodeRootScope::holds(&self.arena.core) {
+            return None;
+        }
+        node_roots::NodeRef::new(id, &self.arena.core)
+            .to_root()
+            .ok()
+    }
+
+    /// Lease an engine-internal ordinal for delivery to a consumer outside
+    /// the engine. A released slot has nothing to deliver.
+    pub(crate) fn lease_for_delivery(
+        &self,
+        id: SemanticNodeId,
+    ) -> Option<node_data_lease::NodeDataLease> {
+        node_roots::NodeRef::new(id, &self.arena.core).read().ok()
+    }
+
     /// Intern a new immutable [`SemanticNodeData`] and return its stable id.
     ///
     /// The interned node records [`NodeScopeId::Global`] in the origin
@@ -172,14 +217,26 @@ impl SemanticGraphStore {
         self.arena.scope(id)
     }
 
-    /// Read the resolved payload for a semantic node id. Returns `None` if
-    /// the id has not been interned. An id whose payload a document close
+    /// Read the resolved payload for a construction ordinal. Returns `None`
+    /// if the id has not been interned. An id whose payload a document close
     /// released ([`Self::release_canonical`]) is still a known id: it reads
     /// as the shared `Opaque(Miss)` placeholder (see
     /// [`Self::node_is_live`]), so a stale holder sees an unresolved value
     /// rather than an invalid-id fault.
+    ///
+    /// A bare ordinal is internal construction identity: outside this crate
+    /// a production read goes through [`Self::read`] with a capability its
+    /// owner minted. Test builds expose the ordinal read as a fixture seam.
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn node_data(&self, id: SemanticNodeId) -> Option<Arc<SemanticNodeData>> {
+        self.arena.get(id)
+    }
+
+    /// Construction-ordinal read; see the test-build variant.
+    #[cfg(not(any(test, feature = "test-support")))]
+    #[must_use]
+    pub(crate) fn node_data(&self, id: SemanticNodeId) -> Option<Arc<SemanticNodeData>> {
         self.arena.get(id)
     }
 }

@@ -141,7 +141,7 @@ fn selected_key_mapped_materialization_closes_conditional_to_function() {
         .expect("surface node must have semantic data");
 
     let view = match surface_data.as_ref() {
-        SemanticNodeData::Object(view) => view.clone(),
+        SemanticNodeData::Object(view) => view.copy_for_tests(),
         other => panic!(
             "synthesise_mapped_surface MUST produce a \
              `SemanticNodeData::Object` for LiteralKeyedSlots<PricingPlan>. Got: {other:?}",

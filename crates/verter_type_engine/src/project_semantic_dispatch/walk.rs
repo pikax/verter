@@ -140,7 +140,7 @@ pub fn probe_walk_typeof_resolved<C: crate::resolver_core::ResolverCapabilities>
 /// Variants describe non-fatal observations (cycle short-circuits, open
 /// conditionals, pathological-input cap) so consumers can render
 /// human-readable messages without re-walking the graph.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub enum ShallowDiagnostic {
     /// The connected root demand exhausted its projection/evaluation work
     /// envelope while identities were still changing. This is operational
@@ -170,7 +170,7 @@ pub enum ShallowDiagnostic {
     /// distinguish missing declarations from budget exhaustion.
     InstantiationError {
         decl: DeclIdentity,
-        error: QueryError,
+        error: DiagnosticError,
     },
     /// Open conditional encountered at empty-path Shallow terminal —
     /// no branch was selected, so the walker yields the empty surface
@@ -229,6 +229,99 @@ pub enum ShallowDiagnostic {
         /// The check's target.
         target: SemanticNodeId,
     },
+}
+
+impl ShallowDiagnostic {
+    /// A fixture copy. Test builds only: production consumers borrow the
+    /// carrier from the lease that owns its operands.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn copy_for_tests(&self) -> Self {
+        self.clone()
+    }
+
+    /// Copy inside the owning crate. A consumer borrows this carrier from the lease that owns its graph operands; there is no public detached copy.
+    #[allow(
+        clippy::clone_on_copy,
+        reason = "an exhaustive field copy, so a new field cannot be skipped"
+    )]
+    pub(crate) fn clone(&self) -> Self {
+        match self {
+            Self::ProjectionWorkLimit { root } => Self::ProjectionWorkLimit { root: root.clone() },
+            Self::ConnectedQueryDepthLimit { root } => {
+                Self::ConnectedQueryDepthLimit { root: root.clone() }
+            }
+            Self::ConnectedMemoryLimit { root } => {
+                Self::ConnectedMemoryLimit { root: root.clone() }
+            }
+            Self::DuplicateArmShortCircuited { node } => {
+                Self::DuplicateArmShortCircuited { node: node.clone() }
+            }
+            Self::CycleShortCircuited { node } => Self::CycleShortCircuited { node: node.clone() },
+            Self::CyclicInstantiation { decl } => Self::CyclicInstantiation { decl: decl.clone() },
+            Self::InstantiationError { decl, error } => Self::InstantiationError {
+                decl: decl.clone(),
+                error: error.clone(),
+            },
+            Self::OpenConditional { node } => Self::OpenConditional { node: node.clone() },
+            Self::PathologicalInput { root } => Self::PathologicalInput { root: root.clone() },
+            Self::UnionArmEmpty {
+                union_node,
+                arm_index,
+            } => Self::UnionArmEmpty {
+                union_node: union_node.clone(),
+                arm_index: arm_index.clone(),
+            },
+            Self::OpenSpreadProgram { node } => Self::OpenSpreadProgram { node: node.clone() },
+            Self::UnresolvedSurfaceArm {
+                name,
+                owner_canonical,
+                owner,
+            } => Self::UnresolvedSurfaceArm {
+                name: name.clone(),
+                owner_canonical: owner_canonical.clone(),
+                owner: owner.clone(),
+            },
+            Self::PendingFlowRoot { gap } => Self::PendingFlowRoot { gap: gap.clone() },
+            Self::RelationTooComplex { source, target } => Self::RelationTooComplex {
+                source: source.clone(),
+                target: target.clone(),
+            },
+        }
+    }
+}
+
+/// The query failure a diagnostic records. Consumers render it; its graph
+/// operands (a recursive back-edge's arguments) stay with the read that
+/// delivered the diagnostic, so the error has no public copy and no
+/// borrowed `QueryError` view to copy from.
+#[derive(PartialEq, Eq, Hash)]
+pub struct DiagnosticError(pub(crate) QueryError);
+
+impl DiagnosticError {
+    /// Record a fixture failure. Production diagnostics are minted by the
+    /// shallow walker.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn for_tests(error: QueryError) -> Self {
+        Self(error)
+    }
+
+    /// Whether the recorded failure is a fatal query-level failure.
+    #[must_use]
+    pub fn is_fatal(&self) -> bool {
+        is_fatal_query_error(&self.0)
+    }
+
+    pub(crate) fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl std::fmt::Debug for DiagnosticError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
 }
 
 impl ShallowDiagnostic {
@@ -603,7 +696,7 @@ enum SurfacelessWalk {
 /// for the type-resolution unification): named members PLUS call signatures,
 /// construct signatures, index signatures, and the keyspace. Members stay
 /// shallow — each `value` is a `SemanticNodeId`, never an expanded body.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub struct ShallowSurface {
     /// Resolver-ordered stream. This is the only ordering authority; the
     /// kind-specific vectors below are derived indexes.
@@ -621,12 +714,62 @@ pub struct ShallowSurface {
     pub keyspace: Option<SemanticNodeId>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl ShallowSurface {
+    /// A fixture copy. Test builds only: production consumers borrow the
+    /// carrier from the lease that owns its operands.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn copy_for_tests(&self) -> Self {
+        self.clone()
+    }
+
+    /// Copy inside the owning crate; there is no public detached copy of the graph operands it carries.
+    #[allow(
+        clippy::clone_on_copy,
+        reason = "an exhaustive field copy, so a new field cannot be skipped"
+    )]
+    pub(crate) fn clone(&self) -> Self {
+        Self {
+            entries: self
+                .entries
+                .iter()
+                .map(ShallowSurfaceEntry::clone)
+                .collect(),
+            members: self.members.clone(),
+            call_signatures: self.call_signatures.clone(),
+            construct_signatures: self.construct_signatures.clone(),
+            index_signatures: self
+                .index_signatures
+                .iter()
+                .map(crate::semantic_query::IndexSignature::clone)
+                .collect(),
+            keyspace: self.keyspace.clone(),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
 pub enum ShallowSurfaceEntry {
     Member(ShallowSurfaceMember),
     CallSignature(SemanticNodeId),
     ConstructSignature(SemanticNodeId),
     IndexSignature(crate::semantic_query::IndexSignature),
+}
+
+impl ShallowSurfaceEntry {
+    /// Copy inside the owning crate; there is no public detached copy of the graph operands it carries.
+    #[allow(
+        clippy::clone_on_copy,
+        reason = "an exhaustive field copy, so a new field cannot be skipped"
+    )]
+    pub(crate) fn clone(&self) -> Self {
+        match self {
+            Self::Member(v0) => Self::Member(v0.clone()),
+            Self::CallSignature(v0) => Self::CallSignature(v0.clone()),
+            Self::ConstructSignature(v0) => Self::ConstructSignature(v0.clone()),
+            Self::IndexSignature(v0) => Self::IndexSignature(v0.clone()),
+        }
+    }
 }
 
 /// One member contribution while the walker is merging arms. Carries the
@@ -794,7 +937,10 @@ pub(crate) fn presence_intersection_members(
     evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
 ) -> Vec<crate::semantic_query::SurfaceMember> {
     if let [only] = arm_members {
-        return only.clone();
+        return only
+            .iter()
+            .map(crate::semantic_query::SurfaceMember::clone)
+            .collect();
     }
     let arm_surfaces: Vec<Option<ShallowSurface>> = arm_members
         .iter()
@@ -811,7 +957,9 @@ pub(crate) fn presence_intersection_members(
     match merge_intersection_surfaces_with_graph(graph, &arm_surfaces, evidence) {
         Some(merged) => surface_view_from_shallow(&merged)
             .positive_members()
-            .to_vec(),
+            .iter()
+            .map(crate::semantic_query::SurfaceMember::clone)
+            .collect(),
         None => Vec::new(),
     }
 }
@@ -832,7 +980,10 @@ pub(crate) fn presence_union_members(
     evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
 ) -> Vec<crate::semantic_query::SurfaceMember> {
     if let [only] = arm_members {
-        return only.clone();
+        return only
+            .iter()
+            .map(crate::semantic_query::SurfaceMember::clone)
+            .collect();
     }
     let arm_surfaces: Vec<Option<ShallowSurface>> = arm_members
         .iter()
@@ -849,7 +1000,9 @@ pub(crate) fn presence_union_members(
     match merge_union_surfaces_for_macro(graph, &arm_surfaces, evidence) {
         Some(merged) => surface_view_from_shallow(&merged)
             .positive_members()
-            .to_vec(),
+            .iter()
+            .map(crate::semantic_query::SurfaceMember::clone)
+            .collect(),
         None => Vec::new(),
     }
 }
@@ -1228,7 +1381,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDi
 /// [`merge_declaration_surfaces_core`]: the graph reducer interns it into an
 /// `Object`, the display projection renders it directly. Neither side
 /// re-implements the peer-merge precedence.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub(crate) struct MergedDeclSurface {
     pub(crate) members: Vec<MergedDeclMember>,
     pub(crate) call_signatures: Vec<SemanticNodeId>,
@@ -1257,7 +1410,7 @@ pub(crate) struct MergedDeclMember {
 /// `extends`/`implements` HERITAGE reference arms plus the peer-merged own-body
 /// surface. Mirrors the graph reducer's `Intersection([heritage…, own_object])`
 /// shape so the read-only display projection renders byte-identically.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub(crate) struct MergedDeclDisplaySurface {
     pub(crate) heritage_arms: Vec<SemanticNodeId>,
     pub(crate) own_surface: MergedDeclSurface,
@@ -2002,7 +2155,11 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
     /// Whether `node` is a surface every member of which is known and none
     /// of which is named `name` (in either element-access spelling).
     fn surface_proves_absent(&self, node: SemanticNodeId, name: &PropertyKey) -> bool {
-        let Some(SemanticNodeData::Object(view)) = self.graph().node_data(node).as_deref().cloned()
+        let Some(SemanticNodeData::Object(view)) = self
+            .graph()
+            .node_data(node)
+            .as_deref()
+            .map(crate::semantic_query::SemanticNodeData::clone)
         else {
             return false;
         };
@@ -2402,7 +2559,13 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         if !is_union {
             return probes
                 .iter()
-                .flat_map(|probe| probe.view.index_signatures.iter().cloned())
+                .flat_map(|probe| {
+                    probe
+                        .view
+                        .index_signatures
+                        .iter()
+                        .map(crate::semantic_query::IndexSignature::clone)
+                })
                 .collect();
         }
         let Some((first, rest)) = probes.split_first() else {
@@ -2412,7 +2575,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             view.index_signatures
                 .iter()
                 .find(|signature| self.index_key_types(signature.key_type).contains(&key_type))
-                .cloned()
+                .map(crate::semantic_query::IndexSignature::clone)
         };
         let mut signatures = Vec::new();
         for signature in first.view.index_signatures.iter() {
@@ -7531,7 +7694,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 drop(data);
                 let buffer_id = *next_buffer_id;
                 *next_buffer_id += 1;
-                intersection_buffers.insert(buffer_id, vec![None; arms.len()]);
+                intersection_buffers.insert(buffer_id, std::iter::repeat_with(|| None).take(arms.len()).collect::<Vec<_>>());
                 // Push the flush frame BEFORE the iterator frame so
                 // LIFO pop order executes the flush after every arm
                 // has contributed.
@@ -7561,7 +7724,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 drop(data);
                 let buffer_id = *next_buffer_id;
                 *next_buffer_id += 1;
-                union_buffers.insert(buffer_id, vec![None; arms.len()]);
+                union_buffers.insert(buffer_id, std::iter::repeat_with(|| None).take(arms.len()).collect::<Vec<_>>());
                 work.push(Frame::FlushUnion {
                     buffer_id,
                     parent_target: target,
@@ -7640,7 +7803,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         {
                             let buffer_id = *next_buffer_id;
                             *next_buffer_id += 1;
-                            intersection_buffers.insert(buffer_id, vec![None; 1]);
+                            intersection_buffers.insert(buffer_id, std::iter::repeat_with(|| None).take(1).collect::<Vec<_>>());
                             work.push(Frame::FlushObjectFilter {
                                 buffer_id,
                                 keys,
@@ -7707,7 +7870,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         self.walker_diagnostics
                             .push(ShallowDiagnostic::InstantiationError {
                                 decl: identity,
-                                error,
+                                error: DiagnosticError(error),
                             });
                         self.contribute_surface(
                             target,
@@ -7804,7 +7967,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         self.walker_diagnostics
                             .push(ShallowDiagnostic::InstantiationError {
                                 decl: identity,
-                                error,
+                                error: DiagnosticError(error),
                             });
                         self.contribute_surface(
                             target,
@@ -7867,7 +8030,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     // optional automatically.
                     let buffer_id = *next_buffer_id;
                     *next_buffer_id += 1;
-                    union_buffers.insert(buffer_id, vec![None; 2]);
+                    union_buffers.insert(buffer_id, std::iter::repeat_with(|| None).take(2).collect::<Vec<_>>());
                     work.push(Frame::FlushUnion {
                         buffer_id,
                         parent_target: target,
@@ -7907,7 +8070,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     // using the iterator-frame discipline.
                     let buffer_id = *next_buffer_id;
                     *next_buffer_id += 1;
-                    union_buffers.insert(buffer_id, vec![None; 2]);
+                    union_buffers.insert(buffer_id, std::iter::repeat_with(|| None).take(2).collect::<Vec<_>>());
                     work.push(Frame::FlushUnion {
                         buffer_id,
                         parent_target: target,
@@ -10497,7 +10660,9 @@ pub fn spread_formula_positive_members_for_macro(
         let surface = shallow_surface_from_projection_alternative(graph, only);
         return surface_view_from_shallow(&surface)
             .positive_members()
-            .to_vec();
+            .iter()
+            .map(crate::semantic_query::SurfaceMember::clone)
+            .collect();
     }
     let arm_surfaces: Vec<Option<ShallowSurface>> = formula
         .alternatives()
@@ -10512,7 +10677,9 @@ pub fn spread_formula_positive_members_for_macro(
     match merge_union_surfaces_for_macro(graph, &arm_surfaces, evidence) {
         Some(merged) => surface_view_from_shallow(&merged)
             .positive_members()
-            .to_vec(),
+            .iter()
+            .map(crate::semantic_query::SurfaceMember::clone)
+            .collect(),
         None => Vec::new(),
     }
 }

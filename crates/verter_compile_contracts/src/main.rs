@@ -12,6 +12,7 @@ const PASS_FIXTURES: &[&str] = &[
     "no_storedspan_good_carrier.rs",
     "recursive_self_good_recursive_carrier.rs",
     "script_fact_partial_exact_syntax.rs",
+    "public_owned_carriers_borrow_and_own.rs",
 ];
 
 fn workspace_root() -> PathBuf {

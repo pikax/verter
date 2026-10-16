@@ -367,12 +367,12 @@ pub(crate) fn expand_slot_binding_output(
         binding_name,
         ProjectionMode::Expanded,
     );
-    match slot_binding.value {
+    match *slot_binding.value() {
         QueryResult::Value(terminal_id) => {
             let artifact = AdmittedExpansionNode::new(
                 terminal_id,
-                slot_binding.dep_signature,
-                !slot_binding.fact_status.is_complete(),
+                slot_binding.dep_signature().clone(),
+                !slot_binding.fact_status().is_complete(),
             );
             match materialize_admitted_expansion_node(dispatch, &artifact, fallback_source) {
                 Some(normalized) => MacroPathOutputExpansion::Materialized {

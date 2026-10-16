@@ -252,7 +252,7 @@ fn a_deep_chain_over_a_reduced_budget_ends_on_the_work_rail() {
             (
                 (
                     read.result_is_partial(),
-                    read.cache_suppress,
+                    read.cache_suppress(),
                     read.partial_reasons(),
                 ),
                 dispatch.connected_demand().work_used_for_tests(),
@@ -715,12 +715,12 @@ fn warm_second(source: &str, scheduled: bool) -> WarmSecond {
         let candidates = dispatch
             .graph()
             .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key.clone())));
-        let value =
-            matches!(read.value, QueryResult::Value(_)).then(|| eval_key_on(&host, dispatch, key));
+        let value = matches!(read.value().clone(), QueryResult::Value(_))
+            .then(|| eval_key_on(&host, dispatch, key));
         WarmSecond {
             warm,
             value,
-            partial: read.result_is_partial() && read.cache_suppress,
+            partial: read.result_is_partial() && read.cache_suppress(),
             reasons: read.partial_reasons(),
             candidates,
             work,
@@ -745,8 +745,8 @@ fn unscheduled_plain_chain(levels: usize) -> (bool, bool, PartialReasonSet, usiz
                 .graph()
                 .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key)));
             (
-                matches!(read.value, QueryResult::Value(_)),
-                read.result_is_partial() && read.cache_suppress,
+                matches!(read.value().clone(), QueryResult::Value(_)),
+                read.result_is_partial() && read.cache_suppress(),
                 read.partial_reasons(),
                 candidates,
             )
@@ -854,7 +854,7 @@ fn cold_read(
     let candidates = dispatch
         .graph()
         .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key)));
-    let printed = match &read.value {
+    let printed = match &read.value() {
         QueryResult::Value(SemanticQueryValue::FlowReturn(result))
             if result.degradation().is_none() =>
         {

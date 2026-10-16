@@ -112,19 +112,16 @@ pub(super) fn published_member_source_upgrade_for_node<
             verter_type_expr::facts::ClosedTypeFact::LeafUnion(leaves),
         ));
     }
-    let identity =
-        match verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), node)
-            .as_deref()
-        {
-            Some(verter_type_engine::semantic_query::SemanticNodeData::DeclRef { identity }) => {
-                Some(identity.clone())
-            }
-            Some(verter_type_engine::semantic_query::SemanticNodeData::InstantiationRef {
-                base,
-                ..
-            }) if include_lossy_instantiation => Some(base.clone()),
-            _ => None,
-        };
+    let identity = match dispatch.graph().read_in_scope(node).as_deref() {
+        Some(verter_type_engine::semantic_query::SemanticNodeData::DeclRef { identity }) => {
+            Some(identity.clone())
+        }
+        Some(verter_type_engine::semantic_query::SemanticNodeData::InstantiationRef {
+            base,
+            ..
+        }) if include_lossy_instantiation => Some(base.clone()),
+        _ => None,
+    };
     match identity {
         // Content-free: canonical + symbol only — the whole-hash is a version,
         // never part of a published source.
@@ -193,8 +190,7 @@ pub(crate) fn structural_member_value_source<
             verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit(),
         )
         .into_usable_node()?;
-    let data =
-        verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), resolved)?;
+    let data = dispatch.graph().read_in_scope(resolved)?;
     if matches!(
         data.as_ref(),
         verter_type_engine::semantic_query::SemanticNodeData::Opaque(error)

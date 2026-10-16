@@ -688,7 +688,7 @@ fn class_dual_space_routes_instance_and_static_through_distinct_shared_paths() {
     match static_data.as_deref() {
         Some(verter_type_engine::semantic_query::SemanticNodeData::Object(view)) => {
             assert!(
-                !view.construct_signatures.is_empty(),
+                !view.construct_signatures().is_empty(),
                 "static surface must carry the class construct signature"
             );
             assert!(

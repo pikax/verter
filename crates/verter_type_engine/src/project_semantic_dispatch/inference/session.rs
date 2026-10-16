@@ -74,12 +74,36 @@ struct ProjectionInferenceInfo {
 }
 
 /// Recovered source-shape entries accumulated by the reverse pass.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) enum ReverseRecoveredEntry {
     ObjectMember { member: SurfaceMember },
     ArrayElement { value: SemanticNodeId },
     TupleElement { element: TupleElement },
     IndexSignature { signature: IndexSignature },
+}
+
+impl ReverseRecoveredEntry {
+    /// Copy inside the owning crate; there is no public detached copy of the graph operands it carries.
+    #[allow(
+        clippy::clone_on_copy,
+        reason = "an exhaustive field copy, so a new field cannot be skipped"
+    )]
+    pub(crate) fn clone(&self) -> Self {
+        match self {
+            Self::ObjectMember { member } => Self::ObjectMember {
+                member: member.clone(),
+            },
+            Self::ArrayElement { value } => Self::ArrayElement {
+                value: value.clone(),
+            },
+            Self::TupleElement { element } => Self::TupleElement {
+                element: element.clone(),
+            },
+            Self::IndexSignature { signature } => Self::IndexSignature {
+                signature: signature.clone(),
+            },
+        }
+    }
 }
 
 /// Session-owned journals for exact reverse-homomorphic mapped inference.
@@ -496,7 +520,12 @@ impl InferenceSession {
     ) -> Vec<ReverseRecoveredEntry> {
         self.reverse_projection
             .as_ref()
-            .map(|reverse| reverse.recovered[checkpoint.recovered_len..].to_vec())
+            .map(|reverse| {
+                reverse.recovered[checkpoint.recovered_len..]
+                    .iter()
+                    .map(ReverseRecoveredEntry::clone)
+                    .collect()
+            })
             .unwrap_or_default()
     }
 

@@ -175,7 +175,7 @@ fn set_key(subject: SemanticNodeId) -> SemanticQueryKey {
 }
 
 fn set_epoch(value: &SignatureSetValue) -> Option<GraphEpoch> {
-    value.set.epoch()
+    value.set().epoch()
 }
 
 fn candidates(
@@ -183,7 +183,7 @@ fn candidates(
     value: &SignatureSetValue,
 ) -> Vec<SignatureCandidate> {
     match SemanticReadView::pin(d.graph().signature_store())
-        .read_set(value.set)
+        .read_set(value.set())
         .expect("a current-epoch set reads")
     {
         BorrowedSet::Empty => Vec::new(),

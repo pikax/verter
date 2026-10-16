@@ -23,7 +23,8 @@ use verter_type_engine::semantic_query::{
 fn domain_of(host: &VerterHost, subject: SemanticNodeId) -> TruthinessDomain {
     ProjectSemanticDispatch::new(host)
         .classify_truthiness_domain_read(subject)
-        .value
+        .value()
+        .clone()
 }
 
 fn prim(host: &VerterHost, kind: PrimitiveKind) -> SemanticNodeId {
@@ -245,11 +246,11 @@ fn decided_domain_warms_and_undecided_domain_never_does() {
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let decided_key = SemanticQueryKey::ClassifyTruthinessDomain { subject: string };
     let first = dispatch.classify_truthiness_domain_read(string);
-    assert_eq!(first.value, TruthinessDomain::BOTH);
-    assert!(!first.cache_suppress, "a decided domain is admissible");
+    assert_eq!(first.value().clone(), TruthinessDomain::BOTH);
+    assert!(!first.cache_suppress(), "a decided domain is admissible");
     let cold_after_first = dispatch_cold_for(&decided_key);
     let second = dispatch.classify_truthiness_domain_read(string);
-    assert_eq!(second.value, TruthinessDomain::BOTH);
+    assert_eq!(second.value().clone(), TruthinessDomain::BOTH);
     assert_eq!(
         dispatch_cold_for(&decided_key),
         cold_after_first,
@@ -263,16 +264,16 @@ fn decided_domain_warms_and_undecided_domain_never_does() {
     let opaque = graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss));
     let undecided_key = SemanticQueryKey::ClassifyTruthinessDomain { subject: opaque };
     let first = dispatch.classify_truthiness_domain_read(opaque);
-    assert_eq!(first.value, TruthinessDomain::UNDECIDED);
+    assert_eq!(first.value().clone(), TruthinessDomain::UNDECIDED);
     assert!(
-        first.cache_suppress,
+        first.cache_suppress(),
         "an undecided domain suppresses admission"
     );
-    assert_eq!(first.value.truthy, TruthinessInhabitance::Undecided);
+    assert_eq!(first.value().truthy, TruthinessInhabitance::Undecided);
     let cold_after_first = dispatch_cold_for(&undecided_key);
     let second = dispatch.classify_truthiness_domain_read(opaque);
-    assert_eq!(second.value, TruthinessDomain::UNDECIDED);
-    assert!(second.cache_suppress);
+    assert_eq!(second.value().clone(), TruthinessDomain::UNDECIDED);
+    assert!(second.cache_suppress());
     assert_eq!(
         dispatch_cold_for(&undecided_key),
         cold_after_first + 1,

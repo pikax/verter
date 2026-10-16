@@ -342,8 +342,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined));
         let mut added: Vec<SurfaceMember> = Vec::new();
         for sibling in siblings {
-            let Some(SemanticNodeData::Object(sibling)) =
-                self.graph().node_data(*sibling).as_deref().cloned()
+            let Some(SemanticNodeData::Object(sibling)) = self
+                .graph()
+                .node_data(*sibling)
+                .as_deref()
+                .map(crate::semantic_query::SemanticNodeData::clone)
             else {
                 continue;
             };

@@ -148,10 +148,10 @@ fn stopped_demands_never_offer_unevaluated_subjects_as_positional_values() {
         for key in keys.iter().cloned() {
             let read = dispatch.execute_read(key);
             assert!(
-                matches!(read.fact_status, FactStatus::Unavailable(_)),
+                matches!(read.fact_status(), FactStatus::Unavailable(_)),
                 "stopped work establishes no positional guarantee: {read:?}"
             );
-            assert!(!matches!(read.value, QueryResult::Value(_)));
+            assert!(!matches!(read.value().clone(), QueryResult::Value(_)));
         }
     }
     dispatch
@@ -160,11 +160,11 @@ fn stopped_demands_never_offer_unevaluated_subjects_as_positional_values() {
     for key in keys {
         let read = dispatch.execute_read(key);
         assert_eq!(
-            read.fact_status,
+            read.fact_status().clone(),
             FactStatus::Complete,
             "the unaffected control completes: {read:?}"
         );
-        assert!(matches!(read.value, QueryResult::Value(_)));
+        assert!(matches!(read.value().clone(), QueryResult::Value(_)));
     }
 }
 
@@ -225,7 +225,7 @@ fn finite_mapped_batch_stops_at_its_first_refusal_and_warms_when_complete() {
     assert!(tight
         .partial_reason_classes()
         .contains(PartialReasonSet::PROJECTION_WORK_LIMIT));
-    assert!(tight.cache_suppress);
+    assert!(tight.cache_suppress());
     let accesses = DISPATCH_TRACE.with(|trace| {
         trace
             .borrow()
@@ -239,11 +239,11 @@ fn finite_mapped_batch_stops_at_its_first_refusal_and_warms_when_complete() {
     );
     dispatch.connected_demand().set_limits_for_tests(10_000, 24);
     let complete = dispatch.execute_read(key.clone());
-    assert!(!complete.result_is_partial() && !complete.cache_suppress);
+    assert!(!complete.result_is_partial() && !complete.cache_suppress());
     let before = graph.stats_snapshot();
     let repeat = dispatch.execute_read(key);
-    assert!(!repeat.result_is_partial() && !repeat.cache_suppress);
-    assert!(matches!((repeat.value, complete.value),
+    assert!(!repeat.result_is_partial() && !repeat.cache_suppress());
+    assert!(matches!((repeat.value().clone(), complete.value().clone()),
         (verter_type_engine::semantic_query::QueryResult::Value(a), verter_type_engine::semantic_query::QueryResult::Value(b)) if a == b));
     assert!(graph.stats_snapshot().hits > before.hits);
 }

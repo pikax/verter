@@ -504,11 +504,11 @@ fn an_independent_return_type_is_exact_beside_its_refused_flow_proof() {
         "ReturnType actually demanded pf while its preparation refused proof"
     );
     assert_eq!(
-        read.fact_status,
+        read.fact_status().clone(),
         FactStatus::Complete,
         "an independently proven return source cannot inherit its refused flow proof: {read:?}"
     );
-    let QueryResult::Value(node) = read.value else {
+    let QueryResult::Value(node) = read.value().clone() else {
         panic!("ReturnType has a value")
     };
     assert!(matches!(
@@ -517,8 +517,8 @@ fn an_independent_return_type_is_exact_beside_its_refused_flow_proof() {
     ));
     drop(refusal);
     let control = dispatch.execute_read(key);
-    assert_eq!(control.fact_status, FactStatus::Complete);
-    assert!(matches!(control.value, QueryResult::Value(control) if control == node));
+    assert_eq!(control.fact_status().clone(), FactStatus::Complete);
+    assert!(matches!(control.value().clone(), QueryResult::Value(control) if control == node));
 }
 
 /// Conditionals, object literals and blocks nested past the plan budget

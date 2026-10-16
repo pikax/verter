@@ -514,13 +514,13 @@ fn lowers_type_literal_construct_signature_as_object_not_constructor_type() {
         SemanticNodeData::Object(view) => {
             assert!(view.positive_members().is_empty(), "no plain members");
             assert_eq!(
-                view.construct_signatures.len(),
+                view.construct_signatures().len(),
                 1,
                 "the construct signature is preserved on the Object surface"
             );
             assert!(
                 matches!(
-                    &*node(&graph, view.construct_signatures[0]),
+                    &*node(&graph, view.construct_signatures()[0]),
                     SemanticNodeData::Signature { .. }
                 ),
                 "the construct signature lowers to a Function node"

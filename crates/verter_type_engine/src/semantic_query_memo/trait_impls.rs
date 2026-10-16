@@ -1,11 +1,14 @@
 //! Trait adapters owned by the semantic graph store.
 
+#[cfg(test)]
 use std::sync::Arc;
 
+#[cfg(test)]
 use crate::semantic_query::{QueryError, SemanticGraphRead, SemanticNodeData, SemanticNodeId};
 
 use super::SemanticGraphStore;
 
+#[cfg(test)]
 impl SemanticGraphRead for SemanticGraphStore {
     fn node_data(&self, node: SemanticNodeId) -> Arc<SemanticNodeData> {
         SemanticGraphStore::node_data(self, node).unwrap_or_else(|| {

@@ -113,6 +113,73 @@ impl NodeRootSet {
             .as_ref()
             .is_none_or(|owner| Arc::ptr_eq(&owner.arena, arena))
     }
+
+    /// Borrow one operand this set owns. An ordinal the set does not hold is
+    /// a foreign operand: a copied integer never authorizes a read.
+    pub fn node_ref(&self, id: SemanticNodeId) -> Result<NodeRef<'_>, QueryError> {
+        let owner = self.0.as_ref().ok_or(QueryError::ForeignSemanticOperand)?;
+        if !owner.ids.contains(&id) {
+            return Err(QueryError::ForeignSemanticOperand);
+        }
+        Ok(NodeRef {
+            id,
+            arena: &owner.arena,
+        })
+    }
+}
+
+/// A borrowed, arena-qualified capability to read one live node.
+///
+/// Only an owner mints it — a [`NodeRoot`], a [`NodeRootSet`] operand, a
+/// [`super::node_data_lease::NodeDataLease`] child, a delivered
+/// [`crate::semantic_query::CacheRead`] or an active [`NodeRootScope`] — and
+/// it cannot outlive that owner. The node's ordinal alone authorizes nothing.
+#[derive(Clone, Copy)]
+pub struct NodeRef<'a> {
+    id: SemanticNodeId,
+    arena: &'a Arc<NodeArenaCore>,
+}
+
+impl std::fmt::Debug for NodeRef<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("NodeRef").field(&self.id).finish()
+    }
+}
+
+impl<'a> NodeRef<'a> {
+    pub(super) fn new(id: SemanticNodeId, arena: &'a Arc<NodeArenaCore>) -> Self {
+        Self { id, arena }
+    }
+
+    /// The node's ordinal: an identity label that authorizes no read.
+    #[must_use]
+    pub fn id(self) -> SemanticNodeId {
+        self.id
+    }
+
+    pub(super) fn arena(self) -> &'a Arc<NodeArenaCore> {
+        self.arena
+    }
+
+    /// Read the payload under a new owning root. A slot a legacy close
+    /// already released is stale; it never reads as a live payload.
+    pub fn read(self) -> Result<super::node_data_lease::NodeDataLease, QueryError> {
+        let roots = NodeRootSet::acquire(Arc::clone(self.arena), vec![self.id])?;
+        let data = self
+            .arena
+            .live_payload(self.id)
+            .ok_or(QueryError::StaleSemanticOperand)?;
+        Ok(super::node_data_lease::NodeDataLease {
+            data,
+            root: NodeRoot::from_roots(self.id, roots),
+        })
+    }
+
+    /// Acquire an owning root that outlives this borrow.
+    pub fn to_root(self) -> Result<NodeRoot, QueryError> {
+        let roots = NodeRootSet::acquire(Arc::clone(self.arena), vec![self.id])?;
+        Ok(NodeRoot::from_roots(self.id, roots))
+    }
 }
 
 /// A rooted node, qualified by its arena. The integer alone is not an owner.
@@ -141,6 +208,10 @@ impl NodeRoot {
     pub fn roots(&self) -> &NodeRootSet {
         &self.roots
     }
+    /// Borrow the rooted node as a read capability.
+    pub fn node_ref(&self) -> Result<NodeRef<'_>, QueryError> {
+        self.roots.node_ref(self.id)
+    }
 }
 
 std::thread_local! {
@@ -158,6 +229,7 @@ struct ConstructionOwners {
 /// the scope releases its intermediates.
 pub struct NodeRootScope {
     arena: usize,
+    core: Arc<NodeArenaCore>,
     depth: usize,
     thread_bound: std::marker::PhantomData<std::rc::Rc<()>>,
 }
@@ -185,9 +257,27 @@ impl NodeRootScope {
         });
         Self {
             arena: identity,
+            core: Arc::clone(arena),
             depth,
             thread_bound: std::marker::PhantomData,
         }
+    }
+
+    /// Borrow a construction ordinal of this scope's arena. The scope roots
+    /// the node until it closes, so the capability cannot outlive its owner.
+    pub fn node_ref(&self, id: SemanticNodeId) -> Result<NodeRef<'_>, QueryError> {
+        let roots = NodeRootSet::acquire(Arc::clone(&self.core), vec![id])?;
+        // Root it in THIS scope, not an inner one of the same arena that
+        // could close while the borrow is still live.
+        SCOPES.with(|scopes| {
+            scopes.borrow_mut()[self.depth]
+                .roots
+                .push(NodeRoot::from_roots(id, roots));
+        });
+        Ok(NodeRef {
+            id,
+            arena: &self.core,
+        })
     }
 
     pub(crate) fn capture(root: NodeRoot) {
@@ -221,6 +311,16 @@ impl NodeRootScope {
             }
         });
         drop(lease);
+    }
+
+    /// Whether this thread holds a construction scope of `arena`.
+    pub(super) fn holds(arena: &Arc<NodeArenaCore>) -> bool {
+        SCOPES.with(|scopes| {
+            scopes
+                .borrow()
+                .iter()
+                .any(|scope| Arc::ptr_eq(&scope.arena, arena))
+        })
     }
 
     /// Attach operands to a record minted within its issuing graph scope.

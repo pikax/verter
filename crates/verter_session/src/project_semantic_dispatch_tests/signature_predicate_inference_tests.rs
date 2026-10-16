@@ -241,8 +241,8 @@ fn lone_signature(
     node: SemanticNodeId,
 ) -> SemanticNodeId {
     match dispatch.graph().node_data(node).as_deref() {
-        Some(SemanticNodeData::Object(surface)) if surface.call_signatures.len() == 1 => {
-            surface.call_signatures[0]
+        Some(SemanticNodeData::Object(surface)) if surface.call_signatures().len() == 1 => {
+            surface.call_signatures()[0]
         }
         _ => node,
     }
@@ -880,11 +880,13 @@ fn an_inferred_predicate_names_the_positional_parameter() {
         observe(&host, STRICT_ROOT, symbol, |dispatch, _, node| {
             let graph = dispatch.graph();
             let signature = match graph.node_data(node).as_deref() {
-                Some(SemanticNodeData::Object(surface)) => surface.call_signatures[0],
+                Some(SemanticNodeData::Object(surface)) => surface.call_signatures()[0],
                 _ => node,
             };
-            let Some(SemanticNodeData::Signature { predicate, .. }) =
-                graph.node_data(signature).as_deref().cloned()
+            let Some(SemanticNodeData::Signature { predicate, .. }) = graph
+                .node_data(signature)
+                .as_deref()
+                .map(verter_type_engine::semantic_query::SemanticNodeData::copy_for_tests)
             else {
                 panic!(
                     "`{symbol}` is a signature; measured `{}`",
@@ -895,9 +897,10 @@ fn an_inferred_predicate_names_the_positional_parameter() {
             assert_eq!(predicate.subject, PredicateSubject::Parameter(position));
             assert!(!predicate.asserts);
             assert_eq!(
-                predicate
-                    .ty
-                    .and_then(|target| graph.node_data(target).as_deref().cloned()),
+                predicate.ty.and_then(|target| graph
+                    .node_data(target)
+                    .as_deref()
+                    .map(verter_type_engine::semantic_query::SemanticNodeData::copy_for_tests)),
                 Some(SemanticNodeData::Primitive(PrimitiveKind::String))
             );
         });

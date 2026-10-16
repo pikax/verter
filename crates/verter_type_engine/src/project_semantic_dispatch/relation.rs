@@ -4896,8 +4896,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let mut any_unknown = false;
         for combination in 0..combinations {
             let mut rest = combination;
-            let mut narrowed: Vec<crate::semantic_query::SurfaceMember> =
-                source_view.positive_members().to_vec();
+            let mut narrowed: Vec<crate::semantic_query::SurfaceMember> = source_view
+                .positive_members()
+                .iter()
+                .map(crate::semantic_query::SurfaceMember::clone)
+                .collect::<Vec<_>>();
             for (index, units) in &discriminants {
                 narrowed[*index].value = units[rest % units.len()];
                 rest /= units.len();
@@ -5248,8 +5251,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 
         let relation = match graph.node_data(source).as_deref() {
             Some(SemanticNodeData::Object(view)) => {
-                let members = view.positive_members().to_vec();
-                let index_signatures = view.index_signatures.to_vec();
+                let members = view
+                    .positive_members()
+                    .iter()
+                    .map(crate::semantic_query::SurfaceMember::clone)
+                    .collect::<Vec<_>>();
+                let index_signatures = view
+                    .index_signatures
+                    .iter()
+                    .map(crate::semantic_query::IndexSignature::clone)
+                    .collect::<Vec<_>>();
                 let mut verdict = assignable(bindings);
                 for member in members {
                     let Some(optional) =
@@ -5658,7 +5669,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             name: base_name,
             binder: base_binder,
             ..
-        }) = graph.node_data(base_infer).as_deref().cloned()
+        }) = graph
+            .node_data(base_infer)
+            .as_deref()
+            .map(crate::semantic_query::SemanticNodeData::clone)
         else {
             return Vec::new();
         };
@@ -10238,7 +10252,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             {
                 return None;
             }
-            view.closed().complete_members().to_vec()
+            view.closed()
+                .complete_members()
+                .iter()
+                .map(crate::semantic_query::SurfaceMember::clone)
+                .collect::<Vec<_>>()
         };
         // A homomorphic key space (`[P in keyof T]`) is the source's public
         // member names, read off the surface just unwrapped; any other is

@@ -488,11 +488,11 @@ fn classify_binding(
     let read = dispatch.execute_read(key);
     verter_type_engine::meta_resolve::emit_dispatch_dep_signature_facts(
         dispatch,
-        &read.dep_signature,
+        &read.dep_signature(),
     );
     verter_type_engine::request_context::observe_component_meta_read_suppress(&read);
-    match read.value {
-        QueryResult::Value(node) if !read.result_is_partial() => {
+    match read.value() {
+        &QueryResult::Value(node) if !read.result_is_partial() => {
             classify_node(dispatch, node, subject, route_candidate.as_ref())
         }
         QueryResult::Recursive(_) => unresolved_row(
@@ -696,7 +696,7 @@ fn carrier_instantiation_args(
     if !visited.insert(node) {
         return None;
     }
-    match dispatch.graph().node_data(node)?.as_ref() {
+    match dispatch.graph().read_in_scope(node)?.as_ref() {
         SemanticNodeData::InstantiationRef { args, .. } => Some(Arc::clone(args)),
         SemanticNodeData::Alias(next) => carrier_instantiation_args(dispatch, *next, visited),
         _ => None,
@@ -741,7 +741,7 @@ fn classify_normalized_domain(
             exactness: ResolutionExactness::Incomplete,
         };
     }
-    let Some(data) = dispatch.graph().node_data(node) else {
+    let Some(data) = dispatch.graph().read_in_scope(node) else {
         return ClosedLiteralDomain::Unresolved {
             reason: ClosedLiteralDomainUnresolvedReason::Fault,
             exactness: ResolutionExactness::Incomplete,

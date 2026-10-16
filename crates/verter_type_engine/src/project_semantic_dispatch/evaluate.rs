@@ -2399,8 +2399,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if evaluated.completeness.is_partial() {
             return evaluated;
         }
-        let Some(SemanticNodeData::InstantiationRef { base, args }) =
-            self.graph().node_data(evaluated.node).as_deref().cloned()
+        let Some(SemanticNodeData::InstantiationRef { base, args }) = self
+            .graph()
+            .node_data(evaluated.node)
+            .as_deref()
+            .map(crate::semantic_query::SemanticNodeData::clone)
         else {
             return evaluated;
         };

@@ -578,12 +578,15 @@ fn flow_return_new_of_a_local_class_constructs_that_class() {
             .graph()
             .node_data(result.return_type())
             .as_deref()
-            .cloned()
+            .map(verter_type_engine::semantic_query::SemanticNodeData::copy_for_tests)
         else {
             panic!("the local class's instance");
         };
-        let Some(SemanticNodeData::Object(surface)) =
-            dispatch.graph().node_data(instance).as_deref().cloned()
+        let Some(SemanticNodeData::Object(surface)) = dispatch
+            .graph()
+            .node_data(instance)
+            .as_deref()
+            .map(verter_type_engine::semantic_query::SemanticNodeData::copy_for_tests)
         else {
             panic!("the instance reads as an object surface");
         };

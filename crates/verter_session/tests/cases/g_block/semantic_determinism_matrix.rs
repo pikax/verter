@@ -344,7 +344,7 @@ fn render_node(
             // The entry STREAM is the ordering authority: render member
             // names in entry order so authored member order stays visible.
             out.push_str("object{");
-            for (index, entry) in surface.entries.iter().enumerate() {
+            for (index, entry) in surface.entries().iter().enumerate() {
                 if index > 0 {
                     out.push(',');
                 }

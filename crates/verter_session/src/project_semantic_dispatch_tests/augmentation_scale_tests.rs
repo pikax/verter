@@ -438,7 +438,11 @@ fn finite_batch_reads_match_single_keys_across_projection_modes() {
     let SemanticNodeData::Object(surface) = data.as_ref() else {
         panic!("object subject")
     };
-    let mut members = surface.positive_members().to_vec();
+    let mut members = surface
+        .positive_members()
+        .iter()
+        .map(verter_type_engine::semantic_query::SurfaceMember::copy_for_tests)
+        .collect::<Vec<_>>();
     let getter = members
         .iter_mut()
         .find(|member| {
@@ -471,7 +475,7 @@ fn finite_batch_reads_match_single_keys_across_projection_modes() {
             "complete member read: {:?}",
             read.partial_reasons()
         );
-        match read.value {
+        match read.value().clone() {
             QueryResult::Value(node) => node,
             other => panic!("value expected: {other:?}"),
         }
@@ -725,18 +729,22 @@ fn merged_global_instantiation_preserves_approximation_from_every_declaration() 
             if partial {
                 assert!(
                     matches!(
-                        read.fact_status,
+                        read.fact_status(),
                         FactStatus::Approximate(_, Some(FactInterpretation::Positional))
                     ),
                     "{file}: {read:?}"
                 );
-                assert!(read.cache_suppress);
+                assert!(read.cache_suppress());
                 assert!(dispatch.graph().get_validated(&key, dispatch.ctx).is_none());
             } else {
-                assert_eq!(read.fact_status, FactStatus::Complete, "{file}: {read:?}");
+                assert_eq!(
+                    read.fact_status().clone(),
+                    FactStatus::Complete,
+                    "{file}: {read:?}"
+                );
                 assert!(dispatch.graph().get_validated(&key, dispatch.ctx).is_some());
             }
-            let QueryResult::Value(node) = read.value else {
+            let QueryResult::Value(node) = read.value().clone() else {
                 panic!("{file}: {read:?}")
             };
             let mut pending = vec![node];
@@ -770,7 +778,7 @@ fn merged_global_instantiation_preserves_approximation_from_every_declaration() 
                     ))
                 ));
             }
-            let answer = (node, read.fact_status);
+            let answer = (node, read.fact_status().clone());
             if let Some(first) = first {
                 assert_eq!(
                     answer, first,

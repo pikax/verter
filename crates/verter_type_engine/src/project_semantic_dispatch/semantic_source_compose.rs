@@ -494,8 +494,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     members: Arc::from(std::mem::take(run).into_boxed_slice()),
                 };
                 let node = self.compose_object_fact_node(&run_fact, ctx).node();
-                let Some(SemanticNodeData::Object(surface)) =
-                    self.graph().node_data(node).as_deref().cloned()
+                let Some(SemanticNodeData::Object(surface)) = self
+                    .graph()
+                    .node_data(node)
+                    .as_deref()
+                    .map(crate::semantic_query::SemanticNodeData::clone)
                 else {
                     return;
                 };

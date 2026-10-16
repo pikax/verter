@@ -119,7 +119,11 @@ fn comparability(a: &str, b: &str) -> &'static str {
         |dispatch, node| {
             let Some(verter_type_engine::semantic_query::SemanticNodeData::Tuple {
                 elements, ..
-            }) = dispatch.graph().node_data(node).as_deref().cloned()
+            }) = dispatch
+                .graph()
+                .node_data(node)
+                .as_deref()
+                .map(verter_type_engine::semantic_query::SemanticNodeData::copy_for_tests)
             else {
                 panic!("`[{a}, {b}]` settles to a tuple");
             };

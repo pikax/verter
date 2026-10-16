@@ -158,7 +158,7 @@ impl crate::project_semantic_dispatch::walk::ShallowDiagnostic {
                 visit(*source);
                 visit(*target);
             }
-            Self::InstantiationError { decl: _, error } => error.for_each_retained_node(visit),
+            Self::InstantiationError { decl: _, error } => error.0.for_each_retained_node(visit),
             Self::CyclicInstantiation { decl: _ }
             | Self::UnresolvedSurfaceArm {
                 name: _,

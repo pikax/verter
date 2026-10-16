@@ -497,12 +497,12 @@ fn a_primitive_wrapper_read_is_the_demanding_projects() {
             let _scope =
                 LexicalDemandScopeGuard::push(&dispatch.lexical_demand_scope, Arc::from(canonical));
             let read = dispatch.execute_via_cold_build_helper(key(string));
-            let signatures: Vec<String> = match &read.value {
+            let signatures: Vec<String> = match &read.value() {
                 QueryResult::Value(SemanticQueryValue::SignatureSet(set)) => set
-                    .nodes
+                    .candidate_nodes()
                     .iter()
                     .map(|nodes| {
-                        let authored = nodes.authored.expect("an authored signature");
+                        let authored = nodes.authored().expect("an authored signature");
                         crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::render_node(
                             dispatch, authored, 0,
                         )

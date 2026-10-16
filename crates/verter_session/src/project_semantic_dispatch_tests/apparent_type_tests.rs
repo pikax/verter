@@ -312,12 +312,12 @@ fn rootless_apparent_taint_propagates_through_enclosing_member_projection() {
     let key = rootless_key(&dispatch, base, "/a/main.ts");
     let read = dispatch.execute_read(key.clone());
     assert!(
-        matches!(read.value, QueryResult::Value(_)),
+        matches!(read.value().clone(), QueryResult::Value(_)),
         "the rootless apparent surface resolves, got {:?}",
-        read.value
+        read.value().clone()
     );
     assert!(
-        read.cache_suppress,
+        read.cache_suppress(),
         "a rootless apparent value must be cache-suppressed"
     );
 
@@ -336,12 +336,12 @@ fn rootless_apparent_taint_propagates_through_enclosing_member_projection() {
         dispatch.execute_read(member_key.clone())
     };
     assert!(
-        matches!(member_read.value, QueryResult::Value(_)),
+        matches!(member_read.value().clone(), QueryResult::Value(_)),
         "`.call` on a rootless callable resolves through the apparent hop, got {:?}",
-        member_read.value
+        member_read.value().clone()
     );
     assert!(
-        member_read.cache_suppress,
+        member_read.cache_suppress(),
         "the enclosing member projection must inherit the rootless suppress taint"
     );
 
@@ -388,9 +388,9 @@ fn rootless_apparent_without_registered_ambient_fails_closed() {
     );
     let read = dispatch.execute_read(rootless_key(&dispatch, base, "/ws/main.ts"));
     assert!(
-        matches!(read.value, QueryResult::Error(QueryError::Miss)),
+        matches!(read.value().clone(), QueryResult::Error(QueryError::Miss)),
         "the producer misses honestly, got {:?}",
-        read.value
+        read.value().clone()
     );
 }
 
@@ -484,23 +484,23 @@ fn a_primitive_member_read_is_scoped_to_its_project_and_reused_warm() {
 
     let a = read("/a/main.ts", "onlyA");
     assert_eq!(
-        value(&a.value),
+        value(&a.value()),
         Some("a".to_string()),
         "project A reads its own String member"
     );
-    assert!(!a.cache_suppress, "a scoped wrapper read is admissible");
+    assert!(!a.cache_suppress(), "a scoped wrapper read is admissible");
 
     let b = read("/b/main.ts", "onlyA");
     assert!(
-        matches!(b.value, QueryResult::Value(node) if matches!(
+        matches!(b.value().clone(), QueryResult::Value(node) if matches!(
             graph.node_data(node).as_deref(),
             Some(SemanticNodeData::Opaque(_))
         )),
         "project B's String declares no `onlyA`: never A's answer, got {:?}",
-        b.value
+        b.value().clone()
     );
     assert_eq!(
-        value(&read("/b/main.ts", "onlyB").value),
+        value(&read("/b/main.ts", "onlyB").value().clone()),
         Some("b".to_string()),
         "project B reads its own String member"
     );
@@ -528,7 +528,7 @@ fn a_primitive_member_read_is_scoped_to_its_project_and_reused_warm() {
     let before = graph.stats_snapshot();
     let warm = read("/a/main.ts", "onlyA");
     let after = graph.stats_snapshot();
-    assert_eq!(value(&warm.value), Some("a".to_string()));
+    assert_eq!(value(&warm.value()), Some("a".to_string()));
     assert_eq!(
         after.misses, before.misses,
         "a warm repeat is served from the memo"
@@ -568,14 +568,14 @@ fn a_wrapper_member_read_without_a_wrapper_is_an_admitted_miss() {
         )
     });
     assert!(
-        matches!(read.value, QueryResult::Value(node) if matches!(
+        matches!(read.value().clone(), QueryResult::Value(node) if matches!(
             graph.node_data(node).as_deref(),
             Some(SemanticNodeData::Opaque(QueryError::Miss))
         )),
         "no String declares `length`, got {:?}",
-        read.value
+        read.value().clone()
     );
-    assert!(!read.cache_suppress, "the miss is admissible");
+    assert!(!read.cache_suppress(), "the miss is admissible");
     assert_eq!(graph.slot_candidate_count_for_tests(&path_key(miss)), 1);
     assert_eq!(graph.slot_candidate_count_for_tests(&path_key(string)), 0);
 }

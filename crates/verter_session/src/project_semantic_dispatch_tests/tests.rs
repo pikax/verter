@@ -34,12 +34,15 @@ fn an_unsupported_typeof_expression_has_no_positional_value() {
     let read = dispatch.execute_read(key.clone());
     assert!(
         matches!(
-            read.fact_status,
+            read.fact_status(),
             verter_type_engine::semantic_query::FactStatus::Unavailable(_)
         ),
         "{read:?}"
     );
-    assert!(matches!(read.value, QueryResult::Error(_)), "{read:?}");
+    assert!(
+        matches!(read.value().clone(), QueryResult::Error(_)),
+        "{read:?}"
+    );
     assert_eq!(dispatch.graph().slot_candidate_count_for_tests(&key), 0);
 }
 
@@ -61,7 +64,7 @@ fn presence_projection_keeps_its_subset_without_offering_exact_values() {
         );
         ProjectSemanticDispatch::new(&host).execute_read(key.clone())
     };
-    assert!(matches!(read.fact_status, FactStatus::Approximate(_, _)));
+    assert!(matches!(read.fact_status(), FactStatus::Approximate(_, _)));
     let FactResult::Approximate { value, .. } = read.into_fact().unwrap() else {
         panic!("a proven presence subset must remain usable")
     };
@@ -92,29 +95,29 @@ fn unsupported_unfinished_projection_withholds_its_value_at_dispatch() {
         ProjectSemanticDispatch::new(&host).execute_read(key.clone())
     };
     assert!(matches!(
-        read.fact_status,
+        read.fact_status(),
         verter_type_engine::semantic_query::FactStatus::Unavailable(_)
     ));
     assert!(
         matches!(
-            read.value,
+            read.value().clone(),
             QueryResult::Error(QueryError::IncompleteSemanticOperand { .. })
         ),
         "unsupported unfinished values cannot escape: {read:?}"
     );
     assert_eq!(graph.slot_candidate_count_for_tests(&key), 0);
     let clean = ProjectSemanticDispatch::new(&host).execute_read(key.clone());
-    assert!(matches!(clean.value, QueryResult::Value(node) if node == base));
+    assert!(matches!(clean.value().clone(), QueryResult::Value(node) if node == base));
     assert!(!clean.result_is_partial());
     assert_eq!(
-        clean.fact_status,
+        clean.fact_status().clone(),
         verter_type_engine::semantic_query::FactStatus::Complete
     );
     assert_eq!(graph.slot_candidate_count_for_tests(&key), 1);
     let hits = graph.stats_snapshot().hits;
     let retained = ProjectSemanticDispatch::new(&host).execute_read(key);
-    assert_eq!(retained.fact_status, clean.fact_status);
-    assert!(matches!(retained.value, QueryResult::Value(node) if node == base));
+    assert_eq!(retained.fact_status(), clean.fact_status());
+    assert!(matches!(retained.value().clone(), QueryResult::Value(node) if node == base));
     assert!(
         graph.stats_snapshot().hits > hits,
         "the complete fact must repeat from retention"
@@ -218,7 +221,7 @@ fn expanded_open_conditional_applies_branch_only_pending_substitution() {
         path: Arc::from([]),
         context: ProjectionReductionContext::published(ProjectionMode::Expanded),
     });
-    let QueryResult::Value(result) = read.value else {
+    let QueryResult::Value(result) = read.value().clone() else {
         panic!("expanded root must resolve")
     };
     assert!(
@@ -367,8 +370,8 @@ fn conditional_pending_frame_is_family_identity_and_reuses_relation_selection() 
     let mut selection_receipt = None;
     for (key, expected) in [(&string_key, string), (&number_key, number)] {
         let cold = dispatch.execute_read(key.clone());
-        assert!(matches!(cold.value, QueryResult::Value(node) if node == expected));
-        assert!(!cold.result_is_partial() && !cold.cache_suppress);
+        assert!(matches!(cold.value().clone(), QueryResult::Value(node) if node == expected));
+        assert!(!cold.result_is_partial() && !cold.cache_suppress());
         let receipt = graph
             .relation_published_carrier(&relation_key)
             .expect("the decided relation is published")
@@ -384,7 +387,7 @@ fn conditional_pending_frame_is_family_identity_and_reuses_relation_selection() 
         assert_eq!(count, 1);
         for _ in 0..3 {
             let warm = dispatch.execute_read(key.clone());
-            assert!(matches!(warm.value, QueryResult::Value(node) if node == expected));
+            assert!(matches!(warm.value().clone(), QueryResult::Value(node) if node == expected));
             assert_eq!(graph.slot_candidate_count_for_tests(key), count);
         }
     }
@@ -452,9 +455,9 @@ fn pending_conditional_keeps_argument_roots_and_cancelled_work_cold() {
     {
         let _guard = verter_type_engine::request_context::RequestContextGuard::install(cancelled);
         let read = ProjectSemanticDispatch::new(&host).execute_read(key.clone());
-        assert!(read.cache_suppress && read.result_is_partial());
+        assert!(read.cache_suppress() && read.result_is_partial());
         assert!(matches!(
-            read.value,
+            read.value().clone(),
             QueryResult::Error(QueryError::Cancelled)
         ));
         assert_eq!(graph.slot_candidate_count_for_tests(&key), 0);
@@ -462,8 +465,8 @@ fn pending_conditional_keeps_argument_roots_and_cancelled_work_cold() {
     }
     for _ in 0..2 {
         let (read, evidence) = dispatch.execute_read_with_operand_evidence(key.clone());
-        assert!(!read.cache_suppress && !read.result_is_partial());
-        let QueryResult::Value(result) = read.value else {
+        assert!(!read.cache_suppress() && !read.result_is_partial());
+        let QueryResult::Value(result) = read.value().clone() else {
             panic!("clean retry must resolve")
         };
         assert!(
@@ -607,7 +610,7 @@ fn duplicate_pending_conditionals_retain_argument_roots_cold_warm_and_after_edit
                 ConditionalPendingSubstitution::empty().append_both(parameter, argument),
             )),
         };
-        let first = graph.intern_node_with_scope(shell.clone(), scope("first"));
+        let first = graph.intern_node_with_scope(shell.copy_for_tests(), scope("first"));
         let second = graph.intern_node_with_scope(shell, scope("second"));
         let key = SemanticQueryKey::ReduceUnion {
             members: Arc::from([first, second]),
@@ -616,8 +619,8 @@ fn duplicate_pending_conditionals_retain_argument_roots_cold_warm_and_after_edit
         for _ in 0..2 {
             let (read, evidence) =
                 ProjectSemanticDispatch::new(&host).execute_read_with_operand_evidence(key.clone());
-            assert!(matches!(read.value, QueryResult::Value(node) if node == first));
-            assert!(!read.result_is_partial() && !read.cache_suppress);
+            assert!(matches!(read.value().clone(), QueryResult::Value(node) if node == first));
+            assert!(!read.result_is_partial() && !read.cache_suppress());
             assert!(evidence.expect("canonical normalization carries roots").self_roots().iter().any(|(file, hash)| file.as_ref() == "/w/argument.ts" && *hash == expected_hash), "discarding a duplicate conditional retains its frame-only argument root");
             assert_eq!(graph.slot_candidate_count_for_tests(&key), 1);
             assert_eq!(
@@ -664,7 +667,7 @@ fn pending_conditional_arguments_remain_visible_to_mapped_value_demand() {
         },
         context: ProjectionReductionContext::published(ProjectionMode::Expanded),
     });
-    let QueryResult::Value(result) = read.value else {
+    let QueryResult::Value(result) = read.value().clone() else {
         panic!("mapped value must resolve")
     };
     let surface = require_object_surface(graph, result, "key-dependent pending value");
@@ -1351,7 +1354,7 @@ fn macro_hot_script_setup_infer_bounds_share_eager_authored_identities() {
                 .hot
                 .node();
         let surface = match graph.node_data(root).as_deref() {
-            Some(SemanticNodeData::Object(surface)) => surface.clone(),
+            Some(SemanticNodeData::Object(surface)) => surface.copy_for_tests(),
             other => panic!("defineProps object must lower structurally, got {other:?}"),
         };
         ["constraint", "fallback"].map(|name| {
@@ -1766,7 +1769,7 @@ fn scc_member_drain_keeps_the_exact_root_candidate_across_sibling_warm_promotion
         assert_eq!(exact_root.validated_at_generation, root_generation);
         let warmed = graph
             .get_relation_payload(&warm_host, &root_key)
-            .map(|served| served.value)
+            .map(|served| served.value().clone())
             .expect("the sibling must validate in the warm reader's generation");
         assert_eq!(warmed.outcome, RelationOutcome::NotAssignable);
         barrier.wait();
@@ -2474,8 +2477,8 @@ fn conditional_applications_reuse_demanded_arguments_and_keep_origins() {
             args: Arc::from([application]),
             context: dispatch.template_literal_reduce_context(),
         });
-        assert!(!read.result_is_partial() && !read.cache_suppress);
-        let QueryResult::Value(result) = read.value else {
+        assert!(!read.result_is_partial() && !read.cache_suppress());
+        let QueryResult::Value(result) = read.value().clone() else {
             panic!("template must reduce")
         };
         assert!(matches!(graph.node_data(result).as_deref(),
@@ -2532,9 +2535,9 @@ fn demanded_imported_arguments_share_their_defining_scope() {
         ),
     ));
     assert!(
-        matches!(warm.value, QueryResult::Value(_))
+        matches!(warm.value().clone(), QueryResult::Value(_))
             && !warm.result_is_partial()
-            && !warm.cache_suppress
+            && !warm.cache_suppress()
     );
     let mut after_first = None;
     for (path, nested, named) in [
@@ -2598,8 +2601,8 @@ fn demanded_imported_arguments_share_their_defining_scope() {
             args: Arc::from([application]),
             context: dispatch.template_literal_reduce_context(),
         });
-        assert!(!read.result_is_partial() && !read.cache_suppress);
-        let QueryResult::Value(result) = read.value else {
+        assert!(!read.result_is_partial() && !read.cache_suppress());
+        let QueryResult::Value(result) = read.value().clone() else {
             panic!("template must reduce")
         };
         assert!(matches!(graph.node_data(result).as_deref(),
@@ -2700,8 +2703,8 @@ fn finite_mapped_index_matches_single_key_publication_context() {
                 path: Arc::from([PathSegment::Index(index)]),
                 context,
             });
-            assert!(!read.result_is_partial() && !read.cache_suppress);
-            let QueryResult::Value(value) = read.value else {
+            assert!(!read.result_is_partial() && !read.cache_suppress());
+            let QueryResult::Value(value) = read.value().clone() else {
                 panic!("mapped key must project");
             };
             value
@@ -2724,7 +2727,7 @@ fn finite_mapped_index_matches_single_key_publication_context() {
             members: Arc::from(singles),
             nullability: verter_session_query::flow::policy::NullabilityPolicy::Strict,
         });
-        let QueryResult::Value(expected) = expected.value else {
+        let QueryResult::Value(expected) = expected.value().clone() else {
             panic!("single projections reduce");
         };
         let batched = project(IndexKey::Computed(key_space));
@@ -2770,15 +2773,15 @@ fn conditional_branch_keeps_an_argument_cached_by_a_closed_demand() {
         )))
     };
     let outer = instantiate("Outer");
-    assert!(!outer.result_is_partial() && !outer.cache_suppress);
-    let QueryResult::Value(value) = outer.value else {
+    assert!(!outer.result_is_partial() && !outer.cache_suppress());
+    let QueryResult::Value(value) = outer.value().clone() else {
         panic!("the outer application must resolve");
     };
     assert!(matches!(graph.node_data(value).as_deref(),
         Some(SemanticNodeData::Literal(LiteralValue::String(text))) if text == "yes"));
     let before = graph.stats_snapshot().instantiate_count;
     let inner = instantiate("Ignore");
-    assert!(!inner.result_is_partial() && !inner.cache_suppress);
+    assert!(!inner.result_is_partial() && !inner.cache_suppress());
     assert_eq!(
         graph.stats_snapshot().instantiate_count,
         before,
@@ -2860,8 +2863,8 @@ fn residual_template_application_does_not_force_unused_mapped_argument() {
         args: Arc::from([application]),
         context: dispatch.template_literal_reduce_context(),
     });
-    assert!(!read.result_is_partial() && !read.cache_suppress);
-    let QueryResult::Value(result) = read.value else {
+    assert!(!read.result_is_partial() && !read.cache_suppress());
+    let QueryResult::Value(result) = read.value().clone() else {
         panic!("closed interpolation must reduce");
     };
     assert!(matches!(graph.node_data(result).as_deref(),
@@ -2876,7 +2879,9 @@ fn residual_template_application_does_not_force_unused_mapped_argument() {
         mapper,
         context: ProjectionReductionContext::published(ProjectionMode::Expanded),
     });
-    assert!(matches!(control.value, QueryResult::Value(_)) && !control.result_is_partial());
+    assert!(
+        matches!(control.value().clone(), QueryResult::Value(_)) && !control.result_is_partial()
+    );
     assert_eq!(
         graph.stats_snapshot().mapped_per_k_materializations - before,
         2,
@@ -3129,10 +3134,10 @@ fn cancelled_dispatch_is_typed_return_only_and_cold_retry_succeeds() {
             verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
         let read = ProjectSemanticDispatch::new(&host).execute_read(key.clone());
         assert!(matches!(
-            read.value,
+            read.value().clone(),
             QueryResult::Error(QueryError::Cancelled)
         ));
-        assert!(read.cache_suppress, "cancelled reads are ReturnOnly");
+        assert!(read.cache_suppress(), "cancelled reads are ReturnOnly");
         assert!(
             read.result_is_partial(),
             "cancelled reads are structurally partial"
@@ -3153,9 +3158,9 @@ fn cancelled_dispatch_is_typed_return_only_and_cold_retry_succeeds() {
     );
     let _guard = verter_type_engine::request_context::RequestContextGuard::install(retry);
     let first = ProjectSemanticDispatch::new(&host).execute_read(key.clone());
-    assert!(matches!(first.value, QueryResult::Value(_)));
+    assert!(matches!(first.value().clone(), QueryResult::Value(_)));
     let warm = ProjectSemanticDispatch::new(&host).execute_read(key);
-    assert!(matches!(warm.value, QueryResult::Value(_)));
+    assert!(matches!(warm.value().clone(), QueryResult::Value(_)));
 }
 
 /// A dispatch `ResolveDecl` for an ambient rune name (`$state`) RESOLVES in a
@@ -3256,7 +3261,7 @@ fn resolve_decl_warm_node_survives_between_execute_calls() {
         .semantic_graph()
         .get_unvalidated(&SemanticQueryKey::ResolveDecl(key.clone()))
         .expect("warm memo entry must exist after first query");
-    match warm.value {
+    match warm.value().clone() {
         QueryResult::Value(id) => assert_eq!(id, first_id),
         other => panic!("expected warm value, got {other:?}"),
     }
@@ -3316,7 +3321,7 @@ fn resolve_decl_dep_signature_captures_file_hash_and_project_gen() {
         .expect("warm entry must exist");
     let mut has_whole_hash = false;
     let mut has_project_gen = false;
-    for (_, dv) in warm.dep_signature.iter() {
+    for (_, dv) in warm.dep_signature().iter() {
         match dv {
             DepVersion::WholeHash(_) => has_whole_hash = true,
             DepVersion::ProjectGeneration(_) => has_project_gen = true,
@@ -3462,7 +3467,7 @@ fn member_value(
 ) -> SemanticNodeId {
     let data = graph.node_data(node).expect("node interned");
     let view = match data.as_ref() {
-        SemanticNodeData::Object(v) => v.clone(),
+        SemanticNodeData::Object(v) => v.copy_for_tests(),
         other => panic!("expected Object node, got {other:?}"),
     };
     view.positive_members()
@@ -3540,7 +3545,7 @@ fn reduce_union_dedups_cross_scope_duplicates_and_roots_discarded_arm() {
     let lit = SemanticNodeData::Literal(verter_type_engine::semantic_query::LiteralValue::String(
         "dup".to_string(),
     ));
-    let kept = graph.intern_node_with_scope(lit.clone(), file_scope("/w/dup_kept.ts", 3));
+    let kept = graph.intern_node_with_scope(lit.copy_for_tests(), file_scope("/w/dup_kept.ts", 3));
     let discarded = graph.intern_node_with_scope(lit, file_scope("/w/dup_discarded.ts", 5));
     assert_ne!(
         kept, discarded,
@@ -3696,13 +3701,13 @@ fn reduce_union_incomplete_comparison_is_return_only_with_zero_warm_candidates()
         };
         let first = ProjectSemanticDispatch::new(&host).execute_read(key.clone());
         assert!(
-            first.cache_suppress,
+            first.cache_suppress(),
             "{what}: an Incomplete comparison must report cache_suppress (ReturnOnly)"
         );
-        let QueryResult::Value(node) = first.value else {
+        let QueryResult::Value(node) = first.value().clone() else {
             panic!(
                 "{what}: the value still flows to the caller, got {:?}",
-                first.value
+                first.value().clone()
             );
         };
         assert!(
@@ -3716,7 +3721,7 @@ fn reduce_union_incomplete_comparison_is_return_only_with_zero_warm_candidates()
         );
         let second = ProjectSemanticDispatch::new(&host).execute_read(key.clone());
         assert!(
-            second.cache_suppress,
+            second.cache_suppress(),
             "{what}: the second demand also reports cache_suppress — with zero \
              stored candidates there is nothing to serve warm, so it recomputed"
         );
@@ -4296,7 +4301,7 @@ fn tier1_payload_equal_discard_roots_descendant_files() {
         file_scope("/w/file_b.ts", 7),
     );
     let g = simple_object(&graph, &[("v", c)]);
-    let payload = graph.node_data(g).expect("payload").as_ref().clone();
+    let payload = graph.node_data(g).expect("payload").copy_for_tests();
     let f = graph.intern_node_with_scope(payload, file_scope("/w/file_a.ts", 9));
     assert_ne!(g, f, "scope is arena identity — the fixture needs two ids");
 
@@ -4462,12 +4467,16 @@ fn comparator_object_arm_discriminates_diverged_positive_members() {
     };
     // Mimic `call_shape_transform`: transformed positive members (readonly
     // flipped) while `entries` keeps the originals.
-    let mut transformed = base_view.positive_members().to_vec();
+    let mut transformed = base_view
+        .positive_members()
+        .iter()
+        .map(verter_type_engine::semantic_query::SurfaceMember::copy_for_tests)
+        .collect::<Vec<_>>();
     for member in &mut transformed {
         member.readonly = true;
     }
     let diverged_view = base_view
-        .clone()
+        .copy_for_tests()
         .with_positive_members(Arc::from(transformed.into_boxed_slice()));
     let diverged = graph.intern_node(SemanticNodeData::Object(diverged_view));
     assert_ne!(
@@ -4813,7 +4822,7 @@ fn path_projection_through_intersection_keeps_callable_member_order() {
             ProjectionMode::Navigate,
         ),
     });
-    let QueryResult::Value(joined) = read.value else {
+    let QueryResult::Value(joined) = read.value().clone() else {
         panic!("member projection through the intersection produces a value");
     };
     match graph.node_data(joined).as_deref() {
@@ -5294,7 +5303,7 @@ fn project_path_of_length_one_dedups_with_project_member_at_memo() {
     let warm = graph
         .get_unvalidated(&canonical_key)
         .expect("canonical ProjectPath must be warm");
-    match &warm.value {
+    match &warm.value() {
         QueryResult::Value(id) => assert_eq!(*id, sugar_id),
         other => panic!("warm entry value mismatch: {other:?}"),
     }
@@ -5849,8 +5858,8 @@ fn surface_view_carries_call_signatures_and_construct_signatures() {
     let data = graph.node_data(obj).expect("interned");
     match &*data {
         SemanticNodeData::Object(s) => {
-            assert_eq!(s.call_signatures.as_ref(), &[string_id]);
-            assert_eq!(s.construct_signatures.as_ref(), &[num_id]);
+            assert_eq!(s.call_signatures().as_ref(), &[string_id]);
+            assert_eq!(s.construct_signatures().as_ref(), &[num_id]);
         }
         other => panic!("expected Object, got {other:?}"),
     }
@@ -6025,7 +6034,7 @@ fn concurrent_sugar_and_canonical_requests_share_in_flight_entry() {
     let warm = graph
         .get_unvalidated(&canonical_key)
         .expect("canonical ProjectPath warm after concurrent dispatch");
-    match &warm.value {
+    match &warm.value() {
         QueryResult::Value(id) => assert_eq!(*id, id1),
         other => panic!("warm entry value mismatch: {other:?}"),
     }
@@ -6419,23 +6428,26 @@ fn instantiate_scopes_unresolved_owner_debt_by_demanded_body_role() {
     };
 
     let member = read("MemberOnly");
-    assert!(matches!(member.value, QueryResult::Value(_)));
+    assert!(matches!(member.value().clone(), QueryResult::Value(_)));
     assert!(
-        !member.result_is_partial() && !member.cache_suppress,
+        !member.result_is_partial() && !member.cache_suppress(),
         "a member-value miss must stay locally classifiable; got partial={}, suppress={}",
         member.result_is_partial(),
-        member.cache_suppress,
+        member.cache_suppress(),
     );
 
     for name in ["RootAlias", "Heritage", "IntersectionArm", "UnionArm"] {
         let structural = read(name);
-        assert!(matches!(structural.value, QueryResult::Value(_)), "{name}");
         assert!(
-            structural.result_is_partial() && structural.cache_suppress,
+            matches!(structural.value().clone(), QueryResult::Value(_)),
+            "{name}"
+        );
+        assert!(
+            structural.result_is_partial() && structural.cache_suppress(),
             "{name} loses an authoritative root/surface arm and must remain Partial + ReturnOnly; \
              got partial={}, suppress={}",
             structural.result_is_partial(),
-            structural.cache_suppress,
+            structural.cache_suppress(),
         );
     }
 }
@@ -6493,7 +6505,7 @@ fn instantiate_is_mode_free_one_entry_across_depth_requests() {
     let warm = graph
         .get_unvalidated(&key)
         .expect("Instantiate entry must be warm after execute");
-    match warm.value {
+    match warm.value().clone() {
         QueryResult::Value(_) => {}
         other => panic!("expected warm Value, got {other:?}"),
     }
@@ -6625,7 +6637,7 @@ fn shallow_instantiate_does_not_materialise_member_bodies() {
 
     let data = graph.node_data(result).expect("result node");
     let view = match &*data {
-        SemanticNodeData::Object(v) => v.clone(),
+        SemanticNodeData::Object(v) => v.copy_for_tests(),
         other => panic!("expected Object shell after Instantiate, got {other:?}"),
     };
     // Member `y` must not be recursively lowered into an `Object`
@@ -7258,10 +7270,10 @@ fn distributed_conditional_dependencies_follow_member_selections() {
                     );
                 }
                 assert!(
-                    !read.cache_suppress && !read.result_is_partial(),
+                    !read.cache_suppress() && !read.result_is_partial(),
                     "{case}: {read:?}"
                 );
-                let QueryResult::Value(result) = read.value else {
+                let QueryResult::Value(result) = read.value().clone() else {
                     panic!("{case}: expected a complete distributed value");
                 };
                 match case {
@@ -7885,11 +7897,11 @@ fn an_infer_selected_nested_conditional_reduces_to_its_final_value() {
         pending: None,
     });
     assert_eq!(
-        read.fact_status,
+        read.fact_status().clone(),
         verter_type_engine::semantic_query::FactStatus::Complete
     );
     assert!(
-        matches!(read.value, QueryResult::Value(node) if node == one),
+        matches!(read.value().clone(), QueryResult::Value(node) if node == one),
         "every selected conditional must reduce: {read:?}"
     );
 }
@@ -8940,8 +8952,11 @@ fn homomorphic_mapped_over_resolved_empty_source_publishes_empty_object() {
             verter_type_engine::semantic_query::ProjectionMode::Expanded,
         ),
     });
-    let QueryResult::Value(id) = read.value else {
-        panic!("Partial<{{}}> produces a value, got {:?}", read.value);
+    let QueryResult::Value(id) = read.value().clone() else {
+        panic!(
+            "Partial<{{}}> produces a value, got {:?}",
+            read.value().clone()
+        );
     };
     match graph.node_data(id).as_deref() {
         Some(SemanticNodeData::Object(view)) => {
@@ -9321,7 +9336,7 @@ fn instantiate_ref_with_args_produces_sub_instantiate_shell_with_edge() {
 
     let data = graph.node_data(result).expect("result data");
     let view = match &*data {
-        SemanticNodeData::Object(v) => v.clone(),
+        SemanticNodeData::Object(v) => v.copy_for_tests(),
         other => panic!("expected Object shell, got {other:?}"),
     };
     let y_member = view
@@ -9386,7 +9401,7 @@ fn mapped_type_uses_source_member_names_when_object_source() {
     };
     let data = graph.node_data(result).expect("mapped result");
     let view = match &*data {
-        SemanticNodeData::Object(v) => v.clone(),
+        SemanticNodeData::Object(v) => v.copy_for_tests(),
         other => panic!("expected Object, got {other:?}"),
     };
     let names: Vec<String> = view
@@ -9459,7 +9474,7 @@ fn partial_routes_through_mapped_type_dispatch() {
     // optional because Partial adds the `?` modifier.
     let data = graph.node_data(result).expect("result data");
     let view = match &*data {
-        SemanticNodeData::Object(v) => v.clone(),
+        SemanticNodeData::Object(v) => v.copy_for_tests(),
         other => panic!("expected Object, got {other:?}"),
     };
     assert!(
@@ -9504,7 +9519,7 @@ fn required_routes_through_mapped_type_dispatch() {
     };
     let data = graph.node_data(result).expect("result data");
     let view = match &*data {
-        SemanticNodeData::Object(v) => v.clone(),
+        SemanticNodeData::Object(v) => v.copy_for_tests(),
         other => panic!("expected Object, got {other:?}"),
     };
     for member in view.positive_members().iter() {
@@ -9545,7 +9560,7 @@ fn readonly_routes_through_mapped_type_dispatch() {
     };
     let data = graph.node_data(result).expect("result data");
     let view = match &*data {
-        SemanticNodeData::Object(v) => v.clone(),
+        SemanticNodeData::Object(v) => v.copy_for_tests(),
         other => panic!("expected Object, got {other:?}"),
     };
     for member in view.positive_members().iter() {
@@ -9950,7 +9965,9 @@ fn partial_produces_structurally_equivalent_mapped_shape_to_userland() {
     let u_data = graph.node_data(userland).expect("userland data");
     let b_data = graph.node_data(utility_result).expect("utility data");
     let (u_view, b_view) = match (&*u_data, &*b_data) {
-        (SemanticNodeData::Object(u), SemanticNodeData::Object(b)) => (u.clone(), b.clone()),
+        (SemanticNodeData::Object(u), SemanticNodeData::Object(b)) => {
+            (u.copy_for_tests(), b.copy_for_tests())
+        }
         other => panic!("expected both sides to be Objects, got {other:?}"),
     };
     let u_names: Vec<String> = u_view
@@ -10174,17 +10191,20 @@ fn object_filter_and_mapper_utilities_over_any_materialize_tsgo_shapes() {
                     surface.positive_members().is_empty(),
                     "{label}: no named members"
                 );
-                assert!(surface.call_signatures.is_empty(), "{label}: no call sigs");
                 assert!(
-                    surface.construct_signatures.is_empty(),
+                    surface.call_signatures().is_empty(),
+                    "{label}: no call sigs"
+                );
+                assert!(
+                    surface.construct_signatures().is_empty(),
                     "{label}: no construct sigs"
                 );
                 assert_eq!(
-                    surface.index_signatures.len(),
+                    surface.index_signatures().len(),
                     1,
                     "{label}: exactly the string index signature"
                 );
-                let sig = &surface.index_signatures[0];
+                let sig = &surface.index_signatures()[0];
                 assert_node_primitive(&graph, sig.key_type, PrimitiveKind::String, label);
                 assert_node_primitive(&graph, sig.value_type, PrimitiveKind::Any, label);
                 assert!(!sig.readonly, "{label}: index signature is not readonly");
@@ -10216,7 +10236,7 @@ fn object_filter_and_mapper_utilities_over_any_materialize_tsgo_shapes() {
             assert!(!member.optional, "Pick<any, \"x\">: member is required");
             assert_node_primitive(&graph, member.value, PrimitiveKind::Any, "Pick<any, \"x\">");
             assert!(
-                surface.index_signatures.is_empty() && !surface.has_known_index_signature(),
+                surface.index_signatures().is_empty() && !surface.has_known_index_signature(),
                 "Pick<any, \"x\">: closed surface, no index signatures"
             );
         }
@@ -10263,11 +10283,11 @@ fn object_filter_and_mapper_utilities_over_any_materialize_tsgo_shapes() {
                 "Omit<any, \"x\">: no named members"
             );
             assert_eq!(
-                surface.index_signatures.len(),
+                surface.index_signatures().len(),
                 3,
                 "Omit<any, \"x\">: string + number + symbol index signatures"
             );
-            for (sig, expected_key) in surface.index_signatures.iter().zip([
+            for (sig, expected_key) in surface.index_signatures().iter().zip([
                 PrimitiveKind::String,
                 PrimitiveKind::Number,
                 PrimitiveKind::Symbol,
@@ -10310,7 +10330,7 @@ fn object_filter_and_mapper_utilities_over_any_materialize_tsgo_shapes() {
             assert!(!member.optional, "Pick<any, 1>: member is required");
             assert_node_primitive(&graph, member.value, PrimitiveKind::Any, "Pick<any, 1>");
             assert!(
-                surface.index_signatures.is_empty() && !surface.has_known_index_signature(),
+                surface.index_signatures().is_empty() && !surface.has_known_index_signature(),
                 "Pick<any, 1>: closed surface, no index signatures"
             );
         }
@@ -10376,7 +10396,7 @@ fn object_filter_and_mapper_utilities_over_any_materialize_tsgo_shapes() {
                 "Omit<any, 1>: no named members"
             );
             assert_eq!(
-                surface.index_signatures.len(),
+                surface.index_signatures().len(),
                 3,
                 "Omit<any, 1>: string + number + symbol index signatures"
             );
@@ -12968,11 +12988,11 @@ fn return_type_of_typeof_local_fn_resolves_via_dispatch() {
                 "typeof of pure function has no user members"
             );
             assert_eq!(
-                surface.call_signatures.len(),
+                surface.call_signatures().len(),
                 1,
                 "typeof of pure function has one call signature"
             );
-            let sig_id = surface.call_signatures[0];
+            let sig_id = surface.call_signatures()[0];
             match &*graph.node_data(sig_id).expect("call sig data") {
                 SemanticNodeData::Signature {
                     params,
@@ -13532,14 +13552,14 @@ fn function_surface_publishes_as_object_with_call_signatures() {
                 v.positive_members().is_empty(),
                 "pure function has no ordinary members"
             );
-            assert_eq!(v.call_signatures.len(), 2, "two overload signatures");
-            assert_eq!(v.call_signatures[0], sig_a, "first signature preserved");
-            assert_eq!(v.call_signatures[1], sig_b, "second signature preserved");
-            assert_eq!(v.construct_signatures.len(), 1, "one construct signature");
-            assert_eq!(v.construct_signatures[0], ctor_sig);
-            assert!(v.index_signatures.is_empty());
+            assert_eq!(v.call_signatures().len(), 2, "two overload signatures");
+            assert_eq!(v.call_signatures()[0], sig_a, "first signature preserved");
+            assert_eq!(v.call_signatures()[1], sig_b, "second signature preserved");
+            assert_eq!(v.construct_signatures().len(), 1, "one construct signature");
+            assert_eq!(v.construct_signatures()[0], ctor_sig);
+            assert!(v.index_signatures().is_empty());
             assert!(!v.has_known_index_signature());
-            assert!(v.keyspace.is_none());
+            assert!(v.keyspace().is_none());
         }
         other => panic!("function must publish as Object, got {other:?}"),
     }
@@ -14089,7 +14109,7 @@ fn unresolved_typeparameter_references_alias_by_name_within_same_file() {
     };
 
     let view = match graph.node_data(inst).as_deref() {
-        Some(SemanticNodeData::Object(v)) => v.clone(),
+        Some(SemanticNodeData::Object(v)) => v.copy_for_tests(),
         other => panic!("expected Object, got {other:?}"),
     };
     let a_value = view
@@ -15163,14 +15183,17 @@ fn raw_relate_rejects_forged_inference_context_when_target_has_no_pattern() {
     // The rejection supplies no relation, so its read must report the same
     // Unavailable fact the fact API adopts, not a Complete status.
     let read = dispatch.execute_read(forged.to_query_key());
-    assert!(matches!(read.value, QueryResult::Error(QueryError::Miss)));
+    assert!(matches!(
+        read.value().clone(),
+        QueryResult::Error(QueryError::Miss)
+    ));
     assert!(
         matches!(
-            read.fact_status,
+            read.fact_status(),
             verter_type_engine::semantic_query::FactStatus::Unavailable(_)
         ),
         "a rejected raw relation read must report Unavailable, got {:?}",
-        read.fact_status
+        read.fact_status()
     );
     assert!(read.result_is_partial());
     assert!(!read.partial_reason_classes().is_empty());
@@ -15178,7 +15201,7 @@ fn raw_relate_rejects_forged_inference_context_when_target_has_no_pattern() {
         .execute_fact(forged.to_query_key())
         .expect("a rejected raw relation is not an execution abort");
     assert_eq!(
-        read.fact_status,
+        read.fact_status().clone(),
         fact.status(),
         "the raw read and the fact API must carry one adopted disposition"
     );
@@ -15849,7 +15872,7 @@ fn binding_relation_cold_publish_obeys_store_owned_abort_fence() {
     assert!(
         graph
             .get_relation_payload(&host, &key)
-            .map(|served| served.value)
+            .map(|served| served.value().clone())
             .is_none(),
         "an aborted cold binding owner must not resurrect a warm relation entry"
     );
@@ -15988,10 +16011,10 @@ fn reverse_homomorphic_preserves_array_tuple_and_index_shapes_and_inverts_add_mo
     let named = surface_get_member(&object_view, "named");
     assert_eq!(named.value, string);
     assert!(!named.optional && !named.readonly);
-    assert_eq!(object_view.index_signatures.len(), 1);
-    assert_eq!(object_view.index_signatures[0].value_type, boolean);
+    assert_eq!(object_view.index_signatures().len(), 1);
+    assert_eq!(object_view.index_signatures()[0].value_type, boolean);
     assert!(
-        !object_view.index_signatures[0].readonly,
+        !object_view.index_signatures()[0].readonly,
         "a mapped `+readonly` is synthetic on the recovered index signature"
     );
 }
@@ -16441,7 +16464,7 @@ fn reverse_homomorphic_remove_modifiers_reject_incompatible_metadata() {
         "readonly index modifier removal",
     );
     assert!(
-        readonly_index_view.index_signatures[0].readonly,
+        readonly_index_view.index_signatures()[0].readonly,
         "TypeScript reverse construction preserves a readonly source index signature through `-readonly`"
     );
     let readonly_array = graph.intern_node(SemanticNodeData::Array {
@@ -17541,7 +17564,11 @@ fn navigate_lowering_pick_omit_preserve_carrier_other_utilities_unchanged() {
     let graph = host.project_type_store().semantic_graph();
     let wrap_data = graph.node_data(wrap_body).expect("Wrap body data");
     let members = match wrap_data.as_ref() {
-        SemanticNodeData::Object(view) => view.positive_members().to_vec(),
+        SemanticNodeData::Object(view) => view
+            .positive_members()
+            .iter()
+            .map(verter_type_engine::semantic_query::SurfaceMember::copy_for_tests)
+            .collect::<Vec<_>>(),
         other => panic!("Wrap skeleton body must be an Object surface, got {other:?}"),
     };
     for (member_name, util_name) in [("v", "NonNullable"), ("p", "Partial")] {
@@ -22172,7 +22199,7 @@ fn project_path_prefix_peek_short_circuits_sibling_walk() {
     let warm_prefix = graph
         .get_unvalidated(&prefix_key)
         .expect("prefix key must be warm after first dispatch — backfill should have published it");
-    match warm_prefix.value {
+    match warm_prefix.value().clone() {
         QueryResult::Value(id) => assert_eq!(
             id, variants_obj,
             "warm prefix must point at the variants_obj (the node reached after consuming `variants`)"
@@ -22430,7 +22457,7 @@ fn budget_early_exit_folds_partial_into_enclosing_build_local_frame_and_request_
         "the early-exit return MUST carry result_is_partial=true",
     );
     assert!(
-        read.cache_suppress,
+        read.cache_suppress(),
         "the early-exit return MUST carry cache_suppress=true",
     );
 
@@ -23582,11 +23609,11 @@ fn execute_read_preserves_dep_signature_on_success() {
     // entry. A lossy return shape would discard the signature; here the
     // signature flows through to the caller intact.
     assert!(
-        !read.dep_signature.is_empty(),
+        !read.dep_signature().is_empty(),
         "execute_read must preserve dep_signature; got empty"
     );
     let names: Vec<String> = read
-        .dep_signature
+        .dep_signature()
         .iter()
         .map(|(c, _)| c.to_string())
         .collect();
@@ -23794,7 +23821,7 @@ fn require_object_surface(
          walker did not run terminal-surface synthesis)",
     );
     match &*data {
-        SemanticNodeData::Object(view) => view.clone(),
+        SemanticNodeData::Object(view) => view.copy_for_tests(),
         _ => unreachable!("guarded by assert! above"),
     }
 }
@@ -24557,13 +24584,13 @@ fn cacheread_carries_walker_diagnostics_for_shallow_with_open_conditional() {
 
     let cache_read = read_shallow_metadata(&host, cond_id);
     assert!(
-        cache_read.walker_diagnostics.iter().any(|d| matches!(
+        cache_read.walker_diagnostics().iter().any(|d| matches!(
             d,
             verter_type_engine::project_semantic_dispatch::walk::ShallowDiagnostic::OpenConditional { .. }
         )),
         "warm-read walker_diagnostics must carry the OpenConditional variant emitted \
          during shallow-mode terminal-surface synthesis; observed diagnostics={:?}",
-        cache_read.walker_diagnostics,
+        cache_read.walker_diagnostics(),
     );
 }
 
@@ -24607,12 +24634,12 @@ fn cacheread_warm_replays_walker_diagnostics_after_memo_hit() {
 
     // First dispatch — cold build runs the walker and emits diagnostics.
     let first = read_shallow_metadata(&host, cond_id);
-    let first_count = first.walker_diagnostics.len();
+    let first_count = first.walker_diagnostics().len();
     assert!(
         first_count > 0,
         "cold build over an OpenConditional must produce at least one walker \
          diagnostic; observed count=0, diagnostics={:?}",
-        first.walker_diagnostics,
+        first.walker_diagnostics(),
     );
 
     // Second dispatch — warm replay must produce equal diagnostics
@@ -24621,15 +24648,16 @@ fn cacheread_warm_replays_walker_diagnostics_after_memo_hit() {
     // equality without re-allocating.
     let second = read_shallow_metadata(&host, cond_id);
     assert_eq!(
-        second.walker_diagnostics.len(),
+        second.walker_diagnostics().len(),
         first_count,
         "warm-replay walker_diagnostics count must match cold-build count; \
          observed warm={}, cold={}",
-        second.walker_diagnostics.len(),
+        second.walker_diagnostics().len(),
         first_count,
     );
     assert_eq!(
-        &*second.walker_diagnostics, &*first.walker_diagnostics,
+        &*second.walker_diagnostics(),
+        &*first.walker_diagnostics(),
         "warm-replay walker_diagnostics contents must match cold-build contents \
          (no-poison invariant: warm reads replay verbatim)"
     );
@@ -24677,7 +24705,7 @@ fn memo_refuses_insertion_on_cache_suppress_true_via_pathological_input() {
     );
     let warm = warm.expect("guarded above");
     assert!(
-        !warm.cache_suppress,
+        !warm.cache_suppress(),
         "warm-read cache_suppress must always be false (suppressed builds never reach memo)",
     );
 }
@@ -25316,7 +25344,7 @@ fn cross_file_omit_heritage_carrier_preserves_construct_and_index_signatures() {
     };
 
     let surface = dispatch
-        .resolve_typeinfo_surface_view(
+        .resolve_typeinfo_surface(
             derived,
             verter_type_engine::semantic_query::ProjectionReductionContext::published(
                 ProjectionMode::Shallow,
@@ -25346,7 +25374,7 @@ fn cross_file_omit_heritage_carrier_preserves_construct_and_index_signatures() {
     // through `Base`'s construct + index signatures into `Derived`'s surface.
     // The retired `MacroSurfaceView` reader dropped both for the carrier source.
     assert_eq!(
-        surface.construct_signatures.len(),
+        surface.construct_signatures().len(),
         1,
         "Derived must inherit Base's construct signature through `extends Omit<Base, 'a'>` \
          (the retired MacroSurfaceView reader dropped it on the carrier path)"
@@ -25356,7 +25384,7 @@ fn cross_file_omit_heritage_carrier_preserves_construct_and_index_signatures() {
         "Derived must inherit Base's index-signature flag through `extends Omit<Base, 'a'>`"
     );
     assert_eq!(
-        surface.index_signatures.len(),
+        surface.index_signatures().len(),
         1,
         "Derived must inherit Base's index signature through `extends Omit<Base, 'a'>` \
          (the retired MacroSurfaceView reader dropped it on the carrier path)"
@@ -25405,7 +25433,7 @@ fn omit_over_union_source_is_common_keys_minus_k_not_distributive() {
                 other => panic!("ResolveDecl({name}) failed: {other:?}"),
             };
         dispatch
-            .resolve_typeinfo_surface_view(
+            .resolve_typeinfo_surface(
                 node,
                 verter_type_engine::semantic_query::ProjectionReductionContext::published(
                     ProjectionMode::Shallow,
@@ -25512,7 +25540,7 @@ fn multi_level_omit_heritage_carriers_compose_through_all_levels() {
     };
 
     let surface = dispatch
-        .resolve_typeinfo_surface_view(
+        .resolve_typeinfo_surface(
             a,
             verter_type_engine::semantic_query::ProjectionReductionContext::published(
                 ProjectionMode::Shallow,
@@ -25971,7 +25999,7 @@ fn identity_utility_shallow_empty_path_surface_publishes_source_member_values_no
         other => panic!("expected Shallow ProjectPath Value, got {other:?}"),
     };
     let view = match graph.node_data(surface).as_deref() {
-        Some(SemanticNodeData::Object(view)) => view.clone(),
+        Some(SemanticNodeData::Object(view)) => view.copy_for_tests(),
         other => {
             panic!("Shallow surface over the Identity carrier must be an Object, got {other:?}")
         }
@@ -26066,7 +26094,7 @@ fn identity_mapped_build_without_projectable_source_publishes_addressable_carrie
         other => panic!("expected MappedType Value, got {other:?}"),
     };
     let view = match graph.node_data(result).as_deref() {
-        Some(SemanticNodeData::Object(view)) => view.clone(),
+        Some(SemanticNodeData::Object(view)) => view.copy_for_tests(),
         other => panic!("keyspace-enumerated mapped type must build an Object, got {other:?}"),
     };
     assert_eq!(
@@ -27314,7 +27342,7 @@ fn signature_return_data(
     let ret = graph
         .node_data(*return_type)
         .expect("signature return node");
-    (*ret).clone()
+    ret.copy_for_tests()
 }
 
 /// Multi-overload function: the set carries the ordered VISIBLE group only —
@@ -30291,7 +30319,10 @@ fn grow_string_demand(
         QueryResult::Value(verter_type_engine::semantic_query::SemanticQueryOutput {
             value,
             ..
-        }) => graph.node_data(value).as_deref().cloned(),
+        }) => graph
+            .node_data(value)
+            .as_deref()
+            .map(verter_type_engine::semantic_query::SemanticNodeData::copy_for_tests),
         _ => None,
     };
     (
@@ -30464,10 +30495,10 @@ fn real_query_deep_finite_nested_demand_completes_and_warms() {
         "a 10,000-deep finite structural value must resolve Complete"
     );
     assert!(
-        !read.cache_suppress,
+        !read.cache_suppress(),
         "finite structural depth must not suppress the enclosing query's admission"
     );
-    assert!(read.walker_diagnostics.is_empty());
+    assert!(read.walker_diagnostics().is_empty());
 
     assert!(
         graph
@@ -30483,8 +30514,8 @@ fn real_query_deep_finite_nested_demand_completes_and_warms() {
         context,
     });
     let stats_after_repeat = graph.stats_snapshot();
-    assert!(!repeat.result_is_partial() && !repeat.cache_suppress);
-    assert!(repeat.walker_diagnostics.is_empty());
+    assert!(!repeat.result_is_partial() && !repeat.cache_suppress());
+    assert!(repeat.walker_diagnostics().is_empty());
     assert!(
         stats_after_repeat.hits > stats_before_repeat.hits,
         "the complete repeated mapped-type demand must warm-hit"
@@ -30546,7 +30577,7 @@ fn carrier_subject_normalization_fenced_serve_suppresses_caching() {
     // CONTROL (knob OFF): an ordinary carrier-subject read is NOT suppressed.
     let clean_read = dispatch.execute_read(make_key());
     assert!(
-        !clean_read.cache_suppress,
+        !clean_read.cache_suppress(),
         "control (no fence): an ordinary carrier-subject read must NOT be cache-suppressed;          a false-positive here would make the fence assertion meaningless"
     );
 
@@ -30562,7 +30593,7 @@ fn carrier_subject_normalization_fenced_serve_suppresses_caching() {
         .store(false, std::sync::atomic::Ordering::Relaxed);
 
     assert!(
-        fenced_read.cache_suppress,
+        fenced_read.cache_suppress(),
         "a fenced serve observed by the traced carrier-normalization prelude MUST set          cache_suppress on the returned CacheRead (the rewrite computed from a          served-without-publication artifact must refuse warm admission). Pre-fix the untraced          normalization could not observe the fence and this read would NOT be suppressed."
     );
 }
@@ -31469,7 +31500,7 @@ fn shallow_intersection_signature_entries_are_the_discovery_authoritys() {
         "shallow_intersection_signature_entries_are_the_discovery_authoritys",
     );
     assert_eq!(
-        view.call_signatures.as_ref(),
+        view.call_signatures().as_ref(),
         discovered.as_slice(),
         "the merged object's call signatures are exactly what discovery answers"
     );
@@ -31982,7 +32013,10 @@ fn union_surface_merges_match_reference_semantics_across_arm_permutations() {
         [2, 1, 0],
     ];
     for perm in perms {
-        let permuted: Vec<Option<ShallowSurface>> = perm.iter().map(|&i| arms[i].clone()).collect();
+        let permuted: Vec<Option<ShallowSurface>> = perm
+            .iter()
+            .map(|&i| arms[i].as_ref().map(ShallowSurface::copy_for_tests))
+            .collect();
         // Plain permutation.
         let actual = merge_union_surfaces(&graph, &permuted, &mut test_canonical_evidence())
             .expect("non-empty arm vector yields a surface");
@@ -32002,7 +32036,10 @@ fn union_surface_merges_match_reference_semantics_across_arm_permutations() {
         );
 
         // With a trailing non-Object arm.
-        let mut with_none = permuted.clone();
+        let mut with_none: Vec<Option<ShallowSurface>> = permuted
+            .iter()
+            .map(|arm| arm.as_ref().map(ShallowSurface::copy_for_tests))
+            .collect();
         with_none.push(None);
         let actual_none = merge_union_surfaces(&graph, &with_none, &mut test_canonical_evidence())
             .expect("non-empty arm vector yields a surface");
@@ -32037,7 +32074,7 @@ fn union_surface_merges_match_reference_semantics_across_arm_permutations() {
     // Degenerate inputs stay pinned.
     assert!(merge_union_surfaces(&graph, &[], &mut test_canonical_evidence()).is_none());
     assert!(merge_union_surfaces_for_macro(&graph, &[], &mut test_canonical_evidence()).is_none());
-    let single = vec![arms[0].clone()];
+    let single = vec![arms[0].as_ref().map(ShallowSurface::copy_for_tests)];
     let actual_single = merge_union_surfaces(&graph, &single, &mut test_canonical_evidence())
         .expect("single arm yields");
     let expected_single = oracle_merge_union_surfaces(&graph, &single).expect("oracle yields");
@@ -32394,7 +32431,7 @@ fn mapped_type_over_flow_return_heritage_enumerates_the_composed_key_domain() {
         ),
         context: ProjectionReductionContext::published(ProjectionMode::Shallow),
     });
-    let shallow_node = match shallow.value {
+    let shallow_node = match shallow.value().clone() {
         QueryResult::Value(id) => id,
         other => panic!("expected Value, got {other:?}"),
     };
@@ -32497,7 +32534,7 @@ fn mapped_type_over_degraded_flow_return_heritage_preserves_the_typed_partiality
         ),
         context: ProjectionReductionContext::published(ProjectionMode::Shallow),
     });
-    let node = match read.value {
+    let node = match read.value().clone() {
         QueryResult::Value(id) => id,
         other => panic!("expected Value, got {other:?}"),
     };
@@ -32823,10 +32860,10 @@ fn instantiation_of_duplicate_projection_union_collapses_to_the_shared_arm() {
             BodySourceWitness::mint_for_unit_tests(),
         ),
     )));
-    let QueryResult::Value(result) = read.value else {
+    let QueryResult::Value(result) = read.value().clone() else {
         panic!(
             "`Both<Src>` must instantiate to a value, got {:?}",
-            read.value
+            read.value().clone()
         );
     };
     let data = graph.node_data(result);
@@ -33498,13 +33535,13 @@ fn budget_recovery_root_reprojection_remains_approximate_and_unretained() {
         for _ in 0..2 {
             let read = dispatch.execute_read(key.clone());
             assert!(
-                matches!(read.value, QueryResult::Value(node) if node == recovery),
+                matches!(read.value().clone(), QueryResult::Value(node) if node == recovery),
                 "{read:?}"
             );
             if basis == RecoveryBasis::Budget {
                 assert!(
                     matches!(
-                        read.fact_status,
+                        read.fact_status(),
                         FactStatus::Approximate(_, Some(FactInterpretation::CheckerRecovery))
                     ),
                     "{read:?}"
@@ -33512,14 +33549,18 @@ fn budget_recovery_root_reprojection_remains_approximate_and_unretained() {
                 assert!(read.partial_reasons().contains(
                     verter_type_engine::semantic_query::PartialReasonSet::OPERATION_BUDGET
                 ));
-                assert!(read.cache_suppress);
+                assert!(read.cache_suppress());
                 assert!(graph.get_validated(&key, dispatch.ctx).is_none());
                 assert_eq!(graph.slot_candidate_count_for_tests(&key), 0);
             } else {
-                assert_eq!(read.fact_status, FactStatus::Complete);
-                assert!(!read.cache_suppress);
+                assert_eq!(read.fact_status().clone(), FactStatus::Complete);
+                assert!(!read.cache_suppress());
                 assert_eq!(
-                    graph.get_validated(&key, dispatch.ctx).unwrap().fact_status,
+                    graph
+                        .get_validated(&key, dispatch.ctx)
+                        .unwrap()
+                        .fact_status()
+                        .clone(),
                     FactStatus::Complete
                 );
                 assert_eq!(graph.slot_candidate_count_for_tests(&key), 1);
@@ -33576,8 +33617,12 @@ fn carrier_normalization_preserves_recovery_interpretation_when_forwarded() {
         };
         let read = dispatch.execute_read(key.clone());
         if name.starts_with("Good") {
-            assert_eq!(read.fact_status, FactStatus::Complete, "{name}: {read:?}");
-            let QueryResult::Value(node) = read.value else {
+            assert_eq!(
+                read.fact_status().clone(),
+                FactStatus::Complete,
+                "{name}: {read:?}"
+            );
+            let QueryResult::Value(node) = read.value().clone() else {
                 panic!("{name}: {read:?}")
             };
             let expected = if name == "Good" {
@@ -33589,12 +33634,12 @@ fn carrier_normalization_preserves_recovery_interpretation_when_forwarded() {
         } else {
             assert!(
                 matches!(
-                    read.fact_status,
+                    read.fact_status(),
                     FactStatus::Approximate(_, Some(FactInterpretation::CheckerRecovery))
                 ),
                 "{name}: {read:?}"
             );
-            let QueryResult::Value(node) = read.value else {
+            let QueryResult::Value(node) = read.value().clone() else {
                 panic!("{name}: {read:?}")
             };
             assert!(matches!(
@@ -33609,19 +33654,19 @@ fn carrier_normalization_preserves_recovery_interpretation_when_forwarded() {
                 path: Arc::from([]),
                 context,
             };
-            assert!(read.cache_suppress);
+            assert!(read.cache_suppress());
             assert!(dispatch.graph().get_validated(&key, dispatch.ctx).is_none());
             assert_eq!(dispatch.graph().slot_candidate_count_for_tests(&key), 0);
             let root = dispatch.execute_read(root_key.clone());
             assert!(
                 matches!(
-                    root.fact_status,
+                    root.fact_status(),
                     FactStatus::Approximate(_, Some(FactInterpretation::CheckerRecovery))
                 ),
                 "{root:?}"
             );
             assert!(read.partial_reasons().contains(root.partial_reasons()));
-            assert!(root.cache_suppress);
+            assert!(root.cache_suppress());
             assert!(dispatch
                 .graph()
                 .get_validated(&root_key, dispatch.ctx)

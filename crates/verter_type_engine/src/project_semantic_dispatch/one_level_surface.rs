@@ -37,7 +37,7 @@ use crate::semantic_query_memo::SemanticGraphStore;
 /// A graph-only one-level surface: the resolver-owned ordered declaration
 /// stream plus the keyspace / index-signature facts of the surface it was
 /// read from.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct OneLevelSurface {
     entries: SurfaceEntries,
     keyspace: Option<SemanticNodeId>,
@@ -47,7 +47,7 @@ pub struct OneLevelSurface {
 /// Backing of a [`OneLevelSurface`]'s entry stream: a graph view's stream is
 /// SHARED (no copy); a surface synthesized here (a presence join, a spread
 /// join) OWNS the one vector it was built into.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 enum SurfaceEntries {
     Shared(Arc<[SurfaceEntry]>),
     Owned(Vec<SurfaceEntry>),
@@ -456,7 +456,12 @@ pub fn project_one_level_surface<C: crate::resolver_core::ResolverCapabilities>(
                 None
             };
             if let Some(sink) = walker_diagnostics {
-                sink.extend(surface_read.walker_diagnostics.iter().cloned());
+                sink.extend(
+                    surface_read
+                        .walker_diagnostics
+                        .iter()
+                        .map(crate::project_semantic_dispatch::walk::ShallowDiagnostic::clone),
+                );
             }
             match surface_read.value {
                 QueryResult::Value(node) => (node, read_partiality),
@@ -618,7 +623,12 @@ pub fn read_positive_surface_members<C: crate::resolver_core::ResolverCapabiliti
         for arm in arms {
             match arm {
                 SurfaceResolution::Resolved(members) | SurfaceResolution::OpenPresence(members) => {
-                    per_arm.push((**members).clone())
+                    per_arm.push(
+                        members
+                            .iter()
+                            .map(crate::semantic_query::SurfaceMember::clone)
+                            .collect::<Vec<_>>(),
+                    )
                 }
                 SurfaceResolution::NoSurface(_) => per_arm.push(Vec::new()),
                 SurfaceResolution::Incomplete(inc) => {
@@ -640,9 +650,12 @@ pub fn read_positive_surface_members<C: crate::resolver_core::ResolverCapabiliti
     }
 
     match super::node_data_for(dispatch.graph(), surface_node).as_deref() {
-        Some(SemanticNodeData::Object(view)) => {
-            SurfaceResolution::resolved(view.positive_members().to_vec())
-        }
+        Some(SemanticNodeData::Object(view)) => SurfaceResolution::resolved(
+            view.positive_members()
+                .iter()
+                .map(crate::semantic_query::SurfaceMember::clone)
+                .collect::<Vec<_>>(),
+        ),
         Some(SemanticNodeData::ObjectSpreadProgram(_)) => {
             let formula = match dispatch.project_object_spread_for_consumer(
                 surface_node,
@@ -751,7 +764,7 @@ pub struct UnresolvedSurfaceArm {
 
 /// One macro's graph-only one-level surface, as the macro surface producer
 /// projected it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct MacroArgumentSurface {
     /// The macro's one-level surface (the type argument's members / call
     /// signatures / index signatures, or the analyzer-fact runtime-object

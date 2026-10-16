@@ -73,7 +73,7 @@ fn lower_ref_through(
     (*graph
         .node_data(node)
         .expect("the lowered ref node must be interned"))
-    .clone()
+    .copy_for_tests()
 }
 
 #[test]

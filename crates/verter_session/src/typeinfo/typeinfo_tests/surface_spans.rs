@@ -1074,7 +1074,7 @@ fn one_level_surface_converts_every_entry_kind_and_generic_roots_stay_open() {
 
     let built = TypeInfoSurface::build(graph, &view);
     let one_level = OneLevelSurface::from_view(&view);
-    assert_eq!(one_level.entries(), &view.entries[..]);
+    assert_eq!(one_level.entries(), &view.entries()[..]);
     assert_eq!(TypeInfoSurface::from_one_level(graph, &one_level), built);
     assert_eq!(built.members.len(), 1);
     assert_eq!(built.call_signatures.len(), 1);

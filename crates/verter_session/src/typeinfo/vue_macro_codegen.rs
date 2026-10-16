@@ -1483,7 +1483,7 @@ impl VerterHost {
                     verter_type_engine::request_context::observe_component_meta_read_suppress(
                         &read,
                     );
-                    match read.value {
+                    match *read.value() {
                         QueryResult::Value(node) | QueryResult::Recursive(node) => {
                             let context =
                                 ProjectionReductionContext::published(ProjectionMode::Expanded);

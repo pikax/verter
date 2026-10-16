@@ -396,7 +396,7 @@ fn barrel_imported_alias_materializes_at_the_final_defining_canonical() {
     let node = host
         .resolve_named_symbol("/use.ts", "A", Some(ProjectionMode::Expanded))
         .expect("A must resolve Expanded through the barrel");
-    let SemanticNodeData::Object(surface) = node_data(&host, node).as_ref().clone() else {
+    let SemanticNodeData::Object(surface) = node_data(&host, node).copy_for_tests() else {
         panic!("A must materialise to Node's Object body through the barrel");
     };
     let label = surface

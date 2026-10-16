@@ -1220,9 +1220,7 @@ pub(super) fn emit_type_is_cross_sfc_carrier(
     payload: verter_type_engine::semantic_query::SemanticNodeId,
     owner_canonical: &str,
 ) -> bool {
-    let Some(data) =
-        verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), payload)
-    else {
+    let Some(data) = dispatch.graph().read_in_scope(payload) else {
         return false;
     };
     let canonical: &str = match data.as_ref() {
@@ -1255,8 +1253,7 @@ pub(super) fn cross_file_namespace_import_type(
     owner_canonical: &str,
     inventory: &TscScopeInventory<'_>,
 ) -> Option<String> {
-    let data =
-        verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), node)?;
+    let data = dispatch.graph().read_in_scope(node)?;
     let SemanticNodeData::DeclRef { identity } = data.as_ref() else {
         return None;
     };
@@ -1431,9 +1428,7 @@ fn render_emit_payload_parameters(
     let Some(node) = normalized.into_complete_node() else {
         return Err(failure_from_local(local));
     };
-    match verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), node)
-        .as_deref()
-    {
+    match dispatch.graph().read_in_scope(node).as_deref() {
         Some(SemanticNodeData::Tuple { elements, .. }) => {
             render_tuple_parameters(dispatch, owner_canonical, elements, counters)
         }

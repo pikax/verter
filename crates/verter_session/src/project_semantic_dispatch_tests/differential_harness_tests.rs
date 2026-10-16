@@ -856,28 +856,28 @@ fn print(
         // An object type with one call signature and nothing else prints as
         // that signature's function type.
         SemanticNodeData::Object(surface)
-            if surface.call_signatures.len() == 1
-                && surface.construct_signatures.is_empty()
-                && surface.index_signatures.is_empty()
+            if surface.call_signatures().len() == 1
+                && surface.construct_signatures().is_empty()
+                && surface.index_signatures().is_empty()
                 && surface.positive_members().is_empty() =>
         {
-            signature_text(dispatch, surface.call_signatures[0], depth, " => ")
+            signature_text(dispatch, surface.call_signatures()[0], depth, " => ")
         }
         SemanticNodeData::Object(surface) => {
             let mut members: Vec<String> = Vec::new();
-            for signature in surface.call_signatures.iter() {
+            for signature in surface.call_signatures().iter() {
                 members.push(format!(
                     "{};",
                     signature_text(dispatch, *signature, depth, ": ")
                 ));
             }
-            for signature in surface.construct_signatures.iter() {
+            for signature in surface.construct_signatures().iter() {
                 members.push(format!(
                     "{};",
                     signature_text(dispatch, *signature, depth, ": ")
                 ));
             }
-            for index in surface.index_signatures.iter() {
+            for index in surface.index_signatures().iter() {
                 members.push(format!(
                     "{}[x: {}]: {};",
                     if index.readonly { "readonly " } else { "" },

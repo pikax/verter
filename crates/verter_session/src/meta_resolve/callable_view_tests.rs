@@ -1302,7 +1302,8 @@ fn exact_instance_owner_prepared_body_locator_materializes_without_ordinary_fall
             scope: ScopeId::file(Arc::clone(&identity.canonical_id), identity.owner),
             name: Arc::clone(&identity.decl_name),
         }))
-        .value
+        .value()
+        .clone()
     {
         QueryResult::Value(node) => node,
         other => panic!("the exact-owner DeclRef resolves, got {other:?}"),
@@ -1332,7 +1333,8 @@ fn exact_instance_owner_prepared_body_locator_materializes_without_ordinary_fall
                 ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
             ),
         )))
-        .value
+        .value()
+        .clone()
     {
         QueryResult::Value(node) => node,
         other => panic!("the exact-owner declaration instantiates, got {other:?}"),

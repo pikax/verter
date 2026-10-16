@@ -743,9 +743,11 @@ pub(crate) fn materialize_through_aliases(
 ) -> Result<SemanticNodeId, TypeResolutionRequestError> {
     verter_debug_assert!(!matches!(mode, ProjectionMode::Identity));
     let store = host.project_type_store().semantic_graph();
+    // A construction reader: the scope owns every ordinal it reads.
+    let _scope = store.enter_node_root_scope();
     let mut current = start;
     for _ in 0..16 {
-        let data = store.node_data(current);
+        let data = store.read_in_scope(current);
         match data.as_deref() {
             Some(SemanticNodeData::Alias(inner)) => {
                 current = *inner;
@@ -866,7 +868,7 @@ pub(crate) fn materialize_through_aliases(
                 // the resolved node to the surfacing. A non-fault resolution
                 // miss falls back to the carrier (the reducer round-trips it
                 // deferred); a genuine fault propagates.
-                let reference_resolved = match store.node_data(*base).as_deref() {
+                let reference_resolved = match store.read_in_scope(*base).as_deref() {
                     Some(SemanticNodeData::DeclRef { identity }) => {
                         let resolve_result = match dispatch.execute_type_node(
                             SemanticQueryKey::ResolveDecl(ResolveDeclKey {
@@ -1099,6 +1101,8 @@ pub(crate) fn classify_operator_reduction_step(
     result: QueryResult<SemanticNodeId>,
     carrier: SemanticNodeId,
 ) -> Result<MaterializationStep, TypeResolutionRequestError> {
+    // A construction reader: the scope owns every ordinal it reads.
+    let _scope = store.enter_node_root_scope();
     match result {
         QueryResult::Value(next) => {
             if next == carrier {
@@ -1110,7 +1114,7 @@ pub(crate) fn classify_operator_reduction_step(
             // FAULT propagates (never masked behind the operator shell); a
             // non-fault miss preserves the carrier (never degrades to a
             // `semanticMiss` terminal).
-            if let Some(SemanticNodeData::Opaque(err)) = store.node_data(next).as_deref() {
+            if let Some(SemanticNodeData::Opaque(err)) = store.read_in_scope(next).as_deref() {
                 return match classify_dispatch_error(err, Some(carrier)) {
                     Ok(_) => Ok(MaterializationStep::Stop(carrier)),
                     Err(fault) => Err(fault),

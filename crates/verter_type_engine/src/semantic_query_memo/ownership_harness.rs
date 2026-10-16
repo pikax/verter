@@ -269,7 +269,7 @@ mod tests {
                 crate::semantic_query::SemanticQueryValue::SignatureSet(
                     crate::signature_kernel::SignatureSetValue {
                         set,
-                        nodes: std::sync::Arc::from([]),
+                        nodes: Default::default(),
                         version,
                     },
                 ),

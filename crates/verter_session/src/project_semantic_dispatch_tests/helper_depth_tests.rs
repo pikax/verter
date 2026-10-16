@@ -81,8 +81,10 @@ fn tuple_spreads_splice_at_any_depth() {
                 readonly: false,
             });
         }
-        let Some(SemanticNodeData::Tuple { elements, .. }) =
-            graph.node_data(tuple).as_deref().cloned()
+        let Some(SemanticNodeData::Tuple { elements, .. }) = graph
+            .node_data(tuple)
+            .as_deref()
+            .map(verter_type_engine::semantic_query::SemanticNodeData::copy_for_tests)
         else {
             unreachable!("a tuple was interned");
         };

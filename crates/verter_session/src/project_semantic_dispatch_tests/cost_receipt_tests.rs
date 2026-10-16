@@ -1151,7 +1151,7 @@ fn reversed_relation_key(
 }
 
 /// What one root demand answered and what it was charged.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 struct RootAnswer {
     /// The relation's outcome, or the class of the refusal it answered.
     answer: String,
@@ -1193,7 +1193,7 @@ fn root_read_with_context(
         dispatch.connected_demand().charge_units(preceding).unwrap();
     }
     let read = dispatch.execute_via_cold_build_helper(key.clone());
-    let answer = match &read.value {
+    let answer = match &read.value() {
         QueryResult::Value(SemanticQueryValue::TypeNode(node)) => {
             match dispatch.graph().node_data(*node).as_deref() {
                 Some(verter_type_engine::semantic_query::SemanticNodeData::Literal(literal)) => {
@@ -1211,17 +1211,17 @@ fn root_read_with_context(
     };
     RootAnswer {
         answer,
-        status: read.fact_status,
-        has_value: matches!(read.value, QueryResult::Value(_)),
+        status: read.fact_status().clone(),
+        has_value: matches!(read.value().clone(), QueryResult::Value(_)),
         partial: read.result_is_partial(),
         reasons: read.partial_reason_classes(),
         work: dispatch.connected_demand().work_used_for_tests(),
         bytes: dispatch.connected_demand().bytes_used_for_tests(),
         refusals: read
-            .walker_diagnostics
+            .walker_diagnostics()
             .iter()
             .filter(|diagnostic| diagnostic.is_operation_refusal())
-            .cloned()
+            .map(super::walk::ShallowDiagnostic::copy_for_tests)
             .collect(),
     }
 }
@@ -2161,18 +2161,19 @@ fn the_refusal_table_keeps_the_newest_and_refuses_torn_evaluations() {
             name: Arc::from(format!("R{name}")),
         })
     };
-    let refusal = || CacheRead {
-        lease: Default::default(),
-        value: QueryResult::<SemanticQueryValue>::Error(
-            verter_type_engine::semantic_query::QueryError::Miss,
-        ),
-        dep_signature: verter_type_engine::semantic_query_memo::empty_signature(),
-        walker_diagnostics: Arc::from([]),
-        cache_suppress: true,
-        fact_status: verter_type_engine::semantic_query::FactStatus::unavailable(
-            PartialReasonSet::PROJECTION_WORK_LIMIT,
-        ),
-        receipt: verter_type_engine::semantic_query::ReadReceipt::Unpriced,
+    let refusal = || {
+        CacheRead::unleased_for_tests(
+            QueryResult::<SemanticQueryValue>::Error(
+                verter_type_engine::semantic_query::QueryError::Miss,
+            ),
+            verter_type_engine::semantic_query_memo::empty_signature(),
+            Arc::from([]),
+            true,
+            verter_type_engine::semantic_query::FactStatus::unavailable(
+                PartialReasonSet::PROJECTION_WORK_LIMIT,
+            ),
+            verter_type_engine::semantic_query::ReadReceipt::Unpriced,
+        )
     };
     let carrier =
         || verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(Vec::new()));

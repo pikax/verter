@@ -22,7 +22,6 @@ use crate::resolver_core::fallthrough::{
     intersect_known_spread_keys, normalize_public_spread_key, structural_substitute_typeof_refs,
     DynamicRootCandidate, FallthroughPropOverrideSet, KnownSpreadKeys,
 };
-use verter_type_engine::project_semantic_dispatch::node_data_for;
 
 use verter_type_engine::semantic_query::{ProjectionMode, SemanticNodeData, SemanticNodeId};
 
@@ -537,7 +536,7 @@ fn known_spread_keys_from_node_inner(
         NodeWalkStep::Halt => return None,
         NodeWalkStep::Visit => {}
     }
-    let result = match node_data_for(dispatch.graph(), node) {
+    let result = match dispatch.graph().read_in_scope(node) {
         None => None,
         Some(data) => match data.as_ref() {
             // The `Alias` identity hop is the node equivalent of the
@@ -630,9 +629,9 @@ fn known_spread_keys_from_surface(
         }
     }
     if surface.has_known_index_signature()
-        || !surface.index_signatures.is_empty()
-        || !surface.call_signatures.is_empty()
-        || !surface.construct_signatures.is_empty()
+        || !surface.index_signatures().is_empty()
+        || !surface.call_signatures().is_empty()
+        || !surface.construct_signatures().is_empty()
     {
         result.exact = false;
     }
@@ -721,7 +720,7 @@ fn collect_dynamic_root_candidates_from_node_inner(
         NodeWalkStep::Halt => return DynamicRootCandidateSet::default(),
         NodeWalkStep::Visit => {}
     }
-    let out = match node_data_for(dispatch.graph(), node) {
+    let out = match dispatch.graph().read_in_scope(node) {
         None => DynamicRootCandidateSet::default(),
         Some(data) => match data.as_ref() {
             SemanticNodeData::Literal(LiteralValue::String(tag)) => {

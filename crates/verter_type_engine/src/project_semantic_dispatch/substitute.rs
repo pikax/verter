@@ -1804,7 +1804,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let Some(SemanticNodeData::Infer {
             binder: target_binder,
             ..
-        }) = self.graph().node_data(binder).as_deref().cloned()
+        }) = self
+            .graph()
+            .node_data(binder)
+            .as_deref()
+            .map(crate::semantic_query::SemanticNodeData::clone)
         else {
             return false;
         };

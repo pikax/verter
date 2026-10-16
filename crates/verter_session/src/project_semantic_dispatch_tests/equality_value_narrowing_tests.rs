@@ -182,31 +182,33 @@ fn comparability_reads_required_properties_and_array_elements() {
         ("readonly string[]", "number[]", "disjoint"),
         ("string[]", "readonly string[]", "overlaps"),
     ];
-    let failures: Vec<String> = rows
-        .iter()
-        .filter_map(|(a, b, expected)| {
-            let measured = super::checker_probe_lane_tests::with_probe(
-                COMPARABLE,
-                &format!("[{a}, {b}]"),
-                |dispatch, node| {
-                    let Some(verter_type_engine::semantic_query::SemanticNodeData::Tuple {
-                        elements,
-                        ..
-                    }) = dispatch.graph().node_data(node).as_deref().cloned()
-                    else {
-                        panic!("`[{a}, {b}]` settles to a tuple");
-                    };
-                    match dispatch.nodes_comparable(elements[0].value, elements[1].value) {
-                        super::relation::ComparabilityVerdict::Overlaps => "overlaps",
-                        super::relation::ComparabilityVerdict::Disjoint(_) => "disjoint",
-                        super::relation::ComparabilityVerdict::Undecided => "undecided",
-                    }
-                },
-            );
-            (measured != *expected)
-                .then(|| format!("`{a}` / `{b}`: expected {expected}, measured {measured}"))
-        })
-        .collect();
+    let failures: Vec<String> =
+        rows.iter()
+            .filter_map(|(a, b, expected)| {
+                let measured = super::checker_probe_lane_tests::with_probe(
+                    COMPARABLE,
+                    &format!("[{a}, {b}]"),
+                    |dispatch, node| {
+                        let Some(verter_type_engine::semantic_query::SemanticNodeData::Tuple {
+                            elements,
+                            ..
+                        }) = dispatch.graph().node_data(node).as_deref().map(
+                            verter_type_engine::semantic_query::SemanticNodeData::copy_for_tests,
+                        )
+                        else {
+                            panic!("`[{a}, {b}]` settles to a tuple");
+                        };
+                        match dispatch.nodes_comparable(elements[0].value, elements[1].value) {
+                            super::relation::ComparabilityVerdict::Overlaps => "overlaps",
+                            super::relation::ComparabilityVerdict::Disjoint(_) => "disjoint",
+                            super::relation::ComparabilityVerdict::Undecided => "undecided",
+                        }
+                    },
+                );
+                (measured != *expected)
+                    .then(|| format!("`{a}` / `{b}`: expected {expected}, measured {measured}"))
+            })
+            .collect();
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 

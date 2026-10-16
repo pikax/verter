@@ -569,7 +569,7 @@ mod tests {
                     macro_index: 0,
                     macro_kind: AnalyzedMacroKind::DefineEmits,
                     kind: PublishedSurfaceKind::Emits,
-                    node: graph.lease_node_data(node).unwrap().root().clone(),
+                    node: graph.root_in_scope(node).unwrap(),
                     _seal: Seal,
                 },
                 value,

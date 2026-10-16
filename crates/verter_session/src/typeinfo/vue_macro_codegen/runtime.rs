@@ -32,9 +32,7 @@ pub(super) fn direct_member_dependency_is_missing(
         if !visited.insert((node, tracked_dependency)) {
             continue;
         }
-        let Some(data) =
-            verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), node)
-        else {
+        let Some(data) = dispatch.graph().read_in_scope(node) else {
             continue;
         };
         match data.as_ref() {
@@ -229,9 +227,7 @@ fn is_definitely_non_object_root(
         ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate);
 
     while visited.insert(subject) {
-        let Some(data) =
-            verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), subject)
-        else {
+        let Some(data) = dispatch.graph().read_in_scope(subject) else {
             return false;
         };
         match data.as_ref() {
@@ -467,12 +463,7 @@ pub(super) fn emits_surface_has_invalid_member(
             else {
                 return false;
             };
-            match verter_type_engine::project_semantic_dispatch::node_data_for(
-                dispatch.graph(),
-                node,
-            )
-            .as_deref()
-            {
+            match dispatch.graph().read_in_scope(node).as_deref() {
                 Some(SemanticNodeData::Primitive(kind)) => {
                     !matches!(kind, PrimitiveKind::Any | PrimitiveKind::Unknown)
                 }

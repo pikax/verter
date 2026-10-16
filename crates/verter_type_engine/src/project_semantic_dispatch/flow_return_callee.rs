@@ -723,7 +723,10 @@ fn reduce_instantiated_return(
     node: SemanticNodeId,
 ) -> SemanticNodeId {
     let graph = dispatch.arena();
-    let Some(SemanticNodeData::Intersection(members)) = graph.node_data(node).as_deref().cloned()
+    let Some(SemanticNodeData::Intersection(members)) = graph
+        .node_data(node)
+        .as_deref()
+        .map(crate::semantic_query::SemanticNodeData::clone)
     else {
         return node;
     };

@@ -2302,9 +2302,9 @@ fn whole_declaration_force_shares_the_declaration_instantiate_memo() {
     assert_eq!(dispatch_cold_for(&ordinary_key), 1);
     let read = dispatch.execute_read(ordinary_key.clone());
     assert!(
-        matches!(read.value, QueryResult::Value(_)),
+        matches!(read.value().clone(), QueryResult::Value(_)),
         "the ordinary declaration dispatch must serve, got {:?}",
-        read.value
+        read.value().clone()
     );
     assert_eq!(
         dispatch_cold_for(&ordinary_key),
@@ -2573,7 +2573,8 @@ pub(super) fn lowered_root(
 ) -> SemanticNodeId {
     match dispatch
         .execute_read(locator_key(host, dispatch, locator))
-        .value
+        .value()
+        .clone()
     {
         QueryResult::Value(node) => node,
         other => panic!("fixture locator must lower, got {other:?}"),

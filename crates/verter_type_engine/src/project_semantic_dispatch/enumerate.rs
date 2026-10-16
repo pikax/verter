@@ -497,7 +497,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// Returns `None` when the projection errors or the terminal is not an
     /// `Object` surface (a primitive / unresolvable carrier has no one-level
     /// member surface).
-    pub fn resolve_typeinfo_surface_view(
+    pub(crate) fn resolve_typeinfo_surface_view(
         &self,
         base: SemanticNodeId,
         context: crate::semantic_query::ProjectionReductionContext,
@@ -506,17 +506,46 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .map(|(view, _terminal)| view)
     }
 
+    /// The one-level surface [`Self::resolve_typeinfo_surface_view`] reads,
+    /// delivered as an owning read of its terminal `Object` node, so the
+    /// surface and every operand it names stay valid through the final
+    /// holder. The node IS the composed surface (see
+    /// [`Self::resolve_typeinfo_surface_view_with_node`]).
+    pub fn resolve_typeinfo_surface(
+        &self,
+        base: SemanticNodeId,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Option<crate::semantic_query_memo::node_data_lease::SurfaceLease> {
+        let terminal = self.typeinfo_surface_terminal(base, context)?;
+        crate::semantic_query_memo::node_data_lease::SurfaceLease::from_lease(
+            self.graph().lease_for_delivery(terminal)?,
+        )
+    }
+
     /// As [`Self::resolve_typeinfo_surface_view`], but also returns the terminal
     /// `Object` NODE the one-level surface was read from. The node IS the
     /// composed surface (the same `SurfaceView` it carries), so folding the
     /// node-domain raised-shape facts over it yields the EXACT materializedness
     /// of the composed surface — distinct from the carrier-intact `base` decl
     /// anchor, whose own raise keeps heritage / import carriers unresolved.
-    pub fn resolve_typeinfo_surface_view_with_node(
+    pub(crate) fn resolve_typeinfo_surface_view_with_node(
         &self,
         base: SemanticNodeId,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<(crate::semantic_query::SurfaceView, SemanticNodeId)> {
+        let terminal = self.typeinfo_surface_terminal(base, context)?;
+        match self.graph().node_data(terminal).as_deref() {
+            Some(SemanticNodeData::Object(view)) => Some((view.clone(), terminal)),
+            _ => None,
+        }
+    }
+
+    /// The terminal `Object` node of `base`'s complete one-level surface.
+    fn typeinfo_surface_terminal(
+        &self,
+        base: SemanticNodeId,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Option<SemanticNodeId> {
         verter_debug_assert_eq!(
             context.mode,
             crate::semantic_query::ProjectionMode::Shallow,
@@ -544,10 +573,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             crate::semantic_query::QueryResult::Recursive(node) => node,
             crate::semantic_query::QueryResult::Error(_) => return None,
         };
-        match self.graph().node_data(terminal).as_deref() {
-            Some(SemanticNodeData::Object(view)) => Some((view.clone(), terminal)),
-            _ => None,
-        }
+        matches!(
+            self.graph().node_data(terminal).as_deref(),
+            Some(SemanticNodeData::Object(_))
+        )
+        .then_some(terminal)
     }
 
     /// Name-only projection of [`Self::key_literals_from_keyspace_node`]

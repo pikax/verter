@@ -43,7 +43,7 @@ fn counted_zero_retention_admission_returns_an_owned_complete_delivery() {
             },
         )
     });
-    assert!(matches!(read.value, QueryResult::Value(_)));
+    assert!(matches!(read.value().clone(), QueryResult::Value(_)));
     assert!(
         !read.result_is_partial(),
         "retention pressure does not change computation completeness"
@@ -171,7 +171,7 @@ fn counted_outer_build_keeps_a_consumed_warm_read_through_cache_eviction() {
                         panic!("must read warm");
                     },
                 );
-                let QueryResult::Value(node) = inner.value else {
+                let QueryResult::Value(node) = inner.value().clone() else {
                     panic!("complete dependency");
                 };
                 store.invalidate_all();
@@ -216,7 +216,7 @@ fn counted_cancelled_producer_releases_unaudited_intermediates() {
         )
     });
     assert!(matches!(
-        read.value,
+        read.value().clone(),
         QueryResult::Error(QueryError::Cancelled)
     ));
     assert_eq!(harness.live_nodes(), 0);
@@ -254,19 +254,19 @@ fn counted_return_only_delivery_owns_value_and_actual_diagnostic_after_store_dro
             },
         )
     });
-    assert!(read.cache_suppress);
-    assert_eq!(read.walker_diagnostics.len(), 1);
+    assert!(read.cache_suppress());
+    assert_eq!(read.walker_diagnostics().len(), 1);
     assert_eq!(harness.live_nodes(), 2);
     harness.run(|store| assert_eq!(store.memo_entry_count(), 0));
     drop(harness);
     assert_eq!(
-        read.lease.live_nodes_for_tests(),
+        read.lease().live_nodes_for_tests(),
         2,
         "delivery itself owns both nodes"
     );
     let cloned = read.clone();
     drop(read);
-    assert_eq!(cloned.lease.live_nodes_for_tests(), 2);
+    assert_eq!(cloned.lease().live_nodes_for_tests(), 2);
 }
 
 #[test]
@@ -286,10 +286,10 @@ fn counted_recursion_delivery_owns_its_returned_sentinel() {
             )
         })
     });
-    assert!(matches!(read.value, QueryResult::Recursive(_)));
+    assert!(matches!(read.value().clone(), QueryResult::Recursive(_)));
     assert_eq!(harness.live_nodes(), 1);
     drop(harness);
-    assert_eq!(read.lease.live_nodes_for_tests(), 1);
+    assert_eq!(read.lease().live_nodes_for_tests(), 1);
 }
 
 #[test]
@@ -449,11 +449,11 @@ fn a_producer_belongs_to_its_task_and_a_subscription_waits_when_its_holder_choos
             .join()
             .expect("the producer thread completes")
     });
-    let QueryResult::Value(value) = produced.value else {
+    let QueryResult::Value(value) = produced.value().clone() else {
         panic!("the producer completes with its value");
     };
     assert_eq!(
-        produced.fact_status,
+        produced.fact_status().clone(),
         verter_type_engine::semantic_query::FactStatus::Complete
     );
 
@@ -465,13 +465,13 @@ fn a_producer_belongs_to_its_task_and_a_subscription_waits_when_its_holder_choos
         &mut capture,
     ) {
         Joined::Read(read) => {
-            assert_eq!(read.fact_status, produced.fact_status);
+            assert_eq!(read.fact_status(), produced.fact_status());
             assert!(
-                matches!(read.value, QueryResult::Value(joined) if joined == value),
+                matches!(read.value().clone(), QueryResult::Value(joined) if joined == value),
                 "the subscriber reads the producer's value"
             );
             assert!(
-                read.receipt
+                read.receipt()
                     .priced()
                     .is_some_and(|delivered| Arc::ptr_eq(delivered, &receipt)),
                 "the subscriber's read carries the producer's receipt, to replay it as a warm read would"
@@ -517,14 +517,14 @@ fn an_unavailable_producer_broadcasts_its_fact_without_a_candidate_value() {
     else {
         panic!("same-view priced follower must receive the fact")
     };
-    assert_eq!(produced.fact_status, joined.fact_status);
+    assert_eq!(produced.fact_status(), joined.fact_status());
     for read in [produced, joined] {
-        assert!(matches!(read.fact_status, FactStatus::Unavailable(_)));
+        assert!(matches!(read.fact_status(), FactStatus::Unavailable(_)));
         assert!(matches!(
-            read.value,
+            read.value().clone(),
             QueryResult::Error(QueryError::IncompleteSemanticOperand { .. })
         ));
-        assert!(read.result_is_partial() && read.cache_suppress);
+        assert!(read.result_is_partial() && read.cache_suppress());
         assert!(read
             .partial_reasons()
             .contains(PartialReasonSet::MISSING_DEPENDENCY));
@@ -571,7 +571,7 @@ fn a_subscriber_never_takes_another_demands_unpriced_partial() {
             .admit(&host, flags, &mut capture)
             .expect("an uncancelled producer completes");
         let read = settled.complete(&host, &mut capture);
-        assert!(read.result_is_partial() && read.receipt.priced().is_none());
+        assert!(read.result_is_partial() && read.receipt().priced().is_none());
     }
 
     let mut capture = ReadCapture::default();

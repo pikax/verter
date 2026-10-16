@@ -1119,10 +1119,7 @@ fn svelte_snippet_slots_from_typeinfo_surface(
                 .realized_callable_root(context)
                 .recorded()
                 .and_then(|realized_root| {
-                    let combine = match verter_type_engine::project_semantic_dispatch::node_data_for(
-                        dispatch.graph(),
-                        realized_root,
-                    )
+                    let combine = match dispatch.graph().read_in_scope(realized_root)
                     .as_deref()
                     {
                         Some(SemanticNodeData::Union(_)) => {
@@ -1866,7 +1863,7 @@ pub(in crate::typeinfo::framework_surface::svelte_exec) fn materialize_payload_t
 /// renders. A non-`Alias` node (or an unresolved id) is returned as-is.
 fn follow_alias_chain(store: &SemanticGraphStore, mut id: SemanticNodeId) -> SemanticNodeId {
     for _ in 0..16 {
-        match store.node_data(id).as_deref() {
+        match store.read_in_scope(id).as_deref() {
             Some(SemanticNodeData::Alias(target)) => id = *target,
             _ => return id,
         }
@@ -1890,17 +1887,19 @@ fn instance_export_display_node(
     node: SemanticNodeId,
 ) -> SemanticNodeId {
     let resolved = follow_alias_chain(store, node);
-    if let Some(SemanticNodeData::Object(surface)) = store.node_data(resolved).as_deref() {
+    if let Some(SemanticNodeData::Object(surface)) = store.read_in_scope(resolved).as_deref() {
         if surface.positive_members().is_empty()
-            && surface.construct_signatures.is_empty()
-            && surface.index_signatures.is_empty()
+            && surface.construct_signatures().is_empty()
+            && surface.index_signatures().is_empty()
             && !surface.has_known_index_signature()
-            && surface.keyspace.is_none()
-            && surface.call_signatures.len() == 1
+            && surface.keyspace().is_none()
+            && surface.call_signatures().len() == 1
         {
-            let sig = surface.call_signatures[0];
+            let sig = surface.call_signatures()[0];
             if matches!(
-                store.node_data(follow_alias_chain(store, sig)).as_deref(),
+                store
+                    .read_in_scope(follow_alias_chain(store, sig))
+                    .as_deref(),
                 Some(SemanticNodeData::Signature { .. })
             ) {
                 return sig;
@@ -1935,7 +1934,7 @@ pub(crate) fn resolve_svelte_value_export_member(
     ));
     verter_type_engine::request_context::observe_component_meta_read_suppress(&read);
 
-    let node = match read.value {
+    let node = match *read.value() {
         QueryResult::Value(node) | QueryResult::Recursive(node) => Some(node),
         QueryResult::Error(_) => None,
     };
@@ -1972,8 +1971,10 @@ pub(crate) fn resolve_svelte_value_export_member(
         // widen helper, and the declaring identity stays on the graph for
         // the relation authority.
         let graph = dispatch.graph();
-        let is_declaring_export = graph
-            .node_data(reduced.node_id())
+        let is_declaring_export = reduced
+            .node()
+            .and_then(|node| graph.read(node))
+            .ok()
             .as_deref()
             .and_then(|data| data.typeof_nominal_identity())
             .is_some_and(|identity| {
@@ -2012,9 +2013,10 @@ pub(crate) fn resolve_svelte_value_export_member(
         // EXT_TOKEN` / `typeof Tokens.A`) — the precise type — so the display
         // and the retained references read the carrier, not the widened
         // primitive that backed the shallow output.
-        let display_node = if graph
-            .node_data(reduced.node_id())
-            .is_some_and(|data| data.typeof_nominal_identity().is_some())
+        let display_node = if reduced
+            .node()
+            .and_then(|node| graph.read(node))
+            .is_ok_and(|data| data.typeof_nominal_identity().is_some())
         {
             reduced.node_id()
         } else {

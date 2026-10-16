@@ -316,7 +316,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let Some(SemanticNodeData::Signature {
             return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(_),
             ..
-        }) = graph.node_data(*selected_signature).as_deref().cloned()
+        }) = graph
+            .node_data(*selected_signature)
+            .as_deref()
+            .map(crate::semantic_query::SemanticNodeData::clone)
         else {
             return None;
         };
@@ -1624,12 +1627,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return partial_target;
         };
         let graph = self.graph();
-        let Some(SemanticNodeData::Signature { return_type, .. }) =
-            graph.node_data(partial_signature).as_deref().cloned()
+        let Some(SemanticNodeData::Signature { return_type, .. }) = graph
+            .node_data(partial_signature)
+            .as_deref()
+            .map(crate::semantic_query::SemanticNodeData::clone)
         else {
             return fixed_target;
         };
-        let Some(mut data) = graph.node_data(fixed_signature).as_deref().cloned() else {
+        let Some(mut data) = graph
+            .node_data(fixed_signature)
+            .as_deref()
+            .map(crate::semantic_query::SemanticNodeData::clone)
+        else {
             return fixed_target;
         };
         let SemanticNodeData::Signature {
@@ -4169,7 +4178,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 )
             }
             Some(SemanticNodeData::Object(surface)) => {
-                let mut members = surface.positive_members().to_vec();
+                let mut members = surface
+                    .positive_members()
+                    .iter()
+                    .map(crate::semantic_query::SurfaceMember::clone)
+                    .collect::<Vec<_>>();
                 for member in &mut members {
                     member.value = self.call_shape_transform(member.value, policy, memo);
                     member.readonly = policy == ConstParamPolicy::Const;

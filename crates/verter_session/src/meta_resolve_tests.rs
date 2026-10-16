@@ -8132,7 +8132,7 @@ fn emit_branch_merge_merges_colliding_js_property_spellings() {
         ),
     ];
 
-    let merged = merge_emit_branch_members(&true_members, &false_members);
+    let merged = merge_emit_branch_members(true_members, false_members);
     assert_eq!(
         merged.len(),
         2,

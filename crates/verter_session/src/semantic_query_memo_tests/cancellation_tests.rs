@@ -117,15 +117,15 @@ fn cancelled_joiner_detaches_without_aborting_live_winner() {
         .recv_timeout(std::time::Duration::from_secs(5))
         .expect("cancelled joiner must detach while winner remains blocked");
     assert!(matches!(
-        detached.value,
+        detached.value().clone(),
         QueryResult::Error(QueryError::Cancelled)
     ));
-    assert!(detached.cache_suppress && detached.result_is_partial());
+    assert!(detached.cache_suppress() && detached.result_is_partial());
     let _ = join_within(joiner, "cancelled joiner");
 
     release_tx.send(()).unwrap();
     let winner = join_within(winner, "live winner");
-    assert!(matches!(winner.value, QueryResult::Value(_)));
+    assert!(matches!(winner.value().clone(), QueryResult::Value(_)));
     assert_eq!(builds.load(Ordering::SeqCst), 1);
     assert_eq!(store.memo_entry_count(), 1);
     assert_eq!(
@@ -211,12 +211,12 @@ fn cancelled_leader_never_publishes_and_live_follower_retries_cold() {
     abort_barrier.wait();
     let leader = join_within(leader, "cancelled leader");
     assert!(matches!(
-        leader.value,
+        leader.value().clone(),
         QueryResult::Error(QueryError::Cancelled)
     ));
-    assert!(leader.cache_suppress && leader.result_is_partial());
+    assert!(leader.cache_suppress() && leader.result_is_partial());
 
-    let follower_node = match follower.value {
+    let follower_node = match follower.value().clone() {
         QueryResult::Value(node) => node,
         other => panic!("expected follower value, got {other:?}"),
     };
@@ -238,7 +238,7 @@ fn cancelled_leader_never_publishes_and_live_follower_retries_cold() {
             panic!("the live follower's result must be the sole warm value")
         },
     );
-    assert!(matches!(warm.value, QueryResult::Value(node) if node == follower_node));
+    assert!(matches!(warm.value().clone(), QueryResult::Value(node) if node == follower_node));
 }
 
 #[test]
@@ -320,7 +320,7 @@ fn post_admission_cancellation_preserves_aba_replacement_and_success_capture() {
         });
 
     assert!(matches!(
-        worker.0.value,
+        worker.0.value().clone(),
         QueryResult::Value(SemanticQueryValue::TypeNode(node))
             if matches!(
                 store.node_data(node).as_deref(),
@@ -342,7 +342,7 @@ fn post_admission_cancellation_preserves_aba_replacement_and_success_capture() {
         .get_unvalidated(&query)
         .expect("the replacement candidate must survive");
     assert!(matches!(
-        survivor.value,
+        survivor.value().clone(),
         QueryResult::Value(node)
             if matches!(
                 store.node_data(node).as_deref(),
@@ -416,7 +416,7 @@ fn post_admission_cancellation_keeps_same_discriminant_replacement_successful() 
     });
 
     assert!(matches!(
-        read.value,
+        read.value().clone(),
         QueryResult::Value(SemanticQueryValue::TypeNode(node))
             if matches!(
                 store.node_data(node).as_deref(),
@@ -499,7 +499,7 @@ fn post_admission_cancellation_keeps_cap_lru_eviction_committed() {
         worker.join().expect("cap/LRU publisher")
     });
 
-    assert!(matches!(read.value, QueryResult::Value(_)));
+    assert!(matches!(read.value().clone(), QueryResult::Value(_)));
     assert_eq!(
         publication
             .expect("cap/LRU admission capture")
@@ -569,7 +569,7 @@ fn post_admission_cancellation_keeps_global_fifo_eviction_committed() {
         worker.join().expect("global FIFO publisher")
     });
 
-    assert!(matches!(read.value, QueryResult::Value(_)));
+    assert!(matches!(read.value().clone(), QueryResult::Value(_)));
     assert!(store.get_unvalidated(&first).is_none());
     assert!(store.get_unvalidated(&second).is_some());
     assert!(store.get_unvalidated(&admitted).is_some());
@@ -650,7 +650,7 @@ fn post_admission_cancellation_keeps_parent_and_prefix_backfill() {
         worker.join().expect("prefix publisher")
     });
 
-    assert!(matches!(read.value, QueryResult::Value(_)));
+    assert!(matches!(read.value().clone(), QueryResult::Value(_)));
     assert!(store.get_unvalidated(&parent).is_some());
     assert!(store.get_unvalidated(&child).is_some());
     assert_eq!(store.memo_budget_tracked_len_for_test(), 2);
@@ -700,7 +700,7 @@ fn cancellation_before_admission_remains_cancelled_and_unpublished() {
     });
 
     assert!(matches!(
-        read.value,
+        read.value().clone(),
         QueryResult::Error(QueryError::Cancelled)
     ));
     assert!(publication.is_none());
@@ -790,7 +790,7 @@ fn a_joiner_parked_when_the_winner_panics_retries_cold() {
         "the winner's build panicked"
     );
     let joined = join_within(joiner, "joiner of a panicked winner");
-    let node = match joined.value {
+    let node = match joined.value().clone() {
         QueryResult::Value(node) => node,
         other => panic!("the joiner retries cold and answers, got {other:?}"),
     };
@@ -798,7 +798,7 @@ fn a_joiner_parked_when_the_winner_panics_retries_cold() {
         *store.node_data(node).unwrap(),
         SemanticNodeData::Primitive(PrimitiveKind::Number)
     ));
-    assert!(!joined.cache_suppress && !joined.result_is_partial());
+    assert!(!joined.cache_suppress() && !joined.result_is_partial());
     assert_eq!(
         builds.load(Ordering::SeqCst),
         2,
@@ -863,7 +863,7 @@ fn a_joiner_of_an_inline_member_flight_aborted_under_cancellation_retries_cold()
     owner_context.cancel();
     store.abort_inline_member_flight(&flight);
     let joined = join_within(joiner, "joiner of an aborted inline member");
-    let node = match joined.value {
+    let node = match joined.value().clone() {
         QueryResult::Value(node) => node,
         other => panic!("the joiner retries cold and answers, got {other:?}"),
     };
@@ -871,7 +871,7 @@ fn a_joiner_of_an_inline_member_flight_aborted_under_cancellation_retries_cold()
         *store.node_data(node).unwrap(),
         SemanticNodeData::Primitive(PrimitiveKind::Number)
     ));
-    assert!(!joined.cache_suppress && !joined.result_is_partial());
+    assert!(!joined.cache_suppress() && !joined.result_is_partial());
     assert_eq!(
         builds.load(Ordering::SeqCst),
         1,

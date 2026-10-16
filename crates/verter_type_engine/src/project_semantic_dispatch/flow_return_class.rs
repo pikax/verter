@@ -928,7 +928,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 .borrow()
                 .iter()
                 .filter(|member| member.key == key)
-                .cloned()
+                .map(crate::semantic_query::SurfaceMember::clone)
                 .map(crate::semantic_query::SurfaceEntry::Member)
                 .collect();
             if !own.is_empty() {
@@ -1255,7 +1255,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 return_type,
                 return_carrier,
                 ..
-            }) = graph.node_data(*signature).as_deref().cloned()
+            }) = graph
+                .node_data(*signature)
+                .as_deref()
+                .map(crate::semantic_query::SemanticNodeData::clone)
             else {
                 return None;
             };
@@ -1323,7 +1326,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         // values); a union base constructor contributes none.
         let static_members = match (type_variable, graph.node_data(settled).as_deref()) {
             (Some(_), _) => Vec::new(),
-            (None, Some(SemanticNodeData::Object(view))) => view.positive_members().to_vec(),
+            (None, Some(SemanticNodeData::Object(view))) => view
+                .positive_members()
+                .iter()
+                .map(crate::semantic_query::SurfaceMember::clone)
+                .collect::<Vec<_>>(),
             (None, Some(arms @ SemanticNodeData::Intersection(_))) => {
                 let per_arm: Vec<Vec<SurfaceMember>> = arms
                     .composite_members()
@@ -1335,9 +1342,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                             crate::semantic_query::ProjectionReductionContext::structural_transit(),
                         );
                         match graph.node_data(arm).as_deref() {
-                            Some(SemanticNodeData::Object(view)) => {
-                                view.positive_members().to_vec()
-                            }
+                            Some(SemanticNodeData::Object(view)) => view
+                                .positive_members()
+                                .iter()
+                                .map(crate::semantic_query::SurfaceMember::clone)
+                                .collect::<Vec<_>>(),
                             _ => Vec::new(),
                         }
                     })

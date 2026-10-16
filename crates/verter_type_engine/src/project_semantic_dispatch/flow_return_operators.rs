@@ -379,7 +379,11 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
             }
             SemanticNodeData::Object(surface) => {
                 use crate::semantic_query::{SurfaceEntry, SurfaceView};
-                let mut entries = surface.entries.to_vec();
+                let mut entries = surface
+                    .entries
+                    .iter()
+                    .map(crate::semantic_query::SurfaceEntry::clone)
+                    .collect::<Vec<_>>();
                 for entry in &mut entries {
                     match entry {
                         SurfaceEntry::Member(member) => slot(&mut member.value),

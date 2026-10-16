@@ -122,7 +122,7 @@ fn node_data(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: SemanticNodeId,
 ) -> Option<SemanticNodeData> {
-    dispatch.graph().node_data(node).map(|d| (*d).clone())
+    dispatch.graph().node_data(node).map(|d| d.copy_for_tests())
 }
 
 /// Drive a node through the dispatch as the base of an empty-path

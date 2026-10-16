@@ -4094,7 +4094,7 @@ pub enum HopDecision {
 /// owning surface is interned. A walker that needs the body issues
 /// [`SemanticQueryApi::execute`] with a [`SemanticQueryKey::ProjectPath`]
 /// rooted at `value`; the family memo dedups across distinct entry paths.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct SurfaceMember {
     pub key: AuthoredPropertyKey,
     pub value: SemanticNodeId,
@@ -4191,6 +4191,38 @@ pub struct SurfaceMember {
 }
 
 impl SurfaceMember {
+    /// A fixture copy. Test builds only: production consumers borrow the
+    /// carrier from the lease that owns its operands.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn copy_for_tests(&self) -> Self {
+        self.clone()
+    }
+
+    /// Copy inside the owning crate. A consumer borrows this carrier from the lease that owns its graph operands; there is no public detached copy.
+    #[allow(
+        clippy::clone_on_copy,
+        reason = "an exhaustive field copy, so a new field cannot be skipped"
+    )]
+    pub(crate) fn clone(&self) -> Self {
+        Self {
+            key: self.key.clone(),
+            value: self.value.clone(),
+            optional: self.optional.clone(),
+            readonly: self.readonly.clone(),
+            method_kind: self.method_kind.clone(),
+            has_implementation_body: self.has_implementation_body.clone(),
+            visibility: self.visibility.clone(),
+            spans: self.spans.clone(),
+            declaration_origin: self.declaration_origin.clone(),
+            declared_in_macro_type_arg: self.declared_in_macro_type_arg.clone(),
+            merge_role: self.merge_role.clone(),
+            excess_origin: self.excess_origin.clone(),
+        }
+    }
+}
+
+impl SurfaceMember {
     /// Ordinary string key for publication surfaces whose external schema is
     /// string-only. Other key classes remain on the semantic member and must
     /// be rejected or handled by the caller.
@@ -4215,7 +4247,7 @@ impl SurfaceMember {
 /// on a surface. Carried as structured metadata rather than an opaque
 /// [`SemanticNodeId`] so consumers downstream of dispatch can read the
 /// declared `key_type` / `value_type` shape directly.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct IndexSignature {
     pub key_type: SemanticNodeId,
     pub value_type: SemanticNodeId,
@@ -4235,11 +4267,36 @@ pub struct IndexSignature {
     pub declaration_origin: Option<Arc<str>>,
 }
 
+impl IndexSignature {
+    /// A fixture copy. Test builds only: production consumers borrow the
+    /// carrier from the lease that owns its operands.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn copy_for_tests(&self) -> Self {
+        self.clone()
+    }
+
+    /// Copy inside the owning crate. A consumer borrows this carrier from the lease that owns its graph operands; there is no public detached copy.
+    #[allow(
+        clippy::clone_on_copy,
+        reason = "an exhaustive field copy, so a new field cannot be skipped"
+    )]
+    pub(crate) fn clone(&self) -> Self {
+        Self {
+            key_type: self.key_type.clone(),
+            value_type: self.value_type.clone(),
+            readonly: self.readonly.clone(),
+            spans: self.spans.clone(),
+            declaration_origin: self.declaration_origin.clone(),
+        }
+    }
+}
+
 /// One canonical entry in a resolved declaration surface.
 ///
 /// This stream is the ordering authority. Kind-specific collections on
 /// [`SurfaceView`] are lookup indexes and must not be joined positionally.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub enum SurfaceEntry {
     /// Named property or method member.
     Member(SurfaceMember),
@@ -4251,6 +4308,30 @@ pub enum SurfaceEntry {
     IndexSignature(IndexSignature),
 }
 
+impl SurfaceEntry {
+    /// A fixture copy. Test builds only: production consumers borrow the
+    /// carrier from the lease that owns its operands.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn copy_for_tests(&self) -> Self {
+        self.clone()
+    }
+
+    /// Copy inside the owning crate. A consumer borrows this carrier from the lease that owns its graph operands; there is no public detached copy.
+    #[allow(
+        clippy::clone_on_copy,
+        reason = "an exhaustive field copy, so a new field cannot be skipped"
+    )]
+    pub(crate) fn clone(&self) -> Self {
+        match self {
+            Self::Member(v0) => Self::Member(v0.clone()),
+            Self::CallSignature(v0) => Self::CallSignature(v0.clone()),
+            Self::ConstructSignature(v0) => Self::ConstructSignature(v0.clone()),
+            Self::IndexSignature(v0) => Self::IndexSignature(v0.clone()),
+        }
+    }
+}
+
 /// One-level surface view of a semantic node. The entry stream is ordered to
 /// keep declaration semantics and hashing stable.
 ///
@@ -4259,17 +4340,49 @@ pub enum SurfaceEntry {
 /// require either a [`ClosedSurfaceView`] witness or [`SurfaceKeyProjection`].
 /// The one registry publication materialisation happens at the query-engine
 /// terminal sink (`surface_view_to_registry_type_expr`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// A consumer borrows the stream and its indexes from the payload lease
+/// that owns them. The nested arrays are never handed out as shared
+/// `Arc`s and the view has no public copy, so no surface, member, entry or
+/// index signature outlives the read that owns its graph operands.
+#[derive(Debug, PartialEq, Eq)]
 pub struct SurfaceView {
     /// Canonical resolver-produced declaration stream. This is the primary
     /// stored surface; all kind-specific collections below are derived indexes.
-    pub entries: Arc<[SurfaceEntry]>,
+    pub(crate) entries: Arc<[SurfaceEntry]>,
     members: Arc<[SurfaceMember]>,
-    pub call_signatures: Arc<[SemanticNodeId]>,
-    pub construct_signatures: Arc<[SemanticNodeId]>,
-    pub index_signatures: Arc<[IndexSignature]>,
-    pub keyspace: Option<SemanticNodeId>,
+    pub(crate) call_signatures: Arc<[SemanticNodeId]>,
+    pub(crate) construct_signatures: Arc<[SemanticNodeId]>,
+    pub(crate) index_signatures: Arc<[IndexSignature]>,
+    pub(crate) keyspace: Option<SemanticNodeId>,
     has_index_signature: bool,
+}
+
+impl SurfaceView {
+    /// A fixture copy. Test builds only: production consumers borrow the
+    /// carrier from the lease that owns its operands.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn copy_for_tests(&self) -> Self {
+        self.clone()
+    }
+
+    /// Copy inside the owning crate. A consumer borrows this carrier from the lease that owns its graph operands; there is no public detached copy.
+    #[allow(
+        clippy::clone_on_copy,
+        reason = "an exhaustive field copy, so a new field cannot be skipped"
+    )]
+    pub(crate) fn clone(&self) -> Self {
+        Self {
+            entries: self.entries.clone(),
+            members: self.members.clone(),
+            call_signatures: self.call_signatures.clone(),
+            construct_signatures: self.construct_signatures.clone(),
+            index_signatures: self.index_signatures.clone(),
+            keyspace: self.keyspace.clone(),
+            has_index_signature: self.has_index_signature.clone(),
+        }
+    }
 }
 
 /// Construction-only carrier for [`SurfaceView`]. Semantic consumers receive
@@ -4523,7 +4636,7 @@ impl SurfaceView {
         // index order so `entries`-keyed hashing agrees with `from_entries`.
         let entries: Arc<[SurfaceEntry]> = members
             .iter()
-            .cloned()
+            .map(SurfaceMember::clone)
             .map(SurfaceEntry::Member)
             .chain(
                 call_signatures
@@ -4540,7 +4653,7 @@ impl SurfaceView {
             .chain(
                 index_signatures
                     .iter()
-                    .cloned()
+                    .map(IndexSignature::clone)
                     .map(SurfaceEntry::IndexSignature),
             )
             .collect();
@@ -4617,6 +4730,36 @@ impl SurfaceView {
     /// absence unless [`Self::closed`] succeeds.
     pub fn positive_members(&self) -> &[SurfaceMember] {
         &self.members
+    }
+
+    /// The canonical ordered declaration stream, borrowed.
+    #[must_use]
+    pub fn entries(&self) -> &[SurfaceEntry] {
+        &self.entries
+    }
+
+    /// Root call signatures, borrowed.
+    #[must_use]
+    pub fn call_signatures(&self) -> &[SemanticNodeId] {
+        &self.call_signatures
+    }
+
+    /// Root construct signatures, borrowed.
+    #[must_use]
+    pub fn construct_signatures(&self) -> &[SemanticNodeId] {
+        &self.construct_signatures
+    }
+
+    /// Index signatures, borrowed.
+    #[must_use]
+    pub fn index_signatures(&self) -> &[IndexSignature] {
+        &self.index_signatures
+    }
+
+    /// The surface's key-space node, if any.
+    #[must_use]
+    pub fn keyspace(&self) -> Option<SemanticNodeId> {
+        self.keyspace
     }
 
     /// The complete-domain witness. Total: every surface is closed by
@@ -4842,34 +4985,14 @@ macro_rules! test_surface_view {
         keyspace: $keyspace:expr,
         has_index_signature: $has_index_signature:expr $(,)?
     ) => {{
-        let members: std::sync::Arc<[$crate::semantic_query::SurfaceMember]> = $members;
-        let calls: std::sync::Arc<[$crate::semantic_query::SemanticNodeId]> = $calls;
-        let constructs: std::sync::Arc<[$crate::semantic_query::SemanticNodeId]> = $constructs;
-        let indexes: std::sync::Arc<[$crate::semantic_query::IndexSignature]> = $indexes;
-        let entries = members
-            .iter()
-            .cloned()
-            .map($crate::semantic_query::SurfaceEntry::Member)
-            .chain(
-                calls
-                    .iter()
-                    .copied()
-                    .map($crate::semantic_query::SurfaceEntry::CallSignature),
-            )
-            .chain(
-                constructs
-                    .iter()
-                    .copied()
-                    .map($crate::semantic_query::SurfaceEntry::ConstructSignature),
-            )
-            .chain(
-                indexes
-                    .iter()
-                    .cloned()
-                    .map($crate::semantic_query::SurfaceEntry::IndexSignature),
-            )
-            .collect();
-        $crate::semantic_query::SurfaceView::from_entries(entries, $keyspace, $has_index_signature)
+        $crate::semantic_query::SurfaceView::new(
+            $members,
+            $calls,
+            $constructs,
+            $indexes,
+            $keyspace,
+            $has_index_signature,
+        )
     }};
 }
 
@@ -5344,13 +5467,13 @@ pub use crate::project_semantic_dispatch::cost_receipt::ReadReceipt;
 pub struct CacheRead<T> {
     /// Internal graph and signature-version ownership, independent of cache
     /// admission. Production canonical close can still revoke graph slots.
-    pub lease: crate::semantic_query_memo::delivery_lease::SemanticDeliveryLease,
-    pub value: T,
-    pub dep_signature: DepSignature,
+    pub(crate) lease: crate::semantic_query_memo::delivery_lease::SemanticDeliveryLease,
+    pub(crate) value: T,
+    pub(crate) dep_signature: DepSignature,
     /// Walker diagnostics produced during this query's computation.
     /// Stored on the memo entry; warm reads replay transparently. Empty
     /// for queries that don't run the walker.
-    pub walker_diagnostics: Arc<[crate::project_semantic_dispatch::walk::ShallowDiagnostic]>,
+    pub(crate) walker_diagnostics: Arc<[crate::project_semantic_dispatch::walk::ShallowDiagnostic]>,
     /// **Inner-memo non-cacheability.** `true` when THIS query's memo
     /// entry must not be admitted/shared — either because the build hit a
     /// fatal `QueryError` / pathological-input cap, OR because a perfectly
@@ -5360,20 +5483,97 @@ pub struct CacheRead<T> {
     /// queries. The memo refuses insertion when this is true; the value
     /// still flows back to the caller. This is NOT the partial-result
     /// signal — see [`Self::result_is_partial`].
-    pub cache_suppress: bool,
+    pub(crate) cache_suppress: bool,
     /// The adopted producer fact. Compatibility summaries are projections of
     /// this disposition; an unavailable read cannot offer its candidate value.
-    pub fact_status: FactStatus,
+    pub(crate) fact_status: FactStatus,
     /// **The value's cost receipt.** A stored, joined or freshly built
     /// result is [`ReadReceipt::Priced`] with what computing it cost: the
     /// consumer replays it into its connected demand before using the
     /// value and records it as a prerequisite. Reads that carry no
     /// computation (recursion carriers, cancellation, typed refusals) are
     /// [`ReadReceipt::Unpriced`].
-    pub receipt: ReadReceipt,
+    pub(crate) receipt: ReadReceipt,
 }
 
 impl<T> CacheRead<T> {
+    /// The delivered value, borrowed from the read that owns its operands.
+    #[must_use]
+    pub fn value(&self) -> &T {
+        &self.value
+    }
+
+    /// The delivery's graph and signature-version ownership.
+    #[must_use]
+    pub fn lease(&self) -> &crate::semantic_query_memo::delivery_lease::SemanticDeliveryLease {
+        &self.lease
+    }
+
+    /// Borrow a node this delivery owns: its value or a diagnostic operand.
+    /// An ordinal the delivery does not own is foreign.
+    pub fn node(
+        &self,
+        id: SemanticNodeId,
+    ) -> Result<crate::semantic_query_memo::node_roots::NodeRef<'_>, QueryError> {
+        self.lease.node_ref(id)
+    }
+
+    /// The dependency facts the value was computed from: file versions,
+    /// never graph operands.
+    #[must_use]
+    pub fn dep_signature(&self) -> &DepSignature {
+        &self.dep_signature
+    }
+
+    /// The walker diagnostics, borrowed from the read that owns their
+    /// operands.
+    #[must_use]
+    pub fn walker_diagnostics(
+        &self,
+    ) -> &[crate::project_semantic_dispatch::walk::ShallowDiagnostic] {
+        &self.walker_diagnostics
+    }
+
+    /// Whether this read's memo entry must not be admitted or shared.
+    #[must_use]
+    pub fn cache_suppress(&self) -> bool {
+        self.cache_suppress
+    }
+
+    /// The adopted producer fact.
+    #[must_use]
+    pub fn fact_status(&self) -> &FactStatus {
+        &self.fact_status
+    }
+
+    /// The value's cost receipt.
+    #[must_use]
+    pub fn receipt(&self) -> &ReadReceipt {
+        &self.receipt
+    }
+
+    /// A fixture read that owns no graph operands. Test builds only.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn unleased_for_tests(
+        value: T,
+        dep_signature: DepSignature,
+        walker_diagnostics: Arc<[crate::project_semantic_dispatch::walk::ShallowDiagnostic]>,
+        cache_suppress: bool,
+        fact_status: FactStatus,
+        receipt: ReadReceipt,
+    ) -> Self {
+        Self {
+            lease: Default::default(),
+            value,
+            dep_signature,
+            walker_diagnostics,
+            cache_suppress,
+            fact_status,
+            receipt,
+        }
+    }
+
     /// Convert a `(value, dep_signature)` pair into a `CacheRead` with
     /// no walker diagnostics and `cache_suppress = false`. Used by
     /// build closures for queries that do not run the shallow-mode
@@ -9682,7 +9882,7 @@ impl ObjectSpreadProgram {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum SemanticNodeData {
     /// A compiler-native intrinsic operation applied to its operands, kept
     /// DEFERRED because the answer depends on a binder the substitution has
@@ -10123,6 +10323,158 @@ pub enum SemanticNodeData {
         /// materialisation; it is not part of [`SyntheticBindingId`].
         value_node: u64,
     },
+}
+
+impl SemanticNodeData {
+    /// A fixture copy. Test builds only: production consumers borrow the
+    /// carrier from the lease that owns its operands.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn copy_for_tests(&self) -> Self {
+        self.clone()
+    }
+
+    /// Copy inside the owning crate. A consumer borrows this carrier from the lease that owns its graph operands; there is no public detached copy.
+    #[allow(
+        clippy::clone_on_copy,
+        reason = "an exhaustive field copy, so a new field cannot be skipped"
+    )]
+    pub(crate) fn clone(&self) -> Self {
+        match self {
+            Self::IntrinsicApplication { op, args } => Self::IntrinsicApplication {
+                op: op.clone(),
+                args: args.clone(),
+            },
+            Self::Alias(v0) => Self::Alias(v0.clone()),
+            Self::Object(v0) => Self::Object(v0.clone()),
+            Self::ObjectSpreadProgram(v0) => Self::ObjectSpreadProgram(v0.clone()),
+            Self::Union(v0) => Self::Union(v0.clone()),
+            Self::Intersection(v0) => Self::Intersection(v0.clone()),
+            Self::Primitive(v0) => Self::Primitive(v0.clone()),
+            Self::Literal(v0) => Self::Literal(v0.clone()),
+            Self::EnumLiteral(v0) => Self::EnumLiteral(v0.clone()),
+            Self::Opaque(v0) => Self::Opaque(v0.clone()),
+            Self::Array { element, readonly } => Self::Array {
+                element: element.clone(),
+                readonly: readonly.clone(),
+            },
+            Self::Tuple { elements, readonly } => Self::Tuple {
+                elements: elements.clone(),
+                readonly: readonly.clone(),
+            },
+            Self::TemplateLiteral {
+                quasis,
+                expressions,
+            } => Self::TemplateLiteral {
+                quasis: quasis.clone(),
+                expressions: expressions.clone(),
+            },
+            Self::KeyOf { base } => Self::KeyOf { base: base.clone() },
+            Self::IndexedAccess { object, index } => Self::IndexedAccess {
+                object: object.clone(),
+                index: index.clone(),
+            },
+            Self::Mapped { source, mapper } => Self::Mapped {
+                source: source.clone(),
+                mapper: mapper.clone(),
+            },
+            Self::TypeOf(v0) => Self::TypeOf(v0.clone()),
+            Self::TypeOfNominal(v0) => Self::TypeOfNominal(v0.clone()),
+            Self::TypeParam {
+                decl,
+                param_index,
+                constraint,
+                default,
+                display_name,
+            } => Self::TypeParam {
+                decl: decl.clone(),
+                param_index: param_index.clone(),
+                constraint: constraint.clone(),
+                default: default.clone(),
+                display_name: display_name.clone(),
+            },
+            Self::Infer {
+                name,
+                binder,
+                constraint,
+            } => Self::Infer {
+                name: name.clone(),
+                binder: binder.clone(),
+                constraint: constraint.clone(),
+            },
+            Self::InferRef { name, binder } => Self::InferRef {
+                name: name.clone(),
+                binder: binder.clone(),
+            },
+            Self::Conditional {
+                check,
+                extends,
+                true_branch_ref,
+                false_branch_ref,
+                distributive,
+                pending,
+            } => Self::Conditional {
+                check: check.clone(),
+                extends: extends.clone(),
+                true_branch_ref: true_branch_ref.clone(),
+                false_branch_ref: false_branch_ref.clone(),
+                distributive: distributive.clone(),
+                pending: pending.clone(),
+            },
+            Self::Signature {
+                kind,
+                params,
+                return_type,
+                type_parameters,
+                occurrence,
+                return_carrier,
+                signature_span,
+                return_type_span,
+                predicate,
+                is_abstract,
+            } => Self::Signature {
+                kind: kind.clone(),
+                params: params.clone(),
+                return_type: return_type.clone(),
+                type_parameters: type_parameters.clone(),
+                occurrence: occurrence.clone(),
+                return_carrier: return_carrier.clone(),
+                signature_span: signature_span.clone(),
+                return_type_span: return_type_span.clone(),
+                predicate: predicate.clone(),
+                is_abstract: is_abstract.clone(),
+            },
+            Self::DeferredCallable(v0) => Self::DeferredCallable(v0.clone()),
+            Self::DeclRef { identity } => Self::DeclRef {
+                identity: identity.clone(),
+            },
+            Self::InstantiationRef { base, args } => Self::InstantiationRef {
+                base: base.clone(),
+                args: args.clone(),
+            },
+            Self::ClassExpressionInstance {
+                identity,
+                type_arguments,
+                surface,
+            } => Self::ClassExpressionInstance {
+                identity: identity.clone(),
+                type_arguments: type_arguments.clone(),
+                surface: surface.clone(),
+            },
+            Self::MergedDecl { contributors } => Self::MergedDecl {
+                contributors: contributors.clone(),
+            },
+            Self::BareRef(v0) => Self::BareRef(v0.clone()),
+            Self::ImportType(v0) => Self::ImportType(v0.clone()),
+            Self::RawFallback { value } => Self::RawFallback {
+                value: value.clone(),
+            },
+            Self::SyntheticBinding { id, value_node } => Self::SyntheticBinding {
+                id: id.clone(),
+                value_node: value_node.clone(),
+            },
+        }
+    }
 }
 
 impl SemanticNodeData {
@@ -10805,10 +11157,10 @@ pub trait TypeNavigator {
     fn choose_next_hop(&self, path: &[PathSegment], at: SemanticNodeId) -> HopDecision;
 }
 
-/// Read access to the shared semantic graph. Callers that hold a
-/// [`SemanticNodeId`] use this trait to inspect the resolved node data
-/// without spawning private side channels.
-pub trait SemanticGraphRead {
+/// Read access to the shared semantic graph by construction ordinal; the
+/// missing-id fabrication fixture reads through it.
+#[cfg(test)]
+pub(crate) trait SemanticGraphRead {
     fn node_data(&self, node: SemanticNodeId) -> Arc<SemanticNodeData>;
 }
 

@@ -112,9 +112,9 @@ pub(crate) fn named_native_props_outcome(
     }));
     verter_type_engine::meta_resolve::emit_dispatch_dep_signature_facts(
         dispatch,
-        &read.dep_signature,
+        &read.dep_signature(),
     );
-    let (base, recursive) = match read.value {
+    let (base, recursive) = match *read.value() {
         QueryResult::Value(node) => (node, false),
         QueryResult::Recursive(node) => (node, true),
         QueryResult::Error(_) => return ResolvedNativePropsOutcome::Miss,

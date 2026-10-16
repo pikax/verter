@@ -710,7 +710,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if policy == ExactOptionalPropertyPolicy::Enabled {
             return value;
         }
-        let Some(SemanticNodeData::Union(arms)) = self.graph().node_data(value).as_deref().cloned()
+        let Some(SemanticNodeData::Union(arms)) = self
+            .graph()
+            .node_data(value)
+            .as_deref()
+            .map(crate::semantic_query::SemanticNodeData::clone)
         else {
             return value;
         };

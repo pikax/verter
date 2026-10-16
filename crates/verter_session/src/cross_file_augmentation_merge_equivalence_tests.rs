@@ -1102,13 +1102,13 @@ fn external_module_augmentation_discharges_exact_unresolved_owner_debt() {
         "a non-file ambient import must begin as exact typed unresolved-owner debt"
     );
     assert!(
-        !ambient_read.result_is_partial() && !ambient_read.cache_suppress,
+        !ambient_read.result_is_partial() && !ambient_read.cache_suppress(),
         "the exact Cfg debt must discharge when the normal resolver reaches the live ambient \
          augmentation; got partial={}, suppress={}",
         ambient_read.result_is_partial(),
-        ambient_read.cache_suppress,
+        ambient_read.cache_suppress(),
     );
-    let ambient_node = match ambient_read.value {
+    let ambient_node = match ambient_read.value().clone() {
         QueryResult::Value(value) => value,
         other => panic!("ambient U must resolve to a value, got {other:?}"),
     };
@@ -1140,11 +1140,11 @@ fn external_module_augmentation_discharges_exact_unresolved_owner_debt() {
         "the absent import must retain exact typed unresolved-owner debt"
     );
     assert!(
-        missing_read.result_is_partial() && missing_read.cache_suppress,
+        missing_read.result_is_partial() && missing_read.cache_suppress(),
         "an undischargeable owner debt must remain Partial(MissingDependency) and ReturnOnly; \
          got partial={}, suppress={}",
         missing_read.result_is_partial(),
-        missing_read.cache_suppress,
+        missing_read.cache_suppress(),
     );
 }
 
@@ -1365,7 +1365,7 @@ fn external_module_augmentation_torn_contributor_folds_cache_suppress() {
                     ProjectionReductionContext::published(ProjectionMode::Expanded),
                 ),
             ));
-        dispatch.execute_read(key).cache_suppress
+        dispatch.execute_read(key).cache_suppress()
     };
 
     // TORN: arm the injection, then COLD-build `/use.ts::U`. `Cfg` resolves to
@@ -1489,7 +1489,7 @@ fn relative_augmentation_torn_stitch_fans_non_cacheability_to_outer_tracer() {
             verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_)
         );
         (
-            read.cache_suppress,
+            read.cache_suppress(),
             read.result_is_partial(),
             outer_non_cacheable,
         )
@@ -1626,7 +1626,7 @@ fn external_module_augmentation_broken_lease_contributor_folds_cache_suppress() 
                     ProjectionReductionContext::published(ProjectionMode::Expanded),
                 ),
             ));
-        dispatch.execute_read(key).cache_suppress
+        dispatch.execute_read(key).cache_suppress()
     };
 
     // BROKEN LEASE: cold-build `/use.ts::U`. The external augmentation stitch

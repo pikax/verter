@@ -263,8 +263,8 @@ fn callable_base(host: &VerterHost) -> SemanticNodeId {
     // signature is the authored callable a member lookup starts from.
     let data = graph.node_data(node).expect("`Callable` node must exist");
     let signature = match &*data {
-        SemanticNodeData::Object(surface) if surface.call_signatures.len() == 1 => {
-            surface.call_signatures[0]
+        SemanticNodeData::Object(surface) if surface.call_signatures().len() == 1 => {
+            surface.call_signatures()[0]
         }
         other => {
             panic!("`Callable` MUST resolve to a single-call-signature surface, got {other:?}")

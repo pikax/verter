@@ -12,6 +12,7 @@
 //! parent-private (no visibility relaxation).
 
 use rustc_hash::FxHashSet;
+use verter_type_engine::semantic_query_memo::node_data_lease::SurfaceLease;
 use verter_type_expr::TypeExpr;
 
 use super::route_admission::{
@@ -122,7 +123,7 @@ pub(crate) fn lower_and_project_to_expanded_node(
             ProjectionMode::Expanded,
         ),
     });
-    let result_node = match read.value {
+    let result_node = match *read.value() {
         QueryResult::Value(node) => node,
         QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
     };
@@ -188,7 +189,7 @@ pub(crate) fn project_class_a_terminal_node(
             ProjectionMode::Expanded,
         ),
     });
-    let result_node = match read.value {
+    let result_node = match *read.value() {
         QueryResult::Value(node) => node,
         QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
     };
@@ -198,7 +199,9 @@ pub(crate) fn project_class_a_terminal_node(
     // pre-carrier `Opaque(Miss)` terminal did. (`DeclRef` /
     // `InstantiationRef` identity carriers are NOT in this class — they
     // name a resolved declaration.)
-    if verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), result_node)
+    if dispatch
+        .graph()
+        .read_in_scope(result_node)
         .as_deref()
         .is_some_and(|data| data.bare_ref_head().is_some())
     {
@@ -257,7 +260,7 @@ pub(super) fn surface_view_from_semantic_node(
         crate::resolver_core::HostCapabilities,
     >,
     node: SemanticNodeId,
-) -> Option<SurfaceView> {
+) -> Option<SurfaceLease> {
     let mut active = FxHashSet::default();
     surface_view_from_semantic_node_inner(dispatch, node, &mut active)
 }
@@ -269,9 +272,8 @@ fn surface_view_from_semantic_node_inner(
     >,
     node: SemanticNodeId,
     active: &mut FxHashSet<SemanticNodeId>,
-) -> Option<SurfaceView> {
-    let data =
-        verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), node)?;
+) -> Option<SurfaceLease> {
+    let data = dispatch.graph().read_in_scope(node)?;
     match data.as_ref() {
         SemanticNodeData::Alias(target) => {
             if !active.insert(node) {
@@ -281,7 +283,7 @@ fn surface_view_from_semantic_node_inner(
             active.remove(&node);
             result
         }
-        SemanticNodeData::Object(surface) => Some(surface.clone()),
+        SemanticNodeData::Object(_) => SurfaceLease::from_lease(data),
         _ => None,
     }
 }
@@ -313,12 +315,12 @@ pub(super) fn compound_root_surface_view_via_dispatch(
         crate::resolver_core::HostCapabilities,
     >,
     node: SemanticNodeId,
-) -> Option<(SurfaceView, SemanticNodeId)> {
+) -> Option<(SurfaceLease, SemanticNodeId)> {
     use verter_type_engine::semantic_query::{
         ProjectionMode, ProjectionReductionContext, SurfaceProvenanceContext,
     };
 
-    let (surface, surface_node) = dispatch.resolve_typeinfo_surface_view_with_node(
+    let surface = dispatch.resolve_typeinfo_surface(
         node,
         ProjectionReductionContext::macro_object_surface(
             ProjectionMode::Shallow,
@@ -328,6 +330,7 @@ pub(super) fn compound_root_surface_view_via_dispatch(
     if surface_view_is_empty(&surface) {
         return None;
     }
+    let surface_node = surface.node();
     Some((surface, surface_node))
 }
 

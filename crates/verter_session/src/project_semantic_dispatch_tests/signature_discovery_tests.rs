@@ -1097,7 +1097,7 @@ fn signature_set_of(
         context,
     }) {
         QueryResult::Value(output) => match output.value {
-            SemanticQueryValue::SignatureSet(value) => value.set,
+            SemanticQueryValue::SignatureSet(value) => value.set(),
             other => panic!("expected a signature set, got {other:?}"),
         },
         other => panic!("expected a value, got {other:?}"),
@@ -1568,15 +1568,15 @@ fn each_read_reports_the_authored_node_its_own_subject_carries() {
     let from_first = read(first);
     let from_second = read(second);
     assert_eq!(
-        candidates(from_first.set, store)[0].signature,
-        candidates(from_second.set, store)[0].signature,
+        candidates(from_first.set(), store)[0].signature,
+        candidates(from_second.set(), store)[0].signature,
         "premise: both subjects publish the one content-interned descriptor"
     );
     let authored = |value: &verter_type_engine::signature_kernel::SignatureSetValue| {
         value
-            .nodes
+            .candidate_nodes()
             .iter()
-            .map(|nodes| nodes.authored)
+            .map(|nodes| nodes.authored())
             .collect::<Vec<_>>()
     };
     assert_eq!(authored(&from_first), [Some(first)]);
@@ -1594,7 +1594,7 @@ fn each_read_reports_the_authored_node_its_own_subject_carries() {
     let union = d.intern_normalized_union_or_intersection(&[first, other], true);
     let composite = read(union);
     assert!(matches!(
-        recipe_of(store, candidates(composite.set, store)[0]),
+        recipe_of(store, candidates(composite.set(), store)[0]),
         SignatureResultRecipe::UnionCommon { .. }
     ));
     assert_eq!(authored(&composite), [None]);
@@ -1607,7 +1607,7 @@ fn each_read_reports_the_authored_node_its_own_subject_carries() {
         "premise: the union keeps both authored arms, got {arms:?}"
     );
     assert_eq!(
-        &*composite.nodes[0].constituents,
+        &*composite.candidate_nodes()[0].constituents(),
         arms.as_slice(),
         "a composite names the authored node of every constituent, in arm order"
     );

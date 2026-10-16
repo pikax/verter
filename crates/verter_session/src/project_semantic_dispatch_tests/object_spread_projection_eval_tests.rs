@@ -797,8 +797,10 @@ fn keyof_and_substitution_consume_the_canonical_program() {
         ],
     );
     let substituted = dispatch.substitute_semantic_type_param(substitution_subject, binder, string);
-    let Some(SemanticNodeData::ObjectSpreadProgram(substituted)) =
-        graph.node_data(substituted).as_deref().cloned()
+    let Some(SemanticNodeData::ObjectSpreadProgram(substituted)) = graph
+        .node_data(substituted)
+        .as_deref()
+        .map(verter_type_engine::semantic_query::SemanticNodeData::copy_for_tests)
     else {
         panic!("substitution must preserve the canonical program carrier");
     };
@@ -1799,7 +1801,7 @@ fn identical_unresolved_program_relation_is_unknown_and_never_published() {
     assert!(
         graph
             .get_relation_payload(&host, &key)
-            .map(|served| served.value)
+            .map(|served| served.value().clone())
             .is_none(),
         "an unresolved Unknown must never publish to the relation memo"
     );
@@ -2552,7 +2554,7 @@ fn carrier_wrapped_identical_open_program_stays_unpublished_unknown() {
     assert!(
         graph
             .get_relation_payload(&host, &key)
-            .map(|served| served.value)
+            .map(|served| served.value().clone())
             .is_none(),
         "the unresolved Unknown never publishes: {step:?}"
     );
@@ -2948,7 +2950,7 @@ fn empty_path_shallow_surface(
     };
     let data = graph.node_data(value).expect("surface node has data");
     match &*data {
-        SemanticNodeData::Object(view) => view.clone(),
+        SemanticNodeData::Object(view) => view.copy_for_tests(),
         other => {
             panic!("empty-path Shallow terminal must publish an Object surface, got {other:?}")
         }
@@ -3030,8 +3032,8 @@ fn empty_path_shallow_over_open_program_root_returns_open_typed_evidence() {
         ),
         context: ProjectionReductionContext::published(ProjectionMode::Shallow),
     });
-    let QueryResult::Value(node) = read.value else {
-        panic!("expected a terminal value, got {:?}", read.value)
+    let QueryResult::Value(node) = read.value().clone() else {
+        panic!("expected a terminal value, got {:?}", read.value().clone())
     };
     assert!(
         matches!(
@@ -3046,11 +3048,11 @@ fn empty_path_shallow_over_open_program_root_returns_open_typed_evidence() {
         "the open-root read is genuinely partial"
     );
     assert!(
-        read.cache_suppress,
+        read.cache_suppress(),
         "the open-root read must never be cached as a finished surface"
     );
     assert!(
-        read.walker_diagnostics.iter().any(|diag| matches!(
+        read.walker_diagnostics().iter().any(|diag| matches!(
             diag,
             verter_type_engine::project_semantic_dispatch::walk::ShallowDiagnostic::OpenSpreadProgram { .. }
         )),
@@ -3094,8 +3096,8 @@ fn empty_path_shallow_over_correlated_program_merges_closed_alternatives() {
         ),
         context: ProjectionReductionContext::published(ProjectionMode::Shallow),
     });
-    let QueryResult::Value(node) = read.value else {
-        panic!("expected a terminal value, got {:?}", read.value)
+    let QueryResult::Value(node) = read.value().clone() else {
+        panic!("expected a terminal value, got {:?}", read.value().clone())
     };
     let node_data = graph.node_data(node);
     let Some(SemanticNodeData::Object(view)) = node_data.as_deref() else {
@@ -3111,7 +3113,7 @@ fn empty_path_shallow_over_correlated_program_merges_closed_alternatives() {
         .collect();
     assert_eq!(names, vec!["c"], "the common member of both alternatives");
     assert!(
-        !read.result_is_partial() && !read.cache_suppress,
+        !read.result_is_partial() && !read.cache_suppress(),
         "every alternative closed: the merged surface is complete and cacheable"
     );
 }
@@ -3187,8 +3189,8 @@ fn empty_path_shallow_over_union_with_program_arm_projects_the_arm() {
         ),
         context: ProjectionReductionContext::published(ProjectionMode::Shallow),
     });
-    let QueryResult::Value(terminal) = read.value else {
-        panic!("expected a terminal value, got {:?}", read.value)
+    let QueryResult::Value(terminal) = read.value().clone() else {
+        panic!("expected a terminal value, got {:?}", read.value().clone())
     };
     assert_eq!(
         terminal,
@@ -3198,7 +3200,7 @@ fn empty_path_shallow_over_union_with_program_arm_projects_the_arm() {
         graph.node_data(terminal)
     );
     assert!(
-        read.result_is_partial() && read.cache_suppress,
+        read.result_is_partial() && read.cache_suppress(),
         "a union with an open program arm must flag the read partial + uncacheable"
     );
 }
@@ -3246,8 +3248,8 @@ fn empty_path_shallow_over_intersection_with_open_program_arm_keeps_the_carrier(
         ),
         context: ProjectionReductionContext::published(ProjectionMode::Shallow),
     });
-    let QueryResult::Value(terminal) = read.value else {
-        panic!("expected a terminal value, got {:?}", read.value)
+    let QueryResult::Value(terminal) = read.value().clone() else {
+        panic!("expected a terminal value, got {:?}", read.value().clone())
     };
     assert_eq!(
         terminal,
@@ -3256,7 +3258,7 @@ fn empty_path_shallow_over_intersection_with_open_program_arm_keeps_the_carrier(
          observed {:?}",
         graph.node_data(terminal)
     );
-    assert!(read.result_is_partial() && read.cache_suppress);
+    assert!(read.result_is_partial() && read.cache_suppress());
 }
 
 /// The shared typeinfo surface reader never hands out a
@@ -3294,12 +3296,13 @@ fn typeinfo_surface_view_refuses_partial_terminal_reads() {
             xa, open_arm,
         ])),
     ));
-    assert_eq!(
-        dispatch.resolve_typeinfo_surface_view(
-            open_union_root,
-            ProjectionReductionContext::published(ProjectionMode::Shallow),
-        ),
-        None,
+    assert!(
+        dispatch
+            .resolve_typeinfo_surface(
+                open_union_root,
+                ProjectionReductionContext::published(ProjectionMode::Shallow),
+            )
+            .is_none(),
         "a partial (open-spread) terminal read yields no completeness-claiming view"
     );
     // A closed union still hands out its view.
@@ -3317,7 +3320,7 @@ fn typeinfo_surface_view_refuses_partial_terminal_reads() {
     ));
     assert!(
         dispatch
-            .resolve_typeinfo_surface_view(
+            .resolve_typeinfo_surface(
                 closed_union_root,
                 ProjectionReductionContext::published(ProjectionMode::Shallow),
             )
@@ -3355,8 +3358,8 @@ fn empty_path_shallow_over_program_root_failure_is_typed_partial() {
         ),
         context: ProjectionReductionContext::published(ProjectionMode::Shallow),
     });
-    let QueryResult::Value(terminal) = read.value else {
-        panic!("expected a terminal value, got {:?}", read.value)
+    let QueryResult::Value(terminal) = read.value().clone() else {
+        panic!("expected a terminal value, got {:?}", read.value().clone())
     };
     assert!(
         !matches!(
@@ -3366,7 +3369,7 @@ fn empty_path_shallow_over_program_root_failure_is_typed_partial() {
         "a failed program-root projection must not publish any closed Object"
     );
     assert!(
-        read.result_is_partial() && read.cache_suppress,
+        read.result_is_partial() && read.cache_suppress(),
         "the failure path is typed partial + uncacheable"
     );
 }
@@ -3856,8 +3859,8 @@ fn macro_member_reader_recurses_union_carriers_for_positive_members() {
         ),
         context: ProjectionReductionContext::published(ProjectionMode::Shallow),
     });
-    let QueryResult::Value(terminal) = read.value else {
-        panic!("expected a terminal value, got {:?}", read.value)
+    let QueryResult::Value(terminal) = read.value().clone() else {
+        panic!("expected a terminal value, got {:?}", read.value().clone())
     };
     let members =
         verter_type_engine::project_semantic_dispatch::one_level_surface::read_positive_surface_members(
@@ -4346,8 +4349,8 @@ fn keyof_over_program_base_enumerates_closed_and_defers_open() {
         ],
     );
     let read = keyof(closed_program);
-    let QueryResult::Value(node) = read.value else {
-        panic!("expected a keyspace value, got {:?}", read.value)
+    let QueryResult::Value(node) = read.value().clone() else {
+        panic!("expected a keyspace value, got {:?}", read.value().clone())
     };
     let data = graph.node_data(node).expect("keyof node interned");
     let SemanticNodeData::Union(arms) = &*data else {
@@ -4368,7 +4371,7 @@ fn keyof_over_program_base_enumerates_closed_and_defers_open() {
     names.sort();
     assert_eq!(names, vec!["a".to_string(), "b".to_string()]);
     assert!(
-        !read.result_is_partial() && !read.cache_suppress,
+        !read.result_is_partial() && !read.cache_suppress(),
         "the exact closed keyspace is a complete, admissible value"
     );
 
@@ -4390,8 +4393,8 @@ fn keyof_over_program_base_enumerates_closed_and_defers_open() {
         ],
     );
     let read = keyof(open_program);
-    let QueryResult::Value(node) = read.value else {
-        panic!("expected a keyof carrier, got {:?}", read.value)
+    let QueryResult::Value(node) = read.value().clone() else {
+        panic!("expected a keyof carrier, got {:?}", read.value().clone())
     };
     let data = graph.node_data(node).expect("keyof node interned");
     assert!(

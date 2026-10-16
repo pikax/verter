@@ -105,9 +105,7 @@ fn raise_node_to_sealed_carrier(
     let sealed = match cap.materialize_output_type_expr(node) {
         Some(sealed) => sealed,
         None => {
-            if verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), node)
-                .is_none()
-            {
+            if dispatch.graph().read_in_scope(node).is_none() {
                 // GENUINE absence (no typed payload minted for this id): the
                 // exact `missing_output` — NON-partial.
                 wrap_output_type_expr(
@@ -154,8 +152,7 @@ fn authored_package_alias_for_carrier(
     owner_canonical: &str,
     node: SemanticNodeId,
 ) -> Option<String> {
-    let data =
-        verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), node)?;
+    let data = dispatch.graph().read_in_scope(node)?;
     let verter_type_engine::semantic_query::SemanticNodeData::DeclRef { identity } = data.as_ref()
     else {
         return None;
@@ -973,34 +970,28 @@ fn resolve_member_value_for_classification(
     // and classifies `ExactConcrete` — the same hop the path-walker / query
     // entry run. Done in `Navigate` (carrier-preserving for deeper structure);
     // the alias unwrap below then proceeds on the resolved `DeclRef`.
-    let value =
-        match verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), value)
-            .as_deref()
-        {
-            Some(data) if data.bare_ref_head().is_some() || data.import_type_head().is_some() => {
-                dispatch.resolve_carrier_subject_node(
-                    value,
-                    verter_type_engine::semantic_query::ProjectionReductionContext::published(
-                        ProjectionMode::Navigate,
-                    ),
-                )
-            }
-            _ => value,
-        };
-    let should_expand =
-        match verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), value)
-            .as_deref()
-        {
-            Some(SemanticNodeData::DeclRef { .. }) => true,
-            // Carrier-mode: do NOT expand a generic instantiation to
-            // its shallow object surface — that would breadth-
-            // enumerate the instantiated type's members (a Rule-5
-            // shallow-by-default violation). The un-expanded node
-            // classifies as `ExactSymbolic`, the correct exactness
-            // for a carrier.
-            Some(SemanticNodeData::InstantiationRef { .. }) => !carrier_mode,
-            _ => false,
-        };
+    let value = match dispatch.graph().read_in_scope(value).as_deref() {
+        Some(data) if data.bare_ref_head().is_some() || data.import_type_head().is_some() => {
+            dispatch.resolve_carrier_subject_node(
+                value,
+                verter_type_engine::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Navigate,
+                ),
+            )
+        }
+        _ => value,
+    };
+    let should_expand = match dispatch.graph().read_in_scope(value).as_deref() {
+        Some(SemanticNodeData::DeclRef { .. }) => true,
+        // Carrier-mode: do NOT expand a generic instantiation to
+        // its shallow object surface — that would breadth-
+        // enumerate the instantiated type's members (a Rule-5
+        // shallow-by-default violation). The un-expanded node
+        // classifies as `ExactSymbolic`, the correct exactness
+        // for a carrier.
+        Some(SemanticNodeData::InstantiationRef { .. }) => !carrier_mode,
+        _ => false,
+    };
     if !should_expand {
         return value;
     }
@@ -1012,8 +1003,8 @@ fn resolve_member_value_for_classification(
         ),
     });
     verter_type_engine::request_context::observe_component_meta_read_suppress(&read);
-    emit_dispatch_dep_signature_facts(dispatch, &read.dep_signature);
-    match read.value {
+    emit_dispatch_dep_signature_facts(dispatch, &read.dep_signature());
+    match *read.value() {
         QueryResult::Value(id) => id,
         _ => value,
     }
@@ -1098,10 +1089,7 @@ pub(crate) fn project_model(
         // branches on that typed state, never on a fabricated sentinel
         // string. No `TypeExpr` is materialised for the decision.
         let presence_outcome: SemanticOutcome<()> =
-            match verter_type_engine::project_semantic_dispatch::node_data_for(
-                dispatch.graph(),
-                payload_node,
-            ) {
+            match dispatch.graph().read_in_scope(payload_node) {
                 Some(_) => SemanticOutcome::Value(()),
                 None => SemanticOutcome::Degraded(QueryError::RaiseMiss),
             };

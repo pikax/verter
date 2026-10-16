@@ -131,7 +131,7 @@ fn only_call_signature(
     node: SemanticNodeId,
 ) -> SemanticNodeId {
     match dispatch.graph().node_data(node).as_deref() {
-        Some(SemanticNodeData::Object(surface)) => match surface.call_signatures.as_ref() {
+        Some(SemanticNodeData::Object(surface)) => match surface.call_signatures().as_ref() {
             [signature] => *signature,
             other => panic!("expected one call signature, got {other:?}"),
         },
@@ -906,7 +906,9 @@ export function multi(x: unknown) { if (x) return typeof x === \"string\"; retur
                     effect
                         .ty
                         .and_then(|token| store.type_token_node(token).ok())
-                        .and_then(|target| dispatch.graph().node_data(target).as_deref().cloned()),
+                        .and_then(|target| dispatch.graph().node_data(target).as_deref().map(
+                            verter_type_engine::semantic_query::SemanticNodeData::copy_for_tests
+                        )),
                     Some(SemanticNodeData::Primitive(PrimitiveKind::String))
                 );
             } else {

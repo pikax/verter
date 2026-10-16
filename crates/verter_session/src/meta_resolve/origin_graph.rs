@@ -110,7 +110,7 @@ pub(crate) fn build_origin_graph(
             }
             let idx = nodes.len() as u32;
             let (kind, label) = graph
-                .node_data(id)
+                .read_in_scope(id)
                 .map(|d| {
                     use verter_type_engine::semantic_query::SemanticNodeData;
                     let k = format!("{:?}", *d).split_once('{').map_or_else(

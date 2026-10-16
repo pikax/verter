@@ -935,11 +935,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         });
         match published {
             Ok((set, nodes_of, version)) => QueryOutcome::Ready(Ready {
-                value: crate::signature_kernel::SignatureSetValue {
-                    version,
-                    set,
-                    nodes: Arc::from(nodes_of.into_boxed_slice()),
-                },
+                value: crate::signature_kernel::SignatureSetValue::new(version, set, nodes_of),
                 evidence: CONTEXT_FREE_EVIDENCE,
             }),
             Err(error) => QueryOutcome::Incomplete(error.incomplete_reason()),

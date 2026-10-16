@@ -280,11 +280,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             match graph.node_data(key.source).as_deref() {
                 Some(SemanticNodeData::Object(view)) => {
                     let source_closed = view.closed();
-                    let source_members = source_closed.complete_members().to_vec();
+                    let source_members = source_closed
+                        .complete_members()
+                        .iter()
+                        .map(crate::semantic_query::SurfaceMember::clone)
+                        .collect::<Vec<_>>();
                     let candidates = source_members
                         .iter()
                         .filter(|member| member.excess_origin == ExcessPropertyOrigin::FreshOwn)
-                        .cloned()
+                        .map(crate::semantic_query::SurfaceMember::clone)
                         .collect();
                     (source_members, candidates)
                 }

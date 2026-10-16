@@ -62,8 +62,11 @@ fn a_computed_key_read_off_a_literal_local_names_its_property() {
 #[track_caller]
 fn assert_late_bound(probe: &str, members: &[&str], index: &[(&str, &str)]) {
     with_probe(FIXTURE, probe, |dispatch, node| {
-        let Some(SemanticNodeData::Object(view)) =
-            dispatch.graph().node_data(node).as_deref().cloned()
+        let Some(SemanticNodeData::Object(view)) = dispatch
+            .graph()
+            .node_data(node)
+            .as_deref()
+            .map(verter_type_engine::semantic_query::SemanticNodeData::copy_for_tests)
         else {
             panic!(
                 "{probe}: expected an object, measured `{}`",
@@ -83,11 +86,11 @@ fn assert_late_bound(probe: &str, members: &[&str], index: &[(&str, &str)]) {
         named.sort();
         assert_eq!(named, members, "{probe}: named members");
         assert_eq!(
-            view.index_signatures.len(),
+            view.index_signatures().len(),
             index.len(),
             "{probe}: index signatures"
         );
-        for (signature, (key, value)) in view.index_signatures.iter().zip(index) {
+        for (signature, (key, value)) in view.index_signatures().iter().zip(index) {
             for (node, print) in [(signature.key_type, key), (signature.value_type, value)] {
                 let parsed = checker_syntax::parse(print).expect("checker print parses");
                 assert!(

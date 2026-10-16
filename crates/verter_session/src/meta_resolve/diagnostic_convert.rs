@@ -251,9 +251,11 @@ mod tests {
     fn shallow_to_expansion_maps_instantiation_error_to_dedicated_variant() {
         let diag = ShallowDiagnostic::InstantiationError {
             decl: dummy_decl(),
-            error: verter_type_engine::semantic_query::QueryError::Other(std::sync::Arc::from(
-                "synthetic",
-            )),
+            error: verter_type_engine::project_semantic_dispatch::walk::DiagnosticError::for_tests(
+                verter_type_engine::semantic_query::QueryError::Other(std::sync::Arc::from(
+                    "synthetic",
+                )),
+            ),
         };
         let proj = shallow_to_expansion(&diag);
         assert_eq!(proj.reason, ExpansionStopReason::InstantiationError);

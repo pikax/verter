@@ -5659,7 +5659,7 @@ fn method_overload_group_carrier_hides_the_implementation_signature() {
                 let projected = project_member_path(dispatch, base, "m");
                 match dispatch.graph().node_data(projected).as_deref() {
                     Some(SemanticNodeData::Object(view)) => view
-                        .call_signatures
+                        .call_signatures()
                         .iter()
                         .map(|sig| {
                             let parts = signature_parts(dispatch, *sig);

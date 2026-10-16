@@ -30,7 +30,7 @@ use crate::typeinfo::framework_surface::results::{
 };
 use crate::typeinfo::surface::{TypeInfoSurfaceEntry, TypeInfoSurfaceMember};
 use verter_type_engine::project_semantic_dispatch::callable_view::CallableNodeView;
-use verter_type_engine::project_semantic_dispatch::{node_data_for, ProjectSemanticDispatch};
+use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
 use verter_type_engine::semantic_query::{
     FunctionParam, ProjectionMode, ProjectionReductionContext, SemanticNodeData, SemanticNodeId,
 };
@@ -161,7 +161,7 @@ pub(crate) fn props_from_typeinfo_surface<C: crate::session_attachment::SessionC
             // its Navigate-raised authored form, so an unconditional proof
             // would false-negative the single-contributor classes).
             let member_value_is_merge_capable = matches!(
-                node_data_for(dispatch.graph(), member.value).as_deref(),
+                dispatch.graph().read_in_scope(member.value).as_deref(),
                 Some(
                     SemanticNodeData::Intersection(_)
                         | SemanticNodeData::Union(_)
@@ -613,7 +613,7 @@ fn closed_tuple_fact<C: verter_type_engine::resolver_core::ResolverCapabilities>
     node: SemanticNodeId,
 ) -> Option<verter_type_expr::facts::TuplePayloadFact> {
     use verter_type_expr::facts::{TupleElementFact, TuplePayloadFact};
-    let data = node_data_for(dispatch.graph(), node)?;
+    let data = dispatch.graph().read_in_scope(node)?;
     let SemanticNodeData::Tuple { elements, readonly } = data.as_ref() else {
         return None;
     };
@@ -1305,7 +1305,7 @@ fn authored_candidate_matches_call_signature_payload<
     else {
         return false;
     };
-    let Some(data) = node_data_for(dispatch.graph(), raised.node()) else {
+    let Some(data) = dispatch.graph().read_in_scope(raised.node()) else {
         return false;
     };
     let SemanticNodeData::Tuple { elements, readonly } = data.as_ref() else {
@@ -1377,7 +1377,7 @@ fn authored_candidate_matches_member_value<
     // (an agree-duplicate merge). A single non-matching arm — a different
     // shape or a stable unresolved carrier — fails the proof and therefore
     // selects the graph-native merged replay source.
-    match node_data_for(dispatch.graph(), member_value).as_deref() {
+    match dispatch.graph().read_in_scope(member_value).as_deref() {
         Some(composite @ (SemanticNodeData::Intersection(_) | SemanticNodeData::Union(_))) => {
             let arms = composite.composite_members().expect("composite arm");
             !arms.is_empty()
