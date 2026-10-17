@@ -2500,67 +2500,72 @@ fn a_33_by_33_spread_publishes_every_correlated_constituent_and_infers_from_each
     );
 }
 
-/// The stress sizes — 369 × 271 and 50 × 50 × 39 — also read through an
-/// inference. `Values<typeof s>` unions the values of every constituent,
-/// and a later direct write over one arm's key replaces that arm's value
-/// in every constituent: the inferred set is exactly the surviving arm
-/// values plus the write's literal, so a lost constituent, a missed write
-/// or a write that appended instead of replacing all show up here.
-#[test]
-fn stress_size_spreads_infer_every_constituent_and_the_later_write() {
-    let inferred_values = |widths: &[usize]| {
-        let declarations = widths
-            .iter()
-            .zip(["A", "B", "C"].iter().zip(["a", "b", "c"]))
-            .map(|(width, (type_name, name))| {
-                let union = (0..*width)
-                    .map(|i| format!("{{ {name}{i}: {i} }}"))
-                    .collect::<Vec<_>>()
-                    .join(" | ");
-                format!("type {type_name} = {union};\ndeclare const {name}: {type_name};\n")
-            })
-            .collect::<String>();
-        let spreads = ["a", "b", "c"]
-            .iter()
-            .take(widths.len())
-            .map(|name| format!("...{name}"))
-            .chain([format!("a{}: 4242 as const", widths[0] - 1)])
-            .collect::<Vec<_>>()
-            .join(", ");
-        let host = bench_host(
-            0,
-            &format!(
-                "{declarations}const s = {{ {spreads} }};\n\
-                 type Values<T> = [T] extends [{{ [key: string]: infer V }}] ? V : never;\n\
-                 type __Probe = Values<typeof s>;\nexport {{}};\n"
-            ),
-        );
-        let bytes = probe_answer(&host).expect("the stress probe answers");
-        let expr: verter_type_expr::TypeExpr =
-            serde_json::from_slice(&bytes).expect("the answer decodes");
-        verter_type_expr::render_type_expr_display(&expr)
-            .expect("the answer renders")
-            .text
-    };
+/// A stress-size spread also reads through an inference (one test per
+/// size, so each stays inside the 20-second speed gate). `Values<typeof
+/// s>` unions the values of every constituent, and a later direct write
+/// over one arm's key replaces that arm's value in every constituent:
+/// the inferred set is exactly the surviving arm values plus the write's
+/// literal, so a lost constituent, a missed write or a write that
+/// appended instead of replacing all show up here.
+fn assert_stress_size_spread_infers_every_constituent_and_the_later_write(widths: &[usize]) {
+    let declarations = widths
+        .iter()
+        .zip(["A", "B", "C"].iter().zip(["a", "b", "c"]))
+        .map(|(width, (type_name, name))| {
+            let union = (0..*width)
+                .map(|i| format!("{{ {name}{i}: {i} }}"))
+                .collect::<Vec<_>>()
+                .join(" | ");
+            format!("type {type_name} = {union};\ndeclare const {name}: {type_name};\n")
+        })
+        .collect::<String>();
+    let spreads = ["a", "b", "c"]
+        .iter()
+        .take(widths.len())
+        .map(|name| format!("...{name}"))
+        .chain([format!("a{}: 4242 as const", widths[0] - 1)])
+        .collect::<Vec<_>>()
+        .join(", ");
+    let host = bench_host(
+        0,
+        &format!(
+            "{declarations}const s = {{ {spreads} }};\n\
+             type Values<T> = [T] extends [{{ [key: string]: infer V }}] ? V : never;\n\
+             type __Probe = Values<typeof s>;\nexport {{}};\n"
+        ),
+    );
+    let bytes = probe_answer(&host).expect("the stress probe answers");
+    let expr: verter_type_expr::TypeExpr =
+        serde_json::from_slice(&bytes).expect("the answer decodes");
+    let inferred = verter_type_expr::render_type_expr_display(&expr)
+        .expect("the answer renders")
+        .text;
 
-    for widths in [vec![369usize, 271], vec![50, 50, 39]] {
-        let inferred = inferred_values(&widths);
-        let values: std::collections::BTreeSet<String> =
-            inferred.split(" | ").map(str::to_owned).collect();
-        let overwritten = widths[0] - 1;
-        let mut expected: std::collections::BTreeSet<String> = widths
-            .iter()
-            .flat_map(|width| (0..*width).map(|i| i.to_string()).collect::<Vec<_>>())
-            .collect();
-        // The write replaces the arm's own value everywhere; it leaves the
-        // inferred set only when no other union writes the same value.
-        if !widths[1..].iter().any(|width| overwritten < *width) {
-            expected.remove(&overwritten.to_string());
-        }
-        expected.insert("4242".to_owned());
-        assert_eq!(
-            values, expected,
-            "{widths:?}: inference reads every surviving value and the later write: {inferred}"
-        );
+    let values: std::collections::BTreeSet<String> =
+        inferred.split(" | ").map(str::to_owned).collect();
+    let overwritten = widths[0] - 1;
+    let mut expected: std::collections::BTreeSet<String> = widths
+        .iter()
+        .flat_map(|width| (0..*width).map(|i| i.to_string()).collect::<Vec<_>>())
+        .collect();
+    // The write replaces the arm's own value everywhere; it leaves the
+    // inferred set only when no other union writes the same value.
+    if !widths[1..].iter().any(|width| overwritten < *width) {
+        expected.remove(&overwritten.to_string());
     }
+    expected.insert("4242".to_owned());
+    assert_eq!(
+        values, expected,
+        "{widths:?}: inference reads every surviving value and the later write: {inferred}"
+    );
+}
+
+#[test]
+fn a_369_by_271_spread_infers_every_constituent_and_the_later_write() {
+    assert_stress_size_spread_infers_every_constituent_and_the_later_write(&[369, 271]);
+}
+
+#[test]
+fn a_50_by_50_by_39_spread_infers_every_constituent_and_the_later_write() {
+    assert_stress_size_spread_infers_every_constituent_and_the_later_write(&[50, 50, 39]);
 }
