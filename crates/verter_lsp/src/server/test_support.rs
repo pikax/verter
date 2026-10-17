@@ -168,7 +168,7 @@ impl VerterLanguageServer {
             },
         );
         let outcome = self.carrier_transaction_coordinator.admit_owned(
-            &host,
+            host,
             &self.provider_sync_states,
             &canonical,
             committed,
@@ -246,7 +246,7 @@ impl VerterLanguageServer {
         for source in sources {
             crate::workspace_scanner::sync_file_to_provider(
                 &source,
-                &self.documents.host(),
+                self.documents.host(),
                 Some(&self.documents),
                 &profile,
                 self.project_sync.as_ref(),

@@ -508,7 +508,7 @@ async fn svelte_dotted_component_completion_is_sanitized_but_edit_placement_defe
 
     // (1) SHARED completion path: the dotted Svelte carrier sanitizes to a valid
     //     identifier with the real `.svelte` path preserved.
-    let ws_components = build_workspace_components(&server.documents.host(), &app_canonical);
+    let ws_components = build_workspace_components(server.documents.host(), &app_canonical);
     let svelte = ws_components
         .iter()
         .find(|c| c.import_path.ends_with("Dotted.Svelte.Name.svelte"))

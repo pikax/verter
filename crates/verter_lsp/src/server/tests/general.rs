@@ -480,7 +480,7 @@ async fn dotted_component_auto_import_edit_is_valid_end_to_end() {
     let server = service.inner();
 
     // 1. The REAL enumeration: derive the binding name + import path from disk.
-    let ws_components = build_workspace_components(&server.documents.host(), &app_canonical);
+    let ws_components = build_workspace_components(server.documents.host(), &app_canonical);
     let model = ws_components
         .iter()
         .find(|c| c.import_path.ends_with("Model.Named.vue"))
@@ -558,7 +558,7 @@ async fn nested_dir_dotted_component_keeps_real_path_and_sanitized_binding() {
     let app_canonical = format!("{workspace_id}/src/App.vue");
     let server = service.inner();
 
-    let ws_components = build_workspace_components(&server.documents.host(), &app_canonical);
+    let ws_components = build_workspace_components(server.documents.host(), &app_canonical);
     let nested = ws_components
         .iter()
         .find(|c| c.name == "DottedName")

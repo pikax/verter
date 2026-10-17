@@ -534,7 +534,7 @@ async fn scanner_loop(
         {
             sync_file_to_provider(
                 path,
-                &config.host.as_ref(),
+                config.host.as_ref(),
                 Some(&config.documents),
                 &config.tsx_profile,
                 config.project_sync.as_ref(),
@@ -806,7 +806,7 @@ async fn sync_non_carrier_file_to_provider(
 
     // Framework carriers never sync to the provider as raw scripts.
     let Some(file_language) =
-        crate::provider_sync::provider_script_language(&host.as_ref(), canonical_id)
+        crate::provider_sync::provider_script_language(host.as_ref(), canonical_id)
     else {
         return Vec::new();
     };

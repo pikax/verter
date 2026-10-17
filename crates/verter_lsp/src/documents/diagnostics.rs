@@ -58,7 +58,7 @@ impl ReadinessBasis {
 
     fn environment_is_current(&self, documents: &DocumentRegistry, uri: &Uri) -> bool {
         self.environment
-            .matches(&documents.host(), &uri_to_canonical_id(uri))
+            .matches(documents.host(), &uri_to_canonical_id(uri))
     }
 
     fn is_current(&self, documents: &DocumentRegistry, uri: &Uri) -> bool {
@@ -441,7 +441,7 @@ impl DocumentRegistry {
             let environment = publication.basis.environment.clone();
             move || {
                 state.lock().epochs.get(&uri) == Some(&epoch)
-                    && environment.matches(&host.as_ref(), &canonical_id)
+                    && environment.matches(host.as_ref(), &canonical_id)
             }
         };
         let sent = tokio::select! {

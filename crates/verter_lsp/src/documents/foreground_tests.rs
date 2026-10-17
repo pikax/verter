@@ -290,13 +290,13 @@ fn a_created_path_is_delivered_only_while_it_stays_absent() {
         "an absent create still settles while the path is absent"
     );
     assert!(
-        settlement.authority.is_current(&documents.host()),
+        settlement.authority.is_current(documents.host()),
         "precondition: authority is unchanged before the path appears"
     );
 
     documents.appear_open_for_test(&absent, "<template><div/></template>\n");
     assert!(
-        settlement.authority.is_current(&documents.host()),
+        settlement.authority.is_current(documents.host()),
         "the appearance must not replace project authority"
     );
     assert!(
@@ -346,7 +346,7 @@ fn a_created_path_that_appears_on_disk_settles_content_modified() {
         "the create settles while the path is absent"
     );
     assert!(
-        settlement.authority.is_current(&documents.host()),
+        settlement.authority.is_current(documents.host()),
         "precondition: authority is unchanged before the path appears"
     );
 
@@ -369,7 +369,7 @@ fn a_created_path_that_appears_on_disk_settles_content_modified() {
         "the workspace read sees the bytes written on disk"
     );
     assert!(
-        settlement.authority.is_current(&documents.host()),
+        settlement.authority.is_current(documents.host()),
         "a disk appearance must not replace project authority"
     );
     assert!(
@@ -457,7 +457,7 @@ async fn a_host_committed_alias_settles_without_a_workspace_file() {
         })
         .expect("commit other bytes");
     assert!(
-        request.authority.is_current(&documents.host()),
+        request.authority.is_current(documents.host()),
         "a content commit must not replace project authority"
     );
     assert!(

@@ -1807,7 +1807,7 @@ fn compute_verter_diagnostics_for_with_views(
                     &analysis,
                     &doc.line_index,
                     &|import_source| {
-                        resolve_child_component_for(&host, &canonical_id, import_source)
+                        resolve_child_component_for(host, &canonical_id, import_source)
                     },
                 ),
             );
@@ -1947,7 +1947,7 @@ pub(crate) fn verter_owned_diagnostics(
     // `NotReady` stay silent — the shared owner authority decides, never a
     // path-shape heuristic.
     diags.extend(crate::external_ts::project_ownership_diagnostics_for(
-        &documents.host(),
+        documents.host(),
         canonical_id,
     ));
 

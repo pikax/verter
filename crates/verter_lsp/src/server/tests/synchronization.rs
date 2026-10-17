@@ -13254,7 +13254,7 @@ async fn a_scanner_started_closed_yields_when_the_document_opens_after_compile()
     let (_, before) = tokio::join!(
         crate::workspace_scanner::sync_file_to_provider(
             id,
-            &host,
+            host,
             Some(&server.documents),
             &profile,
             server.project_sync.as_ref(),
@@ -13323,7 +13323,7 @@ async fn a_scanner_started_closed_is_refused_when_the_document_opens_after_its_l
     let (_, before) = tokio::join!(
         crate::workspace_scanner::sync_file_to_provider(
             id,
-            &host,
+            host,
             Some(&server.documents),
             &profile,
             server.project_sync.as_ref(),

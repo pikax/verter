@@ -533,7 +533,7 @@ pub(super) async fn resync_aliased_imports_for_open_files(
             documents.language_classifier(),
             &analysis.imports,
             Some(&canonical_id),
-            |parent, specifier| resolve_import_specifier_standalone(&host, parent, specifier),
+            |parent, specifier| resolve_import_specifier_standalone(host, parent, specifier),
         ) {
             Ok(ids) => ids,
             Err(_) => return false,
@@ -710,19 +710,16 @@ pub(super) async fn resync_aliased_imports_for_open_files(
                 let Some(import_source) = component.import_source.as_deref() else {
                     continue;
                 };
-                let resolved = match resolve_import_specifier_standalone(
-                    &host,
-                    &canonical_id,
-                    import_source,
-                ) {
-                    verter_workspace::ResolutionPublication::Admitted(admitted) => {
-                        let Some(resolved) = admitted.into_result() else {
-                            continue;
-                        };
-                        resolved
-                    }
-                    verter_workspace::ResolutionPublication::Refused(_) => return false,
-                };
+                let resolved =
+                    match resolve_import_specifier_standalone(host, &canonical_id, import_source) {
+                        verter_workspace::ResolutionPublication::Admitted(admitted) => {
+                            let Some(resolved) = admitted.into_result() else {
+                                continue;
+                            };
+                            resolved
+                        }
+                        verter_workspace::ResolutionPublication::Refused(_) => return false,
+                    };
                 if verter_session_query::resolution::path_is_carrier(&resolved) {
                     continue; // a directly-resolved carrier is already handled by the carrier pass
                 }
@@ -741,7 +738,7 @@ pub(super) async fn resync_aliased_imports_for_open_files(
                         if let Some(specifier) = &module_ref.literal_specifier {
                             if verter_session_query::resolution::path_is_carrier(specifier) {
                                 let carrier_id = match resolve_import_specifier_standalone(
-                                    &host, &resolved, specifier,
+                                    host, &resolved, specifier,
                                 ) {
                                     verter_workspace::ResolutionPublication::Admitted(admitted) => {
                                         let Some(carrier_id) = admitted.into_result() else {
@@ -1236,7 +1233,7 @@ pub(super) async fn sync_open_unresolved_carrier_provider_file(
                 crate::provider_surface_store::record_carrier_ide_surface_fenced(
                     provider_surfaces,
                     Some(documents),
-                    &documents.host(),
+                    documents.host(),
                     canonical_id,
                     &ide_path,
                     delivered,
@@ -1389,7 +1386,7 @@ async fn apply_owner_resolved_carrier_sync(
             activate_provider_member: documents.canonical_id_to_uri(canonical_id).is_some(),
         });
     match crate::external_ts::reconcile_carrier_source(crate::external_ts::CarrierSyncRequest {
-        host: &documents.host(),
+        host: documents.host(),
         vfs: carrier_publish.map(|publish| publish.vfs.as_ref()),
         ownership_ready: carrier_publish.is_some_and(|publish| publish.ownership_ready),
         resolver: &snapshot.resolver,
@@ -1420,7 +1417,7 @@ async fn apply_owner_resolved_carrier_sync(
                 kinds.push(ProviderPathKind::Ide);
             }
             if carrier_coordinator.admit_owned_fenced(
-                &documents.host(),
+                documents.host(),
                 provider_sync_states,
                 canonical_id,
                 committed_state,
@@ -1507,7 +1504,7 @@ async fn apply_owner_resolved_carrier_sync(
                                 crate::provider_surface_store::record_carrier_ide_surface_fenced(
                                     documents.provider_surfaces(),
                                     Some(documents),
-                                    &documents.host(),
+                                    documents.host(),
                                     canonical_id,
                                     &ide_path,
                                     delivered,
@@ -1539,7 +1536,7 @@ async fn apply_owner_resolved_carrier_sync(
                 // carried forward — not a re-read of the provider path's ledger.
                 let receipt = pending.confirm_opened_with_ide_surface(&synced, ide_delivery);
                 if carrier_coordinator.admit_owned_fenced(
-                    &documents.host(),
+                    documents.host(),
                     provider_sync_states,
                     canonical_id,
                     committed_state,
@@ -1745,7 +1742,7 @@ pub(crate) async fn sync_carrier_api_transaction(
     // the SAME published `vfs` the scanner reads.
     let (transition, pending) =
         match crate::external_ts::reconcile_carrier_source(crate::external_ts::CarrierSyncRequest {
-            host: &host.as_ref(),
+            host: host.as_ref(),
             vfs,
             ownership_ready: snapshot.ownership_ready,
             resolver: &snapshot.resolver,
@@ -1854,7 +1851,7 @@ pub(super) async fn deliver_api_transaction(
             // capture already fails the publication identity above.
             && vfs.is_none_or(|vfs| {
                 matches!(crate::external_ts::resolve_carrier_ownership_over_vfs(
-                    &host, vfs, canonical_id, ownership_ready, Arc::from(binding.ensure_project_request().ts_version())),
+                    host, vfs, canonical_id, ownership_ready, Arc::from(binding.ensure_project_request().ts_version())),
                     verter_session::external_ts::CarrierOwnershipResolution::Bound(current) if current == binding)
             })
     };
@@ -1868,7 +1865,7 @@ pub(super) async fn deliver_api_transaction(
     };
     let code = api.code_for_companion_path(&path);
     let carrier_source =
-        crate::provider_surface_store::resolve_carrier_source(Some(documents), &host, canonical_id);
+        crate::provider_surface_store::resolve_carrier_source(Some(documents), host, canonical_id);
     let previous = states.get(canonical_id).map(|entry| entry.clone());
     if !basis_is_current() {
         queue.insert(canonical_id.to_string());
@@ -1942,7 +1939,7 @@ pub(super) async fn deliver_api_transaction(
     // Record only after admission, under the same document identity pin. The
     // source comes from that pin rather than a second live registry lookup.
     let admit = |source: Arc<str>| {
-        let outcome = coordinator.admit_api_owned(&host, states, canonical_id, state, &receipt);
+        let outcome = coordinator.admit_api_owned(host, states, canonical_id, state, &receipt);
         if outcome == crate::external_ts::AdmitOutcome::Admitted {
             let _ = crate::provider_surface_store::record_carrier_companion_surface_with_source(
                 documents.provider_surfaces(),
@@ -2014,7 +2011,7 @@ pub(super) async fn sync_pending_non_carrier_provider_file(
     documents.host().bump_diagnostics_generation(canonical_id);
     // Framework carriers never sync to the provider as raw scripts.
     let Some(file_language) =
-        crate::provider_sync::provider_script_language(&documents.host(), canonical_id)
+        crate::provider_sync::provider_script_language(documents.host(), canonical_id)
     else {
         return false;
     };

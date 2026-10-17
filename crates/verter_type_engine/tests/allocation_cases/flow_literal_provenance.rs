@@ -55,7 +55,6 @@ impl Fixture {
         let held = graph
             .root_nodes([result])
             .expect("the fixture union is live");
-        drop(algebra);
         drop(scope);
         Self {
             graph,

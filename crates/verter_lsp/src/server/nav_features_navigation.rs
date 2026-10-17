@@ -332,7 +332,7 @@ async fn handle_goto_definition_attempt(
         let host_guard = server.documents.host();
         let resolve_path = {
             let canonical_id = canonical_id.clone();
-            let host: &verter_session::VerterHost = &host_guard;
+            let host: &verter_session::VerterHost = host_guard;
             move |specifier: &str| -> Option<String> {
                 host.resolve_import_transient(&canonical_id, specifier)
             }

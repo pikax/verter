@@ -252,7 +252,7 @@ impl VerterLanguageServer {
         crate::provider_surface_store::record_carrier_ide_surface_fenced(
             store,
             Some(&self.documents),
-            &host,
+            host,
             canonical_id,
             ide_path,
             &delivered,
@@ -303,7 +303,7 @@ impl VerterLanguageServer {
         crate::provider_surface_store::record_carrier_ide_surface_fenced(
             self.documents.provider_surfaces(),
             Some(&self.documents),
-            &host,
+            host,
             canonical_id,
             path,
             prepared,
@@ -798,7 +798,7 @@ impl VerterLanguageServer {
         let snapshot = self.published_resolver()?;
         let canonical_id = source_id_from_provider_carrier_path(
             &snapshot.resolver,
-            &self.documents.host(),
+            self.documents.host(),
             ide_path,
         )?;
         self.documents.canonical_id_to_uri(&canonical_id)
@@ -1052,7 +1052,7 @@ impl VerterLanguageServer {
         let publishes_editor_membership = membership.is_some();
         let decision =
             crate::external_ts::reconcile_carrier_source(crate::external_ts::CarrierSyncRequest {
-                host: &self.documents.host(),
+                host: self.documents.host(),
                 vfs: vfs.as_deref(),
                 ownership_ready: snapshot.ownership_ready,
                 resolver: &snapshot.resolver,
@@ -1128,7 +1128,7 @@ impl VerterLanguageServer {
         open_pin: Option<(&Uri, &crate::documents::DocumentSnapshotIdentity)>,
     ) {
         if self.carrier_transaction_coordinator.admit_owned_fenced(
-            &self.documents.host(),
+            self.documents.host(),
             &self.provider_sync_states,
             canonical_id,
             state,
@@ -1367,7 +1367,7 @@ impl VerterLanguageServer {
         // and closes NOTHING — the computed stale paths may be the newer transaction's LIVE
         // buffers. Only an admitted commit closes them.
         if self.carrier_transaction_coordinator.admit_owned_fenced(
-            &self.documents.host(),
+            self.documents.host(),
             &self.provider_sync_states,
             canonical_id,
             committed_state,

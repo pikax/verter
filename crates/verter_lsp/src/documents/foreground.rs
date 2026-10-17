@@ -674,7 +674,7 @@ impl ForegroundRequest {
         if !revision_is_current {
             return Some(Superseded::Revision);
         }
-        if !self.authority.is_current(&documents.host()) {
+        if !self.authority.is_current(documents.host()) {
             return Some(Superseded::Authority);
         }
         let surfaces = documents.provider_surfaces();
@@ -724,7 +724,7 @@ impl ForegroundRequest {
                 .contract_publications
                 .lock()
                 .iter()
-                .all(|witness| witness.is_current(&host));
+                .all(|witness| witness.is_current(host));
         let dependencies_are_current =
             dependencies_are_current && host.native_facts_are_current(&self.native_facts.lock());
         (!dependencies_are_current).then_some(Superseded::Dependency)
