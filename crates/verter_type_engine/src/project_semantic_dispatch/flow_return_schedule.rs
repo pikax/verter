@@ -592,7 +592,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             hash_key: site.slice_key,
             slice_hash: planned.hash(),
         };
-        let Some(lowered) = self.flow_slice_driver().lookup_lowered(lowered_key) else {
+        let Some(lowered) = self
+            .flow_slice_driver()
+            .lookup_lowered(lowered_key, &planned)
+        else {
             return Vec::new();
         };
         self.callees_of(key, &index, entry, &lowered)

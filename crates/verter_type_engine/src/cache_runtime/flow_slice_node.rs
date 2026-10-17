@@ -128,35 +128,36 @@ pub struct FunctionFlowGraphStore {
 }
 
 /// One retained bundle and the charge for keeping it: its map slot, its key
-/// and the whole bundle — skeleton, binding map and graph — on one refusable
-/// reservation released with the entry.
+/// and the whole bundle — skeleton, binding map and graph — pinned, never
+/// refused (a slice plan and its completeness proof address the memoized
+/// bundle, so it is evaluation storage like the graph arena), released with
+/// the entry.
 struct GraphEntry {
     bundle: Arc<FlowGraphBundle>,
     _retention: verter_session_query::retention::RetentionCharge,
 }
 
 impl GraphEntry {
-    /// Charge an entry for keeping `bundle`; `None` when the account
-    /// refuses it, so the bundle serves its builder uncached.
+    /// Charge an entry for keeping `bundle`.
     fn admit(
         bundle: &Arc<FlowGraphBundle>,
         account: &Arc<verter_session_query::retention::SemanticRetentionAccount>,
-    ) -> Option<Self> {
+    ) -> Self {
         use verter_session_query::retention::allocation::arc_block_bytes;
         let footprint = verter_session_query::retention::heap_size::footprint(&**bundle);
-        let ctx = verter_session_query::retention::owned::ChargeCtx::new(account);
-        let holds = footprint.handles.hold_or_pin(ctx).ok()?;
+        footprint
+            .handles
+            .pin(verter_session_query::retention::owned::ChargeCtx::new(
+                account,
+            ));
         let own = verter_session_query::retention::ENTRY_OVERHEAD_BYTES
             + std::mem::size_of::<(FlowSliceFunctionKey, GraphEntry)>()
             + arc_block_bytes(std::mem::size_of::<FlowGraphBundle>())
             + footprint.bytes;
-        let charge = account
-            .reserve(verter_session_query::retention::ChargeClass::Retained, own)
-            .admitted()?;
-        Some(Self {
+        Self {
             bundle: Arc::clone(bundle),
-            _retention: charge.holding(holds),
-        })
+            _retention: account.pin(own),
+        }
     }
 }
 
@@ -185,11 +186,7 @@ impl GraphPublish<'_> {
         }
         self.builds.fetch_add(1, Ordering::Relaxed);
         let bundle = Arc::new(bundle);
-        // A refused charge leaves the slot vacant: the bundle serves its
-        // builder uncached.
-        if let Some(entry) = GraphEntry::admit(&bundle, self.account) {
-            self.slot.insert(entry);
-        }
+        self.slot.insert(GraphEntry::admit(&bundle, self.account));
         Some(bundle)
     }
 }
@@ -259,9 +256,7 @@ impl FunctionFlowGraphStore {
             dashmap::mapref::entry::Entry::Vacant(vacant) => {
                 let bundle = Arc::new(FlowGraphBundle::build(structure));
                 self.builds.fetch_add(1, Ordering::Relaxed);
-                if let Some(entry) = GraphEntry::admit(&bundle, self.retention.get()) {
-                    vacant.insert(entry);
-                }
+                vacant.insert(GraphEntry::admit(&bundle, self.retention.get()));
                 bundle
             }
         };
@@ -427,7 +422,8 @@ impl FlowSliceHashNode {
     /// when its minted hash still matches `slice_hash`. `None` when the
     /// entry is absent, evicted (`remove_canonical`), or names another
     /// plan — the lowered node fails closed on each, never re-planning.
-    pub(crate) fn retained_plan(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn retained_plan_for_test(
         &self,
         key: &FlowSliceHashKey,
         slice_hash: FlowSliceHash,

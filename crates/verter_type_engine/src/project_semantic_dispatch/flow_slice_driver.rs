@@ -110,12 +110,18 @@ impl<'a> FlowSliceDriver<'a> {
         )
     }
 
+    /// The lowered slice of `planned`, the plan the hash node delivered
+    /// under `key`'s slice hash.
     pub fn lookup_lowered(
         &self,
         key: FlowSliceLoweredKey,
+        planned: &verter_session_query::retention::heap_size::OwnedTree<PlannedFlowSlice>,
     ) -> Option<verter_session_query::retention::heap_size::OwnedTree<FlowSliceIR>> {
         crate::cache_runtime::lookup(
-            &FlowSliceLoweredBodyNodeDemand { driver: self },
+            &FlowSliceLoweredBodyNodeDemand {
+                driver: self,
+                planned,
+            },
             key,
             self.facts,
             self.flags,
@@ -128,6 +134,9 @@ struct FlowSliceHashNodeDemand<'a> {
 }
 struct FlowSliceLoweredBodyNodeDemand<'a> {
     driver: &'a FlowSliceDriver<'a>,
+    /// The plan the hash node delivered for this slice: the one cold
+    /// planning run, shared with the hash node's entry when it retained it.
+    planned: &'a verter_session_query::retention::heap_size::OwnedTree<PlannedFlowSlice>,
 }
 
 impl ArtifactNode for FlowSliceHashNodeDemand<'_> {
@@ -222,21 +231,17 @@ impl ArtifactNode for FlowSliceLoweredBodyNodeDemand<'_> {
                 reason: NonAdmissionReason::ComputeFailed,
             };
         };
-        // Lower EXACTLY the plan the hash node planned and retained on its
-        // published outcome: planning runs once per cold demand, so this
-        // node never re-plans and never computes a slice hash. An absent
-        // or evicted retained plan is a torn view — a typed miss, never a
-        // re-plan under a different demand.
-        let Some(planned) = self
-            .driver
-            .stores
-            .hash_node()
-            .retained_plan(&key.hash_key, key.slice_hash)
-        else {
+        // Lower EXACTLY the plan the hash node delivered: planning runs
+        // once per cold demand, so this node never re-plans and never
+        // computes a slice hash. The plan reaches it whether or not the hash
+        // node could retain it — a plan for another slice is a torn view,
+        // a typed miss, never a re-plan under a different demand.
+        let planned = self.planned;
+        if planned.hash() != key.slice_hash {
             return CacheAdmission::Failed {
                 reason: NonAdmissionReason::ComputeFailed,
             };
-        };
+        }
         CacheAdmission::Cacheable {
             value: verter_session_query::retention::heap_size::owned_tree(lower_slice_plan(
                 planned.selection(),
