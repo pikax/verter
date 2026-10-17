@@ -296,3 +296,221 @@ fn a_pending_semantic_task_dropped_on_another_thread_releases_its_frames() {
     drop(lease);
     drop(other);
 }
+
+/// Another task's producer of `key`, held until the lease drops.
+fn hold_producer<'g>(
+    host: &crate::VerterHost,
+    graph: &'g verter_type_engine::semantic_query_memo::SemanticGraphStore,
+    key: SemanticQueryKey,
+) -> (
+    verter_execution::tasks::ExecutionTask,
+    verter_type_engine::semantic_query_memo::ProducerLease<'g>,
+) {
+    let other = graph.task_registry_for_tests().register_task();
+    let mut capture = ReadCapture::default();
+    let Ok(mut attempt) = graph.begin_query_claim(host, host.request_flags(), key, &mut capture)
+    else {
+        panic!("a cold typeof has no warm answer");
+    };
+    let Claim::Produce(lease) = graph.claim_query(
+        host,
+        host.request_flags(),
+        &mut attempt,
+        &other,
+        &mut capture,
+    ) else {
+        panic!("the other task produces the cold typeof");
+    };
+    (other, lease)
+}
+
+/// A request of its own, with an operation budget its spend is charged to.
+fn budgeted_request(id: u64) -> Arc<verter_type_engine::request_context::RequestContext> {
+    verter_type_engine::request_context::RequestContext::with_kind_timing_and_projection_budget(
+        id,
+        Arc::from(TASK_FILE),
+        verter_audit::RequestKind::ComponentMeta,
+        false,
+        false,
+        None,
+        1_000_000,
+    )
+}
+
+/// Run `x5`'s task with `x2` held by another producer: one poll here, then
+/// the producer goes away and the task finishes on another thread or here.
+fn drive_x5_across_a_wait(
+    host: &Arc<crate::VerterHost>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    elsewhere: bool,
+) -> QueryResult<SemanticQueryValue> {
+    let graph = host.project_type_store().semantic_graph();
+    let (other, lease) = hold_producer(host, graph, typeof_key(dispatch, "x2"));
+    let waker = Waker::from(Arc::new(CountingWaker::default()));
+    let mut lease = Some(lease);
+    let answer = dispatch
+        .with_semantic_task_for_tests(typeof_key(dispatch, "x5"), |slot| {
+            let task = slot.as_mut().expect("the task is lent");
+            assert!(task.poll_for_tests(&waker).is_pending());
+            drop(lease.take());
+            let mut finish = || match task.poll_for_tests(&waker) {
+                Poll::Ready(TaskOutcomeForTests::Answered(answer)) => answer,
+                Poll::Ready(TaskOutcomeForTests::Stopped) => panic!("nothing stops the task"),
+                Poll::Pending => panic!("the woken task produces x2 itself"),
+            };
+            if elsewhere {
+                std::thread::scope(|scope| {
+                    scope
+                        .spawn(finish)
+                        .join()
+                        .expect("the resumed task answers")
+                })
+            } else {
+                finish()
+            }
+        })
+        .expect("the cold root runs as a task");
+    drop(other);
+    answer
+}
+
+/// A task suspended under a scheduler job that two requests share keeps
+/// observing that job's cancellation on whatever thread resumes it: the
+/// first requester cancelling does not stop work the second still needs,
+/// even on a thread with no job installed, where the task's own request
+/// is the cancelled one.
+#[test]
+fn a_pending_semantic_task_keeps_its_jobs_cancellation_on_another_thread() {
+    let host = chain_host();
+    let dispatch = ProjectSemanticDispatch::new(&*host);
+    let graph = host.project_type_store().semantic_graph();
+    let (other, lease) = hold_producer(&host, graph, typeof_key(&dispatch, "x2"));
+    let first = budgeted_request(1);
+    let second = budgeted_request(2);
+    let job = verter_execution::cancellation::CancellationToken::aggregate();
+    let _first_owner = job
+        .register_owner(Some(first.cancellation_token()))
+        .expect("the live job accepts the first requester");
+    let _second_owner = job
+        .register_owner(Some(second.cancellation_token()))
+        .expect("the live job accepts the second requester");
+    let _job = verter_execution::cancellation::JobCancellationGuard::install(job.clone());
+    let _request =
+        verter_type_engine::request_context::RequestContextGuard::install(Arc::clone(&first));
+    let waker = Waker::from(Arc::new(CountingWaker::default()));
+    let mut lease = Some(lease);
+    let answer = dispatch
+        .with_semantic_task_for_tests(typeof_key(&dispatch, "x5"), |slot| {
+            let task = slot.as_mut().expect("the task is lent");
+            assert!(task.poll_for_tests(&waker).is_pending());
+            first.cancel();
+            assert!(
+                !job.is_cancelled(),
+                "the second requester keeps the job live"
+            );
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(|| {
+                        assert!(
+                            task.poll_for_tests(&waker).is_pending(),
+                            "the job, not the cancelled first request, decides: the task still waits"
+                        );
+                    })
+                    .join()
+                    .expect("the pending poll returns");
+            });
+            drop(lease.take());
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(|| match task.poll_for_tests(&waker) {
+                        Poll::Ready(TaskOutcomeForTests::Answered(answer)) => answer,
+                        Poll::Ready(TaskOutcomeForTests::Stopped) => {
+                            panic!("a live job does not stop the task")
+                        }
+                        Poll::Pending => panic!("the woken task produces x2 itself"),
+                    })
+                    .join()
+                    .expect("the resumed task answers")
+            })
+        })
+        .expect("the cold root runs as a task");
+    assert_eq!(display(&dispatch, &answer), "\"ok\"");
+    drop(other);
+}
+
+/// The work, spend and paid computations a task's frames charge on
+/// another thread land in the component-meta compute that lent it the
+/// request, exactly as when the task finishes on its own thread.
+#[test]
+fn a_semantic_task_resumed_on_another_thread_charges_the_compute_that_lent_it() {
+    let charged = |elsewhere: bool| {
+        let host = chain_host();
+        let dispatch = ProjectSemanticDispatch::new(&*host);
+        let _request =
+            verter_type_engine::request_context::RequestContextGuard::install(budgeted_request(1));
+        let ((answer, operations, paid), usage) =
+            verter_type_engine::project_semantic_dispatch::connected_demand::with_connected_work_capture_for_tests(
+                || {
+                    verter_type_engine::request_budget::with_request_spend_capture_for_tests(|| {
+                        drive_x5_across_a_wait(&host, &dispatch, elsewhere)
+                    })
+                },
+            );
+        assert_eq!(display(&dispatch, &answer), "\"ok\"");
+        (usage.work, usage.bytes, operations, paid)
+    };
+    let here = charged(false);
+    assert!(
+        here.0 > 0 && here.2 > 0,
+        "finishing the chain charges work and spends operations: {here:?}"
+    );
+    assert_eq!(
+        charged(true),
+        here,
+        "finishing on another thread charges the lending compute the same"
+    );
+}
+
+/// A task dropped instead of returned leaves the request state it
+/// borrowed for its lender, which takes it back: the connected demand's
+/// charges and the dispatcher's open state are what returning it leaves.
+#[test]
+fn a_semantic_task_dropped_without_returning_gives_its_lender_the_request_state() {
+    let charged = |drop_task: bool| {
+        let host = chain_host();
+        let dispatch = ProjectSemanticDispatch::new(&*host);
+        let waker = Waker::from(Arc::new(CountingWaker::default()));
+        let answer = dispatch
+            .with_semantic_task_for_tests(typeof_key(&dispatch, "x5"), |slot| {
+                let answer = match slot
+                    .as_mut()
+                    .expect("the task is lent")
+                    .poll_for_tests(&waker)
+                {
+                    Poll::Ready(TaskOutcomeForTests::Answered(answer)) => answer,
+                    other => panic!("a chain nothing else produces answers at once: {other:?}"),
+                };
+                if drop_task {
+                    let task = slot.take().expect("the task is lent");
+                    std::thread::scope(|scope| {
+                        scope
+                            .spawn(move || drop(task))
+                            .join()
+                            .expect("the task drops on another thread");
+                    });
+                }
+                answer
+            })
+            .expect("the cold root runs as a task");
+        assert_eq!(display(&dispatch, &answer), "\"ok\"");
+        assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+        dispatch.connected_demand().work_used_for_tests()
+    };
+    let returned = charged(false);
+    assert!(returned > 0, "the drive charges its connected demand");
+    assert_eq!(
+        charged(true),
+        returned,
+        "a dropped task's charges reach its lender"
+    );
+}

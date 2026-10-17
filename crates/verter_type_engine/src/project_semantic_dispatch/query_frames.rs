@@ -227,19 +227,66 @@ pub(super) struct PendingClaim<'p> {
 /// Everything a suspended task needs is its own: its frames, their builds
 /// and leases, its outside subscription, the checker transaction with its
 /// inference sessions, its active instantiations, cost recordings and taint
-/// stack, and the counted roots of every node it constructed. It reaches the
-/// request only through immutable shared inputs. So the task is `Send` and
-/// one exclusive poller may resume it on any thread: each poll installs its
-/// construction owner, its execution task, its validity and its bound
-/// request context on the polling thread for the poll's extent and restores
-/// the thread's own after it.
+/// stack, the counted roots of every node it constructed, the scheduler
+/// job whose cancellation it observes, and the component-meta charges,
+/// request spend and refusals it records for the computes it was lent
+/// under. It reaches the request only through immutable shared inputs. So
+/// the task is `Send` and one exclusive poller may resume it on any thread:
+/// each poll installs its construction owner, its execution task, its
+/// validity, its job cancellation, its accounting and its bound request
+/// context on the polling thread for the poll's extent and restores the
+/// thread's own after it.
 pub struct SemanticTask<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> {
     execution: SemanticExecution<QueryProgram<'p, 'a, C>>,
-    program: QueryProgram<'p, 'a, C>,
+    /// Taken when the task gives its request state back: by
+    /// [`ProjectSemanticDispatch::return_semantic_task`], or by its drop
+    /// through `home`.
+    program: Option<QueryProgram<'p, 'a, C>>,
     construction: crate::semantic_query_memo::node_roots::TaskConstructionOwner,
     validity: crate::request_context::TaskExecutionValidity,
+    /// The scheduler job the task was lent under: its aggregate token
+    /// decides cancellation on every thread the task is polled on.
+    job_cancellation: Option<verter_execution::cancellation::CancellationToken>,
+    accounting: TaskAccounting,
+    /// Where a task dropped without being returned leaves its request state
+    /// for the dispatcher that lent it.
+    home: Arc<parking_lot::Mutex<Option<UnreturnedTask<'a, C>>>>,
     /// The root the first poll opens.
     root: Option<SemanticQueryKey>,
+}
+
+/// The per-thread accounting a task records for the computes it was lent
+/// under, carried between its polls.
+#[derive(Default)]
+struct TaskAccounting {
+    spans: super::connected_demand::TaskSpanCarry,
+    spend: crate::request_budget::TaskSpendCarry,
+    refusals: crate::fact_tracing::refusal_scope::TaskRefusalCarry,
+}
+
+impl TaskAccounting {
+    fn lend() -> Self {
+        Self {
+            spans: super::connected_demand::TaskSpanCarry::lend(),
+            spend: crate::request_budget::TaskSpendCarry::lend(),
+            refusals: crate::fact_tracing::refusal_scope::TaskRefusalCarry::lend(),
+        }
+    }
+
+    fn return_to_lender(self) {
+        self.spans.return_to_lender();
+        self.spend.return_to_lender();
+        self.refusals.return_to_lender();
+    }
+}
+
+/// What a task dropped without being returned leaves for its lender: the
+/// request state its dispatcher borrowed, the abort its polls observed and
+/// the accounting it recorded.
+struct UnreturnedTask<'a, C: crate::resolver_core::ResolverCapabilities> {
+    dispatch: ProjectSemanticDispatch<'a, C>,
+    validity: crate::request_context::TaskExecutionValidity,
+    accounting: TaskAccounting,
 }
 
 impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> SemanticTask<'p, 'a, C> {
@@ -250,11 +297,20 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> SemanticTask<'p,
         &mut self,
         waker: &std::task::Waker,
     ) -> std::task::Poll<Result<QueryDelivery, ()>> {
+        let program = self
+            .program
+            .as_mut()
+            .expect("a task holds its program until it gives its state back");
         let _construction = self.construction.install();
-        let _task = self.program.graph.install_execution(&self.program.task);
+        let _task = program.graph.install_execution(&program.task);
         let _validity = self.validity.install();
-        self.execution
-            .poll(&mut self.program, self.root.take(), waker)
+        let _job = verter_execution::cancellation::JobCancellationGuard::replace(
+            self.job_cancellation.clone(),
+        );
+        let _spans = self.accounting.spans.install();
+        let _spend = self.accounting.spend.install();
+        let _refusals = self.accounting.refusals.install();
+        self.execution.poll(program, self.root.take(), waker)
     }
 
     /// Poll the task to completion on this thread.
@@ -314,10 +370,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> Option<R> {
         let (_connected_guard, _) = self.enter_connected_demand(false);
         let (attempt, _query_depth_guard) = self.enter_query(&key, None, Nesting::Drive).ok()?;
-        let mut lent = LentTask {
-            lender: self,
-            task: Some(self.lend_semantic_task(key, attempt)),
-        };
+        let mut lent = LentTask::new(self, self.lend_semantic_task(key, attempt));
         Some(drive(&mut lent.task))
     }
 
@@ -334,8 +387,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Drop for SemanticTask<'p, 'a, C> {
     fn drop(&mut self) {
         // A task released while pending releases its frames through the
-        // program, which holds the state they entered.
-        self.execution.release(&mut self.program);
+        // program, which holds the state they entered; a task nobody
+        // returns leaves the request state it borrowed for its lender.
+        let Some(mut program) = self.program.take() else {
+            return;
+        };
+        self.execution.release(&mut program);
+        let QueryProgram { dispatch, .. } = program;
+        *self.home.lock() = Some(UnreturnedTask {
+            dispatch,
+            validity: std::mem::take(&mut self.validity),
+            accounting: std::mem::take(&mut self.accounting),
+        });
     }
 }
 
@@ -344,7 +407,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// dispatcher's request state until it is returned
     /// ([`Self::return_semantic_task`]): its claim continues `attempt`, it
     /// runs as the execution task installed here (or a fresh one), and
-    /// every poll runs under the request context active here.
+    /// every poll runs under the request context, the scheduler job and the
+    /// component-meta accounting active here.
     pub(super) fn lend_semantic_task(
         &self,
         key: SemanticQueryKey,
@@ -367,41 +431,68 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         program.retries.insert(key.clone(), attempt);
         SemanticTask {
             execution,
-            program,
+            program: Some(program),
             construction: crate::semantic_query_memo::node_roots::TaskConstructionOwner::new(
                 self.binding.construction.arena(),
             ),
             validity: crate::request_context::TaskExecutionValidity::inherit(),
+            job_cancellation: verter_execution::cancellation::current_job_cancellation_token(),
+            accounting: TaskAccounting::lend(),
+            home: Arc::new(parking_lot::Mutex::new(None)),
             root: Some(key),
         }
     }
 
     /// Take back the request state `task` borrowed, with the abort its
-    /// polls observed, the nodes it constructed (now rooted by the
-    /// construction owner open here) and the frames it still holds, which
-    /// it releases first.
+    /// polls observed, the accounting it recorded, the nodes it constructed
+    /// (now rooted by the construction owner open here) and the frames it
+    /// still holds, which it releases first.
     pub(super) fn return_semantic_task<'p>(&self, mut task: SemanticTask<'p, 'a, C>)
     where
         'a: 'p,
     {
-        task.execution.release(&mut task.program);
-        self.exchange_request_state(&task.program.dispatch);
+        let mut program = task.program.take().expect("a task is returned once");
+        task.execution.release(&mut program);
+        self.exchange_request_state(&program.dispatch);
+        std::mem::take(&mut task.accounting).return_to_lender();
         task.validity.bubble();
+    }
+
+    /// Take back the request state a task this dispatcher lent left in
+    /// `home` when it was dropped without being returned.
+    fn reclaim_unreturned_task(&self, home: &parking_lot::Mutex<Option<UnreturnedTask<'a, C>>>) {
+        if let Some(unreturned) = home.lock().take() {
+            self.exchange_request_state(&unreturned.dispatch);
+            unreturned.accounting.return_to_lender();
+            unreturned.validity.bubble();
+        }
     }
 }
 
 /// A semantic task lent the request state of the dispatcher evaluating it on
 /// this thread, which takes the state back when the task is done — or when
-/// the drive unwinds.
+/// the drive unwinds, or from where the task left it when it was dropped.
 struct LentTask<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> {
     lender: &'p ProjectSemanticDispatch<'a, C>,
     task: Option<SemanticTask<'p, 'a, C>>,
+    home: Arc<parking_lot::Mutex<Option<UnreturnedTask<'a, C>>>>,
+}
+
+impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> LentTask<'p, 'a, C> {
+    fn new(lender: &'p ProjectSemanticDispatch<'a, C>, task: SemanticTask<'p, 'a, C>) -> Self {
+        Self {
+            lender,
+            home: Arc::clone(&task.home),
+            task: Some(task),
+        }
+    }
 }
 
 impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Drop for LentTask<'p, 'a, C> {
     fn drop(&mut self) {
-        if let Some(task) = self.task.take() {
-            self.lender.return_semantic_task(task);
+        match self.task.take() {
+            Some(task) => self.lender.return_semantic_task(task),
+            None => self.lender.reclaim_unreturned_task(&self.home),
         }
     }
 }
@@ -740,10 +831,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // The drive runs as a semantic task that borrows this dispatcher's
         // request state and gives it back when it is done.
         let outcome = {
-            let mut lent = LentTask {
-                lender: self,
-                task: Some(self.lend_semantic_task(key.clone(), attempt)),
-            };
+            let mut lent = LentTask::new(self, self.lend_semantic_task(key.clone(), attempt));
             lent.task.as_mut().expect("the task is lent").drive()
         };
         match outcome {

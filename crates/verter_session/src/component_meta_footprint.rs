@@ -66,7 +66,10 @@ pub(crate) fn cached_result_footprint(
 /// request cache retains — measured whole: its analysis snapshot, its
 /// resolution payload, its synthesis diagnostics and its audit sidecar.
 impl verter_retention::heap_size::HeapSize for crate::meta_resolve::ResolvedComponentMetaState {
-    fn heap_size<'t>(&'t self, meter: &mut verter_retention::heap_size::HeapMeter<'_, 't>) -> usize {
+    fn heap_size<'t>(
+        &'t self,
+        meter: &mut verter_retention::heap_size::HeapMeter<'_, 't>,
+    ) -> usize {
         let Self {
             snapshot,
             mode,

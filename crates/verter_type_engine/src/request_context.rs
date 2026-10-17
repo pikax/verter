@@ -105,6 +105,7 @@ impl Drop for ExecutionValidityScope {
 /// it and hands back to the execution it returns to
 /// ([`Self::bubble`]). Each poll installs it as the innermost validity scope
 /// of the polling thread ([`Self::install`]).
+#[derive(Default)]
 pub(crate) struct TaskExecutionValidity {
     abort: Option<crate::semantic_query::ExecutionAbort>,
 }

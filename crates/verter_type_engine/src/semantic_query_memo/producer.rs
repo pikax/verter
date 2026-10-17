@@ -225,14 +225,18 @@ pub struct Subscription<'s> {
     inflight: Arc<FlightCell>,
     waiter: TaskId,
     /// Set once the subscriber parked: the wait-for edge it holds to the
-    /// producer's task, when it began waiting, and the waker a poll left on
-    /// the flight. Dropping the subscription releases all three.
+    /// producer's task and the waker a poll left on the flight (and, in an
+    /// observing build, when it began waiting). Dropping the subscription
+    /// releases them.
     parked: Option<Parked>,
 }
 
 /// A parked subscriber's registrations.
 struct Parked {
     _edge: verter_execution::tasks::WaitEdge,
+    /// When a polled subscriber began waiting, for the `waits_ms` stat.
+    /// Observation only: a default build keeps no timer across `Pending`.
+    #[cfg(feature = "semantic-observe")]
     since: Instant,
     /// The subscription's own waker registration on the flight.
     waker: Option<super::inflight::WakeRegistration>,
@@ -663,6 +667,7 @@ impl Subscription<'_> {
     ) -> Joined {
         let inflight = Arc::clone(&self.inflight);
         let mut state = inflight.state.lock();
+        let wait_start = Instant::now();
         if !flight_resolved(&state, flags) {
             if let Err(WaitCycle) = self.park(&state) {
                 return Joined::Recursive(Recursion::WaitCycle);
@@ -680,7 +685,7 @@ impl Subscription<'_> {
                     .wait_for(&mut state, std::time::Duration::from_millis(2));
             }
         }
-        self.resolve(state, ctx, flags, attempt, capture)
+        self.resolve(state, ctx, flags, attempt, capture, Some(wait_start))
     }
 
     /// Poll the producer's completion without blocking: `Ready` once the
@@ -701,7 +706,19 @@ impl Subscription<'_> {
         let inflight = Arc::clone(&self.inflight);
         let mut state = inflight.state.lock();
         if flight_resolved(&state, flags) {
-            return std::task::Poll::Ready(self.resolve(state, ctx, flags, attempt, capture));
+            // A polled wait is timed only in an observing build, from when
+            // its subscriber parked.
+            #[cfg(feature = "semantic-observe")]
+            let wait_start = Some(
+                self.parked
+                    .as_ref()
+                    .map_or_else(Instant::now, |parked| parked.since),
+            );
+            #[cfg(not(feature = "semantic-observe"))]
+            let wait_start = None;
+            return std::task::Poll::Ready(
+                self.resolve(state, ctx, flags, attempt, capture, wait_start),
+            );
         }
         if self.parked.is_none() {
             if let Err(WaitCycle) = self.park(&state) {
@@ -740,6 +757,7 @@ impl Subscription<'_> {
             .fetch_add(1, Ordering::SeqCst);
         self.parked = Some(Parked {
             _edge: edge,
+            #[cfg(feature = "semantic-observe")]
             since: Instant::now(),
             waker: None,
         });
@@ -747,7 +765,8 @@ impl Subscription<'_> {
     }
 
     /// Read the resolved flight: release the wait registrations and return
-    /// the producer's result as it holds for this subscriber.
+    /// the producer's result as it holds for this subscriber. `wait_start`,
+    /// when the wait is timed, feeds the `waits_ms` stat.
     fn resolve<C: crate::resolver_core::ResolverCapabilities>(
         &mut self,
         mut state: parking_lot::MutexGuard<'_, super::inflight::InflightState>,
@@ -755,25 +774,22 @@ impl Subscription<'_> {
         flags: &crate::resolver_core::resolver_context::RequestFlags,
         attempt: &mut ClaimAttempt,
         capture: &mut ReadCapture<'_>,
+        wait_start: Option<Instant>,
     ) -> Joined {
         let store = self.store;
         let inflight = Arc::clone(&self.inflight);
         let prepared = &attempt.prepared;
         // The flight resolved: whatever it woke, this subscriber's waker
         // and wait-for edge are spent.
-        let wait_start = match self.parked.take() {
-            Some(parked) => {
-                if let Some(registration) = parked.waker {
-                    state.withdraw_waker(registration);
-                }
-                parked.since
-            }
-            None => Instant::now(),
-        };
-        store
-            .stats
-            .waits_ms
-            .fetch_add(wait_start.elapsed().as_millis() as u64, Ordering::Relaxed);
+        if let Some(registration) = self.parked.take().and_then(|parked| parked.waker) {
+            state.withdraw_waker(registration);
+        }
+        if let Some(wait_start) = wait_start {
+            store
+                .stats
+                .waits_ms
+                .fetch_add(wait_start.elapsed().as_millis() as u64, Ordering::Relaxed);
+        }
         // Every cooperative wait return counts; a retry may count again.
         store.stats.joined_waits.fetch_add(1, Ordering::Relaxed);
         if let Some(ctx) = verter_execution::request_context::current_context() {

@@ -15,7 +15,17 @@ use crate::analysis::types::Hash16;
 ///
 /// `Default` is the unstamped sentinel — equals no realistic identity,
 /// so an unstamped analysis fails closed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, verter_retention::heap_size::HeapSize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Default,
+    serde::Serialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(transparent)]
 pub struct AnalysisSourceRevision(Hash16);
 

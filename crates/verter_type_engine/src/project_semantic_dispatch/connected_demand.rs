@@ -398,6 +398,82 @@ fn span_open() -> bool {
     COMPONENT_META_SPAN_OPEN.with(Cell::get)
 }
 
+/// The component-meta charges of a semantic task, which may be polled on a
+/// thread other than the one that lent it its request: one span standing
+/// for every span open where it was lent (none when none was). Each poll
+/// installs it as the polling thread's only span, so a charge lands in the
+/// task — never in a span the polling thread has open for other work — and
+/// the task's return folds it into the spans it was lent under.
+#[derive(Default)]
+pub(crate) struct TaskSpanCarry {
+    open: bool,
+    /// The task's span while it is not polled: one entry when `open`.
+    stack: Vec<ComponentMetaSpan>,
+}
+
+impl TaskSpanCarry {
+    /// The carry of a task lent here: open exactly when a span is.
+    pub(crate) fn lend() -> Self {
+        let open = span_open();
+        Self {
+            open,
+            stack: if open {
+                vec![ComponentMetaSpan::default()]
+            } else {
+                Vec::new()
+            },
+        }
+    }
+
+    /// Install the task's span on this thread for one poll; the returned
+    /// guard restores the thread's own spans and takes the task's back.
+    pub(crate) fn install(&mut self) -> TaskSpanInstall<'_> {
+        let thread =
+            COMPONENT_META_SPANS.with(|spans| spans.replace(std::mem::take(&mut self.stack)));
+        let thread_open = COMPONENT_META_SPAN_OPEN.with(|open| open.replace(self.open));
+        TaskSpanInstall {
+            carry: self,
+            thread,
+            thread_open,
+        }
+    }
+
+    /// Fold what the task charged into every span open on this thread, the
+    /// one that lent it, as if each charge had been made here.
+    pub(crate) fn return_to_lender(self) {
+        let Some(span) = self.stack.into_iter().next() else {
+            return;
+        };
+        if !span_open() {
+            return;
+        }
+        COMPONENT_META_SPANS.with(|spans| {
+            for open in spans.borrow_mut().iter_mut() {
+                open.work = open.work.saturating_add(span.work);
+                open.bytes = open.bytes.saturating_add(span.bytes);
+                open.trip = open.trip.union(span.trip);
+                open.schedule_cuts = open.schedule_cuts.saturating_add(span.schedule_cuts);
+                open.certificates = open.certificates.saturating_add(span.certificates);
+            }
+        });
+    }
+}
+
+/// A task's span installed for one poll ([`TaskSpanCarry::install`]).
+pub(crate) struct TaskSpanInstall<'c> {
+    carry: &'c mut TaskSpanCarry,
+    thread: Vec<ComponentMetaSpan>,
+    thread_open: bool,
+}
+
+impl Drop for TaskSpanInstall<'_> {
+    fn drop(&mut self) {
+        self.carry.stack =
+            COMPONENT_META_SPANS.with(|spans| spans.replace(std::mem::take(&mut self.thread)));
+        COMPONENT_META_SPAN_OPEN.with(|open| open.set(self.thread_open));
+    }
+}
+
 fn remember_work(n: usize) {
     if n == 0 || !span_open() {
         return;
