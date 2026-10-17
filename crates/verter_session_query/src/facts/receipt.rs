@@ -580,9 +580,10 @@ pub fn reserve_retained_with_evidence(
     let mut claim: Vec<(&parking_lot::Mutex<RetentionCharge>, usize)> = Vec::new();
     let mut stack: Vec<&[FactVersionRef]> = signatures.to_vec();
     // Every distinct evidence that can reach a page is walked once, whatever
-    // its kind: a consumed result's receipt owns no charge of its own but may
-    // hold pages (a result recorded over a wide warm-hit signature), and the
-    // candidate retains those pages through it just as it retains its own.
+    // its kind: a consumed result's receipt carries its own charge, claimed
+    // here like any other evidence no earlier admission claimed, and may hold
+    // pages (a result recorded over a wide warm-hit signature), which the
+    // candidate retains through it just as it retains its own.
     while let Some(level) = stack.pop() {
         for fact in level {
             let FactVersionRef::Receipt(receipt) = fact else {

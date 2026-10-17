@@ -488,7 +488,10 @@ impl VerterHost {
                     Some(
                         FactReadSetFinalise::Ok(facts) | FactReadSetFinalise::NonCacheable(facts),
                     ) => ResultReceipt::retained_signature(facts, db.module_export_account.get()),
-                    _ => ResultReceipt::new(input.facts.iter().cloned().collect()),
+                    _ => ResultReceipt::new_on(
+                        input.facts.iter().cloned().collect(),
+                        db.module_export_account.get(),
+                    ),
                 };
                 receipts.push(receipt);
                 dependencies.extend(

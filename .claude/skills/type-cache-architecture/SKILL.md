@@ -176,25 +176,40 @@ cost identities) by `semantic_query/allocation_footprint.rs`'s
 allocation that carries its own charge (an evidence page, a cost receipt,
 a pooled identity string, a graph node) is never charged by a holder.
 
-**Shared allocations and transfer to callers** (`retention/shared.rs`).
-An allocation several independently charged owners alias — a build's fact
-carrier shared by its root, prefix backfills and SCC members; the
-interned dependency rail; the diagnostics and value a warm read hands its
-caller — is charged ONCE through the store's `AliasCharges` registry,
-keyed by allocation address (the registered charge co-owns the
-allocation, so the address cannot be reused while it lives). Cache owners
-hold `CacheHold`s; deliveries hold `CallerHold`s, attached to the
-delivery lease (`SemanticDeliveryLease::attach_retention`) so every clone
-of a read carries them. When the last cache hold drops while callers
-remain, the charge moves `Retained → Pinned` in one step at the account's
-linearization point (`RetentionCharge::transfer_to_pinned`) — never
-uncharged, never charged twice, never refused; a cache retaining the
-allocation again adopts the pin back refusably
-(`RetentionCharge::try_adopt_retained`). A memo candidate's charges are
+**Self-charged delivered allocations** (`retention/owned.rs`). Everything
+a read hands its caller — the dependency rail (`DepSignature`, whose
+canonicals are `OwnedStr`s), the walker-diagnostic list
+(`WalkerDiagnostics`, whose names are `OwnedStr`s), and a value's
+outermost allocation with the lists nested in it (`OwnedSlice` /
+`Owned<T>`: flow-return and call results, candidate table, relation
+bindings, overload list, projection alternatives, runtime kinds, cycle-gate
+reasons) — is a sealed `Owned` cell that carries its charge inside the
+allocation. Every owning clone shares the one charge and the charge is
+released in the step that frees the allocation, so a clone a caller keeps
+past every read, cache and store stays charged until its own drop, with no
+sweep. No accessor exposes the raw `Arc`. A delivery pins the cells it
+mints (`Owned::pin`, never refused); a cache retaining them takes an
+`OwnedHold` (`Owned::hold`), refusable, which adopts the pin into
+`Retained` together with every nested cell, and hands the charge back
+(`Retained → Pinned`, one step at the account's linearization point) when
+its last hold drops. A nested cell is offered to its parent's measurement,
+never counted in it, so a cell several parents share is charged once.
+
+**Shared registered allocations** (`retention/shared.rs`). An allocation
+cache owners alias without handing it out — a build's fact carrier shared
+by its root, prefix backfills and SCC members; the self-root list; a raw
+identity string an owned cell still reaches — is charged ONCE through the
+store's `AliasCharges` registry, keyed by allocation address (the
+registered charge co-owns the allocation, so the address cannot be reused
+while it lives). Cache owners hold `CacheHold`s, callers `CallerHold`s;
+the same `Retained → Pinned` transfer and refusable re-adoption apply, and
+a holder reviving a charge whose last holder is releasing it keeps the
+charge's leaf holds in the reviver's class. A memo candidate's charges are
 `MemoRetention { own, carrier, delivered }`: `own` is cache-only
 bookkeeping (its entry in every slot it may populate, its point record,
 its lease metadata, its reverse-index registrations) and is released the
-moment the candidate drains; a refusal summary uses the same split.
+moment the candidate drains; `delivered` are its `OwnedHold`s; a refusal
+summary uses the same split.
 
 **Graph storage is pinned** (`retention/granular.rs`). The arena's live
 chunks, payload blocks and dedup tables, every signature epoch's tables

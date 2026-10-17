@@ -29,15 +29,22 @@
 //!   holder only the handle's inline bytes.
 //! * **Aliases inside one charge.** Within one charge each distinct `Arc`
 //!   allocation is counted once ([`AliasSet`]). Allocations several
-//!   independently charged owners share are charged once process-wide
-//!   through [`super::shared::AliasCharges`].
-//! * **Leaf text.** A leaf `Arc<str>` name inside a registered carrier (a
-//!   fact's interned names, a dependency's canonical, a diagnostic's name)
-//!   is its own shared allocation: measuring a carrier for registration
-//!   collects its leaves instead of counting them ([`AliasSet::collecting`])
-//!   and the registry charges each leaf once, held by every carrier that
-//!   reaches it ([`super::shared::AliasCharges`]). Outside registration a
-//!   measurement counts each distinct leaf it reaches in full.
+//!   independently charged owners share are charged once: a delivered
+//!   allocation carries its charge inside itself
+//!   ([`super::owned::Owned`]), a cache-internal one is charged through
+//!   [`super::shared::AliasCharges`].
+//! * **Nested owned allocations.** An [`super::owned::Owned`] handle nested
+//!   in a measured value is its own allocation: a charging measurement
+//!   collects it ([`AliasSet::collecting`]) and the nested cell charges
+//!   itself, once however many parents reach it. Any other measurement
+//!   counts it in full, once.
+//! * **Leaf text.** A raw leaf `Arc<str>` name inside a registered carrier
+//!   or an owned cell (a fact's interned names, an identity string) is its
+//!   own shared allocation: measuring for a charge collects its leaves
+//!   instead of counting them ([`AliasSet::collecting`]) and the registry
+//!   charges each leaf once, held by every holder that reaches it
+//!   ([`super::shared::AliasCharges`]). Outside a charge a measurement
+//!   counts each distinct leaf it reaches in full.
 //!
 //! The figures are admission ESTIMATES (see the module docs of
 //! [`super`]): nothing in cache validity reads them.
