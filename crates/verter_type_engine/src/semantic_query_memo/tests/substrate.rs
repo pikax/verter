@@ -85,7 +85,7 @@ fn release_type_param(canonical: &str, hash: u8, name: &str) -> SemanticNodeData
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from(name),
+        display_name: verter_type_expr::OwnedStr::from(name),
     }
 }
 
@@ -159,14 +159,109 @@ fn release_decl_key(canonical: &str, name: &str) -> SemanticQueryKey {
 /// content then, with no close or sidecar write left to drain the log: the
 /// release that grows the destroyed log past its threshold drains it into
 /// the sidecars itself, so neither the log nor the stale sidecar entries
-/// outlive the drop by more than the threshold.
+/// outlive the drop by more than the threshold. When a sidecar lock is held
+/// across that final release the drain cannot run then; the lock's holder
+/// runs it as it unlocks, with no fresh entry of its own and no later work.
 ///
 /// Discriminating against a log drained only by a later close or sidecar
-/// write: every destroyed id and its structure bits would stay retained.
+/// write, and against a release that gives up on a held sidecar lock: every
+/// destroyed id and its structure bits would stay retained.
 #[test]
 fn a_final_drop_after_close_keeps_the_destroyed_log_bounded() {
+    /// A lock guard held across the final release, dropped by type erasure.
+    trait Held {}
+    impl<T> Held for T {}
+    type Hold = for<'a> fn(&'a SemanticGraphStore) -> Box<dyn Held + 'a>;
+    let cases: [(&str, Option<Hold>); 5] = [
+        ("uncontended", None),
+        (
+            "key classes held",
+            Some(|store| Box::new(store.key_classes.lock())),
+        ),
+        (
+            "structure bits held",
+            Some(|store| Box::new(store.unresolved_reach.lock())),
+        ),
+        (
+            "origin edges held",
+            Some(|store| Box::new(store.derivation.lock())),
+        ),
+        (
+            "member-index order held",
+            Some(|store| Box::new(store.member_ordinal_index_fifo.lock())),
+        ),
+    ];
+    let threshold = super::super::release::DESTROYED_DRAIN_THRESHOLD;
+    for (label, hold) in cases {
+        let store = SemanticGraphStore::new();
+        let count = threshold * 4;
+        let scope = store.enter_node_root_scope();
+        let scoped = release_file_scope("/w/a.ts", 1);
+        for index in 0..count {
+            let node = store.intern_node_with_scope(
+                release_type_param("/w/a.ts", 1, &format!("T{index}")),
+                scoped.clone(),
+            );
+            // Classifying writes the node's structure-bit sidecar entry.
+            store.node_is_inert_structure(node);
+        }
+        assert_eq!(store.unresolved_reach_count(), count, "{label}");
+
+        store.close_canonical("/w/a.ts");
+        assert_eq!(
+            store.unresolved_reach_count(),
+            count,
+            "{label}: premise: the scope still holds every node"
+        );
+        let held = hold.map(|hold| hold(&store));
+        drop(scope);
+        assert_eq!(
+            store.node_count(),
+            0,
+            "{label}: the final drop destroys them all"
+        );
+        if held.is_some() {
+            assert_eq!(
+                store.pending_destroyed_nodes(),
+                count,
+                "{label}: premise: the held lock blocks the release's drain"
+            );
+        }
+        drop(held);
+
+        assert!(
+            store.pending_destroyed_nodes() <= threshold,
+            "{label}: pending {} of {count}",
+            store.pending_destroyed_nodes()
+        );
+        assert!(
+            store.unresolved_reach_count() <= threshold,
+            "{label}: stale structure bits {} of {count}",
+            store.unresolved_reach_count()
+        );
+    }
+}
+
+/// A final release's drain that takes some sidecar locks and is blocked on
+/// another overlaps the blocking holder's unlock: the holder's settle runs
+/// while the drain still holds its partial locks. The obligation must
+/// survive that overlap — the drain retries once it lets its partial locks
+/// go — so the log is drained with no later work.
+///
+/// Discriminating against overlapping drain attempts that each fail on the
+/// other's partial locks and both return: the obligation stays owed and
+/// every destroyed id and its structure bits stay retained.
+#[test]
+fn an_unlock_during_a_blocked_drain_leaves_no_cleanup_stranded() {
+    use crate::semantic_query_memo::arena::ArenaRaceEvent;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    const WAIT: Duration = Duration::from_secs(30);
+    let threshold = super::super::release::DESTROYED_DRAIN_THRESHOLD;
+    let count = threshold * 4;
     let store = SemanticGraphStore::new();
-    let count = super::super::release::DESTROYED_DRAIN_THRESHOLD * 4;
     let scope = store.enter_node_root_scope();
     let scoped = release_file_scope("/w/a.ts", 1);
     for index in 0..count {
@@ -174,27 +269,56 @@ fn a_final_drop_after_close_keeps_the_destroyed_log_bounded() {
             release_type_param("/w/a.ts", 1, &format!("T{index}")),
             scoped.clone(),
         );
-        // Classifying writes the node's structure-bit sidecar entry.
         store.node_is_inert_structure(node);
     }
-    assert_eq!(store.unresolved_reach_count(), count);
-
     store.close_canonical("/w/a.ts");
-    assert_eq!(
-        store.unresolved_reach_count(),
-        count,
-        "premise: the scope still holds every node"
-    );
-    drop(scope);
 
+    let (held_tx, held_rx) = mpsc::channel();
+    let (unlock_tx, unlock_rx) = mpsc::channel::<()>();
+    let (unlocked_tx, unlocked_rx) = mpsc::channel();
+    let unlocked_rx = parking_lot::Mutex::new(unlocked_rx);
+    let blocked = Arc::new(AtomicUsize::new(0));
+    std::thread::scope(|threads| {
+        let holder = threads.spawn({
+            let store = &store;
+            move || {
+                let held = store.derivation.lock();
+                held_tx.send(()).unwrap();
+                let _ = unlock_rx.recv_timeout(WAIT);
+                // The guard's unlock settles while the drain holds its other
+                // sidecar locks.
+                drop(held);
+                let _ = unlocked_tx.send(());
+            }
+        });
+        held_rx.recv_timeout(WAIT).unwrap();
+        let observed = Arc::clone(&blocked);
+        store.arena.set_race_hook(Some(Arc::new(move |event| {
+            if event == ArenaRaceEvent::SidecarDrainBlocked
+                && observed.fetch_add(1, Ordering::SeqCst) == 0
+            {
+                let _ = unlock_tx.send(());
+                let _ = unlocked_rx.lock().recv_timeout(WAIT);
+            }
+        })));
+        drop(scope);
+        // Dropping the hook disconnects a holder the drain never released.
+        store.arena.set_race_hook(None);
+        holder.join().unwrap();
+    });
+
+    assert!(
+        blocked.load(Ordering::SeqCst) >= 1,
+        "premise: the final release's drain was blocked by the held lock"
+    );
     assert_eq!(store.node_count(), 0, "the final drop destroys them all");
     assert!(
-        store.pending_destroyed_nodes() <= super::super::release::DESTROYED_DRAIN_THRESHOLD,
+        store.pending_destroyed_nodes() <= threshold,
         "pending {} of {count}",
         store.pending_destroyed_nodes()
     );
     assert!(
-        store.unresolved_reach_count() <= super::super::release::DESTROYED_DRAIN_THRESHOLD,
+        store.unresolved_reach_count() <= threshold,
         "stale structure bits {} of {count}",
         store.unresolved_reach_count()
     );
@@ -471,7 +595,7 @@ fn intern_typeparam_display_name_excluded_from_identity() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from(display),
+        display_name: verter_type_expr::OwnedStr::from(display),
     };
     let id1 = store.intern_node(mk("T"));
     let id2 = store.intern_node(mk("TRenamed"));
@@ -676,7 +800,7 @@ fn node_arena_invalidation_preserves_global_scope() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("Param_A"),
+        display_name: verter_type_expr::OwnedStr::from("Param_A"),
     };
     let file_b_payload = SemanticNodeData::TypeParam {
         decl: DeclIdentity {
@@ -688,7 +812,7 @@ fn node_arena_invalidation_preserves_global_scope() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("Param_B"),
+        display_name: verter_type_expr::OwnedStr::from("Param_B"),
     };
 
     let global_id_first = store.intern_node_with_scope(global_payload(), NodeScopeId::Global);
@@ -862,7 +986,7 @@ fn many_distinct_relations_under_tiny_retention_keep_operand_only_residency() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from(name.as_str()),
+        display_name: verter_type_expr::OwnedStr::from(name.as_str()),
     };
     let pairs: Vec<(SemanticNodeId, SemanticNodeId)> = (0..RELATIONS)
         .map(|i| {
@@ -2106,6 +2230,52 @@ fn an_origin_edge_retains_its_fence_until_its_store_lets_go() {
             + verter_session_query::retention::owned::OwnedStr::charge_for_len("/w/fence.ts".len()),
         "the last handle releases the rail's charge and its canonical's"
     );
+}
+
+/// The origin-edge store's own storage — its tables, edge lists, source
+/// lists and pooled fence blocks — is charged while it holds them and
+/// given back as it drops them; the store's teardown restores the baseline.
+#[test]
+fn the_origin_edge_store_charges_its_own_storage_until_it_drops_it() {
+    use verter_session_query::retention::allocation::arc_block_bytes;
+    use verter_session_query::retention::{
+        RetentionLimits, SemanticRetentionAccount, StoreAccount,
+    };
+    const EDGES: usize = 200;
+    const SOURCES: usize = 32;
+    let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
+    let store = SemanticGraphStore::with_account(StoreAccount::new(Arc::clone(&account)));
+    // An edge describes a live node: the scope owns every endpoint.
+    let scope = store.enter_node_root_scope();
+    let source = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let before = store.bookkeeping_storage_charge_bytes();
+    for index in 0..EDGES {
+        let result = store.intern_node(SemanticNodeData::Literal(
+            crate::semantic_query::LiteralValue::String(format!("edge-{index}")),
+        ));
+        store.record_origin_edge(
+            result,
+            OriginEdgeKind::Normalize,
+            Arc::from(vec![source; SOURCES].into_boxed_slice()),
+            crate::semantic_query::OriginMeta::None,
+            dep_sig_for(&format!("/w/edge-{index}.ts"), index as u8),
+        );
+    }
+    let source_lists = EDGES * arc_block_bytes(SOURCES * std::mem::size_of::<SemanticNodeId>());
+    let grown = store.bookkeeping_storage_charge_bytes() - before;
+    assert!(
+        grown >= source_lists,
+        "every edge's source list is charged with the store: {grown} < {source_lists}"
+    );
+    store.invalidate_all();
+    let cleared = store.bookkeeping_storage_charge_bytes();
+    assert!(
+        cleared + source_lists <= before + grown,
+        "cleared edges give their lists back; only retained table capacity stays: {cleared}"
+    );
+    drop(scope);
+    drop(store);
+    assert_eq!(account.snapshot().total_bytes(), 0);
 }
 
 /// ORIGIN-EDGE DEDUP DURABILITY — re-emitting an origin edge whose fence

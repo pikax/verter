@@ -55,6 +55,7 @@ pub type FactAuthoredPropertyKey = AuthoredPropertyKey<TypeBodySlot, ValueDeclId
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum TopLevelOwnerKind {
     Module,
@@ -83,6 +84,7 @@ pub enum TopLevelOwnerKind {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct TopLevelOwnerId {
     kind: TopLevelOwnerKind,
@@ -778,7 +780,7 @@ impl TypeDependencyPathFact {
 )]
 pub enum DeclarationOrigin {
     /// The member's declaration lives in this canonical file.
-    Declared(Arc<str>),
+    Declared(crate::OwnedStr),
     /// Genuinely synthetic or multi-origin — no single declaring file (the
     /// `None`/empty case in the untyped `declaration_origin` carriers).
     Synthetic,
@@ -799,6 +801,7 @@ pub enum DeclarationOrigin {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct ValueDeclIdentityPart {
     /// Canonical id of the file declaring the value symbol.
@@ -2299,6 +2302,7 @@ pub struct FunctionParamFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum FunctionPartIdentity {
     /// The declaration's own callable body (`function f` declarations and
@@ -2340,6 +2344,7 @@ pub enum FunctionPartIdentity {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct FlowFunctionReturnIdentity {
     /// The owning declaration's content-free anchor.
@@ -2369,6 +2374,7 @@ pub struct FlowFunctionReturnIdentity {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum FunctionReturnSource {
     /// A declared return (an authored TS annotation or a JSDoc recovery).

@@ -123,7 +123,7 @@ pub(crate) fn node_contains_reducible_operator(
             let args = d.carrier_type_args();
             (!args.is_empty()
                 && d.bare_ref_head()
-                    .is_some_and(|head| BuiltinUtility::from_name(head.0.as_ref()).is_some()))
+                    .is_some_and(|head| BuiltinUtility::from_name(head.0).is_some()))
                 || args.iter().any(|&arg| recur(arg))
         }
         // Graph-native `Alias` — pass-through (no `TypeExpr` equivalent).

@@ -1460,7 +1460,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // come from the serving scope, as every signature composition fills
         // them.
         let mut identity = identity.clone();
-        identity.anchor.canonical_id = verter_type_expr::OwnedStr::from(root.canonical_id);
+        identity.anchor.canonical_id = root.canonical_id;
         identity.anchor.owner = root.owner;
         Some(identity)
     }

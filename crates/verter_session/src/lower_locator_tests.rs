@@ -841,7 +841,7 @@ fn locator_shape_infer_predeclaration_does_not_capture_ordinary_sibling_ref() {
             param_index: 0,
             constraint: None,
             default: None,
-            display_name: Arc::from("U"),
+            display_name: verter_type_expr::OwnedStr::from("U"),
         },
         scope.clone(),
     );

@@ -25,6 +25,7 @@
 
 use std::sync::Arc;
 use verter_session_query::source::demand::ExpressionSourceDemand as _;
+use verter_type_expr::OwnedStr;
 
 use super::call_resolve::union_self_roots;
 use super::dispatch_txn::flow_obligation_state::{
@@ -6022,33 +6023,36 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             scope_payload.as_ref(),
         );
         let name_resolution: rustc_hash::FxHashMap<
-            std::sync::Arc<str>,
+            verter_type_expr::OwnedStr,
             verter_session_query::type_solver::host::ResolvedRootIdentity,
         > = rustc_hash::FxHashMap::default();
         // Seed from the ENCLOSING environment, then let this clause
         // shadow it.
         let mut env: rustc_hash::FxHashMap<String, SemanticNodeId> =
             outer.map(|outer| outer.env.clone()).unwrap_or_default();
-        let intern_binder = |name: &Arc<str>,
+        let intern_binder = |name: &OwnedStr,
                              constraint: Option<SemanticNodeId>,
                              default: Option<SemanticNodeId>| {
             let decl_name = match nested_at {
-                Some(offset) => Arc::from(format!("{name}\u{1}{offset}").as_str()),
-                None => Arc::clone(name),
+                Some(offset) => OwnedStr::from(format!("{name}\u{1}{offset}")),
+                None => name.clone(),
             };
             graph.intern_node(SemanticNodeData::TypeParam {
                 decl: crate::semantic_query::DeclIdentity::from_scope(&scope, decl_name),
                 param_index: 0,
                 constraint,
                 default,
-                display_name: Arc::clone(name),
+                display_name: name.clone(),
             })
         };
         // PASS 1 — every binder of this clause, bare. Sibling references
         // in a constraint / default resolve against these, in either
         // direction.
         for tp in type_parameters.iter() {
-            env.insert(tp.name.to_string(), intern_binder(&tp.name, None, None));
+            env.insert(
+                tp.name.to_string(),
+                intern_binder(&OwnedStr::from(&tp.name), None, None),
+            );
         }
         // PASS 2 — the constraints and defaults, lowered under the
         // composed environment, then the final binders.
@@ -6072,7 +6076,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             };
             let constraint = tp.constraint.as_ref().map(&mut lower);
             let default = tp.default.as_ref().map(&mut lower);
-            let display_name: Arc<str> = Arc::clone(&tp.name);
+            let display_name = OwnedStr::from(&tp.name);
             let binder = intern_binder(&display_name, constraint, default);
             finalized.push((tp.name.to_string(), binder));
             type_param_decls.push(crate::semantic_query::TypeParamDecl {
@@ -9535,7 +9539,7 @@ pub(super) struct FlowBinderEnv {
     shadowing: crate::resolver_core::scope_shadowing::ScopeShadowing,
     /// The (empty) explicit name-resolution overlay.
     name_resolution: rustc_hash::FxHashMap<
-        Arc<str>,
+        verter_type_expr::OwnedStr,
         verter_session_query::type_solver::host::ResolvedRootIdentity,
     >,
     /// Binder name → interned `TypeParam` node.
@@ -10104,7 +10108,11 @@ pub(super) trait FlowDemandDriver {
     fn flow_slice_lowered(
         &self,
         key: crate::cache_runtime::flow_slice_node::FlowSliceLoweredKey,
-    ) -> Option<Arc<verter_session_query::flow::flow_ir::FlowSliceIR>>;
+    ) -> Option<
+        verter_session_query::retention::heap_size::OwnedTree<
+            verter_session_query::flow::flow_ir::FlowSliceIR,
+        >,
+    >;
     fn flow_slice_hash(
         &self,
         key: crate::cache_runtime::flow_slice_node::FlowSliceHashKey,
@@ -10357,7 +10365,7 @@ pub(super) trait FlowDemandDriver {
     ) -> ReunionReduction;
     fn reduce_template_literal_nodes(
         &self,
-        quasis: &[Arc<str>],
+        quasis: &[OwnedStr],
         args: &[SemanticNodeId],
         eval_context: crate::semantic_query::ProjectionReductionContext,
     ) -> Result<SemanticNodeId, crate::semantic_query::PartialReasonSet>;
@@ -10391,7 +10399,7 @@ pub(super) trait FlowDemandDriver {
         expr: &TypeExpr,
         env: &FxHashMap<String, SemanticNodeId>,
         scope: &NodeScopeId,
-        name_resolution: &FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
+        name_resolution: &FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
         scope_payload: Option<&DeclarationScopePayload>,
         shadowing: &ScopeShadowing,
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
@@ -10496,7 +10504,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
     fn flow_slice_lowered(
         &self,
         key: crate::cache_runtime::flow_slice_node::FlowSliceLoweredKey,
-    ) -> Option<Arc<verter_session_query::flow::flow_ir::FlowSliceIR>> {
+    ) -> Option<
+        verter_session_query::retention::heap_size::OwnedTree<
+            verter_session_query::flow::flow_ir::FlowSliceIR,
+        >,
+    > {
         self.flow_slice_driver().lookup_lowered(key)
     }
     fn flow_slice_hash(
@@ -10931,7 +10943,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
     }
     fn reduce_template_literal_nodes(
         &self,
-        quasis: &[Arc<str>],
+        quasis: &[OwnedStr],
         args: &[SemanticNodeId],
         eval_context: crate::semantic_query::ProjectionReductionContext,
     ) -> Result<SemanticNodeId, crate::semantic_query::PartialReasonSet> {
@@ -10981,7 +10993,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         expr: &TypeExpr,
         env: &FxHashMap<String, SemanticNodeId>,
         scope: &NodeScopeId,
-        name_resolution: &FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
+        name_resolution: &FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
         scope_payload: Option<&DeclarationScopePayload>,
         shadowing: &ScopeShadowing,
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
@@ -11185,7 +11197,11 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     fn flow_slice_lowered(
         &self,
         key: crate::cache_runtime::flow_slice_node::FlowSliceLoweredKey,
-    ) -> Option<Arc<verter_session_query::flow::flow_ir::FlowSliceIR>> {
+    ) -> Option<
+        verter_session_query::retention::heap_size::OwnedTree<
+            verter_session_query::flow::flow_ir::FlowSliceIR,
+        >,
+    > {
         self.driver.flow_slice_lowered(key)
     }
     fn flow_slice_hash(
@@ -11596,7 +11612,7 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     }
     fn reduce_template_literal_nodes(
         &self,
-        quasis: &[Arc<str>],
+        quasis: &[OwnedStr],
         args: &[SemanticNodeId],
         eval_context: crate::semantic_query::ProjectionReductionContext,
     ) -> Result<SemanticNodeId, crate::semantic_query::PartialReasonSet> {
@@ -11647,7 +11663,7 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
         expr: &TypeExpr,
         env: &FxHashMap<String, SemanticNodeId>,
         scope: &NodeScopeId,
-        name_resolution: &FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
+        name_resolution: &FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
         scope_payload: Option<&DeclarationScopePayload>,
         shadowing: &ScopeShadowing,
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
@@ -26034,7 +26050,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 let node = self.unmodeled_position();
                 params.push(node);
                 signature_params.push(crate::semantic_query::FunctionParam {
-                    name: param.name.clone(),
+                    name: param.name.as_deref().map(OwnedStr::from),
                     ty: node,
                     optional: param.optional,
                     rest: param.rest,
@@ -26065,7 +26081,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             };
             params.push(node);
             signature_params.push(crate::semantic_query::FunctionParam {
-                name: param.name.clone(),
+                name: param.name.as_deref().map(OwnedStr::from),
                 ty: node,
                 optional: param.optional,
                 rest: param.rest,

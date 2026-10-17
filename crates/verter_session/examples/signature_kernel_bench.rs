@@ -439,7 +439,7 @@ fn outcome(host: &VerterHost, witness: &Witness) -> String {
 const RENDER_DEPTH: usize = 12;
 
 fn render_type(
-    node_data: &dyn Fn(SemanticNodeId) -> Option<Arc<SemanticNodeData>>,
+    node_data: &dyn Fn(SemanticNodeId) -> Option<verter_type_engine::semantic_query_memo::NodeData>,
     node: SemanticNodeId,
     depth: usize,
     out: &mut String,

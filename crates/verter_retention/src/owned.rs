@@ -273,7 +273,7 @@ pub(crate) fn hold_node(
         }
         slot.cache_holds += 1;
     }
-    Ok(OwnedHold(node))
+    Ok(OwnedHold(Some(node)))
 }
 
 /// The owned allocations a carrier reaches at its top level, each once
@@ -341,6 +341,18 @@ impl OwnedHandles {
     /// holder, charge and class is unchanged.
     pub fn hold(self, ctx: ChargeCtx<'_>) -> Result<Box<[OwnedHold]>, RetentionRefusal> {
         hold_nodes(&self.0, ctx)
+    }
+
+    /// A cache's holds on all of them; on refusal they are charged to
+    /// their callers instead, so a value returned uncached is charged
+    /// whatever the pressure.
+    ///
+    /// # Errors
+    ///
+    /// The account's refusal: nothing is retained; every allocation is
+    /// pinned for the callers keeping it.
+    pub fn hold_or_pin(self, ctx: ChargeCtx<'_>) -> Result<Box<[OwnedHold]>, RetentionRefusal> {
+        hold_nodes(&self.0, ctx).inspect_err(|_| self.pin(ctx))
     }
 
     /// `charge` holding these allocations too: the retaining cache's whole
@@ -580,70 +592,76 @@ impl<T: Measured + Default> Default for Owned<T> {
 }
 
 /// An owned slice: a sealed, self-charged list allocation. Derefs to the
-/// slice; cloning shares the allocation and its one charge.
-pub struct OwnedSlice<T: Measured>(Owned<Box<[T]>>);
+/// slice; cloning shares the allocation and its one charge. An empty slice
+/// allocates nothing, so it has no charge and nothing to hold.
+pub struct OwnedSlice<T: Measured>(Option<Owned<Box<[T]>>>);
 
 impl<T: Measured> OwnedSlice<T> {
     /// A new allocation of `items`, charged by the first owner that keeps
-    /// it.
+    /// it; none for no items.
     #[must_use]
     pub fn new(items: Box<[T]>) -> Self {
-        Self(Owned::new(items))
-    }
-
-    /// The allocation as an owned cell.
-    #[must_use]
-    pub fn as_owned(&self) -> &Owned<Box<[T]>> {
-        &self.0
+        Self((!items.is_empty()).then(|| Owned::new(items)))
     }
 
     /// Offer this nested handle to a measurement (see [`Owned::offer`]).
     pub fn offer(&self, aliases: &mut AliasSet) -> usize {
-        self.0.offer(aliases)
+        self.0.as_ref().map_or(0, |owned| owned.offer(aliases))
     }
 
     /// Charge it to its callers (see [`Owned::pin`]).
     pub fn pin(&self, ctx: ChargeCtx<'_>) {
-        self.0.pin(ctx);
+        if let Some(owned) = &self.0 {
+            owned.pin(ctx);
+        }
     }
 
-    /// A cache's hold on it (see [`Owned::hold`]).
+    /// A cache's hold on it (see [`Owned::hold`]); an empty slice's holds
+    /// nothing.
     ///
     /// # Errors
     ///
     /// The account's refusal.
     pub fn hold(&self, ctx: ChargeCtx<'_>) -> Result<OwnedHold, RetentionRefusal> {
-        self.0.hold(ctx)
+        self.0
+            .as_ref()
+            .map_or(Ok(OwnedHold(None)), |owned| owned.hold(ctx))
     }
 
-    /// Bytes its charge holds, once charged.
+    /// Bytes its charge holds, once charged; an empty slice's is none.
     #[must_use]
     pub fn charge_bytes(&self) -> Option<usize> {
-        self.0.charge_bytes()
+        self.0.as_ref().and_then(Owned::charge_bytes)
     }
 
     /// Its charge's class, once charged.
     #[must_use]
     pub fn charge_class(&self) -> Option<ChargeClass> {
-        self.0.charge_class()
+        self.0.as_ref().and_then(Owned::charge_class)
     }
 
-    /// Whether two slices share one allocation.
+    /// Whether two slices share one allocation; two empty slices share
+    /// none and compare as one.
     #[must_use]
     pub fn ptr_eq(this: &Self, other: &Self) -> bool {
-        Owned::ptr_eq(&this.0, &other.0)
+        match (&this.0, &other.0) {
+            (Some(this), Some(other)) => Owned::ptr_eq(this, other),
+            (None, None) => true,
+            _ => false,
+        }
     }
 
-    /// The allocation's address, for identity checks that never deref.
+    /// The allocation's address, for identity checks that never deref; `0`
+    /// for an empty slice.
     #[must_use]
     pub fn addr(this: &Self) -> usize {
-        Owned::addr(&this.0)
+        this.0.as_ref().map_or(0, Owned::addr)
     }
 
-    /// Owning handles of this allocation.
+    /// Owning handles of this allocation; `0` for an empty slice.
     #[must_use]
     pub fn strong_count(this: &Self) -> usize {
-        Owned::strong_count(&this.0)
+        this.0.as_ref().map_or(0, Owned::strong_count)
     }
 
     /// Bytes the cell's block holds beside the slice's backing.
@@ -663,19 +681,19 @@ impl<T: Measured> Clone for OwnedSlice<T> {
 impl<T: Measured> std::ops::Deref for OwnedSlice<T> {
     type Target = [T];
     fn deref(&self) -> &[T] {
-        &self.0
+        self.0.as_deref().map_or(&[], |items| items)
     }
 }
 
 impl<T: Measured> AsRef<[T]> for OwnedSlice<T> {
     fn as_ref(&self) -> &[T] {
-        &self.0
+        self
     }
 }
 
 impl<T: Measured> std::borrow::Borrow<[T]> for OwnedSlice<T> {
     fn borrow(&self) -> &[T] {
-        &self.0
+        self
     }
 }
 
@@ -683,13 +701,13 @@ impl<'a, T: Measured> IntoIterator for &'a OwnedSlice<T> {
     type Item = &'a T;
     type IntoIter = std::slice::Iter<'a, T>;
     fn into_iter(self) -> Self::IntoIter {
-        self.0.iter()
+        self.iter()
     }
 }
 
 impl<T: Measured> Default for OwnedSlice<T> {
     fn default() -> Self {
-        Self::new(Box::new([]))
+        Self(None)
     }
 }
 
@@ -778,7 +796,7 @@ impl<T: Measured> FromIterator<T> for OwnedSlice<T> {
 
 impl<T: Measured + PartialEq> PartialEq for OwnedSlice<T> {
     fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
+        **self == **other
     }
 }
 
@@ -870,6 +888,13 @@ impl<T: Measured> WeakOwned<T> {
     pub fn strong_count(&self) -> usize {
         self.0.strong_count()
     }
+
+    /// Whether `owned` is the allocation this view names. The view keeps
+    /// the block allocated, so its address is never reused while it lives.
+    #[must_use]
+    pub fn is(&self, owned: &Owned<T>) -> bool {
+        std::ptr::eq(self.0.as_ptr(), Arc::as_ptr(&owned.0))
+    }
 }
 
 impl<T: Measured> Clone for WeakOwned<T> {
@@ -878,38 +903,45 @@ impl<T: Measured> Clone for WeakOwned<T> {
     }
 }
 
-/// A cache's hold on one owned allocation. See the module docs.
-pub struct OwnedHold(Arc<dyn Node>);
+/// A cache's hold on one owned allocation (none for an empty slice, which
+/// allocates nothing). See the module docs.
+pub struct OwnedHold(Option<Arc<dyn Node>>);
 
 impl OwnedHold {
     /// Bytes the held allocation's charge holds.
     #[must_use]
     pub fn bytes(&self) -> usize {
-        self.0
-            .slot()
-            .lock()
-            .charge
-            .as_ref()
-            .map_or(0, RetentionCharge::bytes)
+        self.0.as_ref().map_or(0, |node| {
+            node.slot()
+                .lock()
+                .charge
+                .as_ref()
+                .map_or(0, RetentionCharge::bytes)
+        })
     }
 
-    /// The held allocation's charge class.
+    /// The held allocation's charge class; an empty hold's is
+    /// [`ChargeClass::Retained`], the class a hold keeps.
     #[must_use]
     pub fn class(&self) -> ChargeClass {
-        self.0
-            .slot()
-            .lock()
-            .charge
-            .as_ref()
-            .expect("a held allocation is charged")
-            .class()
+        self.0.as_ref().map_or(ChargeClass::Retained, |node| {
+            node.slot()
+                .lock()
+                .charge
+                .as_ref()
+                .expect("a held allocation is charged")
+                .class()
+        })
     }
 }
 
 impl Drop for OwnedHold {
     fn drop(&mut self) {
+        let Some(node) = &self.0 else {
+            return;
+        };
         let released = {
-            let mut guard = self.0.slot().lock();
+            let mut guard = node.slot().lock();
             let slot = &mut *guard;
             slot.cache_holds -= 1;
             if slot.cache_holds == 0 {
@@ -934,7 +966,10 @@ impl Drop for OwnedHold {
 
 impl std::fmt::Debug for OwnedHold {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let slot = self.0.slot().lock();
+        let Some(node) = &self.0 else {
+            return f.write_str("OwnedHold(empty)");
+        };
+        let slot = node.slot().lock();
         f.debug_struct("OwnedHold")
             .field(
                 "bytes",
@@ -942,6 +977,18 @@ impl std::fmt::Debug for OwnedHold {
             )
             .field("cache_holds", &slot.cache_holds)
             .finish()
+    }
+}
+
+/// A weak view of an [`OwnedStr`] allocation (see [`OwnedStr::downgrade`]).
+#[derive(Clone)]
+pub struct WeakOwnedStr(WeakOwned<Box<str>>);
+
+impl WeakOwnedStr {
+    /// Whether `owned` is the string allocation this view names.
+    #[must_use]
+    pub fn is(&self, owned: &OwnedStr) -> bool {
+        self.0.is(&owned.0)
     }
 }
 
@@ -997,6 +1044,13 @@ impl OwnedStr {
     #[must_use]
     pub fn ptr_eq(this: &Self, other: &Self) -> bool {
         Owned::ptr_eq(&this.0, &other.0)
+    }
+
+    /// A weak view that names this string's allocation without keeping its
+    /// text or its charge: an identity check that outlives no owner.
+    #[must_use]
+    pub fn downgrade(this: &Self) -> WeakOwnedStr {
+        WeakOwnedStr(Owned::downgrade(&this.0))
     }
 
     /// Bytes one owned string of `len` bytes is charged.

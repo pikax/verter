@@ -85,8 +85,12 @@
 //! decides whether the process may retain the entry at all, so an
 //! imprecise estimate costs hit rate, never correctness.
 
+// The `HeapSize` derive names this crate by its absolute path.
+extern crate self as verter_retention;
+
 pub mod allocation;
 pub mod granular;
+pub mod heap_size;
 pub mod owned;
 pub mod shared;
 

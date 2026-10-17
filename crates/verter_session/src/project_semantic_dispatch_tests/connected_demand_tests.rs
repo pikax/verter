@@ -202,7 +202,7 @@ fn finite_mapped_batch_stops_at_its_first_refusal_and_warms_when_complete() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("K"),
+        display_name: verter_type_expr::OwnedStr::from("K"),
     });
     let mapped = graph.intern_node(SemanticNodeData::Mapped {
         source: domain,

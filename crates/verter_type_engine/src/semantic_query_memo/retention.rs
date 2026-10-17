@@ -242,6 +242,7 @@ impl SemanticGraphStore {
         // is retained with the result.
         carrier.extend(parts.lease.adopt_metadata()?);
         let mut owned = Vec::with_capacity(3);
+        owned.extend(parts.lease.hold_metadata_handles(self.charge_ctx())?);
         if let Some(diagnostics) = parts.diagnostics.owned() {
             owned.push(diagnostics.hold(self.charge_ctx())?);
         }
@@ -372,6 +373,7 @@ impl SemanticGraphStore {
         self.canonical_to_entries.storage_charge_bytes()
             + self.alias_charges.table_charged_bytes()
             + self.dep_signature_interner.storage_charge_bytes()
+            + self.derivation.lock().storage_charge_bytes()
     }
 
     /// Bytes the store's own storage is pinned for: its graph storage and

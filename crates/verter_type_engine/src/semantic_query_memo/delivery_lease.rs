@@ -40,20 +40,30 @@ impl DeliveryOwner {
         mut self,
         account: &std::sync::Arc<verter_session_query::retention::SemanticRetentionAccount>,
     ) -> std::sync::Arc<Self> {
+        let footprint = self.own_footprint();
+        footprint
+            .handles
+            .pin(verter_session_query::retention::owned::ChargeCtx::new(
+                account,
+            ));
+        self._own = Some(verter_session_query::retention::shared::CallerHold::pin(
+            account,
+            footprint.bytes,
+        ));
+        std::sync::Arc::new(self)
+    }
+
+    /// This owner's own block and the root owners' handles.
+    fn own_footprint(&self) -> verter_session_query::retention::Footprint {
         use verter_session_query::retention::allocation::{arc_block_bytes, AliasSet};
         let mut aliases = AliasSet::new();
         let bytes = arc_block_bytes(std::mem::size_of::<Self>())
             + self.roots.owned_heap_bytes(&mut aliases)
             + self.key_roots.owned_heap_bytes(&mut aliases);
-        aliases
-            .take_handles()
-            .pin(verter_session_query::retention::owned::ChargeCtx::new(
-                account,
-            ));
-        self._own = Some(verter_session_query::retention::shared::CallerHold::pin(
-            account, bytes,
-        ));
-        std::sync::Arc::new(self)
+        verter_session_query::retention::Footprint {
+            bytes,
+            handles: aliases.take_handles(),
+        }
     }
 }
 
@@ -99,16 +109,16 @@ impl SemanticDeliveryLease {
             .as_ref()
             .map(|owner| std::sync::Arc::as_ptr(owner) as usize)
     }
-    /// The bytes this delivery's own metadata is pinned for.
+    /// The bytes this delivery's own metadata is charged for: its owner's
+    /// block and the root owners it names, each by its own cell.
     #[cfg(any(test, feature = "test-support"))]
     pub fn own_charge_bytes_for_tests(&self) -> usize {
-        self.0
-            .as_ref()
-            .and_then(|owner| owner._own.as_ref())
-            .map_or(
+        self.0.as_ref().map_or(0, |owner| {
+            owner._own.as_ref().map_or(
                 0,
                 verter_session_query::retention::shared::CallerHold::bytes,
-            )
+            ) + owner.own_footprint().handles.charged_bytes()
+        })
     }
 
     /// A cache's hold on this delivery's metadata charge, for a cache that
@@ -131,6 +141,26 @@ impl SemanticDeliveryLease {
             .and_then(|owner| owner._own.as_ref())
             .map(verter_session_query::retention::shared::CallerHold::adopt)
             .transpose()
+    }
+
+    /// A cache's holds on the root owners this delivery's metadata names,
+    /// retained beside [`Self::adopt_metadata`]'s hold for as long as the
+    /// cache keeps the delivery.
+    ///
+    /// # Errors
+    ///
+    /// The account's refusal: nothing is held.
+    pub(super) fn hold_metadata_handles(
+        &self,
+        ctx: verter_session_query::retention::owned::ChargeCtx<'_>,
+    ) -> Result<
+        Box<[verter_session_query::retention::owned::OwnedHold]>,
+        verter_session_query::retention::RetentionRefusal,
+    > {
+        match self.0.as_ref() {
+            Some(owner) => owner.own_footprint().handles.hold(ctx),
+            None => Ok(Box::new([])),
+        }
     }
 
     /// A delivery rooting `roots` and holding no shared allocation, its own
@@ -198,7 +228,7 @@ impl SemanticGraphStore {
         key_roots: NodeRootSet,
     ) -> Result<SemanticDeliveryLease, QueryError> {
         let result = delivered.result;
-        let mut nodes = Vec::new();
+        let mut nodes = super::node_roots::RootIds::new();
         result.for_each_retained_node(|node| nodes.push(node));
         for diagnostic in delivered.diagnostics.map_or(&[][..], |d| &d[..]) {
             diagnostic.for_each_retained_node(|node| nodes.push(node));
@@ -237,12 +267,70 @@ impl SemanticGraphStore {
         Ok(lease)
     }
 
+    /// `lease` itself when it already roots, in this graph's arena, every
+    /// node `result` and `diagnostics` deliver (a lease the result was
+    /// stored or produced with), handed to this thread's construction owner
+    /// as a fresh lease would be; otherwise a fresh delivery lease. A value
+    /// that carries a signature kernel epoch is always leased afresh, so its
+    /// epoch lease is the one this read names.
+    ///
+    /// A reused lease still charges the allocations the delivery hands its
+    /// caller, exactly as a fresh lease would.
+    pub(crate) fn redeliver(
+        &self,
+        lease: SemanticDeliveryLease,
+        delivered: DeliveredAllocations<'_>,
+    ) -> Result<SemanticDeliveryLease, QueryError> {
+        let diagnostics = delivered.diagnostics.map_or(&[][..], |d| &d[..]);
+        if self.lease_covers(&lease, delivered.result, diagnostics) {
+            self.pin_delivered_allocations(&delivered);
+            lease.capture();
+            return Ok(lease);
+        }
+        self.lease_delivery(delivered)
+    }
+
+    /// Whether `lease` roots, in this graph's arena, every allocatable node
+    /// `result` and `diagnostics` retain, and `result` names no kernel epoch.
+    fn lease_covers(
+        &self,
+        lease: &SemanticDeliveryLease,
+        result: &QueryResult<SemanticQueryValue>,
+        diagnostics: &[crate::project_semantic_dispatch::walk::ShallowDiagnostic],
+    ) -> bool {
+        let Some(owner) = lease.0.as_ref() else {
+            return false;
+        };
+        if !owner.roots.belongs_to(&self.arena.core)
+            || matches!(
+                result,
+                QueryResult::Value(
+                    SemanticQueryValue::SignatureSet(_) | SemanticQueryValue::SignatureResult(_)
+                )
+            )
+        {
+            return false;
+        }
+        let roots = owner.roots.operands();
+        let mut covered = true;
+        let mut check = |node: crate::semantic_query::SemanticNodeId| {
+            if node.0 < super::UNALLOCATABLE_ID_FLOOR && !roots.contains(&node) {
+                covered = false;
+            }
+        };
+        result.for_each_retained_node(&mut check);
+        for diagnostic in diagnostics {
+            diagnostic.for_each_retained_node(&mut check);
+        }
+        covered
+    }
+
     pub(super) fn lease_candidate(
         &self,
         family: &super::family::FamilyKey,
         delivered: DeliveredAllocations<'_>,
     ) -> Result<SemanticDeliveryLease, QueryError> {
-        let mut nodes = Vec::new();
+        let mut nodes = super::node_roots::RootIds::new();
         family.for_each_node_id(|node| {
             if node.0 < super::UNALLOCATABLE_ID_FLOOR {
                 nodes.push(node);

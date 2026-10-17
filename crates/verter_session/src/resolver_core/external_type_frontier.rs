@@ -305,7 +305,7 @@ impl ExternalTypeFrontier {
                     domain: BudgetDomain::Frontier,
                     limit: self.budgets.frontier_symbol_visits,
                     actual: self.counters.frontier_symbol_visits,
-                    context: format!("{}::{}", pending.canonical_id, pending.exported_name),
+                    context: format!("{}::{}", pending.canonical_id, pending.exported_name).into(),
                 };
                 self.budget_failure = Some(failure.clone());
                 return Err(failure);

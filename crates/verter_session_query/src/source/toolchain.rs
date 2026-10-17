@@ -5,7 +5,7 @@
 /// This is deliberately separate from [`verter_identity::identity::ParseKey`]:
 /// it invalidates derived session values whose representation changed without
 /// claiming that identical source bytes parse differently.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub struct BuildToolchainFingerprint([u8; 32]);
 
 impl BuildToolchainFingerprint {

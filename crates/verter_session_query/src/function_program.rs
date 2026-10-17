@@ -22,7 +22,17 @@ pub use class_index::{
 /// the owner discriminates script-block owners, the name is the registered
 /// merged-symbol name — namespaces qualify `Ns.Name` exactly like the eval
 /// env registration).
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, verter_no_typeexpr::NoTypeExpr)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    verter_no_typeexpr::NoTypeExpr,
+    verter_retention::heap_size::HeapSize,
+)]
 pub struct FunctionDeclarationRef {
     /// Lexical top-level owner of the contributing statement.
     pub owner: verter_type_expr::TopLevelOwnerId,
@@ -238,7 +248,17 @@ impl Drop for FunctionDescent {
 }
 
 /// The full program identity of one served function position.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, verter_no_typeexpr::NoTypeExpr)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    verter_no_typeexpr::NoTypeExpr,
+    verter_retention::heap_size::HeapSize,
+)]
 pub struct FunctionProgramKey {
     /// The owning declaration.
     pub declaration: FunctionDeclarationRef,
@@ -269,7 +289,16 @@ pub struct FunctionParamRecord {
 }
 
 /// The kind of one local binding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_no_typeexpr::NoTypeExpr)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    verter_no_typeexpr::NoTypeExpr,
+    verter_retention::heap_size::HeapSize,
+)]
 pub enum FunctionBindingKind {
     /// A formal parameter.
     Param,
@@ -575,7 +604,7 @@ pub struct ProgramExpressionRecord {
 /// per-capture-list ordinal) can distinguish. NEVER a node id, a type, a
 /// content hash, or a span — capture types rehydrate from indexed binding /
 /// reaching-definition facts under the final type substitution.
-#[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr)]
+#[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub struct FlowBindingIdentity {
     /// The binding name.
     pub name: Arc<str>,

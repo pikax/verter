@@ -1,7 +1,7 @@
 //! Resolution budget domains and the typed failure a budget overrun reports.
 
 /// Structured failure when a budget is exceeded.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub struct BudgetExceededFailure {
     /// Which budget domain was exceeded.
     pub domain: BudgetDomain,
@@ -9,12 +9,13 @@ pub struct BudgetExceededFailure {
     pub limit: usize,
     /// Actual count at the time of failure.
     pub actual: u64,
-    /// Context about what was being resolved when the budget tripped.
-    pub context: String,
+    /// Context about what was being resolved when the budget tripped: an
+    /// owned name a delivered error shares with every clone.
+    pub context: verter_type_expr::OwnedStr,
 }
 
 /// Which resolution domain hit its budget.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub enum BudgetDomain {
     LocalClosure,
     Frontier,

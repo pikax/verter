@@ -14,6 +14,7 @@
 //! `fn raise_node_to_type_expr` exists in `crates/`.
 
 use std::sync::Arc;
+use verter_type_expr::OwnedStr;
 
 use crate::semantic_query::SurfaceView;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -1606,7 +1607,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 (self.opaque(QueryError::ExecutionAborted(abort)), None),
                             _ => (self.opaque(QueryError::Miss), None),
                         };
-                        let names: Vec<_> = type_parameters.iter().map(|p| Arc::clone(&p.name)).collect();
+                        let names: Vec<_> = type_parameters.iter().map(|p| Arc::<str>::from(&p.name)).collect();
                         let arguments: Vec<_> = type_parameters.iter().map(|p| p.param).collect();
                         let returned = self.bind_flow_return_own_clause(returned,
                             source.identity().anchor.canonical_id.as_ref(), source.identity().anchor.owner,
@@ -2796,17 +2797,15 @@ fn type_param_shell_node<C: crate::resolver_core::ResolverCapabilities>(
 ) -> SemanticNodeId {
     dispatch.graph().intern_node(SemanticNodeData::TypeParam {
         decl: crate::semantic_query::DeclIdentity {
-            canonical_id: verter_type_expr::OwnedStr::from(
-                prepared.root_identity.canonical_id.clone(),
-            ),
+            canonical_id: prepared.root_identity.canonical_id.clone(),
             owner: prepared.root_identity.owner,
             whole_hash: crate::semantic_query::HashValue::default(),
-            decl_name: verter_type_expr::OwnedStr::from(prepared.root_identity.symbol_name.clone()),
+            decl_name: prepared.root_identity.symbol_name.clone(),
         },
         param_index: u16::try_from(param.ordinal).unwrap_or(u16::MAX),
         constraint: None,
         default: None,
-        display_name: Arc::from(param.name.as_str()),
+        display_name: OwnedStr::from(param.name.as_str()),
     })
 }
 
@@ -2821,7 +2820,7 @@ fn lower_body_under_env<C: crate::resolver_core::ResolverCapabilities>(
     env: &FxHashMap<String, SemanticNodeId>,
 ) -> SemanticNodeId {
     let scope = crate::semantic_query::NodeScopeId::File {
-        canonical_id: verter_type_expr::OwnedStr::from(prepared.root_identity.canonical_id.clone()),
+        canonical_id: prepared.root_identity.canonical_id.clone(),
         owner: prepared.root_identity.owner,
         whole_hash: crate::semantic_query::HashValue::default(),
         local_scope: None,
@@ -2984,12 +2983,10 @@ fn prepared_instantiation_key_domain_is_closed_unguarded<
                         || resolved.symbol_name.as_ref() != base.decl_name.as_ref()
                 }) {
                     let resolved = crate::semantic_query::DeclIdentity {
-                        canonical_id: verter_type_expr::OwnedStr::from(
-                            resolved.canonical_id.clone(),
-                        ),
+                        canonical_id: resolved.canonical_id.clone(),
                         owner: resolved.owner,
                         whole_hash: crate::semantic_query::HashValue::default(),
-                        decl_name: verter_type_expr::OwnedStr::from(resolved.symbol_name.clone()),
+                        decl_name: resolved.symbol_name.clone(),
                     };
                     return prepared_instantiation_key_domain_is_closed(
                         dispatch, &resolved, args, budget,
@@ -3978,7 +3975,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> OpenWalk<'a, C> {
         &mut self,
         ctx: &dyn crate::resolver_core::ResolverContext<C>,
         node: SemanticNodeId,
-        data: Arc<SemanticNodeData>,
+        data: crate::semantic_query_memo::NodeData,
     ) -> bool {
         let Some(_nesting) = OpennessNesting::enter() else {
             return self.role.question().undecidable_is_open();
@@ -4426,7 +4423,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> OpenWalk<'a, C> {
         &mut self,
         ctx: &dyn crate::resolver_core::ResolverContext<C>,
         node: SemanticNodeId,
-        data: Arc<SemanticNodeData>,
+        data: crate::semantic_query_memo::NodeData,
     ) -> bool {
         // Own the carrier args so the `data` borrow can be released
         // before the `&mut self` recursion / the dispatch re-entry.

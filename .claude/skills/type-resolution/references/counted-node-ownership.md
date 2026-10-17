@@ -69,7 +69,9 @@ deferred memos, the signature store's roots on its current epoch's tokens
 (replacing the epoch once stranded tokens dominate; a read view or
 `SignatureEpochLease` of that epoch alive at the close keeps those roots until
 the last one drops, so a delivered signature result never reads a destroyed
-token node; re-rooting a stranded token uncounts it) and, through `memo::close_canonical_with_shapes`,
+token node; a closed token's root-table entry becomes a `Stranded` mark under
+the table lock, and only an intern that finds that mark re-roots and uncounts
+it, so the stranded count is exact under concurrent close and intern) and, through `memo::close_canonical_with_shapes`,
 the shape-cache entries. "Closed content" is decided per cached node by
 `NodeArenaCore::reaches_canonical_content` (file scope, a payload binding the
 content identity, or a retained child reaching such a node), memoized for one
@@ -85,9 +87,27 @@ pending log, which a close, any sidecar write past
 `DESTROYED_DRAIN_THRESHOLD`, or the release that grows the log past that
 threshold drains (`reclaim_destroyed_sidecars`; the release drains through the
 store's `SidecarSink`, weak handles bound into the arena, without blocking on a
-held sidecar lock). The log never outgrows the stale entries it removes and
-stays within the threshold at rest even when a holder's final drop follows the
-last close; `pending_destroyed_nodes` is its current count.
+held sidecar lock). A release that finds a sidecar lock held records the drain
+as owed; every sidecar lock is a `SidecarMutex` whose guard settles an owed
+drain as it unlocks (a SeqCst fence on both sides, so the obligation is never
+lost between a failed try-lock and the holder's unlock). The member-index
+`DashMap` shards are leaf-held, so the drain waits for them. The log never
+outgrows the stale entries it removes and stays within the threshold at rest
+even when a holder's final drop follows the last close under sidecar-lock
+contention; `pending_destroyed_nodes` is its current count.
+
+**Known retention bound (open).** The deferral above is per EPOCH, not per
+token: every live `SignatureEpochLease` counts as a holder, including the
+leases warm memo candidates, delivered signature values and prepared
+`ReadSignatureResult` keys keep. While any such holder is alive — usually a
+cached signature result of some still-open file — a close's released token
+roots wait in `released_roots`, so the closed file's token nodes (and the
+DAGs they retain) outlive its own cache and caller owners. The bound is the
+stranded-majority epoch replacement (`replace_epoch_if_mostly_stranded`) or
+the eviction of the last holder; `SemanticCloseReport::signature_tokens_released`
+counts roots taken from the store, not nodes freed. The exact fix roots, per
+delivered value or prepared key, the token nodes its records can read back, so
+only real readers keep them.
 
 ## Internal delivery and retained holders
 

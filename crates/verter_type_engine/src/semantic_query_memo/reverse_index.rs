@@ -144,7 +144,7 @@ const INDEX_STORAGE_GRANULE: usize = 4 * 1024;
 /// Every mutation runs under the family memo's `entries` lock (see the
 /// module docs), so the storage figures settle without racing each other.
 pub(super) struct CanonicalToEntries {
-    map: dashmap::DashMap<Arc<str>, Mutex<ShardMap>>,
+    map: dashmap::DashMap<Arc<str>, Mutex<ShardMap>, rustc_hash::FxBuildHasher>,
     storage: Mutex<IndexStorage>,
 }
 
@@ -194,7 +194,7 @@ fn shrink_drained_shard(map: &mut ShardMap) {
 }
 
 impl std::ops::Deref for CanonicalToEntries {
-    type Target = dashmap::DashMap<Arc<str>, Mutex<ShardMap>>;
+    type Target = dashmap::DashMap<Arc<str>, Mutex<ShardMap>, rustc_hash::FxBuildHasher>;
     fn deref(&self) -> &Self::Target {
         &self.map
     }
@@ -206,7 +206,7 @@ impl CanonicalToEntries {
         account: &Arc<verter_session_query::retention::SemanticRetentionAccount>,
     ) -> Self {
         Self {
-            map: dashmap::DashMap::new(),
+            map: dashmap::DashMap::default(),
             storage: Mutex::new(IndexStorage {
                 account: Some(Arc::clone(account)),
                 ..IndexStorage::default()

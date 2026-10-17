@@ -254,7 +254,7 @@ pub enum FamilyKey {
     },
     ProjectMember {
         base: SemanticNodeId,
-        member: Arc<str>,
+        member: verter_type_expr::OwnedStr,
     },
     IndexedAccess {
         base: SemanticNodeId,
@@ -295,7 +295,11 @@ pub enum FamilyKey {
         true_branch: SemanticNodeId,
         false_branch: SemanticNodeId,
         distributive: bool,
-        pending: Option<Arc<crate::semantic_query::ConditionalPendingSubstitution>>,
+        pending: Option<
+            verter_session_query::retention::owned::Owned<
+                crate::semantic_query::ConditionalPendingSubstitution,
+            >,
+        >,
     },
     /// `value_root` is the env-bearing, content-free
     /// [`crate::semantic_query::ValueRootSlotIdentity`] (R6 — carries the
@@ -513,7 +517,7 @@ pub enum FamilyKey {
     /// dims ride here ON the family key (env hashes, R6-clean). LIVE
     /// producer (build folds via the shared deferred evaluator).
     TemplateLiteralReduce {
-        pattern: Arc<[Arc<str>]>,
+        pattern: verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr>,
         args: Arc<[SemanticNodeId]>,
         resolve_env_hash: crate::semantic_query::HashValue,
         type_env_hash: crate::semantic_query::HashValue,
@@ -2130,7 +2134,7 @@ pub(crate) fn family_and_slot_in(
         SemanticQueryKey::ProjectMember { base, member, mode } => (
             FamilyKey::ProjectMember {
                 base: *base,
-                member: std::sync::Arc::<str>::from(member.as_str()),
+                member: member.clone(),
             },
             mode_to_slot(*mode),
         ),
@@ -2416,7 +2420,7 @@ pub(crate) fn family_and_slot_in(
             context,
         } => (
             FamilyKey::TemplateLiteralReduce {
-                pattern: Arc::clone(pattern),
+                pattern: pattern.clone(),
                 args: Arc::clone(args),
                 resolve_env_hash: context.resolve_env_hash,
                 type_env_hash: context.type_env_hash,

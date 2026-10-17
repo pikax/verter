@@ -420,11 +420,11 @@ fn structural_hash_discriminates_exact_infer_binder_identity() {
     let left_binder = graph.alloc_infer_binder_id();
     let right_binder = graph.alloc_infer_binder_id();
     let left = SemanticNodeData::InferRef {
-        name: Arc::from("T"),
+        name: verter_type_expr::OwnedStr::from("T"),
         binder: left_binder.clone(),
     };
     let right = SemanticNodeData::InferRef {
-        name: Arc::from("T"),
+        name: verter_type_expr::OwnedStr::from("T"),
         binder: right_binder,
     };
 
@@ -439,7 +439,7 @@ fn structural_hash_discriminates_exact_infer_binder_identity() {
         hash_in_lane(
             &graph,
             &SemanticNodeData::InferRef {
-                name: Arc::from("T"),
+                name: verter_type_expr::OwnedStr::from("T"),
                 binder: left_binder,
             },
         ),
@@ -517,8 +517,12 @@ fn structural_hash_carrier_discrimination_comes_from_args_not_head() {
 
     // Heads are identical (same name + scope, no args).
     assert_eq!(
-        foo_a.bare_ref_head().map(|(n, s)| (n.clone(), s.clone())),
-        foo_b.bare_ref_head().map(|(n, s)| (n.clone(), s.clone())),
+        foo_a
+            .bare_ref_head()
+            .map(|(n, s)| (n.to_owned(), s.clone())),
+        foo_b
+            .bare_ref_head()
+            .map(|(n, s)| (n.to_owned(), s.clone())),
         "Foo<A> and Foo<B> must share an identical head — the only difference is the arg child"
     );
     // …yet the fingerprints diverge, so the arg child is the discriminator.

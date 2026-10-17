@@ -142,7 +142,7 @@ fn node_contains_free_type_param_descends_carrier_args() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("X"),
+        display_name: verter_type_expr::OwnedStr::from("X"),
     });
 
     for kind in 0u8..3 {
@@ -219,7 +219,7 @@ fn free_param(
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("X"),
+        display_name: verter_type_expr::OwnedStr::from("X"),
     })
 }
 

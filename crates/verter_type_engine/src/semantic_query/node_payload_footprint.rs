@@ -22,8 +22,6 @@
 //! be `Copy` — a type that gains an owned allocation stops being `Copy` and
 //! fails to compile there.
 
-use std::sync::Arc;
-
 #[cfg(test)]
 use rustc_hash::FxHashSet;
 use verter_session_query::retention::allocation::{
@@ -146,30 +144,17 @@ impl<T: verter_session_query::retention::owned::Measured> PayloadHeap
     }
 }
 
-impl PayloadHeap for Arc<str> {
+impl<T: verter_session_query::retention::owned::Measured> PayloadHeap
+    for verter_session_query::retention::owned::Owned<T>
+{
     fn visit_payload_heap(&self, visitor: &mut dyn PayloadHeapVisitor) {
-        visit_arc_str(self, visitor);
-    }
-}
-
-impl<T: PayloadHeap> PayloadHeap for Arc<[T]> {
-    fn visit_payload_heap(&self, visitor: &mut dyn PayloadHeapVisitor) {
-        visit_arc_slice(self, visitor);
-    }
-}
-
-impl<T: PayloadHeap> PayloadHeap for Arc<T> {
-    fn visit_payload_heap(&self, visitor: &mut dyn PayloadHeapVisitor) {
-        let block = arc_block_bytes(std::mem::size_of::<T>());
-        if visitor.shared(allocation_key(Arc::as_ptr(self)), block) {
-            T::visit_payload_heap(self, visitor);
-        }
+        visitor.handle(&mut |aliases| self.offer(aliases));
     }
 }
 
 impl<T: PayloadHeap> PayloadHeap for PayloadArray<T> {
     fn visit_payload_heap(&self, visitor: &mut dyn PayloadHeapVisitor) {
-        self.as_arc().visit_payload_heap(visitor);
+        visit_arc_slice(self, visitor);
     }
 }
 
@@ -329,14 +314,15 @@ impl PayloadHeap for SemanticNodeData {
             }
             Self::BareRef(_) => {
                 if let Some((name, scope)) = self.bare_ref_head() {
-                    name.visit_payload_heap(visitor);
+                    // The head lends the whole text of the private name.
+                    visit_arc_str(name, visitor);
                     scope.visit_payload_heap(visitor);
                 }
                 visit_arc_slice(self.carrier_type_args(), visitor);
             }
             Self::ImportType(_) => {
                 if let Some((specifier, qualifier, _typeof_query)) = self.import_type_head() {
-                    specifier.visit_payload_heap(visitor);
+                    visit_arc_str(specifier, visitor);
                     qualifier.visit_payload_heap(visitor);
                 }
                 visit_arc_slice(self.carrier_type_args(), visitor);
@@ -454,11 +440,12 @@ impl PayloadHeap for SurfaceView {
             keyspace,
             has_index_signature,
         } = self;
-        entries.visit_payload_heap(visitor);
-        members.visit_payload_heap(visitor);
-        call_signatures.visit_payload_heap(visitor);
-        construct_signatures.visit_payload_heap(visitor);
-        index_signatures.visit_payload_heap(visitor);
+        // The lists are private to the surface and borrowed as slices.
+        visit_arc_slice(entries, visitor);
+        visit_arc_slice(members, visitor);
+        visit_arc_slice(call_signatures, visitor);
+        visit_arc_slice(construct_signatures, visitor);
+        visit_arc_slice(index_signatures, visitor);
         keyspace.visit_payload_heap(visitor);
         has_index_signature.visit_payload_heap(visitor);
     }
@@ -789,7 +776,7 @@ impl PayloadHeap for QueryError {
 
 impl PayloadHeap for RecursiveRefArgs {
     fn visit_payload_heap(&self, visitor: &mut dyn PayloadHeapVisitor) {
-        self.operands_arc().visit_payload_heap(visitor);
+        self.operands_owned().visit_payload_heap(visitor);
     }
 }
 
@@ -897,7 +884,8 @@ impl PayloadHeap for InferBinderIdentity {
                 declaration_path,
             } => {
                 scope.visit_payload_heap(visitor);
-                exact_typed_root.visit_payload_heap(visitor);
+                // A private identity field, never lent out.
+                visit_arc_slice(exact_typed_root, visitor);
                 declaration_path.visit_payload_heap(visitor);
             }
             #[cfg(any(test, feature = "test-support"))]
@@ -1090,7 +1078,16 @@ impl PayloadHeap for DeferredFlowReturnSource {
         // Fields are private to their module; its accessors expose each one,
         // the bindings as the whole contents of their shared allocation.
         self.source().visit_payload_heap(visitor);
-        visit_arc_slice(self.bindings(), visitor);
+        // The bindings are engine-internal; their names are counted with
+        // the list that holds them.
+        let bindings = self.bindings();
+        let block = arc_block_bytes(std::mem::size_of_val(bindings));
+        if visitor.shared(allocation_key(bindings.as_ptr()), block) {
+            for (name, image) in bindings {
+                visit_arc_str(name, visitor);
+                image.visit_payload_heap(visitor);
+            }
+        }
         self.receiver().visit_payload_heap(visitor);
     }
 }
@@ -1109,8 +1106,9 @@ impl PayloadHeap for DeferredCallable {
             is_abstract,
         } = self.stable_identity_parts();
         kind.visit_payload_heap(visitor);
-        params.visit_payload_heap(visitor);
-        type_parameters.visit_payload_heap(visitor);
+        // The parts are borrowed inside the engine only.
+        visit_arc_slice(params, visitor);
+        visit_arc_slice(type_parameters, visitor);
         occurrence.visit_payload_heap_ref(visitor);
         return_carrier.visit_payload_heap(visitor);
         signature_span.visit_payload_heap(visitor);

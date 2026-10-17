@@ -120,7 +120,11 @@ the cache-runtime overhaul and any feature admitting cache entries.
 
 ## Aggregate retention account
 
-`crates/verter_session_query/src/retention/mod.rs` owns
+`crates/verter_retention` owns `SemanticRetentionAccount` and its charge
+primitives (re-exported unchanged as `verter_session_query::retention`). The
+crate sits below both `verter_type_expr` and `verter_session_query`, so the
+type-expression DTO and every identity type carry its owned handles directly.
+It owns
 `SemanticRetentionAccount` — the single process-local byte account every
 host-owned semantic store charges. One account per PROCESS (not per
 project): `ProjectTypeStore::retention_account()` hands back
@@ -165,7 +169,7 @@ which is correct, because the bytes are still resident.
 
 **What a charge measures.** A charge covers the allocations its owner
 keeps reachable, by CAPACITY, under the declared conventions of
-`retention/allocation.rs` (heap block = payload rounded to 16 B plus a
+`verter_retention/src/allocation.rs` (heap block = payload rounded to 16 B plus a
 16 B header; `Arc` blocks include their counters; inline field bytes ride
 the block that embeds them) — never a fixed per-item proxy. Fact rails are
 measured by `allocation::fact_slice_bytes` (every fact's owned canonical
@@ -176,15 +180,18 @@ cost identities) by `semantic_query/allocation_footprint.rs`'s
 allocation that carries its own charge (an evidence page, a cost receipt,
 a pooled identity string, a graph node) is never charged by a holder.
 
-**Self-charged delivered allocations** (`retention/owned.rs`). Everything
+**Self-charged delivered allocations** (`verter_retention/src/owned.rs`). Everything
 a read hands its caller — the dependency rail (`DepSignature`, whose
 canonicals are `OwnedStr`s), the walker-diagnostic list
 (`WalkerDiagnostics`, whose names are `OwnedStr`s), and a value's
 outermost allocation with the lists nested in it (`OwnedSlice` /
 `Owned<T>`: flow-return and call results, candidate table, relation
 bindings, overload list, projection alternatives, runtime kinds, cycle-gate
-reasons) — is a sealed `Owned` cell that carries its charge inside the
-allocation. Every owning clone shares the one charge and the charge is
+reasons) — and every identity string any of them, a graph payload, an error
+or a diagnostic names (declaration, slot, scope, locator-anchor, function,
+root and property identities, `QueryError` names, budget contexts) — is a
+sealed `Owned` cell (`OwnedSlice`, `OwnedStr`) that carries its charge inside
+the allocation. An empty `OwnedSlice` allocates nothing and holds nothing. Every owning clone shares the one charge and the charge is
 released in the step that frees the allocation, so a clone a caller keeps
 past every read, cache and store stays charged until its own drop, with no
 sweep. No accessor exposes the raw `Arc`. A delivery pins the cells it
@@ -194,11 +201,21 @@ mints (`Owned::pin`, never refused); a cache retaining them takes an
 (`Retained → Pinned`, one step at the account's linearization point) when
 its last hold drops. A nested cell is offered to its parent's measurement,
 never counted in it, so a cell several parents share is charged once.
+A measurement returns `Footprint { bytes, handles }`: the bytes the owner
+charges itself and the handles it pins (caller) or holds (cache). A debug
+build panics when an owned cell's value reaches a raw `Arc`
+(`AliasSet::for_cell`), when a measurement drops the handles it collected,
+and when a delivered carrier counts heap outside its handles
+(`OwnedHandles::of`). The arena pins the owned handles its payloads reach,
+so a name cloned out of a node payload stays charged after the arena lets
+go; a released slot whose payload a reader still holds keeps the payload's
+block and heap charged until the arena's next mutation after the reader
+lets go.
 
-**Shared registered allocations** (`retention/shared.rs`). An allocation
+**Shared registered allocations** (`verter_retention/src/shared.rs`). An allocation
 cache owners alias without handing it out — a build's fact carrier shared
-by its root, prefix backfills and SCC members; the self-root list; a raw
-identity string an owned cell still reaches — is charged ONCE through the
+by its root, prefix backfills and SCC members; the self-root list; a raw leaf
+string a registered carrier still reaches (a fact's canonical, a self-root) — is charged ONCE through the
 store's `AliasCharges` registry, keyed by allocation address (the
 registered charge co-owns the allocation, so the address cannot be reused
 while it lives). Cache owners hold `CacheHold`s, callers `CallerHold`s;
@@ -211,7 +228,7 @@ its lease metadata, its reverse-index registrations) and is released the
 moment the candidate drains; `delivered` are its `OwnedHold`s; a refusal
 summary uses the same split.
 
-**Graph storage is pinned** (`retention/granular.rs`). The arena's live
+**Graph storage is pinned** (`verter_retention/src/granular.rs`). The arena's live
 chunks, payload blocks and dedup tables, every signature epoch's tables
 (boxcar buckets, record heap, dedup indexes, side maps), and every flight
 cell are liveness obligations of the graph: `Pinned`, charged through
@@ -220,7 +237,16 @@ less than two granules), released with the storage — a retired epoch with
 its last holder. `HostRetentionSnapshot::semantic_graph_storage_bytes`
 reports the arena's and current epoch's part of `pinned_bytes`. A memo
 family's container (key, slot lists, budget-ledger record) is charged when
-the family is keyed and released with it.
+the family is keyed and released with it. The origin-edge store's tables,
+edge lists, source lists and pooled fence blocks are part of the memo's
+bookkeeping pin, settled on every mutation.
+
+**Not yet charged.** The content-addressed artifact caches driven by
+`cache_runtime::lookup` (`ArtifactNode`: the component-meta shape,
+declaration-lookup, owner-collection and resolvability caches, the
+flow-slice stores, the compile-output caches) claim their entries'
+evidence pages, and their entries' owned identity strings charge
+themselves, but an entry's own allocations and value carry no charge yet.
 
 **Refusal routing.** `RetentionRefusal::{Oversized, Pressure,
 ActiveExhausted}` all map to `NonAdmissionReason::RetentionPressure`,
@@ -231,9 +257,11 @@ from `BudgetExceeded`, which means the compute stopped early and its
 value may be partial.
 
 **Participants** (each charges the account, none keeps a parallel byte
-quota): `IdentityInterner` (each pooled `Arc` block and map slot,
-`pooled_entry_bytes`; sheds pool-only entries
-and retries once on refusal, else returns the string un-pooled),
+quota): `IdentityInterner` (each pooled `OwnedStr` is held by the pool and
+charged by its own cell, its map slot is a separate charge,
+`pooled_entry_bytes`; sheds pool-only entries and retries once on refusal,
+else returns the string un-pooled; when the pool lets go, the string's
+charge passes to the identities still holding it),
 `ComponentMetaResultDb` via `BoundedCandidateMap` (the charge rides the
 `RetentionCandidate`), the `SemanticGraphStore` family memo (the charges
 ride `MemoEntry::retention`; `warm_publish_one` refusal returns

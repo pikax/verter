@@ -228,8 +228,8 @@ fn whole_hash_read_site_5_decl_identity_hash_alongside_content_free_slot() {
     // the legacy `DeclIdentity`. The slot has six fields (R7) and
     // does NOT include `whole_hash`.
     let slot_present = source.contains("pub struct ResolvedDeclSlotIdentity");
-    let slot_six_fields = source.contains("pub defining_canonical: Arc<str>")
-        && source.contains("pub merged_symbol_name: Arc<str>")
+    let slot_six_fields = source.contains("pub defining_canonical: OwnedStr")
+        && source.contains("pub merged_symbol_name: OwnedStr")
         && source.contains("pub symbol_space: SemanticSymbolSpace")
         && source.contains("pub project_identity: u32")
         && source.contains("pub type_env_hash: HashValue")

@@ -1011,10 +1011,41 @@ fn page_canonical_at_width(mut entries: Vec<FactVersionRef>, width: usize) -> Ve
 /// tracer. It never compacts: compaction needs a tracer's live basis.
 #[must_use]
 pub fn seal_canonical_signature(mut facts: Vec<FactVersionRef>) -> Arc<[FactVersionRef]> {
-    facts.sort_unstable_by(compare_fact_refs);
-    facts.dedup();
+    sort_dedup_facts(&mut facts);
     crate::facts::fact_cache::drop_subsumed_receipts(&mut facts);
     Arc::from(page_canonical(facts))
+}
+
+/// The most facts appended past a canonical prefix that are placed into it
+/// one by one rather than by sorting the whole collection.
+const APPENDED_TAIL_MAX: usize = 8;
+
+/// Sort `facts` into canonical order and drop duplicates. A hand-assembled
+/// signature is usually a canonical set with a few facts appended (a
+/// self-root beside the traced set): those are placed into the strictly
+/// increasing prefix by binary search, which is the same set in the same
+/// order as a full sort and deduplication.
+fn sort_dedup_facts(facts: &mut Vec<FactVersionRef>) {
+    let mut prefix = facts.len().min(1);
+    while prefix < facts.len()
+        && compare_fact_refs(&facts[prefix - 1], &facts[prefix]) == std::cmp::Ordering::Less
+    {
+        prefix += 1;
+    }
+    if prefix == facts.len() {
+        return;
+    }
+    if facts.len() - prefix > APPENDED_TAIL_MAX {
+        facts.sort_unstable_by(compare_fact_refs);
+        facts.dedup();
+        return;
+    }
+    let tail = facts.split_off(prefix);
+    for fact in tail {
+        if let Err(at) = facts.binary_search_by(|held| compare_fact_refs(held, &fact)) {
+            facts.insert(at, fact);
+        }
+    }
 }
 
 /// Canonical ordering for [`FactVersionRef`] values. Used by

@@ -652,29 +652,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let (_connected_guard, preexisting_trip) = self.enter_connected_demand(false);
         let query_depth_guard =
             self.charge_query_entry(key, preexisting_trip, nesting.query_levels() > 0)?;
-        // A result this dispatcher's build already published answers before
-        // the memo is looked up.
-        match self.replay_kept_read(key, nesting) {
-            super::KeptReplay::Served(read, held) => {
-                match carrier {
-                    Some(slot) => *slot = Some(held),
-                    None => held.bubble_via_tls(),
-                }
-                return Err(self.attribute_query_read(
-                    key,
-                    false,
-                    read,
-                    &CarrierNormalizationPrelude::none(),
-                ));
-            }
-            super::KeptReplay::Refused(_) => {
-                let attempt = self
-                    .graph()
-                    .begin_query_recompute(self.snapshot.flags(), key.clone())?;
-                return Ok((attempt, query_depth_guard));
-            }
-            super::KeptReplay::Absent => {}
-        }
         let mut capture = match carrier {
             Some(slot) => ReadCapture::deferring_carrier(slot),
             None => ReadCapture::default(),
@@ -1207,7 +1184,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     &mut ReadCapture::deferring_carrier(&mut carrier),
                 );
                 if let Some(kept) = kept {
-                    self.keep_published(&frame.key, &read, kept, frame.computed_at, false);
+                    self.keep_published(&frame.key, &read, kept, frame.computed_at);
                 }
                 return QueryDelivery {
                     read: self.attribute_query_read(
@@ -1231,13 +1208,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             let published = settled.published_carrier();
                             let read = settled.complete(self.ctx, &mut capture);
                             if let Some(carrier) = published {
-                                self.keep_published(
-                                    &frame.key,
-                                    &read,
-                                    carrier,
-                                    frame.computed_at,
-                                    true,
-                                );
+                                self.keep_published(&frame.key, &read, carrier, frame.computed_at);
                             }
                             read
                         }
