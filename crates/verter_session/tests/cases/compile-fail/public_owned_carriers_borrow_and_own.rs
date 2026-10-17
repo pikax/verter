@@ -113,7 +113,9 @@ fn spread_through_a_dispatcher<C: ResolverCapabilities>(
     dispatch: &ProjectSemanticDispatch<'_, C>,
     formula: &ObjectProjectionFormula,
 ) -> usize {
-    dispatch.spread_formula_positive_members_for_macro(formula).len()
+    dispatch
+        .spread_formula_positive_members_for_macro(formula)
+        .map_or(0, |members| members.len())
 }
 
 fn keep_error(error: &QueryError) -> QueryError {

@@ -6102,7 +6102,7 @@ pub struct SemanticGraphStats {
 /// node that carries the error owns them, and a reader reaches them only
 /// through that node's lease.
 #[derive(Clone, PartialEq, Eq, Hash, Default)]
-pub struct RecursiveRefArgs(Arc<[SemanticNodeId]>);
+pub struct RecursiveRefArgs(verter_type_expr::OwnedSlice<SemanticNodeId>);
 
 impl RecursiveRefArgs {
     /// The operands, for engine-internal construction and traversal.
@@ -6111,7 +6111,7 @@ impl RecursiveRefArgs {
     }
 
     /// The operand allocation, for its retained footprint.
-    pub(crate) fn operands_arc(&self) -> &Arc<[SemanticNodeId]> {
+    pub(crate) fn operands_owned(&self) -> &verter_type_expr::OwnedSlice<SemanticNodeId> {
         &self.0
     }
 
@@ -6143,25 +6143,25 @@ impl std::fmt::Debug for RecursiveRefArgs {
 
 impl From<Arc<[SemanticNodeId]>> for RecursiveRefArgs {
     fn from(nodes: Arc<[SemanticNodeId]>) -> Self {
-        Self(nodes)
+        Self(verter_type_expr::OwnedSlice::from(nodes.to_vec()))
     }
 }
 
 impl From<Vec<SemanticNodeId>> for RecursiveRefArgs {
     fn from(nodes: Vec<SemanticNodeId>) -> Self {
-        Self(Arc::from(nodes))
+        Self(verter_type_expr::OwnedSlice::from(nodes))
     }
 }
 
 impl From<&[SemanticNodeId]> for RecursiveRefArgs {
     fn from(nodes: &[SemanticNodeId]) -> Self {
-        Self(Arc::from(nodes))
+        Self(verter_type_expr::OwnedSlice::from(nodes.to_vec()))
     }
 }
 
 impl<const N: usize> From<[SemanticNodeId; N]> for RecursiveRefArgs {
     fn from(nodes: [SemanticNodeId; N]) -> Self {
-        Self(Arc::from(Vec::from(nodes)))
+        Self(verter_type_expr::OwnedSlice::from(Vec::from(nodes)))
     }
 }
 

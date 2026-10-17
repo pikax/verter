@@ -30,9 +30,8 @@
 
 use std::sync::Arc;
 
-use verter_session_query::retention::allocation::{
-    arc_block_bytes, arc_slice_block_bytes, heap_block_bytes, AliasSet,
-};
+use rustc_hash::FxHashSet;
+use verter_session_query::retention::allocation::{arc_block_bytes, heap_block_bytes, AliasSet};
 
 use super::ProjectSemanticDispatch;
 use crate::semantic_query::allocation_footprint::{copy_inline, OwnedHeap};
@@ -42,12 +41,33 @@ use crate::semantic_query::{
     PositiveKeyFact, PositiveKeyPresence, ProjectionEvidence, PropertyKey, SemanticNodeId,
 };
 
-/// An `Arc<T>`'s block and the heap its value owns, once per `aliases`.
-fn arc_value_bytes<T: OwnedHeap>(value: &Arc<T>, aliases: &mut AliasSet) -> usize {
-    if aliases.first(value) {
-        arc_block_bytes(std::mem::size_of::<T>()) + T::owned_heap_bytes(value, aliases)
-    } else {
-        0
+/// The measurement of a product's interior: its shared nodes and
+/// fragments are private to the product — no caller can clone one out of the
+/// owned cell — so each is counted once by pointer here, while the owned
+/// handles the interior reaches (names, nested formulas) go to `aliases`.
+struct Interior<'a> {
+    aliases: &'a mut AliasSet,
+    seen: FxHashSet<usize>,
+}
+
+impl Interior<'_> {
+    fn first<T: ?Sized>(&mut self, value: &Arc<T>) -> bool {
+        self.seen.insert(Arc::as_ptr(value).cast::<()>() as usize)
+    }
+
+    /// An `Arc<T>`'s block and the heap its value owns, once.
+    fn value<T>(&mut self, value: &Arc<T>, heap: impl FnOnce(&T, &mut Self) -> usize) -> usize {
+        if self.first(value) {
+            arc_block_bytes(std::mem::size_of::<T>()) + heap(value, self)
+        } else {
+            0
+        }
+    }
+
+    /// An `Arc<[T]>`'s block, or `None` when already counted.
+    fn slice_block<T>(&mut self, value: &Arc<[T]>) -> Option<usize> {
+        self.first(value)
+            .then(|| arc_block_bytes(std::mem::size_of_val::<[T]>(value)))
     }
 }
 
@@ -490,8 +510,13 @@ impl OwnedHeap for SpreadProduct {
             policy,
             closed,
         } = self;
-        node_bytes(root, aliases)
-            + selector_bytes(selector, aliases)
+        node_bytes(
+            root,
+            &mut Interior {
+                aliases,
+                seen: FxHashSet::default(),
+            },
+        ) + selector_bytes(selector, aliases)
             + copy_inline(policy)
             + copy_inline(closed)
     }
@@ -515,72 +540,67 @@ fn selector_bytes(selector: &ObjectProjectionSelector, aliases: &mut AliasSet) -
     }
 }
 
-fn node_bytes(node: &ProductNode, aliases: &mut AliasSet) -> usize {
+fn node_bytes(node: &ProductNode, interior: &mut Interior<'_>) -> usize {
     match node {
-        ProductNode::Leaf(leaf) => arc_value_bytes(leaf, aliases),
-        ProductNode::Choice(arms) | ProductNode::Overlay(arms) => arc_value_bytes(arms, aliases),
-        ProductNode::Nested(nested) => arc_value_bytes(nested, aliases),
-        ProductNode::Finished(alternative) => arc_value_bytes(alternative, aliases),
+        ProductNode::Leaf(leaf) => interior.value(leaf, leaf_bytes),
+        ProductNode::Choice(arms) | ProductNode::Overlay(arms) => interior.value(arms, arms_bytes),
+        ProductNode::Nested(nested) => interior.value(nested, |nested, interior| {
+            let NestedProduct { operand, formula } = nested;
+            copy_inline(operand) + formula.owned_heap_bytes(interior.aliases)
+        }),
+        ProductNode::Finished(alternative) => interior
+            .value(alternative, |alternative, interior| {
+                alternative.owned_heap_bytes(interior.aliases)
+            }),
     }
 }
 
-impl OwnedHeap for ProductArms {
-    fn owned_heap_bytes(&self, aliases: &mut AliasSet) -> usize {
-        let Self {
-            nodes,
-            marks,
-            bounds,
-        } = self;
-        heap_block_bytes(std::mem::size_of_val::<[ProductNode]>(nodes))
-            + nodes
-                .iter()
-                .map(|node| node_bytes(node, aliases))
-                .sum::<usize>()
-            + heap_block_bytes(std::mem::size_of_val::<[u64]>(marks))
-            + copy_inline(bounds)
-    }
+fn arms_bytes(arms: &ProductArms, interior: &mut Interior<'_>) -> usize {
+    let ProductArms {
+        nodes,
+        marks,
+        bounds,
+    } = arms;
+    heap_block_bytes(std::mem::size_of_val::<[ProductNode]>(nodes))
+        + nodes
+            .iter()
+            .map(|node| node_bytes(node, interior))
+            .sum::<usize>()
+        + heap_block_bytes(std::mem::size_of_val::<[u64]>(marks))
+        + copy_inline(bounds)
 }
 
-impl OwnedHeap for NestedProduct {
-    fn owned_heap_bytes(&self, aliases: &mut AliasSet) -> usize {
-        let Self { operand, formula } = self;
-        copy_inline(operand) + formula.owned_heap_bytes(aliases)
-    }
-}
-
-impl OwnedHeap for ProductLeaf {
-    fn owned_heap_bytes(&self, aliases: &mut AliasSet) -> usize {
-        match self {
-            Self::Direct {
-                program,
-                effect,
-                closed,
-            } => copy_inline(program) + copy_inline(effect) + copy_inline(closed),
-            Self::Spread(SpreadFragment {
-                members,
-                indices,
-                residual,
-            }) => {
-                let mut bytes = copy_inline(residual);
-                if let Some(block) = arc_slice_block_bytes(members, aliases) {
-                    bytes += block;
-                    for member in members.iter() {
-                        bytes += member_bytes(member, aliases);
-                    }
+fn leaf_bytes(leaf: &ProductLeaf, interior: &mut Interior<'_>) -> usize {
+    match leaf {
+        ProductLeaf::Direct {
+            program,
+            effect,
+            closed,
+        } => copy_inline(program) + copy_inline(effect) + copy_inline(closed),
+        ProductLeaf::Spread(SpreadFragment {
+            members,
+            indices,
+            residual,
+        }) => {
+            let mut bytes = copy_inline(residual);
+            if let Some(block) = interior.slice_block(members) {
+                bytes += block;
+                for member in members.iter() {
+                    bytes += member_bytes(member, interior.aliases);
                 }
-                if let Some(block) = arc_slice_block_bytes(indices, aliases) {
-                    bytes += block;
-                    for index in indices.iter() {
-                        bytes += index.owned_heap_bytes(aliases);
-                    }
+            }
+            if let Some(block) = interior.slice_block(indices) {
+                bytes += block;
+                for index in indices.iter() {
+                    bytes += index.owned_heap_bytes(interior.aliases);
                 }
-                bytes
             }
-            Self::CopiedWrites { programs, writes } => {
-                arc_slice_block_bytes(programs, aliases).unwrap_or(0) + copy_inline(writes)
-            }
-            Self::Residual { operand, class } => copy_inline(operand) + copy_inline(class),
+            bytes
         }
+        ProductLeaf::CopiedWrites { programs, writes } => {
+            interior.slice_block(programs).unwrap_or(0) + copy_inline(writes)
+        }
+        ProductLeaf::Residual { operand, class } => copy_inline(operand) + copy_inline(class),
     }
 }
 

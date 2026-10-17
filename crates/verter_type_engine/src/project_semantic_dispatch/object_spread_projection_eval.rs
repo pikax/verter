@@ -1214,6 +1214,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             else {
                 break;
             };
+            // Pay for the link (its tail scan and both id lists) before
+            // growing them: the chain is as long as the nesting is deep.
+            self.charge_spread_construction(
+                1 + tail.len(),
+                2 * std::mem::size_of::<SemanticNodeId>(),
+            )?;
             if !tail.iter().all(|effect| {
                 matches!(effect, ObjectConstructionEffect::DirectProperty(property)
                     if !property.optional

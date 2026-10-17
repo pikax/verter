@@ -789,7 +789,7 @@ impl PayloadHeap for QueryError {
 
 impl PayloadHeap for RecursiveRefArgs {
     fn visit_payload_heap(&self, visitor: &mut dyn PayloadHeapVisitor) {
-        self.operands_arc().visit_payload_heap(visitor);
+        self.operands_owned().visit_payload_heap(visitor);
     }
 }
 

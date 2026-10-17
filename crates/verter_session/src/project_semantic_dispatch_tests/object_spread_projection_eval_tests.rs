@@ -5065,3 +5065,60 @@ fn a_selected_key_read_grows_with_the_arms_not_their_product() {
         "doubling the arms must keep the read linear: {small} -> {large}"
     );
 }
+
+/// A chain of nested property-only spreads (`p(i) = { ...p(i-1), a(i): 0 }`)
+/// is paid for link by link before its id lists grow: the charged work grows with the chain, so a small connected allowance
+/// stops a long chain before it is traversed.
+#[test]
+fn a_nested_property_spread_chain_is_charged_before_it_is_built() {
+    let chain = |host: &VerterHost, links: usize| {
+        let graph = host.project_type_store().semantic_graph();
+        let zero = graph.intern_node(SemanticNodeData::Literal(
+            verter_type_engine::semantic_query::LiteralValue::Number(0.0),
+        ));
+        let mut inner = program(graph, [property("a0", zero, false)]);
+        for link in 1..links {
+            inner = program(
+                graph,
+                [
+                    ObjectConstructionEffect::Spread(inner),
+                    property(&format!("a{link}"), zero, false),
+                ],
+            );
+        }
+        program(
+            graph,
+            [
+                ObjectConstructionEffect::Spread(inner),
+                property("x", zero, false),
+            ],
+        )
+    };
+    let query = |dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+                 root| {
+        dispatch.execute(SemanticQueryKey::ProjectObjectSpread {
+            program: root,
+            selector: ObjectProjectionSelector::Key(key("x")),
+            context: context(ExactOptionalPropertyPolicy::Disabled),
+        })
+    };
+    let work = |links: usize| {
+        let host = host();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let root = chain(&host, links);
+        let (result, usage) =
+            verter_type_engine::project_semantic_dispatch::connected_demand::with_connected_work_capture_for_tests(
+                || query(&dispatch, root),
+            );
+        assert!(
+            matches!(result, QueryResult::Value(_)),
+            "the chain builds within the production allowance: {result:?}"
+        );
+        usage.work
+    };
+    let (short, long) = (work(40), work(400));
+    assert!(
+        long >= short + 300,
+        "the chain's links are charged: {short} -> {long}"
+    );
+}
