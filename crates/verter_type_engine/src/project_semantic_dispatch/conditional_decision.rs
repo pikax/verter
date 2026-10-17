@@ -735,6 +735,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     recovered = true;
                     value
                 }
+                // A decision whose run waits on a read drops that run:
+                // reading on, it reaches the reads the remaining positions
+                // make in this run rather than one position per run.
+                _ if self.decision_waits() => element.value,
                 _ => return None,
             };
             let mut position = element.copy();

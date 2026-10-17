@@ -101,32 +101,38 @@ pub(super) enum FrameBuild {
 }
 
 /// A conditional type's decision between its steps: the answers to the
-/// instantiations and `typeof`s its decision read, and the one it waits
-/// on.
+/// instantiations and `typeof`s its decision read, the one it waits on and
+/// the others its last run reached without an answer.
 ///
 /// The decision procedure is a function of its operands and of those
-/// answers. A step runs it with the answers the frame holds; a read none of
-/// them answers becomes the frame's need, and the step's run is discarded
-/// — its observations with it — to run again once the need is delivered.
-/// No read is ever evaluated in place one native level deeper, so a chain
-/// of conditionals each deciding over the one before is a chain of frames.
+/// answers. A step runs it with the answers the frame holds; every read
+/// none of them answers becomes one of the frame's needs, and the step's
+/// run is discarded — its observations with it — to run again once each of
+/// them is delivered. No read is ever evaluated in place one native level
+/// deeper, so a chain of conditionals each deciding over the one before is
+/// a chain of frames, and a decision over a wide union runs again once
+/// for its operands, not once per member.
 #[derive(Default)]
 pub(super) struct ConditionalBuild {
     answers: FxHashMap<SemanticQueryKey, QueryDelivery>,
     awaiting: Option<SemanticQueryKey>,
     /// The claim the awaited read entered with, until the runtime takes it.
     claim: Option<ClaimAttempt>,
+    /// The other reads the last run reached without an answer, in the order
+    /// it reached them, each with the claim it entered with.
+    pending: std::collections::VecDeque<(SemanticQueryKey, ClaimAttempt)>,
 }
 
 /// What a running conditional decision's reads are answered from: its
-/// frame's answers, and the first read they do not answer.
+/// frame's answers, and the reads they do not answer.
 pub(super) struct DecisionSeam {
     answers: FxHashMap<SemanticQueryKey, QueryDelivery>,
-    need: Option<SemanticQueryKey>,
+    /// The reads the run reached that no answer holds, in the order it
+    /// reached them, each with the claim it entered with for the runtime
+    /// to produce it.
+    needs: Vec<(SemanticQueryKey, ClaimAttempt)>,
     /// The frame depth a needed demand's own frame runs at.
     depth: u32,
-    /// The claim the need entered with, for the runtime to produce it.
-    claim: Option<ClaimAttempt>,
     /// How many queries the decision reached are evaluating in place now.
     /// Inside one, a read the answers hold is still answered by them, but
     /// any other evaluates as it would anywhere: a query evaluated in place
@@ -154,7 +160,7 @@ impl Drop for NestedDecisionQuery<'_> {
 pub(super) struct InstantiateFrame<'p, 'a, C: crate::resolver_core::ResolverCapabilities> {
     dispatch: &'p ProjectSemanticDispatch<'a, C>,
     key: SemanticQueryKey,
-    lease: Option<ProducerLease<'p>>,
+    producer: Option<FrameProducer<'p>>,
     tracer: Option<crate::fact_signature_helpers::StepwiseFactTracer<'p, C::Clocks>>,
     taint: BuildLocalTaint,
     build: Option<FrameBuild>,
@@ -176,7 +182,7 @@ pub(super) struct InstantiateFrame<'p, 'a, C: crate::resolver_core::ResolverCapa
 impl<C: crate::resolver_core::ResolverCapabilities> Drop for InstantiateFrame<'_, '_, C> {
     fn drop(&mut self) {
         // A build stopped between its steps leaves the declaration it
-        // entered; its lease aborts its flight on drop.
+        // entered; its producer lease aborts its flight on drop.
         if let Some((identity, args)) = self.active.take() {
             self.dispatch.leave_instantiate_active(&identity, &args);
         }
@@ -184,6 +190,27 @@ impl<C: crate::resolver_core::ResolverCapabilities> Drop for InstantiateFrame<'_
         // charged is its consumer's.
         if self.recording {
             self.dispatch.connected_demand.abandon_cost_scope();
+        }
+    }
+}
+
+/// What produces a frame's demand: the family memo's producer lease, or —
+/// for a cheap intermediate nested in another computation
+/// ([`super::completes_request_locally`]) — the request's own completion of
+/// the claim its lookup missed, open on the dispatcher until it completes.
+pub(super) enum FrameProducer<'p> {
+    Lease(ProducerLease<'p>),
+    RequestLocal {
+        attempt: ClaimAttempt,
+        _open: super::RequestLocalOpen<'p>,
+    },
+}
+
+impl FrameProducer<'_> {
+    fn cost_identity(&self) -> super::cost_receipt::CostIdentity {
+        match self {
+            Self::Lease(lease) => lease.cost_identity(),
+            Self::RequestLocal { attempt, .. } => attempt.cost_identity(),
         }
     }
 }
@@ -196,6 +223,28 @@ pub(super) struct PendingClaim<'p> {
     attempt: Option<ClaimAttempt>,
     /// How the claim's result is read: the needed key's frame depth.
     nesting: Nesting,
+}
+
+impl<'p, 'a, C: crate::resolver_core::ResolverCapabilities> QueryProgram<'p, 'a, C> {
+    /// The frame that produces `key` one level below the needing frame.
+    fn producing_frame(
+        &self,
+        key: &SemanticQueryKey,
+        producer: FrameProducer<'p>,
+    ) -> QueryFrame<'p, 'a, C> {
+        QueryFrame::Instantiate(Box::new(InstantiateFrame {
+            dispatch: self.dispatch,
+            key: key.clone(),
+            producer: Some(producer),
+            tracer: None,
+            taint: BuildLocalTaint::default(),
+            build: None,
+            active: None,
+            depth: self.child_depth,
+            recording: false,
+            computed_at: self.dispatch.workspace_edit(),
+        }))
+    }
 }
 
 impl<'p, 'a, C: crate::resolver_core::ResolverCapabilities> Program for QueryProgram<'p, 'a, C> {
@@ -232,6 +281,23 @@ impl<'p, 'a, C: crate::resolver_core::ResolverCapabilities> Program for QueryPro
                 ),
                 carrier: Some(carrier),
             }));
+        }
+        // A cheap intermediate nested in the drive completes for this
+        // request alone, as it does nested in a synchronous build: its
+        // frame produces it without the family memo's claim.
+        if dispatch.request_local_is_open(key) {
+            dispatch.connected_demand.note_divergence_certificate();
+            return Start::Answer(Ok(dispatch.recursion_delivery(key, Recursion::SamePath)));
+        }
+        if dispatch.completes_nested_request_locally(key) {
+            let open = super::RequestLocalOpen::enter(&dispatch.request_local_open, key);
+            return Start::Produce(self.producing_frame(
+                key,
+                FrameProducer::RequestLocal {
+                    attempt,
+                    _open: open,
+                },
+            ));
         }
         let (claim, carrier) = loop {
             let mut carrier = None;
@@ -280,18 +346,7 @@ impl<'p, 'a, C: crate::resolver_core::ResolverCapabilities> Program for QueryPro
                 nesting,
             }),
             Claim::Produce(lease) => {
-                Start::Produce(QueryFrame::Instantiate(Box::new(InstantiateFrame {
-                    dispatch,
-                    key: key.clone(),
-                    lease: Some(lease),
-                    tracer: None,
-                    taint: BuildLocalTaint::default(),
-                    build: None,
-                    active: None,
-                    depth: self.child_depth,
-                    recording: false,
-                    computed_at: dispatch.workspace_edit(),
-                })))
+                Start::Produce(self.producing_frame(key, FrameProducer::Lease(lease)))
             }
         }
     }
@@ -433,6 +488,19 @@ impl<'p, 'a, C: crate::resolver_core::ResolverCapabilities> Program for QueryPro
 }
 
 impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
+    /// Whether a demand of `key` a frame needs completes for this request
+    /// alone, outside the family memo's claim and admission: exactly when a
+    /// read of it nested in a synchronous build does
+    /// ([`super::completes_request_locally`]) — outside every checker
+    /// obligation and every forced operand, and not already produced on this
+    /// task's path.
+    fn completes_nested_request_locally(&self, key: &SemanticQueryKey) -> bool {
+        super::completes_request_locally(key)
+            && self.active_operand_evidence.borrow().is_empty()
+            && self.dispatch_txn.borrow().obligations.decides_root()
+            && !self.graph().is_same_path_claim(key)
+    }
+
     /// Whether `key` runs on the continuation runtime when it is evaluated
     /// outside any drive: an instantiation or a `typeof` read for its value
     /// alone. A `typeof` whose value's type lowers from its authored value
@@ -697,10 +765,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 
     fn consume_delivery(&self, delivery: QueryDelivery, depth: u32) -> SemanticNodeId {
-        match self
-            .read_delivery(delivery, Some(Nesting::Frame { depth }))
-            .value
-        {
+        match self.read_delivery(delivery, Nesting::Frame { depth }).value {
             QueryResult::Value(SemanticQueryValue::TypeNode(node)) => node,
             _ => self.opaque(QueryError::Miss),
         }
@@ -708,15 +773,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 
     /// The read a delivery answers its consumer with: its carrier replayed
     /// into the tracers active now, its receipt recorded as the consumer's
-    /// prerequisite read the way `nesting` names (when it is the
-    /// consumer's to pay), its rails folded into the consumer's taint —
-    /// what the read's own entry leaves on its reader.
-    fn read_delivery(&self, delivery: QueryDelivery, nesting: Option<Nesting>) -> ValueRead {
+    /// prerequisite read the way `nesting` names, its rails folded into the
+    /// consumer's taint — what the read's own entry leaves on its reader.
+    fn read_delivery(&self, delivery: QueryDelivery, nesting: Nesting) -> ValueRead {
         let QueryDelivery { read, carrier } = delivery;
         if let Some(carrier) = carrier {
             carrier.bubble_via_tls();
         }
-        if let (Some(receipt), Some(nesting)) = (read.receipt.priced(), nesting) {
+        if let Some(receipt) = read.receipt.priced() {
             self.connected_demand.record_prerequisite(receipt, nesting);
         }
         self.fold_cache_read_rails(
@@ -747,6 +811,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .expect("a delivery answers the read its decision waited on");
             build.answers.insert(answered, delivery);
         }
+        // The last run reached more reads without an answer: each is needed
+        // before the decision runs again.
+        if let Some((need, claim)) = build.pending.pop_front() {
+            build.awaiting = Some(need.clone());
+            build.claim = Some(claim);
+            return InstantiatePoll::Need(need);
+        }
         let SemanticQueryKey::Conditional {
             check,
             extends,
@@ -760,8 +831,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         };
         let installed = self.decision_seam.replace(Some(DecisionSeam {
             answers: std::mem::take(&mut build.answers),
-            need: None,
-            claim: None,
+            needs: Vec::new(),
             depth,
             nested: 0,
         }));
@@ -781,14 +851,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .take()
             .expect("the decision's seam stays installed for its run");
         build.answers = seam.answers;
-        let output = match seam.need {
-            Some(need) => match run.discard() {
+        let mut needs = seam.needs.into_iter();
+        let output = match needs.next() {
+            Some((need, claim)) => match run.discard() {
                 // An aborted run is the decision's answer: its abort is
                 // observed, never discarded.
                 Err(abort) => self.aborted_build_output(abort),
                 Ok(_) => {
                     build.awaiting = Some(need.clone());
-                    build.claim = seam.claim;
+                    build.claim = Some(claim);
+                    build.pending = needs.collect();
                     return InstantiatePoll::Need(need);
                 }
             },
@@ -814,10 +886,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// `typeof` the decision's frame holds the answer to reads it. Any other
     /// one the decision reads itself enters as the frame's need would: a
     /// result the memo serves warm answers it at once, and joins the
-    /// frame's answers; one that must be computed becomes the frame's need
-    /// (when the run does not wait on one already), its claim kept for the
-    /// runtime to produce it, and reads as a typed gap nothing built from it
-    /// keeps. A query the decision evaluates in place reads only the frame's
+    /// frame's answers; one that must be computed becomes one of the frame's
+    /// needs, its claim kept for the runtime to produce it, and reads as a
+    /// typed gap nothing built from it keeps. A query the decision evaluates in place reads only the frame's
     /// answers here and evaluates anything else as it would anywhere.
     /// `None` when no decision runs here, or for any other query.
     pub(super) fn read_at_decision_seam(&self, key: &SemanticQueryKey) -> Option<ValueRead> {
@@ -828,13 +899,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return None;
         }
         // The answer, or what the read does without one. An answer was
-        // computed in a frame of its own, the needed demand's, which the
-        // decision's frame paid as its need when its own run read it: a
-        // query the decision evaluates in place reads it as a value the
-        // decision already holds, its carrier and rails and no cost of its
-        // own.
+        // computed in a frame of its own, the needed demand's, so it reads
+        // as that frame's result wherever the decision's run reads it.
         enum Seam {
-            Answered(QueryDelivery, bool),
+            Answered(QueryDelivery),
             Waiting,
             Enter,
         }
@@ -843,31 +911,26 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let seam = installed.as_ref()?;
             let answered = seam.answers.get(key).cloned();
             let read = match answered {
-                Some(delivery) => Seam::Answered(delivery, seam.nested > 0),
+                Some(delivery) => Seam::Answered(delivery),
                 None if seam.nested > 0 => return None,
-                None if seam.need.is_some() => Seam::Waiting,
+                None if seam.needs.iter().any(|(needed, _)| needed == key) => Seam::Waiting,
                 None => Seam::Enter,
             };
             (read, seam.depth)
         };
         let nesting = Nesting::Frame { depth };
         Some(match seam {
-            Seam::Answered(delivery, nested) => {
-                self.read_delivery(delivery, (!nested).then_some(nesting))
-            }
+            Seam::Answered(delivery) => self.read_delivery(delivery, nesting),
             Seam::Waiting => self.suspended_decision_read(),
             Seam::Enter => match self.enter_query_frame(key, depth) {
                 Err(delivery) => {
                     self.with_decision_seam(|seam| {
                         seam.answers.insert(key.clone(), (*delivery).clone());
                     });
-                    self.read_delivery(*delivery, Some(nesting))
+                    self.read_delivery(*delivery, nesting)
                 }
                 Ok(claim) => {
-                    self.with_decision_seam(|seam| {
-                        seam.need = Some(key.clone());
-                        seam.claim = Some(claim);
-                    });
+                    self.with_decision_seam(|seam| seam.needs.push((key.clone(), claim)));
                     self.suspended_decision_read()
                 }
             },
@@ -904,7 +967,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         self.decision_seam
             .borrow()
             .as_ref()
-            .is_some_and(|seam| seam.need.is_some())
+            .is_some_and(|seam| !seam.needs.is_empty())
     }
 
     /// Mark a query the running decision reached as evaluating in place:
@@ -942,9 +1005,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     {
         if !frame.recording {
             let identity = frame
-                .lease
+                .producer
                 .as_ref()
-                .expect("a stepping frame owns its lease")
+                .expect("a stepping frame owns its producer")
                 .cost_identity();
             self.connected_demand.open_cost_scope(identity);
             frame.recording = true;
@@ -1110,10 +1173,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             finalise,
             &CarrierNormalizationPrelude::none(),
         );
-        let lease = frame
-            .lease
+        let producer = frame
+            .producer
             .take()
-            .expect("a producing frame owns its lease");
+            .expect("a producing frame owns its producer");
         if frame.depth == 1 {
             // The drive's root: its entry seals a refusal on these facts.
             *self.driven_root_traced.borrow_mut() = super::TracedFacts::of_output(&output, rooting);
@@ -1130,6 +1193,33 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             None
         };
         let mut carrier = None;
+        let lease = match producer {
+            FrameProducer::Lease(lease) => lease,
+            // A request-local completion settles as a producer's would and
+            // enters no family memo; the dispatcher keeps what it may serve
+            // again.
+            FrameProducer::RequestLocal { attempt, _open } => {
+                let (read, kept) = self.graph().complete_request_local(
+                    attempt,
+                    self.snapshot.flags(),
+                    output,
+                    receipt,
+                    &mut ReadCapture::deferring_carrier(&mut carrier),
+                );
+                if let Some(kept) = kept {
+                    self.keep_published(&frame.key, &read, kept, frame.computed_at, false);
+                }
+                return QueryDelivery {
+                    read: self.attribute_query_read(
+                        &frame.key,
+                        true,
+                        read,
+                        &CarrierNormalizationPrelude::none(),
+                    ),
+                    carrier,
+                };
+            }
+        };
         let read = {
             let mut capture = ReadCapture::deferring_carrier(&mut carrier);
             match lease.settle(self.ctx, self.snapshot.flags(), output, receipt.clone()) {

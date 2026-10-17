@@ -1076,7 +1076,10 @@ impl ConnectedDemandLedger<'_> {
             return Err(ReplayRefusal::Tripped);
         }
         let footprint = receipt.footprint();
-        if u32::from(self.query_depth.get()) + u32::from(footprint.query_depth)
+        // The reader's own nesting bounds where the result's drive, and so
+        // each of its frames, would be entered from.
+        if u32::from(self.query_depth.get())
+            + u32::from(footprint.query_depth.max(footprint.frame_query_depth))
             > u32::from(self.query_depth_limit.get())
         {
             return Err(ReplayRefusal::Depth);

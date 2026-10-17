@@ -2541,7 +2541,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             self.graph()
                 .evaluate_deferred_memo_get(node, reduction_context, demand, self.ctx)
         {
-            if self.admits_served_in_place(&served.receipt) {
+            if self.admits_served(&served.receipt) {
                 return EvaluateDeferredOutcome::complete(served.value);
             }
         }
@@ -2692,7 +2692,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 let memo_hit = if check_memo {
                     self.graph()
                         .evaluate_deferred_memo_get(entry_node, context, demand, self.ctx)
-                        .filter(|served| self.admits_served_in_place(&served.receipt))
+                        .filter(|served| self.admits_served(&served.receipt))
                         .map(|served| served.value)
                 } else {
                     None
@@ -3557,7 +3557,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             reduction.completeness = reduction
                                 .completeness
                                 .merge(ResultCompleteness::partial(reasons));
-                            return self.end_composite(reduction, None);
+                            // A conditional decision whose run waits on a
+                            // read drops that run: reading on, it reaches
+                            // the reads the remaining arms make in this run
+                            // rather than one arm per run.
+                            if !self.decision_waits() {
+                                return self.end_composite(reduction, None);
+                            }
+                            arm
                         }
                     };
                     // A union joins a named union's members, whatever they

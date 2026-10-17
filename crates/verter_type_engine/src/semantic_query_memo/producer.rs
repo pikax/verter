@@ -1088,7 +1088,7 @@ impl SemanticGraphStore {
     /// computation was never registered as a flight and its result never
     /// enters the family memo. The output
     /// settles exactly as a producer's does ([`ProducerLease::settle`]),
-    /// its carrier is bubbled into the tracers active now, and the read
+    /// its carrier is delivered through `capture`, and the read
     /// carries the receipt its recording sealed. The returned carrier is
     /// `Some` when the result is complete, cacheable and priced — what the
     /// dispatcher may keep and serve again — and `None` otherwise. A
@@ -1101,6 +1101,7 @@ impl SemanticGraphStore {
         cost_receipt: Option<
             Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
         >,
+        capture: &mut ReadCapture<'_>,
     ) -> (
         ValueRead,
         Option<verter_session_query::facts::fact_cache::ReadSetSignature>,
@@ -1117,7 +1118,7 @@ impl SemanticGraphStore {
             return (cancelled_cache_read(), None);
         }
         let settled = settle_output(self, attempt.prepared.key(), output, cost_receipt.is_some());
-        settled.carrier.bubble_via_tls();
+        capture.deliver_carrier(&settled.carrier);
         let read = CacheRead {
             lease: self
                 .lease_delivery(super::delivery_lease::DeliveredAllocations::read(

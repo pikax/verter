@@ -1315,21 +1315,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         self.admits_served_in(receipt, true)
     }
 
-    /// [`Self::admits_served`] for a result its reader evaluates in place,
-    /// entering no query: a deferred evaluation, read warm the way its cold
-    /// evaluation is recorded ([`cost_receipt::Nesting::InPlace`]).
-    pub(super) fn admits_served_in_place(
-        &self,
-        receipt: &crate::semantic_query::ReadReceipt,
-    ) -> bool {
-        receipt.priced().is_none_or(|receipt| {
-            matches!(
-                self.admit_served_in(receipt, cost_receipt::Nesting::InPlace, true),
-                ServedAdmission::Admitted
-            )
-        })
-    }
-
     /// [`Self::admits_served`] for a read that is a relation check of its
     /// own ([`Self::admit_served_in`]).
     pub(super) fn admits_served_as_own_check(
@@ -4736,7 +4721,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             .record_prerequisite(receipt, cost_receipt::Nesting::Entered);
                     }
                     let (read, kept) =
-                        graph.complete_request_local(attempt, flags, output, receipt);
+                        graph.complete_request_local(attempt, flags, output, receipt, &mut capture);
                     if let Some(carrier) = kept {
                         self.keep_published(key, &read, carrier, computed_at, false);
                     }

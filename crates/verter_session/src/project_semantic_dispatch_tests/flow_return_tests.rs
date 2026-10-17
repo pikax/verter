@@ -1797,6 +1797,12 @@ fn inline_no_value_close_folds_the_no_surface_rails() {
 /// members' nodes. Mutation recipe: publishing the member with the root's
 /// relation-only self-root set (the pre-union behavior) drops its own
 /// file from the carrier.
+///
+/// The conditional relates object types holding the classes: a decision
+/// instantiates operands that name declarations before it relates them,
+/// which would evaluate the methods' returns ahead of the relation, outside
+/// its component. Holding them in members leaves their instantiation, and
+/// the flows it reads, to the relation.
 #[test]
 fn mixed_component_member_entry_self_roots_cover_all_component_files() {
     let host = make_host();
@@ -1828,7 +1834,7 @@ fn mixed_component_member_entry_self_roots_cover_all_component_files() {
         canonical_id: Some("/ws/root.ts".to_string()),
         input_id: "/ws/root.ts".to_string(),
         source: Arc::from(
-            "import type { RootBox } from \"/ws/mixed_a\";\nimport type { NextBox } from \"/ws/mixed_b\";\nexport type RootAssign = RootBox extends NextBox ? \"yes\" : \"no\";\n",
+            "import type { RootBox } from \"/ws/mixed_a\";\nimport type { NextBox } from \"/ws/mixed_b\";\nexport type RootAssign = { v: RootBox } extends { v: NextBox } ? \"yes\" : \"no\";\n",
         ),
         file_language: crate::LanguageRegistry::global()
             .classify_static("/ws/root.ts")
