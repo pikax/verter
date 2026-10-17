@@ -27,7 +27,7 @@ use verter_session_query::inputs::prepared::PreparedTypeDeclResolution;
 
 #[path = "tuple_product.rs"]
 mod tuple_product;
-pub(super) use tuple_product::ExpressionSplice;
+pub(super) use tuple_product::{CheckingSite, ExpressionSplice};
 
 /// The node budget of one transitive self-root walk
 /// ([`ProjectSemanticDispatch::transitive_self_roots_from_nodes`]). A walk

@@ -1,8 +1,9 @@
 //! Splicing a tuple into a tuple is weighed before an element is copied, as
 //! the checker weighs it (`createNormalizedTupleType`): the elements the
 //! tuple has expanded so far and the spliced tuple's elements together
-//! reach 10,000 and the tuple is the checker's TS2799 recovery (TS2800 in
-//! an expression), a resource partial that reads as `any`; under the limit
+//! reach 10,000 and the tuple is the checker's TS2799 recovery (TS2800
+//! while an expression is checked), a resource partial that reads as `any`;
+//! under the limit
 //! the splice keeps every position, label and marker an authored tuple of
 //! the same elements has. A product the connected demand cannot pay for
 //! keeps its spreads in place as a typed partial — never a truncated tuple.
@@ -12,7 +13,8 @@
 //! ...Z4999]` build; `[...Z10000]`, `[1, ...Z9999]` and `[...Z5000,
 //! ...Z5000]` are TS2799 and `any`; `[...Z9999, 1]` has 10,000 elements and
 //! an authored 10,001-element tuple builds; `[...a, ...b] as const` over
-//! values of 5,000 elements each is TS2800 and `any`; `[2, ...R]` over a
+//! values of 5,000 elements each is TS2800 and `any`, as is a call of
+//! `f<T extends unknown[]>(a: T): [...T, ...T]` over one; `[2, ...R]` over a
 //! refused `R` reports nothing more.
 
 use std::sync::Arc;
@@ -343,20 +345,26 @@ fn a_refused_splice_is_the_recovery_holding_the_authored_tuple() {
     );
 }
 
-/// An array literal under `as const` splices the tuples it spreads by the
-/// same rule, refused with TS2800: its value is that recovery, the return
-/// degraded by the operation budget. Under the limit the literal is the
-/// whole readonly tuple; elements after the last spread are not counted.
+/// A tuple built while an expression is checked is refused with TS2800,
+/// whoever writes it: an array literal under `as const` splicing the tuples
+/// it spreads, and a generic call whose declared return type splices the
+/// tuple its argument infers. Its value is
+/// that recovery, the return degraded by the operation budget. Under the
+/// limit the tuple is whole; elements after the last spread are not
+/// counted.
 #[test]
 fn an_expression_splice_past_the_limit_is_ts2800() {
     let host = default_probe_host();
     let declare = |name: &str, len: usize| format!("declare const {name}: {};\n", zeros(len));
     let source = format!(
         "{}{}{}{}\
+         declare function twice<T extends unknown[]>(a: T): [...T, ...T];\n\
          export function two() {{ return [...a5000, ...b4999] as const; }}\n\
          export function twoAtLimit() {{ return [...a5000, ...b5000] as const; }}\n\
          export function prefix() {{ return [1, ...c9999] as const; }}\n\
-         export function suffix() {{ return [...c9999, 1] as const; }}\n",
+         export function suffix() {{ return [...c9999, 1] as const; }}\n\
+         export function call() {{ return twice(b4999); }}\n\
+         export function callAtLimit() {{ return twice(a5000); }}\n",
         declare("a5000", 5_000),
         declare("b4999", 4_999),
         declare("b5000", 5_000),
@@ -364,10 +372,12 @@ fn an_expression_splice_past_the_limit_is_ts2800() {
     );
     let mut failures = Vec::new();
     for (function, expected) in [
-        ("two", Ok(9_999)),
+        ("two", Ok((true, 9_999))),
         ("twoAtLimit", Err(())),
         ("prefix", Err(())),
-        ("suffix", Ok(10_000)),
+        ("suffix", Ok((true, 10_000))),
+        ("call", Ok((false, 9_998))),
+        ("callAtLimit", Err(())),
     ] {
         let result = flow_return_audited_on_host(&host, &source, function)
             .into_result()
@@ -378,8 +388,8 @@ fn an_expression_splice_past_the_limit_is_ts2800() {
         let dispatch = ProjectSemanticDispatch::new(&ctx);
         let node = result.return_type();
         let measured = match expected {
-            Ok(len) => tuple_shape(&dispatch, node)
-                .filter(|(readonly, elements)| *readonly && elements.len() == len)
+            Ok((readonly, len)) => tuple_shape(&dispatch, node)
+                .filter(|(built, elements)| *built == readonly && elements.len() == len)
                 .map(|_| ())
                 .ok_or(())
                 .and_then(|()| result.degradation().is_none().then_some(()).ok_or(())),
@@ -395,11 +405,12 @@ fn an_expression_splice_past_the_limit_is_ts2800() {
         };
         if measured.is_err() {
             failures.push(format!(
-                "`{function}` expected {expected:?}, measured degradation {:?} and `{}`",
+                "`{function}` expected {expected:?}, measured degradation {:?}, recovery {:?} and `{}`",
                 result.degradation(),
+                recovery(&dispatch, node).map(|(diagnostic, basis, _)| (diagnostic, basis)),
                 abbreviated(&format!(
                     "{:?}",
-                    tuple_shape(&dispatch, node).map(|(_, e)| e.len())
+                    tuple_shape(&dispatch, node).map(|(readonly, e)| (readonly, e.len()))
                 ))
             ));
         }
@@ -459,11 +470,14 @@ fn splice_in_demand(
 
 /// The splice is weighed before it is built: a product of 9,999 elements is
 /// charged the 10,001 elements read to size it plus the 9,999 it holds, and
-/// their bytes; the refused product of 10,000 is charged nothing and
-/// copies nothing. A demand that cannot pay for the product keeps both
-/// spreads in place under the trip that refused it — the work rail, or the
-/// soft construction-byte rail — never a truncated tuple and never the
-/// size refusal.
+/// their bytes; the refused product of two spreads of one 5,000-element
+/// tuple is charged the 5,002 elements read to decide it — the tuple sized
+/// once — and copies nothing; sizing stops reading once a refusal is
+/// certain. A demand that cannot pay
+/// for the product keeps both spreads in place under the trip that refused
+/// it — the work rail, or the soft construction-byte rail — never a
+/// truncated tuple and never the size refusal; one that cannot pay for
+/// sizing it stops reading as it runs out, keeping what it paid for.
 #[test]
 fn a_splice_is_weighed_and_paid_for_before_it_is_built() {
     let host = crate::VerterHost::new_standalone(crate::HostConfig::default());
@@ -488,8 +502,19 @@ fn a_splice_is_weighed_and_paid_for_before_it_is_built() {
     ));
     assert_eq!(
         (work, bytes, trip),
-        (0, 0, None),
-        "nothing is charged or copied"
+        (5_002, 0, None),
+        "the sizing that decided the refusal is charged; nothing is copied"
+    );
+    let (shape, work, _, trip) = splice_in_demand(&host, [9_999, 20_000], full, None);
+    assert!(matches!(
+        shape,
+        super::build::NormalizedTupleShape::Array(_)
+    ));
+    assert_eq!(
+        (work, trip),
+        (10_002, None),
+        "sizing stops at the first element of the second spread, where the \
+         refusal is certain, not at the end of its 20,000"
     );
 
     let unspliced = |shape: &super::build::NormalizedTupleShape| {
@@ -504,6 +529,15 @@ fn a_splice_is_weighed_and_paid_for_before_it_is_built() {
         splice_in_demand(&host, [5_000, 4_999], full, Some(9_999 * element_bytes - 1));
     assert!(unspliced(&shape), "the spreads stay in place");
     assert_eq!(trip, Some(PartialReasonSet::CONNECTED_MEMORY_LIMIT));
+
+    let (shape, work, _, trip) = splice_in_demand(&host, [5_000, 4_999], 300, None);
+    assert!(unspliced(&shape), "the spreads stay in place");
+    assert_eq!(trip, Some(PartialReasonSet::PROJECTION_WORK_LIMIT));
+    assert!(
+        work > 0 && work <= 300,
+        "sizing pays as it reads and stops when the demand runs out, \
+         long before the 10,001 elements sizing the product reads: charged {work}"
+    );
 }
 
 /// What one isolated root demand answered.
@@ -616,7 +650,7 @@ fn sealed_refusals(host: &crate::VerterHost) -> usize {
 /// another profile that evaluates — and is refused again, the limit being
 /// the checker's, not an allowance — a root inside an enclosing demand
 /// never inherits the refusal, and an edit to the module declaring the
-/// spliced tuple evaluates afresh.
+/// generic whose instantiation splices evaluates afresh.
 #[test]
 fn a_refused_splice_answers_its_own_profile_without_rebuilding() {
     let host = default_probe_host();

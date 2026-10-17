@@ -6790,6 +6790,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 )
             });
         let flow_cx = FlowCx::new(self);
+        // What the evaluator demands is demanded while an expression is
+        // checked — save the type nodes it lowers: a tuple splice it
+        // refuses is the checker's TS2800.
+        let _expression_site = super::build::CheckingSite::expression();
         let value_observations = crate::request_context::ColdComputeCompletenessScope::enter();
         let mut evaluator = FlowEvaluator {
             dispatch: &flow_cx,
@@ -10866,6 +10870,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         expr: &verter_type_expr::TypeExpr,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<SemanticNodeId> {
+        let _type_node = super::build::CheckingSite::type_node();
         ProjectSemanticDispatch::lower_type_expr_in_owner_scope_with_context(
             self,
             scope_canonical_id,
@@ -11001,6 +11006,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
         reduction_context: ProjectionReductionContext,
     ) -> SemanticNodeId {
+        let _type_node = super::build::CheckingSite::type_node();
         ProjectSemanticDispatch::shallow_lower_type_expr_with_context(
             self,
             expr,

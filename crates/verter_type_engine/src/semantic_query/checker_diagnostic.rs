@@ -84,12 +84,14 @@ pub enum CheckerDiagnosticCode {
     /// product limit of constituents, checked before one is built
     /// ([`checker_policy::cross_product_union`](super::checker_policy::cross_product_union)).
     UnionTooComplex,
-    /// TS2799: splicing a tuple into a tuple type reaches the checker's
-    /// tuple-size limit
-    /// ([`checker_policy::tuple_splice`](super::checker_policy::tuple_splice)).
+    /// TS2799: splicing a tuple into a tuple reaches the checker's
+    /// tuple-size limit while a type node is checked
+    /// ([`checker_policy::TupleSplicePosition`](super::checker_policy::TupleSplicePosition)).
     TupleTooLarge,
-    /// TS2800: the same tuple-size limit reached by a tuple an expression
-    /// produces (an array literal spreading tuples as a tuple).
+    /// TS2800: the same tuple-size limit reached while an expression is
+    /// checked — an array literal spreading tuples as a tuple, or any type
+    /// the expression's check instantiates, such as a generic call's
+    /// declared return.
     ExpressionTupleTooLarge,
     /// TS2859: one relation check recorded as many structured comparisons as
     /// the checker allows it

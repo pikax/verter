@@ -10,17 +10,21 @@
 //! element list and every tuple it splices, nested ones included, and sizes
 //! each spliced tuple as the checker sizes it — its own splices checked
 //! against its own prefix, a tuple met again sized once. Each splice is
-//! checked against the checker's tuple-size rule
-//! ([`checker_policy::tuple_splice`]): at the limit the whole tuple is the
-//! checker's TS2799 recovery (TS2800 in an expression), a resource partial
-//! holding the authored tuple as its origin, and nothing is copied. Under
-//! it, the elements read and the elements the product will hold are
-//! charged to the connected-work ledger, and the product's construction
-//! bytes reserved, before the product is built. A refused charge keeps the
+//! checked against the checker's tuple-size rule ([`splice_fits`]); the
+//! pass stops reading as soon as a refusal is certain, and charges the
+//! elements it reads to the connected-work ledger in batches as it goes, so
+//! a demand that runs out (or is cancelled) stops the pass and a refusal
+//! keeps the work that decided it. At the limit the whole tuple is the
+//! checker's recovery — TS2799, or TS2800 while an expression is checked
+//! ([`CheckingSite`]) — a resource partial holding the authored
+//! tuple as its origin, and nothing is copied. Under it, the elements the
+//! product will hold are charged and the product's construction bytes
+//! reserved before the product is built. A refused charge keeps the
 //! authored element list as it is — every spread still in place, never a
 //! truncated tuple — and folds the ledger's trip into the build, so the
 //! answer is a typed partial.
 
+use std::cell::Cell;
 use std::sync::Arc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -30,13 +34,97 @@ use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::semantic_query::checker_policy::{self, OperationRefusal, TupleSplicePosition};
 use crate::semantic_query::{PartialReasonSet, SemanticNodeData, SemanticNodeId, TupleElement};
 
+/// The checker's tuple-size limit (`createNormalizedTupleType`): splicing
+/// a tuple of `n` elements after the `prefix` elements the tuple being
+/// built has expanded so far fails once `prefix + n` reaches this, before
+/// an element is copied. Only a splice is checked: a directly authored
+/// tuple, and the elements written after the last splice, are never
+/// counted, so a tuple may end up longer than the limit.
+///
+/// Measured on TypeScript 7.0.2 (`tsc --strict`), with `A<n>` an authored
+/// tuple of `n` elements: `[...A9999]`, `[1, ...A9998]` and `[...A5000,
+/// ...A4999]` build; `[...A10000]`, `[1, ...A9999]` and `[...A5000,
+/// ...A5000]` are TS2799 and `any`; `[...A9999, 1]` (10,000 elements) and
+/// an authored 10,001-element tuple build; `[...a, ...b] as const` over
+/// values of 5,000 elements each is TS2800 and `any`, and so is a call
+/// `f(a)` of `f<T extends unknown[]>(a: T): [...T, ...T]` over 5,000: the
+/// checker picks the code by the node it is checking when it builds the
+/// tuple, not by where the tuple is written. An enclosing tuple spreading
+/// the refused `any` reports nothing more.
+pub(crate) const TUPLE_SPLICE_SIZE: usize = 10_000;
+
+/// Whether `incoming` spliced elements fit after the `prefix` elements a
+/// tuple has expanded so far ([`TUPLE_SPLICE_SIZE`]).
+const fn splice_fits(prefix: usize, incoming: usize) -> bool {
+    match prefix.checked_add(incoming) {
+        Some(expanded) => expanded < TUPLE_SPLICE_SIZE,
+        None => false,
+    }
+}
+
+/// Elements the sizing pass reads between two charges to the connected
+/// ledger: the most it reads past a trip or a cancellation.
+const SIZING_CHARGE_BATCH: usize = 256;
+
+std::thread_local! {
+    /// The checking site of the demand running on this thread
+    /// ([`CheckingSite`]).
+    static CHECKING_SITE: Cell<TupleSplicePosition> =
+        const { Cell::new(TupleSplicePosition::Type) };
+}
+
+/// The node the demand on this thread is checking while this guard lives,
+/// which decides the code a tuple splice it refuses reports, as the
+/// checker reports a refusal at the node it is checking
+/// (`isPartOfTypeNode` of its current node): TS2800 while an expression is
+/// checked — the tuple an expression produces, or any type its check
+/// instantiates on the way, such as a generic call's declared return —
+/// and TS2799 while a type node is, including a type written inside an
+/// expression, which the checker checks as a type node of its own. With
+/// no guard on the thread the site is a type node.
+///
+/// The site never enters a key: only a refused splice reads it, and a
+/// refusal is a resource partial — never admitted to a memo, never shared.
+/// The one refusal kept, an isolated root's sealed summary, is replayed
+/// only for its own root query, whose evaluation fixes the site of every
+/// splice it makes.
+#[must_use = "the site lasts while the guard lives"]
+pub(in crate::project_semantic_dispatch) struct CheckingSite {
+    enclosing: TupleSplicePosition,
+}
+
+impl CheckingSite {
+    /// Check an expression on this thread until the guard drops.
+    pub(in crate::project_semantic_dispatch) fn expression() -> Self {
+        Self::enter(TupleSplicePosition::Expression)
+    }
+
+    /// Check a type node on this thread until the guard drops.
+    pub(in crate::project_semantic_dispatch) fn type_node() -> Self {
+        Self::enter(TupleSplicePosition::Type)
+    }
+
+    fn enter(site: TupleSplicePosition) -> Self {
+        Self {
+            enclosing: CHECKING_SITE.replace(site),
+        }
+    }
+}
+
+impl Drop for CheckingSite {
+    fn drop(&mut self) {
+        CHECKING_SITE.set(self.enclosing);
+    }
+}
+
 /// What splicing an element list produced.
 enum Spliced {
     /// The expanded elements.
     Elements(Vec<TupleElement>),
     /// A splice reached the checker's tuple-size limit.
     Refused(OperationRefusal),
-    /// The connected-work ledger refused to pay for the product.
+    /// The connected-work ledger refused to pay for the product, or for
+    /// sizing it.
     Unpaid(PartialReasonSet),
 }
 
@@ -62,8 +150,6 @@ struct SplicePlan {
     targets: FxHashMap<SemanticNodeId, SpliceTarget>,
     /// The elements the product holds.
     len: usize,
-    /// The elements read to size it.
-    read: usize,
 }
 
 /// One element list the sizing pass is reading: its elements, the next
@@ -96,6 +182,14 @@ impl LevelElements<'_> {
     }
 }
 
+/// The elements the sizing pass has read, and how many of them it has
+/// charged.
+#[derive(Default)]
+struct SizingWork {
+    read: usize,
+    charged: usize,
+}
+
 impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
     /// Spread-normalise a tuple TYPE's element list (the shared
     /// normalize-on-intern rule for every tuple intern site that can
@@ -109,9 +203,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ///    substitute to concrete tuples — no utility name special-casing.
     ///    Splicing reaches nested `[...[...T]]` shapes at any depth. A
     ///    splice reaching the checker's tuple-size limit makes the whole
-    ///    tuple the checker's TS2799 recovery; a product the connected
-    ///    demand cannot pay for keeps the authored elements, as a partial
-    ///    (see the module documentation).
+    ///    tuple the checker's recovery — TS2799, or TS2800 while an
+    ///    expression is checked ([`CheckingSite`]); a product the
+    ///    connected demand cannot pay for keeps the authored elements, as
+    ///    a partial (see the module documentation).
     /// 2. **Non-trailing optional reconciliation** — an `optional` marker
     ///    followed anywhere later by a REQUIRED (non-optional, non-rest)
     ///    element converts to a REQUIRED `T | undefined` slot.
@@ -136,7 +231,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         elements: &[TupleElement],
         readonly: bool,
     ) -> NormalizedTupleShape {
-        self.normalize_tuple_spread_at(elements, readonly, TupleSplicePosition::Type)
+        self.normalize_tuple_spread_at(elements, readonly, CHECKING_SITE.get())
     }
 
     /// [`Self::normalize_tuple_spread`] for the tuple an expression
@@ -162,10 +257,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         prefix: usize,
         incoming: usize,
     ) -> ExpressionSplice {
-        if let Err(refusal) =
-            checker_policy::tuple_splice(prefix, incoming, TupleSplicePosition::Expression)
-        {
-            return ExpressionSplice::Refused(self.recover_at_operation_budget(refusal, None));
+        if !splice_fits(prefix, incoming) {
+            return ExpressionSplice::Refused(self.recover_at_operation_budget(
+                checker_policy::tuple_splice_refusal(TupleSplicePosition::Expression),
+                None,
+            ));
         }
         if self.connected_demand.is_active() {
             let paid = self.connected_demand.charge_units(incoming).and_then(|()| {
@@ -272,7 +368,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
         let plan = match self.plan_tuple_splice(elements, position) {
             Ok(plan) => plan,
-            Err(refusal) => return Spliced::Refused(refusal),
+            Err(refused) => return refused,
         };
         if plan.targets.is_empty() {
             return verbatim();
@@ -280,13 +376,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // The connected ledger only exists inside a demand; a splice built
         // outside one (a fixture's direct call) is weighed, not charged.
         if self.connected_demand.is_active() {
-            let paid = self
-                .connected_demand
-                .charge_units(plan.read.saturating_add(plan.len))
-                .and_then(|()| {
-                    self.connected_demand
-                        .reserve_bytes(plan.len.saturating_mul(std::mem::size_of::<TupleElement>()))
-                });
+            let paid = self.connected_demand.charge_units(plan.len).and_then(|()| {
+                self.connected_demand
+                    .reserve_bytes(plan.len.saturating_mul(std::mem::size_of::<TupleElement>()))
+            });
             if let Err(reasons) = paid {
                 return Spliced::Unpaid(reasons);
             }
@@ -316,21 +409,50 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// — and check each splice against the checker's tuple-size rule. A
     /// tuple spread into itself (a cycle) keeps its rest element and counts
     /// as one element. Nothing is copied.
+    ///
+    /// The elements read are charged in batches as they are read
+    /// ([`SIZING_CHARGE_BATCH`]), and the rest on every exit, so a ledger
+    /// trip or a cancellation stops the pass within a batch and a refusal
+    /// keeps the work that decided it. Once the elements every open level
+    /// has expanded to reach the limit, a refusal is certain — each level
+    /// only grows, and each joins its parent's prefix whole — so the pass
+    /// stops there rather than read the rest of the spliced tuples.
     fn plan_tuple_splice(
         &self,
         elements: &[TupleElement],
         position: TupleSplicePosition,
-    ) -> Result<SplicePlan, OperationRefusal> {
+    ) -> Result<SplicePlan, Spliced> {
+        let mut work = SizingWork::default();
+        let planned = self.size_tuple_splice(elements, &mut work);
+        let charged = self.charge_sizing(&mut work);
+        match (planned, charged) {
+            (Err(Some(reasons)), _) | (_, Err(reasons)) => Err(Spliced::Unpaid(reasons)),
+            (Err(None), Ok(())) => Err(Spliced::Refused(checker_policy::tuple_splice_refusal(
+                position,
+            ))),
+            (Ok(plan), Ok(())) => Ok(plan),
+        }
+    }
+
+    /// The sizing pass of [`Self::plan_tuple_splice`]: `Err(None)` when a
+    /// splice reaches the limit, `Err(Some(trip))` when charging what it
+    /// read stopped it.
+    fn size_tuple_splice(
+        &self,
+        elements: &[TupleElement],
+        work: &mut SizingWork,
+    ) -> Result<SplicePlan, Option<PartialReasonSet>> {
         let mut targets: FxHashMap<SemanticNodeId, SpliceTarget> = FxHashMap::default();
         let mut sized: FxHashMap<SemanticNodeId, usize> = FxHashMap::default();
         let mut splicing: FxHashSet<SemanticNodeId> = FxHashSet::default();
-        let mut read = 0usize;
         let mut levels = vec![SizingLevel {
             elements: LevelElements::Outer(elements),
             next: 0,
             tuple: None,
             len: 0,
         }];
+        // The elements every open level has expanded to so far.
+        let mut expanded = 0usize;
         loop {
             let Some(level) = levels.last_mut() else {
                 unreachable!("the outermost level returns the plan");
@@ -343,7 +465,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     return Ok(SplicePlan {
                         targets,
                         len: done.len,
-                        read,
                     });
                 };
                 splicing.remove(&tuple);
@@ -351,11 +472,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 let Some(parent) = levels.last_mut() else {
                     unreachable!("a spliced tuple has the level that spread it");
                 };
-                parent.len = checker_policy::tuple_splice(parent.len, done.len, position)?;
+                if !splice_fits(parent.len, done.len) {
+                    return Err(None);
+                }
+                parent.len += done.len;
                 continue;
             };
             level.next += 1;
-            read += 1;
+            work.read += 1;
+            if work.read - work.charged >= SIZING_CHARGE_BATCH {
+                self.charge_sizing(work).map_err(Some)?;
+            }
+            let mut grown = 1;
             if rest {
                 let target = match targets.get(&value) {
                     Some((tuple, inner)) => Some((*tuple, Arc::clone(inner))),
@@ -365,9 +493,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 };
                 if let Some((tuple, inner)) = target.filter(|(tuple, _)| !splicing.contains(tuple))
                 {
-                    if let Some(&len) = sized.get(&tuple) {
-                        level.len = checker_policy::tuple_splice(level.len, len, position)?;
-                    } else {
+                    let Some(&len) = sized.get(&tuple) else {
                         splicing.insert(tuple);
                         levels.push(SizingLevel {
                             elements: LevelElements::Inner(inner),
@@ -375,11 +501,34 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             tuple: Some(tuple),
                             len: 0,
                         });
+                        continue;
+                    };
+                    if !splice_fits(level.len, len) {
+                        return Err(None);
                     }
-                    continue;
+                    grown = len;
                 }
             }
-            level.len = level.len.saturating_add(1);
+            level.len += grown;
+            expanded = expanded.saturating_add(grown);
+            if levels.len() > 1 && !splice_fits(0, expanded) {
+                return Err(None);
+            }
+        }
+    }
+
+    /// Charge the elements the sizing pass has read since its last charge.
+    /// Outside a demand nothing is charged, but a cancelled request still
+    /// stops the pass.
+    fn charge_sizing(&self, work: &mut SizingWork) -> Result<(), PartialReasonSet> {
+        let units = work.read - work.charged;
+        work.charged = work.read;
+        if self.connected_demand.is_active() {
+            self.connected_demand.charge_units(units)
+        } else if self.cancellation.is_cancelled() {
+            Err(PartialReasonSet::CANCELLED)
+        } else {
+            Ok(())
         }
     }
 
