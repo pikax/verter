@@ -51,7 +51,7 @@ pub fn begin(
     method: LspMethodTag,
     target_identity: RequestTargetIdentity,
 ) -> LspAuditSession {
-    host.with_arc(|host| host.lsp_audit_begin(method, target_identity))
+    host.lsp_audit_begin(method, target_identity)
 }
 
 /// Build a `Position`-bound payload base for a hover / goto-def /
@@ -191,7 +191,7 @@ where
     P: FnOnce(&mut LspRequestPayload, &T),
 {
     let (deadline, budget, audit_enabled) = {
-        let host = host.host();
+        let host = host.as_ref();
         let timeouts = &host.config().lsp_method_timeouts;
         (
             timeouts.request_deadlines.for_method(&method),
@@ -355,7 +355,7 @@ mod tests {
             character: 7,
         };
         let record_a = begin(
-            &crate::documents::SharedHost::new(std::sync::Arc::clone(&host)),
+            &std::sync::Arc::clone(&host),
             LspMethodTag::Completion,
             identity_a.clone(),
         )
@@ -366,7 +366,7 @@ mod tests {
         ))
         .expect("first audit session must publish");
         let record_b = begin(
-            &crate::documents::SharedHost::new(std::sync::Arc::clone(&host)),
+            &std::sync::Arc::clone(&host),
             LspMethodTag::Completion,
             identity_b.clone(),
         )

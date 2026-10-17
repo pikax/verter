@@ -922,6 +922,10 @@ fn chatmessages_budget_tripped_value_partial_does_not_warm_final_result_cache() 
     );
 
     let host = project.host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let canonical = "/workspace/src/runtime/components/ChatMessages.vue";
 
     let (_meta, resolution) = host
@@ -1696,6 +1700,10 @@ fn genuine_runaway_budget_trip_still_refused_warm_admission() {
     ];
     let project = build_hermetic_project_with_budget(files, 1);
     let host = project.host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let canonical = "/workspace/src/BigTable.vue";
 
     let (_meta, resolution) = host

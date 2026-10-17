@@ -107,33 +107,42 @@ fn the_record_cap_replaces_the_epoch_only_past_the_cap() {
     );
 }
 
-/// Released nodes strand the kernel records reached through their tokens;
-/// the epoch is replaced once stranded tokens outnumber live ones, never
-/// before, and never for a release that names no token of the epoch.
+/// Releasing the epoch's roots on closed nodes strands the kernel records
+/// reached through their tokens; the epoch is replaced once stranded tokens
+/// outnumber live ones, never before, and never for a release that names no
+/// token of the epoch.
 #[test]
 fn releasing_most_tokenised_nodes_replaces_the_epoch() {
     let graph = SemanticGraphStore::new();
+    let _scope = graph.enter_node_root_scope();
     let store = graph.signature_store();
-    for id in 1..=4 {
-        store.intern_type_token(SemanticNodeId(id), None).unwrap();
+    let node = |n: u32| {
+        graph.intern_node(SemanticNodeData::Literal(
+            crate::semantic_query::LiteralValue::Number(f64::from(n)),
+        ))
+    };
+    let tokenised: Vec<SemanticNodeId> = (1..=4).map(node).collect();
+    let untokenised = node(40);
+    for id in &tokenised {
+        store.intern_type_token(*id, None).unwrap();
     }
     let before = store.epoch();
 
     assert_eq!(
-        graph.release_signature_records_naming([SemanticNodeId(40)]),
+        graph.release_signature_records_naming([untokenised]),
         None,
         "a node with no token strands nothing"
     );
     assert_eq!(store.stranded_token_count(), 0);
     assert_eq!(
-        graph.release_signature_records_naming([SemanticNodeId(1), SemanticNodeId(2)]),
+        graph.release_signature_records_naming([tokenised[0], tokenised[1]]),
         None,
         "half the tokens stranded is not a majority"
     );
     assert_eq!(store.epoch(), before);
     assert_eq!(store.stranded_token_count(), 2);
 
-    let replaced = graph.release_signature_records_naming([SemanticNodeId(3)]);
+    let replaced = graph.release_signature_records_naming([tokenised[2]]);
     assert!(replaced.is_some_and(|epoch| epoch != before));
     assert_eq!(
         store.interned_len(),
@@ -146,7 +155,7 @@ fn releasing_most_tokenised_nodes_replaces_the_epoch() {
         "the replacement epoch has stranded nothing"
     );
     assert_eq!(
-        graph.release_signature_records_naming([SemanticNodeId(4)]),
+        graph.release_signature_records_naming([tokenised[3]]),
         None,
         "a token of a retired epoch strands nothing in the current one"
     );

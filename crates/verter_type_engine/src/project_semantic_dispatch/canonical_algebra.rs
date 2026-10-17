@@ -136,6 +136,7 @@ mod pairwise_budget_tests {
     #[test]
     fn an_exhausted_compare_budget_ends_the_pairwise_tier() {
         let graph = SemanticGraphStore::new();
+        let _scope = graph.enter_node_root_scope();
         let past_budget = 600;
         let arms: Vec<SemanticNodeId> = (0..COMPARE_WORK_BUDGET as usize + 1 + past_budget)
             .map(|file| array_of_a_in(&graph, file))
@@ -170,6 +171,7 @@ mod literal_provenance_tests {
     #[test]
     fn literal_union_subsumption_reads_each_arm_a_bounded_number_of_times() {
         let graph = SemanticGraphStore::new();
+        let _scope = graph.enter_node_root_scope();
         let members: Vec<_> = (0..1024)
             .map(|n| graph.intern_node(SemanticNodeData::Literal(LiteralValue::Number(n as f64))))
             .collect();
@@ -230,6 +232,7 @@ mod literal_provenance_tests {
             ),
         ] {
             let graph = SemanticGraphStore::new();
+            let _scope = graph.enter_node_root_scope();
             let left = scoped_literal(&graph, left, "/fresh.ts");
             let right = scoped_literal(&graph, right, "/pinned.ts");
             let result = intern_ordered_union(
@@ -255,6 +258,7 @@ mod literal_provenance_tests {
     #[test]
     fn literal_provenance_batches_partial_roots_and_normalizes_survivors() {
         let graph = SemanticGraphStore::new();
+        let _scope = graph.enter_node_root_scope();
         let a = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String("a".into())));
         let b = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String("b".into())));
         let c = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String("c".into())));
@@ -332,6 +336,7 @@ mod literal_provenance_tests {
     #[test]
     fn literal_provenance_hashes_shared_payloads_once_per_operation() {
         let graph = SemanticGraphStore::new();
+        let _scope = graph.enter_node_root_scope();
         let string = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
             "s".repeat(4096),
         )));

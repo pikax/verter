@@ -69,6 +69,10 @@ fn an_approximate_extreme_cannot_select_a_conditional_branch() {
     const PROBE: &str = "0 extends 1 & ReturnType<typeof f> ? 'selected' : 'other'";
     for refused in [true, false] {
         let host = default_probe_host();
+        let _scope = host
+            .project_type_store()
+            .semantic_graph()
+            .enter_node_root_scope();
         let _refusal = refused.then(|| {
             flow_admission_fault_injection::Guard::arm(
                 &host.flow_fault_injection.zero_obligation_budget,
@@ -141,6 +145,10 @@ fn approximate_member_evidence_cannot_select_a_conditional_branch() {
             "}".repeat(depth)
         );
         let host = default_probe_host();
+        let _scope = host
+            .project_type_store()
+            .semantic_graph()
+            .enter_node_root_scope();
         let _refusal = (depth != 0).then(|| {
             super::flow_return::flow_admission_fault_injection::Guard::arm(
                 &host.flow_fault_injection.zero_obligation_budget,

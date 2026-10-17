@@ -281,6 +281,10 @@ fn assert_string_label(
 #[test]
 fn a_marker_in_a_callee_return_position_is_a_value_not_a_frame_failure() {
     let host = make_seal_host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     for (name, array) in [
         ("q1LocalHelperBare", false),
         ("q1LocalHelperArray", true),
@@ -328,6 +332,10 @@ fn a_marker_in_a_callee_return_position_is_a_value_not_a_frame_failure() {
 #[test]
 fn a_nested_bodys_control_surface_failure_marks_its_return_not_the_enclosing_frame() {
     let host = make_seal_host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let outcome =
         evaluate(&host, "objWithInvokedArrow").expect("objWithInvokedArrow produces a value");
     with_dispatch(&host, |dispatch| {
@@ -424,6 +432,10 @@ fn the_clean_control_is_undegraded_and_warms() {
 #[test]
 fn an_unmodeled_array_element_marks_only_its_own_position() {
     let host = make_seal_host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let outcome = evaluate(&host, "arrayWithUnmodeledElement")
         .expect("arrayWithUnmodeledElement produces a value");
     with_dispatch(&host, |dispatch| {

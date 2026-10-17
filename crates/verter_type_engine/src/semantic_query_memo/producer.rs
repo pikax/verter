@@ -416,7 +416,10 @@ impl SemanticGraphStore {
             // producer registration, the panic guard and the publish. See the
             // `prepared` module for the equality contract (token equality ⟺
             // key equality).
-            let prepared = self.prepare_rooted_key(key);
+            let prepared = match self.try_prepare_rooted_key(key) {
+                Ok(prepared) => prepared,
+                Err(error) => return Err(super::refused_operand_cache_read(error)),
+            };
 
             // Warm lookup. One lock acquisition snapshots the slot; the
             // candidate's carrier is validated strictly (self-roots through
@@ -1113,14 +1116,22 @@ impl<'s> ProducerLease<'s> {
         } else {
             satisfied_projection
         };
+        // A build that answered with a node it no longer holds cannot be
+        // delivered: its flight is retired and the caller gets the typed
+        // refusal, never the destroyed node.
+        let lease = match store.lease_delivery(super::delivery_lease::DeliveredAllocations::read(
+            &result,
+            &walker_diagnostics,
+            &dep_signature,
+        )) {
+            Ok(lease) => lease,
+            Err(error) => {
+                store.abort_inflight_for_cancellation(&prepared, &inflight, independent);
+                return Err(super::refused_operand_cache_read(error));
+            }
+        };
         Ok(SettledProducer {
-            lease: store
-                .lease_delivery(super::delivery_lease::DeliveredAllocations::read(
-                    &result,
-                    &walker_diagnostics,
-                    &dep_signature,
-                ))
-                .expect("settled output owns live operands"),
+            lease,
             store,
             prepared,
             inflight,

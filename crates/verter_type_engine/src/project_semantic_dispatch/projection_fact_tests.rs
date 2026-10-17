@@ -103,6 +103,7 @@ fn positional_guarantees_keep_a_value_with_the_same_causes_as_an_unavailable_one
 #[test]
 fn a_presence_subset_cannot_certify_absence_or_an_unsupported_root() {
     let graph = crate::semantic_query_memo::SemanticGraphStore::new();
+    let _scope = graph.enter_node_root_scope();
     let (_, _, key) = keys();
     for (error, observed, guarantee) in [
         (

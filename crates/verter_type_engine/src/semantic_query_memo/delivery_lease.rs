@@ -197,7 +197,7 @@ impl SemanticGraphStore {
             diagnostic.for_each_retained_node(|node| nodes.push(node));
         }
         nodes.retain(|node| node.0 < super::UNALLOCATABLE_ID_FLOOR);
-        let roots = self.root_existing_nodes(nodes)?;
+        let roots = self.root_nodes(nodes)?;
         let attached = match result {
             QueryResult::Value(SemanticQueryValue::SignatureSet(value)) => value.version.0.clone(),
             QueryResult::Value(SemanticQueryValue::SignatureResult(value)) => {
@@ -241,7 +241,7 @@ impl SemanticGraphStore {
                 nodes.push(node);
             }
         });
-        let key_roots = self.root_existing_nodes(nodes)?;
+        let key_roots = self.root_nodes(nodes)?;
         self.mint_delivery(delivered, key_roots)
     }
 }

@@ -26,7 +26,8 @@ use crate::semantic_query::demand::{Demand, EvalPolicy, ProjectionDemand};
 
 impl OwnedHeap for FlowReturnResult {
     /// The fresh-arm and diagnostic slices and both independent proofs.
-    /// The return node is the arena's.
+    /// The return node is the arena's; a delivered result's owner pins its
+    /// own metadata.
     fn owned_heap_bytes(&self, aliases: &mut AliasSet) -> usize {
         let Self {
             independent_member,
@@ -38,6 +39,7 @@ impl OwnedHeap for FlowReturnResult {
             fresh_literal_arms,
             facet,
             checker_diagnostics,
+            owner: _,
         } = self;
         independent_member.owned_heap_bytes(aliases)
             + copy_inline(observed_completeness)
@@ -330,6 +332,7 @@ impl FlowReturnResult {
             fresh_literal_arms,
             facet: FunctionKindFacet::None,
             checker_diagnostics: Vec::new().into(),
+            owner: Default::default(),
         }
     }
 }

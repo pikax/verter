@@ -3183,7 +3183,7 @@ fn overlay_views_of_an_open_owner_keep_two_component_meta_views() {
 
     const OWNER: &str = "/src/Consumer.vue";
     const DEPENDENCY: &str = "/src/types/icon.ts";
-    let (_ws, host) = activity_gate_fixture();
+    let (_ws, host) = close_lifecycle_fixture();
     // The fixture resolved the owner once under the base view: one state
     // per projection mode it publishes.
     let modes = host.retention_snapshot().component_meta_states;

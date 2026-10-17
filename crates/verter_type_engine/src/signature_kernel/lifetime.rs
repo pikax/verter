@@ -97,7 +97,7 @@ pub(super) struct EpochInner {
     pub store_live_readers: Arc<AtomicU64>,
     pub descriptor_chain_walks: AtomicU64,
     pub apply_count: AtomicU64,
-    /// Type tokens of this epoch whose graph node was released
+    /// Type tokens of this epoch whose graph root a close released
     /// ([`SignatureStore::note_released_nodes`]): every record reached
     /// through one of them is garbage no live request can name again.
     pub stranded_tokens: AtomicUsize,
@@ -185,10 +185,10 @@ impl EpochInner {
 /// Every record is epoch-local and append-only, and type tokens name graph
 /// nodes, so an edited project keeps interning records for content no
 /// reader can reach again. Replacing the epoch is the only reclamation;
-/// this cap bounds the garbage between two replacements. A holder that
-/// releases graph nodes also reports them
+/// this cap bounds the garbage between two replacements. A document close
+/// releases the epoch's roots on tokens naming the closed content
 /// ([`SignatureStore::note_released_nodes`]), and the epoch is then
-/// replaced once its tokens naming released nodes outnumber the rest
+/// replaced once its stranded tokens outnumber the rest
 /// ([`SignatureStore::replace_epoch_if_mostly_stranded`]), which keeps the
 /// tables proportional to the live set; the cap is the bound where nothing
 /// is released.
@@ -322,35 +322,48 @@ impl SignatureStore {
     }
 
     construction_ordinal_seam! {
-        /// Note that the graph released `released` for good: its ids are never
-        /// handed out again, so a current-epoch type token naming one strands
-        /// every record reached through it. Each node is released once, so a
-        /// token is counted at most once. Returns how many of `released` the
-        /// current epoch holds a token for.
+        /// Release the current epoch's roots on the type tokens naming
+        /// `released` — closed content no request reaches again — so the
+        /// epoch no longer keeps those nodes alive; every record reached
+        /// through such a token is stranded. A token is counted once, when
+        /// its root is released. Returns how many of `released` the current
+        /// epoch held a root for.
         fn note_released_nodes(&self, released: impl IntoIterator<Item = SemanticNodeId>) -> usize {
             let inner = self.current.load();
-            let stranded = released
+            let freed: Vec<_> = released
                 .into_iter()
-                .filter(|node| {
-                    let Some(index) = inner.type_tokens.lookup(node) else {
-                        return false;
-                    };
-                    let freed = inner
+                .filter_map(|node| {
+                    let index = inner.type_tokens.lookup(&node)?;
+                    inner
                         .graph_roots
                         .lock()
-                        .remove(&super::records::handle_index(index));
-                    if let Some(roots) = freed {
-                        inner.storage.sub(roots.heap_bytes());
-                    }
-                    true
+                        .remove(&super::records::handle_index(index))
                 })
-                .count();
+                .collect();
+            let stranded = freed.len();
+            for roots in &freed {
+                inner.storage.sub(roots.heap_bytes());
+            }
+            // The roots drop here, outside the table's lock.
+            drop(freed);
             inner.stranded_tokens.fetch_add(stranded, Ordering::Relaxed);
             stranded
         }
     }
 
-    /// Type tokens of the current epoch that name a released node
+    /// The graph nodes the current epoch's type tokens hold roots on: the
+    /// candidates a document close checks against the closed content.
+    pub(crate) fn rooted_token_nodes(&self) -> Vec<SemanticNodeId> {
+        self.current
+            .load()
+            .graph_roots
+            .lock()
+            .values()
+            .filter_map(|roots| roots.operands().first().copied())
+            .collect()
+    }
+
+    /// Type tokens of the current epoch whose graph roots a close released
     /// ([`Self::note_released_nodes`]).
     #[must_use]
     pub fn stranded_token_count(&self) -> usize {
@@ -681,7 +694,7 @@ impl SignatureStore {
                 .and_then(Weak::upgrade)
                 .map(|arena| {
                     let nodes =
-                        if Self::is_binder_token(node) || (!arena.counted() && !arena.is_live(node)) {
+                        if Self::is_binder_token(node) {
                             Vec::new()
                         } else {
                             vec![node]

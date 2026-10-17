@@ -513,7 +513,7 @@ async fn scanner_loop(
         let profile = config.tsx_profile.clone();
 
         let compile_ok = tokio::task::spawn_blocking(move || {
-            if !&host.host().ensure_loaded(&path_clone) {
+            if !&host.as_ref().ensure_loaded(&path_clone) {
                 return false;
             }
             // IDE-sync: gate on the IDE/TSX surface, NOT the runtime `Main`
@@ -521,7 +521,7 @@ async fn scanner_loop(
             // `ensure_compiled` (which demands `Main`) would report failure and
             // the file would never reach the type provider. `ensure_ide_compiled`
             // gates on the IDE surface: `Ok(true)` ⇒ sync to the provider.
-            host.host()
+            host.as_ref()
                 .ensure_ide_compiled(&path_clone, &profile)
                 .unwrap_or(false)
         })
@@ -534,7 +534,7 @@ async fn scanner_loop(
         {
             sync_file_to_provider(
                 path,
-                &config.host.host(),
+                &config.host.as_ref(),
                 Some(&config.documents),
                 &config.tsx_profile,
                 config.project_sync.as_ref(),
@@ -743,7 +743,7 @@ pub(crate) async fn resync_non_carrier_file(
     let host_clone = host.clone();
     let id_clone = canonical_id.to_string();
     tokio::task::spawn_blocking(move || {
-        host_clone.host().remove(&id_clone);
+        host_clone.as_ref().remove(&id_clone);
     })
     .await
     .ok();
@@ -794,8 +794,8 @@ async fn sync_non_carrier_file_to_provider(
     let host_clone = host.clone();
     let id_clone = canonical_id.to_string();
     let load_result = tokio::task::spawn_blocking(move || {
-        host_clone.host().ensure_loaded(&id_clone);
-        host_clone.host().get_source(&id_clone)
+        host_clone.as_ref().ensure_loaded(&id_clone);
+        host_clone.as_ref().get_source(&id_clone)
     })
     .await
     .unwrap_or(None);
@@ -806,7 +806,7 @@ async fn sync_non_carrier_file_to_provider(
 
     // Framework carriers never sync to the provider as raw scripts.
     let Some(file_language) =
-        crate::provider_sync::provider_script_language(&host.host(), canonical_id)
+        crate::provider_sync::provider_script_language(&host.as_ref(), canonical_id)
     else {
         return Vec::new();
     };
@@ -818,7 +818,7 @@ async fn sync_non_carrier_file_to_provider(
     let source_clone = Arc::clone(&source);
     let prepared = tokio::task::spawn_blocking(move || {
         let module_references = host_clone
-            .host()
+            .as_ref()
             .upsert(UpsertRequest {
                 canonical_id: Some(id_clone.clone()),
                 input_id: id_clone.clone(),
@@ -831,9 +831,9 @@ async fn sync_non_carrier_file_to_provider(
 
         // `prepare_non_carrier_provider_sync` is
         // a read-only consumer; route through `host.workspace_read()`.
-        let ws = host_clone.host().workspace_read();
+        let ws = host_clone.as_ref().workspace_read();
         crate::server::prepare_non_carrier_provider_sync(
-            host_clone.host().language_classifier(),
+            host_clone.as_ref().language_classifier(),
             Some(&snap_clone),
             ws.as_ref(),
             &id_clone,
@@ -891,7 +891,7 @@ async fn sync_non_carrier_file_to_provider(
 
     // Store import dependencies in host for dependency tracking
     if !prepared.resolved_dependencies.is_empty() {
-        host.host().set_import_dependencies(
+        host.as_ref().set_import_dependencies(
             canonical_id,
             prepared
                 .resolved_dependencies

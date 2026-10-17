@@ -67,6 +67,10 @@ fn carrier_wrapping(
 fn accumulate_carrier_deps_descends_carrier_args() {
     for kind in 0u8..3 {
         let host = VerterHost::new_standalone(HostConfig::default());
+        let _scope = host
+            .project_type_store()
+            .semantic_graph()
+            .enter_node_root_scope();
         let ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
             crate::resolver_core::HostCapabilities,
         > = &host;

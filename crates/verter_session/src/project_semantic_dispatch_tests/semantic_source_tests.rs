@@ -735,6 +735,10 @@ fn fenced_serve_synthetic_binding_deepen_is_not_admitted() {
 
     // Control — an UNFENCED deepen admits its reduced shape.
     let control = fixture();
+    let _control_scope = control
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let control_carrier = carrier_for(intern_seed(&control));
     assert!(
         drive(&control, &control_carrier),
@@ -750,6 +754,10 @@ fn fenced_serve_synthetic_binding_deepen_is_not_admitted() {
     // fenced at a STABLE generation (no bump, so a GenerationSuperseded gate cannot
     // mask the refusal).
     let fenced = fixture();
+    let _fenced_scope = fenced
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let fenced_carrier = carrier_for(intern_seed(&fenced));
     {
         let rctx = RequestContext::new(1, Arc::from(SCOPE), false, None);

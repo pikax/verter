@@ -114,6 +114,20 @@ impl SemanticGraphStore {
                 (edge, already_recorded)
             };
             if !already_recorded {
+                // Recorded first and marked after, so a node destroyed in
+                // between is either logged for cleanup or refused here.
+                let stale: Vec<SemanticNodeId> = std::iter::once(result)
+                    .chain(edge.sources.iter().copied())
+                    .filter(|node| !self.track_sidecar(*node))
+                    .collect();
+                if !stale.is_empty() {
+                    self.derivation
+                        .lock()
+                        .release_nodes(&|node| stale.contains(&node));
+                    return;
+                }
+            }
+            if !already_recorded {
                 self.stats
                     .origin_edges_emitted
                     .fetch_add(1, Ordering::Relaxed);

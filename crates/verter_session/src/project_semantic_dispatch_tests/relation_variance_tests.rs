@@ -497,16 +497,9 @@ fn closing_the_declaring_document_releases_its_variance_markers() {
     );
     let graph = std::sync::Arc::clone(host.project_type_store().semantic_graph());
     assert!(edited.iter().all(|(node, _, _)| graph.node_is_live(*node)));
-    // The editor closes the document: the host evicts it, and WSP6 applies
-    // the close-time release as soon as no computation is in flight.
+    // The editor closes the document: the host evicts it, its caches drop
+    // their owners, and nothing else holds the markers.
     host.evict(PROBE_FILE);
-    let store = host.project_type_store();
-    store.try_apply_deferred_releases();
-    assert_eq!(
-        store.deferred_release_count(),
-        0,
-        "the close release applied"
-    );
     let live: Vec<_> = edited
         .iter()
         .filter(|(node, _, _)| graph.node_is_live(*node))

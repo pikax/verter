@@ -272,16 +272,18 @@ impl SemanticGraphStore {
             QueryResult::Error(error) => QueryResult::Error(error),
         };
         let walker_diagnostics = super::empty_diagnostics();
-        let lease = self
-            .lease_candidate(
-                &family,
-                super::delivery_lease::DeliveredAllocations::read(
-                    &result,
-                    &walker_diagnostics,
-                    &dispatch_dep_signature,
-                ),
-            )
-            .expect("fixture candidate operands are live");
+        // A candidate whose operands are not live is never admitted, as on
+        // the production publish paths.
+        let Ok(lease) = self.lease_candidate(
+            &family,
+            super::delivery_lease::DeliveredAllocations::read(
+                &result,
+                &walker_diagnostics,
+                &dispatch_dep_signature,
+            ),
+        ) else {
+            return 0;
+        };
         let mut entry = MemoEntry {
             lease,
             result,

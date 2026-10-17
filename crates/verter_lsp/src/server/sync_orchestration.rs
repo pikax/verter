@@ -600,7 +600,7 @@ impl VerterLanguageServer {
     /// publish path with no observability cost.
     pub(super) async fn publish_full_diagnostics_with_audit(&self, uri: &Uri) {
         let host = self.documents.host_arc();
-        if !host.host().config().audit_enabled {
+        if !host.as_ref().config().audit_enabled {
             self.publish_full_diagnostics(uri).await;
             return;
         }

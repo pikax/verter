@@ -23,7 +23,7 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use verter_type_engine::semantic_query::{LiteralValue, SemanticNodeData};
-    use verter_type_engine::semantic_query_memo::ownership_harness::CountedOwnershipHarness;
+    use verter_type_engine::semantic_query_memo::graph_fixture::GraphFixture;
     use verter_type_expr::PropertyKey;
 
     #[test]
@@ -35,9 +35,9 @@ mod tests {
                 PropertyKey::string_literal("second"),
             ],
         ] {
-            let harness = CountedOwnershipHarness::new();
+            let harness = GraphFixture::new();
             let host = crate::VerterHost::new_standalone(Default::default());
-            let dispatch = ProjectSemanticDispatch::with_ownership_harness(&host, harness);
+            let dispatch = ProjectSemanticDispatch::with_graph_fixture(&host, harness);
             let graph = Arc::clone(dispatch.graph());
             let owner = build_keys_union_node(&graph, &keys).unwrap();
             let node = owner.id();

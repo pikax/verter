@@ -441,7 +441,7 @@ impl DocumentRegistry {
             let environment = publication.basis.environment.clone();
             move || {
                 state.lock().epochs.get(&uri) == Some(&epoch)
-                    && environment.matches(&host.host(), &canonical_id)
+                    && environment.matches(&host.as_ref(), &canonical_id)
             }
         };
         let sent = tokio::select! {

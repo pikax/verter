@@ -1025,6 +1025,10 @@ fn surfaces_differing_only_in_excess_origin_intern_distinctly() {
     use verter_type_expr::ExcessPropertyOrigin;
 
     let host = host_for_relation_tests();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
 
@@ -4363,6 +4367,10 @@ fn strict_family_flip_changes_verdict_without_cross_hit() {
             ("/relaxed", r#"{ "compilerOptions": { "strict": false } }"#),
         ],
     );
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = host.project_type_store().semantic_graph();
     let null = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Null));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -6472,6 +6480,10 @@ pub(crate) mod fresh_excess_property_checking {
     #[test]
     fn union_excess_keeps_an_open_arm_undecided() {
         let host = host_for_relation_tests();
+        let _scope = host
+            .project_type_store()
+            .semantic_graph()
+            .enter_node_root_scope();
         let graph = host.project_type_store().semantic_graph();
         let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -6548,6 +6560,10 @@ pub(crate) mod fresh_excess_property_checking {
     #[test]
     fn discriminated_union_rejects_extra_after_narrowing() {
         let host = host_for_relation_tests();
+        let _scope = host
+            .project_type_store()
+            .semantic_graph()
+            .enter_node_root_scope();
         let graph = host.project_type_store().semantic_graph();
         let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -6593,6 +6609,10 @@ pub(crate) mod fresh_excess_property_checking {
     #[test]
     fn surviving_arm_property_is_value_checked_against_reduced_union() {
         let host = host_for_relation_tests();
+        let _scope = host
+            .project_type_store()
+            .semantic_graph()
+            .enter_node_root_scope();
         let graph = host.project_type_store().semantic_graph();
         let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -6650,6 +6670,10 @@ pub(crate) mod fresh_excess_property_checking {
     #[test]
     fn applicable_index_signature_accepts_compatible_and_rejects_incompatible() {
         let host = host_for_relation_tests();
+        let _scope = host
+            .project_type_store()
+            .semantic_graph()
+            .enter_node_root_scope();
         let graph = host.project_type_store().semantic_graph();
         let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -6701,6 +6725,10 @@ pub(crate) mod fresh_excess_property_checking {
     #[test]
     fn empty_object_object_primitive_and_global_object_targets_skip_excess() {
         let host = host_for_relation_tests();
+        let _scope = host
+            .project_type_store()
+            .semantic_graph()
+            .enter_node_root_scope();
         let graph = host.project_type_store().semantic_graph();
         let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
 
@@ -6813,6 +6841,10 @@ pub(crate) mod fresh_excess_property_checking {
     #[test]
     fn method_and_accessor_shaped_fresh_members_are_excess_candidates() {
         let host = host_for_relation_tests();
+        let _scope = host
+            .project_type_store()
+            .semantic_graph()
+            .enter_node_root_scope();
         let graph = host.project_type_store().semantic_graph();
         let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
 
@@ -6837,6 +6869,10 @@ pub(crate) mod fresh_excess_property_checking {
     #[test]
     fn spread_tainted_members_are_not_candidates_but_still_value_check() {
         let host = host_for_relation_tests();
+        let _scope = host
+            .project_type_store()
+            .semantic_graph()
+            .enter_node_root_scope();
         let graph = host.project_type_store().semantic_graph();
         let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -6872,6 +6908,10 @@ pub(crate) mod fresh_excess_property_checking {
     #[test]
     fn origin_does_not_change_ordinary_assignability() {
         let host = host_for_relation_tests();
+        let _scope = host
+            .project_type_store()
+            .semantic_graph()
+            .enter_node_root_scope();
         let graph = host.project_type_store().semantic_graph();
         let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
 
@@ -6900,6 +6940,10 @@ pub(crate) mod fresh_excess_property_checking {
     #[test]
     fn union_arms_do_not_rerun_branch_local_excess() {
         let host = host_for_relation_tests();
+        let _scope = host
+            .project_type_store()
+            .semantic_graph()
+            .enter_node_root_scope();
         let graph = host.project_type_store().semantic_graph();
         let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
 
@@ -6932,6 +6976,10 @@ pub(crate) mod fresh_excess_property_checking {
     #[test]
     fn nested_inline_excess_rejected_variable_sourced_nested_accepted() {
         let host = host_for_relation_tests();
+        let _scope = host
+            .project_type_store()
+            .semantic_graph()
+            .enter_node_root_scope();
         let graph = host.project_type_store().semantic_graph();
         let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
 
@@ -6979,6 +7027,10 @@ pub(crate) mod fresh_excess_property_checking {
     #[test]
     fn union_value_check_unknown_stays_unknown() {
         let host = host_for_relation_tests();
+        let _scope = host
+            .project_type_store()
+            .semantic_graph()
+            .enter_node_root_scope();
         let graph = host.project_type_store().semantic_graph();
         let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         let lit_a = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
@@ -7121,6 +7173,10 @@ pub(crate) mod fresh_excess_property_checking {
     #[test]
     fn deep_alias_chain_target_still_excess_checks() {
         let host = host_for_relation_tests();
+        let _scope = host
+            .project_type_store()
+            .semantic_graph()
+            .enter_node_root_scope();
         let graph = host.project_type_store().semantic_graph();
         let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         let target_surface = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
@@ -7149,6 +7205,10 @@ pub(crate) mod fresh_excess_property_checking {
     #[test]
     pub(crate) fn freshness_tracks_per_property_spread_taint() {
         let host = host_for_relation_tests();
+        let _scope = host
+            .project_type_store()
+            .semantic_graph()
+            .enter_node_root_scope();
         let graph = host.project_type_store().semantic_graph();
         let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -7260,6 +7320,10 @@ pub(crate) mod fresh_excess_property_checking {
     #[test]
     fn unknown_discriminant_arm_is_kept_not_dropped() {
         let host = host_for_relation_tests();
+        let _scope = host
+            .project_type_store()
+            .semantic_graph()
+            .enter_node_root_scope();
         let graph = host.project_type_store().semantic_graph();
         let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         let lit_a = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(

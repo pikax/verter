@@ -567,7 +567,7 @@ async fn optional_semantic_analysis_is_isolated_and_published_asynchronously() {
         assert_eq!(
             semantic.semantic_host_revision(),
             semantic_host
-                .host()
+                .as_ref()
                 .registered_source_revision_token(&uri_to_canonical_id(&uri))
                 .expect("semantic Source-stage revision token")
         );
@@ -636,7 +636,7 @@ async fn a_narrowed_admission_governs_both_document_ingress_paths() {
         .clone()
         .expect("the enrichment task constructed the semantic host");
     assert_eq!(
-        semantic_host.host().framework_options(),
+        semantic_host.as_ref().framework_options(),
         &vue_only,
         "the semantic-enrichment host admits exactly what the projection host admits"
     );

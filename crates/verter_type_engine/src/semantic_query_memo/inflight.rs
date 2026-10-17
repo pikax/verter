@@ -297,6 +297,10 @@ pub struct InlineMemberFlight {
     /// active while the flight is open, whether it is the installed task of
     /// the enclosing execution or one registered for this flight alone.
     _task: super::tasks::ExecutionTask,
+    /// The member's decided value, owned from the moment its component
+    /// closes until the batched publish stages it: the construction scope
+    /// that computed it may close first.
+    held: super::delivery_lease::SemanticDeliveryLease,
 }
 
 impl std::fmt::Debug for InlineMemberFlight {
@@ -308,6 +312,21 @@ impl std::fmt::Debug for InlineMemberFlight {
 }
 
 impl InlineMemberFlight {
+    /// Own `value` — the member's decided value — until this flight is
+    /// published or aborted. A value whose operands are not live cannot be
+    /// held; the batched publish then refuses the member.
+    pub(crate) fn hold_value(
+        &mut self,
+        graph: &super::SemanticGraphStore,
+        value: &crate::semantic_query::QueryResult<crate::semantic_query::SemanticQueryValue>,
+    ) {
+        if let Ok(lease) =
+            graph.lease_delivery(super::delivery_lease::DeliveredAllocations::value(value))
+        {
+            self.held = lease;
+        }
+    }
+
     pub(super) fn state(&self) -> &Mutex<InflightState> {
         &self.inflight.state
     }
@@ -355,6 +374,7 @@ impl super::SemanticGraphStore {
             prepared,
             inflight,
             _task: task,
+            held: Default::default(),
         })
     }
 

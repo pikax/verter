@@ -52,6 +52,10 @@ fn template(host: &VerterHost, quasis: &[&str], expressions: &[SemanticNodeId]) 
 #[test]
 fn truthiness_rules_match_the_pinned_checker() {
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = host.project_type_store().semantic_graph();
 
     let string = prim(&host, PrimitiveKind::String);

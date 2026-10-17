@@ -2327,6 +2327,10 @@ fn projected_optional_to_required_honors_the_strict_family_config() {
             ),
         ],
     );
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let base = object(graph, [surface_member("a", number, true)]);
@@ -3545,6 +3549,10 @@ fn key_projection_over_spelling_overwrite_reads_the_latest_write() {
 #[test]
 fn macro_member_reader_publishes_open_program_positive_names_without_completeness() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -3828,6 +3836,10 @@ fn direct_write_excess_candidates_replace_dual_spelling_stale_entries() {
 #[test]
 fn macro_member_reader_recurses_union_carriers_for_positive_members() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -3921,6 +3933,10 @@ fn macro_member_reader_recurses_union_carriers_for_positive_members() {
 #[test]
 fn props_reader_applies_intersection_rules_to_intersection_carriers() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -4048,6 +4064,10 @@ fn props_reader_applies_intersection_rules_to_intersection_carriers() {
 #[test]
 fn macro_union_merge_collapses_dual_spelling_members() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));

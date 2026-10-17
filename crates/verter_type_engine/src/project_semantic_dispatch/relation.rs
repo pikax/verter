@@ -3501,19 +3501,25 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     // consumes the computed step.
                     self_step = Some(relation_step_from_payload(&payload));
                     settles.push(!recursion_uses[position].context_dependent);
-                    completed.push(CompletedSccMember {
-                        key,
-                        payload,
-                        inline_flight,
-                    });
+                    completed.push(
+                        CompletedSccMember {
+                            key,
+                            payload,
+                            inline_flight,
+                        }
+                        .held(self.graph()),
+                    );
                 }
             } else if !session_delta {
                 settles.push(!recursion_uses[position].context_dependent);
-                completed.push(CompletedSccMember {
-                    key,
-                    payload,
-                    inline_flight,
-                });
+                completed.push(
+                    CompletedSccMember {
+                        key,
+                        payload,
+                        inline_flight,
+                    }
+                    .held(self.graph()),
+                );
             } else {
                 self.abort_inline_flight(inline_flight.as_ref());
             }
@@ -3617,13 +3623,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             match verdict {
                 Some(super::flow_solve::FlowSolveOutcome::Complete(proof)) => {
-                    proven_flow_members.push(super::dispatch_txn::CompletedFlowReturnMember {
-                        key: member.key,
-                        result: proof,
-                        inline_flight: member.inline_flight,
-                        self_roots: member.self_roots,
-                        materialized: member.materialized,
-                    });
+                    proven_flow_members.push(
+                        super::dispatch_txn::CompletedFlowReturnMember {
+                            key: member.key,
+                            result: proof,
+                            inline_flight: member.inline_flight,
+                            self_roots: member.self_roots,
+                            materialized: member.materialized,
+                        }
+                        .held(self.graph()),
+                    );
                 }
                 unproven => {
                     flow_batch_unproven = true;
@@ -3712,12 +3721,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // provenance and is not the admission oracle.
                 match crate::semantic_query::AdmissibleCallResult::new(result, state.proof_complete)
                 {
-                    Some(result) => txn.call.completed_members.push(CompletedResolveCallMember {
-                        key,
-                        result,
-                        inline_flight: state.inline_flight,
-                        self_roots: state.self_roots,
-                    }),
+                    Some(result) => txn.call.completed_members.push(
+                        CompletedResolveCallMember {
+                            key,
+                            result,
+                            inline_flight: state.inline_flight,
+                            self_roots: state.self_roots,
+                        }
+                        .held(self.graph()),
+                    ),
                     _ => rootless_flights.push(state.inline_flight),
                 }
             }
@@ -4213,11 +4225,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .borrow_mut()
             .relation
             .completed_members
-            .push(CompletedSccMember {
-                key: member_key,
-                payload,
-                inline_flight: Some(inline_flight),
-            });
+            .push(
+                CompletedSccMember {
+                    key: member_key,
+                    payload,
+                    inline_flight: Some(inline_flight),
+                }
+                .held(self.graph()),
+            );
         self.execute_relate_root(root_key)
     }
 

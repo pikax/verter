@@ -255,6 +255,12 @@ pub(super) fn with_probe_outcome_on_host<R>(
         super::evaluate::StructuralFactDemandOutcome,
     ) -> R,
 ) -> R {
+    // The probe holds what its reads deliver for as long as it inspects
+    // them.
+    let _probe_scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let module = format!(
         "{source}\nexport function __checker_probe() {{ \
             const __probe: {probe} = null as any; \

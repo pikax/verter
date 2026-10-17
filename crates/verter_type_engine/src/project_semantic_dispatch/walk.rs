@@ -11560,6 +11560,7 @@ mod overload_carrier_exclusion_tests {
     #[test]
     fn alias_wrapped_callables_keep_authored_overload_order() {
         let graph = SemanticGraphStore::new();
+        let _scope = graph.enter_node_root_scope();
         let ret_a = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
         let ret_b = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         let callable_object = |ret: crate::semantic_query::SemanticNodeId| {
@@ -11625,6 +11626,7 @@ mod overload_carrier_exclusion_tests {
     #[test]
     fn bare_callable_objects_stay_a_kernel_owned_intersection_carrier() {
         let graph = SemanticGraphStore::new();
+        let _scope = graph.enter_node_root_scope();
         let ret_a = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
         let ret_b = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         let callable_object = |ret: crate::semantic_query::SemanticNodeId| {
@@ -11681,6 +11683,7 @@ mod overload_carrier_exclusion_tests {
     #[test]
     fn non_callable_object_values_still_merge_into_one_surface() {
         let graph = SemanticGraphStore::new();
+        let _scope = graph.enter_node_root_scope();
         let keyspace = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
         // Two DISTINCT plain surfaces (distinct keyspaces keep them from
         // interning to one node), neither carrying a signature entry.
@@ -11881,6 +11884,7 @@ mod overload_carrier_exclusion_tests {
     fn augmentable_apparent_type_carriers_keep_authored_overload_order() {
         for kind in ["Array", "Tuple", "TemplateLiteral"] {
             let graph = SemanticGraphStore::new();
+            let _scope = graph.enter_node_root_scope();
             // Adversarial interning order: the SECOND authored contributor
             // is minted first, so its ordinal sorts lower.
             let b = apparent_type_carrier(&graph, kind, PrimitiveKind::Number);
@@ -11904,6 +11908,7 @@ mod overload_carrier_exclusion_tests {
     #[test]
     fn keyof_domain_keeps_authored_overload_order() {
         let graph = SemanticGraphStore::new();
+        let _scope = graph.enter_node_root_scope();
         let type_param = |name: &str| {
             graph.intern_node(SemanticNodeData::TypeParam {
                 decl: crate::semantic_query::DeclIdentity::synthetic(name),
@@ -11940,6 +11945,7 @@ mod overload_carrier_exclusion_tests {
             "TypeOf",
         ] {
             let graph = SemanticGraphStore::new();
+            let _scope = graph.enter_node_root_scope();
             // Adversarial interning order: the SECOND authored contributor
             // is minted first, so its ordinal sorts lower.
             let b = reference_carrier(&graph, kind, "B");
@@ -11956,6 +11962,7 @@ mod overload_carrier_exclusion_tests {
     #[test]
     fn budget_exhausted_classification_keeps_authored_overload_order() {
         let graph = SemanticGraphStore::new();
+        let _scope = graph.enter_node_root_scope();
         let deep_chain = |terminal: PrimitiveKind| {
             let mut node = graph.intern_node(SemanticNodeData::Primitive(terminal));
             // bounded-loop: fixed 80-hop fixture chain, comfortably past the classification walk's node budget.

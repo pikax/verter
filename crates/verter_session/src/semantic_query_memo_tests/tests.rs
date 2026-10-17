@@ -2176,6 +2176,7 @@ fn invalidating_an_scc_root_before_member_publish_cannot_resurrect_the_member() 
     use std::thread;
 
     let store = Arc::new(SemanticGraphStore::new());
+    let _scope = store.enter_node_root_scope();
     let canonical = Arc::<str>::from("/w/relation-scc-race.ts");
     let whole_hash = [0x61; 16];
     let scoped = |kind| {
@@ -3335,6 +3336,7 @@ fn carrier_naming(
 fn recursive_sentinel_does_not_promote_to_warm_memo() {
     let host = ctx_host();
     let store = Arc::new(SemanticGraphStore::new());
+    let _scope = store.enter_node_root_scope();
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/a.ts"),
         name: Arc::from("R"),
@@ -9457,7 +9459,7 @@ fn operand_evidence_refuses_a_root_without_its_whole_hash_fact() {
 }
 
 // ──────────────────────────────────────────────────────────────────
-// Document-close release (`release_canonical`)
+// Document close (`close_canonical`)
 // ──────────────────────────────────────────────────────────────────
 
 fn release_file_scope(canonical: &str, hash: u8) -> NodeScopeId {
@@ -9554,43 +9556,61 @@ fn release_decl_key(canonical: &str, name: &str) -> SemanticQueryKey {
     })
 }
 
-/// The production warm read refuses a candidate whose result names a
-/// released node, even when the candidate's carrier validates — the
-/// read-side guarantee behind the release: whatever a racing publish
-/// lands after the tombstone, a released node is never SERVED from the
-/// warm memo. A candidate whose result is live is still served.
+/// A candidate whose result or key names a destroyed node is never admitted:
+/// its candidate lease cannot root a destroyed operand, so the publish is
+/// refused and no warm read can ever serve the destroyed node. A candidate
+/// over a live result is admitted and served.
 ///
-/// On the old code there was no liveness check on the warm read:
-/// `get_validated` returned the (vacuously valid) entry and handed the
-/// caller an id whose payload was gone — the first assertion after the
-/// publish failed.
+/// Discriminating: a publish that admitted the candidate without rooting
+/// its operands would serve an id whose payload is gone.
 #[test]
-fn warm_read_refuses_a_candidate_whose_result_was_released() {
+fn a_candidate_over_a_destroyed_node_is_never_admitted() {
     let host = ctx_host();
     let store = SemanticGraphStore::new();
     let shared = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let (_, a_obj, _, _) = release_intern_document(&store, "/w/a.ts", 1, shared);
-    let report = store.release_canonical("/w/a.ts");
-    assert_eq!(report.nodes_released, 3);
-    assert!(!store.node_is_live(a_obj));
+    let a_obj = {
+        let _build = store.enter_node_root_scope();
+        release_intern_document(&store, "/w/a.ts", 1, shared).1
+    };
+    assert!(
+        !store.node_is_live(a_obj),
+        "premise: nothing holds A's object"
+    );
 
-    // A publish that raced the tombstone: its carrier is empty (validates
-    // vacuously), so only the liveness guard can refuse it.
     let no_roots: Arc<[Arc<str>]> = Arc::from(Vec::<Arc<str>>::new());
-    let stale_key = release_decl_key("/w/b.ts", "Stale");
+    let stale_result = release_decl_key("/w/b.ts", "Stale");
     store.publish_with_carrier_for_tests(
-        stale_key.clone(),
+        stale_result.clone(),
         QueryResult::Value(a_obj),
         verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
         Arc::clone(&no_roots),
     );
     assert!(
-        store.get_unvalidated(&stale_key).is_some(),
-        "the unchecked probe still sees the raw slot (it is a test-only reader)"
+        store.get_unvalidated(&stale_result).is_none(),
+        "a result naming a destroyed node is never admitted"
+    );
+    let stale_key = family_test_key(a_obj, ProjectionMode::Identity);
+    let read = store.execute_cooperative(
+        &host,
+        stale_key.clone(),
+        || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+        || {
+            (
+                QueryResult::Value(shared),
+                dep_sig_for("/w/consumer.vue", 7),
+            )
+        },
     );
     assert!(
-        store.get_validated(&stale_key, &host).is_none(),
-        "the production warm read must refuse a result naming a released node"
+        matches!(
+            read.value().clone(),
+            QueryResult::Error(QueryError::StaleSemanticOperand)
+        ),
+        "the stale re-dispatch answers its caller with the typed refusal"
+    );
+    assert!(
+        store.get_unvalidated(&stale_key).is_none(),
+        "a family keyed on a destroyed node is never admitted"
     );
 
     let live_key = release_decl_key("/w/b.ts", "Live");
@@ -9620,13 +9640,21 @@ fn warm_read_refuses_a_candidate_whose_result_was_released() {
 /// build this test's unrelated build was aborted (`inflight_aborted == 1`)
 /// and its publish refused, so the final `is_some` assertion failed.
 #[test]
-fn release_canonical_leaves_an_unrelated_inflight_build_and_its_publish_alone() {
+fn close_canonical_leaves_an_unrelated_inflight_build_and_its_publish_alone() {
     use std::sync::Barrier;
     use std::thread;
 
     let store = Arc::new(SemanticGraphStore::new());
     let shared = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let (_, _a_obj, _, _) = release_intern_document(&store, "/w/a.ts", 1, shared);
+    let build = store.enter_node_root_scope();
+    let (_, a_obj, _, _) = release_intern_document(&store, "/w/a.ts", 1, shared);
+    store.publish_with_carrier_for_tests(
+        release_decl_key("/w/a.ts", "A"),
+        QueryResult::Value(a_obj),
+        carrier_naming("/w/a.ts", 1),
+        Arc::from(vec![Arc::<str>::from("/w/a.ts")]),
+    );
+    drop(build);
     // An unrelated key over a Global node: nothing in its identity or
     // carrier names /w/a.ts.
     let key = family_test_key(shared, ProjectionMode::Identity);
@@ -9659,11 +9687,12 @@ fn release_canonical_leaves_an_unrelated_inflight_build_and_its_publish_alone() 
     in_build.wait();
 
     let flights_before = store.resident_flight_keys_for_tests().len();
-    let report = store.release_canonical("/w/a.ts");
+    let report = store.close_canonical("/w/a.ts");
     assert_eq!(
-        report.nodes_released, 3,
-        "the close still releases A's nodes: {report:?}"
+        report.memo_entries_evicted, 1,
+        "the close still evicts A's entry: {report:?}"
     );
+    assert!(!store.node_is_live(a_obj), "and A's object goes with it");
     assert_eq!(
         store.resident_flight_keys_for_tests().len(),
         flights_before,
@@ -9682,34 +9711,27 @@ fn release_canonical_leaves_an_unrelated_inflight_build_and_its_publish_alone() 
     );
 }
 
-/// The `ProjectPath` growth of a close-heavy session: a consumer keeps a
-/// released ordinal (a published carrier's `value_node`, a retained
-/// surface) and, after the close, dispatches `ProjectPath { base: <dead> }`
-/// again. The cold build reads the placeholder and the entry is admitted
-/// with a carrier naming only the consumer — keyed on a node that was
-/// already dead before any later release, so no release's dead set ever
-/// contains it and it survives every close. Twenty open / query / close
-/// cycles, each followed by such a stale re-dispatch, must keep the
-/// `ProjectPath` family flat: the publish refuses a family keyed on a
-/// released node, and a close drops any family keyed on a non-live node.
+/// The `ProjectPath` growth of a close-heavy session stays flat: twenty
+/// open / query / close cycles, each followed by a stale re-dispatch over
+/// the previous version's base, keep the family memo empty after every
+/// close. The live entry is evicted by the close, and a stale re-dispatch
+/// over a destroyed base is never admitted (its candidate cannot root the
+/// destroyed operand).
 ///
-/// On the previous release (dead set = this call's tombstones only, no
-/// admission check) the raw re-publish landed every cycle and the family
-/// grew by one per cycle — the flat assertion failed on cycle 2 with
-/// `ProjectPath` at 2.
+/// Discriminating: an admission that did not root the key's operands lands
+/// the stale family every cycle; a close that left the live entry keeps one
+/// family per content version.
 #[test]
-fn release_canonical_keeps_project_path_flat_when_a_consumer_redispatches_dead_bases() {
+fn close_canonical_keeps_project_path_flat_when_a_consumer_redispatches_dead_bases() {
     let host = ctx_host();
     let store = SemanticGraphStore::new();
     let shared = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let roots_a: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from("/w/a.ts")]);
-    let roots_c: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from("/w/consumer.vue")]);
     let mut previous_base: Option<SemanticNodeId> = None;
-    let mut first_open: Option<Vec<(&'static str, usize)>> = None;
 
     for cycle in 0..20usize {
         // Open: A's version interns its object; the consumer resolves a
         // path over it (the real cooperative path).
+        let build = store.enter_node_root_scope();
         let (_, a_obj, _, _) = release_intern_document(&store, "/w/a.ts", cycle as u8 + 1, shared);
         let key = family_test_key(a_obj, ProjectionMode::Identity);
         let read = store.execute_cooperative(
@@ -9723,14 +9745,16 @@ fn release_canonical_keeps_project_path_flat_when_a_consumer_redispatches_dead_b
                 )
             },
         );
+        drop(build);
         assert!(matches!(read.value().clone(), QueryResult::Value(_)));
+        drop(read);
         assert!(
             store.get_unvalidated(&key).is_some(),
             "cycle {cycle}: the live entry is warm"
         );
 
         // The stale holder: after the previous close, a consumer query
-        // re-dispatches a path over the PREVIOUS version's (dead) base.
+        // re-dispatches a path over the PREVIOUS version's destroyed base.
         if let Some(dead_base) = previous_base {
             assert!(!store.node_is_live(dead_base));
             let stale_key = family_test_key(dead_base, ProjectionMode::Identity);
@@ -9747,48 +9771,22 @@ fn release_canonical_keeps_project_path_flat_when_a_consumer_redispatches_dead_b
             );
             assert!(
                 store.get_unvalidated(&stale_key).is_none(),
-                "cycle {cycle}: a family keyed on a released node must not be admitted"
+                "cycle {cycle}: a family keyed on a destroyed node must not be admitted"
             );
-            // And a candidate that DID land (the raw test publish bypasses the
-            // admission fence) is dropped by the next close of any document.
-            store.publish_with_carrier_for_tests(
-                stale_key.clone(),
-                QueryResult::Value(shared),
-                carrier_naming("/w/consumer.vue", 7),
-                Arc::clone(&roots_c),
-            );
-            assert!(store.get_unvalidated(&stale_key).is_some());
         }
 
-        // Cycle 0 has no previous version to re-dispatch; from cycle 1 on
-        // the "open" point holds the live entry plus the raw stale one, and
-        // that is the steady state every later cycle must reproduce.
-        let open = store.memo_entry_counts_by_family();
-        match &first_open {
-            None => {
-                if cycle >= 1 {
-                    first_open = Some(open);
-                }
-            }
-            Some(first) => {
-                assert_eq!(
-                    &open, first,
-                    "cycle {cycle}: the ProjectPath family must stay flat"
-                );
-            }
-        }
-
-        // Close A. Its own entries drain by node id / carrier; the raw
-        // dead-based candidate drains because its key names a non-live node.
-        let _ = store.release_canonical("/w/a.ts");
+        let _ = store.close_canonical("/w/a.ts");
         assert_eq!(
             store.memo_entry_count(),
             0,
-            "cycle {cycle}: nothing keyed on a dead base survives a close"
+            "cycle {cycle}: nothing keyed on the closed base survives a close"
+        );
+        assert!(
+            !store.node_is_live(a_obj),
+            "cycle {cycle}: the closed base is destroyed with its entry"
         );
         previous_base = Some(a_obj);
     }
-    let _ = roots_a;
 }
 
 /// Every node id a family identity embeds DIRECTLY — not only its base or
@@ -9806,7 +9804,6 @@ fn release_canonical_keeps_project_path_flat_when_a_consumer_redispatches_dead_b
 /// contextual-typing or return-demand node sets — so each such key escaped
 /// the sweep and passed the fence.
 mod release_embedded_node_family_tests {
-    use super::super::family::family_and_slot;
     use super::*;
     use verter_type_engine::semantic_query::{
         AuthoredPropertyKey, CanonicalTypeSubstitution, ConditionalPendingSubstitution,
@@ -10106,11 +10103,12 @@ mod release_embedded_node_family_tests {
     }
 
     #[test]
-    fn release_sweeps_and_fences_a_family_whose_only_dead_id_is_an_embedded_field() {
+    fn close_evicts_and_fences_a_family_whose_only_closed_id_is_an_embedded_field() {
         let mut escaped = Vec::new();
         for field in 0..cases(SemanticNodeId(0)).len() {
             let store = SemanticGraphStore::new();
             let shared = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+            let build = store.enter_node_root_scope();
             let live = store.intern_node_with_scope(
                 SemanticNodeData::Literal(LiteralValue::Number(1.0)),
                 release_file_scope("/w/b.ts", 2),
@@ -10123,9 +10121,10 @@ mod release_embedded_node_family_tests {
                 SemanticNodeData::Literal(LiteralValue::Number(3.0)),
                 release_file_scope("/w/a.ts", 1),
             );
-            let (label, build) = cases(live).swap_remove(field);
-            let dead_key = build(doomed);
-            let live_key = build(control);
+            let held = store.root_nodes([live, control]).unwrap();
+            let (label, build_key) = cases(live).swap_remove(field);
+            let dead_key = build_key(doomed);
+            let live_key = build_key(control);
             let roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from("/w/consumer.vue")]);
             for key in [&dead_key, &live_key] {
                 store.publish_with_carrier_for_tests(
@@ -10139,40 +10138,53 @@ mod release_embedded_node_family_tests {
                     "{label}: fixture publishes"
                 );
             }
+            drop(build);
 
-            let report = store.release_canonical("/w/a.ts");
+            let report = store.close_canonical("/w/a.ts");
 
-            assert!(!store.node_is_live(doomed), "{label}: {report:?}");
             assert!(
                 store.get_unvalidated(&live_key).is_some(),
-                "{label}: the control over a live node stays"
-            );
-            assert!(
-                !store.family_names_released_node(&family_and_slot(&live_key).0),
-                "{label}: the control stays admissible"
+                "{label}: the control over another document's node stays"
             );
             let evicted = store.get_unvalidated(&dead_key).is_none();
-            let fenced = store.family_names_released_node(&family_and_slot(&dead_key).0);
-            if !evicted || !fenced {
-                escaped.push(format!("{label} (evicted: {evicted}, fenced: {fenced})"));
+            drop(dead_key);
+            let destroyed = !store.node_is_live(doomed);
+            // Re-presenting the key after the close cannot root its
+            // destroyed operand, so the family is refused.
+            let refused = destroyed && {
+                let again = cases(live).swap_remove(field).1(doomed);
+                store.publish_with_carrier_for_tests(
+                    again.clone(),
+                    QueryResult::Value(shared),
+                    carrier_naming("/w/consumer.vue", 7),
+                    Arc::clone(&roots),
+                );
+                store.get_unvalidated(&again).is_none()
+            };
+            if !evicted || !destroyed || !refused {
+                escaped.push(format!(
+                    "{label} (evicted: {evicted}, destroyed: {destroyed}, refused: {refused}) {report:?}"
+                ));
             }
+            drop(held);
         }
         assert!(
             escaped.is_empty(),
-            "a key whose only released id sits in one field must be evicted by the close \
-             and refused admission afterwards; escaped: {escaped:#?}"
+            "a key whose only closed-content id sits in one field must be evicted by the close, \
+             its node destroyed, and the family refused afterwards; escaped: {escaped:#?}"
         );
     }
 
-    /// End to end through the cooperative publish: after the close, a stale
-    /// re-dispatch of a path whose computed index is the released node is
-    /// returned to its caller but never admitted; the same path over a live
-    /// index is.
+    /// End to end through the cooperative publish: after the close destroyed
+    /// a node, a stale re-dispatch of a path whose computed index is that
+    /// node is returned to its caller but never admitted; the same path over
+    /// a live index is.
     #[test]
-    fn a_path_over_a_released_computed_index_is_not_admitted_after_the_close() {
+    fn a_path_over_a_destroyed_computed_index_is_not_admitted() {
         let host = ctx_host();
         let store = SemanticGraphStore::new();
         let shared = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let build = store.enter_node_root_scope();
         let live = store.intern_node_with_scope(
             SemanticNodeData::Literal(LiteralValue::Number(1.0)),
             release_file_scope("/w/b.ts", 2),
@@ -10181,7 +10193,9 @@ mod release_embedded_node_family_tests {
             SemanticNodeData::Literal(LiteralValue::Number(3.0)),
             release_file_scope("/w/a.ts", 1),
         );
-        let _ = store.release_canonical("/w/a.ts");
+        let held = store.root_nodes([live]).unwrap();
+        drop(build);
+        assert!(!store.node_is_live(doomed), "premise: nothing holds it");
         for (index, admitted) in [(live, true), (doomed, false)] {
             let key = SemanticQueryKey::ProjectPath {
                 base: live,
@@ -10199,46 +10213,61 @@ mod release_embedded_node_family_tests {
                     )
                 },
             );
-            assert!(matches!(read.value().clone(), QueryResult::Value(_)));
+            assert_eq!(
+                matches!(read.value().clone(), QueryResult::Value(_)),
+                admitted,
+                "index {index:?}: a destroyed index answers the typed refusal"
+            );
             assert_eq!(
                 store.get_unvalidated(&key).is_some(),
                 admitted,
                 "index {index:?}: admitted only over a live computed index"
             );
         }
+        drop(held);
     }
 }
 
-/// A document close hands the nodes it released to the signature kernel:
-/// once the kernel's tokens name mostly released nodes the epoch is
-/// replaced at the close, long before the record cap, and a close whose
-/// released nodes the kernel holds few tokens for leaves the epoch alone.
-/// Discriminating: without the hand-off the close only checks the cap, so
-/// the stranded tokens stay until thousands of cycles later.
+/// A document close releases the signature kernel's roots on the type
+/// tokens naming its closed content: once the kernel's tokens are mostly
+/// stranded the epoch is replaced at the close, long before the record cap,
+/// and a close whose content the kernel holds few tokens for leaves the
+/// epoch alone. The tokens' nodes are destroyed once the kernel lets go.
+/// Discriminating: without the hand-off the epoch keeps the closed content
+/// alive until the cap replaces it, thousands of cycles later.
 #[test]
-fn release_canonical_retires_the_kernel_epoch_its_released_nodes_strand() {
+fn close_canonical_retires_the_kernel_epoch_its_closed_content_strands() {
     let store = SemanticGraphStore::new();
     let kernel = store.signature_store();
     let shared = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let (a_param, a_obj, _, _) = release_intern_document(&store, "/w/a.ts", 1, shared);
-    let (b_param, _, _, _) = release_intern_document(&store, "/w/b.ts", 2, shared);
-    for token in [a_param, a_obj, b_param] {
-        kernel.intern_type_token(token, None).unwrap();
-    }
+    let (a_param, a_obj, b_param) = {
+        let _build = store.enter_node_root_scope();
+        let (a_param, a_obj, _, _) = release_intern_document(&store, "/w/a.ts", 1, shared);
+        let (b_param, _, _, _) = release_intern_document(&store, "/w/b.ts", 2, shared);
+        for token in [a_param, a_obj, b_param] {
+            kernel.intern_type_token(token, None).unwrap();
+        }
+        (a_param, a_obj, b_param)
+    };
+    assert!(
+        store.node_is_live(a_obj),
+        "premise: the kernel holds its tokens"
+    );
     let before = kernel.epoch();
 
-    let report = store.release_canonical("/w/b.ts");
+    let report = store.close_canonical("/w/b.ts");
     assert!(
         !report.signature_epoch_replaced,
         "one of three tokens stranded is not a majority: {report:?}"
     );
     assert_eq!(kernel.epoch(), before);
     assert_eq!(kernel.stranded_token_count(), 1);
+    assert!(!store.node_is_live(b_param), "B's token node is destroyed");
 
-    let report = store.release_canonical("/w/a.ts");
+    let report = store.close_canonical("/w/a.ts");
     assert!(
         report.signature_epoch_replaced,
-        "every token now names a released node: {report:?}"
+        "every token now names closed content: {report:?}"
     );
     assert_ne!(kernel.epoch(), before);
     assert_eq!(
@@ -10246,8 +10275,5 @@ fn release_canonical_retires_the_kernel_epoch_its_released_nodes_strand() {
         0,
         "the replacement epoch starts empty"
     );
-    assert!(
-        kernel.interned_len() < kernel.record_cap(),
-        "the replacement came from the release, not the cap"
-    );
+    assert!(!store.node_is_live(a_param) && !store.node_is_live(a_obj));
 }

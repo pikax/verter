@@ -33,14 +33,25 @@ fn context(
 }
 
 fn query(
+    program: SemanticNodeId,
     selector: ObjectProjectionSelector,
     context: verter_type_engine::semantic_query::ObjectSpreadProjectionContext,
 ) -> SemanticQueryKey {
     SemanticQueryKey::ProjectObjectSpread {
-        program: SemanticNodeId(41),
+        program,
         selector,
         context,
     }
+}
+
+/// A live node of `store`, standing for the fixture ordinal `n`: a key or
+/// value names only nodes its graph holds.
+fn live(store: &SemanticGraphStore, n: u32) -> SemanticNodeId {
+    store.intern_node(
+        verter_type_engine::semantic_query::SemanticNodeData::Literal(
+            verter_type_engine::semantic_query::LiteralValue::Number(f64::from(n)),
+        ),
+    )
 }
 
 fn formula() -> verter_type_engine::semantic_query::ObjectProjectionFormula {
@@ -74,11 +85,13 @@ fn join_within<T: Send + 'static>(handle: thread::JoinHandle<T>, label: &str) ->
 
 #[test]
 fn family_retains_selector_and_every_non_slot_context_axis() {
+    let program = SemanticNodeId(41);
     let base_context = context(ProjectionMode::Shallow);
-    let base = query(ObjectProjectionSelector::Surface, base_context);
+    let base = query(program, ObjectProjectionSelector::Surface, base_context);
     let (base_family, base_slot) = family_and_slot(&base);
 
     let selector_mutation = query(
+        program,
         ObjectProjectionSelector::Key(PropertyKey::identifier("x")),
         base_context,
     );
@@ -91,6 +104,7 @@ fn family_retains_selector_and_every_non_slot_context_axis() {
     assert_ne!(family_and_slot(&program_mutation).0, base_family);
 
     let mode_mutation = query(
+        program,
         ObjectProjectionSelector::Surface,
         context(ProjectionMode::Expanded),
     );
@@ -101,6 +115,7 @@ fn family_retains_selector_and_every_non_slot_context_axis() {
     let mut reduction = ProjectionReductionContext::published(ProjectionMode::Shallow);
     reduction.provenance = SurfaceProvenanceContext::MacroTypeArgOwnBody;
     let provenance_mutation = query(
+        program,
         ObjectProjectionSelector::Surface,
         test_support::context(
             reduction,
@@ -117,6 +132,7 @@ fn family_retains_selector_and_every_non_slot_context_axis() {
     reduction.provenance = SurfaceProvenanceContext::Structural;
     reduction.merge_role = MemberMergeRole::Heritage;
     let merge_role_mutation = query(
+        program,
         ObjectProjectionSelector::Surface,
         test_support::context(
             reduction,
@@ -188,7 +204,7 @@ fn family_retains_selector_and_every_non_slot_context_axis() {
     ];
     for mutation in mutations {
         assert_ne!(
-            family_and_slot(&query(ObjectProjectionSelector::Surface, mutation)).0,
+            family_and_slot(&query(program, ObjectProjectionSelector::Surface, mutation)).0,
             base_family
         );
     }
@@ -197,7 +213,12 @@ fn family_retains_selector_and_every_non_slot_context_axis() {
 #[test]
 fn equal_selector_and_context_share_one_singleflight() {
     let store = Arc::new(SemanticGraphStore::new());
+    let _scope = store.enter_node_root_scope();
+    let program = live(&store, 41);
+    let n900 = live(&store, 900);
+    let n901 = live(&store, 901);
     let key = query(
+        program,
         ObjectProjectionSelector::Surface,
         context(ProjectionMode::Identity),
     );
@@ -213,7 +234,7 @@ fn equal_selector_and_context_share_one_singleflight() {
         owner_store.execute_cooperative_value(
             &ctx,
             owner_key,
-            || SemanticNodeId(900),
+            || n900,
             || {
                 owner_builds.fetch_add(1, Ordering::SeqCst);
                 started_tx.send(()).expect("signal owner start");
@@ -237,7 +258,7 @@ fn equal_selector_and_context_share_one_singleflight() {
         joiner_store.execute_cooperative_value(
             &ctx,
             joiner_key,
-            || SemanticNodeId(901),
+            || n901,
             || {
                 joiner_builds.fetch_add(1, Ordering::SeqCst);
                 (
@@ -274,12 +295,19 @@ fn equal_selector_and_context_share_one_singleflight() {
 #[test]
 fn selector_specific_invalidation_evicts_only_the_dependent_projection() {
     let store = SemanticGraphStore::new();
+    let _scope = store.enter_node_root_scope();
+    let program = live(&store, 41);
+    let n902 = live(&store, 902);
+    let n903 = live(&store, 903);
+    let n904 = live(&store, 904);
     let ctx = host();
     let surface = query(
+        program,
         ObjectProjectionSelector::Surface,
         context(ProjectionMode::Identity),
     );
     let selected = query(
+        program,
         ObjectProjectionSelector::Key(PropertyKey::identifier("x")),
         context(ProjectionMode::Identity),
     );
@@ -288,7 +316,7 @@ fn selector_specific_invalidation_evicts_only_the_dependent_projection() {
         let _ = store.execute_cooperative_value(
             &ctx,
             key.clone(),
-            || SemanticNodeId(902),
+            || n902,
             || {
                 (
                     QueryResult::Value(SemanticQueryValue::ObjectProjection(formula())),
@@ -305,7 +333,7 @@ fn selector_specific_invalidation_evicts_only_the_dependent_projection() {
     let _ = store.execute_cooperative_value(
         &ctx,
         surface,
-        || SemanticNodeId(903),
+        || n903,
         || {
             surface_rebuilds.fetch_add(1, Ordering::SeqCst);
             (
@@ -317,7 +345,7 @@ fn selector_specific_invalidation_evicts_only_the_dependent_projection() {
     let _ = store.execute_cooperative_value(
         &ctx,
         selected,
-        || SemanticNodeId(904),
+        || n904,
         || {
             key_rebuilds.fetch_add(1, Ordering::SeqCst);
             (
@@ -333,8 +361,13 @@ fn selector_specific_invalidation_evicts_only_the_dependent_projection() {
 #[test]
 fn same_path_projection_recursion_never_publishes_a_placeholder() {
     let store = SemanticGraphStore::new();
+    let _scope = store.enter_node_root_scope();
+    let program = live(&store, 41);
+    let n905 = live(&store, 905);
+    let n906 = live(&store, 906);
     let ctx = host();
     let key = query(
+        program,
         ObjectProjectionSelector::Surface,
         context(ProjectionMode::Identity),
     );
@@ -343,12 +376,12 @@ fn same_path_projection_recursion_never_publishes_a_placeholder() {
     let read = store.execute_cooperative_value(
         &ctx,
         key.clone(),
-        || SemanticNodeId(905),
+        || n905,
         || {
             let nested = store.execute_cooperative_value(
                 &ctx,
                 key,
-                || SemanticNodeId(906),
+                || n906,
                 || {
                     nested_builds.fetch_add(1, Ordering::SeqCst);
                     (QueryResult::Error(QueryError::Miss), empty_dep())
@@ -359,7 +392,7 @@ fn same_path_projection_recursion_never_publishes_a_placeholder() {
     );
     assert!(matches!(
         read.value().clone(),
-        QueryResult::Recursive(SemanticNodeId(906))
+        QueryResult::Recursive(id) if id == n906
     ));
     assert_eq!(nested_builds.load(Ordering::SeqCst), 0);
     assert_eq!(
@@ -372,18 +405,23 @@ fn same_path_projection_recursion_never_publishes_a_placeholder() {
 #[test]
 fn projection_family_rejects_and_does_not_publish_a_type_node_payload() {
     let store = SemanticGraphStore::new();
+    let _scope = store.enter_node_root_scope();
+    let program = live(&store, 41);
+    let n907 = live(&store, 907);
+    let n908 = live(&store, 908);
     let ctx = host();
     let key = query(
+        program,
         ObjectProjectionSelector::Surface,
         context(ProjectionMode::Identity),
     );
     let read = store.execute_cooperative_value(
         &ctx,
         key,
-        || SemanticNodeId(907),
+        || n907,
         || {
             (
-                QueryResult::Value(SemanticQueryValue::TypeNode(SemanticNodeId(908))),
+                QueryResult::Value(SemanticQueryValue::TypeNode(n908)),
                 empty_dep(),
             )
         },
@@ -422,6 +460,10 @@ fn cross_view_projection_joiner_forks_when_winner_carrier_fails_follower_validat
 
     let keyed_canonical = "/p10/keyed.ts";
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let _ = host
         .upsert(crate::UpsertRequest {
             canonical_id: Some(keyed_canonical.to_string()),
@@ -440,7 +482,10 @@ fn cross_view_projection_joiner_forks_when_winner_carrier_fails_follower_validat
     let host = Arc::new(host);
 
     let store = Arc::new(SemanticGraphStore::new());
+    let _scope = store.enter_node_root_scope();
+    let program = live(&store, 41);
     let key = query(
+        program,
         ObjectProjectionSelector::Key(PropertyKey::identifier("x")),
         context(ProjectionMode::Identity),
     );

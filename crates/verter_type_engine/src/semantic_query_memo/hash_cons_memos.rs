@@ -111,7 +111,7 @@ impl SemanticGraphStore {
                 }
                 Entry::Vacant(slot) => {
                     let Ok(roots) =
-                        self.root_existing_nodes(vec![value_expr, parameter_node, arg, result])
+                        self.root_nodes(vec![value_expr, parameter_node, arg, result])
                     else {
                         return;
                     };
@@ -238,7 +238,7 @@ impl SemanticGraphStore {
         if receipt.reserve_retention(self.retention_account()).is_err() {
             return;
         }
-        let Ok(roots) = self.root_existing_nodes(vec![node, result]) else {
+        let Ok(roots) = self.root_nodes(vec![node, result]) else {
             return;
         };
         let lease = super::delivery_lease::SemanticDeliveryLease::from_roots(

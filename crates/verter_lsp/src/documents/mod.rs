@@ -1,7 +1,6 @@
 mod analysis;
 mod diagnostics;
 mod foreground;
-mod guarded_host;
 pub(crate) use analysis::type_expr_contains_boolean;
 pub(crate) use analysis::SemanticReady;
 #[cfg(test)]
@@ -11,7 +10,9 @@ pub(crate) use diagnostics::DiagnosticsRefresh;
 pub(crate) use foreground::{
     ClosedTargetAuthority, EditBearing, ForegroundRequest, ForegroundRoute, Settled,
 };
-pub use guarded_host::{HostRef, SharedHost};
+/// A shareable handle to the session host for work that outlives one
+/// borrow (a blocking task, a background loop).
+pub type SharedHost = Arc<VerterHost>;
 pub mod carrier_structure;
 pub mod line_index;
 pub mod position_map;
@@ -41,9 +42,7 @@ use provider_projection::{
 
 /// Manages open documents and their relationship to verter_session.
 pub struct DocumentRegistry {
-    /// The session host. Private and non-dereferencing on purpose: every
-    /// access goes through [`Self::host`], which holds a semantic-activity
-    /// guard for the call (see [`guarded_host`]).
+    /// The session host.
     host: SharedHost,
     /// The host's language classifier, captured once: it is immutable for
     /// the host's lifetime, so protocol paths classify under the host's
@@ -597,7 +596,7 @@ impl DocumentRegistry {
         let (diagnostics_refresh_tx, _) = tokio::sync::broadcast::channel(64);
         let language_classifier = host.language_classifier().clone();
         Self {
-            host: SharedHost::new(host),
+            host,
             language_classifier,
             documents: DashMap::new(),
             diagnostics_state: Arc::new(parking_lot::Mutex::new(
@@ -2044,10 +2043,9 @@ impl DocumentRegistry {
         self.documents.iter().map(|e| e.key().clone()).collect()
     }
 
-    /// Borrow the session host for one call under a semantic-activity guard
-    /// (see [`guarded_host`]).
-    pub fn host(&self) -> HostRef<'_> {
-        self.host.host()
+    /// Borrow the session host.
+    pub fn host(&self) -> &VerterHost {
+        &self.host
     }
 
     /// The serving host's language classifier — the admission-aware
@@ -2057,9 +2055,9 @@ impl DocumentRegistry {
     }
 
     /// A shareable host handle for work that outlives this borrow (a blocking
-    /// task, a background loop); every access through it is guarded.
+    /// task, a background loop).
     pub fn host_arc(&self) -> SharedHost {
-        self.host.clone()
+        Arc::clone(&self.host)
     }
 }
 

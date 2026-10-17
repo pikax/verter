@@ -142,6 +142,10 @@ fn file_scope(
 #[test]
 fn broad_runtime_preserves_union_order_and_first_occurrence_dedup() {
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = host.project_type_store().semantic_graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let number = graph.intern_node(SemanticNodeData::Literal(LiteralValue::Number(42.0)));
@@ -176,6 +180,10 @@ fn broad_runtime_preserves_union_order_and_first_occurrence_dedup() {
 #[test]
 fn broad_runtime_classifies_container_callable_and_object_without_member_descent() {
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = host.project_type_store().semantic_graph();
     let leaf = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let array = graph.intern_node(SemanticNodeData::Array {
@@ -264,6 +272,10 @@ fn broad_runtime_classifies_container_callable_and_object_without_member_descent
 #[test]
 fn broad_runtime_keeps_null_and_unsupported_undefined_distinct() {
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = host.project_type_store().semantic_graph();
     let null = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Null));
     let undefined = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined));
@@ -865,6 +877,10 @@ fn recursive_runtime_carrier_is_typed_partial_and_return_only() {
 #[test]
 fn finite_deep_alias_chain_is_iterative_and_complete() {
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = host.project_type_store().semantic_graph();
     let mut subject = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     // Builds the finite alias chain the classifier must resolve iteratively.

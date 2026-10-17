@@ -5041,6 +5041,10 @@ fn fenced_serve_surface_member_shape_is_not_admitted() {
         analysis_level: crate::types::AnalysisLevel::Full,
         ..HostConfig::default()
     });
+    let _control_scope = control
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let control_scope = "/fenced_surface/control.ts";
     upsert(
         &control,
@@ -5065,6 +5069,10 @@ fn fenced_serve_surface_member_shape_is_not_admitted() {
         analysis_level: crate::types::AnalysisLevel::Full,
         ..HostConfig::default()
     });
+    let _fenced_scope = fenced
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let fenced_scope = "/fenced_surface/fenced.ts";
     upsert(
         &fenced,
@@ -5357,10 +5365,21 @@ mod fenced_gate_arm_admission_tests {
 
     /// Lower `expr` in `scope` to the settled graph node the per-member
     /// publication seam takes as `SurfaceMember.value`.
+    /// Lower `expr`, keeping the node in the caller's construction scope
+    /// once the lowering dispatcher is gone.
     fn lower(host: &VerterHost, scope: &str, expr: &TypeExpr) -> SemanticNodeId {
-        ProjectSemanticDispatch::new(host)
+        let dispatch = ProjectSemanticDispatch::new(host);
+        let node = dispatch
             .lower_type_expr_in_scope_with_mode(scope, expr, ProjectionMode::Navigate)
-            .expect("expr must lower")
+            .expect("expr must lower");
+        let roots = host
+            .project_type_store()
+            .semantic_graph()
+            .root_nodes([node])
+            .expect("the lowered node is live");
+        drop(dispatch);
+        roots.retain_for_construction();
+        node
     }
 
     /// Drive the REAL production per-member publication seam
@@ -5411,6 +5430,10 @@ mod fenced_gate_arm_admission_tests {
             analysis_level: AnalysisLevel::Full,
             ..HostConfig::default()
         });
+        let _control_scope = control
+            .project_type_store()
+            .semantic_graph()
+            .enter_node_root_scope();
         let (control_scope, control_node) = build(&control);
         let control_before = control.project_type_store().shape_cache_db().live_count();
         let control_after = drive_member_seam(&control, control_scope, control_node);
@@ -5427,6 +5450,10 @@ mod fenced_gate_arm_admission_tests {
             analysis_level: AnalysisLevel::Full,
             ..HostConfig::default()
         });
+        let _fenced_scope = fenced
+            .project_type_store()
+            .semantic_graph()
+            .enter_node_root_scope();
         let (fenced_scope, fenced_node) = build(&fenced);
         let fenced_before = fenced.project_type_store().shape_cache_db().live_count();
         let rctx = RequestContext::new(1, Arc::from(fenced_scope), false, None);

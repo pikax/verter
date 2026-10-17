@@ -286,6 +286,10 @@ fn is_unresolved_marker(
 #[test]
 fn an_unmodeled_member_marks_its_position_and_the_composite_survives() {
     let host = make_pos_host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     for (name, reason) in [
         (
             "objectWithUnmodeledCall",
@@ -429,6 +433,10 @@ fn an_unmodeled_member_marks_its_position_and_the_composite_survives() {
 #[test]
 fn every_positional_class_survives_inside_a_composite() {
     let host = make_pos_host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     for name in [
         "twinFrameShadowedLeaf",
         "twinDeclaratorAnnotation",
@@ -475,6 +483,10 @@ fn every_positional_class_survives_inside_a_composite() {
 #[test]
 fn the_local_binding_spelling_reaches_the_same_disposition() {
     let host = make_pos_host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let outcome = evaluate(&host, POS_CANONICAL, "objectWithUnmodeledLocal")
         .expect("objectWithUnmodeledLocal must produce a value");
     with_dispatch(&host, |dispatch| {

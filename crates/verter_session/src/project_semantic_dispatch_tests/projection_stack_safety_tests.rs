@@ -223,6 +223,8 @@ fn run_deep_conditional_projection_child() {
 fn run_deep_structural_validation_child() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let graph = host.project_type_store().semantic_graph();
+    // This thread owns the chain while the worker validates it.
+    let _scope = graph.enter_node_root_scope();
     let leaf = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let mut root = leaf;
     // bounded-loop: fixed finite structural-validation fixture depth.
@@ -687,6 +689,10 @@ fn connected_query_depth_limit_allows_boundary_and_trips_at_plus_one() {
 #[test]
 fn runaway_generic_returns_work_partial_one_root_diagnostic_and_seals_its_refusal() {
     let host = VerterHost::new_standalone(HostConfig::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let _update = host
         .upsert(UpsertRequest {
             canonical_id: Some("/runaway.ts".to_string()),
@@ -806,6 +812,10 @@ fn runaway_generic_returns_work_partial_one_root_diagnostic_and_seals_its_refusa
 #[test]
 fn connected_query_depth_limit_is_distinct_diagnostic_and_seals_its_refusal() {
     let host = build_host("export type Deep = keyof { x: string };\n".to_string());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
     dispatch.set_connected_limits_for_tests(128, 1);
     let graph = host.project_type_store().semantic_graph();

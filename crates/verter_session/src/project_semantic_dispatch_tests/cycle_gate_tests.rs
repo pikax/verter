@@ -1015,6 +1015,7 @@ mod carrier_descent_tests {
     #[test]
     fn collect_ref_identities_descends_carrier_args() {
         let graph = SemanticGraphStore::new();
+        let _scope = graph.enter_node_root_scope();
         let inner_id = decl_identity("/dep.ts", "Inner");
         let decl_ref = graph.intern_node(SemanticNodeData::DeclRef {
             identity: inner_id.clone(),
@@ -1057,6 +1058,7 @@ mod carrier_descent_tests {
     #[test]
     fn body_contains_recursive_ref_descends_carrier_args() {
         let graph = SemanticGraphStore::new();
+        let _scope = graph.enter_node_root_scope();
         let target: Arc<str> = Arc::from("SelfRef");
         let rec = graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
             name: Arc::clone(&target),

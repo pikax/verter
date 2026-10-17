@@ -263,6 +263,10 @@ fn assert_eq_nodes_parity(host: &VerterHost, a: SemanticNodeId, b: SemanticNodeI
 #[test]
 fn parity_opaque_errors_and_raw_fallback() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
 
     // `Opaque(Miss)` raises to the `SEMANTIC_MISS` sentinel ⇒ NOT materialized.
@@ -359,6 +363,10 @@ fn typed_control_sentinel_producers_raise_byte_identical_and_keep_miss_decision(
     use verter_type_engine::semantic_query::compat_spelling::SEMANTIC_SURFACE_MEMBER;
 
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
 
     // Surface-member fallback (the CONVERTED `fold_member` miss arm): an object
@@ -426,6 +434,10 @@ fn opaque_arm_routes_through_typed_sentinel_byte_identical_and_keeps_node_domain
     use verter_type_engine::semantic_query::compat_spelling::semantic_query_error_raw;
 
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
 
     // The `_ => opaque_sentinel`-reachable set the converted `Opaque(err)` arm
@@ -556,6 +568,10 @@ fn opaque_arm_routes_through_typed_sentinel_byte_identical_and_keeps_node_domain
 #[test]
 fn parity_alias_chain_transparent() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
 
     let leaf = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -579,6 +595,10 @@ fn parity_alias_chain_transparent() {
 #[test]
 fn parity_alias_cycle_sentinel_string_classification() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
 
     // A TRUE `Alias` self-cycle (or 2-node mutual `Alias` cycle) — which fires
@@ -635,6 +655,10 @@ fn parity_alias_cycle_sentinel_string_classification() {
 #[test]
 fn parity_merged_decl_peer_merges_to_object() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
 
     // Two same-name interface contributors (bare objects) peer-merge into one
@@ -672,6 +696,10 @@ fn parity_merged_decl_peer_merges_to_object() {
 #[test]
 fn parity_lazy_carriers() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
 
     let declref = graph.intern_node(SemanticNodeData::DeclRef {
@@ -792,6 +820,10 @@ fn parity_lazy_carriers() {
 #[test]
 fn parity_object_edge_cases() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
 
     // Empty surface ⇒ representable empty `Object{}` ⇒ materialized + expanded.
@@ -858,6 +890,10 @@ fn parity_object_edge_cases() {
 #[test]
 fn parity_intersection_arm_drop_and_collapse() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
 
     let string_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -989,6 +1025,10 @@ fn parity_intersection_arm_drop_and_collapse() {
 #[test]
 fn intersection_drops_only_typed_root_unrepresentable_surface() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
 
     let string_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -1072,6 +1112,10 @@ fn intersection_drops_only_typed_root_unrepresentable_surface() {
 #[test]
 fn parity_deferred_operator_shells() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
 
     let tp = graph.intern_node(SemanticNodeData::TypeParam {
@@ -1250,6 +1294,10 @@ fn parity_union_and_terminals_and_none() {
 #[test]
 fn parity_equality_pairs_different_nodes_raise_equal() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
 
     // Different-scope `BareRef("T")`: two distinct nodes (distinct scope) that
@@ -1361,6 +1409,10 @@ fn parity_equality_pairs_different_nodes_raise_equal() {
 #[test]
 fn discrimination_oracle_separates_the_facts() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
 
     // contains_semantic_miss is BOTH true (Miss) and false (String) across the
@@ -1462,6 +1514,10 @@ fn shared_core_raiser_output_matches_oracle_for_primitive() {
 #[test]
 fn parity_function_and_constructor_type() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
 
     let string_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -1564,6 +1620,10 @@ fn parity_function_and_constructor_type() {
 #[test]
 fn parity_template_literal_leaf_vs_recurse_boundary() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
 
     let string_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -1613,6 +1673,10 @@ fn parity_template_literal_leaf_vs_recurse_boundary() {
 #[test]
 fn parity_type_param_with_constraint_and_default() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
 
     let string_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -1664,6 +1728,10 @@ fn parity_type_param_with_constraint_and_default() {
 #[test]
 fn parity_real_index_signature_member() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
 
     let string_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -1743,6 +1811,10 @@ fn parity_real_index_signature_member() {
 #[test]
 fn parity_carriers_with_type_args_and_raise_miss() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
 
     let number_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
@@ -1882,6 +1954,10 @@ fn raised_shape_eq_node_type_expr_negative_some_false_discriminates() {
     // the parity suite (which only checks node-vs-its-own-raise = `Some(true)` and
     // unraisable = `None`).
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
 
     // A `Literal("idle")` node raises to `TypeExpr::Literal("idle")`, which does
@@ -2011,6 +2087,10 @@ fn raised_shape_eq_node_type_expr_ignores_has_ts_annotation_like_typeexpr_partia
     };
 
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
 
     let string_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -2119,6 +2199,10 @@ fn raise_oracle_payload_shape_preserves_recursed_children() {
     // not notice. These DIRECT `raise_oracle(...)` shape assertions pin the
     // recursed child payloads so a regression in child-raising is caught.
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
 
     let string_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -2293,6 +2377,10 @@ fn decl_identity_unscoped(canonical_id: &str, name: &str) -> DeclIdentity {
 #[test]
 fn parity_union_no_collapse_single_and_empty() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
 
     // `Union([A])` — a single-member union — stays a `Union`, NOT collapsed to A.
@@ -3007,6 +3095,10 @@ fn publication_score_corpus_covers_every_semantic_node_data_variant() {
     ];
 
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
 
     let mut covered: FxHashSet<&'static str> = FxHashSet::default();
@@ -3042,6 +3134,10 @@ fn publication_score_corpus_covers_every_semantic_node_data_variant() {
 #[test]
 fn intersection_arm_drop_keeps_typed_degradation_in_sidecar() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
 
     let string_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -3086,6 +3182,10 @@ fn intersection_arm_drop_keeps_typed_degradation_in_sidecar() {
 #[test]
 fn invalid_call_signature_drop_keeps_typed_degradation_in_sidecar() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
 
     let string_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -3121,6 +3221,10 @@ fn fold_raises(host: &VerterHost, node: SemanticNodeId) -> bool {
 #[test]
 fn union_with_unraisable_member_fails_whole() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
     let str_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let node = graph.intern_node(SemanticNodeData::Union(
@@ -3137,6 +3241,10 @@ fn union_with_unraisable_member_fails_whole() {
 #[test]
 fn intersection_with_unraisable_arm_fails_whole() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
     let str_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let node = graph.intern_node(SemanticNodeData::Intersection(
@@ -3153,6 +3261,10 @@ fn intersection_with_unraisable_arm_fails_whole() {
 #[test]
 fn tuple_with_unraisable_element_fails_whole() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
     let str_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let node = graph.intern_node(SemanticNodeData::Tuple {
@@ -3184,6 +3296,10 @@ fn tuple_with_unraisable_element_fails_whole() {
 #[test]
 fn template_literal_with_unraisable_expression_fails_whole() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
     let node = graph.intern_node(SemanticNodeData::TemplateLiteral {
         quasis: Arc::from(vec![Arc::from("x")].into_boxed_slice()),
@@ -3200,6 +3316,10 @@ fn template_literal_with_unraisable_expression_fails_whole() {
 #[test]
 fn function_with_unraisable_return_fails_whole() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
     let node = graph.intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Call,
@@ -3228,6 +3348,10 @@ fn function_with_unraisable_return_fails_whole() {
 #[test]
 fn function_with_unraisable_parameter_fails_whole() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
     let str_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let node = graph.intern_node(SemanticNodeData::Signature {
@@ -3263,6 +3387,10 @@ fn function_with_unraisable_parameter_fails_whole() {
 #[test]
 fn type_parameter_with_unraisable_constraint_or_default_fails_whole() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
     let decl = decl_identity_unscoped("/w/tp.ts", "T");
     let with_constraint = graph.intern_node(SemanticNodeData::TypeParam {
@@ -3306,6 +3434,10 @@ fn carrier_arg_fallback_is_typed_surface_member_and_marks_partial() {
     use verter_type_engine::semantic_query::DepSignature;
 
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
     let node = graph.intern_node(SemanticNodeData::InstantiationRef {
         base: decl_identity_unscoped("/w/r.ts", "Box"),
@@ -3360,6 +3492,10 @@ fn terminal_marks_unraisable_composite_partial_and_genuine_absence_exact() {
     };
 
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
     let str_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
 

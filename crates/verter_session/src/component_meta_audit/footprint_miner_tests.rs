@@ -40,6 +40,7 @@ fn empty_graph() -> SemanticGraphStore {
 #[test]
 fn mine_footprint_empty_state_yields_empty_subgraph_and_zero_counters() {
     let graph = empty_graph();
+    let _graph_scope = graph.enter_node_root_scope();
     let ctx = make_ctx(1);
     let state = AccumulatorState::default();
     let fp = mine_footprint(
@@ -59,6 +60,7 @@ fn mine_footprint_empty_state_yields_empty_subgraph_and_zero_counters() {
 #[test]
 fn mine_footprint_cache_outcomes_read_from_per_context_atomic_counters() {
     let graph = empty_graph();
+    let _graph_scope = graph.enter_node_root_scope();
     let ctx = make_ctx(2);
     ctx.cold_builds.store(3, Ordering::Relaxed);
     ctx.warm_hits.store(5, Ordering::Relaxed);
@@ -85,6 +87,7 @@ fn mine_footprint_cache_outcomes_read_from_per_context_atomic_counters() {
 #[test]
 fn mine_footprint_truncates_at_max_derivation_edges_sets_orphan_flag() {
     let graph = empty_graph();
+    let _graph_scope = graph.enter_node_root_scope();
     let ctx = make_ctx(3);
     let mut state = AccumulatorState::default();
     for i in 0..10u64 {
@@ -111,6 +114,7 @@ fn mine_footprint_truncates_at_max_derivation_edges_sets_orphan_flag() {
 #[test]
 fn mine_footprint_identical_inputs_produce_byte_identical_outputs() {
     let graph = empty_graph();
+    let _graph_scope = graph.enter_node_root_scope();
     let ctx_a = make_ctx(1);
     let ctx_b = make_ctx(1);
     let mut state_a = AccumulatorState::default();
@@ -162,6 +166,7 @@ fn mine_footprint_identical_inputs_produce_byte_identical_outputs() {
 #[test]
 fn mine_footprint_conditional_decisions_distinguish_true_false_deferred() {
     let graph = empty_graph();
+    let _graph_scope = graph.enter_node_root_scope();
     let ctx = make_ctx(4);
     let mut state = AccumulatorState::default();
     state.derivation_edges_raw.push(synth_edge(
@@ -200,6 +205,7 @@ fn mine_footprint_conditional_decisions_distinguish_true_false_deferred() {
 #[test]
 fn mine_footprint_alias_resolve_emits_one_record_per_hop() {
     let graph = empty_graph();
+    let _graph_scope = graph.enter_node_root_scope();
     let ctx = make_ctx(5);
     let mut state = AccumulatorState::default();
     for hop in 0..3u64 {
@@ -227,6 +233,7 @@ fn mine_footprint_alias_resolve_emits_one_record_per_hop() {
 #[test]
 fn mine_footprint_path_segments_preserve_member_index_distinction() {
     let graph = empty_graph();
+    let _graph_scope = graph.enter_node_root_scope();
     let ctx = make_ctx(6);
     let mut state = AccumulatorState::default();
     let path = [
@@ -265,6 +272,7 @@ fn mine_footprint_path_segments_preserve_member_index_distinction() {
 #[test]
 fn mine_footprint_indexed_ready_builds_extracted_from_structured_events() {
     let graph = empty_graph();
+    let _graph_scope = graph.enter_node_root_scope();
     let ctx = make_ctx(7);
     let mut state = AccumulatorState::default();
     state
@@ -295,6 +303,7 @@ fn mine_footprint_indexed_ready_builds_extracted_from_structured_events() {
 #[test]
 fn mine_footprint_multiple_derivations_for_same_result_produce_multiple_edges() {
     let graph = empty_graph();
+    let _graph_scope = graph.enter_node_root_scope();
     let ctx = make_ctx(8);
     let mut state = AccumulatorState::default();
     // Two derivations of the same result via different alias hops.
@@ -356,6 +365,7 @@ fn bare_ref_with_arg(arg_child: SemanticNodeId) -> SemanticNodeData {
 #[test]
 fn structural_hash_discriminates_carrier_type_args_foo_a_vs_foo_b() {
     let graph = empty_graph();
+    let _graph_scope = graph.enter_node_root_scope();
     // Two structurally-DISTINCT argument children (`A` = string, `B` =
     // number), each a real interned node.
     let child_a = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -387,6 +397,7 @@ fn structural_hash_discriminates_carrier_type_args_foo_a_vs_foo_b() {
 #[test]
 fn structural_hash_is_stable_for_identical_carriers() {
     let graph = empty_graph();
+    let _graph_scope = graph.enter_node_root_scope();
     let child_a = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
 
     // Two independently-constructed but structurally-identical Foo<A>.
@@ -405,6 +416,7 @@ fn structural_hash_is_stable_for_identical_carriers() {
 #[test]
 fn structural_hash_discriminates_exact_infer_binder_identity() {
     let graph = empty_graph();
+    let _graph_scope = graph.enter_node_root_scope();
     let left_binder = graph.alloc_infer_binder_id();
     let right_binder = graph.alloc_infer_binder_id();
     let left = SemanticNodeData::InferRef {
@@ -440,6 +452,7 @@ fn structural_hash_discriminates_spread_operand_identity() {
     use verter_type_engine::semantic_query::{MacroOwnBodyStamp, MergeRoleStamp, SurfaceMember};
 
     let graph = empty_graph();
+    let _graph_scope = graph.enter_node_root_scope();
     let value = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let operand = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown));
     let member = SurfaceMember {
@@ -495,6 +508,7 @@ fn structural_hash_discriminates_spread_operand_identity() {
 #[test]
 fn structural_hash_carrier_discrimination_comes_from_args_not_head() {
     let graph = empty_graph();
+    let _graph_scope = graph.enter_node_root_scope();
     let child_a = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let child_b = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
 
@@ -541,12 +555,14 @@ fn array_of(graph: &SemanticGraphStore, inner: SemanticNodeId) -> SemanticNodeId
 fn structural_hash_is_cross_graph_stable_despite_different_child_ordinals() {
     // Graph A: `String` is the FIRST interned node → ordinal 0.
     let graph_a = empty_graph();
+    let _graph_a_scope = graph_a.enter_node_root_scope();
     let string_a = graph_a.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let foo_a = bare_ref_with_arg(string_a);
 
     // Graph B: intern unrelated nodes FIRST, so `String` lands at a HIGHER
     // ordinal than in graph A.
     let graph_b = empty_graph();
+    let _graph_b_scope = graph_b.enter_node_root_scope();
     let _filler0 = graph_b.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
     let _filler1 = graph_b.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Void));
     let string_b = graph_b.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -588,12 +604,14 @@ fn structural_hash_is_cross_graph_stable_despite_different_child_ordinals() {
 fn structural_hash_discriminates_nested_non_carrier_child_across_colliding_ordinals() {
     // Graph A: String(0), Array{element:0}(1) → Foo<Box<String>>.
     let graph_a = empty_graph();
+    let _graph_a_scope = graph_a.enter_node_root_scope();
     let string_a = graph_a.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let box_a = array_of(&graph_a, string_a);
     let foo_a = bare_ref_with_arg(box_a);
 
     // Graph B: Number(0), Array{element:0}(1) → Foo<Box<Number>>.
     let graph_b = empty_graph();
+    let _graph_b_scope = graph_b.enter_node_root_scope();
     let number_b = graph_b.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let box_b = array_of(&graph_b, number_b);
     let foo_b = bare_ref_with_arg(box_b);
@@ -640,6 +658,7 @@ fn structural_hash_discriminates_nested_non_carrier_child_across_colliding_ordin
 fn structural_hash_recursion_into_grandchildren_is_load_bearing() {
     // Graph A: String(0), Array{0}(1), Array{1}(2) → Foo<Box<Box<String>>>.
     let graph_a = empty_graph();
+    let _graph_a_scope = graph_a.enter_node_root_scope();
     let string_a = graph_a.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let inner_a = array_of(&graph_a, string_a);
     let outer_a = array_of(&graph_a, inner_a);
@@ -647,6 +666,7 @@ fn structural_hash_recursion_into_grandchildren_is_load_bearing() {
 
     // Graph B: Number(0), Array{0}(1), Array{1}(2) → Foo<Box<Box<Number>>>.
     let graph_b = empty_graph();
+    let _graph_b_scope = graph_b.enter_node_root_scope();
     let number_b = graph_b.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let inner_b = array_of(&graph_b, number_b);
     let outer_b = array_of(&graph_b, inner_b);
@@ -693,15 +713,23 @@ fn mine_footprint_byte_identical_over_interned_carrier_nodes() {
     /// ordinal than in the un-skewed graph.
     fn build_graph_with_carrier(
         skew: bool,
-    ) -> (SemanticGraphStore, SemanticNodeId, SemanticNodeId) {
+    ) -> (
+        SemanticGraphStore,
+        SemanticNodeId,
+        SemanticNodeId,
+        verter_type_engine::semantic_query_memo::node_roots::NodeRootSet,
+    ) {
         let graph = empty_graph();
+        let _graph_scope = graph.enter_node_root_scope();
         if skew {
             let _f0 = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
             let _f1 = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Void));
         }
         let string_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
         let carrier_id = graph.intern_node(bare_ref_with_arg(string_id));
-        (graph, carrier_id, string_id)
+        // The caller keeps the carrier past this builder's scope.
+        let held = graph.root_nodes([carrier_id]).expect("live carrier");
+        (graph, carrier_id, string_id, held)
     }
 
     fn state_referencing(carrier: SemanticNodeId, child: SemanticNodeId) -> AccumulatorState {
@@ -720,8 +748,8 @@ fn mine_footprint_byte_identical_over_interned_carrier_nodes() {
         state
     }
 
-    let (graph_a, carrier_a, child_a) = build_graph_with_carrier(false);
-    let (graph_b, carrier_b, child_b) = build_graph_with_carrier(true);
+    let (graph_a, carrier_a, child_a, _graph_a_held) = build_graph_with_carrier(false);
+    let (graph_b, carrier_b, child_b, _graph_b_held) = build_graph_with_carrier(true);
     let ctx_a = make_ctx(1);
     let ctx_b = make_ctx(1);
 
@@ -820,6 +848,7 @@ fn intern_synthetic_binding(
 fn synthetic_binding_is_cross_graph_stable_despite_different_value_node_ordinals() {
     // Graph A: `String` target is the FIRST interned node → low ordinal.
     let graph_a = empty_graph();
+    let _graph_a_scope = graph_a.enter_node_root_scope();
     let target_a = graph_a.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let binding_a =
         intern_synthetic_binding(&graph_a, synthetic_binding_id("default", "row"), target_a);
@@ -827,6 +856,7 @@ fn synthetic_binding_is_cross_graph_stable_despite_different_value_node_ordinals
     // Graph B: intern unrelated fillers FIRST, so the same-content `String`
     // target lands at a HIGHER ordinal than in graph A.
     let graph_b = empty_graph();
+    let _graph_b_scope = graph_b.enter_node_root_scope();
     let _f0 = graph_b.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
     let _f1 = graph_b.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Void));
     let target_b = graph_b.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -875,6 +905,7 @@ fn synthetic_binding_is_cross_graph_stable_despite_different_value_node_ordinals
 fn synthetic_binding_distinguishes_value_node_content_under_colliding_ordinals() {
     // Graph A: `String` target is the FIRST interned node → ordinal N.
     let graph_a = empty_graph();
+    let _graph_a_scope = graph_a.enter_node_root_scope();
     let target_a = graph_a.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let binding_a =
         intern_synthetic_binding(&graph_a, synthetic_binding_id("default", "row"), target_a);
@@ -882,6 +913,7 @@ fn synthetic_binding_distinguishes_value_node_content_under_colliding_ordinals()
     // Graph B: `Number` target is the FIRST interned node → the SAME ordinal N,
     // but DIFFERENT content.
     let graph_b = empty_graph();
+    let _graph_b_scope = graph_b.enter_node_root_scope();
     let target_b = graph_b.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let binding_b =
         intern_synthetic_binding(&graph_b, synthetic_binding_id("default", "row"), target_b);

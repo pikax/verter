@@ -179,6 +179,10 @@ fn finite_mapped_batch_stops_at_its_first_refusal_and_warms_when_complete() {
         ProjectionMode, ReadonlyMod, SemanticNodeData, SemanticQueryKey,
     };
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = host.project_type_store().semantic_graph();
     let keys = (0..64)

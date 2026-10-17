@@ -10,6 +10,10 @@ use verter_type_expr::TypeExpr;
 #[test]
 fn raise_node_to_type_expr_preserves_number_index_key_values() {
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let object = graph.intern_node(SemanticNodeData::Primitive(SemanticPrimitiveKind::Unknown));
     let indexed = graph.intern_node(SemanticNodeData::IndexedAccess {
@@ -41,6 +45,10 @@ fn raise_node_to_type_expr_preserves_number_index_key_values() {
 #[test]
 fn raise_all_vacuous_intersection_falls_back_to_empty_object() {
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let empty_a = graph.intern_node(SemanticNodeData::Object(
         verter_type_engine::project_semantic_dispatch::walk::empty_surface_view(),
@@ -87,6 +95,10 @@ fn node_root_sentinel_is_root_only_not_whole_surface_miss() {
     use verter_type_engine::semantic_query::QueryError;
 
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let miss = graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss));
     let string = graph.intern_node(SemanticNodeData::Primitive(SemanticPrimitiveKind::String));
@@ -161,6 +173,10 @@ fn node_contains_semantic_miss_is_whole_tree_and_equals_type_expr_oracle() {
     use verter_type_engine::semantic_query::QueryError;
 
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let miss = graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss));
     let string = graph.intern_node(SemanticNodeData::Primitive(SemanticPrimitiveKind::String));
@@ -247,6 +263,10 @@ fn raise_and_reduce_preserves_open_keyof_over_type_parameter() {
     use verter_type_engine::semantic_query::{DeclIdentity, HashValue, ProjectionMode};
 
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let identity = DeclIdentity {
         canonical_id: Arc::from("/test.ts"),
@@ -287,6 +307,10 @@ fn raise_and_reduce_terminates_on_alias_cycle_via_visited_set() {
     use verter_type_engine::semantic_query::ProjectionMode;
 
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let primitive = graph.intern_node(SemanticNodeData::Primitive(SemanticPrimitiveKind::String));
     let alias = graph.intern_node(SemanticNodeData::Alias(primitive));
@@ -315,6 +339,10 @@ fn raise_and_reduce_template_literal_becomes_unknown_hard_stop() {
     use verter_type_engine::semantic_query::ProjectionMode;
 
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let template = graph.intern_node(SemanticNodeData::TemplateLiteral {
         quasis: Arc::from(vec![Arc::from("prefix-")].into_boxed_slice()),
@@ -352,6 +380,10 @@ fn raise_and_reduce_navigate_mode_decl_ref_raises_to_bare_ref() {
     use verter_type_engine::semantic_query::{DeclIdentity, HashValue, ProjectionMode};
 
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let identity = DeclIdentity {
         canonical_id: Arc::from("/some-unresolved.ts"),
@@ -406,6 +438,10 @@ fn raise_node_to_type_expr_round_trips_indexed_access_string_key() {
     // `_inner` recursive call (cycle invariant for strings: there is
     // no node to recurse into).
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let object = graph.intern_node(SemanticNodeData::Primitive(SemanticPrimitiveKind::Unknown));
     let indexed = graph.intern_node(SemanticNodeData::IndexedAccess {

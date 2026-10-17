@@ -126,7 +126,20 @@ impl PreparedKeyHandle {
 }
 
 impl super::SemanticGraphStore {
+    /// Prepare `key` with its operands rooted, for a key built from live
+    /// construction operands.
     pub(crate) fn prepare_rooted_key(&self, key: SemanticQueryKey) -> PreparedKeyHandle {
+        self.try_prepare_rooted_key(key)
+            .expect("a prepared key has live counted operands")
+    }
+
+    /// Prepare `key` with its operands rooted. A key naming a destroyed
+    /// (`StaleSemanticOperand`) or never-allocated (`ForeignSemanticOperand`)
+    /// operand is refused: it can neither be answered nor cached.
+    pub(crate) fn try_prepare_rooted_key(
+        &self,
+        key: SemanticQueryKey,
+    ) -> Result<PreparedKeyHandle, crate::semantic_query::QueryError> {
         let _scope = self.enter_node_root_scope();
         let signature = match &key {
             SemanticQueryKey::ReadSignatureResult(key) => self
@@ -142,11 +155,9 @@ impl super::SemanticGraphStore {
                 nodes.push(node);
             }
         });
-        Arc::get_mut(&mut prepared.0).unwrap()._roots = self
-            .root_existing_nodes(nodes)
-            .expect("a prepared key has live counted operands");
+        Arc::get_mut(&mut prepared.0).unwrap()._roots = self.root_nodes(nodes)?;
         Arc::get_mut(&mut prepared.0).unwrap()._signature = signature;
-        prepared
+        Ok(prepared)
     }
 }
 

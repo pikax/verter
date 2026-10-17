@@ -859,20 +859,21 @@ function fireChurn() {{
     }
 }
 
-/// A close that lands while a computation is in flight must not change any
-/// node that computation can read: the release is queued, every node of the
-/// closed document keeps its payload (the SAME payload on every read), and
-/// the release is applied the moment the last computation ends.
+/// A close never revokes a node something still holds: a reader holding the
+/// closed document's nodes keeps reading the SAME payloads through the
+/// close, and the nodes are destroyed the moment that reader lets go — no
+/// queue, no watermark, no later reclaim step.
 ///
-/// Discriminating: with the release applied inline at `evict` (the previous
-/// design), the closed document's nodes read as the released placeholder
-/// while the guard is still held — the exact switch that made a carrier
-/// normaliser, midway through two reads of one node, panic on a worker
-/// thread and stall the scheduler in the WSP6 churn lane.
+/// Discriminating: a close that destroyed the closed content's nodes (a
+/// canonical sweep) turns the held nodes into the released placeholder while
+/// the reader still holds them — the switch that made a carrier normaliser,
+/// midway through two reads of one node, panic on a worker thread; a close
+/// that only queued the release leaves the nodes live after the reader
+/// drops.
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn a_close_during_a_computation_defers_the_node_release_until_it_ends() {
-    let (_ws, host) = activity_gate_fixture();
+fn a_close_never_revokes_a_held_node_and_drains_when_the_holder_drops() {
+    let (_ws, host) = close_lifecycle_fixture();
     let graph = host.project_type_store().semantic_graph();
     let ids = live_node_ids_scoped_to(&host, "/src/types/icon.ts");
     assert!(!ids.is_empty(), "fixture: icon.ts has live nodes");
@@ -881,19 +882,13 @@ fn a_close_during_a_computation_defers_the_node_release_until_it_ends() {
         .map(|id| graph.node_data(*id).expect("live node"))
         .collect();
 
-    let computation = host.semantic_activity();
+    let reader = graph
+        .root_nodes(ids.iter().copied())
+        .expect("live operands");
     host.evict("/src/types/icon.ts");
 
-    assert_eq!(
-        host.project_type_store().deferred_release_count(),
-        1,
-        "the close is queued while a computation is in flight"
-    );
     for (id, payload) in ids.iter().zip(&before) {
-        assert!(
-            graph.node_is_live(*id),
-            "node {id:?} stays live until the computation ends"
-        );
+        assert!(graph.node_is_live(*id), "node {id:?} stays live while held");
         let now = graph.node_data(*id).expect("still readable");
         assert!(
             Arc::ptr_eq(&now, payload),
@@ -901,55 +896,62 @@ fn a_close_during_a_computation_defers_the_node_release_until_it_ends() {
         );
     }
 
-    drop(computation);
+    drop(reader);
 
-    assert_eq!(
-        host.project_type_store().deferred_release_count(),
-        0,
-        "the last computation to end applies the queued release"
-    );
     assert!(
         live_node_ids_scoped_to(&host, "/src/types/icon.ts").is_empty(),
-        "every node of the closed document is released once nothing is in flight"
+        "every node of the closed document is destroyed once nothing holds it"
+    );
+    assert_eq!(
+        host.retention_snapshot().closes.closes_applied,
+        1,
+        "the close was applied once, synchronously"
     );
 }
 
-/// With no computation in flight (a batch host, a test), the close applies
-/// the release inline, exactly as before.
+/// With nothing holding the closed content, the close destroys it inline.
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn a_close_with_nothing_in_flight_releases_inline() {
-    let (_ws, host) = activity_gate_fixture();
+fn a_close_with_no_holder_destroys_inline() {
+    let (_ws, host) = close_lifecycle_fixture();
     assert!(!live_node_ids_scoped_to(&host, "/src/types/icon.ts").is_empty());
     host.evict("/src/types/icon.ts");
-    assert_eq!(host.project_type_store().deferred_release_count(), 0);
     assert!(live_node_ids_scoped_to(&host, "/src/types/icon.ts").is_empty());
+    assert_eq!(
+        host.retention_snapshot().pending_destroyed_nodes,
+        0,
+        "the close drained the sidecar log of what it destroyed"
+    );
 }
 
-/// The queued release takes only what the CLOSED content interned: nodes the
-/// reload interned for the same document while the release was waiting
-/// (ids at or past the watermark taken at the close) stay live, and the
-/// consumer still resolves through them.
+/// A close evicts only what the CLOSED content cached: nodes the reload
+/// interned for the same document while a reader still held the closed
+/// content stay live once that reader lets go, and the consumer still
+/// resolves through them.
 ///
-/// Discriminating: a release that re-scanned by canonical at apply time (no
-/// watermark) would also take the reloaded document's fresh nodes, leaving
-/// the live consumer pointing at released ids.
+/// Discriminating: a release keyed by canonical at the reader's drop (a
+/// deferred sweep with no watermark) also takes the reloaded document's
+/// fresh nodes, leaving the live consumer pointing at destroyed ids.
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn a_deferred_release_keeps_nodes_interned_after_the_close() {
+fn a_close_keeps_nodes_interned_after_it() {
     const CONSUMER_V2: &str = r#"<script setup lang="ts">
 import type { IconProps } from './types/icon'
 // edited after the dependency was closed
 defineProps<IconProps>()
 </script>
 <template><div /></template>"#;
-    let (_ws, host) = activity_gate_fixture();
+    let (_ws, host) = close_lifecycle_fixture();
+    let graph = host.project_type_store().semantic_graph();
     let closed = live_node_ids_scoped_to(&host, "/src/types/icon.ts");
     assert!(!closed.is_empty());
 
-    let computation = host.semantic_activity();
+    let reader = graph
+        .root_nodes(closed.iter().copied())
+        .expect("live operands");
     host.evict("/src/types/icon.ts");
-    // The reload and a consumer edit re-lower icon.ts while the release waits.
+    // The reload and a consumer edit re-lower icon.ts while the reader holds
+    // the closed content.
     assert!(host.ensure_loaded("/src/types/icon.ts"));
     upsert_vue(&host, "/src/Consumer.vue", CONSUMER_V2);
     host.set_import_dependencies(
@@ -966,22 +968,21 @@ defineProps<IconProps>()
         .collect();
     assert!(
         !reloaded.is_empty(),
-        "fixture: the reload interned fresh icon.ts nodes while the release waited"
+        "fixture: the reload interned fresh icon.ts nodes while the reader held the closed ones"
     );
 
-    drop(computation);
+    drop(reader);
 
-    let graph = host.project_type_store().semantic_graph();
     for id in &closed {
         assert!(
             !graph.node_is_live(*id),
-            "closed-content node {id:?} is released"
+            "closed-content node {id:?} is destroyed with its last holder"
         );
     }
     for id in &reloaded {
         assert!(
             graph.node_is_live(*id),
-            "node {id:?} interned after the close survives the deferred release"
+            "node {id:?} interned after the close stays live"
         );
     }
 }
@@ -996,7 +997,7 @@ defineProps<IconProps>()
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn edits_keep_the_content_keyed_caches_flat_and_a_close_releases_them() {
-    let (_ws, host) = activity_gate_fixture();
+    let (_ws, host) = close_lifecycle_fixture();
     let edited = |edit: usize| {
         format!(
             "<script setup lang=\"ts\">
@@ -1073,7 +1074,7 @@ defineProps<IconProps>()
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn a_whole_host_reset_drops_the_component_meta_view_bookkeeping() {
-    let (_ws, host) = activity_gate_fixture();
+    let (_ws, host) = close_lifecycle_fixture();
     assert!(
         host.resolver_runtime()
             .component_meta_view_bookkeeping_len()
@@ -1089,7 +1090,7 @@ fn a_whole_host_reset_drops_the_component_meta_view_bookkeeping() {
         "close() forgets the view bookkeeping"
     );
 
-    let (_ws, host) = activity_gate_fixture();
+    let (_ws, host) = close_lifecycle_fixture();
     assert!(
         host.resolver_runtime()
             .component_meta_view_bookkeeping_len()

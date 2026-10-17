@@ -50,6 +50,10 @@ fn an_unsupported_typeof_expression_has_no_positional_value() {
 fn presence_projection_keeps_its_subset_without_offering_exact_values() {
     use verter_type_engine::semantic_query::{FactResult, FactStatus};
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = primitive(graph, PrimitiveKind::Number);
     let base = simple_object(graph, &[("known", number)]);
@@ -567,6 +571,10 @@ fn pending_arguments_remain_visible_to_infer_routing() {
 fn duplicate_pending_conditionals_retain_argument_roots_cold_warm_and_after_edit() {
     use verter_type_engine::semantic_query::ConditionalPendingSubstitution;
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     for file in ["first", "second"] {
         upsert_ts(
             &host,
@@ -3669,6 +3677,10 @@ fn reduce_union_dedups_cross_scope_duplicates_and_roots_discarded_arm() {
 #[test]
 fn reduce_union_incomplete_comparison_is_return_only_with_zero_warm_candidates() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     // Case 1 — missing payload: an arm whose id has no interned node.
@@ -3757,6 +3769,10 @@ fn canonical_algebra_collapses_only_proven_facts() {
     use verter_type_engine::project_semantic_dispatch::canonical_algebra;
 
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -3842,6 +3858,10 @@ fn span_only_distinct_arms_collapse_in_derived_composites_yet_intern_distinct() 
     use verter_type_engine::project_semantic_dispatch::canonical_algebra;
 
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
 
@@ -4027,6 +4047,10 @@ fn pending_substitution_arguments_collapse_structurally_but_parameters_stay_exac
     use verter_type_engine::semantic_query::ConditionalPendingSubstitution;
 
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
@@ -4138,6 +4162,10 @@ fn span_only_duplicates_collapse_above_prehash_narrowing_threshold() {
     use verter_type_engine::project_semantic_dispatch::canonical_algebra;
 
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
 
@@ -4222,6 +4250,10 @@ fn negative_zero_and_zero_are_one_numeric_literal_type() {
     use verter_type_engine::semantic_query::LiteralValue;
 
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     let zero = graph.intern_node(SemanticNodeData::Literal(LiteralValue::Number(0.0)));
@@ -4301,6 +4333,10 @@ fn tier1_payload_equal_discard_roots_descendant_files() {
     use verter_type_engine::semantic_query::LiteralValue;
 
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let file_scope = |canonical: &str, hash: u8| NodeScopeId::File {
         canonical_id: Arc::from(canonical),
@@ -4470,6 +4506,10 @@ fn extreme_and_disjoint_folds_record_contributor_origin_edge() {
 #[test]
 fn comparator_object_arm_discriminates_diverged_positive_members() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
 
@@ -4522,6 +4562,10 @@ fn comparator_object_arm_discriminates_diverged_positive_members() {
 #[test]
 fn over_deep_alias_peek_marks_evidence_incomplete() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let never = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
     let mut aliased = never;
@@ -4559,6 +4603,10 @@ fn wide_distinct_object_union_canonicalizes_without_budget_exhaustion() {
     use verter_type_engine::semantic_query::LiteralValue;
 
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let arms: Vec<SemanticNodeId> = (0..100)
         .map(|index| {
@@ -4600,6 +4648,10 @@ fn wide_union_of_deep_distinct_arms_canonicalizes_completely() {
     use verter_type_engine::semantic_query::LiteralValue;
 
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let literal =
         |text: String| graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(text)));
@@ -4647,6 +4699,10 @@ fn wide_union_of_deep_distinct_arms_canonicalizes_completely() {
 #[test]
 fn frameless_incomplete_canonical_evidence_marks_request_partial() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     // An over-deep alias chain makes the canonicalization UNDECIDED.
@@ -5785,6 +5841,10 @@ fn raise_path_indexed_access_intermediate_stays_navigate_terminal_expands() {
 #[test]
 fn surface_view_carries_surface_member_optional_readonly_is_method() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = host.project_type_store().semantic_graph();
     let string_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
 
@@ -5857,6 +5917,10 @@ fn surface_view_carries_surface_member_optional_readonly_is_method() {
 #[test]
 fn surface_view_carries_call_signatures_and_construct_signatures() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = host.project_type_store().semantic_graph();
     let string_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let num_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
@@ -5966,6 +6030,10 @@ fn repeated_asks_do_not_grow_memo() {
 #[test]
 fn concurrent_sugar_and_canonical_requests_share_in_flight_entry() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = host.project_type_store().semantic_graph();
     let string_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let surface = verter_type_engine::test_surface_view! {
@@ -6075,6 +6143,10 @@ fn concurrent_sugar_and_canonical_requests_share_in_flight_entry() {
 #[test]
 fn dispatch_host_adapter_routes_per_base_scope() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     let scope_a = NodeScopeId::File {
@@ -11477,6 +11549,10 @@ fn number_index_signature_applies_to_canonical_numeric_names() {
     use super::relation_predicates::index_signature_applies_to_property;
 
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let number_key = primitive(&graph, PrimitiveKind::Number);
 
@@ -13557,6 +13633,10 @@ fn semantic_graph_template_literal_variant_preserves_quasis_and_expression_refs(
 #[test]
 fn function_surface_publishes_as_object_with_call_signatures() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = host.project_type_store().semantic_graph();
     // Two placeholder call signatures to prove the field is a
     // list (overload set), not an `Option`. In production each id
@@ -13604,6 +13684,10 @@ fn function_surface_publishes_as_object_with_call_signatures() {
 #[test]
 fn solver_error_publishes_as_opaque_query_error() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = host.project_type_store().semantic_graph();
 
     let miss = graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss));
@@ -13739,6 +13823,7 @@ fn mapped_binder_keys_do_not_depend_on_lowering_order() {
     let keys = |order: [(&'static str, SemanticNodeId); 2], host: &VerterHost| {
         let dispatch = ProjectSemanticDispatch::new(host);
         let graph = Arc::clone(host.project_type_store().semantic_graph());
+        let _scope = graph.enter_node_root_scope();
         for (name, argument) in order {
             let _ = dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(resolve_decl_key(
                 "/w/two_mapped.ts",
@@ -13762,8 +13847,11 @@ fn mapped_binder_keys_do_not_depend_on_lowering_order() {
         // Every mapped shell whose value is a primitive, keyed by that
         // value's kind.
         let mut keys = std::collections::BTreeSet::new();
-        for id in 0u64..(graph.node_count() as u64) {
+        for id in 0u64..(graph.node_slot_count() as u64) {
             let node = SemanticNodeId(id);
+            if !graph.node_is_live(node) {
+                continue;
+            }
             if let Some(SemanticNodeData::Mapped { mapper, .. }) = graph.node_data(node).as_deref()
             {
                 if let Some(SemanticNodeData::Primitive(kind)) =
@@ -22858,6 +22946,10 @@ fn resolve_macro_payload_define_model_branches_distinctly() {
 #[test]
 fn resolve_macro_payload_self_reference_does_not_loop() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = host.project_type_store().semantic_graph();
     let recursive_ref = graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
         name: Arc::from("R"),
@@ -23464,6 +23556,10 @@ defineProps<Pick<Source, 'alpha' | 'beta'>>();
 #[test]
 fn navigate_integrity_project_path_does_not_route_through_macro_payload() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     // Construct a non-trivial base (Object surface with a member).
@@ -28638,6 +28734,10 @@ fn mapped_type_over_open_program_source_defers() {
 #[test]
 fn surface_project_known_key_matches_js_property_identity() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let string = primitive(&graph, PrimitiveKind::String);
     let numeric = verter_type_engine::semantic_query::PropertyKey::Number(
@@ -30210,6 +30310,10 @@ fn missing_node_data_evaluates_partial_not_laundered_complete() {
     // read (an unresolved authored name) stays `Complete` — that path is
     // covered by `normalize_node_for_fact_demand_unresolvable_declref_is_stable_complete`.
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let context = verter_type_engine::semantic_query::ProjectionReductionContext::published(
@@ -32138,6 +32242,10 @@ fn union_merge_fixture_arms(
 #[test]
 fn union_surface_merges_match_reference_semantics_across_arm_permutations() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let arms = union_merge_fixture_arms(&graph);
 
@@ -32242,6 +32350,10 @@ fn union_surface_merges_match_reference_semantics_across_arm_permutations() {
 fn union_surface_merge_pins_order_accessibility_and_neutrality() {
     use verter_type_expr::MemberVisibility as V;
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let s = primitive(&graph, PrimitiveKind::String);
     let n = primitive(&graph, PrimitiveKind::Number);

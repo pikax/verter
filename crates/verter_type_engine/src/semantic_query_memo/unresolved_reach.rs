@@ -24,10 +24,11 @@
 //! cleared on every edit; this one must not be, and clearing it would only
 //! cost recomputation.
 //!
-//! The one exception is a document CLOSE: `release_canonical` drops the
-//! bits of the nodes it tombstones (their payloads are gone, so the bits
-//! are pure retention). A released id asked again reads the `Opaque(Miss)`
-//! placeholder and memoizes `true` — the conservative answer.
+//! The one exception is a node's destruction: its bits are pure retention
+//! once its payload is gone, so the store drops them with the arena's
+//! destroyed log (`release.rs`). A destroyed id asked again reads the
+//! `Opaque(Miss)` placeholder and answers `true` — the conservative answer
+//! — without memoizing it.
 
 use super::*;
 
@@ -104,12 +105,13 @@ impl SemanticGraphStore {
                     stack.pop();
                     on_path.remove(&node);
                     local.insert(node, bit);
-                    if !cycle_seen && self.keeps_structure_bits(node) {
+                    if !cycle_seen {
                         self.unresolved_reach
                             .lock()
                             .entry(node)
                             .or_default()
                             .unresolved = Some(bit);
+                        self.track_structure_bits(node);
                     }
                     if let Some(parent) = stack.last_mut() {
                         parent.bit |= bit;
@@ -370,18 +372,18 @@ impl SemanticGraphStore {
     }
 
     fn set_inert_bit(&self, node: SemanticNodeId, bit: bool) {
-        if self.keeps_structure_bits(node) {
-            self.unresolved_reach.lock().entry(node).or_default().inert = Some(bit);
-        }
+        self.unresolved_reach.lock().entry(node).or_default().inert = Some(bit);
+        self.track_structure_bits(node);
     }
 
-    /// Whether `node`'s structure bits are memoized. A released id is
-    /// answered (it reads the placeholder) but never memoized: no later
-    /// release names it, so its entry would be a residue for the life of
-    /// the store. Until the first release every id is live and this is one
-    /// relaxed load.
-    fn keeps_structure_bits(&self, node: SemanticNodeId) -> bool {
-        !self.released_any.load(std::sync::atomic::Ordering::Relaxed) || self.arena.is_live(node)
+    /// Mark `node`'s just-written structure bits for cleanup when it is
+    /// destroyed. A destroyed id is answered (it reads the placeholder) but
+    /// never memoized: no later destruction names it, so its entry would be
+    /// a residue for the life of the store.
+    fn track_structure_bits(&self, node: SemanticNodeId) {
+        if !self.track_sidecar(node) {
+            self.unresolved_reach.lock().remove(&node);
+        }
     }
 
     /// The memoized structural bits of `node`, if any was decided.

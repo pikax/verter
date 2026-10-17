@@ -705,6 +705,10 @@ mod tests {
         use verter_type_expr::LiteralValue;
 
         let host = VerterHost::new_standalone(HostConfig::default());
+        let _scope = host
+            .project_type_store()
+            .semantic_graph()
+            .enter_node_root_scope();
         let graph = host.project_type_store().semantic_graph();
         let lit = |text: &str| {
             graph.intern_node_with_scope(
@@ -733,6 +737,10 @@ mod tests {
         use verter_type_engine::semantic_query::SemanticNodeData;
 
         let host = VerterHost::new_standalone(HostConfig::default());
+        let _scope = host
+            .project_type_store()
+            .semantic_graph()
+            .enter_node_root_scope();
         let graph = host.project_type_store().semantic_graph();
         let left_binder = graph.alloc_infer_binder_id();
         let right_binder = graph.alloc_infer_binder_id();
@@ -772,6 +780,10 @@ mod tests {
         use verter_type_engine::semantic_query::{PrimitiveKind, SemanticNodeData};
 
         let host = VerterHost::new_standalone(HostConfig::default());
+        let _scope = host
+            .project_type_store()
+            .semantic_graph()
+            .enter_node_root_scope();
         let graph = host.project_type_store().semantic_graph();
         let string_node = graph
             .intern_node_with_scope(SemanticNodeData::Primitive(PrimitiveKind::String), scope());
@@ -812,6 +824,10 @@ mod tests {
         };
 
         let host = VerterHost::new_standalone(HostConfig::default());
+        let _scope = host
+            .project_type_store()
+            .semantic_graph()
+            .enter_node_root_scope();
         let graph = host.project_type_store().semantic_graph();
         let value = graph.intern_node(SemanticNodeData::Primitive(
             verter_type_engine::semantic_query::PrimitiveKind::String,
@@ -958,6 +974,10 @@ mod tests {
         use verter_type_engine::semantic_query::{DeclIdentity, SemanticNodeData};
 
         let host = VerterHost::new_standalone(HostConfig::default());
+        let _scope = host
+            .project_type_store()
+            .semantic_graph()
+            .enter_node_root_scope();
         let graph = host.project_type_store().semantic_graph();
 
         // Intern `Wrapper<'a'>` and `Wrapper<'b'>` argument nodes — an

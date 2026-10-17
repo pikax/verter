@@ -20,14 +20,14 @@ fn counted_zero_retention_admission_returns_an_owned_complete_delivery() {
         RetentionLimits, SemanticRetentionAccount, StoreAccount,
     };
     use verter_type_engine::semantic_query::LiteralValue;
-    use verter_type_engine::semantic_query_memo::ownership_harness::CountedOwnershipHarness;
+    use verter_type_engine::semantic_query_memo::graph_fixture::GraphFixture;
     let (host, _) = keyed_host();
-    let harness = CountedOwnershipHarness::with_account(StoreAccount::new(
-        SemanticRetentionAccount::new(RetentionLimits {
+    let harness = GraphFixture::with_account(StoreAccount::new(SemanticRetentionAccount::new(
+        RetentionLimits {
             aggregate_ceiling_bytes: 0,
             ..RetentionLimits::defaults()
-        }),
-    ));
+        },
+    )));
     let read = harness.run(|store| {
         store.execute_cooperative(
             &host,
@@ -66,9 +66,9 @@ fn counted_sealed_refusal_owns_nonempty_key_value_and_diagnostic_operands() {
         QueryBuildOutput, ShallowDiagnostic,
     };
     use verter_type_engine::semantic_query::{LiteralValue, PartialReasonSet};
-    use verter_type_engine::semantic_query_memo::ownership_harness::CountedOwnershipHarness;
+    use verter_type_engine::semantic_query_memo::graph_fixture::GraphFixture;
     let (host, _) = keyed_host();
-    let harness = CountedOwnershipHarness::new();
+    let harness = GraphFixture::new();
     harness.run(|store| {
         let key_node = store.intern_node(SemanticNodeData::Literal(LiteralValue::String(
             "refused operand".into(),
@@ -135,9 +135,9 @@ fn counted_sealed_refusal_owns_nonempty_key_value_and_diagnostic_operands() {
 fn counted_outer_build_keeps_a_consumed_warm_read_through_cache_eviction() {
     use verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput;
     use verter_type_engine::semantic_query::LiteralValue;
-    use verter_type_engine::semantic_query_memo::ownership_harness::CountedOwnershipHarness;
+    use verter_type_engine::semantic_query_memo::graph_fixture::GraphFixture;
     let (host, _) = keyed_host();
-    let harness = CountedOwnershipHarness::new();
+    let harness = GraphFixture::new();
     harness.run(|store| {
         drop(store.execute_cooperative(
             &host,
@@ -196,9 +196,9 @@ fn counted_outer_build_keeps_a_consumed_warm_read_through_cache_eviction() {
 fn counted_cancelled_producer_releases_unaudited_intermediates() {
     use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
     use verter_type_engine::semantic_query::LiteralValue;
-    use verter_type_engine::semantic_query_memo::ownership_harness::CountedOwnershipHarness;
+    use verter_type_engine::semantic_query_memo::graph_fixture::GraphFixture;
     let (host, _) = keyed_host();
-    let harness = CountedOwnershipHarness::new();
+    let harness = GraphFixture::new();
     let context = RequestContext::new(1, Arc::from(KEYED), false, None);
     let _request = RequestContextGuard::install(Arc::clone(&context));
     let read = harness.run(|store| {
@@ -229,9 +229,9 @@ fn counted_return_only_delivery_owns_value_and_actual_diagnostic_after_store_dro
         QueryBuildOutput, ShallowDiagnostic,
     };
     use verter_type_engine::semantic_query::LiteralValue;
-    use verter_type_engine::semantic_query_memo::ownership_harness::CountedOwnershipHarness;
+    use verter_type_engine::semantic_query_memo::graph_fixture::GraphFixture;
     let (host, _) = keyed_host();
-    let harness = CountedOwnershipHarness::new();
+    let harness = GraphFixture::new();
     let read = harness.run(|store| {
         store.execute_cooperative(
             &host,
@@ -271,9 +271,9 @@ fn counted_return_only_delivery_owns_value_and_actual_diagnostic_after_store_dro
 
 #[test]
 fn counted_recursion_delivery_owns_its_returned_sentinel() {
-    use verter_type_engine::semantic_query_memo::ownership_harness::CountedOwnershipHarness;
+    use verter_type_engine::semantic_query_memo::graph_fixture::GraphFixture;
     let (host, _) = keyed_host();
-    let harness = CountedOwnershipHarness::new();
+    let harness = GraphFixture::new();
     let read = harness.run(|store| {
         store.with_same_path_inflight_for_test(key(), || {
             store.execute_cooperative(
@@ -295,10 +295,10 @@ fn counted_recursion_delivery_owns_its_returned_sentinel() {
 #[test]
 fn counted_cache_and_reader_can_drop_in_either_order() {
     use verter_type_engine::semantic_query::LiteralValue;
-    use verter_type_engine::semantic_query_memo::ownership_harness::CountedOwnershipHarness;
+    use verter_type_engine::semantic_query_memo::graph_fixture::GraphFixture;
     for cache_first in [true, false] {
         let (host, _) = keyed_host();
-        let harness = CountedOwnershipHarness::new();
+        let harness = GraphFixture::new();
         let read = harness.run(|store| {
             store.execute_cooperative(
                 &host,
@@ -504,9 +504,9 @@ fn a_producer_belongs_to_its_task_and_a_subscription_waits_when_its_holder_choos
 /// the value, and its drop releases it.
 #[test]
 fn a_joined_read_owns_the_value_after_the_producer_and_the_cache_are_gone() {
-    use verter_type_engine::semantic_query_memo::ownership_harness::CountedOwnershipHarness;
+    use verter_type_engine::semantic_query_memo::graph_fixture::GraphFixture;
     let (host, hash) = keyed_host();
-    let harness = CountedOwnershipHarness::new();
+    let harness = GraphFixture::new();
     let (produced, joined) = harness.run(|store| {
         let owner = store.task_registry_for_tests().register_task();
         let follower = store.task_registry_for_tests().register_task();

@@ -1028,14 +1028,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 root_result.clone(),
                 component_proof_complete,
             ) {
-                Some(result) => self.dispatch_txn.borrow_mut().call.completed_members.push(
-                    CompletedResolveCallMember {
+                Some(result) => {
+                    let member = CompletedResolveCallMember {
                         key: root_key,
                         result,
                         inline_flight: root.inline_flight,
                         self_roots: root.self_roots,
-                    },
-                ),
+                    }
+                    .held(self.graph());
+                    self.dispatch_txn
+                        .borrow_mut()
+                        .call
+                        .completed_members
+                        .push(member);
+                }
                 _ => {
                     // Incomplete proof stays transaction-local. The value
                     // still flows through `Complete`, so the enclosing

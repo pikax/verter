@@ -1,31 +1,28 @@
-//! Controlled graph ownership fixture. Ordinary constructors always retain
-//! canonical-sweep reclamation, including builds with test support enabled.
+//! A private semantic graph for ownership tests: the production store, with
+//! fixture work run in an unaudited construction scope and its live node
+//! count read back.
 
-use super::{arena::NodeArena, SemanticGraphStore};
+use super::SemanticGraphStore;
 
-pub struct CountedOwnershipHarness {
+pub struct GraphFixture {
     graph: SemanticGraphStore,
 }
 
-impl Default for CountedOwnershipHarness {
+impl Default for GraphFixture {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl CountedOwnershipHarness {
+impl GraphFixture {
     pub fn new() -> Self {
         Self::with_account(Default::default())
     }
 
-    /// Configure fixture retention admission without changing any production
-    /// constructor's reclamation mode.
+    /// A fixture graph charging `retention_account`.
     pub fn with_account(retention_account: verter_session_query::retention::StoreAccount) -> Self {
         Self {
-            graph: SemanticGraphStore::with_arena(
-                NodeArena::counted_for_tests(),
-                retention_account,
-            ),
+            graph: SemanticGraphStore::with_account(retention_account),
         }
     }
 
@@ -58,7 +55,7 @@ mod tests {
 
     #[test]
     fn signature_tokens_are_rooted_before_the_store_accessor_is_used() {
-        let harness = CountedOwnershipHarness::new();
+        let harness = GraphFixture::new();
         let node = harness.run(|graph| {
             let node = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
                 "constructor attachment".into(),
@@ -77,7 +74,7 @@ mod tests {
         use crate::semantic_query::ProjectionMode;
         use std::hash::{Hash, Hasher};
 
-        let harness = CountedOwnershipHarness::new();
+        let harness = GraphFixture::new();
         let key = harness.run(|graph| {
             let node = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
                 "shape operand".into(),
@@ -106,8 +103,12 @@ mod tests {
         assert_eq!(harness.live_nodes(), 0, "the key owns its operand");
     }
 
+    /// Every production constructor runs counted reclamation: the node a
+    /// closed construction scope alone owned is destroyed with it.
+    /// Discriminating against any constructor that leaves graph slots to a
+    /// later sweep.
     #[test]
-    fn ordinary_graph_constructor_variants_keep_legacy_reclamation() {
+    fn every_production_graph_constructor_destroys_on_last_release() {
         let graphs = [
             SemanticGraphStore::new(),
             SemanticGraphStore::with_account(Default::default()),
@@ -118,23 +119,22 @@ mod tests {
             .with_task_registry(Default::default()),
         ];
         for graph in graphs {
-            assert!(!graph.arena.counted());
             let node = {
                 let _scope = graph.enter_node_root_scope();
                 graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
-                    "legacy constructor".into(),
+                    "scoped intermediate".into(),
                 )))
             };
             assert!(
-                graph.node_is_live(node),
-                "dropping the construction scope must not reclaim a production slot"
+                !graph.node_is_live(node),
+                "the scope's release is the node's last: it is destroyed"
             );
         }
     }
 
     #[test]
     fn counted_new_delivery_keeps_a_consumed_value_in_the_outer_builder() {
-        let harness = CountedOwnershipHarness::new();
+        let harness = GraphFixture::new();
         harness.run(|graph| {
             let node = {
                 let _inner = graph.enter_node_root_scope();
@@ -165,7 +165,7 @@ mod tests {
 
     #[test]
     fn counted_identity_record_and_prefix_receipt_own_nonempty_operands() {
-        let harness = CountedOwnershipHarness::new();
+        let harness = GraphFixture::new();
         let (substitution, recipe, receipt) = harness.run(|graph| {
             let node = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
                 "operand".into(),
@@ -198,8 +198,8 @@ mod tests {
 
     #[test]
     fn counted_equal_recipes_in_distinct_arenas_do_not_share_nested_owners() {
-        let first = CountedOwnershipHarness::new();
-        let second = CountedOwnershipHarness::new();
+        let first = GraphFixture::new();
+        let second = GraphFixture::new();
         let make = |graph: &SemanticGraphStore| {
             let node = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
                 "same content".into(),
@@ -239,8 +239,8 @@ mod tests {
         use crate::semantic_query_memo::node_roots::DispatchConstructionScope;
         use std::sync::Arc;
 
-        let issuing = CountedOwnershipHarness::new();
-        let newest = CountedOwnershipHarness::new();
+        let issuing = GraphFixture::new();
+        let newest = GraphFixture::new();
         let issuing_dispatcher = DispatchConstructionScope::enter(&issuing.graph.arena.core);
         // A second graph's dispatcher opened later is the thread's newest
         // owner, and allocates the same ordinal the issuing graph does.
@@ -286,7 +286,7 @@ mod tests {
         use crate::semantic_query::{QueryResult, SemanticQueryValue};
         use crate::semantic_query_memo::node_roots::{DispatchConstructionScope, NodeRootScope};
 
-        let harness = CountedOwnershipHarness::new();
+        let harness = GraphFixture::new();
         let dispatcher = DispatchConstructionScope::enter(&harness.graph.arena.core);
         let node = harness
             .graph
@@ -321,8 +321,8 @@ mod tests {
 
     #[test]
     fn counted_rooted_intern_rejects_foreign_arena_even_at_equal_ordinals() {
-        let a = CountedOwnershipHarness::new();
-        let b = CountedOwnershipHarness::new();
+        let a = GraphFixture::new();
+        let b = GraphFixture::new();
         let root = a.run(|graph| {
             graph
                 .intern_rooted_node(
@@ -349,7 +349,7 @@ mod tests {
 
     #[test]
     fn counted_signature_delivery_owns_its_exact_version_after_replacement() {
-        let harness = CountedOwnershipHarness::new();
+        let harness = GraphFixture::new();
         let lease = harness.run(|graph| {
             let node = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
                 "signature token".into(),

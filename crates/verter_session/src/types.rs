@@ -3933,13 +3933,13 @@ pub struct HostRetentionSnapshot {
     pub carrier_candidates: usize,
     /// Publication lanes the carrier store retains (live and terminal).
     pub publication_lanes: usize,
-    /// Live interned semantic-graph nodes (payloads no close has released).
+    /// Live interned semantic-graph nodes (payloads some owner still holds).
     pub semantic_nodes: usize,
     /// Required current graph roots and internal edges; no history capture.
     pub semantic_node_ownership: verter_type_engine::semantic_query_memo::NodeOwnershipCounts,
     /// Node slots the semantic arena physically holds: live chunks times the
     /// chunk size. Bounded by the live set, so growth here is storage the
-    /// release path failed to give back.
+    /// counted destruction failed to give back.
     pub semantic_node_slots: usize,
     /// Populated semantic memo slots across every family.
     pub semantic_memo_entries: usize,
@@ -4018,9 +4018,9 @@ pub struct HostRetentionSnapshot {
     pub refusals_oversized: u64,
     /// Reservations refused because the active class was exhausted.
     pub refusals_active: u64,
-    /// Close-time semantic releases queued behind in-flight computations
-    /// and not yet applied.
-    pub deferred_releases: usize,
+    /// Destroyed semantic nodes whose per-node sidecar entries wait for
+    /// cleanup: the bounded pending log a close or a sidecar write drains.
+    pub pending_destroyed_nodes: usize,
     /// Resolved-import fact entries (one key per document content hash;
     /// follows the current content, released on close).
     pub resolved_import_facts: usize,
@@ -4046,9 +4046,9 @@ pub struct HostRetentionSnapshot {
     /// Fallthrough nodes the resolver runtime caches: keyed by component,
     /// bounded, and released when their component closes or is deleted.
     pub fallthrough_nodes: usize,
-    /// What the activity gate has applied so far: counts, the longest a
-    /// queued release waited, and the last release's own cost.
-    pub reclaim: crate::project_type_store::semantic_activity::SemanticReclaimStats,
+    /// What document closes have cost so far: counts, the slowest and summed
+    /// close, and the last close's report.
+    pub closes: crate::project_type_store::SemanticCloseStats,
 }
 
 #[derive(Debug, Default)]

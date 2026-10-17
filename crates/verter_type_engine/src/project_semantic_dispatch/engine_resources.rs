@@ -69,13 +69,11 @@ impl EngineStores {
             cache_live,
             task_registry,
             MemoFamilyBound::Production,
-            Default::default(),
         )
     }
 
     /// [`Self::create`] with the semantic graph's family memo bounded by
-    /// `memo_family_bound` and its node slots in `ownership`'s reclamation
-    /// regime at construction.
+    /// `memo_family_bound` at construction.
     #[must_use]
     pub fn create_with_memo_family_bound(
         provenance: Option<Arc<crate::engine_provenance::EngineProvenance>>,
@@ -83,17 +81,12 @@ impl EngineStores {
         cache_live: &Arc<AtomicU64>,
         task_registry: verter_execution::tasks::TaskRegistry,
         memo_family_bound: MemoFamilyBound,
-        ownership: crate::semantic_query_memo::GraphOwnership,
     ) -> (Self, OutputAuthority, SurfaceClaimAuthority) {
         let retention_account = Arc::clone(store_account.get());
         let graph = Arc::new(
             match provenance {
-                Some(prov) => SemanticGraphStore::with_provenance_and_ownership(
-                    prov,
-                    store_account,
-                    ownership,
-                ),
-                None => SemanticGraphStore::with_account_and_ownership(store_account, ownership),
+                Some(prov) => SemanticGraphStore::with_provenance(prov, store_account),
+                None => SemanticGraphStore::with_account(store_account),
             }
             .with_task_registry(task_registry)
             .with_memo_family_bound(memo_family_bound),
@@ -155,15 +148,9 @@ impl EngineIdentity {
             // Unbound fixtures have only their explicit construction scope.
             return crate::semantic_query_memo::node_roots::IdentityNodeRoots::scoped(ids);
         };
-        crate::semantic_query_memo::node_roots::IdentityNodeRoots(
-            graph
-                .root_existing_nodes(
-                    ids.into_iter()
-                        .filter(|node| node.0 < crate::semantic_query_memo::UNALLOCATABLE_ID_FLOOR)
-                        .collect(),
-                )
-                .expect("output holder operands belong to its issuing engine"),
-        )
+        // An operand the engine no longer holds owns nothing; reads through
+        // the holder then fail as stale.
+        crate::semantic_query_memo::node_roots::IdentityNodeRoots::in_graph(&graph, ids)
     }
 
     /// The identity of the engine `dispatch` reads.
@@ -268,12 +255,12 @@ mod tests {
         LiteralValue, ProjectionMode, QueryResult, SemanticNodeData, SemanticQueryValue,
         SurfaceMember,
     };
-    use crate::semantic_query_memo::ownership_harness::CountedOwnershipHarness;
+    use crate::semantic_query_memo::graph_fixture::GraphFixture;
 
     #[test]
     fn counted_shape_holders_acquire_after_nested_scope_returns() {
         for drop_output_first in [false, true] {
-            let graph = Arc::new(CountedOwnershipHarness::new().into_graph());
+            let graph = Arc::new(GraphFixture::new().into_graph());
             let authority = OutputAuthority {
                 engine: EngineIdentity(Arc::downgrade(&graph)),
             };

@@ -12,9 +12,10 @@
 //! - Entries are keyed by `SemanticQueryKey`; cold winners compute the
 //!   node, store it, and return its id. Joiners on the same key observe
 //!   the same id (no duplicated cold work).
-//! - [`SemanticNodeId`] is stable for the lifetime of the memo. Node data
-//!   is stored in an append-only arena so readers can hold a long-lived
-//!   id without worrying about resizing.
+//! - [`SemanticNodeId`] is never reused. A node lives while an owner holds
+//!   it — a cache candidate, a construction scope, a delivered lease, a
+//!   counted edge from a live parent — and is destroyed by its last release
+//!   (`arena.rs`, **Lifetime**).
 //! - **Same-path recursion** returns `QueryResult::Recursive(self_id)`
 //!   so cycles dedup rather than re-entering.
 //! - **Distinct top-level waiters** block cooperatively on a per-entry
@@ -25,12 +26,12 @@
 //! - Entries are immutable once stored. Node data never retains borrowed
 //!   OXC AST pointers — callers materialize semantic data before calling
 //!   [`SemanticGraphStore::intern_node`].
-//! - A document CLOSE releases what the closed canonical retained
-//!   ([`SemanticGraphStore::release_canonical`], see `release.rs`): its
-//!   memo entries, node PAYLOADS (ids stay unique and are never reused; a
-//!   released id reads as `Opaque(Miss)`), per-node sidecars and relation
-//!   proofs. An EDIT ([`SemanticGraphStore::invalidate_canonical`]) keeps
-//!   every payload.
+//! - A document CLOSE evicts the cache owners bound to the closed
+//!   canonical's content ([`SemanticGraphStore::close_canonical`], see
+//!   `release.rs`); its nodes are destroyed once no caller holds them, and
+//!   a held result is never revoked. An EDIT
+//!   ([`SemanticGraphStore::invalidate_canonical`]) drains only the entries
+//!   its carriers name.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -57,6 +58,8 @@ mod family_footprint;
 mod family_intern;
 mod family_retention;
 mod flow_return_memo;
+#[cfg(any(test, feature = "test-support"))]
+pub mod graph_fixture;
 mod hash_cons_memos;
 pub mod inflight;
 pub(crate) mod intern_table;
@@ -65,8 +68,6 @@ pub(crate) mod member_index;
 pub mod node_data_lease;
 pub mod node_roots;
 pub(crate) mod nodes;
-#[cfg(any(test, feature = "test-support"))]
-pub mod ownership_harness;
 mod structural_domains;
 pub use nodes::AliasChainEnd;
 mod observability;
@@ -90,7 +91,7 @@ pub use intern_table::{IdentityIndexSnapshot, InternIndexOccupancy};
 pub use producer::{
     Acquired, Claim, ClaimAttempt, Joined, ProducerLease, ReadCapture, Recursion, Subscription,
 };
-pub use release::SemanticReleaseReport;
+pub use release::{ClosedContent, SemanticCloseReport};
 pub use scc_publish::{
     PendingFlowReturnMember, PendingRelationMember, PendingResolveCallMember, SccRootWitness,
 };
@@ -203,6 +204,26 @@ pub(crate) fn cancelled_cache_read() -> CacheRead<QueryResult<SemanticQueryValue
         fact_status: crate::semantic_query::FactStatus::unavailable(
             crate::semantic_query::PartialReasonSet::CANCELLED,
         ),
+        receipt: crate::semantic_query::ReadReceipt::Unpriced,
+    }
+}
+
+/// The terminal read of a query whose key names an operand this graph does
+/// not hold live: a destroyed node or a foreign ordinal. It is answered as
+/// that typed error and never cached.
+pub(crate) fn refused_operand_cache_read(
+    error: QueryError,
+) -> CacheRead<QueryResult<SemanticQueryValue>> {
+    let fact_status = crate::semantic_query::FactStatus::Unavailable(
+        crate::semantic_query::surface_resolution::NonEmptyReasons::from_query_error(&error),
+    );
+    CacheRead {
+        lease: Default::default(),
+        value: QueryResult::Error(error),
+        dep_signature: empty_signature(),
+        walker_diagnostics: empty_diagnostics(),
+        cache_suppress: true,
+        fact_status,
         receipt: crate::semantic_query::ReadReceipt::Unpriced,
     }
 }
@@ -401,12 +422,6 @@ pub struct SemanticGraphStore {
     /// iteration) instead of trading correctness for it. ONE per-node sidecar:
     /// the entry holds every bit memoized for the id, released together.
     unresolved_reach: Mutex<FxHashMap<SemanticNodeId, unresolved_reach::NodeStructureBits>>,
-    /// Set (and never cleared) by the first [`Self::release_canonical`]
-    /// that tombstones a node. Until then every id ever handed out is
-    /// live, so the warm-read liveness check ([`Self::result_is_live`])
-    /// is a single relaxed load; afterwards a warm candidate whose result
-    /// names a released node is skipped as a miss instead of being served.
-    released_any: std::sync::atomic::AtomicBool,
     /// The `VerterStableV1` member view of each union built in this store's
     /// arena, keyed by the store's OWN node ids. Ownership, lifetime and the
     /// contract with a payload-retiring holder: `union_views.rs`.
@@ -744,19 +759,6 @@ pub enum MemoFamilyBound {
     ForTest(usize),
 }
 
-/// How a host-composed graph reclaims node slots. Production graphs keep
-/// the canonical-sweep regime; the counted regime is the controlled
-/// ownership fixture, available to test builds only.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum GraphOwnership {
-    /// Canonical sweeps reclaim node slots.
-    #[default]
-    Legacy,
-    /// The counted fixture: a node is destroyed when its last root drops.
-    #[cfg(any(test, feature = "test-support"))]
-    CountedForTests,
-}
-
 impl Default for SemanticGraphStore {
     fn default() -> Self {
         Self::with_arena(Default::default(), Default::default())
@@ -764,25 +766,10 @@ impl Default for SemanticGraphStore {
 }
 
 impl SemanticGraphStore {
-    /// A store in `ownership`'s reclamation regime charging
-    /// `retention_account`.
-    pub(crate) fn with_ownership_and_account(
-        ownership: GraphOwnership,
-        retention_account: verter_session_query::retention::StoreAccount,
-    ) -> Self {
-        match ownership {
-            GraphOwnership::Legacy => Self::with_arena(Default::default(), retention_account),
-            #[cfg(any(test, feature = "test-support"))]
-            GraphOwnership::CountedForTests => {
-                Self::with_arena(NodeArena::counted_for_tests(), retention_account)
-            }
-        }
-    }
-
     /// The one store constructor: the store and its graph storage charge
     /// the same account, bound before the first node is interned. Binds
     /// signature-token ownership to the final arena before publishing the
-    /// store, including the controlled counted fixture constructor.
+    /// store.
     pub(super) fn with_arena(
         storage: NodeArena,
         retention_account: verter_session_query::retention::StoreAccount,
@@ -809,7 +796,6 @@ impl SemanticGraphStore {
             alias_charges: Default::default(),
             force_cold_abort_sweep: Default::default(),
             unresolved_reach: Default::default(),
-            released_any: Default::default(),
             union_views: Default::default(),
             key_classes: Default::default(),
             #[cfg(any(test, feature = "test-support"))]
@@ -1169,7 +1155,21 @@ impl SemanticGraphStore {
         &self,
         f: impl FnOnce(&mut crate::semantic_query::stable_key::KeyClasses) -> R,
     ) -> R {
-        f(&mut self.key_classes.lock())
+        let (result, fresh) = {
+            let mut classes = self.key_classes.lock();
+            let result = f(&mut classes);
+            (result, std::mem::take(&mut classes.fresh))
+        };
+        let stale: Vec<SemanticNodeId> = fresh
+            .into_iter()
+            .filter(|node| !self.track_sidecar(*node))
+            .collect();
+        if !stale.is_empty() {
+            self.key_classes
+                .lock()
+                .release_nodes(|node| stale.contains(&node));
+        }
+        result
     }
 
     /// Test-only — number of distinct `FamilyKey`s currently resident in
@@ -2464,13 +2464,6 @@ impl SemanticGraphStore {
         let family = prepared.family();
         let slot = prepared.slot();
         let requested_path = prepared.requested_path();
-        // A family keyed on a released node is a stale holder's re-dispatch:
-        // admitting it would strand a candidate no close can drain. The
-        // winner still returns its value; only the warm publish is refused
-        // (`Skipped`, not `Aborted` — the build's own id epoch is consistent).
-        if self.family_names_released_node(family) {
-            return WarmPublishOutcome::Skipped;
-        }
         // §3.4 soundness invariant (production publish ONLY): the recorded
         // terminal must be at-least the slot's mode — see
         // `family::slot_domain_siblings`. Test-only publishes bypass this.
@@ -2709,11 +2702,6 @@ impl SemanticGraphStore {
         let family = prepared.family();
         let slot = prepared.slot();
         let requested_path = prepared.requested_path();
-        // Same admission fence as `warm_publish_one`: a backfill keyed on a
-        // released node is never admitted.
-        if self.family_names_released_node(family) {
-            return false;
-        }
         // §3.4 soundness invariant — same as `warm_publish_one` (a
         // prefix-backfill's `Navigate@prefix` hop is self-satisfying).
         verter_debug_assert!(

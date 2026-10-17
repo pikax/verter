@@ -226,6 +226,18 @@ impl EvaluateDeferredOutcome {
         }
     }
 
+    /// The refusal of a demand over an operand this graph no longer holds:
+    /// never published, never cached.
+    fn refused_operand(node: SemanticNodeId) -> Self {
+        let reasons = PartialReasonSet::MISSING_SEMANTIC_NODE_DATA;
+        Self {
+            node,
+            completeness: ResultCompleteness::partial(reasons),
+            availability: crate::semantic_query::FactStatus::unavailable(reasons),
+            cache_suppress: true,
+        }
+    }
+
     fn aborted(node: SemanticNodeId, abort: crate::semantic_query::ExecutionAbort) -> Self {
         Self {
             node,
@@ -2503,6 +2515,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 abort,
             );
         }
+        // The demand owns its operand for its whole evaluation; one this
+        // graph no longer holds is refused, never evaluated.
+        let Ok(operand) = self.graph().root_nodes([node]) else {
+            return EvaluateDeferredOutcome::refused_operand(
+                self.opaque(QueryError::StaleSemanticOperand),
+            );
+        };
         // Continuations live on the heap. Authored structural depth has no
         // cap here; only connected operational limits can stop evaluation.
         let (_connected_guard, initial_trip) = self.enter_connected_demand(false);
@@ -2537,11 +2556,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         );
         self.connected_demand.open_cost_scope(
             super::cost_receipt::CostIdentity::of_key((node, reduction_context, demand))
-                .with_roots(
-                    self.graph()
-                        .root_existing_nodes(vec![node])
-                        .expect("evaluation operand is live"),
-                ),
+                .with_roots(operand),
         );
         root.memo_checked = true;
         root.recording = true;
@@ -2687,7 +2702,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         super::cost_receipt::CostIdentity::of_key((entry_node, context, demand))
                             .with_roots(
                                 self.graph()
-                                    .root_existing_nodes(vec![entry_node])
+                                    .root_nodes(vec![entry_node])
                                     .expect("evaluation operand is live"),
                             ),
                     );
@@ -3033,7 +3048,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let receipt = match cached {
             Some(receipt) => receipt,
             None => {
-                let Ok(roots) = self.graph().root_existing_nodes(vec![node]) else {
+                let Ok(roots) = self.graph().root_nodes(vec![node]) else {
                     return false;
                 };
                 let receipt = super::cost_receipt::DemandCostReceipt::new(

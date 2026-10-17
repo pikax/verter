@@ -742,12 +742,6 @@ impl SemanticGraphStore {
         reverse_index_inputs: &reverse_index::ReverseIndexInputs,
         admission_seq: u64,
     ) -> NewlyKeyedFamily {
-        // Same admission fence as `warm_publish_one`: a member keyed on a
-        // released node is a stale holder's re-dispatch; its flight still
-        // completes with the computed value, only the warm slot is refused.
-        if self.family_names_released_node(family) {
-            return NewlyKeyedFamily(false);
-        }
         let cap = family.candidate_cap();
         let Some((slots, family_was_new)) =
             self.family_slots_prepaid_locked(entries, family, family_charge)

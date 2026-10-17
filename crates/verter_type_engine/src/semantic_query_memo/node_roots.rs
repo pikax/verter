@@ -1,5 +1,5 @@
-//! Counted graph roots. Production canonical sweeps may retire these roots;
-//! dropping an old handle then observes the tombstone and does nothing.
+//! Counted graph roots: every holder of a node owns one count on it, and
+//! the last release destroys the node (see `arena.rs`, **Lifetime**).
 
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -225,8 +225,8 @@ impl<'a> NodeRef<'a> {
         self.arena
     }
 
-    /// Read the payload under a new owning root. A slot a legacy close
-    /// already released is stale; it never reads as a live payload.
+    /// Read the payload under a new owning root. The borrow's owner keeps
+    /// the node live, so the read cannot find it destroyed.
     pub fn read(self) -> Result<super::node_data_lease::NodeDataLease, QueryError> {
         let roots = NodeRootSet::acquire(Arc::clone(self.arena), vec![self.id])?;
         let data = self
@@ -684,17 +684,25 @@ impl NodeRootScope {
 }
 
 /// Root a record's operands against the arena of the graph that issued it.
+/// An operand the arena does not hold live — a synthetic ordinal no graph
+/// allocated, or a stale one — owns nothing and is not rooted: the record
+/// keeps naming it, and every read through it fails as stale or foreign.
 pub(crate) fn root_in_arena(
     arena: Arc<NodeArenaCore>,
     ids: impl IntoIterator<Item = SemanticNodeId>,
 ) -> NodeRootSet {
-    let ids = ids
+    let ids: Vec<SemanticNodeId> = ids
         .into_iter()
-        .filter(|node| {
-            node.0 < super::UNALLOCATABLE_ID_FLOOR && (arena.counted() || arena.is_live(*node))
-        })
+        .filter(|node| node.0 < super::UNALLOCATABLE_ID_FLOOR)
         .collect();
-    NodeRootSet::acquire(arena, ids).expect("scoped record operands are live")
+    if ids.is_empty() {
+        return NodeRootSet::default();
+    }
+    let ids = arena.retain_live(ids);
+    if ids.is_empty() {
+        return NodeRootSet::default();
+    }
+    NodeRootSet(Some(Arc::new(RootOwner { arena, ids })))
 }
 
 impl Drop for NodeRootScope {

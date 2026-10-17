@@ -54,6 +54,7 @@ fn sibling_literal_signatures_claim_distinct_binder_spaces() {
     };
     use std::sync::Arc;
     let graph = crate::semantic_query_memo::SemanticGraphStore::new();
+    let _scope = graph.enter_node_root_scope();
     let void = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Void));
     let store = SignatureStore::new();
     let mut keys = std::collections::HashMap::new();

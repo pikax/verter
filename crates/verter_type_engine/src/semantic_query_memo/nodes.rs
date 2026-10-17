@@ -29,19 +29,6 @@ impl SemanticGraphStore {
         node_roots::NodeRootSet::acquire(Arc::clone(&self.arena.core), ids.into_iter().collect())
     }
 
-    pub(crate) fn root_existing_nodes(
-        &self,
-        mut ids: Vec<SemanticNodeId>,
-    ) -> Result<node_roots::NodeRootSet, QueryError> {
-        // A legacy raw carrier may already name a tombstone (or a synthetic
-        // test ordinal). Such an id owns no storage. Counted delivery, where
-        // all carriers participate in ownership, rejects it instead.
-        if !self.arena.counted() {
-            ids.retain(|node| self.node_is_live(*node));
-        }
-        self.root_nodes(ids)
-    }
-
     /// Open a construction scope even when no observation capture is active.
     ///
     /// Holding the graph grants no construction lane: a producer outside the
@@ -105,8 +92,8 @@ impl SemanticGraphStore {
     }
 
     /// Read a node through an arena-qualified capability. A capability
-    /// minted by another graph is foreign; a slot a legacy close already
-    /// released is stale. Neither reads as a live payload.
+    /// minted by another graph is foreign. Neither reads as a live payload
+    /// of this graph.
     pub fn read(
         &self,
         node: node_roots::NodeRef<'_>,
@@ -282,9 +269,8 @@ impl SemanticGraphStore {
     }
 
     /// Read the resolved payload for a construction ordinal. Returns `None`
-    /// if the id has not been interned. An id whose payload a document close
-    /// released ([`Self::release_canonical`]) is still a known id: it reads
-    /// as the shared `Opaque(Miss)` placeholder (see
+    /// if the id has not been interned. A destroyed id is still a known id:
+    /// it reads as the shared `Opaque(Miss)` placeholder (see
     /// [`Self::node_is_live`]), so a stale holder sees an unresolved value
     /// rather than an invalid-id fault.
     ///

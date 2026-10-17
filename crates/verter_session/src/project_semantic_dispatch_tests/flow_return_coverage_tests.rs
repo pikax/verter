@@ -6325,6 +6325,10 @@ fn a_growing_thenable_hits_the_checker_limit_in_the_lib_conditional_only() {
         CheckerDiagnostic, CheckerDiagnosticCode, CheckerDiagnosticOperation,
     };
     let host = host_with(&[(RECURSIVE_THENABLE, RECURSIVE_THENABLE_SRC)]);
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let (data, raised) = {
         let _tail = super::connected_demand::TailBudgetForTests::install(200);
         reduced_annotation(&host, "libGrowThen")
@@ -6414,6 +6418,10 @@ fn a_long_thenable_chain_awaits_to_its_value_within_the_work_budget() {
     let short = chain(8);
     let long = chain(200);
     let host = host_with(&[(SHORT, short.as_str()), (LONG, long.as_str())]);
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     for file in [SHORT, LONG] {
         for name in ["awaitChain", "returnChain"] {
             assert_clean_warm(&host, file, name, promise_of(number()));

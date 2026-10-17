@@ -15,7 +15,7 @@ use verter_type_engine::semantic_query::{
     AuthoredPropertyKey, CacheRead, LiteralValue, ResolveDeclKey, ScopeId, SurfaceMember,
     SurfaceView,
 };
-use verter_type_engine::semantic_query_memo::ownership_harness::CountedOwnershipHarness;
+use verter_type_engine::semantic_query_memo::graph_fixture::GraphFixture;
 use verter_type_expr::TopLevelOwnerId;
 
 const FILE: &str = "/public/carrier.ts";
@@ -95,17 +95,17 @@ fn member_text(read: &CacheRead<QueryResult<SemanticNodeId>>) -> String {
     }
 }
 
-fn harnesses() -> [(&'static str, CountedOwnershipHarness); 2] {
+fn harnesses() -> [(&'static str, GraphFixture); 2] {
     [
-        ("retained", CountedOwnershipHarness::new()),
+        ("retained", GraphFixture::new()),
         (
             "returned uncached at zero headroom",
-            CountedOwnershipHarness::with_account(StoreAccount::new(
-                SemanticRetentionAccount::new(RetentionLimits {
+            GraphFixture::with_account(StoreAccount::new(SemanticRetentionAccount::new(
+                RetentionLimits {
                     aggregate_ceiling_bytes: 0,
                     ..RetentionLimits::defaults()
-                }),
-            )),
+                },
+            ))),
         ),
     ]
 }
@@ -163,7 +163,7 @@ fn delivered_values_members_and_cloned_reads_outlive_every_producer_owner() {
 #[test]
 fn a_member_child_lease_outlives_its_parent_read() {
     let host = host();
-    let harness = CountedOwnershipHarness::new();
+    let harness = GraphFixture::new();
     let read = harness.run(|store| {
         store.execute_cooperative(
             &host,
@@ -208,7 +208,7 @@ fn a_member_child_lease_outlives_its_parent_read() {
 #[test]
 fn diagnostic_operands_stay_owned_by_the_delivering_read() {
     let host = host();
-    let harness = CountedOwnershipHarness::new();
+    let harness = GraphFixture::new();
     let read = harness.run(|store| {
         store.execute_cooperative(
             &host,
@@ -250,7 +250,7 @@ fn diagnostic_operands_stay_owned_by_the_delivering_read() {
 #[test]
 fn a_recursion_delivery_owns_its_carrier() {
     let host = host();
-    let harness = CountedOwnershipHarness::new();
+    let harness = GraphFixture::new();
     let inner = RefCell::new(None);
     let outer = harness.run(|store| {
         store.execute_cooperative(
@@ -295,8 +295,8 @@ fn a_recursion_delivery_owns_its_carrier() {
 #[test]
 fn foreign_and_unowned_capabilities_fail_safely() {
     let host = host();
-    let first = CountedOwnershipHarness::new();
-    let second = CountedOwnershipHarness::new();
+    let first = GraphFixture::new();
+    let second = GraphFixture::new();
     let read = first.run(|store| {
         store.execute_cooperative(
             &host,
@@ -335,11 +335,16 @@ fn foreign_and_unowned_capabilities_fail_safely() {
     ));
 }
 
-/// A root survives no legacy canonical close: the production lifecycle may
-/// still retire its slot, and a read through it then fails as stale instead
-/// of answering with the retired payload.
+/// A root survives its document's close: the close evicts only cache
+/// owners, so a read through the root still answers its payload, and the
+/// node is destroyed with the root's last clone. A destroyed ordinal can
+/// then never be rooted again.
+///
+/// Discriminating: a canonical sweep at close turns the read into
+/// `StaleSemanticOperand` while the root is held; a close that leaked the
+/// node keeps it live after the root drops.
 #[test]
-fn a_root_whose_slot_a_legacy_close_released_reads_as_stale() {
+fn a_root_survives_its_documents_close_and_drains_with_its_last_clone() {
     let graph = SemanticGraphStore::new();
     let root = {
         let scope = graph.enter_node_root_scope();
@@ -356,16 +361,27 @@ fn a_root_whose_slot_a_legacy_close_released_reads_as_stale() {
         drop(scope);
         root
     };
-    assert!(root.node_ref().unwrap().read().is_ok());
-    let _ = graph.release_canonical(FILE);
+    let clone = root.clone();
+    let _ = graph.close_canonical(FILE);
+    let payload = graph.read(root.node_ref().unwrap()).unwrap();
     assert!(matches!(
-        graph.read(root.node_ref().unwrap()),
+        &*payload,
+        SemanticNodeData::Literal(LiteralValue::String(text)) if text == "closed"
+    ));
+    drop(payload);
+    let id = root.id();
+    drop(root);
+    assert!(graph.node_is_live(id), "the clone still owns the node");
+    drop(clone);
+    assert!(!graph.node_is_live(id), "the last clone's drop destroys it");
+    assert!(matches!(
+        graph.root_nodes([id]),
         Err(QueryError::StaleSemanticOperand)
     ));
 }
 
 fn counted_host() -> VerterHost {
-    let host = VerterHost::new_standalone_with_counted_ownership_for_test(HostConfig::default());
+    let host = VerterHost::new_standalone(HostConfig::default());
     let _ = host.upsert(UpsertRequest {
         canonical_id: Some(FILE.to_string()),
         input_id: FILE.to_string(),
@@ -483,7 +499,7 @@ fn a_reduced_output_owns_its_node() {
 fn a_deferred_substitutions_pending_operands_stay_owned_by_the_delivering_read() {
     use verter_type_engine::semantic_query::ConditionalPendingSubstitution;
     let host = host();
-    let harness = CountedOwnershipHarness::new();
+    let harness = GraphFixture::new();
     let pending_argument = RefCell::new(None);
     let read = harness.run(|store| {
         store.execute_cooperative(

@@ -847,18 +847,12 @@ fn sustained_unique_edits_keep_the_kernel_store_bounded_and_the_answers_fresh() 
 #[test]
 fn a_signature_set_roots_its_candidates_in_the_graph_that_published_them() {
     use verter_type_engine::semantic_query::QueryOutcome;
-    use verter_type_engine::semantic_query_memo::ownership_harness::CountedOwnershipHarness;
+    use verter_type_engine::semantic_query_memo::graph_fixture::GraphFixture;
     let host = host();
-    let d = ProjectSemanticDispatch::with_ownership_harness(
-        host.as_ref(),
-        CountedOwnershipHarness::new(),
-    );
+    let d = ProjectSemanticDispatch::with_graph_fixture(host.as_ref(), GraphFixture::new());
     let [overloaded, _] = subjects(&d);
     // Another graph's dispatcher, opened after `d`: its scope is the newest.
-    let other = ProjectSemanticDispatch::with_ownership_harness(
-        host.as_ref(),
-        CountedOwnershipHarness::new(),
-    );
+    let other = ProjectSemanticDispatch::with_graph_fixture(host.as_ref(), GraphFixture::new());
     let QueryOutcome::Ready(ready) = d.signatures_of_type_with_authored(
         d.graph().signature_store(),
         overloaded,
@@ -910,12 +904,9 @@ fn a_signature_set_roots_its_candidates_in_the_graph_that_published_them() {
 /// last copy's drop releases them.
 #[test]
 fn a_cloned_signature_set_owns_its_candidate_nodes_through_its_final_holder() {
-    use verter_type_engine::semantic_query_memo::ownership_harness::CountedOwnershipHarness;
+    use verter_type_engine::semantic_query_memo::graph_fixture::GraphFixture;
     let host = host();
-    let d = ProjectSemanticDispatch::with_ownership_harness(
-        host.as_ref(),
-        CountedOwnershipHarness::new(),
-    );
+    let d = ProjectSemanticDispatch::with_graph_fixture(host.as_ref(), GraphFixture::new());
     let graph = Arc::clone(d.graph());
     let [overloaded, _] = subjects(&d);
     let value = d
@@ -955,7 +946,7 @@ fn a_cloned_signature_set_keeps_its_candidate_table_charged_through_its_final_ho
     use verter_session_query::retention::{
         ChargeClass, RetentionLimits, SemanticRetentionAccount, StoreAccount,
     };
-    use verter_type_engine::semantic_query_memo::ownership_harness::CountedOwnershipHarness;
+    use verter_type_engine::semantic_query_memo::graph_fixture::GraphFixture;
     let host = host();
     let account = SemanticRetentionAccount::new(RetentionLimits {
         aggregate_ceiling_bytes: usize::MAX / 2,
@@ -963,9 +954,9 @@ fn a_cloned_signature_set_keeps_its_candidate_table_charged_through_its_final_ho
         max_entry_bytes: usize::MAX / 2,
         pin_threshold_bytes: usize::MAX / 2,
     });
-    let d = ProjectSemanticDispatch::with_ownership_harness(
+    let d = ProjectSemanticDispatch::with_graph_fixture(
         host.as_ref(),
-        CountedOwnershipHarness::with_account(StoreAccount::new(Arc::clone(&account))),
+        GraphFixture::with_account(StoreAccount::new(Arc::clone(&account))),
     );
     let graph = Arc::clone(d.graph());
     let [overloaded, _] = subjects(&d);

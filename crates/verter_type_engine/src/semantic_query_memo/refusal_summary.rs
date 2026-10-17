@@ -280,11 +280,12 @@ impl SemanticGraphStore {
         true
     }
 
-    /// Whether a stored `result` may still be served: it names no released
-    /// node and no retired signature-kernel epoch — the gates every warm
-    /// read applies besides its fact rail.
+    /// Whether a stored `result` may still be served: it names no retired
+    /// signature-kernel epoch — the gate every warm read applies besides its
+    /// fact rail. A stored result's graph operands are owned by its holder,
+    /// so they cannot have been destroyed.
     pub(crate) fn serves_stored_value(&self, result: &QueryResult<SemanticQueryValue>) -> bool {
-        self.result_is_live(result) && !self.names_retired_kernel_epoch(result)
+        !self.names_retired_kernel_epoch(result)
     }
 
     /// Drop every sealed refusal.

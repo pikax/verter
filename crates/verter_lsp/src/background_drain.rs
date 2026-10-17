@@ -1745,7 +1745,7 @@ pub(crate) async fn sync_carrier_api_transaction(
     // the SAME published `vfs` the scanner reads.
     let (transition, pending) =
         match crate::external_ts::reconcile_carrier_source(crate::external_ts::CarrierSyncRequest {
-            host: &host.host(),
+            host: &host.as_ref(),
             vfs,
             ownership_ready: snapshot.ownership_ready,
             resolver: &snapshot.resolver,

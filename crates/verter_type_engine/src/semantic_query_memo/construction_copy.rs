@@ -123,11 +123,6 @@ impl SemanticGraphStore {
                 operands.push(node);
             }
         });
-        // A legacy close may already have released an operand; it owns no
-        // storage. Counted ownership refuses it instead.
-        if !self.arena.counted() {
-            operands.retain(|node| self.node_is_live(*node));
-        }
         if let Some(&first) = operands.first() {
             let roots =
                 NodeRootSet::acquire(Arc::clone(&self.arena.core), operands.clone()).ok()?;

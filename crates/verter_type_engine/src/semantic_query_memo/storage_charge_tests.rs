@@ -6,7 +6,7 @@ use std::sync::Arc;
 use verter_session_query::retention::allocation::arc_block_bytes;
 use verter_session_query::retention::{RetentionLimits, SemanticRetentionAccount, StoreAccount};
 
-use super::ownership_harness::CountedOwnershipHarness;
+use super::graph_fixture::GraphFixture;
 use super::SemanticGraphStore;
 use crate::semantic_query::{LiteralValue, SemanticNodeData};
 
@@ -18,7 +18,7 @@ fn account() -> Arc<SemanticRetentionAccount> {
 fn graph_storage_is_pinned_while_its_nodes_live_and_released_with_them() {
     const NODES: usize = 600;
     let account = account();
-    let harness = CountedOwnershipHarness::with_account(StoreAccount::new(Arc::clone(&account)));
+    let harness = GraphFixture::with_account(StoreAccount::new(Arc::clone(&account)));
     let payload = arc_block_bytes(std::mem::size_of::<SemanticNodeData>());
     harness.run(|store| {
         for index in 0..NODES {
@@ -147,7 +147,7 @@ fn graph_storage_charges_payload_heap_once_per_shared_allocation() {
 
     const TEXT: usize = 1 << 20;
     let account = account();
-    let harness = CountedOwnershipHarness::with_account(StoreAccount::new(Arc::clone(&account)));
+    let harness = GraphFixture::with_account(StoreAccount::new(Arc::clone(&account)));
     let pinned = || account.snapshot().pinned_bytes;
     let quasi: Arc<str> = Arc::from("q".repeat(TEXT));
     let quasis: Arc<[Arc<str>]> = Arc::from(vec![Arc::clone(&quasi)]);

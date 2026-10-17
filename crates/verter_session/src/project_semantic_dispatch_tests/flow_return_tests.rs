@@ -2138,6 +2138,10 @@ fn flow_return_nested_generic_arrow_keeps_its_type_parameters() {
 #[test]
 fn flow_return_direct_call_chain_charges_connected_work() {
     let host = make_host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let mut source = String::new();
     for index in 0..8 {
         source.push_str(&format!(
@@ -2255,6 +2259,10 @@ fn a_budget_truncated_flow_return_folds_a_faulting_class_not_a_contained_one() {
     use verter_type_engine::semantic_query::PartialReasonSet;
 
     let host = make_host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let mut source = String::new();
     for index in 0..8 {
         source.push_str(&format!(

@@ -8698,17 +8698,16 @@ export type C = { back: A }
             "Pick",
             vec![TypeExpr::named("A"), TypeExpr::string_literal("next")],
         );
-        let node =
-            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host)
-                .lower_type_expr_in_scope_with_mode(
-                    "/cycle.ts",
-                    &pick_over_cycle,
-                    verter_type_engine::semantic_query::ProjectionMode::Navigate,
-                )
-                .expect("Pick<A,'next'> must lower");
-
+        // One dispatcher lowers and detects: it owns the lowered node.
         let fixture_dispatch_16 =
             verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+        let node = fixture_dispatch_16
+            .lower_type_expr_in_scope_with_mode(
+                "/cycle.ts",
+                &pick_over_cycle,
+                verter_type_engine::semantic_query::ProjectionMode::Navigate,
+            )
+            .expect("Pick<A,'next'> must lower");
         let detected = crate::meta_resolve::node_root_reaches_transitive_cycle_with_fence(
             &fixture_dispatch_16,
             "/cycle.ts",

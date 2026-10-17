@@ -1234,6 +1234,10 @@ fn contextual_receiver_budget_exhaustion_admits_nothing() {
     let mut suspended = false;
     for allowance in [1, 2, 4, 8, 16, 32, 128, 1024] {
         let host = host();
+        let _scope = host
+            .project_type_store()
+            .semantic_graph()
+            .enter_node_root_scope();
         let dispatch = ProjectSemanticDispatch::new(host.as_ref());
         let graph = dispatch.graph();
         let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));

@@ -157,11 +157,8 @@ impl SemanticGraphStore {
         };
         // Acquire arena ownership before taking the table lock, matching
         // charge reservation and avoiding a table-to-arena lock order.
-        let Ok(roots) = self.root_existing_nodes(
-            std::iter::once(key.union())
-                .chain(view.iter().copied())
-                .collect(),
-        ) else {
+        let Ok(roots) = self.root_nodes(std::iter::once(key.union()).chain(view.iter().copied()))
+        else {
             return Arc::clone(view);
         };
         let mut table = self.union_views.lock();
@@ -247,6 +244,7 @@ mod tests {
         let store = SemanticGraphStore::with_account(
             verter_session_query::retention::StoreAccount::new(Arc::clone(&account)),
         );
+        let _scope = store.enter_node_root_scope();
         let ctx = SemanticContext::production();
         let literal =
             |text: String| store.intern_node(SemanticNodeData::Literal(LiteralValue::String(text)));
