@@ -2261,11 +2261,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 let locator = verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
                     verter_type_expr::locators::TypeBodySlot {
                         anchor: verter_type_expr::locators::AuthoredAnchor {
-                            canonical_id: verter_type_expr::OwnedStr::from(
-                                identity.canonical_id.clone(),
-                            ),
+                            canonical_id: identity.canonical_id.clone(),
                             owner: identity.owner,
-                            symbol: verter_type_expr::OwnedStr::from(identity.symbol_name.clone()),
+                            symbol: identity.symbol_name.clone(),
                             space: verter_type_expr::locators::LocatorSymbolSpace::Value,
                         },
                         path: verter_type_expr::OwnedSlice::from(
@@ -19909,13 +19907,9 @@ fn value_position_locator(
     verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
         verter_type_expr::locators::TypeBodySlot {
             anchor: verter_type_expr::locators::AuthoredAnchor {
-                canonical_id: verter_type_expr::OwnedStr::from(
-                    prepared.root_identity.canonical_id.clone(),
-                ),
+                canonical_id: prepared.root_identity.canonical_id.clone(),
                 owner: prepared.root_identity.owner,
-                symbol: verter_type_expr::OwnedStr::from(
-                    prepared.root_identity.symbol_name.clone(),
-                ),
+                symbol: prepared.root_identity.symbol_name.clone(),
                 space: verter_type_expr::locators::LocatorSymbolSpace::Value,
             },
             path: verter_type_expr::OwnedSlice::default(),
