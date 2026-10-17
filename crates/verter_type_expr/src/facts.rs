@@ -777,6 +777,7 @@ impl TypeDependencyPathFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum DeclarationOrigin {
     /// The member's declaration lives in this canonical file.
@@ -2029,6 +2030,7 @@ pub enum DeclaredLiteralFreshness {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum AuthoredReferenceArgLocator {
     Value(TypeArgLocator),
@@ -2065,6 +2067,7 @@ pub enum AuthoredReferenceArgLocator {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum AuthoredReferenceHeadFact {
     NotReference,
@@ -2135,6 +2138,7 @@ pub enum SemanticExpressionSource {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct NarrowTypeParam {
     /// The type-parameter name.
@@ -2169,6 +2173,7 @@ pub struct NarrowTypeParam {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum TypeParamVariance {
     /// No annotation: the checker measures the variance.
@@ -2262,6 +2267,7 @@ pub struct PreparedTypeBodyFacts {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct FunctionParamFact {
     /// The parameter name, if any.
@@ -2398,6 +2404,7 @@ pub enum FunctionReturnSource {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct FunctionSignatureFact {
     /// The function's own type parameters.
@@ -2449,6 +2456,7 @@ fn authored_reference_head_unavailable() -> AuthoredReferenceHeadFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct ObjectPropertyFact {
     /// The authored property key.
@@ -2484,6 +2492,7 @@ impl ObjectPropertyFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct ObjectMethodFact {
     /// The authored method or accessor key.
@@ -2520,6 +2529,7 @@ impl ObjectMethodFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum KeyTypeShape {
     /// `[k: string]`.
@@ -2544,6 +2554,7 @@ pub enum KeyTypeShape {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct IndexSignatureFact {
     /// The index key parameter name (`k`).
@@ -2571,6 +2582,7 @@ pub struct IndexSignatureFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct SpreadMemberFact {
     /// The spread OPERAND's type body locator (content-free; the operand type
@@ -2589,6 +2601,7 @@ pub struct SpreadMemberFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum ObjectMemberFact {
     /// A property member.
@@ -2617,6 +2630,7 @@ pub enum ObjectMemberFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct ObjectShapeFact {
     /// The ordered object members.
@@ -3404,6 +3418,7 @@ pub struct AnalyzedMacroFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct SynthesizedLeafMember {
     /// The member name.
@@ -3429,6 +3444,7 @@ pub struct SynthesizedLeafMember {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum FactOrLocator {
     /// A closed scalar/leaf fact.
@@ -3466,6 +3482,7 @@ pub enum FactOrLocator {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum LeafTypeFact {
     /// A primitive type.
@@ -3493,6 +3510,7 @@ pub enum LeafTypeFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct SynthesizedMemberFact {
     /// The member name.
@@ -3516,6 +3534,7 @@ pub struct SynthesizedMemberFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct TupleElementFact {
     /// The element label, if a named tuple member.
@@ -3539,6 +3558,7 @@ pub struct TupleElementFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct TuplePayloadFact {
     /// Whether the tuple is readonly.
@@ -3558,6 +3578,7 @@ pub struct TuplePayloadFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct IndexedAccessFact {
     /// The object body locator.
@@ -3577,6 +3598,7 @@ pub struct IndexedAccessFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum ResolvedLocalShape {
     /// A synthesized object surface.
@@ -3624,6 +3646,7 @@ pub struct ResolvedLocalTypeFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct ProjectedMemberFact {
     /// Exact authored key, including a retained computed-key locator.
@@ -3659,6 +3682,7 @@ pub struct ProjectedMemberFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct ProjectedIndexSignatureFact {
     /// The index key parameter name.
@@ -3686,6 +3710,7 @@ pub struct ProjectedIndexSignatureFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct ProjectedSurfaceFact {
     /// The projected members.
@@ -3844,6 +3869,7 @@ pub struct SvelteScriptFactsFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum ClosedTypeFact {
     /// A primitive / literal / bare-named leaf.
@@ -3876,6 +3902,7 @@ pub enum ClosedTypeFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum ProjectedTypeFact {
     /// A projected object property member.
@@ -3965,6 +3992,7 @@ pub enum ProjectedTypeFact {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct CallableOccurrenceHandle {
     semantic_subject: u64,
@@ -4090,6 +4118,7 @@ impl ResolvedEmitOccurrenceId {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum CallableOccurrenceProjection {
     /// Payload parameters beginning at the given semantic parameter index.
@@ -4112,6 +4141,7 @@ pub enum CallableOccurrenceProjection {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum IndexSignaturePosition {
     /// The declared key type (`[key: K]`).
@@ -4168,6 +4198,7 @@ pub type SynthesizedTypeFact = ResolvedLocalShape;
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum SemanticTypeSource {
     /// (a) an authored parse-backed body addressed by a content-free locator.
@@ -4200,6 +4231,7 @@ pub enum SemanticTypeSource {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum SchemaAbsence {
     /// The position carries no semantic type annotation in the producing
@@ -4231,6 +4263,7 @@ pub enum SchemaAbsence {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum SemanticSourceFailure {
     /// A REQUIRED payload/value position (a realized emit signature's payload
@@ -4277,6 +4310,7 @@ pub enum SemanticSourceFailure {
     serde::Deserialize,
     NoTypeExpr,
     NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
 )]
 // `Present` dominates the payload by design: the faithful source carrier IS
 // the common case, and the wire schema round-trips the enum by value — boxing

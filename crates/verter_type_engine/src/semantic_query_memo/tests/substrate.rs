@@ -1700,6 +1700,78 @@ fn fifo_eviction_prunes_dispatch_only_reverse_index_registration() {
     );
 }
 
+/// Publish one `ResolveDecl` candidate named `name` whose carrier names
+/// `canonical` at version `hash`.
+fn publish_decl_naming(store: &SemanticGraphStore, name: &str, canonical: &str, hash: u8) {
+    let node = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    store.publish_with_carrier_for_tests(
+        release_decl_key(canonical, name),
+        QueryResult::Value(node),
+        carrier_naming(canonical, hash),
+        Arc::from([]),
+    );
+}
+
+/// A read of the reverse index registers the candidates published since
+/// the previous read, not every resident candidate: an invalidation after
+/// one more publish inspects that one candidate however many the memo
+/// holds, and every resident candidate stays registered under its
+/// canonical.
+#[test]
+fn reverse_index_read_registers_only_candidates_published_since_the_last_read() {
+    let store = SemanticGraphStore::new();
+    const RESIDENT: usize = 32;
+    for i in 0..RESIDENT {
+        publish_decl_naming(&store, &format!("E{i}"), &format!("/w/e{i}.ts"), 1);
+    }
+    assert_eq!(store.invalidate_canonical("/w/unrelated.ts"), 0);
+    assert_eq!(
+        store.test_reverse_index_registration_visits(),
+        RESIDENT,
+        "the first read registers each resident candidate once",
+    );
+
+    publish_decl_naming(&store, "Late", "/w/late.ts", 1);
+    assert_eq!(store.invalidate_canonical("/w/unrelated.ts"), 0);
+    assert_eq!(
+        store.test_reverse_index_registration_visits() - RESIDENT,
+        1,
+        "a read after one publish inspects only that publish's candidate",
+    );
+    for i in 0..RESIDENT {
+        assert_eq!(store.canonical_to_entries_count(&format!("/w/e{i}.ts")), 1);
+    }
+    assert_eq!(
+        store.invalidate_canonical("/w/late.ts"),
+        1,
+        "the late candidate is registered, so its canonical drains it",
+    );
+}
+
+/// Publishes that outgrow the resident families before a read (repeat
+/// publishes into one family) still leave every resident candidate
+/// registered when the index is next read, and a displaced candidate
+/// leaves nothing behind.
+#[test]
+fn reverse_index_registers_every_resident_candidate_after_many_unread_publishes() {
+    let store = SemanticGraphStore::new();
+    let key = release_decl_key("/w/a.ts", "A");
+    for hash in 1..=6u8 {
+        publish_decl_naming(&store, "A", "/w/a.ts", hash);
+    }
+    publish_decl_naming(&store, "B", "/w/b.ts", 1);
+    let resident = store.slot_candidate_admission_seqs_for_tests(&key).len();
+    assert!(
+        (2..6).contains(&resident),
+        "the family cap displaced some of A's candidates: {resident} resident",
+    );
+    assert_eq!(store.canonical_to_entries_count("/w/a.ts"), resident);
+    assert_eq!(store.canonical_to_entries_count("/w/b.ts"), 1);
+    assert_eq!(store.invalidate_canonical("/w/a.ts"), resident);
+    assert_eq!(store.canonical_to_entries_count("/w/a.ts"), 0);
+    assert_eq!(store.invalidate_canonical("/w/b.ts"), 1);
+}
+
 /// Multiple edges of the same kind on the same result are stored as a
 /// list — walkers see all of them. This is the multi-derivation
 /// support the contract requires.

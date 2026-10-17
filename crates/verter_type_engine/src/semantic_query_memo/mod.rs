@@ -602,6 +602,12 @@ pub struct SemanticGraphStore {
     /// the production cooperative-wait path is unchanged.
     #[cfg(any(test, feature = "test-support"))]
     joiner_on_condvar_count: std::sync::atomic::AtomicUsize,
+    /// Candidates a reverse-index read inspected while registering the
+    /// unindexed ones. Read via
+    /// [`Self::test_reverse_index_registration_visits`]; per-store and
+    /// absent from release builds, like the counter above.
+    #[cfg(any(test, feature = "test-support"))]
+    reverse_index_registration_visits: std::sync::atomic::AtomicUsize,
     /// Reverse index. For each canonical id,
     /// holds the set of `(family, slot)` pairs whose published
     /// dep_signature references it, paired with the dep_signature
@@ -633,10 +639,10 @@ pub struct SemanticGraphStore {
     /// takes only shard mutexes and never re-enters `entries`, so the
     /// order holds.
     canonical_to_entries: CanonicalToEntries,
-    /// Whether a candidate was published since the reverse index last
-    /// registered every resident candidate. Written and read only under
-    /// the `entries` lock.
-    reverse_index_pending: std::sync::atomic::AtomicBool,
+    /// The candidates published since the reverse index was last read,
+    /// which that read registers. Locked only under the `entries` lock
+    /// (`entries → reverse_index_pending`; nothing takes it first).
+    reverse_index_pending: Mutex<reverse_index::PendingRegistrations>,
     /// Store-owned hash-cons pool for dispatch dependency signatures.
     /// Every warm candidate passes through this pool before admission, so
     /// equivalent signatures share one allocation while live candidates keep
@@ -834,6 +840,8 @@ impl SemanticGraphStore {
             invalidate_canonical_inflight_abort_gate: Default::default(),
             #[cfg(any(test, feature = "test-support"))]
             joiner_on_condvar_count: Default::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            reverse_index_registration_visits: Default::default(),
             canonical_to_entries,
             reverse_index_pending: Default::default(),
             dep_signature_interner,
@@ -1273,44 +1281,88 @@ impl SemanticGraphStore {
             .unwrap_or(0)
     }
 
-    /// Note that a candidate was published unindexed: the next read of the
-    /// reverse index registers it. Called under the `entries` lock.
-    fn defer_reverse_index_registration(&self) {
+    /// Note that the candidate `admission_seq` was published into `family`
+    /// unindexed: the next read of the reverse index registers it. Called
+    /// under the `entries` lock, with the memo's resident family count.
+    fn defer_reverse_index_registration(
+        &self,
+        family: &FamilyKey,
+        admission_seq: u64,
+        resident_families: usize,
+    ) {
         self.reverse_index_pending
-            .store(true, std::sync::atomic::Ordering::Relaxed);
+            .lock()
+            .note(family, admission_seq, resident_families);
     }
 
     /// Register every resident candidate the reverse index does not hold
-    /// yet, under the caller's `entries` lock hold, so the read that
-    /// follows sees every resident candidate's registrations.
+    /// yet — the candidates published since the previous read — under the
+    /// caller's `entries` lock hold, so the read that follows sees every
+    /// resident candidate's registrations.
     pub(super) fn index_unregistered_candidates_locked(
         &self,
         entries: &mut FxHashMap<FamilyKey, FamilySlots>,
     ) {
-        if !self
-            .reverse_index_pending
-            .swap(false, std::sync::atomic::Ordering::Relaxed)
-        {
-            return;
-        }
+        let work = self.reverse_index_pending.lock().take();
         let timing_on = verter_execution::request_context::current_timing_enabled();
-        for (family, slots) in entries.iter_mut() {
-            let mut shared_family: Option<Arc<FamilyKey>> = None;
-            slots.for_each_candidate_mut(|slot, entry| {
-                if entry.reverse_indexed {
-                    return;
+        match work {
+            reverse_index::PendingWork::None => {}
+            reverse_index::PendingWork::Published(published) => {
+                for (family, admission_seq) in published {
+                    let Some(slots) = entries.get_mut(&family) else {
+                        continue;
+                    };
+                    let mut family = Some(family);
+                    self.register_unindexed_candidates(
+                        slots,
+                        Some(admission_seq),
+                        &mut || Arc::new(family.take().expect("a family is shared once")),
+                        timing_on,
+                    );
                 }
-                let family = shared_family.get_or_insert_with(|| Arc::new(family.clone()));
-                reverse_index::register_candidate(
-                    &self.canonical_to_entries,
-                    family,
-                    slot,
-                    entry,
-                    timing_on,
-                );
-                entry.reverse_indexed = true;
-            });
+            }
+            reverse_index::PendingWork::All => {
+                for (family, slots) in entries.iter_mut() {
+                    self.register_unindexed_candidates(
+                        slots,
+                        None,
+                        &mut || Arc::new(family.clone()),
+                        timing_on,
+                    );
+                }
+            }
         }
+    }
+
+    /// Register `slots`' unindexed candidates — only the one admitted as
+    /// `admission_seq` (in each slot it occupies) when given — under the
+    /// family `share` mints once for all of them.
+    fn register_unindexed_candidates(
+        &self,
+        slots: &mut FamilySlots,
+        admission_seq: Option<u64>,
+        share: &mut dyn FnMut() -> Arc<FamilyKey>,
+        timing_on: bool,
+    ) {
+        let mut shared_family: Option<Arc<FamilyKey>> = None;
+        slots.for_each_candidate_mut(|slot, entry| {
+            #[cfg(any(test, feature = "test-support"))]
+            self.reverse_index_registration_visits
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if entry.reverse_indexed || admission_seq.is_some_and(|seq| seq != entry.admission_seq)
+            {
+                return;
+            }
+            let family = shared_family.get_or_insert_with(&mut *share);
+            reverse_index::register_candidate(
+                &self.canonical_to_entries,
+                family,
+                slot,
+                entry,
+                timing_on,
+            );
+            entry.reverse_indexed = true;
+        });
     }
 
     /// Invalidate every warm memo slot whose stored `DepSignature`
@@ -1843,6 +1895,7 @@ impl SemanticGraphStore {
                 }
             }
             self.canonical_to_entries.clear_shards();
+            *self.reverse_index_pending.lock() = Default::default();
             count
         };
         // Test-only injection point: a barrier armed by
@@ -2671,7 +2724,7 @@ impl SemanticGraphStore {
         // The candidate enters the reverse index when the index is next
         // read, under the `entries` lock as this publish holds it.
         if !populated_slots.is_empty() {
-            self.defer_reverse_index_registration();
+            self.defer_reverse_index_registration(family, admission_seq, entries.len());
         }
         let published = PublishedMemoCandidate {
             read_set_signature,
@@ -2891,7 +2944,7 @@ impl SemanticGraphStore {
         // The candidate enters the reverse index when the index is next
         // read; see `warm_publish_one`.
         if !populated_slots.is_empty() {
-            self.defer_reverse_index_registration();
+            self.defer_reverse_index_registration(family, admission_seq, entries.len());
         }
         let admitted = !populated_slots.is_empty();
         drop(entries);

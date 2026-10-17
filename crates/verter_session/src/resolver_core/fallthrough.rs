@@ -24,7 +24,9 @@ use verter_session_query::facts::fact_cache::FactVersionRef;
 /// Both source arms are fact/id carriers (witnessed `NoTypeExpr`), so the
 /// member is safe to retain in the fallthrough node cache; consumers recover
 /// the type on demand (catalog shape lookup / dispatch-bridge raise).
-#[derive(Debug, Clone, PartialEq, verter_no_typeexpr::NoTypeExpr)]
+#[derive(
+    Debug, Clone, PartialEq, verter_no_typeexpr::NoTypeExpr, verter_retention::heap_size::HeapSize,
+)]
 pub struct IntrinsicSurfaceMember {
     /// Attribute name for an attr; canonical event name for a listener.
     pub name: String,
@@ -33,7 +35,9 @@ pub struct IntrinsicSurfaceMember {
 }
 
 /// The type slot of an [`IntrinsicSurfaceMember`].
-#[derive(Debug, Clone, PartialEq, verter_no_typeexpr::NoTypeExpr)]
+#[derive(
+    Debug, Clone, PartialEq, verter_no_typeexpr::NoTypeExpr, verter_retention::heap_size::HeapSize,
+)]
 // `Resolved` carries the project-resolved semantic source by value; the
 // static-catalog arm is a content-free id by design. Boxing the resolved arm
 // would indirect the common consuming path for a cold-path size win.
