@@ -998,6 +998,9 @@ pub(crate) struct NodeArenaCore {
     /// owning store to drop their sidecar entries (see the module docs,
     /// **Sidecar cleanup**), with the log's backing charge.
     destroyed: parking_lot::Mutex<DestroyedLog>,
+    /// The owning store's sidecars, drained by the release that grows
+    /// [`Self::destroyed`] past its threshold.
+    destroyed_sink: OnceLock<super::release::SidecarSink>,
     #[cfg(test)]
     race_hook: parking_lot::Mutex<Option<ArenaRaceHook>>,
     /// The ONE payload every released slot resolves to through [`Self::get`]
@@ -1032,6 +1035,7 @@ impl Default for NodeArena {
                 inner: parking_lot::RwLock::new(ArenaInner::default()),
                 shards: std::array::from_fn(|_| parking_lot::Mutex::new(ShardIndex::default())),
                 destroyed: Default::default(),
+                destroyed_sink: OnceLock::new(),
                 #[cfg(test)]
                 race_hook: Default::default(),
                 released_placeholder: Arc::new(SemanticNodeData::Opaque(
@@ -1232,6 +1236,16 @@ impl NodeArenaCore {
         self.destroyed.lock().drain()
     }
 
+    /// Log `ids` again: a drain that could not clean them yet.
+    pub(super) fn relog_destroyed(&self, ids: &[SemanticNodeId]) {
+        self.destroyed.lock().extend(self.retention_account(), ids);
+    }
+
+    /// Bind the owning store's sidecars; the first store bound keeps them.
+    pub(super) fn bind_destroyed_sink(&self, sink: super::release::SidecarSink) {
+        let _ = self.destroyed_sink.set(sink);
+    }
+
     /// Destroyed ids waiting for sidecar cleanup.
     pub(super) fn pending_destroyed(&self) -> usize {
         self.destroyed.lock().ids.len()
@@ -1321,9 +1335,16 @@ impl NodeArenaCore {
             }
         }
         if !logged.is_empty() {
-            self.destroyed
-                .lock()
-                .extend(self.retention_account(), &logged);
+            let over_threshold = {
+                let mut log = self.destroyed.lock();
+                log.extend(self.retention_account(), &logged);
+                log.ids.len() > super::release::DESTROYED_DRAIN_THRESHOLD
+            };
+            if over_threshold {
+                if let Some(sink) = self.destroyed_sink.get() {
+                    sink.try_drain(self);
+                }
+            }
         }
     }
 }

@@ -794,9 +794,23 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let before = self.degraded_member_reads.get();
         let step = match self.execute_flow_return(key) {
             // The delivered result owns its nodes past this dispatch: a
-            // ReturnOnly result has no cache entry holding them.
+            // ReturnOnly result has no cache entry holding them. Its
+            // producer owns every node it names until this delivery roots
+            // it, so a destroyed one is an ownership defect: loud in checked
+            // builds, a typed no-value failure in shipped ones.
             crate::semantic_query::FlowReturnStep::Complete(result) => {
-                crate::semantic_query::FlowReturnStep::Complete(result.delivered(self.graph()))
+                match result.delivered(self.graph()) {
+                    Ok(result) => crate::semantic_query::FlowReturnStep::Complete(result),
+                    Err(error) => {
+                        verter_debug_assert!(
+                            false,
+                            "flow-return delivery names a destroyed node: {error:?}"
+                        );
+                        crate::semantic_query::FlowReturnStep::NoValue(
+                            crate::semantic_query::FlowReturnFailure::Unresolved,
+                        )
+                    }
+                }
             }
             step => step,
         };
@@ -1639,7 +1653,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             ),
         ) {
             Ok(lease) => lease,
-            Err(_) => return,
+            // The read being sealed owns every node it names, so a destroyed
+            // one is an ownership defect: loud in checked builds; shipped
+            // builds seal nothing and the read is delivered unsealed.
+            Err(error) => {
+                verter_debug_assert!(false, "a sealed refusal names a destroyed node: {error:?}");
+                return;
+            }
         };
         self.graph().seal_refusal(
             self.ctx,
@@ -1705,15 +1725,24 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             crate::project_semantic_dispatch::walk::WalkerDiagnostics::new(diagnostics);
         // The appended diagnostics name the limit's carrier, interned just
         // now: the read's delivery owns it alongside everything else it
-        // hands out.
-        if let Ok(lease) = self.graph().lease_delivery(
+        // hands out. The read and the carrier's construction scope own every
+        // node named, so a destroyed one is an ownership defect: loud in
+        // checked builds, a typed refusal in shipped ones.
+        match self.graph().lease_delivery(
             crate::semantic_query_memo::delivery_lease::DeliveredAllocations::read(
                 &read.value,
                 &read.walker_diagnostics,
                 &read.dep_signature,
             ),
         ) {
-            read.lease = lease;
+            Ok(lease) => read.lease = lease,
+            Err(error) => {
+                verter_debug_assert!(
+                    false,
+                    "connected-limit diagnostics name a destroyed node: {error:?}"
+                );
+                *read = crate::semantic_query_memo::refused_operand_cache_read(error);
+            }
         }
     }
 

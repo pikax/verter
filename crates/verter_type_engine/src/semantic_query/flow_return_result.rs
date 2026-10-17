@@ -276,21 +276,19 @@ impl FlowReturnResult {
     }
 
     /// This result owning every graph node it carries, for delivery out of
-    /// the engine. A result whose nodes are no longer live is returned as
-    /// is: its reads then fail as stale.
+    /// the engine. `Err` when a node it names is no longer live: the result
+    /// cannot be delivered.
     pub(crate) fn delivered(
         mut self,
         graph: &crate::semantic_query_memo::SemanticGraphStore,
-    ) -> Self {
+    ) -> Result<Self, super::QueryError> {
         let value = super::QueryResult::Value(super::SemanticQueryValue::FlowReturn(
             verter_session_query::retention::owned::Owned::new(self.clone()),
         ));
-        if let Ok(lease) = graph.lease_delivery(
+        self.owner = FlowReturnOwner(graph.lease_delivery(
             crate::semantic_query_memo::delivery_lease::DeliveredAllocations::value(&value),
-        ) {
-            self.owner = FlowReturnOwner(lease);
-        }
-        self
+        )?);
+        Ok(self)
     }
 
     /// Explicit producer availability. An approximation retains the evaluated

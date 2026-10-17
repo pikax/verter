@@ -61,15 +61,19 @@ fn stage_relation(
     roots: &Arc<[Arc<str>]>,
     receipt: &Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
 ) -> MemoEntry {
-    store.stage_entry(
-        SemanticQueryValue::Relation(store.relation_payload_for_tests(RelationOutcome::Assignable)),
-        super::relation_memo::relation_satisfied_projection(),
-        carrier,
-        roots,
-        &empty_signature(),
-        0,
-        receipt,
-    )
+    store
+        .stage_entry(
+            SemanticQueryValue::Relation(
+                store.relation_payload_for_tests(RelationOutcome::Assignable),
+            ),
+            super::relation_memo::relation_satisfied_projection(),
+            carrier,
+            roots,
+            &empty_signature(),
+            0,
+            receipt,
+        )
+        .expect("a relation payload names no node")
 }
 
 #[test]

@@ -3870,17 +3870,18 @@ fn coinductive_positive_scc_publishes_assignable() {
 }
 
 /// A `semantic-observe` build captures the cyclic discharge's explanation
-/// request-owned, and the explanation LEASES its operands: after the memo
-/// evicts the judgement and a document close tombstones the operand slots,
-/// the captured explanation still reads the operands' payloads. The answer
-/// and bindings are the uncaptured ones, and a warm re-ask captures nothing.
+/// request-owned, and the explanation ROOTS its operands: after the memo
+/// evicts the judgement and a document close evicts every cache owner of the
+/// closed content, the captured explanation still reads the operands'
+/// payloads, because it is now one of their owners. The answer and bindings
+/// are the uncaptured ones, and a warm re-ask captures nothing.
 ///
-/// DISCRIMINATES an id-only explanation (its operands would read the
-/// released `Opaque(Miss)` placeholder after the close) and a store-owned
-/// one (the close would drop it).
+/// DISCRIMINATES an id-only explanation (its operands would read nothing
+/// once the close evicted their owners) and a store-owned one (the close
+/// would drop it).
 #[cfg(feature = "semantic-observe")]
 #[test]
-fn captured_cycle_explanation_leases_operands_past_eviction_and_release() {
+fn captured_cycle_explanation_leases_operands_past_eviction_and_close() {
     use verter_type_engine::project_semantic_dispatch::relation_explanation::RelationExplanation;
 
     let host = host_for_relation_tests();
@@ -3905,7 +3906,7 @@ fn captured_cycle_explanation_leases_operands_past_eviction_and_release() {
         .iter()
         .find_map(|explanation| match explanation {
             RelationExplanation::CoinductiveCycle { pair, members }
-                if pair.source.id == a && pair.target.id == b =>
+                if pair.source.id() == a && pair.target.id() == b =>
             {
                 Some((pair.clone(), Arc::clone(members)))
             }
@@ -3917,16 +3918,16 @@ fn captured_cycle_explanation_leases_operands_past_eviction_and_release() {
     assert!(
         members
             .iter()
-            .any(|member| member.source.id == a && member.target.id == b),
+            .any(|member| member.source.id() == a && member.target.id() == b),
         "the cycle names every co-discharged pair, the root included: {members:?}"
     );
     let leased_source = pair
         .source
-        .payload
-        .clone()
+        .payload()
+        .cloned()
         .expect("the source operand is leased");
     assert!(
-        !matches!(leased_source.as_ref(), SemanticNodeData::Opaque(_)),
+        !matches!(&*leased_source, SemanticNodeData::Opaque(_)),
         "the lease holds the operand's real payload, got {leased_source:?}"
     );
 
@@ -3940,35 +3941,34 @@ fn captured_cycle_explanation_leases_operands_past_eviction_and_release() {
     let key = dispatch.relate_key_for(a, b);
     assert!(graph
         .get_relation_payload(&host, &key)
-        .map(|served| served.value)
+        .map(|served| served.value().clone())
         .is_some());
-    graph.release_canonical(canonical);
+    graph.close_canonical(canonical);
     assert!(
         graph
             .get_relation_payload(&host, &key)
-            .map(|served| served.value)
+            .map(|served| served.value().clone())
             .is_none(),
         "the close evicts the published judgement"
     );
-    assert!(!graph.node_is_live(a), "the close tombstones the operand");
     assert!(
-        matches!(
-            graph.node_data(a).as_deref(),
-            Some(SemanticNodeData::Opaque(_))
-        ),
-        "the store now reads the released placeholder"
+        graph.node_is_live(a),
+        "the explanation is an owner the close cannot revoke"
     );
-    assert_eq!(
-        pair.source.payload.as_deref(),
-        Some(leased_source.as_ref()),
+    assert!(
+        pair.source.payload().is_some_and(|payload| {
+            verter_type_engine::semantic_query_memo::node_data_lease::NodeDataLease::ptr_eq(
+                payload,
+                &leased_source,
+            )
+        }),
         "the captured explanation still reads the leased operand"
     );
     assert!(
         members.iter().all(|member| member
             .source
-            .payload
-            .as_deref()
-            .is_some_and(|payload| !matches!(payload, SemanticNodeData::Opaque(_)))),
+            .payload()
+            .is_some_and(|payload| !matches!(&**payload, SemanticNodeData::Opaque(_)))),
         "every cycle member keeps its leased source operand"
     );
 }

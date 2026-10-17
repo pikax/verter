@@ -909,6 +909,82 @@ fn a_close_never_revokes_a_held_node_and_drains_when_the_holder_drops() {
     );
 }
 
+/// A close running on another thread while a real request is mid-flight
+/// never revokes what that request computed: every read the request makes
+/// of its resolved declaration during and after the close reads the same
+/// payload, the request keeps executing against the closed document without
+/// a panic, and the declaration is destroyed once the request ends.
+///
+/// Discriminating against a close that destroys the closed content while a
+/// request is still running (a canonical sweep or an epoch-root drop): the
+/// request's next read of the node it resolved finds the placeholder.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_concurrent_close_never_revokes_an_in_flight_requests_nodes() {
+    use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+    use verter_type_engine::semantic_query::{
+        BinderScopeId, QueryResult, ResolveDeclKey, ScopeId, SemanticQueryApi, SemanticQueryKey,
+        SemanticQueryOutput,
+    };
+    const ICON: &str = "/src/types/icon.ts";
+    let (_ws, host) = close_lifecycle_fixture();
+    let graph = host.project_type_store().semantic_graph();
+    let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+    let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+        scope: ScopeId {
+            canonical_id: verter_type_expr::OwnedStr::from(ICON),
+            owner,
+            local_scope: None,
+            binder_scope_id: BinderScopeId::file_scope(owner),
+        },
+        name: verter_type_expr::OwnedStr::from("IconProps"),
+    });
+    let request = ProjectSemanticDispatch::new(&host);
+    let QueryResult::Value(SemanticQueryOutput { value: node, .. }) =
+        request.execute_type_node(key.clone())
+    else {
+        panic!("IconProps resolves");
+    };
+    let payload = graph.node_data(node).expect("the request's node is live");
+
+    let reads = std::thread::scope(|scope| {
+        let closer = scope.spawn(|| host.evict(ICON));
+        let mut reads = 0usize;
+        loop {
+            let finished = closer.is_finished();
+            let now = graph.node_data(node).expect("still readable");
+            assert!(
+                Arc::ptr_eq(&now, &payload),
+                "read {reads} during the close switched payloads"
+            );
+            reads += 1;
+            if finished {
+                break;
+            }
+        }
+        closer.join().expect("the close completes");
+        reads
+    });
+    assert!(reads > 0);
+    assert_eq!(host.retention_snapshot().closes.closes_applied, 1);
+    assert!(
+        graph.node_is_live(node),
+        "the running request still owns it"
+    );
+
+    // The request keeps executing against the closed document.
+    let _ = request.execute_type_node(key);
+    assert!(Arc::ptr_eq(
+        &graph.node_data(node).expect("still readable"),
+        &payload
+    ));
+    drop(request);
+    assert!(
+        !graph.node_is_live(node),
+        "the closed declaration is destroyed once the request ends"
+    );
+}
+
 /// With nothing holding the closed content, the close destroys it inline.
 #[cfg(not(target_arch = "wasm32"))]
 #[test]

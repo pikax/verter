@@ -155,6 +155,51 @@ fn release_decl_key(canonical: &str, name: &str) -> SemanticQueryKey {
     })
 }
 
+/// A holder whose final drop comes after the close destroys the closed
+/// content then, with no close or sidecar write left to drain the log: the
+/// release that grows the destroyed log past its threshold drains it into
+/// the sidecars itself, so neither the log nor the stale sidecar entries
+/// outlive the drop by more than the threshold.
+///
+/// Discriminating against a log drained only by a later close or sidecar
+/// write: every destroyed id and its structure bits would stay retained.
+#[test]
+fn a_final_drop_after_close_keeps_the_destroyed_log_bounded() {
+    let store = SemanticGraphStore::new();
+    let count = super::super::release::DESTROYED_DRAIN_THRESHOLD * 4;
+    let scope = store.enter_node_root_scope();
+    let scoped = release_file_scope("/w/a.ts", 1);
+    for index in 0..count {
+        let node = store.intern_node_with_scope(
+            release_type_param("/w/a.ts", 1, &format!("T{index}")),
+            scoped.clone(),
+        );
+        // Classifying writes the node's structure-bit sidecar entry.
+        store.node_is_inert_structure(node);
+    }
+    assert_eq!(store.unresolved_reach_count(), count);
+
+    store.close_canonical("/w/a.ts");
+    assert_eq!(
+        store.unresolved_reach_count(),
+        count,
+        "premise: the scope still holds every node"
+    );
+    drop(scope);
+
+    assert_eq!(store.node_count(), 0, "the final drop destroys them all");
+    assert!(
+        store.pending_destroyed_nodes() <= super::super::release::DESTROYED_DRAIN_THRESHOLD,
+        "pending {} of {count}",
+        store.pending_destroyed_nodes()
+    );
+    assert!(
+        store.unresolved_reach_count() <= super::super::release::DESTROYED_DRAIN_THRESHOLD,
+        "stale structure bits {} of {count}",
+        store.unresolved_reach_count()
+    );
+}
+
 /// The inert-structure bit and the unresolved-reach bit of a node live in
 /// ONE per-node entry, so the two memos share one lifecycle: an entry
 /// released for a node id takes both bits with it, and no second node-id

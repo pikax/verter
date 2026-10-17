@@ -306,6 +306,9 @@ pub struct InlineMemberFlight {
         super::node_roots::NodeRootSet,
         verter_session_query::retention::shared::CallerHold,
     )>,
+    /// The decided value named a node that was no longer live when the
+    /// component closed: the batched publish refuses the whole component.
+    hold_refused: bool,
 }
 
 impl std::fmt::Debug for InlineMemberFlight {
@@ -319,7 +322,8 @@ impl std::fmt::Debug for InlineMemberFlight {
 impl InlineMemberFlight {
     /// Own the graph nodes of `value` — the member's decided value — until
     /// this flight is published or aborted. A value whose operands are not
-    /// live cannot be held; the batched publish then refuses the member.
+    /// live cannot be held; the flight records it, and the batched publish
+    /// then refuses the whole component ([`Self::hold_refused`]).
     pub(crate) fn hold_value(
         &mut self,
         graph: &super::SemanticGraphStore,
@@ -334,13 +338,31 @@ impl InlineMemberFlight {
         if nodes.is_empty() {
             return;
         }
-        if let Ok(roots) = graph.root_nodes(nodes) {
-            let charge = verter_session_query::retention::shared::CallerHold::pin(
-                graph.retention_account(),
-                roots.heap_bytes(),
-            );
-            self.held = Some((roots, charge));
+        match graph.root_nodes(nodes) {
+            Ok(roots) => {
+                let charge = verter_session_query::retention::shared::CallerHold::pin(
+                    graph.retention_account(),
+                    roots.heap_bytes(),
+                );
+                self.held = Some((roots, charge));
+            }
+            Err(_) => self.hold_refused = true,
         }
+    }
+
+    /// Whether the member's decided value could not be held.
+    pub(super) fn hold_refused(&self) -> bool {
+        self.hold_refused
+    }
+
+    /// Test seam over [`Self::hold_value`] for a hand-staged member.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn hold_value_for_tests(
+        &mut self,
+        graph: &super::SemanticGraphStore,
+        value: &crate::semantic_query::QueryResult<crate::semantic_query::SemanticQueryValue>,
+    ) {
+        self.hold_value(graph, value);
     }
 
     pub(super) fn state(&self) -> &Mutex<InflightState> {
@@ -391,6 +413,7 @@ impl super::SemanticGraphStore {
             inflight,
             _task: task,
             held: None,
+            hold_refused: false,
         })
     }
 

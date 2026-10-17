@@ -356,7 +356,7 @@ pub struct SemanticGraphStore {
     /// snapshots share allocations. Origin edges are bounded best-effort
     /// provenance for the audit origin-graph trace, NOT an invalidation
     /// source — see the `derivation` module docs.
-    pub(super) derivation: Mutex<DerivationStore>,
+    pub(super) derivation: Arc<Mutex<DerivationStore>>,
     /// Lock-free telemetry counters. Read via [`Self::stats_snapshot`]
     /// into the public [`SemanticGraphStats`] surface.
     pub(super) stats: AtomicSemanticGraphStats,
@@ -421,14 +421,14 @@ pub struct SemanticGraphStore {
     /// the bound existed (re-walking the same structure per SCC fixpoint
     /// iteration) instead of trading correctness for it. ONE per-node sidecar:
     /// the entry holds every bit memoized for the id, released together.
-    unresolved_reach: Mutex<FxHashMap<SemanticNodeId, unresolved_reach::NodeStructureBits>>,
+    unresolved_reach: Arc<Mutex<FxHashMap<SemanticNodeId, unresolved_reach::NodeStructureBits>>>,
     /// The `VerterStableV1` member view of each union built in this store's
     /// arena, keyed by the store's OWN node ids. Ownership, lifetime and the
     /// contract with a payload-retiring holder: `union_views.rs`.
     union_views: Mutex<union_views::UnionViews>,
     /// The stable-key classes of this store's nodes. Ownership, lifetime and
     /// release: [`crate::semantic_query::stable_key::KeyClasses`].
-    key_classes: Mutex<crate::semantic_query::stable_key::KeyClasses>,
+    key_classes: Arc<Mutex<crate::semantic_query::stable_key::KeyClasses>>,
     /// Test-only: order union members by DESCENDING stable key. Reversing the
     /// one union order in a fresh store — an isolated cache namespace, its
     /// views and memo entries included — is the §5.8 counterfactual that
@@ -728,9 +728,9 @@ pub struct SemanticGraphStore {
     // and the inner name map both use the collision-safe std default
     // hasher (member names are authored strings — never FxHash).
     pub(super) member_ordinal_index_memo:
-        DashMap<SemanticNodeId, Arc<member_index::MemberOrdinalIndex>>,
+        Arc<DashMap<SemanticNodeId, Arc<member_index::MemberOrdinalIndex>>>,
     pub(super) member_ordinal_index_fifo:
-        parking_lot::Mutex<std::collections::VecDeque<SemanticNodeId>>,
+        Arc<parking_lot::Mutex<std::collections::VecDeque<SemanticNodeId>>>,
     /// Sealed refusals of isolated root demands — see `refusal_summary`.
     pub(super) refusal_summaries: refusal_summary::RefusalSummaryTable,
     /// Test-only: run by a dispatch's synchronous entry once it holds a
@@ -781,7 +781,7 @@ impl SemanticGraphStore {
         signatures.bind_retention_account(retention_account.get());
         let canonical_to_entries = CanonicalToEntries::charged(retention_account.get());
         let dep_signature_interner = DepSignatureInterner::charged(retention_account.get());
-        Self {
+        let store = Self {
             operand_identity: Default::default(),
             arena,
             signatures,
@@ -845,7 +845,9 @@ impl SemanticGraphStore {
             produce_hook: Default::default(),
             #[cfg(any(test, feature = "test-support"))]
             exhausted_join_abort: Default::default(),
-        }
+        };
+        store.bind_destroyed_sidecar_sink();
+        store
     }
 }
 

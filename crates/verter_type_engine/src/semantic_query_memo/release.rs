@@ -39,15 +39,80 @@
 //! edges, stable-key classes) own nothing. Each marks the slot it describes,
 //! and a marked slot's destruction is logged for cleanup, so the pending log
 //! never outgrows the stale entries it removes. The log is drained by every
-//! close and by any sidecar write that finds it past
-//! [`DESTROYED_DRAIN_THRESHOLD`].
+//! close, by any sidecar write that finds it past
+//! [`DESTROYED_DRAIN_THRESHOLD`], and by the release that grows it past that
+//! threshold ([`SidecarSink`]), so the pending log and the stale sidecar
+//! entries it describes stay bounded at rest even when a holder's final drop
+//! comes after the last close and no later work runs.
 
 use rustc_hash::FxHashMap;
 
 use super::*;
 
-/// Destroyed ids the pending log may hold before a sidecar write drains it.
+/// Destroyed ids the pending log may hold before a sidecar write or a
+/// release drains it.
 pub(super) const DESTROYED_DRAIN_THRESHOLD: usize = 1024;
+
+/// Weak handles on a store's per-node sidecars, bound into the store's arena
+/// so the release that grows the destroyed log past
+/// [`DESTROYED_DRAIN_THRESHOLD`] drains it itself.
+pub(super) struct SidecarSink {
+    unresolved_reach: std::sync::Weak<
+        Mutex<FxHashMap<SemanticNodeId, super::unresolved_reach::NodeStructureBits>>,
+    >,
+    member_ordinal_index_memo:
+        std::sync::Weak<DashMap<SemanticNodeId, Arc<super::member_index::MemberOrdinalIndex>>>,
+    member_ordinal_index_fifo: std::sync::Weak<Mutex<std::collections::VecDeque<SemanticNodeId>>>,
+    derivation: std::sync::Weak<Mutex<DerivationStore>>,
+    key_classes: std::sync::Weak<Mutex<crate::semantic_query::stable_key::KeyClasses>>,
+}
+
+impl SidecarSink {
+    /// Drop the sidecar entries of every logged destroyed id without
+    /// blocking. A sidecar lock held elsewhere — on this thread too, when the
+    /// release runs inside a sidecar write — leaves the log for the next
+    /// release, sidecar write or close; an id whose member-index shard is
+    /// held is logged again.
+    pub(super) fn try_drain(&self, arena: &super::arena::NodeArenaCore) {
+        let (Some(reach), Some(memo), Some(fifo), Some(derivation), Some(classes)) = (
+            self.unresolved_reach.upgrade(),
+            self.member_ordinal_index_memo.upgrade(),
+            self.member_ordinal_index_fifo.upgrade(),
+            self.derivation.upgrade(),
+            self.key_classes.upgrade(),
+        ) else {
+            return;
+        };
+        let (Some(mut reach), Some(mut fifo), Some(mut derivation), Some(mut classes)) = (
+            reach.try_lock(),
+            fifo.try_lock(),
+            derivation.try_lock(),
+            classes.try_lock(),
+        ) else {
+            return;
+        };
+        let destroyed = arena.drain_destroyed();
+        let mut blocked = Vec::new();
+        for id in &destroyed {
+            reach.remove(id);
+            match memo.try_entry(*id) {
+                Some(dashmap::Entry::Occupied(entry)) => {
+                    entry.remove();
+                }
+                Some(dashmap::Entry::Vacant(_)) => {}
+                None => blocked.push(*id),
+            }
+        }
+        let dead: rustc_hash::FxHashSet<SemanticNodeId> = destroyed.into_iter().collect();
+        fifo.retain(|id| !dead.contains(id));
+        derivation.release_nodes(&|id| dead.contains(&id));
+        classes.release_nodes(|id| dead.contains(&id));
+        drop((reach, fifo, derivation, classes));
+        if !blocked.is_empty() {
+            arena.relog_destroyed(&blocked);
+        }
+    }
+}
 
 /// What one [`SemanticGraphStore::close_canonical`] evicted. Counts are per
 /// call; `shape_entries_released` is filled by the owning
@@ -197,6 +262,18 @@ impl SemanticGraphStore {
         report.sidecar_entries_dropped = self.reclaim_destroyed_sidecars();
         report.elapsed_micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
         report
+    }
+
+    /// Bind this store's sidecars into its arena, so a release that grows
+    /// the destroyed log past [`DESTROYED_DRAIN_THRESHOLD`] drains it.
+    pub(super) fn bind_destroyed_sidecar_sink(&self) {
+        self.arena.core.bind_destroyed_sink(SidecarSink {
+            unresolved_reach: Arc::downgrade(&self.unresolved_reach),
+            member_ordinal_index_memo: Arc::downgrade(&self.member_ordinal_index_memo),
+            member_ordinal_index_fifo: Arc::downgrade(&self.member_ordinal_index_fifo),
+            derivation: Arc::downgrade(&self.derivation),
+            key_classes: Arc::downgrade(&self.key_classes),
+        });
     }
 
     /// Drop the per-node sidecar entries of every destroyed node the arena

@@ -10285,3 +10285,90 @@ fn close_canonical_retires_the_kernel_epoch_its_closed_content_strands() {
     );
     assert!(!store.node_is_live(a_param) && !store.node_is_live(a_obj));
 }
+
+/// A close evicts the kernel's ownership of the tokens naming closed content,
+/// never a holder's: while a lease of the epoch is alive, every token it can
+/// read back still names its node and payload, and the node is destroyed only
+/// when the last holder drops.
+///
+/// Discriminating against a close that drops the epoch's roots whatever
+/// leases it has: the leased token then reads a destroyed node.
+#[test]
+fn a_close_keeps_the_token_nodes_a_leased_epoch_reads_until_the_lease_drops() {
+    let store = SemanticGraphStore::new();
+    let kernel = store.signature_store();
+    let shared = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let (a_param, b_param, b_token) = {
+        let _build = store.enter_node_root_scope();
+        let (a_param, a_obj, _, _) = release_intern_document(&store, "/w/a.ts", 1, shared);
+        let (b_param, _, _, _) = release_intern_document(&store, "/w/b.ts", 2, shared);
+        kernel.intern_type_token(a_param, None).unwrap();
+        kernel.intern_type_token(a_obj, None).unwrap();
+        let b_token = kernel.intern_type_token(b_param, None).unwrap();
+        (a_param, b_param, b_token)
+    };
+    let payload = store.node_data(b_param).expect("premise: B's node is live");
+    let lease = kernel.lease_epoch(kernel.epoch()).unwrap();
+
+    store.close_canonical("/w/b.ts");
+    assert_eq!(kernel.stranded_token_count(), 1);
+    let view = lease.read_view();
+    let read = view.type_token_node(b_token).unwrap();
+    assert_eq!(read, b_param);
+    assert!(
+        store.node_is_live(read),
+        "a leased epoch still owns the node its token names"
+    );
+    assert!(Arc::ptr_eq(&store.node_data(read).unwrap(), &payload));
+
+    drop(view);
+    assert!(store.node_is_live(b_param), "the lease still holds it");
+    drop(lease);
+    assert!(
+        !store.node_is_live(b_param),
+        "the last holder's drop destroys the closed node"
+    );
+    assert!(store.node_is_live(a_param), "A is still open");
+}
+
+/// A token a close stranded and a later request rooted again is live again:
+/// the next close strands it once more rather than counting it twice, so a
+/// single stranded token among three never reads as a majority.
+///
+/// Discriminating against a stranded count that never forgets a re-rooted
+/// token: the second close would count two of three and replace the epoch.
+#[test]
+fn a_re_rooted_token_is_stranded_once_per_close() {
+    let store = SemanticGraphStore::new();
+    let kernel = store.signature_store();
+    let shared = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let (a_param, held) = {
+        let _build = store.enter_node_root_scope();
+        let (a_param, _, _, _) = release_intern_document(&store, "/w/a.ts", 1, shared);
+        let (c_param, c_obj, _, _) = release_intern_document(&store, "/w/c.ts", 3, shared);
+        for token in [a_param, c_param, c_obj] {
+            kernel.intern_type_token(token, None).unwrap();
+        }
+        (a_param, store.root_nodes([a_param]).unwrap())
+    };
+    let epoch = kernel.epoch();
+
+    store.close_canonical("/w/a.ts");
+    assert_eq!(kernel.stranded_token_count(), 1);
+    assert!(
+        store.node_is_live(a_param),
+        "premise: a caller still holds it"
+    );
+    kernel.intern_type_token(a_param, None).unwrap();
+    assert_eq!(
+        kernel.stranded_token_count(),
+        0,
+        "rooting the token again makes it live"
+    );
+
+    let report = store.close_canonical("/w/a.ts");
+    assert_eq!(kernel.stranded_token_count(), 1);
+    assert!(!report.signature_epoch_replaced, "{report:?}");
+    assert_eq!(kernel.epoch(), epoch);
+    drop(held);
+}
