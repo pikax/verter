@@ -154,13 +154,19 @@ impl SemanticDeliveryLease {
         &self,
         ctx: verter_session_query::retention::owned::ChargeCtx<'_>,
     ) -> Result<
-        Box<[verter_session_query::retention::owned::OwnedHold]>,
+        verter_session_query::retention::owned::HeldHandles,
         verter_session_query::retention::RetentionRefusal,
     > {
-        match self.0.as_ref() {
-            Some(owner) => owner.own_footprint().handles.hold(ctx),
-            None => Ok(Box::new([])),
-        }
+        self.metadata_handles().hold(ctx)
+    }
+
+    /// The root owners this delivery's metadata names, for a cache that
+    /// holds them together with the other allocations it retains.
+    pub(super) fn metadata_handles(&self) -> verter_session_query::retention::owned::OwnedHandles {
+        self.0
+            .as_ref()
+            .map(|owner| owner.own_footprint().handles)
+            .unwrap_or_default()
     }
 
     /// A delivery rooting `roots` and holding no shared allocation, its own

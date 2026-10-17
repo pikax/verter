@@ -46,8 +46,25 @@ fn carrier(name: &OwnedStr, list: usize) -> Owned<Carrier> {
     })
 }
 
+/// Bytes a pointer to a type-erased owned cell takes: one slot of a cell's
+/// child registration, or one cache hold.
+const CELL_POINTER: usize = 2 * std::mem::size_of::<usize>();
+
+/// Bytes a cell reaching `children` owned allocations keeps for its child
+/// registration for its whole life: the registration box and its slice.
+fn registration(children: usize) -> usize {
+    heap_block_bytes(std::mem::size_of::<Nested>()) + heap_block_bytes(children * CELL_POINTER)
+}
+
+/// Bytes the slice keeping `holds` cache holds takes while they live.
+fn hold_slice(holds: usize) -> usize {
+    heap_block_bytes(holds * CELL_POINTER)
+}
+
+/// A carrier's own charge: its cell, its list and the registration of its
+/// one owned name.
 fn own_bytes(list: usize) -> usize {
-    Owned::<Carrier>::cell_block_bytes() + heap_block_bytes(list * 8)
+    Owned::<Carrier>::cell_block_bytes() + heap_block_bytes(list * 8) + registration(1)
 }
 
 /// A clone that outlives the cache that retained it and the read that
@@ -65,7 +82,12 @@ fn a_clone_outliving_every_holder_keeps_the_one_charge_until_its_own_drop() {
         read.pin(ctx);
         let cache = read.hold(ctx).expect("admitted");
         let total = own_bytes(LIST) + OwnedStr::charge_for_len(1);
-        assert_eq!(occupancy(&account), (total, 0), "one charge, retained");
+        let cached = total + hold_slice(1);
+        assert_eq!(
+            occupancy(&account),
+            (cached, 0),
+            "one charge, retained, with the cache's hold on the name"
+        );
 
         let clone = read.clone();
         drop(read);
@@ -78,7 +100,7 @@ fn a_clone_outliving_every_holder_keeps_the_one_charge_until_its_own_drop() {
                 "the clone is the last holder: the charge is pinned, not released"
             );
         } else {
-            assert_eq!(occupancy(&account), (total, 0));
+            assert_eq!(occupancy(&account), (cached, 0));
             drop(cache);
             assert_eq!(occupancy(&account), (0, total));
         }
@@ -87,8 +109,8 @@ fn a_clone_outliving_every_holder_keeps_the_one_charge_until_its_own_drop() {
         assert_eq!(occupancy(&account), (0, 0), "released with the last handle");
         assert_eq!(
             account.snapshot().releases,
-            2,
-            "the carrier and its name, once each"
+            3,
+            "the carrier, its name and the cache's holds slice, once each"
         );
     }
 }
@@ -109,7 +131,7 @@ fn a_shared_nested_string_is_charged_once_and_survives_its_parents() {
     assert_eq!(name.charge_bytes(), Some(name_charge));
     assert_eq!(
         occupancy(&account),
-        (own_bytes(1) + name_charge, own_bytes(1)),
+        (own_bytes(1) + name_charge + hold_slice(1), own_bytes(1)),
         "each carrier pays its own cell; the shared name is retained once with the cached carrier"
     );
 
@@ -239,7 +261,11 @@ fn a_carriers_top_level_handles_are_charged_by_their_own_cells() {
     let list_charge = OwnedSlice::<u32>::cell_block_bytes() + heap_block_bytes(400);
     assert_eq!(occupancy(&account), (0, name_charge + list_charge));
     let holds = handles().hold(ctx).expect("admitted");
-    assert_eq!(occupancy(&account), (name_charge + list_charge, 0));
+    assert_eq!(holds.backing_bytes(), hold_slice(2));
+    assert_eq!(
+        occupancy(&account),
+        (name_charge + list_charge + hold_slice(2), 0)
+    );
     drop(holds);
     drop(carrier);
     drop(list);
@@ -262,11 +288,119 @@ fn sibling_cache_holds_share_one_retained_charge() {
     let total = own_bytes(16) + OwnedStr::charge_for_len(1);
     let first = value.hold(ctx).expect("admitted");
     let second = value.hold(ctx).expect("shared");
-    assert_eq!(occupancy(&account), (total, 0));
+    assert_eq!(occupancy(&account), (total + hold_slice(1), 0));
     drop(first);
-    assert_eq!(occupancy(&account), (total, 0));
+    assert_eq!(occupancy(&account), (total + hold_slice(1), 0));
     drop(second);
     assert_eq!(occupancy(&account), (0, total));
     drop(value);
+    assert_eq!(occupancy(&account), (0, 0));
+}
+
+/// A parent reaching many distinct owned children keeps bookkeeping as
+/// wide as they are: the child registration for as long as the parent
+/// lives, and the slice of a cache's holds on them for as long as the cache
+/// retains it. Both are charged — through the pin, the cache's adoption,
+/// the cache-first release and the final drop.
+#[test]
+fn a_wide_parent_is_charged_its_child_registration_and_its_cache_holds() {
+    const CHILDREN: usize = 64;
+    const NAME: usize = 40;
+    let account = account(1 << 30);
+    let ctx = ChargeCtx::new(&account);
+    let names: Box<[OwnedStr]> = (0..CHILDREN)
+        .map(|i| OwnedStr::from(format!("{i:0>NAME$}")))
+        .collect();
+    let parent = Owned::new(names);
+    let children = CHILDREN * OwnedStr::charge_for_len(NAME);
+    let own = Owned::<Box<[OwnedStr]>>::cell_block_bytes()
+        + heap_block_bytes(CHILDREN * std::mem::size_of::<OwnedStr>())
+        + heap_block_bytes(std::mem::size_of::<Nested>())
+        + heap_block_bytes(CHILDREN * CELL_POINTER);
+    let holds = heap_block_bytes(CHILDREN * CELL_POINTER);
+
+    parent.pin(ctx);
+    assert_eq!(parent.charge_bytes(), Some(own));
+    assert_eq!(occupancy(&account), (0, own + children), "pinned");
+
+    let cache = parent.hold(ctx).expect("adopted");
+    assert_eq!(
+        occupancy(&account),
+        (own + children + holds, 0),
+        "retained, with the slice of the cache's holds on every child"
+    );
+
+    let survivor = parent.clone();
+    drop(parent);
+    drop(cache);
+    assert_eq!(
+        occupancy(&account),
+        (0, own + children),
+        "the cache let go first: its holds' slice is freed, the registration stays"
+    );
+    drop(survivor);
+    assert_eq!(occupancy(&account), (0, 0), "released with the last handle");
+}
+
+/// A cache charge taking over the holds on a carrier's handles takes their
+/// slice's charge with them, and gives it back when the holds end before
+/// the charge does.
+#[test]
+fn a_charge_holding_handles_is_charged_their_slice_until_the_holds_end() {
+    const CHILDREN: usize = 48;
+    let account = account(1 << 30);
+    let ctx = ChargeCtx::new(&account);
+    let names: Vec<OwnedStr> = (0..CHILDREN)
+        .map(|i| OwnedStr::from(format!("{i}")))
+        .collect();
+    let children: usize = names
+        .iter()
+        .map(|name| OwnedStr::charge_for_len(name.len()))
+        .sum();
+    let handles = OwnedHandles::of(|aliases| names.iter().map(|name| name.offer(aliases)).sum());
+    let own = 100;
+    let charge = account
+        .reserve(ChargeClass::Retained, own)
+        .admitted()
+        .expect("admitted");
+    let mut charge = handles.retained_with(charge, ctx).expect("admitted");
+    let slice = heap_block_bytes(CHILDREN * CELL_POINTER);
+    assert_eq!(charge.bytes(), own + slice);
+    assert_eq!(occupancy(&account), (own + slice + children, 0));
+
+    charge.transfer_to_pinned();
+    assert_eq!(
+        charge.bytes(),
+        own,
+        "the holds ended, and their slice with them"
+    );
+    assert_eq!(occupancy(&account), (0, own + children));
+    drop(charge);
+    drop(names);
+    assert_eq!(occupancy(&account), (0, 0));
+}
+
+/// At zero headroom the slice keeping a cache's holds is refused with them,
+/// all or nothing: no child moves into retention.
+#[test]
+fn zero_headroom_refuses_the_holds_slice_with_the_holds() {
+    let account = account(0);
+    let ctx = ChargeCtx::new(&account);
+    let names: Vec<OwnedStr> = (0..8).map(|i| OwnedStr::from(format!("{i}"))).collect();
+    let handles = || OwnedHandles::of(|aliases| names.iter().map(|name| name.offer(aliases)).sum());
+    handles().pin(ctx);
+    let pinned = occupancy(&account);
+    handles()
+        .hold(ctx)
+        .expect_err("no headroom for the holds or their slice");
+    assert_eq!(
+        occupancy(&account),
+        pinned,
+        "every child stays its callers'"
+    );
+    assert!(names
+        .iter()
+        .all(|name| name.charge_class() == Some(ChargeClass::Pinned)));
+    drop(names);
     assert_eq!(occupancy(&account), (0, 0));
 }
