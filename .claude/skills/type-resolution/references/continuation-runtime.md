@@ -48,11 +48,17 @@ Architectural target for the project-global cache cutover:
   (compiled only under `test`, `test-support` or the default-off
   `soak-support`, which `verter_session/soak-support` forwards to the
   soak/tooling runner) parks the first joinable producer of `key` on that
-  store at the dispatcher's cold-build boundary — flight claimed, raw build
-  not begun, no memo or flight lock held — reports a subscriber only once its
-  wait-for edge registered on that exact flight, and releases the producer
-  on `release()` or when the guard drops (completion, unwind, abandoned
-  schedule). Other keys, stores and warm reads never satisfy it. Inventory:
+  store at the dispatcher's synchronous cold-build boundary — flight claimed,
+  raw build not begun, no memo or flight lock held — reports a subscriber
+  only once its wait-for edge registered on that exact flight, and releases
+  the producer on `release()`, when its own request is cancelled
+  (`cancel_participants()` cancels the parked producer and the registered
+  subscribers), or when the guard drops (completion, unwind, abandoned
+  schedule). A guard's drop removes exactly its own registration, so
+  overlapping scopes may end in any order. Other keys, stores and warm
+  reads never satisfy it; an `Instantiate` key driven outside any drive
+  runs on the continuation runtime and never reaches the synchronous
+  boundary, so arming one is refused. Inventory:
   `crates/verter_type_engine/observe-inventory/SKR-FLIGHT-RENDEZVOUS.md`.
 
 Concrete expectation:

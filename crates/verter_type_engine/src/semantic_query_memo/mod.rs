@@ -746,10 +746,11 @@ pub struct SemanticGraphStore {
     #[cfg(any(test, feature = "test-support"))]
     exhausted_join_abort:
         parking_lot::Mutex<Option<(SemanticQueryKey, test_support::ExhaustedJoinAbortForTests)>>,
-    /// The scoped rendezvous armed on this store, if any — see
-    /// [`Self::arm_flight_rendezvous`].
+    /// The rendezvous scopes armed on this store, outermost first — see
+    /// [`Self::arm_flight_rendezvous`]. A guard's drop removes exactly its
+    /// own registration, so overlapping scopes may end in any order.
     #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
-    flight_rendezvous: parking_lot::Mutex<Option<Arc<inflight::FlightRendezvousShared>>>,
+    flight_rendezvous: parking_lot::Mutex<Vec<Arc<inflight::FlightRendezvousShared>>>,
 }
 
 /// The family memo's retention bound, chosen when a store is constructed

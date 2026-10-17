@@ -93,8 +93,9 @@ fn a_held_cold_producer_is_joined_by_a_real_subscriber() {
     let graph = host.project_type_store().semantic_graph();
     let key = resolve_decl("IconBox");
     let joins_before = joined_waits(graph);
+    let waits_before = graph.wait_graph_counts_for_tests();
 
-    let (observed, answers) = std::thread::scope(|threads| {
+    let (observed, answers, held_flight) = std::thread::scope(|threads| {
         let rendezvous = graph.arm_flight_rendezvous(key.clone());
         let producer = threads.spawn(|| request_icon_box(&host));
         rendezvous
@@ -112,7 +113,10 @@ fn a_held_cold_producer_is_joined_by_a_real_subscriber() {
             producer.join().expect("the producer answers"),
             subscriber.join().expect("the subscriber answers"),
         ];
-        (rendezvous.observe(), answers)
+        let held_flight = rendezvous
+            .held_flight_weak()
+            .expect("the rendezvous names the held flight");
+        (rendezvous.observe(), answers, held_flight)
     });
 
     assert!(graph.flight_rendezvous_is_disarmed());
@@ -122,10 +126,14 @@ fn a_held_cold_producer_is_joined_by_a_real_subscriber() {
     );
     assert_eq!(answers[0], answers[1], "both requests share one answer");
     assert_eq!(request_icon_box(&host), answers[0], "a warm read agrees");
+    assert!(
+        held_flight.upgrade().is_none(),
+        "the flight is destroyed once the requests end, not merely off the table"
+    );
     assert_eq!(
-        graph.test_inflight_strong_count(&key),
-        0,
-        "no flight outlives the requests"
+        graph.wait_graph_counts_for_tests(),
+        waits_before,
+        "no task or wait registration outlives the requests"
     );
 }
 
@@ -171,6 +179,10 @@ fn a_failed_assertion_while_the_producer_is_held_releases_it_and_retains_nothing
     let host = host();
     let graph = host.project_type_store().semantic_graph();
     let key = resolve_decl("IconBox");
+    let waits_before = graph.wait_graph_counts_for_tests();
+    // The held flight's weak name must escape the unwind so destruction is
+    // observed independently of the flight table.
+    let held_flight = std::sync::Mutex::new(None);
     let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         std::thread::scope(|threads| {
             let rendezvous = graph.arm_flight_rendezvous(key.clone());
@@ -178,6 +190,7 @@ fn a_failed_assertion_while_the_producer_is_held_releases_it_and_retains_nothing
             rendezvous
                 .wait_producer_parked(HANG_BOUND)
                 .expect("the request parks at its cold build");
+            *held_flight.lock().unwrap() = rendezvous.held_flight_weak();
             // The scope joins the parked producer only after the unwind has
             // dropped the rendezvous and so released it.
             panic!("a planted assertion failure while the producer is held");
@@ -185,7 +198,19 @@ fn a_failed_assertion_while_the_producer_is_held_releases_it_and_retains_nothing
     }));
     assert!(unwound.is_err());
     assert!(graph.flight_rendezvous_is_disarmed());
-    assert_eq!(graph.test_inflight_strong_count(&key), 0);
+    let held_flight = held_flight
+        .into_inner()
+        .expect("the weak-flight cell was not poisoned")
+        .expect("the unwound schedule held a flight");
+    assert!(
+        held_flight.upgrade().is_none(),
+        "the flight the unwound schedule held is destroyed"
+    );
+    assert_eq!(
+        graph.wait_graph_counts_for_tests(),
+        waits_before,
+        "no task or wait registration outlives the unwind"
+    );
     request_icon_box(&host);
 }
 
@@ -194,18 +219,31 @@ fn an_abandoned_rendezvous_releases_its_parked_producer() {
     let host = host();
     let graph = host.project_type_store().semantic_graph();
     let key = resolve_decl("IconBox");
-    let answer = std::thread::scope(|threads| {
+    let waits_before = graph.wait_graph_counts_for_tests();
+    let (held_flight, answer) = std::thread::scope(|threads| {
         let rendezvous = graph.arm_flight_rendezvous(key.clone());
         let producer = threads.spawn(|| request_icon_box(&host));
         rendezvous
             .wait_producer_parked(HANG_BOUND)
             .expect("the request parks at its cold build");
+        let held_flight = rendezvous
+            .held_flight_weak()
+            .expect("the rendezvous names the held flight");
         // The driver cancels its schedule without releasing.
         drop(rendezvous);
-        producer.join().expect("the released producer answers")
+        let answer = producer.join().expect("the released producer answers");
+        (held_flight, answer)
     });
     assert!(graph.flight_rendezvous_is_disarmed());
-    assert_eq!(graph.test_inflight_strong_count(&key), 0);
+    assert!(
+        held_flight.upgrade().is_none(),
+        "the abandoned flight is destroyed once its producer answers"
+    );
+    assert_eq!(
+        graph.wait_graph_counts_for_tests(),
+        waits_before,
+        "no task or wait registration outlives the abandoned schedule"
+    );
     assert_eq!(request_icon_box(&host), answer);
 }
 
@@ -225,6 +263,86 @@ fn a_nested_rendezvous_restores_the_one_it_replaced() {
     );
     drop(outer);
     assert!(graph.flight_rendezvous_is_disarmed());
+}
+
+#[test]
+fn out_of_order_guard_drops_keep_the_live_rendezvous_armed() {
+    let host = host();
+    let graph = host.project_type_store().semantic_graph();
+    let older = graph.arm_flight_rendezvous(resolve_decl("IconBox"));
+    let newer = graph.arm_flight_rendezvous(resolve_decl("IconProps"));
+    // Non-LIFO: the older guard ends first. The newer registration stays
+    // armed — its key's producer still parks — and nothing re-arms the
+    // ended one once the last guard drops.
+    drop(older);
+    assert!(!graph.flight_rendezvous_is_disarmed());
+    std::thread::scope(|threads| {
+        let producer = threads.spawn(|| {
+            host.resolve_named_symbol(ICON, "IconProps", None)
+                .expect("IconProps resolves");
+        });
+        newer
+            .wait_producer_parked(HANG_BOUND)
+            .expect("the live rendezvous still parks its key's producer");
+        newer.release();
+        producer.join().expect("the producer answers");
+    });
+    drop(newer);
+    assert!(graph.flight_rendezvous_is_disarmed());
+    // The ended older rendezvous stays dropped: a fresh request of its key
+    // runs free and the store stays disarmed.
+    request_icon_box(&host);
+    assert!(graph.flight_rendezvous_is_disarmed());
+}
+
+#[test]
+fn cancelling_the_parked_producer_and_its_subscriber_returns_both() {
+    let host = host();
+    let graph = host.project_type_store().semantic_graph();
+    let key = resolve_decl("IconBox");
+    let waits_before = graph.wait_graph_counts_for_tests();
+
+    let (held_flight, answers) = std::thread::scope(|threads| {
+        let rendezvous = graph.arm_flight_rendezvous(key.clone());
+        let producer = threads.spawn(|| host.resolve_named_symbol(ICON, "IconBox", None));
+        rendezvous
+            .wait_producer_parked(HANG_BOUND)
+            .expect("the producer parks at its cold build");
+        let subscriber = threads.spawn(|| host.resolve_named_symbol(ICON, "IconBox", None));
+        rendezvous
+            .wait_subscriber_registered(HANG_BOUND)
+            .expect("the subscriber registers on the held flight");
+        let held_flight = rendezvous
+            .held_flight_weak()
+            .expect("the rendezvous names the held flight");
+        assert_eq!(
+            rendezvous.cancel_participants(),
+            2,
+            "the held producer and the registered subscriber are both cancelled"
+        );
+        let answers = [
+            producer.join().expect("the cancelled producer returns"),
+            subscriber.join().expect("the cancelled subscriber returns"),
+        ];
+        (held_flight, answers)
+    });
+
+    assert!(graph.flight_rendezvous_is_disarmed());
+    assert!(
+        answers.iter().all(Option::is_none),
+        "both cancelled requests answer the cancelled read, got {answers:?}"
+    );
+    assert!(
+        held_flight.upgrade().is_none(),
+        "the cancelled schedule's flight retires"
+    );
+    assert_eq!(
+        graph.wait_graph_counts_for_tests(),
+        waits_before,
+        "no task or wait registration outlives the cancelled schedule"
+    );
+    // The store still answers after the cancelled schedule.
+    request_icon_box(&host);
 }
 
 #[test]

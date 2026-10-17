@@ -1051,15 +1051,19 @@ impl<'s> ProducerLease<'s> {
 
     /// The cold-build boundary of an armed [`super::FlightRendezvous`]: a
     /// joinable producer of its key parks here, its flight claimed and its
-    /// raw computation not begun, until the rendezvous releases it. Called
-    /// with no memo or flight lock held.
+    /// raw computation not begun, until the rendezvous releases it or the
+    /// producer's own request is cancelled. Called with no memo or flight
+    /// lock held.
     #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
-    pub(crate) fn hold_for_flight_rendezvous(&self) {
+    pub(crate) fn hold_for_flight_rendezvous(
+        &self,
+        flags: &crate::resolver_core::resolver_context::RequestFlags,
+    ) {
         if self.independent {
             return;
         }
         if let Some(rendezvous) = self.store.armed_flight_rendezvous() {
-            rendezvous.hold_producer(self.prepared.key(), &self.inflight);
+            rendezvous.hold_producer(self.prepared.key(), &self.inflight, flags);
         }
     }
 

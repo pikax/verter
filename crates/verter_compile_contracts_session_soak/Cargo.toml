@@ -1,0 +1,26 @@
+[package]
+name = "verter_compile_contracts_session_soak"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Soak-support feature-profile compile contracts for verter_session"
+publish = false
+
+[[bin]]
+name = "verter_compile_contracts_session_soak"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+trybuild = "1.0"
+# The soak/tooling runner's own profile: the flight rendezvous reaches a
+# plain consumer only through verter_session's default-off `soak-support`
+# forwarding — never through `test-support` unification. verter_type_engine
+# stays feature-less here so the fixture's engine access rides that
+# forwarding alone.
+verter_session = { path = "../verter_session", features = ["soak-support"] }
+verter_type_engine = { path = "../verter_type_engine" }
