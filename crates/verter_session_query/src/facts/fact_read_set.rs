@@ -1180,8 +1180,14 @@ pub fn signature_work_for_tests() -> usize {
 /// lane verifies the precondition it depends on and a non-canonical input
 /// falls back to the ordinary observation path, which sorts it.
 fn is_canonical_run(run: &[FactVersionRef]) -> bool {
-    run.windows(2)
-        .all(|pair| compare_fact_refs(&pair[0], &pair[1]) == std::cmp::Ordering::Less)
+    let mut index = 1;
+    while index < run.len() {
+        if compare_fact_refs(&run[index - 1], &run[index]) != std::cmp::Ordering::Less {
+            return false;
+        }
+        index += 1;
+    }
+    true
 }
 
 /// A signature verified to be a canonical run — strictly increasing under
