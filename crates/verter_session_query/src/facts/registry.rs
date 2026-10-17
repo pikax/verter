@@ -150,6 +150,7 @@ impl AsRef<str> for InternedGlobPattern {
     serde::Serialize,
     serde::Deserialize,
     verter_no_typeexpr::NoTypeExpr,
+    verter_retention::heap_size::HeapSize,
 )]
 pub enum SymbolSpace {
     Type,

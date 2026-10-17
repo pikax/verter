@@ -86,6 +86,7 @@ impl EngineStores {
         ownership: crate::semantic_query_memo::GraphOwnership,
     ) -> (Self, OutputAuthority, SurfaceClaimAuthority) {
         let retention_account = Arc::clone(store_account.get());
+        let caches = store_account.clone();
         let graph = Arc::new(
             match provenance {
                 Some(prov) => SemanticGraphStore::with_provenance_and_ownership(
@@ -106,13 +107,23 @@ impl EngineStores {
                 &graph,
             ),
             graph,
-            flow_slice: Arc::new(crate::cache_runtime::flow_slice_node::FlowSliceStores::new()),
+            flow_slice: Arc::new(
+                crate::cache_runtime::flow_slice_node::FlowSliceStores::new()
+                    .charged_to(caches.clone()),
+            ),
             intrinsics: Arc::new(crate::intrinsic_registry::IntrinsicRegistry::with_defaults()),
             imported_registry: Arc::new(ImportedRegistryDb::with_counter(Arc::clone(cache_live))),
-            declarations: Arc::new(DeclarationLookupDb::with_counter(Arc::clone(cache_live))),
-            resolvability: Arc::new(ResolvabilityDb::with_counter(Arc::clone(cache_live))),
-            owner_collections: Arc::new(OwnerCollectionDb::with_counter(Arc::clone(cache_live))),
-            shapes: Arc::new(ShapeCacheDb::with_counter(Arc::clone(cache_live))),
+            declarations: Arc::new(
+                DeclarationLookupDb::with_counter(Arc::clone(cache_live))
+                    .charged_to(caches.clone()),
+            ),
+            resolvability: Arc::new(
+                ResolvabilityDb::with_counter(Arc::clone(cache_live)).charged_to(caches.clone()),
+            ),
+            owner_collections: Arc::new(
+                OwnerCollectionDb::with_counter(Arc::clone(cache_live)).charged_to(caches.clone()),
+            ),
+            shapes: Arc::new(ShapeCacheDb::with_counter(Arc::clone(cache_live)).charged_to(caches)),
             identities: Arc::new(crate::identity_interner::IdentityInterner::new(
                 retention_account,
             )),

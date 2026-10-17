@@ -51,7 +51,9 @@ pub enum ExecutableRegionKind {
 }
 
 /// One node of the flow graph.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, verter_retention::heap_size::HeapSize,
+)]
 pub struct FlowNodeId(u32);
 
 impl FlowNodeId {

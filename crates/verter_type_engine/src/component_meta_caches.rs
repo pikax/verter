@@ -399,9 +399,18 @@ pub type DeclarationLookupKey = (
 );
 
 pub struct DeclarationLookupDb {
-    entries: DashMap<DeclarationLookupKey, Arc<CacheEntry<Arc<ResolvedTypeDeclaration>>>>,
+    entries: DashMap<
+        DeclarationLookupKey,
+        Arc<
+            CacheEntry<
+                verter_session_query::retention::heap_size::OwnedTree<ResolvedTypeDeclaration>,
+            >,
+        >,
+    >,
     inflight: InflightTable<QueryFlightKey<DeclarationLookupKey>>,
     live_counter: Arc<AtomicU64>,
+    /// The account this cache's entries are charged to.
+    retention: verter_session_query::retention::StoreAccount,
 }
 
 impl DeclarationLookupDb {
@@ -410,13 +419,14 @@ impl DeclarationLookupDb {
     ) -> crate::project_semantic_dispatch::memo::SingleEntryAttachment<
         '_,
         DeclarationLookupKey,
-        Arc<ResolvedTypeDeclaration>,
+        verter_session_query::retention::heap_size::OwnedTree<ResolvedTypeDeclaration>,
     > {
         crate::project_semantic_dispatch::memo::SingleEntryAttachment::new(
             &self.entries,
             &self.inflight,
             &self.live_counter,
             crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION,
+            std::sync::Arc::clone(self.retention.get()),
         )
     }
     #[cfg(any(test, feature = "test-support"))]
@@ -440,6 +450,7 @@ impl DeclarationLookupDb {
             entries: DashMap::new(),
             inflight: InflightTable::new(),
             live_counter,
+            retention: verter_session_query::retention::StoreAccount::default(),
         }
     }
 
@@ -483,6 +494,17 @@ impl Default for DeclarationLookupDb {
     }
 }
 
+impl DeclarationLookupDb {
+    /// This cache, its entries charged to `account`.
+    pub(crate) fn charged_to(
+        mut self,
+        account: verter_session_query::retention::StoreAccount,
+    ) -> Self {
+        self.retention = account;
+        self
+    }
+}
+
 // ===========================================================================
 // 3. ResolvabilityDb — `(canonical, owner, name) → bool`
 // ===========================================================================
@@ -497,6 +519,8 @@ pub struct ResolvabilityDb {
     entries: DashMap<ResolvabilityKey, Arc<CacheEntry<bool>>>,
     inflight: InflightTable<QueryFlightKey<ResolvabilityKey>>,
     live_counter: Arc<AtomicU64>,
+    /// The account this cache's entries are charged to.
+    retention: verter_session_query::retention::StoreAccount,
 }
 
 impl ResolvabilityDb {
@@ -509,6 +533,7 @@ impl ResolvabilityDb {
             &self.inflight,
             &self.live_counter,
             crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION,
+            std::sync::Arc::clone(self.retention.get()),
         )
     }
     #[cfg(any(test, feature = "test-support"))]
@@ -532,6 +557,7 @@ impl ResolvabilityDb {
             entries: DashMap::new(),
             inflight: InflightTable::new(),
             live_counter,
+            retention: verter_session_query::retention::StoreAccount::default(),
         }
     }
 
@@ -575,6 +601,17 @@ impl Default for ResolvabilityDb {
     }
 }
 
+impl ResolvabilityDb {
+    /// This cache, its entries charged to `account`.
+    pub(crate) fn charged_to(
+        mut self,
+        account: verter_session_query::retention::StoreAccount,
+    ) -> Self {
+        self.retention = account;
+        self
+    }
+}
+
 // ===========================================================================
 // 4. OwnerCollectionDb — `(canonical, owner, name) → Option<AuthoredBodyLocator>`
 //
@@ -605,6 +642,8 @@ pub struct OwnerCollectionDb {
     >,
     inflight: InflightTable<QueryFlightKey<OwnerCollectionKey>>,
     live_counter: Arc<AtomicU64>,
+    /// The account this cache's entries are charged to.
+    retention: verter_session_query::retention::StoreAccount,
 }
 
 impl OwnerCollectionDb {
@@ -620,6 +659,7 @@ impl OwnerCollectionDb {
             &self.inflight,
             &self.live_counter,
             crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION,
+            std::sync::Arc::clone(self.retention.get()),
         )
     }
     #[cfg(any(test, feature = "test-support"))]
@@ -643,6 +683,7 @@ impl OwnerCollectionDb {
             entries: DashMap::new(),
             inflight: InflightTable::new(),
             live_counter,
+            retention: verter_session_query::retention::StoreAccount::default(),
         }
     }
 
@@ -683,6 +724,17 @@ impl OwnerCollectionDb {
 impl Default for OwnerCollectionDb {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl OwnerCollectionDb {
+    /// This cache, its entries charged to `account`.
+    pub(crate) fn charged_to(
+        mut self,
+        account: verter_session_query::retention::StoreAccount,
+    ) -> Self {
+        self.retention = account;
+        self
     }
 }
 
@@ -747,7 +799,7 @@ impl Default for OwnerCollectionDb {
 /// The `MemberValueNode` variant does not need this marker: its
 /// `node: MemberShapeNodeSubject` field is itself module-private to
 /// construct, which already seals that arm.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 struct ConstructionSeal;
 
 /// Sealed graph-node identity for the regular member-shape subject: the
@@ -761,7 +813,7 @@ struct ConstructionSeal;
 /// [`crate::semantic_query::SemanticNodeId`] — so the key's hash bytes are
 /// unchanged versus a bare ordinal field. This is a representation/naming
 /// seal, not a stale-entry compatibility change.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 struct MemberShapeNodeSubject(crate::semantic_query::SemanticNodeId);
 
 impl MemberShapeNodeSubject {
@@ -802,7 +854,7 @@ impl MemberShapeNodeSubject {
 /// registry-side walker enqueues differently than a per-macro
 /// shape solver) and by the cache key to keep slot identity
 /// disjoint across surfaces.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum PublishedSurfaceKind {
     Props,
     Emits,
@@ -844,7 +896,7 @@ pub enum PublishedSurfaceKind {
 /// code must NEVER reach this variant at a hop it intends to walk.
 // The narrowing variants are built by the path-precise projection substrate.
 #[allow(dead_code)]
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum KeyFilter {
     All,
     Include(Arc<[crate::semantic_query::PropertyKey]>),
@@ -908,7 +960,7 @@ impl KeyFilter {
 /// yet its type cannot be named outside this module, so the variant
 /// cannot be struct-constructed externally. That "more private than the
 /// item" shape IS the sealing idiom, not a leak.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 #[allow(private_interfaces)]
 pub enum ShapeSubject {
     /// Member-value graph-node subject. Sibling members whose
@@ -964,7 +1016,7 @@ impl ShapeSubject {
 /// work and distinct results. Without the demand axis a transit lower
 /// would poison the publication slot (or vice versa) the first time
 /// both routes touched the same subject.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub struct ShapeDemand {
     /// Path segments narrowing the requested shape. Empty path =
     /// whole subject. Non-empty path = path-precise demand: projectors
@@ -1024,7 +1076,7 @@ impl ShapeDemand {
 /// hash/equality identity byte-identical and therefore needs NO
 /// `CACHE_CLUSTER_SCHEMA_VERSION` bump (the schema version guards
 /// PERSISTED artifact layouts, not in-memory DashMap key identity).
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub struct ShapeCacheKey {
     roots: crate::semantic_query_memo::node_roots::IdentityNodeRoots,
     /// Module-private so no other module (in-crate or downstream) can
@@ -1182,6 +1234,8 @@ pub struct ShapeCacheDb {
     /// Cache-cluster schema version this Db was constructed under. See
     /// [`crate::cache_schema`] for the contract.
     schema_version: u32,
+    /// The account this cache's entries are charged to.
+    retention: verter_session_query::retention::StoreAccount,
 }
 
 impl ShapeCacheDb {
@@ -1197,6 +1251,7 @@ impl ShapeCacheDb {
             &self.inflight,
             &self.live_counter,
             self.schema_version,
+            std::sync::Arc::clone(self.retention.get()),
         )
     }
     #[cfg(any(test, feature = "test-support"))]
@@ -1235,6 +1290,7 @@ impl ShapeCacheDb {
             inflight: InflightTable::new(),
             live_counter,
             schema_version,
+            retention: verter_session_query::retention::StoreAccount::default(),
         }
     }
 
@@ -1296,17 +1352,13 @@ impl ShapeCacheDb {
             },
             ProjectionMode::Shallow,
         );
-        let entry = Arc::new(CacheEntry {
-            value: MaterializedOutputTypeExpr::from_type_expr_for_test(
-                None,
-                TypeExpr::Unknown(verter_type_expr::UnknownValue::missing_output()),
-                crate::semantic_query::DepSignature::default(),
-                false,
-            ),
-            signature: ReadSetSignature::empty(),
-            self_root_canonicals: Arc::from(vec![Arc::<str>::from(key.subject.scope_canonical())]),
-            validated_at_generation: 0,
-        });
+        let value = MaterializedOutputTypeExpr::from_type_expr_for_test(
+            None,
+            TypeExpr::Unknown(verter_type_expr::UnknownValue::missing_output()),
+            crate::semantic_query::DepSignature::default(),
+            false,
+        );
+        let entry = Arc::new(self.charged_entry(&key, value));
         self.entries.insert(key, entry);
         self.live_counter.fetch_add(1, Ordering::Relaxed);
     }
@@ -1361,17 +1413,13 @@ impl ShapeCacheDb {
             crate::semantic_query::SyntheticBindingId::from_carrier_key(carrier),
             mode,
         );
-        let entry = Arc::new(CacheEntry {
-            value: MaterializedOutputTypeExpr::from_type_expr_for_test(
-                None,
-                deep_type,
-                crate::semantic_query::DepSignature::default(),
-                false,
-            ),
-            signature: ReadSetSignature::empty(),
-            self_root_canonicals: Arc::from(vec![Arc::<str>::from(key.subject.scope_canonical())]),
-            validated_at_generation: 0,
-        });
+        let value = MaterializedOutputTypeExpr::from_type_expr_for_test(
+            None,
+            deep_type,
+            crate::semantic_query::DepSignature::default(),
+            false,
+        );
+        let entry = Arc::new(self.charged_entry(&key, value));
         // Bump `live_counter` ONLY on a genuine new key. `DashMap::insert`
         // returns `Some(old)` on overwrite, `None` on a fresh insert — an
         // unconditional `fetch_add` over-counts when two same-identity
@@ -1408,6 +1456,36 @@ impl ShapeCacheDb {
 impl Default for ShapeCacheDb {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl ShapeCacheDb {
+    /// A fixture entry for `key`, charged like a published one.
+    #[cfg(any(test, feature = "test-support"))]
+    fn charged_entry(
+        &self,
+        key: &ShapeCacheKey,
+        value: MaterializedOutputTypeExpr,
+    ) -> CacheEntry<MaterializedOutputTypeExpr> {
+        let footprint = verter_session_query::retention::heap_size::footprint(&(key, &value));
+        CacheEntry::admit::<ShapeCacheKey>(
+            value,
+            ReadSetSignature::empty(),
+            Arc::from(vec![Arc::<str>::from(key.subject.scope_canonical())]),
+            0,
+            footprint,
+            self.retention.get(),
+        )
+        .unwrap_or_else(|_| panic!("a fixture entry is admitted"))
+    }
+
+    /// This cache, its entries charged to `account`.
+    pub(crate) fn charged_to(
+        mut self,
+        account: verter_session_query::retention::StoreAccount,
+    ) -> Self {
+        self.retention = account;
+        self
     }
 }
 

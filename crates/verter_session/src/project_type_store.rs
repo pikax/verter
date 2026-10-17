@@ -1284,7 +1284,9 @@ impl ProjectTypeStore {
             app_config_no_override_proof: Arc::new(app_config_no_override_proof),
             compile_cache_db: CompileCacheDb::new(),
             compile_output_pure_content:
-                crate::compile_output_node::CompileOutputNodePureContent::new(),
+                crate::compile_output_node::CompileOutputNodePureContent::with_retention_account(
+                    retention_account.clone(),
+                ),
             flow_slice,
             derived_raw_cache_db: DerivedRawCacheDb::new(),
             dependency_cache_db: DependencyCacheDb::new(),

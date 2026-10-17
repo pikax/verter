@@ -56,13 +56,13 @@ impl Drop for RootOwner {
 
 /// One immutable retained operand multiset. Clones share one root reservation;
 /// separate owners acquire separate counts, including repeated operands.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, verter_retention::heap_size::HeapSize)]
 pub struct NodeRootSet(Option<verter_session_query::retention::owned::Owned<RootOwner>>);
 
 /// An ownership attachment is transport, never semantic key identity.
 /// Each wrapper holds its issuing arena's reservation even when the weak
 /// process-wide interner shares equal content with another arena.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, verter_retention::heap_size::HeapSize)]
 pub(crate) struct IdentityNodeRoots(pub(crate) NodeRootSet);
 
 impl IdentityNodeRoots {

@@ -210,7 +210,9 @@ pub type HashValue = Hash16;
 /// graph. The ID is handed out by the graph interner and is only meaningful
 /// inside one [`ProjectTypeStore`](crate::project_type_store::ProjectTypeStore)
 /// for one project generation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, verter_retention::heap_size::HeapSize,
+)]
 pub struct SemanticNodeId(pub u64);
 
 /// Canonical lexical identity of one conditional-`infer` declaration.
@@ -1351,7 +1353,7 @@ impl ClassExpressionIdentity {
 /// [`SemanticNodeId`], a `value_node` ordinal, or any other content/version
 /// hash. The architecture guard `synthetic_binding_identity_is_content_free`
 /// pins it.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub struct SyntheticBindingId {
     /// Canonical id of the component scope the binding lives in.
     pub scope_canonical_id: OwnedStr,
@@ -2864,7 +2866,7 @@ pub type IndexKey = AuthoredPropertyKey;
 ///   parameters". Used by the materialization cycle gate's per-hop
 ///   `Instantiate` (`ClassifyMaterializationCycleGate`).
 ///   Existing Navigate/Expanded callers see no change.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum ProjectionMode {
     Identity,
     Navigate,
@@ -2902,7 +2904,7 @@ impl From<ProjectionMode> for verter_audit::ProjectionModeTag {
 /// caller can substitute / inspect the operator structurally without
 /// paying for member materialisation that no published demand selects
 /// through.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum ReductionDemand {
     /// The caller will publish the result on a consumer-visible
     /// surface. Operators reduce when `mode` admits.
@@ -2959,7 +2961,17 @@ pub enum ReductionDemand {
 /// family and mapped-member context encoding. It contains no content/version
 /// state; prepared-declaration facts and file self-roots remain the sole value
 /// versioning rail (R6).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, verter_no_typeexpr::NoTypeExpr)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    verter_no_typeexpr::NoTypeExpr,
+    verter_retention::heap_size::HeapSize,
+)]
 pub enum VueHeritagePolicy {
     /// Retain the complete TypeScript heritage surface. This is the default
     /// for TSC, component-meta, slots, and every non-runtime query.
@@ -2992,7 +3004,17 @@ pub enum VueHeritagePolicy {
 /// macro-root surface and a plain structural surface of the SAME node
 /// never collide on one memo slot. It is NOT an env-hash dimension (R21)
 /// — it is a query-identity dimension, like the projection mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, verter_no_typeexpr::NoTypeExpr)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Default,
+    verter_no_typeexpr::NoTypeExpr,
+    verter_retention::heap_size::HeapSize,
+)]
 pub enum SurfaceProvenanceContext {
     /// Plain structural lowering. Object members reached here carry
     /// `declared_in_macro_type_arg = false`. This is the default for
@@ -3032,7 +3054,17 @@ pub enum SurfaceProvenanceContext {
 /// `interface Props extends Base` arm is `Heritage` even though it is
 /// `Base`'s own-body member, because the consuming declaration's heritage-arm
 /// context flows into the carrier resolution.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, verter_no_typeexpr::NoTypeExpr)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    verter_no_typeexpr::NoTypeExpr,
+    verter_retention::heap_size::HeapSize,
+)]
 pub enum MemberMergeRole {
     /// Reached via an authored reference / synthesized construction — an
     /// authored intersection's reference arm (`type Props = Base & { … }`'s
@@ -3163,7 +3195,7 @@ impl PartialEq<MemberMergeRole> for MergeRoleStamp {
 /// folded into `FamilyKey` for every context-bearing projection-reduction
 /// family so a macro-root surface and a structural surface of
 /// the same node cache in distinct slots.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub struct ProjectionReductionContext {
     pub mode: ProjectionMode,
     pub demand: ReductionDemand,
@@ -5211,6 +5243,17 @@ impl DepSignature {
     }
 }
 
+impl verter_session_query::retention::heap_size::HeapSize for DepSignature {
+    /// A nonempty rail is an owned allocation, charged by its own cell; the
+    /// static empty rail is never charged.
+    fn heap_size<'t>(
+        &'t self,
+        meter: &mut verter_session_query::retention::heap_size::HeapMeter<'_, 't>,
+    ) -> usize {
+        self.owned().map_or(0, |rail| rail.offer(meter.handles()))
+    }
+}
+
 impl std::ops::Deref for DepSignature {
     type Target = [DepEntry];
     fn deref(&self) -> &[DepEntry] {
@@ -5251,7 +5294,9 @@ impl Default for DepSignature {
 /// finite-large terminating resolution is COMPLETE regardless of op count.
 /// Only a real budget *exhaustion early-exit* (`BUDGET_EXCEEDED`) — which
 /// arises only on a genuine armed-fuse runaway trip — counts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Hash, verter_retention::heap_size::HeapSize,
+)]
 pub struct PartialReasonSet(u32);
 
 impl PartialReasonSet {
@@ -6096,7 +6141,7 @@ pub struct SemanticGraphStats {
 /// error carries them, but no public accessor hands the operands out: the
 /// node that carries the error owns them, and a reader reaches them only
 /// through that node's lease.
-#[derive(Clone, PartialEq, Eq, Hash, Default)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, verter_retention::heap_size::HeapSize)]
 pub struct RecursiveRefArgs(OwnedSlice<SemanticNodeId>);
 
 impl RecursiveRefArgs {
@@ -6166,7 +6211,7 @@ impl<const N: usize> From<[SemanticNodeId; N]> for RecursiveRefArgs {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_retention::heap_size::HeapSize)]
 pub enum QueryError {
     /// Execution validity refused delivery, independently of semantic quality.
     ExecutionAborted(ExecutionAbort),
@@ -6750,7 +6795,7 @@ pub enum SemanticQueryValue {
 /// Content-free discriminant for [`SemanticQueryValue`]. Used by
 /// [`QueryError::ValueDomainMismatch`] to name a value's domain without a
 /// payload.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum SemanticQueryValueTag {
     TypeNode,
     ObjectProjection,

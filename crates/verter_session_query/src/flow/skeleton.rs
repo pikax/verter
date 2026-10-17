@@ -13,7 +13,9 @@ use verter_no_typeexpr::NoTypeExpr;
 use crate::retention::resident::{resident, ResidentCharge, ResidentKind, RESIDENT_SLOTS};
 
 /// Interned identifier / property-key name within one skeleton.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, verter_retention::heap_size::HeapSize,
+)]
 pub struct FlowNameId(pub u32);
 
 impl FlowNameId {
@@ -25,7 +27,9 @@ impl FlowNameId {
 }
 
 /// One entry of the lexical binding index.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, verter_retention::heap_size::HeapSize,
+)]
 pub struct SkeletonBindingId(pub u32);
 
 impl SkeletonBindingId {
@@ -57,7 +61,9 @@ impl SkeletonRegionId {
 }
 
 /// One tracked expression site.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, verter_retention::heap_size::HeapSize,
+)]
 pub struct SkeletonExprSiteId(pub u32);
 
 impl SkeletonExprSiteId {
@@ -99,7 +105,9 @@ impl SkeletonClosureId {
 }
 
 /// One `return` site of the indexed function.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, verter_retention::heap_size::HeapSize,
+)]
 pub struct SkeletonReturnSiteId(pub u32);
 
 impl SkeletonReturnSiteId {
@@ -161,7 +169,9 @@ pub struct SkeletonRegion {
 }
 
 /// The kind of one lexical binding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, verter_retention::heap_size::HeapSize,
+)]
 pub enum SkeletonBindingKind {
     /// A formal parameter (destructured identifiers included).
     Param,
@@ -568,7 +578,9 @@ pub enum SkeletonPathSegment {
 }
 
 /// Whether a write definitely happens when its site evaluates.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, verter_retention::heap_size::HeapSize,
+)]
 pub enum SkeletonWriteCertainty {
     /// The write happens whenever the site evaluates.
     Definite,

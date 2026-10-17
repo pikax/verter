@@ -1989,7 +1989,15 @@ pub struct ScriptTypeEnhancements {
 
 /// TODO(type-provider): Resolved type from TSGO or other type checker.
 /// Initially empty — filled in by the type checker integration layer.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct ResolvedTypeInfo {
     /// e.g., `"Ref<number>"`, `"string"`, `"() => void"`.

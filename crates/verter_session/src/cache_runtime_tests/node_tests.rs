@@ -39,6 +39,14 @@ impl ArtifactNode for CountingArtifactNode {
     type Key = u32;
     type Value = String;
 
+    fn entry_footprint(
+        &self,
+        key: &Self::Key,
+        value: &Self::Value,
+    ) -> verter_session_query::retention::Footprint {
+        verter_retention::heap_size::footprint(&(key, value))
+    }
+
     fn entries(&self) -> &dashmap::DashMap<Self::Key, Arc<CacheEntry<Self::Value>>> {
         &self.entries
     }
@@ -544,6 +552,14 @@ impl WideArtifactNode {
 impl ArtifactNode for WideArtifactNode {
     type Key = u32;
     type Value = String;
+
+    fn entry_footprint(
+        &self,
+        key: &Self::Key,
+        value: &Self::Value,
+    ) -> verter_session_query::retention::Footprint {
+        verter_retention::heap_size::footprint(&(key, value))
+    }
 
     fn entries(&self) -> &dashmap::DashMap<Self::Key, Arc<CacheEntry<Self::Value>>> {
         &self.entries

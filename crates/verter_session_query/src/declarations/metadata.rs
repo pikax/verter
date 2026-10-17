@@ -14,7 +14,7 @@ pub struct ResolvedExportTarget {
 }
 
 /// The syntactic kind of a resolved type declaration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub enum ResolvedDeclarationKind {
     Interface,
     TypeAlias,
@@ -31,7 +31,7 @@ pub struct ResolvedLocalTypeSymbolMetadata {
 
 /// Where a requested type name resolved to: the declaring file, owner,
 /// resolved name, span and kind.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub struct ResolvedTypeDeclaration {
     pub requested_name: String,
     pub declaration_id: Option<DeclarationId>,

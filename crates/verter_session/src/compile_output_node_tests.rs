@@ -400,12 +400,14 @@ fn session_peek_last_good_misses_when_validate_facts_returns_false() {
     }]);
     let admission = SignatureAdmission::Cacheable(ReadSetSignature::new(facts));
     let mut v = value([0x12u8; 16]);
+    let mut products = crate::types::CompileProducts::clone(&v.products);
     if let crate::types::CompileProducts::Produced {
         last_good_outputs, ..
-    } = &mut v.products
+    } = &mut products
     {
         *last_good_outputs = Some(FxHashMap::default());
     }
+    v.products = verter_retention::heap_size::owned_tree(products);
     node.publish(&mut state, 42, admission, v, 0);
 
     let last_good = node.peek_last_good(&state, 42, |_sig| false);
@@ -430,12 +432,14 @@ fn session_peek_last_good_serves_on_empty_fact_rail_without_validator_call() {
     let mut state = ProfileState::default();
     let admission = SignatureAdmission::Cacheable(ReadSetSignature::new(empty_fact_signature()));
     let mut v = value([0x34u8; 16]);
+    let mut products = crate::types::CompileProducts::clone(&v.products);
     if let crate::types::CompileProducts::Produced {
         last_good_outputs, ..
-    } = &mut v.products
+    } = &mut products
     {
         *last_good_outputs = Some(FxHashMap::default());
     }
+    v.products = verter_retention::heap_size::owned_tree(products);
     node.publish(&mut state, 42, admission, v, 0);
 
     let last_good = node.peek_last_good(&state, 42, |_sig| {

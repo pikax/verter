@@ -75,7 +75,9 @@ use super::singleflight::InflightTable;
 /// path (empty = whole return). Further demand axes (the
 /// `ReturnProjectionDemand` lattice point with its `EvalPolicy`) land
 /// with the `FlowReturn` key axes and map onto this identity.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, verter_session_query::retention::heap_size::HeapSize,
+)]
 pub struct FlowSliceDemandIdentity {
     /// The demanded projection path under the return value, in authored
     /// key text (empty = the whole return).
@@ -84,7 +86,9 @@ pub struct FlowSliceDemandIdentity {
 
 /// [`FlowSliceHashNode`] cache key: function content identity plus the
 /// demand identity.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, verter_session_query::retention::heap_size::HeapSize,
+)]
 pub struct FlowSliceHashKey {
     /// The content-pinned function identity.
     pub function: FlowSliceFunctionKey,
@@ -97,7 +101,9 @@ pub struct FlowSliceHashKey {
 /// semantic slice hasher mints it — so this key is unconstructible
 /// until the hash node's compute has run: the slice hash PRECEDES the
 /// lowered lookup by type, not by convention.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, verter_session_query::retention::heap_size::HeapSize,
+)]
 pub struct FlowSliceLoweredKey {
     /// The slice's hash-node key.
     pub hash_key: FlowSliceHashKey,
@@ -261,6 +267,7 @@ impl FunctionFlowGraphStore {
 /// `pub` only so the hermetic test surface (`crate::for_tests`) can name
 /// the carrier; the module path stays crate-private, so production code
 /// outside this module tree cannot reach it.
+#[derive(verter_session_query::retention::heap_size::HeapSize)]
 pub struct PlannedFlowSlice {
     /// The planner-produced slice identity (the lowered-lookup key input).
     hash: FlowSliceHash,
@@ -300,10 +307,11 @@ impl PlannedFlowSlice {
 /// The planned arm carries the minted slice identity AND the retained
 /// plan it was minted from, so lowering and demand planning share the one
 /// cold planning run (hash-then-lower without a re-plan).
-#[derive(Clone)]
+#[derive(Clone, verter_session_query::retention::heap_size::HeapSize)]
 pub enum FlowSliceHashOutcome {
-    /// The planned slice: minted identity plus the retained plan.
-    Planned(Arc<PlannedFlowSlice>),
+    /// The planned slice: minted identity plus the retained plan, a
+    /// self-charged allocation every reader shares.
+    Planned(verter_session_query::retention::heap_size::OwnedTree<PlannedFlowSlice>),
     /// The typed budget refusal — a genuine partial: returned, never
     /// admitted, and carrying NO slice hash, so the lowered store cannot
     /// even be addressed for it.
@@ -366,11 +374,11 @@ impl FlowSliceHashNode {
         &self,
         key: &FlowSliceHashKey,
         slice_hash: FlowSliceHash,
-    ) -> Option<Arc<PlannedFlowSlice>> {
+    ) -> Option<verter_session_query::retention::heap_size::OwnedTree<PlannedFlowSlice>> {
         let entry = self.entries.get(key)?;
         match &entry.value {
             FlowSliceHashOutcome::Planned(planned) if planned.hash == slice_hash => {
-                Some(Arc::clone(planned))
+                Some(planned.clone())
             }
             _ => None,
         }
@@ -385,7 +393,10 @@ impl FlowSliceHashNode {
 /// the hash node's RETAINED plan (the one cold planning run — it never
 /// re-plans) and NEVER computes a slice hash.
 pub struct FlowSliceLoweredBodyNode {
-    pub(crate) entries: DashMap<FlowSliceLoweredKey, Arc<CacheEntry<Arc<FlowSliceIR>>>>,
+    pub(crate) entries: DashMap<
+        FlowSliceLoweredKey,
+        Arc<CacheEntry<verter_session_query::retention::heap_size::OwnedTree<FlowSliceIR>>>,
+    >,
     pub(crate) inflight: InflightTable<QueryFlightKey<FlowSliceLoweredKey>>,
 }
 
@@ -431,9 +442,27 @@ pub struct FlowSliceStores {
     /// constrained test host can re-arm the budget the nodes read.
     #[cfg(any(test, feature = "test-support"))]
     budget: FlowSliceBudgetCell,
+    /// The account both nodes' entries are charged to.
+    retention: verter_session_query::retention::StoreAccount,
 }
 
 impl FlowSliceStores {
+    /// These stores, their entries charged to `account`.
+    pub(crate) fn charged_to(
+        mut self,
+        account: verter_session_query::retention::StoreAccount,
+    ) -> Self {
+        self.retention = account;
+        self
+    }
+
+    /// The account the nodes' entries are charged to.
+    pub(crate) fn retention_account(
+        &self,
+    ) -> Arc<verter_session_query::retention::SemanticRetentionAccount> {
+        Arc::clone(self.retention.get())
+    }
+
     /// Production storage: armed default budget and one shared graph store.
     pub fn new() -> Self {
         let graphs = Arc::new(FunctionFlowGraphStore::new());
@@ -450,6 +479,7 @@ impl FlowSliceStores {
             demand_plans: AtomicU64::new(0),
             #[cfg(any(test, feature = "test-support"))]
             budget,
+            retention: verter_session_query::retention::StoreAccount::default(),
         }
     }
 
