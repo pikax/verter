@@ -804,6 +804,9 @@ impl SemanticGraphStore {
         signatures.bind_graph(&arena.core);
         signatures.bind_retention_account(retention_account.get());
         let canonical_to_entries = CanonicalToEntries::charged(retention_account.get());
+        let reverse_index_pending = Mutex::new(reverse_index::PendingRegistrations::charged(
+            retention_account.get(),
+        ));
         let dep_signature_interner = DepSignatureInterner::charged(retention_account.get());
         Self {
             operand_identity: Default::default(),
@@ -854,7 +857,7 @@ impl SemanticGraphStore {
             #[cfg(any(test, feature = "test-support"))]
             reverse_index_registration_visits: Default::default(),
             canonical_to_entries,
-            reverse_index_pending: Default::default(),
+            reverse_index_pending,
             dep_signature_interner,
             memo_budget: Default::default(),
             candidate_admission_seq: Default::default(),
@@ -1890,7 +1893,7 @@ impl SemanticGraphStore {
                 }
             }
             self.canonical_to_entries.clear_shards();
-            *self.reverse_index_pending.lock() = Default::default();
+            let _ = self.reverse_index_pending.lock().take();
             count
         };
         // Test-only injection point: a barrier armed by

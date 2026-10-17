@@ -61,7 +61,11 @@ pub(super) fn registered_canonical_count(
 /// read registers exactly those instead of walking every resident family.
 /// Locked only while the family memo's `entries` lock is held
 /// (`entries → pending`), so it never contends.
-#[derive(Default)]
+///
+/// The list is charged, pinned, while it waits: its backing by capacity and
+/// the boxes each entry's family-key clone copies (the clone shares the
+/// key's `Arc`s and owned names, which keep their own charges). The read
+/// that takes the list gives the charge back.
 pub(super) struct PendingRegistrations {
     /// Each publish's family and admission sequence, in publish order. An
     /// entry whose candidate was displaced or evicted before the read
@@ -73,6 +77,11 @@ pub(super) struct PendingRegistrations {
     /// in one walk. The list therefore never outgrows the memo it indexes,
     /// and the walk costs no more per publish than the list it replaces.
     overflowed: bool,
+    /// The heap the waiting family-key clones copied.
+    key_heap: usize,
+    /// The bytes `storage` counts for the list: its backing plus `key_heap`.
+    charged: usize,
+    storage: IndexStorage,
 }
 
 /// What a reverse-index read registers.
@@ -86,6 +95,22 @@ pub(super) enum PendingWork {
 }
 
 impl PendingRegistrations {
+    /// An empty list whose storage is charged to `account`.
+    pub(super) fn charged(
+        account: &Arc<verter_session_query::retention::SemanticRetentionAccount>,
+    ) -> Self {
+        Self {
+            published: Vec::new(),
+            overflowed: false,
+            key_heap: 0,
+            charged: 0,
+            storage: IndexStorage {
+                account: Some(Arc::clone(account)),
+                ..IndexStorage::default()
+            },
+        }
+    }
+
     /// Note one published candidate; `resident_families` is the memo's
     /// family count after the publish.
     pub(super) fn note(
@@ -100,20 +125,43 @@ impl PendingRegistrations {
         if self.published.len() >= resident_families {
             self.published = Vec::new();
             self.overflowed = true;
+            self.release();
             return;
         }
         self.published.push((family.clone(), admission_seq));
+        self.key_heap += super::family_footprint::family_key_clone_heap_bytes(family).bytes;
+        let bytes =
+            verter_session_query::retention::allocation::vec_bytes(&self.published) + self.key_heap;
+        let before = std::mem::replace(&mut self.charged, bytes);
+        self.storage.adjust(bytes, before);
+    }
+
+    /// Bytes the pending list is charged.
+    pub(super) fn storage_charge_bytes(&self) -> usize {
+        self.storage.pin.as_ref().map_or(
+            0,
+            verter_session_query::retention::granular::GranularPin::charged,
+        )
+    }
+
+    /// Give back the charge of a list that no longer waits.
+    fn release(&mut self) {
+        self.key_heap = 0;
+        let before = std::mem::take(&mut self.charged);
+        self.storage.adjust(0, before);
     }
 
     /// Take the registration work a read owes, leaving none pending.
     pub(super) fn take(&mut self) -> PendingWork {
-        let pending = std::mem::take(self);
-        if pending.overflowed {
+        let published = std::mem::take(&mut self.published);
+        let overflowed = std::mem::take(&mut self.overflowed);
+        self.release();
+        if overflowed {
             PendingWork::All
-        } else if pending.published.is_empty() {
+        } else if published.is_empty() {
             PendingWork::None
         } else {
-            PendingWork::Published(pending.published)
+            PendingWork::Published(published)
         }
     }
 }
