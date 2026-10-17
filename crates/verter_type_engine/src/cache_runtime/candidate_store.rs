@@ -75,7 +75,9 @@ type StoredCandidate<V> = Arc<Candidate<FactCandidateDiscriminant, V>>;
 /// Direct-edge reverse index over candidates keyed `(key, admission_seq)`:
 /// a key with several admitted seqs (distinct candidates) registers each,
 /// and a per-canonical walk answers every `(key, seq)` whose receipts
-/// reach the canonical.
+/// reach the canonical. The store charges nothing of its candidates, so the
+/// index charges the process-local account for everything it holds, the
+/// candidates' registrations included.
 type CanonicalReverseIndex<K> = crate::semantic_query_memo::ReceiptReverseIndex<(K, u64), ()>;
 
 /// One slot: a bounded, insertion-ordered candidate list behind a write
@@ -191,7 +193,9 @@ where
     ) -> Self {
         Self {
             slots: DashMap::with_hasher(std::hash::BuildHasherDefault::<FxHasher>::default()),
-            canonical_index: CanonicalReverseIndex::default(),
+            canonical_index: CanonicalReverseIndex::charging_registrations(
+                &verter_session_query::retention::SemanticRetentionAccount::process_local(),
+            ),
             retention_budget,
             live_counter,
             retention_gate: RwLock::new(()),

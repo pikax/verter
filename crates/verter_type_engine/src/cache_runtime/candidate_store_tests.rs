@@ -570,17 +570,19 @@ fn publisher_registration_visible_to_concurrent_invalidator() {
         removed
     });
 
-    // The invalidator MUST be blocked while the publisher is parked —
-    // give it a generous quantum to attempt a forbidden interleave.
-    // Under the pre-fix `retention_gate.read()` invalidator, this thread
-    // would have raced through `canonical_index.remove(canonical)` and
-    // set `inv_done = true` long before the timeout elapses.
-    let park_window = Duration::from_millis(150);
-    let park_start = Instant::now();
-    while park_start.elapsed() < park_window {
+    // The invalidator MUST be blocked while the publisher is parked. Wait
+    // for the observed point where it has ENTERED the exclusive acquire:
+    // parking_lot's writer takes the gate's writer bit first and then
+    // waits for the readers to leave, so `is_locked_exclusive()` turns
+    // true exactly when the invalidator is queued behind the parked
+    // publisher's read guard. A read-side invalidator never sets the bit:
+    // however late it is scheduled, it eventually races through
+    // `canonical_index.reached_by(canonical)` and finishes while the
+    // publisher is still parked, which is the bug pattern. The deadline
+    // is only a hang fuse for an invalidator that does neither.
+    let fuse = Instant::now() + Duration::from_secs(5);
+    loop {
         if inv_done.load(std::sync::atomic::Ordering::SeqCst) {
-            // The invalidator ran while the publisher was parked. That
-            // is the bug pattern.
             barrier.wait(); // unblock publisher so the test can clean up
             publisher.join().unwrap();
             let _ = invalidator.join();
@@ -592,8 +594,21 @@ fn publisher_registration_visible_to_concurrent_invalidator() {
                  is taking retention_gate.read() instead of write()."
             );
         }
-        thread::sleep(Duration::from_millis(2));
+        if store.retention_gate().is_locked_exclusive() {
+            break;
+        }
+        assert!(
+            Instant::now() < fuse,
+            "the invalidator neither entered the exclusive gate acquire \
+             nor completed while the publisher was parked"
+        );
+        thread::yield_now();
     }
+    assert!(
+        !inv_done.load(std::sync::atomic::Ordering::SeqCst),
+        "the invalidator is queued on the gate's write side, so it cannot \
+         have drained while the publisher holds the read side"
+    );
 
     // Release the publisher — it completes its canonical_index insert
     // and drops its guards.

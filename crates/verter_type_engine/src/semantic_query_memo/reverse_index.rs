@@ -38,8 +38,15 @@
 //! index drains to empty with its last candidate. Every edge has one owner
 //! — the node it names: an edge naming a candidate is that candidate's
 //! (charged by its owner through [`ReceiptReverseIndex::candidate_bytes`]),
-//! an edge naming an evidence node is the index's own storage, charged to
-//! its retention account for as long as the index holds it.
+//! an edge naming an evidence node is the index's own storage. Every
+//! allocation the index holds is charged to a retention account for as long
+//! as it is held: by CAPACITY, not by live count, so a table or set that
+//! keeps spare buckets after a partial drain stays charged until it shrinks
+//! or is freed. The candidates' own share is the only part an owner may
+//! charge instead ([`ReceiptReverseIndex::charged`]); an owner that charges
+//! nothing of its candidates leaves all of it to the index
+//! ([`ReceiptReverseIndex::charging_registrations`]). There is no
+//! account-less index: [`Default`] charges the process-local account.
 //!
 //! **Locking.** One leaf mutex guards the whole index; no other lock is
 //! taken while it is held, and evidence the index drops is released after
@@ -119,6 +126,16 @@ const CANONICAL_BUCKET_BYTES: usize = std::mem::size_of::<(Arc<str>, FxHashSet<H
 /// Bytes one evidence node's bucket holds.
 const EVIDENCE_BUCKET_BYTES: usize = std::mem::size_of::<(EvidenceAddr, EvidenceNode)>() + 1;
 
+/// Bytes one bucket of the candidate-id table holds.
+const fn id_bucket_bytes<K>() -> usize {
+    std::mem::size_of::<(K, CandidateId)>() + 1
+}
+
+/// Bytes one bucket of the candidate table holds.
+const fn candidate_bucket_bytes<K, P>() -> usize {
+    std::mem::size_of::<(CandidateId, CandidateNode<K, P>)>() + 1
+}
+
 /// Bytes one edge's bucket holds in the set naming it.
 const EDGE_BYTES: usize = std::mem::size_of::<Holder>() + 1;
 
@@ -153,29 +170,35 @@ pub struct ReverseIndexEdgeOps {
     pub walked: u64,
 }
 
-#[derive(Default)]
+/// The index's charge and the running totals it is figured from.
 struct IndexStorage {
-    account: Option<Arc<SemanticRetentionAccount>>,
+    account: Arc<SemanticRetentionAccount>,
+    /// Whether each candidate's own registration
+    /// ([`ReceiptReverseIndex::candidate_bytes`]) is charged by its owner
+    /// rather than here.
+    candidates_charged_by_owner: bool,
     pin: Option<GranularPin>,
-    /// The index's own live bytes.
-    owned: usize,
+    /// Text blocks of the canonicals the index holds.
+    text: usize,
+    /// Buckets of every holder set — a canonical's holders, an evidence
+    /// node's parents — live or spare.
+    set_slots: usize,
+    /// Edges naming a candidate.
+    candidate_edges: usize,
+    /// Extra canonicals the candidates' lists name.
+    candidate_extras: usize,
 }
 
 impl IndexStorage {
-    /// Settle the pin with the live total. An index without an account
-    /// charges nothing.
-    fn settle(&mut self) {
-        let Some(account) = &self.account else {
-            return;
-        };
-        let pin = self
-            .pin
-            .get_or_insert_with(|| GranularPin::new(account, INDEX_STORAGE_GRANULE));
-        let used = pin.used();
-        if self.owned > used {
-            pin.add(self.owned - used);
-        } else if used > self.owned {
-            pin.sub(used - self.owned);
+    fn new(account: Arc<SemanticRetentionAccount>, candidates_charged_by_owner: bool) -> Self {
+        Self {
+            account,
+            candidates_charged_by_owner,
+            pin: None,
+            text: 0,
+            set_slots: 0,
+            candidate_edges: 0,
+            candidate_extras: 0,
         }
     }
 }
@@ -192,8 +215,8 @@ struct IndexState<K, P> {
     ops: ReverseIndexEdgeOps,
 }
 
-impl<K, P> Default for IndexState<K, P> {
-    fn default() -> Self {
+impl<K, P> IndexState<K, P> {
+    fn new(storage: IndexStorage) -> Self {
         Self {
             canonicals: FxHashMap::default(),
             evidence: FxHashMap::default(),
@@ -201,18 +224,73 @@ impl<K, P> Default for IndexState<K, P> {
             candidates: FxHashMap::default(),
             next_candidate: 0,
             edges: 0,
-            storage: IndexStorage::default(),
+            storage,
             #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
             ops: ReverseIndexEdgeOps::default(),
         }
     }
+
+    /// The bytes the index's charge covers: every table's buckets and
+    /// every holder set's buckets by capacity, spare ones included, and the
+    /// canonicals' text — less the share each candidate's owner charges
+    /// when it does.
+    fn storage_bytes(&self) -> usize {
+        let held = self.canonicals.capacity() * CANONICAL_BUCKET_BYTES
+            + self.evidence.capacity() * EVIDENCE_BUCKET_BYTES
+            + self.candidate_ids.capacity() * id_bucket_bytes::<K>()
+            + self.candidates.capacity() * candidate_bucket_bytes::<K, P>()
+            + self.storage.text
+            + self.storage.set_slots * EDGE_BYTES;
+        if self.storage.candidates_charged_by_owner {
+            held - (self.candidates.len()
+                * (id_bucket_bytes::<K>() + candidate_bucket_bytes::<K, P>())
+                + self.storage.candidate_edges * EDGE_BYTES)
+        } else {
+            held + self.storage.candidate_extras * std::mem::size_of::<Arc<str>>()
+        }
+    }
+
+    /// Settle the charge with what the index holds now.
+    fn settle(&mut self) {
+        let bytes = self.storage_bytes();
+        let storage = &mut self.storage;
+        let pin = storage
+            .pin
+            .get_or_insert_with(|| GranularPin::new(&storage.account, INDEX_STORAGE_GRANULE));
+        let used = pin.used();
+        if bytes > used {
+            pin.add(bytes - used);
+        } else if used > bytes {
+            pin.sub(used - bytes);
+        }
+    }
+}
+
+/// Shrink `table` once a quarter or less of its capacity is live, freeing
+/// it outright when empty.
+fn shrink_sparse<T: Hash + Eq, V>(table: &mut FxHashMap<T, V>) {
+    if table.is_empty() {
+        *table = FxHashMap::default();
+    } else if table.len() * 4 <= table.capacity() {
+        table.shrink_to(table.len() * 2);
+    }
+}
+
+/// Shrink a non-empty holder set once a quarter or less of its capacity is
+/// live, answering the buckets it gave back.
+fn shrink_holders(set: &mut FxHashSet<Holder>) -> usize {
+    let before = set.capacity();
+    if set.len() * 4 <= before {
+        set.shrink_to(set.len() * 2);
+    }
+    before - set.capacity()
 }
 
 impl<K: Eq + Hash + Clone, P> IndexState<K, P> {
-    fn note_linked(&mut self, owned_by_index: bool) {
+    fn note_linked(&mut self, holder: Holder) {
         self.edges += 1;
-        if owned_by_index {
-            self.storage.owned += EDGE_BYTES;
+        if matches!(holder, Holder::Candidate(_)) {
+            self.storage.candidate_edges += 1;
         }
         #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
         {
@@ -220,10 +298,10 @@ impl<K: Eq + Hash + Clone, P> IndexState<K, P> {
         }
     }
 
-    fn note_unlinked(&mut self, owned_by_index: bool) {
+    fn note_unlinked(&mut self, holder: Holder) {
         self.edges -= 1;
-        if owned_by_index {
-            self.storage.owned -= EDGE_BYTES;
+        if matches!(holder, Holder::Candidate(_)) {
+            self.storage.candidate_edges -= 1;
         }
         #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
         {
@@ -234,23 +312,22 @@ impl<K: Eq + Hash + Clone, P> IndexState<K, P> {
     /// Register `holder` under `canonical`, answering the index's copy of
     /// the canonical's text.
     fn link_canonical(&mut self, canonical: &str, holder: Holder) -> Arc<str> {
-        let (key, inserted) = match self.canonicals.get_key_value(canonical) {
-            Some((key, _)) => {
-                let key = Arc::clone(key);
-                let set = self.canonicals.get_mut(canonical).expect("present above");
-                (key, set.insert(holder))
-            }
+        let key = match self.canonicals.get_key_value(canonical) {
+            Some((key, _)) => Arc::clone(key),
             None => {
                 let key: Arc<str> = Arc::from(canonical);
-                self.storage.owned += CANONICAL_BUCKET_BYTES + arc_block_bytes(canonical.len());
-                let mut set = FxHashSet::default();
-                set.insert(holder);
-                self.canonicals.insert(Arc::clone(&key), set);
-                (key, true)
+                self.storage.text += arc_block_bytes(canonical.len());
+                self.canonicals
+                    .insert(Arc::clone(&key), FxHashSet::default());
+                key
             }
         };
+        let set = self.canonicals.get_mut(canonical).expect("present above");
+        let before = set.capacity();
+        let inserted = set.insert(holder);
+        self.storage.set_slots += set.capacity() - before;
         if inserted {
-            self.note_linked(matches!(holder, Holder::Evidence(_)));
+            self.note_linked(holder);
         }
         key
     }
@@ -264,20 +341,15 @@ impl<K: Eq + Hash + Clone, P> IndexState<K, P> {
         if !set.remove(&holder) {
             return;
         }
-        let emptied = set.is_empty();
-        if !emptied && set.len() * 4 <= set.capacity() {
-            set.shrink_to(set.len() * 2);
-        }
-        self.note_unlinked(matches!(holder, Holder::Evidence(_)));
-        if emptied {
+        if set.is_empty() {
+            self.storage.set_slots -= set.capacity();
             self.canonicals.remove(canonical);
-            self.storage.owned -= CANONICAL_BUCKET_BYTES + arc_block_bytes(canonical.len());
-            if self.canonicals.is_empty() {
-                self.canonicals = FxHashMap::default();
-            } else if self.canonicals.len() * 4 <= self.canonicals.capacity() {
-                self.canonicals.shrink_to(self.canonicals.len() * 2);
-            }
+            self.storage.text -= arc_block_bytes(canonical.len());
+            shrink_sparse(&mut self.canonicals);
+        } else {
+            self.storage.set_slots -= shrink_holders(set);
         }
+        self.note_unlinked(holder);
     }
 
     /// Link `owner` under `parent`, registering every evidence node it
@@ -292,12 +364,14 @@ impl<K: Eq + Hash + Clone, P> IndexState<K, P> {
         while let Some((owner, parent)) = pending.pop() {
             let addr = owner.addr();
             if let Some(node) = self.evidence.get_mut(&addr) {
-                if node.parents.insert(parent) {
-                    self.note_linked(matches!(parent, Holder::Evidence(_)));
+                let before = node.parents.capacity();
+                let inserted = node.parents.insert(parent);
+                self.storage.set_slots += node.parents.capacity() - before;
+                if inserted {
+                    self.note_linked(parent);
                 }
                 continue;
             }
-            self.storage.owned += EVIDENCE_BUCKET_BYTES;
             let holder = Holder::Evidence(addr);
             for fact in owner.facts() {
                 match fact {
@@ -315,7 +389,8 @@ impl<K: Eq + Hash + Clone, P> IndexState<K, P> {
             }
             let mut parents = FxHashSet::default();
             parents.insert(parent);
-            self.note_linked(matches!(parent, Holder::Evidence(_)));
+            self.storage.set_slots += parents.capacity();
+            self.note_linked(parent);
             self.evidence.insert(addr, EvidenceNode { owner, parents });
         }
         Some(root)
@@ -338,13 +413,14 @@ impl<K: Eq + Hash + Clone, P> IndexState<K, P> {
             if !node.parents.remove(&parent) {
                 continue;
             }
-            let orphaned = node.parents.is_empty();
-            self.note_unlinked(matches!(parent, Holder::Evidence(_)));
-            if !orphaned {
+            if !node.parents.is_empty() {
+                self.storage.set_slots -= shrink_holders(&mut node.parents);
+                self.note_unlinked(parent);
                 continue;
             }
+            self.note_unlinked(parent);
             let node = self.evidence.remove(&addr).expect("present above");
-            self.storage.owned -= EVIDENCE_BUCKET_BYTES;
+            self.storage.set_slots -= node.parents.capacity();
             let holder = Holder::Evidence(addr);
             for fact in node.owner.facts() {
                 match fact {
@@ -362,25 +438,22 @@ impl<K: Eq + Hash + Clone, P> IndexState<K, P> {
             }
             released.push(node.owner);
         }
-        if self.evidence.is_empty() {
-            self.evidence = FxHashMap::default();
-        }
+        shrink_sparse(&mut self.evidence);
     }
 
     fn unregister(&mut self, key: &K, released: &mut Vec<EvidenceOwner>) -> Option<P> {
         let id = self.candidate_ids.remove(key)?;
         let node = self.candidates.remove(&id).expect("every id names a node");
         let holder = Holder::Candidate(id);
+        self.storage.candidate_extras -= node.extras.len();
         for canonical in node.extras.iter() {
             self.unlink_canonical(canonical, holder);
         }
         if let Some(carrier) = node.carrier {
             self.unlink_evidence(carrier, holder, released);
         }
-        if self.candidates.is_empty() {
-            self.candidates = FxHashMap::default();
-            self.candidate_ids = FxHashMap::default();
-        }
+        shrink_sparse(&mut self.candidates);
+        shrink_sparse(&mut self.candidate_ids);
         Some(node.payload)
     }
 }
@@ -392,41 +465,53 @@ pub struct ReceiptReverseIndex<K, P> {
     state: Mutex<IndexState<K, P>>,
 }
 
-impl<K, P> Default for ReceiptReverseIndex<K, P> {
-    /// An index whose own storage is charged nowhere.
-    fn default() -> Self {
+impl<K, P> ReceiptReverseIndex<K, P> {
+    fn with_storage(storage: IndexStorage) -> Self {
         Self {
-            state: Mutex::new(IndexState::default()),
+            state: Mutex::new(IndexState::new(storage)),
         }
+    }
+
+    /// An empty index whose own storage is charged to `account`; each
+    /// candidate's own registration ([`Self::candidate_bytes`]) is charged
+    /// by the candidate's owner.
+    pub fn charged(account: &Arc<SemanticRetentionAccount>) -> Self {
+        Self::with_storage(IndexStorage::new(Arc::clone(account), true))
+    }
+
+    /// An empty index charging `account` for everything it holds, its
+    /// candidates' registrations included: for an owner that charges
+    /// nothing of its candidates itself.
+    pub fn charging_registrations(account: &Arc<SemanticRetentionAccount>) -> Self {
+        Self::with_storage(IndexStorage::new(Arc::clone(account), false))
+    }
+}
+
+impl<K, P> Default for ReceiptReverseIndex<K, P> {
+    /// [`Self::charged`] to the process-local account.
+    fn default() -> Self {
+        Self::charged(&SemanticRetentionAccount::process_local())
     }
 }
 
 impl<K: Eq + Hash + Clone, P: Clone> ReceiptReverseIndex<K, P> {
-    /// An empty index whose own storage is charged to `account`.
-    pub fn charged(account: &Arc<SemanticRetentionAccount>) -> Self {
-        let mut state = IndexState::default();
-        state.storage.account = Some(Arc::clone(account));
-        Self {
-            state: Mutex::new(state),
-        }
-    }
-
     /// The bytes a candidate's own registration keeps: its two table
     /// buckets and node, its extra-canonical list, and the edges naming it
     /// (one per extra canonical, one from its carrier). Its payload's heap
     /// is the caller's to add.
     pub fn candidate_bytes(extras: usize, has_carrier: bool) -> usize {
-        std::mem::size_of::<(K, CandidateId)>()
-            + std::mem::size_of::<(CandidateId, CandidateNode<K, P>)>()
-            + 2
+        id_bucket_bytes::<K>()
+            + candidate_bucket_bytes::<K, P>()
             + extras * std::mem::size_of::<Arc<str>>()
             + (extras + usize::from(has_carrier)) * EDGE_BYTES
     }
 
     /// Register candidate `key` with `payload`: its carrier evidence, every
     /// receipt that evidence reaches that is not indexed yet, and its extra
-    /// canonicals. A key already registered is replaced. Nothing is
-    /// registered for a candidate no canonical could reach.
+    /// canonicals. A key already registered is replaced. A candidate whose
+    /// carrier holds no fact and that names no extra canonical is not
+    /// registered; one whose facts name no canonical still is — no walk
+    /// reaches it, and it drains with its candidate.
     pub fn register<'a>(
         &self,
         key: K,
@@ -440,7 +525,7 @@ impl<K: Eq + Hash + Clone, P: Clone> ReceiptReverseIndex<K, P> {
             let mut state = self.state.lock();
             state.unregister(&key, &mut released);
             if carrier.is_empty() && extras.is_empty() {
-                state.storage.settle();
+                state.settle();
                 drop(state);
                 drop(released);
                 return;
@@ -452,6 +537,7 @@ impl<K: Eq + Hash + Clone, P: Clone> ReceiptReverseIndex<K, P> {
                 .iter()
                 .map(|canonical| state.link_canonical(canonical, holder))
                 .collect();
+            state.storage.candidate_extras += extras.len();
             let carrier = state.link_evidence(EvidenceOwner::Carrier(Arc::clone(carrier)), holder);
             state.candidate_ids.insert(key.clone(), id);
             state.candidates.insert(
@@ -463,7 +549,7 @@ impl<K: Eq + Hash + Clone, P: Clone> ReceiptReverseIndex<K, P> {
                     extras,
                 },
             );
-            state.storage.settle();
+            state.settle();
         }
         drop(released);
     }
@@ -475,7 +561,7 @@ impl<K: Eq + Hash + Clone, P: Clone> ReceiptReverseIndex<K, P> {
         let payload = {
             let mut state = self.state.lock();
             let payload = state.unregister(key, &mut released);
-            state.storage.settle();
+            state.settle();
             payload
         };
         drop(released);
@@ -497,7 +583,7 @@ impl<K: Eq + Hash + Clone, P: Clone> ReceiptReverseIndex<K, P> {
                 .expect("every id names a node");
             if !retain(&mut node.payload) {
                 state.unregister(key, &mut released);
-                state.storage.settle();
+                state.settle();
             }
             true
         };
@@ -545,15 +631,18 @@ impl<K: Eq + Hash + Clone, P: Clone> ReceiptReverseIndex<K, P> {
     pub fn clear(&self) {
         let released = {
             let mut state = self.state.lock();
-            let released: Vec<EvidenceNode> =
-                state.evidence.drain().map(|(_, node)| node).collect();
+            let released: Vec<EvidenceOwner> =
+                state.evidence.drain().map(|(_, node)| node.owner).collect();
             state.canonicals = FxHashMap::default();
             state.evidence = FxHashMap::default();
             state.candidate_ids = FxHashMap::default();
             state.candidates = FxHashMap::default();
             state.edges = 0;
-            state.storage.owned = 0;
-            state.storage.settle();
+            state.storage.text = 0;
+            state.storage.set_slots = 0;
+            state.storage.candidate_edges = 0;
+            state.storage.candidate_extras = 0;
+            state.settle();
             released
         };
         drop(released);

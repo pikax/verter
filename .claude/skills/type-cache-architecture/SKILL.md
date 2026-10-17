@@ -1039,7 +1039,12 @@ never a per-candidate canonical closure — and `invalidate_canonical` walks up
 from the canonical, each node once. Unregistering a candidate drops every
 evidence node and canonical only it reached, so the index drains to empty with
 its last candidate; edges naming a candidate are charged by that candidate's
-reservation, edges naming evidence by the index's own pin. The index drives
+reservation, everything else by the index's own pin — every table and holder
+set by CAPACITY, so the spare buckets a partial drain leaves stay charged
+until the table shrinks (at a quarter live) or empties. There is no
+account-less index: `Default` charges the process-local account, and
+`ReceiptReverseIndex::charging_registrations` (the candidate store, whose
+candidates charge nothing) charges the candidates' share too. The index drives
 explicit-invalidation cleanup only, never validity; its one leaf lock is taken
 inside each store's existing consistency boundary. The
 allocation canary `recursive_paths_allocations_per_entity_stay_flat` guards the
