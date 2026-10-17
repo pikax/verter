@@ -566,7 +566,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 domain: BudgetDomain::ProjectionOperation,
                 limit,
                 actual,
-                context: "semantic-operand-force".to_string(),
+                context: "semantic-operand-force".into(),
             });
         }
         if reasons.contains(crate::semantic_query::PartialReasonSet::SUPERSEDED_GENERATION) {
@@ -591,7 +591,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             domain: BudgetDomain::ProjectionOperation,
             limit: budget.effective_projection_op_budget(),
             actual: budget.projection_ops_executed_count() as u64,
-            context: context.to_string(),
+            context: verter_type_expr::OwnedStr::from(context),
         }))
     }
 
@@ -898,9 +898,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     param_index,
                     default,
                     ..
-                } if anchor.canonical_id == anchor.canonical_id
+                } if decl.canonical_id == anchor.canonical_id
                     && decl.owner == anchor.owner
-                    && anchor.symbol == anchor.symbol =>
+                    && decl.decl_name == anchor.symbol =>
                 {
                     let entry = found.entry(*param_index).or_default();
                     if !entry.0.contains(&node) {

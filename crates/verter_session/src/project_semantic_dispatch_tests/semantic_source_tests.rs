@@ -813,7 +813,7 @@ mod query_error_raise_routing {
             domain: BudgetDomain::SolverResolveSteps,
             limit: 10,
             actual: 11,
-            context: "raise-routing fixture".to_string(),
+            context: "raise-routing fixture".into(),
         }
     }
 

@@ -1163,7 +1163,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     domain,
                     limit,
                     actual,
-                    context: format!("semantic-dispatch:{rail}"),
+                    context: format!("semantic-dispatch:{rail}").into(),
                 }))
             }
         };

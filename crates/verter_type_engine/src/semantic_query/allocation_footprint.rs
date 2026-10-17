@@ -243,11 +243,10 @@ impl OwnedHeap for QueryError {
             QueryError::UnsupportedIntrinsic { name } | QueryError::Other(name) => {
                 name.owned_heap_bytes(aliases)
             }
-            QueryError::BudgetExceeded(failure) => failure.context.owned_heap_bytes(aliases),
+            QueryError::BudgetExceeded(failure) => failure.context.offer(aliases),
             QueryError::AliasCycle { chain } => chain.owned_heap_bytes(aliases),
             QueryError::RecursiveRef { name, args } => {
-                name.owned_heap_bytes(aliases)
-                    + arc_slice_block_bytes(args.operands_arc(), aliases).unwrap_or(0)
+                name.owned_heap_bytes(aliases) + args.operands_owned().offer(aliases)
             }
             QueryError::DeclPlaceholder {
                 canonical_id, name, ..

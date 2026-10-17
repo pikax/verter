@@ -52,6 +52,8 @@ pub(crate) struct DeferredEvaluationMemoEntry {
     /// The entry's retention of its delivery's metadata, which its hits
     /// share with their readers.
     _lease_metadata: Option<verter_session_query::retention::shared::CacheHold>,
+    /// The root owners the delivery's metadata names, held with it.
+    _lease_handles: Box<[verter_session_query::retention::owned::OwnedHold]>,
 }
 
 impl SemanticGraphStore {
@@ -284,6 +286,9 @@ impl SemanticGraphStore {
         let Ok(lease_metadata) = lease.adopt_metadata() else {
             return;
         };
+        let Ok(lease_handles) = lease.hold_metadata_handles(self.charge_ctx()) else {
+            return;
+        };
         let entry = Arc::new(DeferredEvaluationMemoEntry {
             result,
             receipt,
@@ -291,6 +296,7 @@ impl SemanticGraphStore {
             lease,
             _retention: retention,
             _lease_metadata: lease_metadata,
+            _lease_handles: lease_handles,
         });
         let key = (node, context, demand);
         match self.evaluate_deferred_memo.entry(key) {

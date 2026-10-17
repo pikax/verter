@@ -393,7 +393,7 @@ mod tests {
                 domain: BudgetDomain::ProjectionOperation,
                 limit: 1,
                 actual: 2,
-                context: "sentinel-classification-fixture".to_string(),
+                context: "sentinel-classification-fixture".into(),
             }),
             QueryError::UnstableState { attempts: 3 },
             QueryError::AliasCycle {

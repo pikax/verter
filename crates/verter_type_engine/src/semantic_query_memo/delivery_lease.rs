@@ -40,20 +40,30 @@ impl DeliveryOwner {
         mut self,
         account: &std::sync::Arc<verter_session_query::retention::SemanticRetentionAccount>,
     ) -> std::sync::Arc<Self> {
+        let footprint = self.own_footprint();
+        footprint
+            .handles
+            .pin(verter_session_query::retention::owned::ChargeCtx::new(
+                account,
+            ));
+        self._own = Some(verter_session_query::retention::shared::CallerHold::pin(
+            account,
+            footprint.bytes,
+        ));
+        std::sync::Arc::new(self)
+    }
+
+    /// This owner's own block and the root owners' handles.
+    fn own_footprint(&self) -> verter_session_query::retention::Footprint {
         use verter_session_query::retention::allocation::{arc_block_bytes, AliasSet};
         let mut aliases = AliasSet::new();
         let bytes = arc_block_bytes(std::mem::size_of::<Self>())
             + self.roots.owned_heap_bytes(&mut aliases)
             + self.key_roots.owned_heap_bytes(&mut aliases);
-        aliases
-            .take_handles()
-            .pin(verter_session_query::retention::owned::ChargeCtx::new(
-                account,
-            ));
-        self._own = Some(verter_session_query::retention::shared::CallerHold::pin(
-            account, bytes,
-        ));
-        std::sync::Arc::new(self)
+        verter_session_query::retention::Footprint {
+            bytes,
+            handles: aliases.take_handles(),
+        }
     }
 }
 
@@ -131,6 +141,26 @@ impl SemanticDeliveryLease {
             .and_then(|owner| owner._own.as_ref())
             .map(verter_session_query::retention::shared::CallerHold::adopt)
             .transpose()
+    }
+
+    /// A cache's holds on the root owners this delivery's metadata names,
+    /// retained beside [`Self::adopt_metadata`]'s hold for as long as the
+    /// cache keeps the delivery.
+    ///
+    /// # Errors
+    ///
+    /// The account's refusal: nothing is held.
+    pub(super) fn hold_metadata_handles(
+        &self,
+        ctx: verter_session_query::retention::owned::ChargeCtx<'_>,
+    ) -> Result<
+        Box<[verter_session_query::retention::owned::OwnedHold]>,
+        verter_session_query::retention::RetentionRefusal,
+    > {
+        match self.0.as_ref() {
+            Some(owner) => owner.own_footprint().handles.hold(ctx),
+            None => Ok(Box::new([])),
+        }
     }
 
     /// A delivery rooting `roots` and holding no shared allocation, its own

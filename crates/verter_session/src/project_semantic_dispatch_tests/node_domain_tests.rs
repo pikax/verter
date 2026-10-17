@@ -29,7 +29,7 @@ fn opaque_sentinel_summary_is_typed_only_genuine_unknown_is_always_materialized(
                 domain: verter_session_query::inputs::budget::BudgetDomain::ProjectionOperation,
                 limit: 1,
                 actual: 2,
-                context: "opaque-sentinel summary fixture".to_string(),
+                context: "opaque-sentinel summary fixture".into(),
             },
         ),
         QueryError::UnstableState { attempts: 3 },

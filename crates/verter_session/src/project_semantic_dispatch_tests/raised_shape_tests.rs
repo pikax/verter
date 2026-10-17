@@ -292,7 +292,7 @@ fn parity_opaque_errors_and_raw_fallback() {
             domain: BudgetDomain::ProjectionOperation,
             limit: 2000,
             actual: 2001,
-            context: "parity fixture".to_string(),
+            context: "parity fixture".into(),
         },
     )));
     assert_classifier_parity(&host, budget, "opaque-budget-exceeded");
@@ -453,7 +453,7 @@ fn opaque_arm_routes_through_typed_sentinel_byte_identical_and_keeps_node_domain
             domain: BudgetDomain::ProjectionOperation,
             limit: 2000,
             actual: 2001,
-            context: "opaque-arm fixture".to_string(),
+            context: "opaque-arm fixture".into(),
         }),
         QueryError::UnstableState { attempts: 3 },
         QueryError::AliasCycle {

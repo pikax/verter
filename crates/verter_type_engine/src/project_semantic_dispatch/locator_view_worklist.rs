@@ -487,9 +487,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     && type_args.is_empty()
                     && inputs.self_value.is_some_and(|anchor| {
                         value_root.scope.local_scope.is_none()
-                            && anchor.canonical_id == anchor.canonical_id
+                            && value_root.scope.canonical_id == anchor.canonical_id
                             && value_root.scope.owner == anchor.owner
-                            && anchor.symbol == anchor.symbol
+                            && value_root.name == anchor.symbol
                     })
                 {
                     return ReferenceProjectionPlan::Ready(node);

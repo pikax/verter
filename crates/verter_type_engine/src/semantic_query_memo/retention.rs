@@ -261,6 +261,7 @@ impl SemanticGraphStore {
         // is retained with the result.
         carrier.extend(parts.lease.adopt_metadata()?);
         let mut owned = Vec::with_capacity(3);
+        owned.extend(parts.lease.hold_metadata_handles(self.charge_ctx())?);
         if let Some(diagnostics) = parts.diagnostics.owned() {
             owned.push(diagnostics.hold(self.charge_ctx())?);
         }

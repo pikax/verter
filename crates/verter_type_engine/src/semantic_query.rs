@@ -1668,13 +1668,9 @@ impl FlowFunctionSlotIdentity {
         &self,
     ) -> verter_session_query::facts::fact_cache::ProgramAnalysisFunctionRef {
         verter_session_query::facts::fact_cache::ProgramAnalysisFunctionRef {
-            canonical_id: std::sync::Arc::<str>::from(
-                self.declaration_slot.defining_canonical.as_str(),
-            ),
+            canonical_id: self.declaration_slot.defining_canonical.clone(),
             owner: self.declaration_slot.owner,
-            merged_symbol_name: std::sync::Arc::<str>::from(
-                self.declaration_slot.merged_symbol_name.as_str(),
-            ),
+            merged_symbol_name: self.declaration_slot.merged_symbol_name.clone(),
             symbol_space: match self.declaration_slot.symbol_space {
                 SemanticSymbolSpace::Type => verter_session_query::facts::SymbolSpace::Type,
                 SemanticSymbolSpace::Value => verter_session_query::facts::SymbolSpace::Value,
@@ -6102,7 +6098,7 @@ pub struct SemanticGraphStats {
 /// node that carries the error owns them, and a reader reaches them only
 /// through that node's lease.
 #[derive(Clone, PartialEq, Eq, Hash, Default)]
-pub struct RecursiveRefArgs(Arc<[SemanticNodeId]>);
+pub struct RecursiveRefArgs(OwnedSlice<SemanticNodeId>);
 
 impl RecursiveRefArgs {
     /// The operands, for engine-internal construction and traversal.
@@ -6111,7 +6107,7 @@ impl RecursiveRefArgs {
     }
 
     /// The operand allocation, for its retained footprint.
-    pub(crate) fn operands_arc(&self) -> &Arc<[SemanticNodeId]> {
+    pub(crate) fn operands_owned(&self) -> &OwnedSlice<SemanticNodeId> {
         &self.0
     }
 
@@ -6143,25 +6139,31 @@ impl std::fmt::Debug for RecursiveRefArgs {
 
 impl From<Arc<[SemanticNodeId]>> for RecursiveRefArgs {
     fn from(nodes: Arc<[SemanticNodeId]>) -> Self {
+        Self(OwnedSlice::from(&nodes[..]))
+    }
+}
+
+impl From<OwnedSlice<SemanticNodeId>> for RecursiveRefArgs {
+    fn from(nodes: OwnedSlice<SemanticNodeId>) -> Self {
         Self(nodes)
     }
 }
 
 impl From<Vec<SemanticNodeId>> for RecursiveRefArgs {
     fn from(nodes: Vec<SemanticNodeId>) -> Self {
-        Self(Arc::from(nodes))
+        Self(OwnedSlice::from(nodes))
     }
 }
 
 impl From<&[SemanticNodeId]> for RecursiveRefArgs {
     fn from(nodes: &[SemanticNodeId]) -> Self {
-        Self(Arc::from(nodes))
+        Self(OwnedSlice::from(nodes))
     }
 }
 
 impl<const N: usize> From<[SemanticNodeId; N]> for RecursiveRefArgs {
     fn from(nodes: [SemanticNodeId; N]) -> Self {
-        Self(Arc::from(Vec::from(nodes)))
+        Self(OwnedSlice::from(nodes))
     }
 }
 
@@ -11989,7 +11991,7 @@ mod tests {
                     domain: verter_session_query::inputs::budget::BudgetDomain::ProjectionOperation,
                     limit: 1,
                     actual: 2,
-                    context: "hash-fixture".to_string(),
+                    context: "hash-fixture".into(),
                 },
             ),
             QueryError::Cancelled,

@@ -417,9 +417,9 @@ pub struct RouteSurfaceFactRef {
 /// slot env tail is a query-key dimension, never a validation input.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ProgramAnalysisFunctionRef {
-    pub canonical_id: Arc<str>,
+    pub canonical_id: verter_type_expr::OwnedStr,
     pub owner: verter_type_expr::TopLevelOwnerId,
-    pub merged_symbol_name: Arc<str>,
+    pub merged_symbol_name: verter_type_expr::OwnedStr,
     pub symbol_space: SymbolSpace,
     pub function_part: verter_type_expr::facts::FunctionPartIdentity,
     pub overload_ordinal: u32,

@@ -492,7 +492,7 @@ fn typed_query_error_sentinels_round_trip_to_legacy_raw() {
         domain: BudgetDomain::ProjectionOperation,
         limit: 1,
         actual: 2,
-        context: "pls1-budget-sentinel".to_string(),
+        context: "pls1-budget-sentinel".into(),
     });
     assert!(
         semantic_query_error_raw(&budget).starts_with(BUDGET_EXCEEDED_SENTINEL_PREFIX),
