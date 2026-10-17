@@ -63,6 +63,8 @@ mod flow_return_memo;
 pub mod graph_fixture;
 mod hash_cons_memos;
 pub mod inflight;
+#[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+pub use inflight::{FlightRendezvous, FlightRendezvousMiss, FlightRendezvousObservation};
 pub(crate) mod intern_table;
 pub mod interner;
 pub(crate) mod member_index;
@@ -744,6 +746,10 @@ pub struct SemanticGraphStore {
     #[cfg(any(test, feature = "test-support"))]
     exhausted_join_abort:
         parking_lot::Mutex<Option<(SemanticQueryKey, test_support::ExhaustedJoinAbortForTests)>>,
+    /// The scoped rendezvous armed on this store, if any — see
+    /// [`Self::arm_flight_rendezvous`].
+    #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+    flight_rendezvous: parking_lot::Mutex<Option<Arc<inflight::FlightRendezvousShared>>>,
 }
 
 /// The family memo's retention bound, chosen when a store is constructed
@@ -849,6 +855,8 @@ impl SemanticGraphStore {
             produce_hook: Default::default(),
             #[cfg(any(test, feature = "test-support"))]
             exhausted_join_abort: Default::default(),
+            #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+            flight_rendezvous: Default::default(),
         };
         store.bind_destroyed_sidecar_sink();
         store

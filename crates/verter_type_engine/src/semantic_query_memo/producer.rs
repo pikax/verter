@@ -639,6 +639,16 @@ impl Subscription<'_> {
         } else {
             None
         };
+        // A rendezvous learns of this registered subscriber with the flight
+        // unlocked: the wait below re-checks the flight before parking.
+        #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+        if wait_edge.is_some() {
+            if let Some(rendezvous) = store.armed_flight_rendezvous() {
+                parking_lot::MutexGuard::unlocked(&mut state, || {
+                    rendezvous.note_subscriber(prepared.key(), &inflight);
+                });
+            }
+        }
         // Cooperative wait on the flight's condvar until it completes, is
         // aborted by a canonical-invalidation sweep, or this request is
         // cancelled. Subscribers never busy-spin.
@@ -1037,6 +1047,20 @@ impl<'s> ProducerLease<'s> {
         crate::project_semantic_dispatch::cost_receipt::CostIdentity::of_producer(
             self.prepared.as_task_producer(),
         )
+    }
+
+    /// The cold-build boundary of an armed [`super::FlightRendezvous`]: a
+    /// joinable producer of its key parks here, its flight claimed and its
+    /// raw computation not begun, until the rendezvous releases it. Called
+    /// with no memo or flight lock held.
+    #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+    pub(crate) fn hold_for_flight_rendezvous(&self) {
+        if self.independent {
+            return;
+        }
+        if let Some(rendezvous) = self.store.armed_flight_rendezvous() {
+            rendezvous.hold_producer(self.prepared.key(), &self.inflight);
+        }
     }
 
     /// A receipt recording no cost for this producer's computation: a

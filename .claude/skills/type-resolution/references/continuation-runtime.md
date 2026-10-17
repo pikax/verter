@@ -43,6 +43,17 @@ Architectural target for the project-global cache cutover:
   generation checks make stale cleanup harmless after a task slot is reused.
   This is orthogonal to same-task same-path recursion, which keeps its
   sentinel behavior and is checked before wait registration.
+- Overlap between a cold producer and a subscriber is tested by construction,
+  never by arrival timing: `SemanticGraphStore::arm_flight_rendezvous(key)`
+  (compiled only under `test`, `test-support` or the default-off
+  `soak-support`, which `verter_session/soak-support` forwards to the
+  soak/tooling runner) parks the first joinable producer of `key` on that
+  store at the dispatcher's cold-build boundary — flight claimed, raw build
+  not begun, no memo or flight lock held — reports a subscriber only once its
+  wait-for edge registered on that exact flight, and releases the producer
+  on `release()` or when the guard drops (completion, unwind, abandoned
+  schedule). Other keys, stores and warm reads never satisfy it. Inventory:
+  `crates/verter_type_engine/observe-inventory/SKR-FLIGHT-RENDEZVOUS.md`.
 
 Concrete expectation:
 
