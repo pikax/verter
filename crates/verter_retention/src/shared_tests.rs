@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use super::*;
-use crate::retention::{RetentionLimits, SemanticRetentionAccount};
+use crate::{RetentionLimits, SemanticRetentionAccount};
 
 fn account(ceiling: usize) -> Arc<SemanticRetentionAccount> {
     SemanticRetentionAccount::new(RetentionLimits {
@@ -333,7 +333,7 @@ fn a_caller_first_charge_is_never_refused() {
 /// released with the last carrier holding it.
 #[test]
 fn a_leaf_two_carriers_share_is_charged_once_through_either_release_order() {
-    use crate::retention::allocation::arc_str_list_bytes;
+    use crate::allocation::arc_str_list_bytes;
     const LEAF: usize = 50_000;
     for first_released in [0, 1] {
         let account = account(1 << 30);
@@ -389,7 +389,7 @@ fn a_leaf_two_carriers_share_is_charged_once_through_either_release_order() {
 /// retains it again.
 #[test]
 fn a_carriers_leaves_move_with_its_class_and_adopt_all_or_nothing() {
-    use crate::retention::allocation::arc_str_list_bytes;
+    use crate::allocation::arc_str_list_bytes;
     const LEAF: usize = 10_000;
     let account = account(1 << 20);
     let registry = AliasCharges::new();
@@ -441,7 +441,7 @@ fn a_carriers_leaves_move_with_its_class_and_adopt_all_or_nothing() {
 /// thread blocks on the other.
 #[test]
 fn a_carrier_revived_while_its_last_holder_releases_keeps_its_sole_leaf_charged_once() {
-    use crate::retention::allocation::arc_str_list_bytes;
+    use crate::allocation::arc_str_list_bytes;
     const LEAF: usize = 20_000;
     for revive_as_caller in [false, true] {
         let account = account(1 << 20);

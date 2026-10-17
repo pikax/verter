@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use super::*;
-use crate::retention::allocation::{arc_str_bytes, vec_bytes};
-use crate::retention::shared::registration_bytes;
-use crate::retention::RetentionLimits;
+use crate::allocation::{arc_str_bytes, vec_bytes};
+use crate::shared::registration_bytes;
+use crate::RetentionLimits;
 
 fn account(ceiling: usize) -> Arc<SemanticRetentionAccount> {
     SemanticRetentionAccount::new(RetentionLimits {

@@ -130,7 +130,7 @@ impl RetentionCharge {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::retention::RetentionLimits;
+    use crate::RetentionLimits;
 
     #[test]
     fn the_charge_covers_the_live_total_within_two_granules_and_is_released_once() {
