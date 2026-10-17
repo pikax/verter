@@ -8,17 +8,13 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashSet;
 
+use super::super::dispatch_txn::ContextKeptLiteral;
 use super::super::inference::session::InferenceInfoSetup;
 use super::super::ProjectSemanticDispatch;
 use crate::semantic_query::{
     AuthoredPropertyKey, ConstParamPolicy, LiteralValue, PrimitiveKind, SemanticNodeData,
     SemanticNodeId, SignatureKind, TypeParamDecl,
 };
-
-/// How many type-parameter constraints a literal-context read follows
-/// (`T extends U`, `U extends string`); a longer chain (only an erroneous
-/// circular one in practice) reads as no literal context.
-const CONSTRAINT_CHAIN_LIMIT: usize = 16;
 
 /// A primitive kind a literal context is decided by.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -80,12 +76,18 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// constraint of a candidate type parameter whose node carries none.
     /// The argument itself is no nested position: a naked top-level
     /// deposit keeps its literal regardless.
+    ///
+    /// Each kept literal is tied to the candidate type parameters its
+    /// position's contextual type names, the only parameters a deposit
+    /// from that position reaches: `{ a: "x", b: "x" }` against
+    /// `{ a: T; b: U }` with `T extends string` keeps `"x"` for `T`
+    /// alone, so `U` still infers `string`.
     pub(in crate::project_semantic_dispatch) fn nested_literal_context_keeps(
         &self,
         source: SemanticNodeId,
         target: SemanticNodeId,
         declared: &[TypeParamDecl],
-    ) -> Vec<SemanticNodeId> {
+    ) -> Vec<ContextKeptLiteral> {
         let graph = self.graph();
         let mut keeps = Vec::new();
         let mut pending = vec![(source, target, true)];
@@ -126,7 +128,15 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 Some(SemanticNodeData::Literal(_) | SemanticNodeData::Union(_)) if !root => {
                     drop(data);
                     if self.literal_of_contextual_type(source, target, declared) {
-                        keeps.extend(literal_members(graph, source));
+                        let literals = literal_members(graph, source);
+                        for decl in declared {
+                            if self.mentions_node(target, decl.param) {
+                                keeps.extend(literals.iter().map(|&literal| ContextKeptLiteral {
+                                    literal,
+                                    param: decl.param,
+                                }));
+                            }
+                        }
                     }
                 }
                 _ => {}
@@ -137,7 +147,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
 
     /// The contextual types an object literal member named `key` takes
     /// from `contextual` (`getTypeOfPropertyOfContextualType`): the
-    /// declared member of each constituent that lists it.
+    /// declared member of each constituent that lists it, else the value
+    /// type of the constituent's index signatures applicable to the key
+    /// (`findApplicableIndexInfo`: a non-`string` one — `number` for a
+    /// numeric name — before a `string` one).
     fn contextual_member_types(
         &self,
         contextual: SemanticNodeId,
@@ -180,11 +193,41 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 }
             }
         };
-        surface
+        let named: Vec<SemanticNodeId> = surface
             .positive_members()
             .iter()
             .filter(|member| member.key == *key)
             .map(|member| member.value)
+            .collect();
+        if !named.is_empty() {
+            return named;
+        }
+        let Some(known) = key.cloned_known() else {
+            return Vec::new();
+        };
+        let applicable: Vec<(bool, SemanticNodeId)> = surface
+            .index_signatures
+            .iter()
+            .filter(|signature| {
+                super::super::relation_predicates::index_signature_applies_to_property(
+                    graph,
+                    signature.key_type,
+                    &known,
+                )
+            })
+            .map(|signature| {
+                let string_key = matches!(
+                    graph.node_data(signature.key_type).as_deref(),
+                    Some(SemanticNodeData::Primitive(PrimitiveKind::String))
+                );
+                (string_key, signature.value_type)
+            })
+            .collect();
+        let narrow = applicable.iter().any(|(string_key, _)| !string_key);
+        applicable
+            .into_iter()
+            .filter(|(string_key, _)| !(narrow && *string_key))
+            .map(|(_, value)| value)
             .collect()
     }
 
@@ -256,20 +299,28 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     _ => held,
                 }
             });
-        held != 0 && self.literal_context_admits(held, contextual, declared, CONSTRAINT_CHAIN_LIMIT)
+        held != 0
+            && self.literal_context_admits(held, contextual, declared, &mut FxHashSet::default())
     }
 
     /// Whether `contextual` is a literal context for a literal of one of
-    /// the kinds `held` (a [`LiteralKind`] bit set).
+    /// the kinds `held` (a [`LiteralKind`] bit set). `visited` holds the
+    /// nodes already read: a circular constraint (`T extends U`,
+    /// `U extends T`, which the checker rejects) contributes no context,
+    /// while an acyclic chain is followed to its end however long.
     fn literal_context_admits(
         &self,
         held: u8,
         contextual: SemanticNodeId,
         declared: &[TypeParamDecl],
-        depth: usize,
+        visited: &mut FxHashSet<SemanticNodeId>,
     ) -> bool {
         let graph = self.graph();
+        let authored = contextual;
         let contextual = self.resolved_reduction_view(contextual);
+        if !visited.insert(contextual) {
+            return false;
+        }
         let data = graph.node_data(contextual);
         let kinds = match data.as_deref() {
             Some(composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_))) => {
@@ -282,7 +333,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 drop(data);
                 return members
                     .into_iter()
-                    .any(|member| self.literal_context_admits(held, member, declared, depth));
+                    .any(|member| self.literal_context_admits(held, member, declared, visited));
             }
             Some(SemanticNodeData::TypeParam { constraint, .. }) => {
                 let constraint = constraint.or_else(|| {
@@ -292,11 +343,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         .and_then(|decl| decl.constraint)
                 });
                 drop(data);
-                let Some(constraint) = constraint.filter(|_| depth > 0) else {
+                let Some(constraint) = constraint else {
                     return false;
                 };
                 return held & self.base_constraint_primitive_kinds(constraint, declared) != 0
-                    || self.literal_context_admits(held, constraint, declared, depth - 1);
+                    || self.literal_context_admits(held, constraint, declared, visited);
             }
             Some(SemanticNodeData::Literal(value)) => LiteralKind::of(value).bit(),
             Some(SemanticNodeData::TemplateLiteral { .. } | SemanticNodeData::KeyOf { .. }) => {
@@ -304,7 +355,18 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             }
             // `boolean` is the union `true | false` to the checker.
             Some(SemanticNodeData::Primitive(PrimitiveKind::Boolean)) => LiteralKind::Boolean.bit(),
-            _ => 0,
+            _ => {
+                drop(data);
+                // A string mapping (`Uppercase<string>`) is a string
+                // literal context, as a template literal is.
+                if self.string_mapping_of(authored).is_some()
+                    || self.string_mapping_of(contextual).is_some()
+                {
+                    LiteralKind::String.bit()
+                } else {
+                    0
+                }
+            }
         };
         held & kinds != 0
     }
@@ -385,11 +447,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     ) -> SemanticNodeId {
         let graph = self.graph();
         let kept = |node: SemanticNodeId| {
-            let data = graph.node_data(node);
-            matches!(data.as_deref(), Some(SemanticNodeData::Literal(_)))
-                && keeps
-                    .iter()
-                    .any(|keep| *keep == node || graph.node_data(*keep) == data)
+            keeps.contains(&node)
+                && matches!(
+                    graph.node_data(node).as_deref(),
+                    Some(SemanticNodeData::Literal(_))
+                )
         };
         if kept(bound) {
             return bound;

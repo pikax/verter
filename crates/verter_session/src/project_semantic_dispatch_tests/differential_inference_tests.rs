@@ -1560,6 +1560,23 @@ export function l23() { return alu({ v: "x" }); }
 declare function rv<T extends string>(this: { f: () => T }, x: T): T;
 const ru = { f: (): "a" => "a", rv };
 export function l24() { return ru.rv("b"); }
+declare function kv<T extends string, U>(x: { v: T; w: U }): U;
+declare function kt<T extends string, U>(x: [T, U]): U;
+declare function kn<T extends string, U>(x: { v: T; w: { z: U } }): U;
+declare function ku<T extends string | {}, U>(x: { a: T; b: U }): U;
+export function l25() { return kv({ v: "a", w: "a" }); }
+export function l26() { return kv({ v: "a", w: "b" }); }
+export function l27() { return kt(["a", "a"]); }
+export function l28() { return kn({ v: "a", w: { z: "a" } }); }
+export function l29() { return ku({ a: c ? "a" : 1, b: 1 }); }
+declare function ix<T extends string>(x: { [key: string]: T }): T;
+declare function ixn<T extends string>(x: { [key: number]: T }): T;
+declare function um<T extends Uppercase<string>>(x: { v: T }): T;
+declare function lc<T1 extends T2, T2 extends T3, T3 extends T4, T4 extends T5, T5 extends T6, T6 extends T7, T7 extends T8, T8 extends T9, T9 extends T10, T10 extends T11, T11 extends T12, T12 extends T13, T13 extends T14, T14 extends T15, T15 extends T16, T16 extends T17, T17 extends T18, T18 extends "a" | "b">(x: { v: T1 }): T1;
+export function l30() { return ix({ a: "x" }); }
+export function l31() { return ixn({ 1: "x" }); }
+export function l32() { return um({ v: "AB" }); }
+export function l33() { return lc({ v: "a" }); }
 "##;
 
 /// Each candidate evaluates a nested argument literal under its own type
@@ -1573,6 +1590,12 @@ export function l24() { return ru.rv("b"); }
 /// decided whole against its own contextual type: a conditional of a kept
 /// and an unkept kind stays whole, where the same literals as separate
 /// elements widen apart; a constraint is read through its named aliases.
+/// A literal kept at one position stays its own: an equal literal at a
+/// sibling member, tuple element or nested member whose contextual type
+/// is no literal context still widens. A member's contextual type falls
+/// back to an applicable index signature; a string mapping is a string
+/// literal context; and an acyclic constraint chain is read to its end,
+/// however long.
 #[test]
 fn candidate_literal_contexts() {
     let failures = Matrix::new(CANDIDATE_LITERAL_CONTEXTS).four(&[
@@ -1743,6 +1766,69 @@ fn candidate_literal_contexts() {
             r#""a" | "b""#,
             r#""a" | "b""#,
             r#""a" | "b""#,
+        ),
+        (
+            Read::Return(r#"l25"#),
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+        ),
+        (
+            Read::Return(r#"l26"#),
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+        ),
+        (
+            Read::Return(r#"l27"#),
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+        ),
+        (
+            Read::Return(r#"l28"#),
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+        ),
+        (
+            Read::Return(r#"l29"#),
+            r#"number"#,
+            r#"number"#,
+            r#"number"#,
+            r#"number"#,
+        ),
+        (
+            Read::Return(r#"l30"#),
+            r#""x""#,
+            r#""x""#,
+            r#""x""#,
+            r#""x""#,
+        ),
+        (
+            Read::Return(r#"l31"#),
+            r#""x""#,
+            r#""x""#,
+            r#""x""#,
+            r#""x""#,
+        ),
+        (
+            Read::Return(r#"l32"#),
+            r#""AB""#,
+            r#""AB""#,
+            r#""AB""#,
+            r#""AB""#,
+        ),
+        (
+            Read::Return(r#"l33"#),
+            r#""a""#,
+            r#""a""#,
+            r#""a""#,
+            r#""a""#,
         ),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));

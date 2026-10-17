@@ -2416,9 +2416,21 @@ struct CallArgumentLiteralPolicy {
     /// The literals the argument nests in an authored position whose
     /// contextual type in the candidate's parameter is a literal context
     /// for them (`isLiteralOfContextualType`, decided per authored
-    /// expression): a nested deposit keeps these as written and widens
-    /// every other literal.
-    context_keeps: Vec<SemanticNodeId>,
+    /// expression), each tied to a type parameter that position's
+    /// contextual type names: a nested deposit into that parameter keeps
+    /// the literal as written; every other literal widens.
+    context_keeps: Vec<ContextKeptLiteral>,
+}
+
+/// A literal an authored position of a call argument keeps, with a type
+/// parameter the position's contextual type names — the only parameter
+/// whose deposits from that position keep it. A position holding an
+/// equal literal under a contextual type that is no literal context for
+/// it contributes nothing, so its deposits widen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ContextKeptLiteral {
+    pub(crate) literal: SemanticNodeId,
+    pub(crate) param: SemanticNodeId,
 }
 
 /// Saved transient state for a nested SCC re-discharge. Persistent relation
@@ -3028,7 +3040,7 @@ impl CheckerDispatchTransaction {
         literal_mode: Option<crate::semantic_query::ArgumentLiteralMode>,
         top_level_infer_targets: Vec<SemanticNodeId>,
         argument: Option<SemanticNodeId>,
-        context_keeps: Vec<SemanticNodeId>,
+        context_keeps: Vec<ContextKeptLiteral>,
     ) {
         self.relation
             .call_argument_literal_modes
@@ -3079,13 +3091,22 @@ impl CheckerDispatchTransaction {
             .is_some_and(|policy| policy.argument == Some(bound))
     }
 
-    /// The literals the CURRENT call argument nests at a position its
-    /// contextual type keeps them in; empty outside a call argument.
-    pub(crate) fn call_argument_context_keeps(&self) -> &[SemanticNodeId] {
+    /// The literals the CURRENT call argument nests at a position whose
+    /// contextual type keeps them for a deposit into `param`; empty
+    /// outside a call argument.
+    pub(crate) fn call_argument_context_keeps(&self, param: SemanticNodeId) -> Vec<SemanticNodeId> {
         self.relation
             .call_argument_literal_modes
             .last()
-            .map_or(&[], |policy| policy.context_keeps.as_slice())
+            .map(|policy| {
+                policy
+                    .context_keeps
+                    .iter()
+                    .filter(|keep| keep.param == param)
+                    .map(|keep| keep.literal)
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Mark the frame at `idx` as having opened session `session`.

@@ -46,7 +46,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     .zip(txn.call_argument_literal_mode()),
                 txn.call_argument_target_is_top_level(param_node)
                     || txn.call_argument_is_whole(bound),
-                txn.call_argument_context_keeps().to_vec(),
+                txn.call_argument_context_keeps(param_node),
             )
         };
         if let Some((policy, literal_mode)) = call_policy {
